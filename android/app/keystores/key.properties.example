@@ -1,0 +1,12 @@
+# Copy to key.properties (same directory) and fill in. NEVER commit key.properties.
+# storeFile paths are resolved relative to android/app/.
+
+develop.keyAlias=muxr-dev
+develop.keyPassword=CHANGE_ME
+develop.storeFile=keystores/develop.jks
+develop.storePassword=CHANGE_ME
+
+prod.keyAlias=muxr-upload
+prod.keyPassword=CHANGE_ME
+prod.storeFile=keystores/production.jks
+prod.storePassword=CHANGE_ME

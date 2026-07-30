@@ -3,13 +3,16 @@
 // `com.android.application` alone is enough.
 //
 // This is the full Frust build-mode matrix: debug,
-// profile, and release build types, key.properties release signing, optional
-// per-ABI splits, version plumbing via local.properties, and a
-// `-P`-parameterized cargo-ndk step. Every input the Frust CLI passes is a
-// Gradle `-P` project property or a `local.properties`/`key.properties` entry
-// — there are no additional scaffold placeholders here, only build-time
-// values with Kotlin-side defaults, so an Android-Studio-driven build (no CLI)
-// still works with sensible defaults.
+// profile, and release build types; develop/production product flavors with
+// per-flavor identity, naming, and keystore signing (mirrors the Flutter
+// muxr app's android/app/build.gradle.kts — see
+// android/app/keystores/README.md); optional per-ABI splits; version
+// plumbing via local.properties; and a `-P`-parameterized cargo-ndk step.
+// Every input the Frust CLI passes is a Gradle `-P` project property or a
+// `local.properties`/`app/keystores/key.properties` entry — there are no
+// additional scaffold placeholders here, only build-time values with
+// Kotlin-side defaults, so an Android-Studio-driven build (no CLI) still
+// works with sensible defaults.
 import java.util.Properties
 import java.io.FileInputStream
 import java.util.Base64
@@ -20,17 +23,30 @@ plugins {
 }
 
 // `local.properties` carries CLI-written version plumbing (never committed);
-// `key.properties` carries release-signing material (never committed — see
-// frust.toml's [signing] section and the app's .gitignore). Both are
-// optional: absent files yield empty `Properties` and the defaults below apply.
+// optional: an absent file yields empty `Properties` and the defaults below
+// apply.
 val localProperties = Properties().apply {
     val f = rootProject.file("local.properties")
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
+
+// Release signing: android/app/keystores/key.properties (gitignored) locally,
+// or *_KEYSTORE_* env vars on CI. See android/app/keystores/README.md. When
+// neither is present the develop/production flavors below fall back to the
+// debug keystore so `assembleDevelopDebug`/`assembleProductionDebug` (and a
+// hand-run `assemble*Release`) keep working on a dev machine without secrets
+// — mirrors the Flutter muxr app's rig verbatim (same property/env names, see
+// `/muxr/android/app/build.gradle.kts`) so the password-manager keystores
+// drop in unchanged.
 val keystoreProperties = Properties().apply {
-    val f = rootProject.file("key.properties")
-    if (f.exists()) FileInputStream(f).use { load(it) }
+    val propsFile = rootProject.file("app/keystores/key.properties")
+    if (propsFile.exists()) {
+        FileInputStream(propsFile).use { load(it) }
+    }
 }
+
+fun signingValue(propKey: String, envKey: String): String? =
+    keystoreProperties.getProperty(propKey) ?: System.getenv(envKey)
 
 // Reads a Gradle `-P` project property with a Kotlin-side default, so every
 // CLI-driven knob has a working default for Android-Studio-driven builds.
@@ -69,6 +85,13 @@ android {
     namespace = "com.it.f0x.muxr"
     compileSdk = 36
 
+    buildFeatures {
+        // AGP disables resValue generation by default; the flavors below use
+        // it to inject per-flavor app_name strings (mirrors the Flutter muxr
+        // app's android/app/build.gradle.kts).
+        resValues = true
+    }
+
     defaultConfig {
         applicationId = "com.it.f0x.muxr"
         minSdk = 24
@@ -78,33 +101,64 @@ android {
     }
 
     signingConfigs {
-        // Only wire a release signing config when key.properties is present;
-        // otherwise release falls back to debug signing (with a warning) so an
-        // unsigned local build still succeeds. `frust build` (CLI) makes a
-        // missing keystore a hard error — this fallback is the escape hatch for
-        // Android-Studio-driven builds.
-        if (keystoreProperties.isNotEmpty()) {
-            create("release") {
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
-                storeFile = (keystoreProperties["storeFile"] as String?)?.let { rootProject.file(it) }
-                storePassword = keystoreProperties["storePassword"] as String
+        create("develop") {
+            val storePath = signingValue("develop.storeFile", "DEVELOP_KEYSTORE_PATH")
+            if (storePath != null) {
+                storeFile = file(storePath)
+                storePassword = signingValue("develop.storePassword", "DEVELOP_STORE_PASSWORD")
+                keyAlias = signingValue("develop.keyAlias", "DEVELOP_KEY_ALIAS")
+                keyPassword = signingValue("develop.keyPassword", "DEVELOP_KEY_PASSWORD")
+            } else {
+                initWith(getByName("debug"))
+            }
+        }
+        create("production") {
+            val storePath = signingValue("prod.storeFile", "KEYSTORE_PATH")
+            if (storePath != null) {
+                storeFile = file(storePath)
+                storePassword = signingValue("prod.storePassword", "STORE_PASSWORD")
+                keyAlias = signingValue("prod.keyAlias", "KEY_ALIAS")
+                keyPassword = signingValue("prod.keyPassword", "KEY_PASSWORD")
+            } else {
+                initWith(getByName("debug"))
             }
         }
     }
 
+    flavorDimensions += "env"
+
+    productFlavors {
+        create("develop") {
+            dimension = "env"
+            applicationIdSuffix = ".dev"
+            resValue("string", "app_name", "Muxr Dev")
+            signingConfig = signingConfigs.getByName("develop")
+        }
+        create("production") {
+            dimension = "env"
+            resValue("string", "app_name", "Muxr")
+            signingConfig = signingConfigs.getByName("production")
+        }
+    }
+
     buildTypes {
+        debug {
+            // Sign debug builds with the develop keystore too (falls back to
+            // the debug keystore when no key.properties/env is present) so
+            // debug and release installs of a flavor never hit on-device
+            // signature conflicts (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+            signingConfig = signingConfigs.getByName("develop")
+        }
         getByName("release") {
-            val releaseSigning = signingConfigs.findByName("release")
-            if (releaseSigning != null) {
-                signingConfig = releaseSigning
-            } else {
-                signingConfig = signingConfigs.getByName("debug")
-                logger.warn(
-                    "Frust: release build is debug-signed; create " +
-                        "android/key.properties — see frust.toml [signing]",
-                )
-            }
+            // Release signing comes from the flavor's signingConfig above
+            // (develop/production — build-type signing would win, so none is
+            // set here). Neither flavor's keystore configured (no
+            // android/app/keystores/key.properties, no env vars)? Both fall
+            // back to the debug keystore (see signingConfigs above), so an
+            // unsigned local `assemble*Release` still succeeds; create
+            // android/app/keystores/key.properties for real release signing
+            // — see android/app/keystores/README.md.
+            //
             // R8 + resource shrink: the Kotlin/Java side is
             // small (this app's `MainActivity` plus the `:frust-embedding`
             // module) so the dex win is modest, but shipping unminified
@@ -133,8 +187,9 @@ android {
             matchingFallbacks += listOf("release", "debug")
             isDebuggable = false
         }
-        // `debug` is implicit (AGP-provided) and unchanged: no minification,
-        // so no keep-rule risk while iterating.
+        // `debug` is implicit (AGP-provided); overridden above to sign with
+        // the develop config — no minification, so no keep-rule risk while
+        // iterating.
     }
 
     // Per-ABI APK splits, off by default. When enabled, one APK per ABI is
@@ -152,13 +207,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    // Example flavor scaffold — uncomment and mirror frust.toml's [flavors].
-    // flavorDimensions += "env"
-    // productFlavors {
-    //     create("dev")  { dimension = "env"; applicationIdSuffix = ".dev" }
-    //     create("prod") { dimension = "env" }
-    // }
 }
 
 // Frust's Android embedding: the Kotlin host (`FrustActivity`,
