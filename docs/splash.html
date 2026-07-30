@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glyph — splash sequence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg-void:#0a0c11; --bg-base:#10131a; --bg-surface:#161a23; --bg-raised:#1e2330; --bg-overlay:#272d3d;
+  --amber:#ffb627; --amber-dim:#c98a12; --amber-faint:rgba(255,182,39,0.12); --amber-glow:rgba(255,182,39,0.35); --amber-border:rgba(255,182,39,0.35);
+  --warning:#f5c860; --warning-faint:rgba(245,200,96,0.14); --warning-border:rgba(245,200,96,0.35);
+  --success:#5fd88f;
+  --fg:#f2ead9; --fg-muted:#a39c88; --fg-dim:#6b6556;
+  --border-bright:rgba(242,234,217,0.18); --border:rgba(242,234,217,0.09);
+  --radius-xs:3px; --radius-sm:6px; --radius-md:10px;
+  --font-display:'Space Mono', monospace; --font-mono:'IBM Plex Mono', monospace;
+  --ease-spring: cubic-bezier(0.34,1.6,0.5,1);
+}
+*,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
+body{ font-family:var(--font-mono); background:#050608; color:var(--fg); min-height:100vh; -webkit-font-smoothing:antialiased; }
+.page{ display:flex; flex-direction:column; align-items:center; padding:48px 20px 80px; gap:28px; }
+.page-header{ text-align:center; max-width:600px; }
+.eyebrow{ font-size:11px; color:var(--amber); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:14px; }
+h1{ font-family:var(--font-display); font-weight:700; font-size:clamp(26px,5vw,38px); letter-spacing:-0.01em; margin-bottom:12px; }
+.page-header p{ font-size:13px; color:var(--fg-muted); line-height:1.7; font-weight:300; }
+
+.phone{ width:340px; background:var(--bg-void); border-radius:38px; border:1.5px solid var(--border-bright); overflow:hidden; position:relative; box-shadow:0 0 0 1px #000, 0 40px 80px rgba(0,0,0,0.6); }
+.notch{ position:absolute; top:10px; left:50%; transform:translateX(-50%); width:100px; height:26px; background:var(--bg-void); border-radius:16px; z-index:100; }
+.statusbar{ height:48px; padding:12px 22px 6px; display:flex; align-items:flex-end; justify-content:space-between; font-size:11px; font-weight:600; position:relative; z-index:50; }
+.statusbar .icons{ color:var(--fg-muted); font-size:9px; }
+.screen{ height:650px; position:relative; background:var(--bg-void); overflow:hidden; }
+
+canvas{ position:absolute; inset:0; z-index:1; opacity:0; transition:opacity .4s ease-out; }
+canvas.show{ opacity:1; }
+
+.icon-layer{ position:absolute; inset:0; z-index:10; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+.app-icon{ width:96px; height:96px; border-radius:22%; opacity:0; transform:scale(0.75); transition:opacity .35s var(--ease-spring), transform .35s var(--ease-spring); box-shadow:0 20px 46px rgba(0,0,0,0.55), 0 0 44px var(--amber-glow); }
+.app-icon.show{ opacity:1; transform:scale(1); }
+.app-icon.dissolve{ opacity:0; transform:scale(1.2); transition:opacity .38s cubic-bezier(0.4,0,1,1), transform .38s cubic-bezier(0.4,0,1,1); }
+.burst-particle{ position:absolute; color:var(--amber); font-size:13px; font-family:var(--font-mono); pointer-events:none; z-index:8; opacity:1; will-change:transform,opacity; }
+
+.ui-layer{ position:absolute; inset:0; z-index:5; padding:30px 22px; display:flex; flex-direction:column; gap:20px; pointer-events:none; }
+.piece{ opacity:0; transform:translateY(-70px) rotate(-5deg) scale(0.88); filter:blur(3px); transition:opacity .5s var(--ease-spring), transform .5s var(--ease-spring), filter .4s ease-out; }
+.piece.land{ opacity:1; transform:translateY(0) rotate(0) scale(1); filter:blur(0); }
+.piece.land.flash{ animation:landFlash .5s ease-out; }
+@keyframes landFlash{ 0%{ box-shadow:0 0 0 0 var(--amber-glow); } 40%{ box-shadow:0 0 24px 6px var(--amber-glow); } 100%{ box-shadow:0 0 0 0 rgba(255,182,39,0); } }
+
+.connect-mark{ width:60px; height:60px; margin:0 auto; border:1px solid var(--border-bright); border-radius:var(--radius-md); display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:5px; padding:12px; background:var(--bg-void); }
+.connect-mark span{ border-radius:3px; }
+.connect-mark span:nth-child(1),.connect-mark span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
+.connect-mark span:nth-child(2),.connect-mark span:nth-child(3){ background:var(--amber); }
+.connect-badge{ text-align:center; font-size:10.5px; color:var(--fg-dim); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:8px 12px; margin:0 auto; background:var(--bg-void); }
+.connect-badge b{ color:var(--fg-muted); display:block; font-size:11px; margin-bottom:2px; }
+.heading{ text-align:center; background:var(--bg-void); }
+.heading h2{ font-size:16px; font-weight:600; margin-bottom:6px; }
+.heading p{ font-size:11.5px; color:var(--fg-muted); line-height:1.6; }
+.field{ display:flex; flex-direction:column; gap:6px; background:var(--bg-void); }
+.field label{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; }
+.field input{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:11px 12px; font-family:var(--font-mono); font-size:12px; color:var(--fg); outline:none; width:100%; }
+.field input::placeholder{ color:var(--fg-dim); }
+.remember-row{ display:flex; align-items:center; justify-content:space-between; font-size:11.5px; color:var(--fg-muted); background:var(--bg-void); }
+.toggle{ width:36px; height:21px; border-radius:999px; background:var(--amber-faint); border:1px solid var(--amber-border); position:relative; flex-shrink:0; }
+.toggle::after{ content:''; position:absolute; top:2px; left:17px; width:15px; height:15px; border-radius:50%; background:var(--amber); }
+.btn-primary{ background:var(--amber); color:#241a04; border:none; border-radius:var(--radius-sm); padding:13px; font-family:var(--font-mono); font-size:12.5px; font-weight:600; letter-spacing:0.03em; text-align:center; }
+.saved{ display:flex; align-items:center; gap:10px; font-size:11px; background:var(--bg-void); }
+.dot-ok{ width:7px; height:7px; border-radius:50%; background:var(--success); box-shadow:0 0 5px var(--success); flex-shrink:0; }
+.saved .addr{ color:var(--fg); }
+
+.controls{ display:flex; align-items:center; gap:14px; }
+.replay-btn{ font-family:var(--font-mono); font-size:12px; color:var(--fg); background:var(--bg-raised); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:10px 18px; cursor:pointer; }
+.replay-btn:hover{ background:var(--bg-overlay); border-color:var(--amber-border); color:var(--amber); }
+.phase-label{ font-size:11px; color:var(--fg-dim); min-width:120px; }
+.phase-label b{ color:var(--amber); }
+
+.notes{ max-width:600px; font-size:12px; color:var(--fg-muted); line-height:1.8; margin-top:8px; }
+.notes b{ color:var(--amber); }
+.timeline{ display:flex; gap:0; max-width:340px; width:100%; margin-top:4px; }
+.timeline div{ flex:1; height:3px; background:var(--bg-raised); border-radius:2px; margin-right:3px; }
+.timeline div:last-child{ margin-right:0; }
+.timeline div.done{ background:var(--amber); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="page-header">
+    <div class="eyebrow">splash sequence</div>
+    <h1>Icon → rain → assembly</h1>
+    <p>Cold-start only, once per launch. The real app icon appears first, the way the OS would show it while the app loads — then it dissolves outward into the same amber rain, which thins out as the connect screen assembles itself piece by piece.</p>
+  </div>
+
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="statusbar"><span>01:21</span><span class="icons">●●●▮</span></div>
+    <div class="screen" id="screen">
+      <canvas id="rain"></canvas>
+      <div class="icon-layer">
+        <img class="app-icon" id="appIcon" src="data:image/png;base64,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AEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABBEAAAAQRAAAAEAQAQAAAEEEAAAABPkfr8ah3fHawZkAAAAASUVORK5CYII=" alt="">
+      </div>
+      <div class="ui-layer" id="uiLayer">
+        <div class="connect-mark piece" data-delay="0"><span></span><span></span><span></span><span></span></div>
+        <div class="connect-badge piece" data-delay="130"><b>muxrd server</b>zellij · herdr</div>
+        <div class="heading piece" data-delay="260"><h2>Connect to server</h2><p>Enter credentials to attach to a remote zellij or herdr session.</p></div>
+        <div class="field piece" data-delay="390"><label>server url</label><input placeholder="zelli.example.com:50051" readonly></div>
+        <div class="field piece" data-delay="480"><label>login token</label><input placeholder="paste or scan a token" readonly></div>
+        <div class="remember-row piece" data-delay="580">Remember for 4 weeks<div class="toggle"></div></div>
+        <div class="btn-primary piece" data-delay="720">→ connect</div>
+        <div class="saved piece" data-delay="860"><span class="dot-ok"></span><span class="addr">100.71.31.57:50051</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="replay-btn" id="replayBtn">↻ replay sequence</button>
+    <span class="phase-label" id="phaseLabel">phase: <b>idle</b></span>
+  </div>
+  <div class="timeline" id="timeline"></div>
+
+  <p class="notes">
+    <b>Icon phase</b> (0–1s) — the real exported app icon fades and springs in, holds just long enough to register as "the app icon," then scales up and dissolves while a handful of its own glyph characters burst outward — the seed the rain grows from, not two unrelated effects stitched together.<br>
+    <b>Rain phase</b> (+0–1.4s from dissolve) starts already mid-fall, full density, so it doesn't feel like it's booting up from nothing.<br>
+    <b>Thin phase</b> (+1.4–2.8s) drops respawn probability column-by-column instead of all at once — the rain visibly drains rather than switching off.<br>
+    <b>Assembly phase</b> (starts 1.5s after rain begins, staggered ~130ms apart) — each piece begins as a small rotated, blurred shard and drops in with a spring overshoot; a brief amber flash marks the landing.<br>
+    Gated behind <code>prefers-reduced-motion</code> — reduced-motion users get a brief static icon, then the finished screen directly, no rain.
+  </p>
+
+<script>
+(function(){
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var canvas = document.getElementById('rain');
+  var ctx = canvas.getContext('2d');
+  var screenEl = document.getElementById('screen');
+  var icon = document.getElementById('appIcon');
+  var pieces = Array.prototype.slice.call(document.querySelectorAll('.piece'));
+  var phaseLabel = document.getElementById('phaseLabel');
+  var timeline = document.getElementById('timeline');
+  var replayBtn = document.getElementById('replayBtn');
+
+  // build timeline ticks
+  var TICKS = 24;
+  for(var i=0;i<TICKS;i++){ var d=document.createElement('div'); timeline.appendChild(d); }
+  var tickEls = timeline.children;
+
+  var W, H, dpr;
+  function size(){
+    var r = screenEl.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    canvas.width = W*dpr; canvas.height = H*dpr;
+    canvas.style.width = W+'px'; canvas.style.height = H+'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  size();
+  window.addEventListener('resize', size);
+
+  var GLYPHS = "01アイウエオカキクケコサシス<>{}[]/\\|_+-=.:;#$%".split('');
+  var BRAND_GLYPHS = ['▣','◧','◎','▤','⛶','◆','▮','›','//','λ'];
+  // weighted pool: mostly matrix-style chars, occasional brand glyph
+  var POOL = GLYPHS.concat(BRAND_GLYPHS, BRAND_GLYPHS);
+
+  var fontSize = 14, colW = 14;
+  var cols, drops, colActive, colDensity;
+
+  function initCols(){
+    cols = Math.floor(W/colW);
+    drops = []; colActive = []; colDensity = [];
+    for(var i=0;i<cols;i++){
+      drops.push(Math.random()*(H/fontSize)); // start mid-fall, staggered
+      colActive.push(true);
+      colDensity.push(1);
+    }
+  }
+  initCols();
+
+  function rand(a,b){ return a + Math.random()*(b-a); }
+
+  var ICON_IN = 350;
+  var ICON_HOLD = 650;
+  var ICON_DELAY = ICON_IN + ICON_HOLD; // when the icon dissolves and rain takes over
+  var BURST_CHARS = ['▣','◧','◎','▤','0','1','#'];
+
+  function spawnBurst(){
+    var iconRect = icon.getBoundingClientRect();
+    var screenRect = screenEl.getBoundingClientRect();
+    var cx = iconRect.left - screenRect.left + iconRect.width/2;
+    var cy = iconRect.top - screenRect.top + iconRect.height/2;
+    for(var i=0;i<14;i++){
+      (function(){
+        var el = document.createElement('span');
+        el.className = 'burst-particle';
+        el.textContent = BURST_CHARS[Math.floor(Math.random()*BURST_CHARS.length)];
+        el.style.left = cx+'px'; el.style.top = cy+'px';
+        screenEl.appendChild(el);
+        var angle = Math.random()*Math.PI*2;
+        var dist = 55 + Math.random()*95;
+        var dx = Math.cos(angle)*dist, dy = Math.sin(angle)*dist;
+        requestAnimationFrame(function(){
+          el.style.transition = 'transform .6s cubic-bezier(0.16,1,0.3,1), opacity .6s ease-out';
+          el.style.transform = 'translate('+dx+'px,'+dy+'px) scale(0.6)';
+          el.style.opacity = '0';
+        });
+        setTimeout(function(){ el.remove(); }, 650);
+      })();
+    }
+  }
+
+  var overallStart = null;
+  var running = false;
+  var DENSE_END = 1400;
+  var THIN_END = 2800;
+  var TOTAL_MS = ICON_DELAY + THIN_END + 400;
+
+  function frame(ts){
+    if(!running) return;
+    if(overallStart===null) overallStart = ts;
+    var tOverall = ts - overallStart;
+
+    // phase bookkeeping (spans the icon phase too, before rain math even starts)
+    var phase = tOverall < ICON_DELAY ? 'icon'
+      : tOverall < ICON_DELAY+DENSE_END ? 'rain'
+      : tOverall < ICON_DELAY+THIN_END ? 'thinning' : 'settled';
+    phaseLabel.innerHTML = 'phase: <b>' + phase + '</b>';
+    var filled = Math.min(TICKS, Math.floor((tOverall/TOTAL_MS)*TICKS));
+    for(var k=0;k<TICKS;k++){ tickEls[k].className = k<filled ? 'done' : ''; }
+
+    if(tOverall < ICON_DELAY){
+      // still in the icon phase — nothing to draw on canvas yet, just keep the loop alive
+      requestAnimationFrame(frame);
+      return;
+    }
+    var t = tOverall - ICON_DELAY; // rain-local clock, unchanged math below
+
+    // fade previous frame
+    ctx.fillStyle = 'rgba(10,12,17,0.16)';
+    ctx.fillRect(0,0,W,H);
+    ctx.font = fontSize+'px "IBM Plex Mono", monospace';
+    ctx.textBaseline = 'top';
+
+    // thinning: ramp density down 1 -> 0 between DENSE_END and THIN_END
+    var globalDensity = 1;
+    if(t > DENSE_END){
+      globalDensity = Math.max(0, 1 - (t-DENSE_END)/(THIN_END-DENSE_END));
+    }
+
+    for(var c=0;c<cols;c++){
+      if(!colActive[c]) continue;
+      var y = drops[c];
+      var py = y*fontSize;
+      if(py > H+fontSize*6){
+        // decide respawn based on density (per-column randomized threshold so it staggers)
+        if(Math.random() < globalDensity){
+          drops[c] = rand(-6,-1);
+        } else {
+          colActive[c] = false;
+        }
+        continue;
+      }
+      // draw trailing chars above head
+      var trailLen = 7;
+      for(var tI=0; tI<trailLen; tI++){
+        var ty = py - tI*fontSize;
+        if(ty < -fontSize || ty > H) continue;
+        var ch = POOL[Math.floor(Math.random()*POOL.length)];
+        var alpha = tI===0 ? 1 : Math.max(0, 1 - tI/trailLen);
+        var overallFade = t < DENSE_END ? 1 : Math.max(0.15, globalDensity);
+        if(tI===0){
+          ctx.fillStyle = 'rgba(255,238,200,' + (0.95*overallFade) + ')';
+        } else {
+          ctx.fillStyle = 'rgba(255,182,39,' + (alpha*0.75*overallFade) + ')';
+        }
+        ctx.fillText(ch, c*colW, ty);
+      }
+      drops[c] += rand(0.35,0.75);
+    }
+
+    if(t > 200 && Math.random() < 0.002 * (1-globalDensity)){
+      // occasional respawn of a stopped column at very low density to keep faint ambience briefly
+    }
+
+    if(t < THIN_END + 400){
+      requestAnimationFrame(frame);
+    } else {
+      // ambient near-empty tail for a short bit then stop drawing (leave last cleared frame)
+      ctx.fillStyle = 'rgba(10,12,17,0.4)';
+      ctx.fillRect(0,0,W,H);
+      running = false;
+      phaseLabel.innerHTML = 'phase: <b>settled</b>';
+    }
+  }
+
+  function landPieces(){
+    pieces.forEach(function(p){
+      var delay = parseInt(p.getAttribute('data-delay'),10) + ICON_DELAY + 1500;
+      setTimeout(function(){
+        p.classList.add('land','flash');
+        setTimeout(function(){ p.classList.remove('flash'); }, 550);
+      }, delay);
+    });
+  }
+
+  function resetPieces(){
+    pieces.forEach(function(p){ p.classList.remove('land','flash'); });
+  }
+
+  function resetIcon(){
+    icon.style.transition = '';
+    icon.classList.remove('show','dissolve');
+    canvas.classList.remove('show');
+  }
+
+  function play(){
+    resetPieces();
+    resetIcon();
+    initCols();
+    overallStart = null;
+    running = true;
+    ctx.fillStyle = '#0a0c11';
+    ctx.fillRect(0,0,W,H);
+
+    if(reduced){
+      // brief static icon, then straight to the finished screen — no rain, no scaling motion
+      running = false;
+      icon.style.transition = 'opacity .15s linear';
+      icon.classList.add('show');
+      setTimeout(function(){
+        icon.classList.add('dissolve');
+        icon.style.transition = 'opacity .15s linear';
+        pieces.forEach(function(p){ p.classList.add('land'); });
+        phaseLabel.innerHTML = 'phase: <b>settled (reduced motion)</b>';
+        for(var k=0;k<TICKS;k++){ tickEls[k].className='done'; }
+      }, 200);
+      return;
+    }
+
+    requestAnimationFrame(frame);
+    // icon fades/springs in on the very next frame so the CSS transition actually fires
+    requestAnimationFrame(function(){ icon.classList.add('show'); });
+    setTimeout(function(){
+      icon.classList.add('dissolve');
+      canvas.classList.add('show');
+      spawnBurst();
+    }, ICON_DELAY);
+    landPieces();
+  }
+
+  replayBtn.addEventListener('click', play);
+  play();
+})();
+</script>
+
+</div>
+</body>
+</html>
