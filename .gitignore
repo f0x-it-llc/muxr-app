@@ -1,7 +1,14 @@
 /target
+/build
+.DS_Store
+
+# workflow/ is a separate private repo (nested checkout, same convention as
+# the frust framework checkout itself) — never track it here.
+workflow/
 
 # Android release signing material — never commit (see frust.toml [signing]).
 android/key.properties
+key.properties
 *.jks
 *.keystore
 
@@ -11,7 +18,6 @@ android/key.properties
 android/app/build/
 android/build/
 android/.gradle/
-build/
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
