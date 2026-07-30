@@ -5,15 +5,18 @@
 //! `/settings` (see `routes.rs`). Each feature under [`features`] follows
 //! the `{domain, data, presentation}` clean-architecture slice
 //! `examples/huddle` establishes (see its `src/README-phase-c.md`):
-//! dependencies point inward only, `presentation` → `domain` ← `data`. Every
-//! feature is an empty skeleton today (one placeholder page, no real
-//! domain/data logic) — Phase 2 wires each feature's real logic and adds
-//! route guards/redirects, the seam [`shell::root_view`] and
-//! [`routes::build_routes`] are left thin to grow into.
+//! dependencies point inward only, `presentation` → `domain` ← `data`. Only
+//! `connect`'s presentation layer is real today (a static Connect screen, no
+//! domain/data logic behind it); the other three are placeholder pages —
+//! Phase 2 wires each feature's real logic and adds route guards/redirects,
+//! the seam [`shell::root_view`] and [`routes::build_routes`] are left thin
+//! to grow into.
 //!
 //! This file is the **composition root**: `Component::init` builds the
 //! [`Router`]/[`NavigatorController`] pair and resolves the start location
-//! once; `Component::build` mounts [`shell::root_view`] over it. No feature
+//! once; `Component::build` mounts [`shell::root_view`] over it, plus — on
+//! the first build of a cold start — the splash overlay
+//! ([`AppState::splash_plan`], [`ui::splash::sequence`]). No feature
 //! repository exists yet to construct here — a real one joins this function
 //! the same way `examples/huddle`'s `HuddleApp::init` constructs and
 //! `provide_context`s each feature's repository, once a feature's `data`
@@ -34,7 +37,26 @@ mod shell;
 
 use std::rc::Rc;
 
-use frust::{AnyView, Component, NavigatorController, Router};
+use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal};
+
+use features::connect::presentation::pages::connect_layout;
+use features::connect::presentation::pieces::{active_theme, connect_pieces};
+use ui::splash::icon_phase::{IconArt, splash_icon_art};
+use ui::splash::sequence::{SplashPlan, claim_cold_start, reduced_splash, splash_sequence};
+
+/// The location muxr resolves at launch — `/` (Connect), its one entry point
+/// today (no cold-start deep-link source is wired yet; see the module docs'
+/// Phase 2 note). Named because two things read it: the router, and the
+/// splash's cold-start gate, which only plays over this route.
+const START_LOCATION: &str = "/";
+
+/// The seed fixing the splash's rain field and burst particles.
+///
+/// Deliberately a constant rather than a per-launch value: `SplashRng` exists
+/// so the sequence is replayable, the difference between two seeded fields is
+/// imperceptible across a three-second splash, and a fixed seed keeps the
+/// headless sequence test asserting on one exact field.
+const SPLASH_SEED: u64 = 0x6D75_7872; // "muxr"
 
 /// Muxr's retained state (the framework's `Component::State`): the
 /// stack-style [`Router`] every screen navigates through. `Rc` so a screen's
@@ -45,6 +67,70 @@ use frust::{AnyView, Component, NavigatorController, Router};
 pub struct AppState {
     /// The stack-style router every route navigates through.
     pub nav: Rc<Router<AppState>>,
+    /// What this launch's cold-start splash should be. `None` until the
+    /// **first build** resolves it — see [`AppState::splash_plan`] for why
+    /// that is deliberately not `Component::init`.
+    splash: Option<SplashPlan>,
+    /// The decoded app icon, decoded once alongside that decision rather than
+    /// per rebuild (the contract [`splash_icon_art`] documents). Stays `None`
+    /// when this launch has no splash to paint it with.
+    icon: Option<IconArt>,
+    /// Flipped `true` by the sequence's own completion cue. Read (tracked) in
+    /// [`Component::build`], so that one write is what unmounts the overlay.
+    splash_done: RwSignal<bool>,
+}
+
+impl AppState {
+    /// Resolve — once per process — what this launch's splash should be,
+    /// decoding the app icon if it will be needed.
+    ///
+    /// **Called from the first `build`, not from `init`.** On desktop
+    /// `frust::run_with_setup` calls `root.init()` *before*
+    /// `run_desktop`, so at `init` time the shell has neither installed its
+    /// logger nor seeded the `Theme` context — a `reduce_motion` read there is
+    /// guaranteed to see the Glyph baseline's `false` no matter what the app's
+    /// theme actually says. The first `build` runs inside the frame loop,
+    /// after `apply_theme`, where the read is real.
+    ///
+    /// Idempotent regardless: [`claim_cold_start`] spends a process-wide
+    /// atomic, and the answer is cached here for every later build.
+    fn splash_plan(&mut self) -> SplashPlan {
+        if let Some(plan) = self.splash {
+            return plan;
+        }
+        let plan = claim_cold_start(START_LOCATION, active_theme().motion.reduce_motion);
+        self.splash = Some(plan);
+        if plan != SplashPlan::Skip {
+            self.icon = Some(splash_icon_art());
+        }
+        plan
+    }
+
+    /// The splash overlay to stack over the navigator this frame, or `None`
+    /// once there is nothing left to show.
+    ///
+    /// The full sequence assembles the *same* pieces through the *same*
+    /// layout function the `/` route renders, which is what makes the
+    /// unmount invisible — see [`crate::ui::splash::sequence`].
+    fn splash_overlay(&mut self) -> Option<AnyView<AppState>> {
+        let plan = self.splash_plan();
+        // Tracked read: the cue's single `set(true)` wakes this rebuild.
+        if plan == SplashPlan::Skip || self.splash_done.get() {
+            return None;
+        }
+        let art = self.icon.clone()?;
+        match plan {
+            SplashPlan::Full => Some(splash_sequence(
+                art,
+                SPLASH_SEED,
+                connect_pieces(&active_theme()),
+                connect_layout,
+                self.splash_done,
+            )),
+            SplashPlan::Reduced => Some(reduced_splash(art, self.splash_done)),
+            SplashPlan::Skip => None,
+        }
+    }
 }
 
 /// Muxr's root [`Component`] (`Default`, as [`frust::app!`] requires):
@@ -62,13 +148,17 @@ impl Component for MuxrApp {
         let controller = NavigatorController::new();
         let routes = routes::build_routes(controller.clone());
         let router = Router::with_controller(&controller, routes);
-        // Resolves the start location once — "/" (Connect), muxr's one entry
-        // point today (no cold-start deep-link source wired yet; see the
-        // module docs' Phase 2 note).
-        router.handle_location("/");
+        // Resolves the start location once (see `START_LOCATION`).
+        router.handle_location(START_LOCATION);
 
+        // The cold-start splash is deliberately NOT decided here — see
+        // `AppState::splash_plan` for the ordering that forces it into the
+        // first `build`.
         AppState {
             nav: Rc::new(router),
+            splash: None,
+            icon: None,
+            splash_done: RwSignal::new(false),
         }
     }
 
@@ -77,10 +167,13 @@ impl Component for MuxrApp {
         // A separate clone for the navigator's `initial` closure (only ever
         // invoked on the very first build).
         let initial_controller = controller.clone();
+        let overlay = state.splash_overlay();
 
-        shell::root_view(&controller, move || {
-            routes::home_page(initial_controller.clone())
-        })
+        shell::root_view(
+            &controller,
+            move || routes::home_page(initial_controller.clone()),
+            overlay,
+        )
     }
 }
 
