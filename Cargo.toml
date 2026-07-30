@@ -1,0 +1,115 @@
+[package]
+name = "muxr"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
+# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# NOTE: temporary path dependency pointing at the Frust repo checkout
+# that generated this project ("frust_path" is explicitly a temporary
+# mechanism). Once Frust crates are published, `frust
+# create` will emit a version dependency here instead.
+#
+# Design system (gs1): Glyph is this app's design system, named explicitly
+# below (`"glyph"` + `"glyph-fonts"`) instead of left to `frust`'s own
+# crate-level defaults — mirrors the default `Cargo.toml.tmpl`'s comment (see
+# that file for the full rationale). `src/lib.rs`'s
+# `frust::app!(..., setup = { frust::glyph_theme::install(); })` is the
+# runtime call that actually makes it the active theme; delete
+# `"glyph"`/`"glyph-fonts"` below and that call to opt out (still builds,
+# neutral-themed), or swap them for `"material"`/`"cupertino"` plus the
+# matching `frust::set_default_theme(...)` call to use one of the other two
+# built-in design systems instead.
+frust = { path = "/Users/ed/Dev/f0x.it.llc/frust", default-features = false, features = ["glyph", "material", "cupertino", "glyph-fonts"] }
+
+# `--arch clean-signals` demo: the Frust
+# bridge for `clean-signals` (component-scoped controller lifecycle,
+# `async_view`, etc.) — an in-repo plugin, added like any other Frust
+# plugin (`frust_path` resolves to `crates/frust`, so
+# `../../plugins/clean-signals-frust` walks back up to the repo root and
+# down into the plugin's own directory — mirrors `frust-shared-preferences`'s
+# dependency line in the default `Cargo.toml.tmpl`).
+clean-signals-frust = { path = "/Users/ed/Dev/f0x.it.llc/frust/../../plugins/clean-signals-frust" }
+
+# `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
+# Version-Pin Policy) — this app path-deps into a **sibling checkout**
+# (`../clean-signals-rs`, next to this Frust checkout) at the exact same
+# path `clean-signals-frust`'s own `clean-signals` dependency resolves
+# (both by path, relative to different starting points but the same real
+# absolute directory), so Cargo unifies both into one crate identity — the
+# type-identity rule `examples/huddle/Cargo.toml` documents at length.
+# **Dev-machine-only while `clean-signals` is unpublished**: this project
+# will not build without that sibling checkout present (see `frust create
+# --arch clean-signals`'s help text).
+clean-signals = { path = "/Users/ed/Dev/f0x.it.llc/frust/../../../clean-signals-rs/crates/clean-signals" }
+
+# `log` facade dependency for the release-only `lean` feature below — mirrors
+# the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes
+# `--features lean` for every `--release` build regardless of scaffold arch, so
+# this variant must declare the feature too or a release build fails on an
+# unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
+log = "0.4"
+
+[features]
+# Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).
+lean = ["log/release_max_level_warn"]
+
+# `--release` mode: fully optimized, stripped, single-panic-path binary for
+# store distribution. Mirrors the default template's
+# `Cargo.toml.tmpl` block verbatim (not covered by the `profile_sync`
+# tripwire test, which only compares the root/default-template/huddle
+# manifests, but kept in sync by hand for a consistent scaffold).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# `--profile` mode: release performance with symbols + tracing kept for
+# on-device performance measurement. Artifacts land in
+# `target/<triple>/profile/` (custom-profile name, verified legal).
+[profile.profile]
+inherits = "release"
+debug = true
+strip = "none"
+
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
+# vello/wgpu/naga's shader-pipeline
+# translation runs at `opt-level = 0` by default, which is slow enough on a
+# physical iOS device that the OS SIGKILLs a debug `frust run` before the
+# synchronous, main-thread launch-time shader compile finishes.
+[profile.dev.package.vello]
+opt-level = 2
+
+[profile.dev.package.vello_shaders]
+opt-level = 2
+
+[profile.dev.package.vello_encoding]
+opt-level = 2
+
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.package.wgpu-core]
+opt-level = 2
+
+[profile.dev.package.wgpu-hal]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 2
+
+# Debug dep opt widening: non-workspace-member dependencies
+# build at `opt-level = 1` in debug; this app's own code stays at the fast
+# default dev opt-level, and the named shader-stack overrides above
+# (opt-level 2) still win over this wildcard since a named package override
+# takes precedence over `"*"`.
+[profile.dev.package."*"]
+opt-level = 1

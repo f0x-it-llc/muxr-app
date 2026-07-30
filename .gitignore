@@ -1,0 +1,20 @@
+/target
+
+# Android release signing material — never commit (see frust.toml [signing]).
+android/key.properties
+*.jks
+*.keystore
+
+# CLI-generated build output (kept in sync with `frust clean`'s REMOVED_DIRS).
+# `android/build/` is the `:frust-embedding` module's redirected output — see
+# android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block.
+android/app/build/
+android/build/
+android/.gradle/
+build/
+
+# Machine-local Android SDK path + CLI-written version stamps.
+android/local.properties
+
+# Rust-built JNI libraries copied in by the gradle preBuild step — build output, never commit.
+android/app/src/main/jniLibs/
