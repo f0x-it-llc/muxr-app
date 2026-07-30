@@ -67,6 +67,12 @@
 //! here re-checks the theme at paint time anyway, so a theme that turns
 //! `reduce_motion` on *after* the mount decision still collapses to a
 //! terminal state rather than animating.
+//!
+//! The one thing that must **not** collapse is that hold itself: it is only
+//! ever mounted under `reduce_motion`, so a cue short-circuiting on the theme
+//! would end it on its own first frame. [`Cue`] therefore takes the
+//! short-circuit as an opt-out ([`CueView::honor_reduce_motion`]) rather than
+//! applying it unconditionally.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -235,6 +241,11 @@ pub fn splash_sequence<State: 'static>(
 /// alone: the vector stand-in is a *motion* affordance of
 /// [`icon_phase`](super::icon_phase), which is inert under reduced motion by
 /// contract, and a 200ms glimpse does not justify a second copy of it here.
+///
+/// Its cue **opts out** of the reduced-motion short-circuit: this overlay is
+/// only ever mounted when `reduce_motion` is on, so a cue honoring it would
+/// fire on the first painted frame and unmount the hold ~16ms after it
+/// appeared — a flicker where the design reference has a 200ms beat.
 pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> AnyView<State> {
     let mut layers: Vec<AnyView<State>> = vec![any(page_backdrop::<State>().block_input(true))];
     if let IconArt::Image(source) = art {
@@ -244,7 +255,9 @@ pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> Any
                 .child(Image(source).fit(ImageFit::Contain)),
         )));
     }
-    layers.push(any(cue::<State>(spec::REDUCED_HOLD_MS, done)));
+    layers.push(any(
+        cue::<State>(spec::REDUCED_HOLD_MS, done).honor_reduce_motion(false)
+    ));
     any(Stack(layers))
 }
 
@@ -360,27 +373,66 @@ impl Widget for DelayedWidget {
 
 /// A zero-size leaf that sets `signal` to `true` once, `after_ms` into its own
 /// clock — how the overlay tells the shell to unmount it.
+///
+/// Honors `reduce_motion` by default (see [`cue_due`]); a cue whose window
+/// *is* the reduced-motion presentation opts out with
+/// [`CueView::honor_reduce_motion`].
 pub fn cue<State: 'static>(after_ms: f64, signal: RwSignal<bool>) -> CueView<State> {
     CueView {
         after_ms,
         signal,
+        honor_reduce_motion: true,
         state: std::marker::PhantomData,
     }
+}
+
+/// Whether a cue waiting `after_ms` is due at `elapsed_ms`.
+///
+/// A cue that honors `reduce_motion` is due on its first painted frame: it
+/// ends a *timeline*, and a theme asking for no motion asks for no timeline
+/// either (the same rule [`delayed_showing`] applies to a gate). A cue that
+/// does not honor it measures a **hold** rather than a timeline and always
+/// waits its window out — see [`CueView::honor_reduce_motion`].
+pub fn cue_due(
+    elapsed_ms: f64,
+    after_ms: f64,
+    reduce_motion: bool,
+    honors_reduce_motion: bool,
+) -> bool {
+    (honors_reduce_motion && reduce_motion) || elapsed_ms >= after_ms
 }
 
 /// The declarative half of the completion cue. See [`cue`].
 pub struct CueView<State: 'static> {
     after_ms: f64,
     signal: RwSignal<bool>,
+    honor_reduce_motion: bool,
     /// `View<State>` is generic over the app state even though this leaf never
     /// touches it.
     state: std::marker::PhantomData<fn() -> State>,
+}
+
+impl<State: 'static> CueView<State> {
+    /// Whether `reduce_motion` short-circuits this cue to its first painted
+    /// frame (default `true`).
+    ///
+    /// `true` is right for [`splash_sequence`]'s end cue: it is defense in
+    /// depth behind a four-second timeline that a reduced-motion theme should
+    /// never be held behind. It is *wrong* for [`reduced_splash`]'s hold,
+    /// which is only ever mounted under `reduce_motion` in the first place —
+    /// so pass `false` there, or the hold ends on the frame it starts.
+    pub fn honor_reduce_motion(mut self, honor: bool) -> Self {
+        self.honor_reduce_motion = honor;
+        self
+    }
 }
 
 /// The retained half of the completion cue. See [`cue`].
 pub struct CueWidget {
     after_ms: f64,
     signal: RwSignal<bool>,
+    /// See [`CueView::honor_reduce_motion`].
+    honor_reduce_motion: bool,
     elapsed_ms: f64,
     last_frame: Option<FrameTime>,
     /// Set once, so a frame painted after the write (the shell may take one to
@@ -395,6 +447,7 @@ impl<State: 'static> View<State> for CueView<State> {
         CueWidget {
             after_ms: self.after_ms,
             signal: self.signal,
+            honor_reduce_motion: self.honor_reduce_motion,
             elapsed_ms: 0.0,
             last_frame: None,
             fired: false,
@@ -409,6 +462,7 @@ impl<State: 'static> View<State> for CueView<State> {
     ) -> ChangeFlags {
         element.after_ms = self.after_ms;
         element.signal = self.signal;
+        element.honor_reduce_motion = self.honor_reduce_motion;
         ChangeFlags::NONE
     }
 }
@@ -423,13 +477,16 @@ impl Widget for CueWidget {
         if self.fired {
             return;
         }
-        // Reduced motion ends the sequence on the first frame: a theme that
-        // asks for no motion should not be held behind a four-second timeline
-        // (defense in depth — the shell normally mounts `reduced_splash`
-        // instead, which cues at `REDUCED_HOLD_MS`).
+        // Reduced motion ends a *timeline* on its first frame — but not
+        // `reduced_splash`'s hold, which opts out (see `cue_due`).
         let reduce = reduce_motion(Theme::from_paint_ctx(ctx));
         self.elapsed_ms += delta_ms(&mut self.last_frame, ctx.frame_time());
-        if reduce || self.elapsed_ms >= self.after_ms {
+        if cue_due(
+            self.elapsed_ms,
+            self.after_ms,
+            reduce,
+            self.honor_reduce_motion,
+        ) {
             self.fired = true;
             self.signal.set(true);
         }
@@ -807,6 +864,48 @@ mod tests {
     #[test]
     fn reduced_motion_opens_every_gate_immediately() {
         assert!(delayed_showing(0.0, 4_000.0, true));
+    }
+
+    // ---- the cue ---------------------------------------------------------
+
+    #[test]
+    fn a_cue_comes_due_exactly_at_its_window() {
+        assert!(!cue_due(0.0, sequence_end_ms(), false, true));
+        assert!(!cue_due(
+            sequence_end_ms() - 0.1,
+            sequence_end_ms(),
+            false,
+            true
+        ));
+        assert!(cue_due(sequence_end_ms(), sequence_end_ms(), false, true));
+    }
+
+    #[test]
+    fn reduced_motion_ends_the_full_timeline_on_its_first_frame() {
+        // Defense in depth: the shell mounts `reduced_splash` instead, but a
+        // theme flipping `reduce_motion` on after the mount decision must not
+        // be held behind the whole four-second sequence.
+        assert!(cue_due(0.0, sequence_end_ms(), true, true));
+    }
+
+    #[test]
+    fn the_reduced_holds_own_cue_is_not_short_circuited_by_reduced_motion() {
+        // `reduced_splash` is ONLY mounted when `reduce_motion` is on, so a
+        // cue honoring it there would fire on the overlay's first painted
+        // frame and unmount the hold before it was ever seen.
+        assert!(!cue_due(0.0, spec::REDUCED_HOLD_MS, true, false));
+        assert!(!cue_due(
+            spec::REDUCED_HOLD_MS - 0.1,
+            spec::REDUCED_HOLD_MS,
+            true,
+            false
+        ));
+        assert!(cue_due(
+            spec::REDUCED_HOLD_MS,
+            spec::REDUCED_HOLD_MS,
+            true,
+            false
+        ));
     }
 
     // ---- piece motion ----------------------------------------------------

@@ -12,6 +12,15 @@
 //! frame loop does — which is also what lets the overlay's unmount actually
 //! happen mid-run.
 //!
+//! # Frame cadence
+//!
+//! Every helper takes the cadence in nanoseconds ([`drive_at`],
+//! [`frame_at_cadence`]) and the plain [`drive`]/[`frame_at`] wrappers pin
+//! [`FRAME_NS`] (60Hz). The splash is clock-driven, not frame-driven, so the
+//! same wall-clock timeline must come out of a [`FRAME_NS_120`] run —
+//! [`the_timeline_lands_on_the_same_wall_clock_at_120hz`] is the test that
+//! actually holds `spec::REFERENCE_FRAME_MS`'s normalization to that.
+//!
 //! # Reading a piece's text out of a paint pass
 //!
 //! A painted `GlyphRun` carries glyph *ids*, not a string. [`glyph_ids`]
@@ -24,7 +33,7 @@
 use std::any::Any;
 
 use frust::authoring::text::{TextContext, TextStyle};
-use frust::authoring::{Point, View};
+use frust::authoring::{Point, View, any};
 use frust::{AnyView, Component, Get, RwSignal, Theme};
 use frust_core::{FrameTime, PaintScene, RenderRoot};
 use frust_scene::GlyphRun;
@@ -33,6 +42,7 @@ use peniko::Color;
 
 use muxr::features::connect::presentation::pages::connect_layout;
 use muxr::features::connect::presentation::pieces::connect_pieces;
+use muxr::ui::backdrop::page_backdrop;
 use muxr::ui::splash::icon_phase::{IconArt, splash_icon_art};
 use muxr::ui::splash::sequence::{
     assembly_start_ms, rain_cue_ms, reduced_splash, sequence_end_ms, splash_sequence,
@@ -45,8 +55,12 @@ use support::{serial, setup};
 /// The design reference's phone screen (`.screen{height:650px}` inside a
 /// 340px-wide frame) — the same surface `tests/splash.rs` uses.
 const SURFACE: Size = Size::new(340.0, 650.0);
-/// One 60Hz frame, in nanoseconds.
+/// One 60Hz frame, in nanoseconds — `spec::REFERENCE_FRAME_MS`'s cadence, and
+/// the default every helper here pins.
 const FRAME_NS: u64 = 16_666_667;
+/// One 120Hz frame, in nanoseconds — the cadence the splash's `frame_factor`
+/// normalization exists for.
+const FRAME_NS_120: u64 = 8_333_333;
 /// The reduced-motion hold (`spec::REDUCED_HOLD_MS`, which is `pub(crate)`).
 const REDUCED_HOLD_MS: f64 = 200.0;
 /// The heading piece's stagger (`spec::PIECE_DELAYS_MS[2]`, likewise).
@@ -95,20 +109,37 @@ fn theme(reduce_motion: bool) -> Theme {
     theme
 }
 
-/// The frame index by which `ms` of animation has elapsed. Frame 0 seeds the
-/// clock (zero delta), so `ms` of motion is in by frame `ms/16.67 + 1`.
-fn frame_at(ms: f64) -> usize {
-    (ms / (FRAME_NS as f64 / 1_000_000.0)).round() as usize + 1
+/// A `cadence_ns` frame, in milliseconds.
+fn cadence_ms(cadence_ns: u64) -> f64 {
+    cadence_ns as f64 / 1_000_000.0
 }
 
-/// Drive `frames` 60Hz frames of the real shell loop — rebuild, lay out
-/// shaping real text, paint — returning each frame's recording and whether it
-/// asked for another one.
+/// `frame`'s wall-clock instant, in ms, on a run driven at `cadence_ns`.
+fn frame_ms(frame: usize, cadence_ns: u64) -> f64 {
+    frame as f64 * cadence_ms(cadence_ns)
+}
+
+/// The frame index by which `ms` of animation has elapsed at `cadence_ns`.
+/// Frame 0 seeds the clock (zero delta), so `ms` of motion is in by frame
+/// `ms/cadence + 1`.
+fn frame_at_cadence(ms: f64, cadence_ns: u64) -> usize {
+    (ms / cadence_ms(cadence_ns)).round() as usize + 1
+}
+
+/// [`frame_at_cadence`] at 60Hz.
+fn frame_at(ms: f64) -> usize {
+    frame_at_cadence(ms, FRAME_NS)
+}
+
+/// Drive `frames` frames of the real shell loop at `cadence_ns` — rebuild, lay
+/// out shaping real text, paint — returning each frame's recording and whether
+/// it asked for another one.
 ///
 /// Rebuilding *every* frame (rather than laying out once up front) is what
 /// makes the overlay's own unmount observable: the sequence ends by writing a
 /// signal the root component reads.
-fn drive<V: View<AppState>>(
+fn drive_at<V: View<AppState>>(
+    cadence_ns: u64,
     logic: &mut impl FnMut(&mut AppState) -> V,
     state: &mut AppState,
     theme: Theme,
@@ -124,10 +155,33 @@ fn drive<V: View<AppState>>(
             let text_any: &mut dyn Any = &mut text_ctx;
             root.layout_with_text(SURFACE, text_any);
             let mut scene = Recorder::default();
-            let outcome = root.paint(&mut scene, FrameTime::from_nanos(frame as u64 * FRAME_NS));
+            let outcome = root.paint(&mut scene, FrameTime::from_nanos(frame as u64 * cadence_ns));
             (scene, outcome.needs_frame)
         })
         .collect()
+}
+
+/// [`drive_at`] at 60Hz.
+fn drive<V: View<AppState>>(
+    logic: &mut impl FnMut(&mut AppState) -> V,
+    state: &mut AppState,
+    theme: Theme,
+    frames: usize,
+) -> Vec<(Recorder, bool)> {
+    drive_at(FRAME_NS, logic, state, theme, frames)
+}
+
+/// The index of the first frame satisfying `beat`, panicking with `what` if no
+/// frame in the run did.
+fn first_frame(
+    frames: &[(Recorder, bool)],
+    what: &str,
+    beat: impl FnMut(&(Recorder, bool)) -> bool,
+) -> usize {
+    frames
+        .iter()
+        .position(beat)
+        .unwrap_or_else(|| panic!("{what} never happened across {} frames", frames.len()))
 }
 
 /// The glyph ids `text` shapes to at `style` — the fingerprint a painted run
@@ -175,9 +229,13 @@ fn decoded_icon() -> IconArt {
 // The sequence, mounted on its own
 // ---------------------------------------------------------------------------
 
-/// Mount the orchestrator alone (no navigator underneath), so every draw
-/// recorded belongs to the splash.
-fn mount_sequence(reduce_motion: bool, frames: usize) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
+/// Mount the orchestrator alone (no navigator underneath) at `cadence_ns`, so
+/// every draw recorded belongs to the splash.
+fn mount_sequence_at(
+    cadence_ns: u64,
+    reduce_motion: bool,
+    frames: usize,
+) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
     let mut state = MuxrApp.init();
     let art = decoded_icon();
     let done = RwSignal::new(false);
@@ -190,8 +248,19 @@ fn mount_sequence(reduce_motion: bool, frames: usize) -> (Vec<(Recorder, bool)>,
             done,
         )
     };
-    let frames = drive(&mut logic, &mut state, theme(reduce_motion), frames);
+    let frames = drive_at(
+        cadence_ns,
+        &mut logic,
+        &mut state,
+        theme(reduce_motion),
+        frames,
+    );
     (frames, done)
+}
+
+/// [`mount_sequence_at`] at 60Hz.
+fn mount_sequence(reduce_motion: bool, frames: usize) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
+    mount_sequence_at(FRAME_NS, reduce_motion, frames)
 }
 
 #[test]
@@ -272,6 +341,101 @@ fn the_completion_cue_fires_once_the_whole_timeline_has_run() {
     assert!(done.get());
 }
 
+// ---------------------------------------------------------------------------
+// Frame cadence
+// ---------------------------------------------------------------------------
+
+/// The three timeline beats a paint stream can actually witness, as
+/// wall-clock ms since the overlay's first frame.
+#[derive(Debug)]
+struct Beats {
+    /// The rain + burst cue: the first frame drawing any glyph at all (the
+    /// icon beat before it draws only the bitmap).
+    rain_cue: f64,
+    /// The assembly: the first frame the staggered heading piece paints.
+    heading: f64,
+    /// The end: the frame the completion cue fired on — which is the last one
+    /// that asked for another, since a fired cue early-returns without
+    /// requesting and nothing else is left animating.
+    end: f64,
+}
+
+/// Drive the whole sequence at `cadence_ns` and time its beats.
+fn observed_beats(cadence_ns: u64) -> Beats {
+    let heading = heading_ids();
+    let (frames, _) = mount_sequence_at(
+        cadence_ns,
+        false,
+        frame_at_cadence(sequence_end_ms() + 200.0, cadence_ns),
+    );
+
+    let rain_cue = first_frame(&frames, "the rain cue", |(scene, _)| scene.glyph_runs > 0);
+    let heading_frame = first_frame(&frames, "the heading piece", |(scene, _)| {
+        occurrences(&scene.glyph_ids, &heading) > 0
+    });
+    let quiet = first_frame(&frames, "the sequence settling", |(_, needs_frame)| {
+        !needs_frame
+    });
+    Beats {
+        rain_cue: frame_ms(rain_cue, cadence_ns),
+        heading: frame_ms(heading_frame, cadence_ns),
+        end: frame_ms(quiet - 1, cadence_ns),
+    }
+}
+
+#[test]
+fn the_timeline_lands_on_the_same_wall_clock_at_120hz() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let sixty = observed_beats(FRAME_NS);
+    let one_twenty = observed_beats(FRAME_NS_120);
+    let frame = cadence_ms(FRAME_NS);
+
+    // Twice the frames, the same wall clock: the splash is clock-driven, and
+    // `spec::REFERENCE_FRAME_MS`/`frame_factor` exist so the one per-frame
+    // quantity (the rain's row advance) doesn't turn cadence into speed.
+    // Each beat is quantized to its own cadence, so two runs can differ by at
+    // most the coarser frame.
+    for (what, at_60, at_120, expected, gates) in [
+        (
+            "the rain cue",
+            sixty.rain_cue,
+            one_twenty.rain_cue,
+            rain_cue_ms(),
+            1.0,
+        ),
+        (
+            "the heading piece",
+            sixty.heading,
+            one_twenty.heading,
+            assembly_start_ms() + HEADING_DELAY_MS,
+            // Two quantizations compound here: the assembly gate opening, and
+            // then the piece's own stagger off that gate's first painted frame.
+            2.0,
+        ),
+        (
+            "the sequence end",
+            sixty.end,
+            one_twenty.end,
+            sequence_end_ms(),
+            1.0,
+        ),
+    ] {
+        assert!(
+            (at_120 - at_60).abs() <= frame,
+            "{what} moved with the cadence: {at_60:.1}ms at 60Hz vs {at_120:.1}ms at 120Hz"
+        );
+        for (rate, at) in [("60Hz", at_60), ("120Hz", at_120)] {
+            assert!(
+                at >= expected && at - expected <= gates * frame,
+                "{what} at {rate} landed at {at:.1}ms — not inside the {gates} frame(s) \
+                 after its {expected:.1}ms mark"
+            );
+        }
+    }
+}
+
 #[test]
 fn reduced_motion_collapses_the_sequence_on_its_first_frame() {
     let _g = serial();
@@ -308,8 +472,18 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
     let mut state = MuxrApp.init();
     let art = decoded_icon();
     let done = RwSignal::new(false);
-    let mut logic =
-        move |_: &mut AppState| -> AnyView<AppState> { reduced_splash(art.clone(), done) };
+    // Mirrors the shell (`AppState::splash_overlay`): the cue's write is what
+    // *unmounts* the overlay, so this closure has to drop it once `done` is
+    // set. A harness that re-mounted `reduced_splash` unconditionally could
+    // never see the hold end — nor see it end too early, which is the
+    // regression below.
+    let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
+        if done.get() {
+            any(page_backdrop::<AppState>())
+        } else {
+            reduced_splash(art.clone(), done)
+        }
+    };
     let frames = drive(
         &mut logic,
         &mut state,
@@ -317,10 +491,28 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
         frame_at(REDUCED_HOLD_MS + 100.0),
     );
 
+    // The whole hold shows the icon. `reduce_motion` is on for every frame of
+    // this path (it is why the path was chosen), so a cue short-circuiting on
+    // it would fire on frame 0 and leave one ~16ms flicker here instead of a
+    // 200ms beat.
+    for (index, (scene, _)) in frames
+        .iter()
+        .take(frame_at(REDUCED_HOLD_MS) - 1)
+        .enumerate()
+    {
+        assert_eq!(
+            scene.images,
+            1,
+            "frame {index} ({:.0}ms) dropped the static icon mid-hold",
+            frame_ms(index, FRAME_NS)
+        );
+    }
+
+    // ...and once the hold is out, the overlay is gone.
+    let after = frame_at(REDUCED_HOLD_MS + 50.0);
     assert_eq!(
-        frames[frame_at(100.0)].0.images,
-        1,
-        "the static icon is held, not animated"
+        frames[after].0.images, 0,
+        "the overlay must unmount once its hold has elapsed"
     );
     assert!(done.get(), "and the finished screen follows it");
     assert!(
