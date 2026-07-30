@@ -158,9 +158,11 @@ pub enum IconArt {
 /// Decode the embedded app icon, falling back to [`IconArt::Vector`] if the
 /// bytes don't decode.
 ///
-/// **Call once and retain the result** (an orchestrator's `Component::init`,
-/// mirroring how `examples/huddle` stashes its decoded logo in state):
-/// decoding is a real PNG decode plus a full-size RGBA allocation, and
+/// **Call once and retain the result** (from the composition root's first
+/// `build`, via `AppState::splash_plan()` — not `Component::init`, since at
+/// `init` time the shell has not yet applied the theme; see that function's
+/// doc for why), mirroring how `examples/huddle` stashes its decoded logo in
+/// state: decoding is a real PNG decode plus a full-size RGBA allocation, and
 /// `IconArt` clones for free afterwards (`ImageSource` is `Arc`-backed).
 pub fn splash_icon_art() -> IconArt {
     match ImageSource::decode(SPLASH_ICON_PNG) {

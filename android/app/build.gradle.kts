@@ -37,7 +37,9 @@ val localProperties = Properties().apply {
 // hand-run `assemble*Release`) keep working on a dev machine without secrets
 // — mirrors the Flutter muxr app's rig verbatim (same property/env names, see
 // `/muxr/android/app/build.gradle.kts`) so the password-manager keystores
-// drop in unchanged.
+// drop in unchanged. The fallback is loud for a Release build type: see the
+// `developSigningIsDebugFallback`/`productionSigningIsDebugFallback` flags and
+// the `androidComponents.onVariants` warning below.
 val keystoreProperties = Properties().apply {
     val propsFile = rootProject.file("app/keystores/key.properties")
     if (propsFile.exists()) {
@@ -47,6 +49,14 @@ val keystoreProperties = Properties().apply {
 
 fun signingValue(propKey: String, envKey: String): String? =
     keystoreProperties.getProperty(propKey) ?: System.getenv(envKey)
+
+// Set when a flavor's signingConfig below falls back to the debug keystore
+// (no app/keystores/key.properties or *_KEYSTORE_* env material found) — read
+// by the `androidComponents.onVariants` block further down to warn loudly on
+// every *Release variant* that ends up debug-signed. Declared before
+// `signingConfigs` so the closures below can assign into it.
+var developSigningIsDebugFallback = false
+var productionSigningIsDebugFallback = false
 
 // Reads a Gradle `-P` project property with a Kotlin-side default, so every
 // CLI-driven knob has a working default for Android-Studio-driven builds.
@@ -110,6 +120,7 @@ android {
                 keyPassword = signingValue("develop.keyPassword", "DEVELOP_KEY_PASSWORD")
             } else {
                 initWith(getByName("debug"))
+                developSigningIsDebugFallback = true
             }
         }
         create("production") {
@@ -121,6 +132,7 @@ android {
                 keyPassword = signingValue("prod.keyPassword", "KEY_PASSWORD")
             } else {
                 initWith(getByName("debug"))
+                productionSigningIsDebugFallback = true
             }
         }
     }
@@ -155,7 +167,9 @@ android {
             // set here). Neither flavor's keystore configured (no
             // android/app/keystores/key.properties, no env vars)? Both fall
             // back to the debug keystore (see signingConfigs above), so an
-            // unsigned local `assemble*Release` still succeeds; create
+            // unsigned local `assemble*Release` still succeeds, but loudly:
+            // `androidComponents.onVariants` below logs a warning per
+            // debug-signed release variant. Create
             // android/app/keystores/key.properties for real release signing
             // — see android/app/keystores/README.md.
             //
@@ -244,6 +258,40 @@ androidComponents {
                 if (abiName != null) {
                     val abiCode = abiCodes[abiName] ?: 0
                     output.versionCode.set(abiCode * 1000 + versionCodeValue)
+                }
+            }
+        }
+
+        // Loud debug-signing fallback: only the `release` build type ships,
+        // so only it warns — `debug`/`profile` sign with `develop`/`debug`
+        // deliberately (see the signingConfigs/buildTypes comments above) and
+        // must stay silent here.
+        //
+        // `onVariants` configures EVERY variant on EVERY invocation — AGP
+        // computes the whole variant model up front regardless of which task
+        // was requested, so `logger.warn` called directly in this block would
+        // fire for e.g. `productionRelease` even when only
+        // `assembleDevelopDebug` was requested. Instead this hooks `doFirst`
+        // onto the variant's own `assemble<Variant>` task (the stable,
+        // documented AGP task-naming convention), so the warning only prints
+        // when that variant is actually assembled — directly, via the bare
+        // `assemble`/`build` aggregate, or from an IDE run configuration.
+        if (variant.buildType == "release") {
+            val isDebugFallback = when (variant.flavorName) {
+                "develop" -> developSigningIsDebugFallback
+                "production" -> productionSigningIsDebugFallback
+                else -> false
+            }
+            if (isDebugFallback) {
+                val assembleTaskName = "assemble" + variant.name.replaceFirstChar { it.uppercase() }
+                tasks.matching { it.name == assembleTaskName }.configureEach {
+                    doFirst {
+                        logger.warn(
+                            "[muxr] release variant ${variant.name} is DEBUG-SIGNED: no " +
+                                "app/keystores/key.properties or *_KEYSTORE_* env signing " +
+                                "material found",
+                        )
+                    }
                 }
             }
         }
