@@ -144,9 +144,12 @@ fn claim(flag: &AtomicBool, start_route: &str, reduce_motion: bool) -> SplashPla
 
 /// Resolve (and consume) this process's one cold-start splash.
 ///
-/// Call once, from the composition root's `Component::init`. Every later call
-/// returns [`SplashPlan::Skip`]. Logs the outcome at debug level: "did the
-/// splash play, and why" is otherwise only answerable by watching the screen.
+/// Call once, from the composition root's first `build` (via
+/// `AppState::splash_plan()`) — not `Component::init`, since at `init` time
+/// the shell has not yet applied the theme (see that function's doc for
+/// why). Every later call returns [`SplashPlan::Skip`]. Logs the outcome at
+/// debug level: "did the splash play, and why" is otherwise only answerable
+/// by watching the screen.
 pub fn claim_cold_start(start_route: &str, reduce_motion: bool) -> SplashPlan {
     let plan = claim(&COLD_START_RESOLVED, start_route, reduce_motion);
     log::debug!("cold-start splash: {plan:?} (route {start_route}, reduce_motion {reduce_motion})");

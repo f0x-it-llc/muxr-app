@@ -16,22 +16,26 @@ scheme = "muxr"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing is driven by `android/key.properties`, a Java
-# properties file the Gradle build reads (this file is NOT parsed by Frust).
-# It must be gitignored (the generated .gitignore already excludes
-# `key.properties` and `*.jks`) so the keystore/passwords never enter version
-# control. Keys:
-#   storePassword=<keystore password>
-#   keyPassword=<key password>
-#   keyAlias=<key alias>
-#   storeFile=<path to .jks, relative to the android/ dir>
+# Android release signing is driven by `android/app/keystores/key.properties`,
+# a Java properties file the Gradle build reads directly (this file is NOT
+# parsed by Frust). It must be gitignored (the generated .gitignore already
+# excludes `key.properties` and `*.jks`) so the keystore/passwords never enter
+# version control. Keys (develop.*/prod.* prefixes):
+#   develop.storePassword=<...>   prod.storePassword=<...>
+#   develop.keyPassword=<...>     prod.keyPassword=<...>
+#   develop.keyAlias=<...>        prod.keyAlias=<...>
+#   develop.storeFile=<path to .jks>   prod.storeFile=<path to .jks>
 # Generate an upload keystore with:
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
-# Without key.properties, release builds fall back to debug signing (a Gradle
-# warning is logged); `frust build` makes a missing keystore a hard error.
+# Without key.properties, release builds fall back to debug signing (a loud
+# Gradle warning is logged per release variant, see android/app/build.gradle.kts).
+# CLI-gate caveat: `frust build --release` instead gates on `android/key.properties`
+# (a different path this Gradle rig never reads) — do NOT create it to appease
+# the CLI; Gradle ignores it and ships a silently debug-signed release (see
+# docs/DEVELOPMENT.md's Android Signing section).
 # [signing]
-# keystore = "android/key.properties"
+# keystore = "android/app/keystores/key.properties"
 
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `com.it.f0x.muxr`).
