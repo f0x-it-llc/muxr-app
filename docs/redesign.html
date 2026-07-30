@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>muxr — redesigned in Glyph</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg-void:#0a0c11; --bg-base:#10131a; --bg-surface:#161a23; --bg-raised:#1e2330; --bg-overlay:#272d3d; --bg-hover:#2f3648;
+  --amber:#ffb627; --amber-dim:#c98a12; --amber-faint:rgba(255,182,39,0.12); --amber-glow:rgba(255,182,39,0.30); --amber-border:rgba(255,182,39,0.35);
+  --cyan:#5ec8d8; --cyan-faint:rgba(94,200,216,0.14);
+  --success:#5fd88f; --success-faint:rgba(95,216,143,0.12);
+  --warning:#f5c860; --warning-faint:rgba(245,200,96,0.14); --warning-border:rgba(245,200,96,0.35);
+  --error:#ff6b6b; --error-faint:rgba(255,107,107,0.12); --error-border:rgba(255,107,107,0.35);
+  --fg:#f2ead9; --fg-muted:#a39c88; --fg-dim:#6b6556; --fg-faintest:#332f26;
+  --border:rgba(242,234,217,0.09); --border-bright:rgba(242,234,217,0.18);
+  --radius-xs:3px; --radius-sm:6px; --radius-md:10px; --radius-lg:16px; --radius-full:999px;
+  --font-display:'Space Mono', monospace; --font-mono:'IBM Plex Mono', monospace;
+}
+*,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
+body{ font-family:var(--font-mono); background:#050608; color:var(--fg); min-height:100vh; -webkit-font-smoothing:antialiased; }
+::selection{ background:var(--amber-faint); color:var(--amber); }
+
+.page{ display:flex; flex-direction:column; align-items:center; padding:48px 20px 100px; gap:56px; }
+.page-header{ text-align:center; max-width:680px; margin-bottom:8px; }
+.page-header .eyebrow{ font-size:11px; color:var(--amber); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:14px; }
+.page-header h1{ font-family:var(--font-display); font-weight:700; font-size:clamp(28px,5vw,42px); letter-spacing:-0.01em; margin-bottom:14px; }
+.page-header p{ font-size:13.5px; color:var(--fg-muted); line-height:1.7; font-weight:300; }
+
+.row{ display:flex; gap:28px; flex-wrap:wrap; justify-content:center; align-items:flex-start; }
+.screen-block{ display:flex; flex-direction:column; align-items:center; gap:14px; }
+.screen-label{ font-size:11px; color:var(--fg-dim); letter-spacing:0.06em; text-transform:uppercase; display:flex; align-items:center; gap:8px; }
+.screen-label::before, .screen-label::after{ content:''; width:22px; height:1px; background:var(--border-bright); }
+.screen-note{ max-width:260px; font-size:11px; color:var(--fg-dim); line-height:1.6; text-align:center; }
+.screen-note b{ color:var(--amber); font-weight:500; }
+
+.phone{ width:340px; background:var(--bg-void); border-radius:38px; border:1.5px solid var(--border-bright); overflow:hidden; position:relative; box-shadow:0 0 0 1px #000, 0 40px 80px rgba(0,0,0,0.6); flex-shrink:0; }
+.notch{ position:absolute; top:10px; left:50%; transform:translateX(-50%); width:100px; height:26px; background:var(--bg-void); border-radius:16px; z-index:100; }
+.statusbar{ height:48px; padding:12px 22px 0; display:flex; align-items:flex-end; justify-content:space-between; font-size:11px; font-weight:600; position:relative; z-index:10; padding-bottom:6px; }
+.statusbar .icons{ display:flex; gap:5px; align-items:center; color:var(--fg-muted); font-size:9px; }
+.screen{ height:650px; display:flex; flex-direction:column; position:relative; overflow:hidden; background:var(--bg-base); }
+
+.topbar{ background:var(--bg-surface); border-bottom:1px solid var(--border); padding:0 16px; height:46px; display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+.brand{ display:flex; align-items:center; gap:7px; font-family:var(--font-display); font-weight:700; font-size:13px; color:var(--amber); }
+.brand-mark{ width:16px; height:16px; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:2px; }
+.brand-mark span{ background:var(--amber); border-radius:1px; }
+.topbar-title{ position:absolute; left:50%; transform:translateX(-50%); font-size:12.5px; color:var(--fg); font-weight:500; }
+.topbar-icon{ width:30px; height:30px; display:flex; align-items:center; justify-content:center; border-radius:var(--radius-sm); color:var(--fg-muted); font-size:15px; cursor:pointer; }
+.topbar-icon:hover{ background:var(--bg-hover); color:var(--fg); }
+
+.scroll{ flex:1; overflow-y:auto; }
+
+/* ---------- CONNECT SCREEN ---------- */
+.connect{ padding:30px 22px; display:flex; flex-direction:column; gap:22px; }
+.connect-mark{ width:60px; height:60px; margin:0 auto; border:1px solid var(--border-bright); border-radius:var(--radius-md); display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:5px; padding:12px; }
+.connect-mark span{ border-radius:3px; }
+.connect-mark span:nth-child(1){ background:var(--amber-faint); border:1px solid var(--amber-border); }
+.connect-mark span:nth-child(2){ background:var(--amber); }
+.connect-mark span:nth-child(3){ background:var(--amber); }
+.connect-mark span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
+.connect-badge{ text-align:center; font-size:10.5px; color:var(--fg-dim); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:8px 12px; margin:0 auto; }
+.connect-badge b{ color:var(--fg-muted); display:block; font-size:11px; margin-bottom:2px; }
+.connect h2{ font-size:16px; font-weight:600; text-align:center; }
+.connect .sub{ font-size:11.5px; color:var(--fg-muted); text-align:center; line-height:1.6; margin-top:-14px; }
+.field{ display:flex; flex-direction:column; gap:6px; }
+.field label{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; }
+.field input{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:11px 12px; font-family:var(--font-mono); font-size:12px; color:var(--fg); outline:none; }
+.field input::placeholder{ color:var(--fg-dim); }
+.field input:focus{ border-color:var(--amber-border); box-shadow:0 0 0 3px var(--amber-faint); }
+.remember-row{ display:flex; align-items:center; justify-content:space-between; font-size:11.5px; color:var(--fg-muted); }
+.toggle{ width:36px; height:21px; border-radius:var(--radius-full); background:var(--bg-overlay); border:1px solid var(--border-bright); position:relative; flex-shrink:0; }
+.toggle.on{ background:var(--amber-faint); border-color:var(--amber-border); }
+.toggle::after{ content:''; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:var(--fg-dim); }
+.toggle.on::after{ left:17px; background:var(--amber); }
+.radio-opt{ display:flex; align-items:center; gap:9px; font-size:12px; padding:9px 0; }
+.radio-dot{ width:16px; height:16px; border-radius:50%; border:1.5px solid var(--border-bright); flex-shrink:0; position:relative; }
+.radio-dot.sel{ border-color:var(--amber); }
+.radio-dot.sel::after{ content:''; position:absolute; inset:3px; border-radius:50%; background:var(--amber); }
+.radio-opt .warn-chip{ font-size:9px; color:var(--warning); background:var(--warning-faint); border:1px solid var(--warning-border); padding:2px 6px; border-radius:var(--radius-full); margin-left:auto; }
+.btn-primary{ background:var(--amber); color:#241a04; border:none; border-radius:var(--radius-sm); padding:13px; font-family:var(--font-mono); font-size:12.5px; font-weight:600; letter-spacing:0.03em; text-align:center; cursor:pointer; }
+.saved-hdr{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; display:flex; align-items:center; gap:8px; margin-top:2px; }
+.saved-hdr::after{ content:''; flex:1; height:1px; background:var(--border); }
+.saved-row{ display:flex; align-items:center; gap:10px; padding:11px 0; font-size:11.5px; }
+.dot-ok{ width:7px; height:7px; border-radius:50%; background:var(--success); box-shadow:0 0 5px var(--success); flex-shrink:0; }
+.saved-row .addr{ color:var(--fg); }
+.saved-row .meta{ color:var(--fg-dim); font-size:10px; }
+.fab{ position:absolute; right:20px; bottom:20px; width:46px; height:46px; border-radius:var(--radius-md); background:var(--amber); color:#241a04; display:flex; align-items:center; justify-content:center; font-size:17px; box-shadow:0 8px 20px var(--amber-glow); }
+
+/* ---------- SESSIONS SCREEN ---------- */
+.conn-row{ display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--border); font-size:11px; }
+.conn-row .addr{ color:var(--fg); font-size:12px; flex:1; }
+.conn-row .meta{ color:var(--fg-dim); }
+.warn-badge{ font-size:9px; color:var(--warning); background:var(--warning-faint); border:1px solid var(--warning-border); padding:3px 8px; border-radius:var(--radius-full); }
+.sessions-list{ padding:14px 16px; display:flex; flex-direction:column; gap:12px; }
+.sess-card{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:14px; border-left:2px solid transparent; }
+.sess-card.running{ border-left-color:var(--success); }
+.sess-card.idle{ opacity:0.55; }
+.sess-top{ display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.sess-avatar{ width:26px; height:26px; border-radius:var(--radius-xs); background:var(--bg-raised); color:var(--fg-muted); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; flex-shrink:0; }
+.sess-card.running .sess-avatar{ background:var(--success-faint); color:var(--success); }
+.sess-name{ font-size:12.5px; font-weight:500; flex:1; }
+.sess-badges{ display:flex; gap:6px; }
+.chip{ font-size:9px; padding:3px 7px; border-radius:var(--radius-full); }
+.chip-run{ background:var(--success-faint); color:var(--success); }
+.chip-neutral{ background:var(--bg-raised); color:var(--fg-dim); border:1px solid var(--border-bright); }
+.sess-meta{ font-size:10px; color:var(--fg-dim); display:flex; gap:12px; margin-bottom:10px; }
+.sess-panes{ display:flex; gap:6px; }
+.pane-pill{ flex:1; background:var(--bg-base); border:1px solid var(--border); border-radius:var(--radius-xs); padding:8px 10px; font-size:10px; color:var(--fg-dim); }
+.new-sess-btn{ border:1px dashed var(--border-bright); border-radius:var(--radius-md); padding:13px; text-align:center; font-size:11.5px; color:var(--fg-muted); }
+.new-sess-btn b{ color:var(--amber); }
+
+/* ---------- TERMINAL SCREEN ---------- */
+.tabs-strip{ display:flex; align-items:center; gap:18px; padding:0 16px; height:36px; border-bottom:1px solid var(--border); font-size:11px; color:var(--fg-dim); flex-shrink:0; overflow-x:auto; }
+.tabs-strip .t{ display:flex; align-items:center; gap:5px; padding:6px 0; white-space:nowrap; }
+.tabs-strip .t.active{ color:var(--amber); border-bottom:2px solid var(--amber); }
+.tabs-strip .idx{ font-size:9px; color:var(--fg-faintest); }
+.tabs-strip .t.active .idx{ color:var(--amber-dim); }
+.path-bar{ display:flex; align-items:center; justify-content:space-between; padding:9px 16px; background:var(--bg-base); border-bottom:1px solid var(--border); font-size:10.5px; color:var(--fg-dim); flex-shrink:0; }
+.path-bar b{ color:var(--fg-muted); font-weight:500; }
+.term-body{ flex:1; background:var(--bg-void); padding:14px 16px; font-size:11px; line-height:1.75; overflow-y:auto; }
+.term-body .p{ color:var(--amber); }
+.term-body .ok{ color:var(--success); }
+.term-body .dim{ color:var(--fg-dim); }
+.cmd-hint{ display:flex; align-items:center; justify-content:space-between; padding:10px 16px; background:var(--bg-surface); border-top:1px solid var(--border); font-size:10px; color:var(--fg-dim); flex-shrink:0; }
+.cmd-hint kbd{ background:var(--bg-raised); border:1px solid var(--border-bright); border-radius:4px; padding:2px 6px; color:var(--fg-muted); margin:0 3px; }
+.term-fab{ position:absolute; right:16px; bottom:56px; width:40px; height:40px; border-radius:50%; background:var(--bg-overlay); border:1px solid var(--border-bright); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); font-size:14px; }
+
+/* ---------- BOTTOM SHEET ---------- */
+.sheet-scrim{ position:absolute; inset:0; background:rgba(6,7,10,0.6); }
+.sheet{ position:absolute; left:0; right:0; bottom:0; background:var(--bg-surface); border-top:1px solid var(--border-bright); border-radius:20px 20px 0 0; padding:10px 20px 22px; box-shadow:0 -20px 50px rgba(0,0,0,0.5); }
+.sheet-handle{ width:34px; height:4px; border-radius:2px; background:var(--border-bright); margin:0 auto 16px; }
+.sheet-toprow{ display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
+.sheet-toprow .lbl{ font-size:12.5px; color:var(--fg); }
+.sheet-close{ width:26px; height:26px; border-radius:50%; background:var(--bg-raised); display:flex; align-items:center; justify-content:center; color:var(--fg-dim); font-size:12px; }
+.sheet-section-lbl{ font-size:10px; color:var(--fg-dim); text-transform:lowercase; margin:16px 0 10px; display:flex; align-items:center; gap:6px; }
+.sheet-section-lbl::before{ content:'//'; color:var(--amber-dim); }
+.pill-row{ display:flex; gap:8px; flex-wrap:wrap; }
+.pill{ font-size:11px; padding:8px 13px; border-radius:var(--radius-full); background:var(--bg-raised); border:1px solid var(--border-bright); color:var(--fg-muted); }
+.pill.sel{ background:var(--amber-faint); border-color:var(--amber-border); color:var(--amber); }
+.pill.add{ border-style:dashed; color:var(--fg-dim); }
+.pane-item{ background:var(--bg-base); border:1px solid var(--amber-border); border-radius:var(--radius-sm); padding:11px 12px; display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.pane-item .ic{ width:26px; height:26px; border-radius:var(--radius-xs); background:var(--amber-faint); color:var(--amber); display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0; }
+.pane-item .info{ flex:1; min-width:0; }
+.pane-item .name{ font-size:11.5px; color:var(--fg); }
+.pane-item .path{ font-size:9.5px; color:var(--fg-dim); }
+.focused-chip{ font-size:9px; color:var(--amber); background:var(--amber-faint); border:1px solid var(--amber-border); padding:3px 8px; border-radius:var(--radius-full); flex-shrink:0; }
+.new-pane-btn{ border:1px dashed var(--border-bright); border-radius:var(--radius-sm); padding:11px; text-align:center; font-size:11px; color:var(--fg-dim); }
+.new-pane-btn b{ color:var(--amber); }
+
+/* ---------- SETTINGS SCREEN ---------- */
+.settings-scroll{ padding:6px 0 30px; }
+.set-group{ margin-bottom:4px; }
+.set-group-lbl{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; padding:16px 16px 8px; }
+.set-row{ display:flex; align-items:center; gap:12px; padding:11px 16px; border-bottom:1px solid var(--border); }
+.set-ic{ width:28px; height:28px; border-radius:var(--radius-xs); background:var(--bg-raised); display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--fg-muted); flex-shrink:0; }
+.set-body{ flex:1; min-width:0; }
+.set-label{ font-size:12px; color:var(--fg); }
+.set-value{ font-size:10.5px; color:var(--fg-dim); margin-top:2px; }
+.set-value.ok{ color:var(--success); }
+.set-value.warn{ color:var(--warning); }
+.set-chev{ color:var(--fg-faintest); font-size:13px; }
+.token-item{ padding:11px 16px; border-bottom:1px solid var(--border); }
+.token-top{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px; }
+.token-name{ font-size:11.5px; color:var(--fg); }
+.token-scope{ font-size:9px; padding:2px 7px; border-radius:var(--radius-full); }
+.token-scope.rw{ background:var(--bg-raised); color:var(--fg-muted); border:1px solid var(--border-bright); }
+.token-scope.ro{ background:var(--cyan-faint); color:var(--cyan); }
+.token-meta{ font-size:10px; color:var(--fg-dim); display:flex; align-items:center; justify-content:space-between; }
+.revoke-btn{ font-size:10px; color:var(--error); background:transparent; border:1px solid var(--error-border); border-radius:var(--radius-full); padding:4px 10px; }
+.add-token-btn{ margin:12px 16px 4px; border:1px dashed var(--border-bright); border-radius:var(--radius-sm); padding:10px; text-align:center; font-size:11px; color:var(--fg-dim); }
+.add-token-btn b{ color:var(--amber); }
+.disconnect-btn{ margin:20px 16px 4px; background:transparent; border:1px solid var(--error-border); border-radius:var(--radius-sm); padding:13px; text-align:center; font-size:12px; color:var(--error); font-weight:500; }
+.pick-row{ display:flex; align-items:center; justify-content:space-between; padding:13px 4px; font-size:12.5px; color:var(--fg); border-bottom:1px solid var(--border); }
+.pick-row:last-child{ border-bottom:none; }
+.pick-row.sel{ background:var(--amber-faint); color:var(--amber); margin:0 -20px; padding:13px 20px; border-radius:8px; }
+.pick-row .check{ color:var(--amber); }
+
+footer.credit{ margin-top:8px; font-size:11px; color:var(--fg-dim); text-align:center; max-width:640px; line-height:1.7; }
+footer.credit b{ color:var(--amber); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="page-header">
+    <div class="eyebrow">applied redesign</div>
+    <h1>muxr, in Glyph</h1>
+    <p>Same information architecture, same feature set — restyled onto Glyph's tokens, with the color system doing real semantic work instead of one teal covering five different meanings.</p>
+  </div>
+
+  <div class="row">
+
+    <!-- SCREEN 1: CONNECT -->
+    <div class="screen-block">
+      <div class="screen-label">connect</div>
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="statusbar"><span>01:21</span><span class="icons">●●●▮</span></div>
+        <div class="screen">
+          <div class="scroll">
+            <div class="connect">
+              <div class="connect-mark"><span></span><span></span><span></span><span></span></div>
+              <div class="connect-badge"><b>muxrd server</b>zellij · herdr</div>
+              <h2>Connect to server</h2>
+              <p class="sub">Enter credentials to attach to a remote zellij or herdr session.</p>
+              <div class="field"><label>server url</label><input placeholder="zelli.example.com:50051"></div>
+              <div class="field"><label>login token</label><input placeholder="paste or scan a token" type="password"></div>
+              <div class="remember-row">Remember for 4 weeks<div class="toggle on"></div></div>
+              <div>
+                <div class="radio-opt"><div class="radio-dot sel"></div>Public domain (CA)</div>
+                <div class="radio-opt"><div class="radio-dot"></div>Trust anyway<span class="warn-chip">insecure</span></div>
+              </div>
+              <div class="btn-primary">→ connect</div>
+              <div class="saved-hdr">saved servers</div>
+              <div class="saved-row"><span class="dot-ok"></span><div><div class="addr">100.71.31.57:50051</div><div class="meta">insecure-dev TLS · port 50051</div></div></div>
+            </div>
+          </div>
+          <div class="fab">▣</div>
+        </div>
+      </div>
+      <p class="screen-note">CTA moved from teal to <b>amber</b> — it's the interactive action, not a health status. "Trust anyway" now carries a <b>warning chip</b> instead of quiet gray text, since skipping certificate validation is a real risk worth flagging visually, not just describing.</p>
+    </div>
+
+    <!-- SCREEN 2: SESSIONS -->
+    <div class="screen-block">
+      <div class="screen-label">sessions</div>
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="statusbar"><span>01:21</span><span class="icons">●●●▮</span></div>
+        <div class="screen">
+          <div class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div>muxr</div><div class="topbar-title">100.71.31.57</div><div class="topbar-icon">⚙</div></div>
+          <div class="conn-row"><span class="dot-ok"></span><span class="addr">100.71.31.57:50051</span><span class="meta">zellij 0.44.3 · 36ms</span><span class="warn-badge">insecure</span></div>
+          <div class="scroll">
+            <div class="sessions-list">
+              <div class="sess-card running">
+                <div class="sess-top"><div class="sess-avatar">D</div><div class="sess-name">dev</div><div class="sess-badges"><span class="chip chip-run">running</span><span class="chip chip-neutral">zellij</span></div></div>
+                <div class="sess-meta"><span>▣ 9 panes</span><span>◧ 4 tabs</span><span>◎ 0 clients</span></div>
+                <div class="sess-panes"><div class="pane-pill">btop</div><div class="pane-pill">ed@precision:~</div></div>
+              </div>
+              <div class="sess-card idle">
+                <div class="sess-top"><div class="sess-avatar">J</div><div class="sess-name">jumping-peach</div><div class="sess-badges"><span class="chip chip-neutral">resurrectible</span><span class="chip chip-neutral">zellij</span></div></div>
+                <div class="sess-meta"><span>▣ 0 panes</span><span>◧ 0 tabs</span><span>0 tabs saved</span></div>
+              </div>
+              <div class="sess-card running">
+                <div class="sess-top"><div class="sess-avatar">H</div><div class="sess-name">herdr</div><div class="sess-badges"><span class="chip chip-run">running</span><span class="chip chip-neutral">herdr</span></div></div>
+                <div class="sess-meta"><span>▣ 3 panes</span><span>◧ 2 tabs</span><span>◆ 5 spaces</span></div>
+                <div class="sess-panes"><div class="pane-pill">···</div><div class="pane-pill">···</div></div>
+              </div>
+              <div class="new-sess-btn"><b>+</b> new session</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="screen-note">"Running" keeps <b>green</b> — it's a genuine health status, not a selection. The left accent bar reinforces it without adding another badge. Idle sessions dim to 55% opacity so the eye lands on what's actually alive first.</p>
+    </div>
+
+    <!-- SCREEN 3: TERMINAL PICKER SHEET -->
+    <div class="screen-block">
+      <div class="screen-label">session picker</div>
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="statusbar"><span>01:21</span><span class="icons">●●●▮</span></div>
+        <div class="screen">
+          <div class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div>muxr</div><div class="topbar-title">terminal</div><div class="topbar-icon">⋮</div></div>
+          <div class="tabs-strip"><span class="t"><span class="idx">1</span>btop</span><span class="t active"><span class="idx">2</span>gohora</span></div>
+          <div style="flex:1;position:relative;">
+            <div class="sheet-scrim"></div>
+            <div class="sheet">
+              <div class="sheet-handle"></div>
+              <div class="sheet-toprow"><span class="lbl">fullscreen</span><div class="toggle"></div></div>
+              <div class="sheet-section-lbl">spaces</div>
+              <div class="pill-row"><span class="pill">cupline</span><span class="pill">zelli_mobile</span><span class="pill sel">forgekit</span><span class="pill add">+ space</span></div>
+              <div class="sheet-section-lbl">tabs</div>
+              <div class="pill-row"><span class="pill">1 · 2</span><span class="pill sel">2 · 1</span><span class="pill add">+</span></div>
+              <div class="sheet-section-lbl">panes</div>
+              <div class="pane-item"><div class="ic">▤</div><div class="info"><div class="name">(untitled)</div><div class="path">/home/ed/Dev/personal/forgekit</div></div><span class="focused-chip">focused</span></div>
+              <div class="new-pane-btn"><b>+</b> new pane · long-press for floating</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="screen-note">Fullscreen is now a single toggle here — it no longer also exists as a separate icon elsewhere. "Focused" is <b>amber</b> now, since it's telling you what's selected, not that something succeeded.</p>
+    </div>
+
+    <!-- SCREEN 4: TERMINAL LIVE -->
+    <div class="screen-block">
+      <div class="screen-label">terminal — live</div>
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="statusbar"><span>01:22</span><span class="icons">●●●▮</span></div>
+        <div class="screen">
+          <div class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span><span></span></div>muxr</div><div class="topbar-title">terminal</div><div class="topbar-icon">⋮</div></div>
+          <div class="tabs-strip"><span class="t"><span class="idx">1</span>btop</span><span class="t"><span class="idx">2</span>minefit-api</span><span class="t"><span class="idx">3</span>gohora</span><span class="t active"><span class="idx">4</span>devbox</span></div>
+          <div class="path-bar"><span><b>ed@devbox</b> ~ · /home/ed</span><span>⛶</span></div>
+          <div class="term-body">
+            <span class="dim">Jul 04 10:31:23 devbox systemd: Reached target sockets.target — Sockets.</span><br>
+            <span class="dim">Jul 04 10:31:23 devbox systemd: Reached target basic.target — Basic System.</span><br>
+            <span class="dim">Jul 04 10:31:23 devbox systemd: Reached target default.target — Main User Target.</span><br><br>
+            <span class="p">ed@devbox:~$</span> <span class="ok">_</span>
+          </div>
+          <div class="cmd-hint"><span><kbd>Ctrl+Alt</kbd> + <kbd>n</kbd> new pane <kbd>f</kbd> float</span></div>
+          <div class="term-fab">☰</div>
+        </div>
+      </div>
+      <p class="screen-note">Zellij's own onscreen status bar (the lime-green pill row the terminal itself renders) is switched off — muxr's tab strip above already does that job. One navigation bar instead of two stacked on top of each other.</p>
+    </div>
+
+    <!-- SCREEN 5: SETTINGS -->
+    <div class="screen-block">
+      <div class="screen-label">server settings</div>
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="statusbar"><span>01:22</span><span class="icons">●●●▮</span></div>
+        <div class="screen">
+          <div class="topbar"><div class="topbar-icon">‹</div><div class="topbar-title">server settings</div><div style="width:30px"></div></div>
+          <div class="scroll">
+            <div class="settings-scroll">
+              <div class="set-group-lbl">connection</div>
+              <div class="set-row"><div class="set-ic">🌐</div><div class="set-body"><div class="set-label">server url</div><div class="set-value ok">100.71.31.57:50051</div></div><div class="set-chev">›</div></div>
+              <div class="set-row"><div class="set-ic">🔓</div><div class="set-body"><div class="set-label">tls certificate</div><div class="set-value warn">insecure (plaintext)</div></div><div class="set-chev">›</div></div>
+              <div class="set-row"><div class="set-ic">📡</div><div class="set-body"><div class="set-label">zellij version</div><div class="set-value">0.44.3</div></div></div>
+              <div class="set-row"><div class="set-ic">🔌</div><div class="set-body"><div class="set-label">herdr version</div><div class="set-value">herdr-wire-v14</div></div></div>
+
+              <div class="set-group-lbl">auth tokens</div>
+              <div class="token-item"><div class="token-top"><span class="token-name">zelli-mobile-100-71-31-57-mr3g6w5g</span><span class="token-scope rw">read-write</span></div><div class="token-meta"><span>created 2026-07-02</span><span class="revoke-btn">revoke</span></div></div>
+              <div class="token-item"><div class="token-top"><span class="token-name">token_2</span><span class="token-scope ro">read-only</span></div><div class="token-meta"><span>created 2026-07-10</span><span class="revoke-btn">revoke</span></div></div>
+              <div class="add-token-btn"><b>+</b> create new token</div>
+
+              <div class="set-group-lbl">terminal appearance</div>
+              <div class="set-row"><div class="set-ic">abc</div><div class="set-body"><div class="set-label">font family</div><div class="set-value">Hack Nerd Font Mono</div></div><div class="set-chev">›</div></div>
+              <div class="set-row"><div class="set-ic">12</div><div class="set-body"><div class="set-label">font size</div><div class="set-value">12px</div></div><div class="set-chev">›</div></div>
+              <div class="set-row"><div class="set-ic">▮</div><div class="set-body"><div class="set-label">cursor style</div><div class="set-value">block</div></div><div class="set-chev">›</div></div>
+
+              <div class="set-group-lbl">session poll</div>
+              <div class="set-row"><div class="set-ic">↻</div><div class="set-body"><div class="set-label">layout refresh</div><div class="set-value">every 3s</div></div><div class="set-chev">›</div></div>
+              <div class="set-row"><div class="set-ic">🔔</div><div class="set-body"><div class="set-label">bell notifications</div><div class="set-value">haptic + badge</div></div><div class="toggle on" style="margin-left:auto"></div></div>
+
+              <div class="disconnect-btn">Disconnect</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="screen-note">Server address no longer prints twice in the header. "insecure (plaintext)" moved from green to <b>warning yellow</b> — it was previously colored like a success state. Token scope is now a visible chip on every token, not just some.</p>
+    </div>
+
+    <!-- SCREEN 6: CURSOR STYLE SHEET -->
+    <div class="screen-block">
+      <div class="screen-label">picker sheet</div>
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="statusbar"><span>01:30</span><span class="icons">●●●▮</span></div>
+        <div class="screen">
+          <div class="topbar"><div class="topbar-icon">‹</div><div class="topbar-title">server settings</div><div style="width:30px"></div></div>
+          <div style="flex:1;position:relative;">
+            <div class="sheet-scrim"></div>
+            <div class="sheet">
+              <div class="sheet-handle"></div>
+              <div class="sheet-toprow"><span class="lbl" style="font-size:14px;font-weight:600;">cursor style</span></div>
+              <div class="pick-row sel">Block <span class="check">✓</span></div>
+              <div class="pick-row">Underline</div>
+              <div class="pick-row">Bar</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="screen-note">Same picker pattern reused for layout refresh, font size, and font family — the selected row now fills <b>amber</b> instead of teal, matching the "this is what you picked" meaning everywhere else in the app.</p>
+    </div>
+
+  </div>
+
+  <footer class="credit">Every screen above keeps muxr's real feature set and layout — the changes are restricted to the token layer (color, radius, type) and the four fixes noted under each screen. <b>Nothing was added or removed from the information architecture.</b></footer>
+
+</div>
+</body>
+</html>

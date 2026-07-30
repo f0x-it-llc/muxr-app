@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glyph — Terminal screen</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg-void:#0a0c11; --bg-base:#10131a; --bg-surface:#161a23; --bg-raised:#1e2330; --bg-overlay:#272d3d;
+  --amber:#ffb627; --amber-dim:#c98a12; --amber-faint:rgba(255,182,39,0.12); --amber-glow:rgba(255,182,39,0.32); --amber-border:rgba(255,182,39,0.35);
+  --success:#5fd88f; --warning:#f5c860; --error:#ff6b6b;
+  --fg:#f2ead9; --fg-muted:#a39c88; --fg-dim:#6b6556;
+  --border:rgba(242,234,217,0.09); --border-bright:rgba(242,234,217,0.18);
+  --radius-xs:3px; --radius-sm:6px; --radius-md:10px; --radius-lg:16px; --radius-xl:22px; --radius-full:999px;
+  --font-display:'Space Mono', monospace; --font-mono:'IBM Plex Mono', monospace;
+  --ease-out: cubic-bezier(0.16,1,0.3,1);
+  --ease-spring: cubic-bezier(0.34,1.4,0.55,1);
+
+  --term-header:#221e17; --term-body:#1b1811; --term-border:rgba(255,238,210,0.07);
+  --term-out:#9b917a; --term-comment:#726a58;
+}
+*,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
+body{ font-family:var(--font-mono); background:#050608; color:var(--fg); min-height:100vh; -webkit-font-smoothing:antialiased; }
+::selection{ background:var(--amber-faint); color:var(--amber); }
+.page{ display:flex; flex-direction:column; align-items:center; padding:48px 20px 90px; gap:22px; }
+.page-header{ text-align:center; max-width:640px; margin-bottom:6px; }
+.eyebrow{ font-size:11px; color:var(--amber); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:14px; }
+h1{ font-family:var(--font-display); font-weight:700; font-size:clamp(26px,5vw,38px); letter-spacing:-0.01em; margin-bottom:12px; }
+.page-header p{ font-size:13px; color:var(--fg-muted); line-height:1.7; font-weight:300; }
+
+.phone{ width:340px; background:var(--bg-void); border-radius:38px; border:1.5px solid var(--border-bright); overflow:hidden; position:relative; box-shadow:0 0 0 1px #000, 0 40px 80px rgba(0,0,0,0.6); }
+.notch{ position:absolute; top:10px; left:50%; transform:translateX(-50%); width:100px; height:26px; background:var(--bg-void); border-radius:16px; z-index:200; }
+.statusbar{ height:48px; padding:12px 22px 6px; display:flex; align-items:flex-end; justify-content:space-between; font-size:11px; font-weight:600; position:relative; z-index:50; }
+.statusbar .icons{ color:var(--fg-muted); font-size:9px; }
+.screen{ height:660px; display:flex; flex-direction:column; position:relative; overflow:hidden; background:var(--bg-void); }
+
+/* ============ app-level bar: muxr + overflow ============ */
+.app-bar{ height:50px; flex-shrink:0; display:flex; align-items:center; justify-content:space-between; padding:0 10px 0 16px; border-bottom:1px solid var(--border); transition:max-height .32s var(--ease-spring), opacity .22s var(--ease-out), padding .32s var(--ease-spring), border-color .2s; }
+.app-brand{ display:flex; align-items:center; gap:8px; font-family:var(--font-display); font-weight:700; font-size:13px; color:var(--amber); }
+.app-brand-mark{ width:15px; height:15px; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:2px; }
+.app-brand-mark span{ background:var(--amber); border-radius:1px; }
+.app-bar.fs-hidden{ max-height:0; height:0; padding-top:0; padding-bottom:0; opacity:0; border-color:transparent; overflow:hidden; }
+
+.kebab-btn{ width:34px; height:34px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); font-size:16px; cursor:pointer; transition:background .15s, color .15s; }
+.kebab-btn:hover, .kebab-btn.open{ background:var(--bg-overlay); color:var(--amber); }
+.term-dropdown{ position:absolute; top:44px; right:12px; background:var(--bg-overlay); border:1px solid var(--border-bright); border-radius:var(--radius-md); min-width:190px; box-shadow:0 16px 40px rgba(0,0,0,0.5); transform-origin:top right; transform:scale(0.85) translateY(-8px); opacity:0; pointer-events:none; transition:transform .2s var(--ease-spring), opacity .18s var(--ease-out); z-index:120; padding:6px; }
+.term-dropdown.open{ transform:scale(1) translateY(0); opacity:1; pointer-events:auto; }
+.dd-item{ display:flex; align-items:center; gap:9px; padding:10px 11px; font-size:11.5px; color:var(--fg-muted); border-radius:var(--radius-sm); cursor:pointer; opacity:0; transform:translateY(-4px); transition:opacity .18s, transform .18s, background .12s, color .12s; }
+.term-dropdown.open .dd-item{ opacity:1; transform:translateY(0); }
+.dd-item:hover{ background:var(--bg-raised); color:var(--fg); }
+.dd-item .ic{ width:16px; text-align:center; color:var(--amber); flex-shrink:0; }
+.dd-sep{ height:1px; background:var(--border); margin:5px 4px; }
+
+/* ============ terminal card ============ */
+.term-wrap{ flex:1; padding:14px; min-height:0; transition:padding .38s var(--ease-spring); }
+.term-wrap.fs{ padding:0; }
+.term-card{ height:100%; background:var(--term-body); border:1px solid var(--term-border); border-radius:var(--radius-xl); overflow:hidden; display:flex; flex-direction:column; transition:border-radius .38s var(--ease-spring); box-shadow:0 20px 50px rgba(0,0,0,0.4); }
+.term-wrap.fs .term-card{ border-radius:0; }
+
+/* card's own status row — replaces the old dots row */
+.term-statusrow{ display:flex; align-items:center; justify-content:space-between; padding:14px 14px 14px 18px; background:var(--term-header); flex-shrink:0; }
+.term-pane-title{ font-family:var(--font-display); font-weight:700; font-size:13.5px; color:var(--amber); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.expand-btn{ width:28px; height:28px; border-radius:50%; background:rgba(255,238,210,0.06); border:1px solid var(--term-border); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); font-size:12px; cursor:pointer; flex-shrink:0; transition:background .15s, color .15s, border-color .15s, transform .15s var(--ease-out); }
+.expand-btn:hover{ background:var(--amber-faint); color:var(--amber); border-color:var(--amber-border); }
+.expand-btn:active{ transform:scale(0.9); }
+.expand-btn.on{ background:var(--amber-faint); color:var(--amber); border-color:var(--amber-border); }
+
+.term-body{ flex:1; padding:18px 20px; overflow-y:auto; font-size:12.5px; line-height:2; }
+.term-line{ display:block; opacity:0; transform:translateY(4px); transition:opacity .18s var(--ease-out), transform .18s var(--ease-out); white-space:pre-wrap; word-break:break-word; }
+.term-line.show{ opacity:1; transform:translateY(0); }
+.term-line .p{ color:var(--amber); }
+.term-line .out{ color:var(--term-out); }
+.term-line .cm{ color:var(--term-comment); font-style:italic; }
+.term-line .cur{ display:inline-block; width:7px; height:13px; background:var(--amber); vertical-align:-2px; animation:blink 1.1s steps(1) infinite; }
+@keyframes blink{ 50%{ opacity:0; } }
+@media (prefers-reduced-motion:reduce){ .term-line .cur{ animation:none; } }
+
+/* ============ bottom sheet ============ */
+.sheet-scrim{ position:absolute; inset:0; background:rgba(6,7,10,0.6); opacity:0; pointer-events:none; transition:opacity .28s var(--ease-out); z-index:60; }
+.sheet-scrim.show{ opacity:1; pointer-events:auto; }
+.sheet{ position:absolute; left:0; right:0; bottom:0; background:var(--bg-surface); border-top:1px solid var(--border-bright); border-radius:20px 20px 0 0; padding:10px 20px 22px; box-shadow:0 -20px 50px rgba(0,0,0,0.5); transform:translateY(100%); transition:transform .34s var(--ease-spring); z-index:70; }
+.sheet.show{ transform:translateY(0); }
+.sheet-handle{ width:34px; height:4px; border-radius:2px; background:var(--border-bright); margin:0 auto 16px; }
+.sheet-toprow{ display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+.sheet-toprow .lbl{ font-size:12.5px; color:var(--fg); font-weight:500; }
+.sheet-close{ width:26px; height:26px; border-radius:50%; background:var(--bg-raised); display:flex; align-items:center; justify-content:center; color:var(--fg-dim); font-size:12px; cursor:pointer; }
+.sheet-section-lbl{ font-size:10px; color:var(--fg-dim); margin:16px 0 10px; display:flex; align-items:center; gap:6px; }
+.sheet-section-lbl::before{ content:'//'; color:var(--amber-dim); }
+.pill-row{ display:flex; gap:8px; flex-wrap:wrap; }
+.pill{ font-size:11px; padding:8px 13px; border-radius:var(--radius-full); background:var(--bg-raised); border:1px solid var(--border-bright); color:var(--fg-muted); cursor:pointer; transition:background .15s, color .15s, border-color .15s; }
+.pill.sel{ background:var(--amber-faint); border-color:var(--amber-border); color:var(--amber); }
+.pill.add{ border-style:dashed; color:var(--fg-dim); }
+.pane-item{ background:var(--bg-base); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:11px 12px; display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.pane-item.focused{ border-color:var(--amber-border); }
+.pane-item .ic{ width:26px; height:26px; border-radius:var(--radius-xs); background:var(--bg-raised); color:var(--fg-muted); display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0; }
+.pane-item.focused .ic{ background:var(--amber-faint); color:var(--amber); }
+.pane-item .info{ flex:1; min-width:0; }
+.pane-item .name{ font-size:11.5px; color:var(--fg); }
+.pane-item .path{ font-size:9.5px; color:var(--fg-dim); }
+.focused-chip{ font-size:9px; color:var(--amber); background:var(--amber-faint); border:1px solid var(--amber-border); padding:3px 8px; border-radius:var(--radius-full); flex-shrink:0; }
+.new-pane-btn{ border:1px dashed var(--border-bright); border-radius:var(--radius-sm); padding:11px; text-align:center; font-size:11px; color:var(--fg-dim); cursor:pointer; }
+.new-pane-btn b{ color:var(--amber); }
+
+.notes{ max-width:600px; font-size:12px; color:var(--fg-muted); line-height:1.85; margin-top:8px; }
+.notes b{ color:var(--amber); }
+.controls{ display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+.btn{ font-family:var(--font-mono); font-size:11.5px; color:var(--fg); background:var(--bg-raised); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:9px 15px; cursor:pointer; }
+.btn:hover{ background:var(--bg-overlay); border-color:var(--amber-border); color:var(--amber); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="page-header">
+    <div class="eyebrow">applied redesign · terminal screen v2</div>
+    <h1>One less row</h1>
+    <p>The separate terminal-head row is gone entirely — its two jobs moved elsewhere. Overflow now lives on the main app bar. The pane title moved into the terminal card's own status row, replacing the three cosmetic dots with a single one that's now an actual button.</p>
+  </div>
+
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="statusbar"><span>01:22</span><span class="icons">●●●▮</span></div>
+    <div class="screen">
+
+      <div class="app-bar" id="appBar">
+        <div class="app-brand"><div class="app-brand-mark"><span></span><span></span><span></span><span></span></div>muxr</div>
+        <div style="position:relative;">
+          <div class="kebab-btn" id="kebabBtn">⋮</div>
+          <div class="term-dropdown" id="termDropdown">
+            <div class="dd-item" id="sheetToggleItem"><span class="ic">▤</span>Panes &amp; tabs</div>
+            <div class="dd-sep"></div>
+            <div class="dd-item"><span class="ic">✎</span>Rename session</div>
+            <div class="dd-item"><span class="ic">⏻</span>Detach session</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="term-wrap" id="termWrap">
+        <div class="term-card">
+          <div class="term-statusrow">
+            <div class="term-pane-title" id="paneTitle">ed@devbox: ~</div>
+            <div class="expand-btn" id="expandBtn">⛶</div>
+          </div>
+          <div class="term-body" id="termBody"></div>
+        </div>
+      </div>
+
+      <div class="sheet-scrim" id="sheetScrim"></div>
+      <div class="sheet" id="pickerSheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-toprow"><span class="lbl">panes &amp; tabs</span><div class="sheet-close" id="sheetClose">×</div></div>
+        <div class="sheet-section-lbl">spaces</div>
+        <div class="pill-row"><span class="pill">cupline</span><span class="pill">zelli_mobile</span><span class="pill sel">forgekit</span><span class="pill add">+ space</span></div>
+        <div class="sheet-section-lbl">tabs</div>
+        <div class="pill-row" id="sheetTabRow">
+          <span class="pill" data-tab="btop">1 btop</span>
+          <span class="pill" data-tab="minefit">2 minefit-api</span>
+          <span class="pill" data-tab="gohora">3 gohora</span>
+          <span class="pill sel" data-tab="devbox">4 devbox</span>
+          <span class="pill add">+</span>
+        </div>
+        <div class="sheet-section-lbl">panes — <span id="sheetPaneCtx">devbox</span></div>
+        <div class="pane-item focused"><div class="ic">▤</div><div class="info"><div class="name" id="sheetPaneName">ed@devbox</div><div class="path" id="sheetPanePath">/home/ed</div></div><span class="focused-chip">focused</span></div>
+        <div class="new-pane-btn"><b>+</b> new pane · long-press for floating</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="replayBtn">↻ replay output</button>
+  </div>
+
+  <p class="notes">
+    Tap <b>⋮</b> on the app bar for the overflow menu — <b>Panes &amp; tabs</b> opens the sheet, where tapping a tab pill switches the active pane and updates the card. Tap the single circle in the terminal card's own status row to toggle <b>fullscreen</b> — the app bar collapses away and the card fills the screen, but that same button stays put so you can always tap it again to collapse back. Nothing about fullscreen lives in a menu anymore; it's one button, always in the same place.
+  </p>
+
+</div>
+
+<script>
+var TABS = {
+  btop: { title:'ed@precision: ~', name:'ed@precision', path:'/home/ed', lines:[
+    {t:'p', v:'ed@precision:~$ btop'},
+    {t:'out', v:'cpu 12% · mem 4.1/16gb · net 1.2mb/s'},
+    {t:'cm', v:'# live system monitor, refreshes every 2s'},
+    {t:'p', v:'ed@precision:~$ ', cursor:true}
+  ]},
+  minefit: { title:'ed@minefit: ~/api', name:'ed@minefit', path:'~/api', lines:[
+    {t:'p', v:'ed@minefit:~/api$ cargo run --release'},
+    {t:'out', v:'Compiling minefit-api v0.3.2'},
+    {t:'out', v:'Finished release [optimized] in 12.4s'},
+    {t:'p', v:'ed@minefit:~/api$ ', cursor:true}
+  ]},
+  gohora: { title:'ed@gohora: ~/src', name:'ed@gohora', path:'~/src', lines:[
+    {t:'p', v:'ed@gohora:~/src$ go build ./...'},
+    {t:'out', v:'ok  gohora/cmd/server  0.842s'},
+    {t:'cm', v:'# no errors, 3 packages rebuilt'},
+    {t:'p', v:'ed@gohora:~/src$ ', cursor:true}
+  ]},
+  devbox: { title:'ed@devbox: ~', name:'ed@devbox', path:'/home/ed', lines:[
+    {t:'p', v:'ed@devbox:~$ systemctl status muxrd'},
+    {t:'out', v:'Active: active (running) since Jul 04 10:31:23'},
+    {t:'cm', v:'# staggered per-line reveal — replays on tab switch'},
+    {t:'p', v:'ed@devbox:~$ ', cursor:true}
+  ]}
+};
+
+var termBody = document.getElementById('termBody');
+var paneTitle = document.getElementById('paneTitle');
+var sheetPaneCtx = document.getElementById('sheetPaneCtx');
+var sheetPaneName = document.getElementById('sheetPaneName');
+var sheetPanePath = document.getElementById('sheetPanePath');
+
+function renderTab(key){
+  var data = TABS[key];
+  paneTitle.textContent = data.title;
+  sheetPaneCtx.textContent = key;
+  sheetPaneName.textContent = data.name;
+  sheetPanePath.textContent = data.path;
+  termBody.innerHTML = '';
+  data.lines.forEach(function(line){
+    var el = document.createElement('span');
+    el.className = 'term-line';
+    var content = line.v.replace(/</g,'&lt;');
+    if(line.cursor){
+      el.innerHTML = '<span class="'+line.t+'">'+content+'</span><span class="cur"></span>';
+    } else {
+      el.innerHTML = '<span class="'+line.t+'">'+content+'</span>';
+    }
+    termBody.appendChild(el);
+  });
+  playReveal();
+}
+
+function playReveal(){
+  var lines = termBody.querySelectorAll('.term-line');
+  lines.forEach(function(l,i){
+    l.classList.remove('show');
+    setTimeout(function(){ l.classList.add('show'); }, i*140 + 60);
+  });
+}
+
+document.getElementById('replayBtn').addEventListener('click', playReveal);
+renderTab('devbox');
+
+// ===== sheet tab pills switch active tab =====
+document.querySelectorAll('#sheetTabRow .pill[data-tab]').forEach(function(pill){
+  pill.addEventListener('click', function(){
+    document.querySelectorAll('#sheetTabRow .pill[data-tab]').forEach(function(p){ p.classList.remove('sel'); });
+    pill.classList.add('sel');
+    renderTab(pill.getAttribute('data-tab'));
+    setTimeout(closeSheet, 260);
+  });
+});
+
+// ===== app bar overflow menu =====
+var kebabBtn = document.getElementById('kebabBtn');
+var termDropdown = document.getElementById('termDropdown');
+var menuOpen = false;
+function toggleMenu(force){
+  menuOpen = force!==undefined ? force : !menuOpen;
+  kebabBtn.classList.toggle('open', menuOpen);
+  termDropdown.classList.toggle('open', menuOpen);
+}
+kebabBtn.addEventListener('click', function(e){ e.stopPropagation(); toggleMenu(); });
+document.addEventListener('click', function(){ if(menuOpen) toggleMenu(false); });
+termDropdown.addEventListener('click', function(e){ e.stopPropagation(); });
+
+// ===== fullscreen toggle — lives on the card itself =====
+var appBar = document.getElementById('appBar');
+var termWrap = document.getElementById('termWrap');
+var expandBtn = document.getElementById('expandBtn');
+var isFs = false;
+function setFullscreen(state){
+  isFs = state;
+  appBar.classList.toggle('fs-hidden', isFs);
+  termWrap.classList.toggle('fs', isFs);
+  expandBtn.classList.toggle('on', isFs);
+  expandBtn.textContent = isFs ? '⤡' : '⛶';
+}
+expandBtn.addEventListener('click', function(){ setFullscreen(!isFs); });
+
+// ===== bottom sheet =====
+var sheetScrim = document.getElementById('sheetScrim');
+var pickerSheet = document.getElementById('pickerSheet');
+function openSheet(){ sheetScrim.classList.add('show'); pickerSheet.classList.add('show'); }
+function closeSheet(){ sheetScrim.classList.remove('show'); pickerSheet.classList.remove('show'); }
+document.getElementById('sheetToggleItem').addEventListener('click', function(){ openSheet(); toggleMenu(false); });
+document.getElementById('sheetClose').addEventListener('click', closeSheet);
+sheetScrim.addEventListener('click', closeSheet);
+</script>
+</body>
+</html>
