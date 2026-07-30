@@ -8,8 +8,10 @@
 //! occupant today is the cold-start splash, mounted as an `overlay` **above**
 //! the navigator rather than in place of it: the navigator keeps rendering
 //! `/` underneath for the whole sequence, which is what lets the overlay
-//! simply disappear at the end instead of handing anything over (see
-//! [`crate::ui::splash::sequence`]'s handoff note).
+//! simply disappear at the end (see [`crate::ui::splash::sequence`]'s
+//! handoff note) — the root is *always* a `Stack`, with or without an
+//! overlay, so that disappearance costs only the overlay's own pod (see
+//! [`root_view`]'s doc for why the container can never be optional).
 
 use frust::{AnyView, NavigatorController, Stack, any, navigator};
 
@@ -23,16 +25,29 @@ use crate::AppState;
 /// which resolves the start location before the first `build` runs).
 /// `overlay` is rebuilt like any other child: the frame it becomes `None` is
 /// the frame it unmounts.
+///
+/// **Always returns a `Stack`, never a bare navigator.** `AnyView` erases the
+/// concrete view type, and `AnyView::rebuild` tears down and rebuilds the
+/// whole element the instant that erased type changes between two builds
+/// (frust-core's `dyn_rebuild`) — so if this returned the navigator directly
+/// when `overlay` is `None` and a `Stack` when it is `Some`, the frame the
+/// splash's `overlay` flips to `None` would swap the erased root's concrete
+/// type from `StackView` to `NavigatorView` and discard the entire live
+/// navigator subtree (every route's retained widget state) only to rebuild
+/// it fresh one frame later — exactly the frame the design promises is a
+/// no-op. Keeping the root a `Stack` unconditionally (`vec![navigator]` with
+/// no overlay, `vec![navigator, overlay]` with one) means the erased type
+/// never changes across the handoff: `Stack`'s positional reconciliation
+/// (`rebuild_children_positional`) rebuilds the common index — the
+/// navigator — in place, and only the shrunk tail (the overlay) is torn
+/// down.
 pub fn root_view(
     controller: &NavigatorController<AppState>,
     initial: impl Fn() -> AnyView<AppState> + 'static,
     overlay: Option<AnyView<AppState>>,
 ) -> AnyView<AppState> {
     let navigator = any(navigator(controller, initial));
-    match overlay {
-        // A bare navigator when nothing is over it, so the ordinary case
-        // costs no extra container.
-        None => navigator,
-        Some(overlay) => any(Stack(vec![navigator, overlay])),
-    }
+    let mut children = vec![navigator];
+    children.extend(overlay);
+    any(Stack(children))
 }

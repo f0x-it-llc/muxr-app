@@ -34,9 +34,14 @@ Four flat routes, one per feature, no nesting: `/` (Connect), `/sessions`, `/ter
 ## Shell — `src/shell.rs`
 
 `root_view` composes the app's entire root content: the router-driven navigator, with an optional
-overlay stacked above it. Its one occupant today is the cold-start splash — mounted *over* the
-navigator (which keeps rendering `/` underneath the whole time) rather than in place of it, which
-is what lets the overlay disappear at the end without any explicit handoff.
+overlay stacked above it. It always returns the same `Stack` container — `[navigator]` with no
+overlay, `[navigator, overlay]` with one — never a bare navigator: `AnyView` erases the concrete
+view type, and swapping between `StackView` and `NavigatorView` across two builds would tear down
+and rebuild the whole erased root (`AnyView::rebuild`'s `dyn_rebuild`), discarding every route's
+retained widget state. A stable `Stack` root keeps the navigator at the same positional index
+across the whole splash sequence, so `Stack`'s positional reconciliation rebuilds it in place; only
+the overlay's own pod is torn down the frame it becomes `None`, which is what lets the cold-start
+splash disappear at the end without disturbing the `/` route it hands off to.
 
 ## Failure Vocabulary — `src/failure.rs`
 
