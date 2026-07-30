@@ -10,8 +10,18 @@
 //! clock, so they drive `RenderRoot::paint` themselves (the same shape
 //! `examples/huddle`'s toast-entrance test uses) and record through their own
 //! [`SplashScene`]. They still share the harness's `serial`/`setup` guards.
+//!
+//! # Frame cadence
+//!
+//! [`run_frames_at`]/[`frame_at_cadence`] take the cadence in nanoseconds and
+//! the [`run_frames`]/[`frame_at`] wrappers pin [`FRAME_NS`] (60Hz). The rain
+//! is the one widget with a genuinely *per-frame* quantity (the source
+//! specifies its fall in rows per `requestAnimationFrame`), so it is the one
+//! that must be exercised at [`FRAME_NS_120`] as well — see
+//! [`the_rain_falls_the_same_distance_per_second_at_60hz_and_120hz`].
 
 use std::any::Any;
+use std::collections::HashMap;
 
 use frust::authoring::View;
 use frust::{Get, RwSignal, Theme};
@@ -31,8 +41,22 @@ use support::{serial, setup};
 /// The design reference's phone screen (`.screen{height:650px}` inside a
 /// 340px-wide frame), so column counts match the values the unit tests use.
 const SURFACE: Size = Size::new(340.0, 650.0);
-/// One 60Hz frame, in nanoseconds.
+/// One 60Hz frame, in nanoseconds — the cadence every helper here defaults to.
 const FRAME_NS: u64 = 16_666_667;
+/// One 120Hz frame, in nanoseconds.
+const FRAME_NS_120: u64 = 8_333_333;
+/// The rain's column pitch, in logical px (`spec::RAIN_COL_W`, `pub(crate)`).
+const RAIN_COL_W: f64 = 14.0;
+/// The rain's row pitch, in logical px (`spec::RAIN_ROW_H`, likewise).
+const RAIN_ROW_H: f64 = 14.0;
+/// The rain's per-reference-frame fall band, in rows
+/// (`spec::RAIN_ADVANCE_MIN`/`spec::RAIN_ADVANCE_MAX`).
+const RAIN_ADVANCE_MIN: f64 = 0.35;
+/// The top of that band (see [`RAIN_ADVANCE_MIN`]).
+const RAIN_ADVANCE_MAX: f64 = 0.75;
+/// Reference frames a second — the `1000 / spec::REFERENCE_FRAME_MS` the
+/// per-frame band above is authored against.
+const REFERENCE_FRAMES_PER_SECOND: f64 = 60.0;
 
 /// A recording paint target capturing everything the splash widgets emit.
 #[derive(Default)]
@@ -42,6 +66,9 @@ struct SplashScene {
     glyph_runs: usize,
     /// Absolute x of each drawn glyph, for grid assertions.
     glyph_x: Vec<f64>,
+    /// Absolute y of each drawn glyph (parallel to [`Self::glyph_x`]), for
+    /// fall-distance assertions.
+    glyph_y: Vec<f64>,
     /// Alpha of each glyph's brush, for falloff assertions.
     glyph_alpha: Vec<f32>,
     /// Decoded-bitmap draws (the icon).
@@ -61,6 +88,7 @@ impl PaintScene for SplashScene {
     fn draw_glyph_run(&mut self, run: GlyphRun) {
         self.glyph_runs += 1;
         self.glyph_x.push(run.transform.translation().x);
+        self.glyph_y.push(run.transform.translation().y);
         if let peniko::Brush::Solid(color) = run.brush {
             self.glyph_alpha.push(color.components[3]);
         }
@@ -82,9 +110,10 @@ fn theme(reduce_motion: bool) -> Theme {
 }
 
 /// Mount `logic`'s view standalone, lay it out at [`SURFACE`], and paint
-/// `frames` 60Hz frames, returning each frame's recorded scene plus whether
-/// that frame asked for another one.
-fn run_frames<V: View<()>>(
+/// `frames` frames at `cadence_ns`, returning each frame's recorded scene plus
+/// whether that frame asked for another one.
+fn run_frames_at<V: View<()>>(
+    cadence_ns: u64,
     mut logic: impl FnMut(&mut ()) -> V,
     theme: Theme,
     frames: usize,
@@ -101,16 +130,31 @@ fn run_frames<V: View<()>>(
     (0..frames)
         .map(|frame| {
             let mut scene = SplashScene::default();
-            let outcome = root.paint(&mut scene, FrameTime::from_nanos(frame as u64 * FRAME_NS));
+            let outcome = root.paint(&mut scene, FrameTime::from_nanos(frame as u64 * cadence_ns));
             (scene, outcome.needs_frame)
         })
         .collect()
 }
 
-/// The frame index nearest `ms` of animation. Frame 0 seeds the clock (zero
-/// delta), so `ms` of motion has elapsed by frame `ms/16.67 + 1`.
+/// [`run_frames_at`] at 60Hz.
+fn run_frames<V: View<()>>(
+    logic: impl FnMut(&mut ()) -> V,
+    theme: Theme,
+    frames: usize,
+) -> Vec<(SplashScene, bool)> {
+    run_frames_at(FRAME_NS, logic, theme, frames)
+}
+
+/// The frame index nearest `ms` of animation at `cadence_ns`. Frame 0 seeds
+/// the clock (zero delta), so `ms` of motion has elapsed by frame
+/// `ms/cadence + 1`.
+fn frame_at_cadence(ms: f64, cadence_ns: u64) -> usize {
+    (ms / (cadence_ns as f64 / 1_000_000.0)).round() as usize + 1
+}
+
+/// [`frame_at_cadence`] at 60Hz.
 fn frame_at(ms: f64) -> usize {
-    (ms / (FRAME_NS as f64 / 1_000_000.0)).round() as usize + 1
+    frame_at_cadence(ms, FRAME_NS)
 }
 
 // ---------------------------------------------------------------------------
@@ -417,4 +461,130 @@ fn the_rain_never_starts_under_reduced_motion() {
         assert_eq!(scene.glyph_runs, 0);
         assert!(!needs_frame);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rain — frame cadence
+// ---------------------------------------------------------------------------
+
+/// The window each cadence's fall is measured over, in ms. Short enough that
+/// most columns are still on the surface at the end of it (an exited column
+/// respawns at the top and is excluded from the measurement) — including in
+/// the failure case this test exists to catch, where the 120Hz field falls at
+/// twice the speed and drains twice as fast.
+const FALL_WINDOW_MS: f64 = 250.0;
+/// The seed fixing the measured field.
+const FALL_SEED: u64 = 7;
+
+/// Every column's head position in a recorded frame, in rows, keyed by column
+/// index.
+///
+/// A column paints its trail *upward* from its head, so the head is the
+/// lowest glyph the column drew. A head that has fallen past the surface has
+/// its own glyph skipped (leaving a trail glyph as the lowest one), so a
+/// column only counts here when its lowest glyph is a full row clear of the
+/// bottom edge — the condition under which that glyph must be the head
+/// itself.
+fn head_rows(scene: &SplashScene) -> HashMap<usize, f64> {
+    let mut heads: HashMap<usize, f64> = HashMap::new();
+    for (x, y) in scene.glyph_x.iter().zip(&scene.glyph_y) {
+        let column = (x / RAIN_COL_W).round() as usize;
+        let head = heads.entry(column).or_insert(f64::MIN);
+        *head = head.max(*y);
+    }
+    heads.retain(|_, y| *y <= SURFACE.height - RAIN_ROW_H);
+    heads
+        .into_iter()
+        .map(|(c, y)| (c, y / RAIN_ROW_H))
+        .collect()
+}
+
+/// How far each column's head fell over [`FALL_WINDOW_MS`], in rows, on a run
+/// driven at `cadence_ns` — plus how many frames that run took.
+///
+/// A column that exited (and so respawned at the top) shows a *negative*
+/// displacement and is dropped, as is one whose head left the measurable band
+/// at either end.
+fn column_falls(cadence_ns: u64) -> (HashMap<usize, f64>, usize) {
+    let count = frame_at_cadence(FALL_WINDOW_MS, cadence_ns);
+    let frames = run_frames_at(
+        cadence_ns,
+        |_: &mut ()| rain::<()>(FALL_SEED),
+        theme(false),
+        count,
+    );
+    // Frame 0 seeds the clock with a zero delta, so it records the field's
+    // starting positions — identical across cadences, same seed, same layout.
+    let start = head_rows(&frames[0].0);
+    let end = head_rows(&frames[count - 1].0);
+    let falls = start
+        .iter()
+        .filter_map(|(column, from)| {
+            let to = end.get(column)?;
+            (to > from).then_some((*column, to - from))
+        })
+        .collect();
+    (falls, count)
+}
+
+#[test]
+fn the_rain_falls_the_same_distance_per_second_at_60hz_and_120hz() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (sixty, sixty_frames) = column_falls(FRAME_NS);
+    let (one_twenty, one_twenty_frames) = column_falls(FRAME_NS_120);
+    assert_eq!(
+        one_twenty_frames,
+        2 * sixty_frames - 1,
+        "the 120Hz run must cover the same window in twice the frames"
+    );
+
+    // The same columns in both runs: the field starts identically (same seed),
+    // and `frame_factor` is the reason the same ones are still on-surface at
+    // the end of the window.
+    let shared: Vec<usize> = sixty
+        .keys()
+        .filter(|column| one_twenty.contains_key(column))
+        .copied()
+        .collect();
+    assert!(
+        shared.len() >= 8,
+        "too few columns stayed measurable to compare cadences: {}",
+        shared.len()
+    );
+
+    let rows_per_second = |falls: &HashMap<usize, f64>| -> f64 {
+        let total: f64 = shared.iter().map(|column| falls[column]).sum();
+        total / shared.len() as f64 / (FALL_WINDOW_MS / 1_000.0)
+    };
+    let at_60 = rows_per_second(&sixty);
+    let at_120 = rows_per_second(&one_twenty);
+
+    // The source specifies the fall per *reference frame* (`rand(0.35,0.75)`
+    // rows per `requestAnimationFrame` at 60Hz), so a second of falling is 60
+    // of those whatever the real cadence — which is exactly what
+    // `spec::REFERENCE_FRAME_MS` + `frame_factor` convert between. Without
+    // that normalization the 120Hz run would fall at twice this speed.
+    let floor = RAIN_ADVANCE_MIN * REFERENCE_FRAMES_PER_SECOND;
+    let ceiling = RAIN_ADVANCE_MAX * REFERENCE_FRAMES_PER_SECOND;
+    for (rate, speed) in [("60Hz", at_60), ("120Hz", at_120)] {
+        assert!(
+            (floor..=ceiling).contains(&speed),
+            "{rate} fell {speed:.1} rows/s, outside the source's {floor:.0}..{ceiling:.0} band"
+        );
+    }
+    // Twice the frames draw twice as many steps from the seeded LCG, so the
+    // two fields are independent samples of the same per-frame distribution
+    // rather than the same field twice — this compares distributions (the
+    // spread across these seeds/columns is ~5%), and the regression it exists
+    // to catch is a factor of two.
+    let drift = (at_120 - at_60).abs() / at_60;
+    assert!(
+        drift < 0.2,
+        "cadence changed the fall speed: {at_60:.2} rows/s at 60Hz vs \
+         {at_120:.2} rows/s at 120Hz ({:.1}% apart across {} columns)",
+        drift * 100.0,
+        shared.len()
+    );
 }

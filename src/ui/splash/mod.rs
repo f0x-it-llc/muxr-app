@@ -237,10 +237,6 @@ pub(crate) mod spec {
         }
     }
 
-    /// Map a weighted-pool index (`0..POOL_LEN`) onto its distinct-glyph
-    /// index (`0..DISTINCT_LEN`) — the two brand-glyph copies fold onto the
-    /// same shaped glyph, which is what makes the pool *weighted* rather than
-    /// merely longer.
     /// The `index`th piece's stagger, from [`PIECE_DELAYS_MS`].
     ///
     /// An index past the table's end reuses the last entry rather than
@@ -251,6 +247,10 @@ pub(crate) mod spec {
         PIECE_DELAYS_MS[index.min(PIECE_DELAYS_MS.len() - 1)]
     }
 
+    /// Map a weighted-pool index (`0..POOL_LEN`) onto its distinct-glyph
+    /// index (`0..DISTINCT_LEN`) — the two brand-glyph copies fold onto the
+    /// same shaped glyph, which is what makes the pool *weighted* rather than
+    /// merely longer.
     pub(crate) fn pool_to_distinct(pool_index: usize) -> usize {
         let plain = RAIN_GLYPHS.len();
         if pool_index < plain {
