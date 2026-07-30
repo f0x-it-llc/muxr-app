@@ -63,6 +63,28 @@ clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
 # unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
 log = "0.4"
 
+# Test-harness-only, NOT an escape hatch: the headless screen tests
+# (`tests/*.rs`) drive Frust's `RenderRoot` directly (`tests/support/mod.rs` —
+# the desktop shell's own rebuild/layout/paint seam, no GPU, no window) and
+# pump the reactive runtime's UI-thread local task queue frame by frame.
+# `RenderRoot` is deliberately not in `frust::authoring` (it is shell-owned,
+# not something an app constructs), so the harness still names these crates
+# the long way; production code names none of `frust-core`/`frust-scene`/
+# `frust-text`/`kurbo`/`peniko` (mirrors `examples/huddle`'s own dev-deps
+# comment verbatim — see that file for the full rationale). `tokio` is kept
+# available for `#[tokio::test]`-style controller/use-case unit tests once
+# Phase 2 adds them; this crate's own production code never spawns a tokio
+# runtime itself.
+[dev-dependencies]
+frust-core = { path = "../../crates/frust-core" }
+frust-reactive = { path = "../../crates/frust-reactive" }
+frust-scene = { path = "../../crates/frust-scene" }
+frust-text = { path = "../../crates/frust-text" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
+reactive_graph = "0.2"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
+
 [features]
 # Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).
 lean = ["log/release_max_level_warn"]

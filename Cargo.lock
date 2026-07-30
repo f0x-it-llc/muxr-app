@@ -1831,7 +1831,15 @@ dependencies = [
  "clean-signals",
  "clean-signals-frust",
  "frust",
+ "frust-core",
+ "frust-reactive",
+ "frust-scene",
+ "frust-text",
+ "kurbo",
  "log",
+ "peniko",
+ "reactive_graph",
+ "tokio",
 ]
 
 [[package]]
@@ -3115,6 +3123,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
  "pin-project-lite",
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
