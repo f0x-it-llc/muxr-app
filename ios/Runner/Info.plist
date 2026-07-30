@@ -4,8 +4,14 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<!-- Per-flavor display name. `APP_DISPLAY_NAME` is a build setting defined
+	     in every target build configuration ("Muxr" for the stock/Production
+	     configs, "Muxr Dev" for the Develop trio). This project sets
+	     GENERATE_INFOPLIST_FILE = NO, so the INFOPLIST_KEY_* mechanism is
+	     unavailable and build-setting expansion in this file is the routing
+	     seam. -->
 	<key>CFBundleDisplayName</key>
-	<string>Muxr</string>
+	<string>$(APP_DISPLAY_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
