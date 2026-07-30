@@ -10,15 +10,14 @@
 //! | [`icon_phase`] | The real app icon springing in, holding, then dissolving outward |
 //! | [`burst`] | 14 one-shot glyph particles flying out of the icon's center |
 //! | [`rain`] | The full-surface amber matrix rain, thinning column by column |
+//! | [`sequence`] | The orchestrator: all three over one clock, ending in the Connect screen's piece-by-piece assembly |
 //!
-//! **Library code only.** Nothing here is mounted yet: a later task composes
-//! the three into the splash orchestrator and wires it into the route
-//! table/shell. Each widget is independently mountable and independently
-//! testable, and none of them knows about the others — the orchestrator owns
-//! the sequencing (it cues [`burst`]/[`rain`] off the icon's published
-//! [`icon_phase::IconPhase`], which flips to
-//! [`Dissolve`](icon_phase::IconPhase::Dissolve) at exactly
-//! [`spec::ICON_DELAY_MS`]).
+//! Each of the first three widgets is independently mountable and
+//! independently testable, and none of them knows about the others —
+//! [`sequence`] owns the sequencing, cueing [`burst`]/[`rain`] at exactly
+//! [`spec::ICON_DELAY_MS`] (the same instant the icon publishes
+//! [`Dissolve`](icon_phase::IconPhase::Dissolve)) and the assembly
+//! [`spec::ASSEMBLY_START_MS`] after that.
 //!
 //! # Source of truth
 //!
@@ -40,6 +39,7 @@
 pub mod burst;
 pub mod icon_phase;
 pub mod rain;
+pub mod sequence;
 
 use frust::authoring::scene::GlyphRun;
 use frust::authoring::text::{FontFamily, GenericSlot, TextContext, TextStyle};
@@ -167,6 +167,52 @@ pub(crate) mod spec {
     /// Weighted-pool size: brand glyphs appear twice (see [`BRAND_GLYPHS`]).
     pub(crate) const POOL_LEN: usize = RAIN_GLYPHS.len() + 2 * BRAND_GLYPHS.len();
 
+    // ---- Assembly (`.piece` + `landPieces`) ------------------------------
+
+    /// How long after the rain is cued the first piece lands, on the
+    /// rain-local clock (`landPieces`: `data-delay + ICON_DELAY + 1500`, of
+    /// which `ICON_DELAY` is the rain cue itself).
+    pub(crate) const ASSEMBLY_START_MS: f64 = 1500.0;
+    /// Per-piece stagger in source order (each `.piece`'s `data-delay`), from
+    /// the assembly start. Eight entries, one per Connect-screen piece.
+    pub(crate) const PIECE_DELAYS_MS: [f64; 8] =
+        [0.0, 130.0, 260.0, 390.0, 480.0, 580.0, 720.0, 860.0];
+    /// A piece's entrance duration (`.piece{transition:opacity .5s
+    /// var(--ease-spring), transform .5s var(--ease-spring)}`). Rides
+    /// [`SPRING`], the same overshooting curve the icon springs in on.
+    pub(crate) const PIECE_IN_MS: f64 = 500.0;
+    /// Vertical offset a piece drops in from (`transform:translateY(-70px)`).
+    pub(crate) const PIECE_ENTER_DY: f64 = -70.0;
+    /// Rotation a piece unwinds from, in radians (`rotate(-5deg)`).
+    pub(crate) const PIECE_ENTER_ROTATION: f64 = -5.0 * std::f64::consts::PI / 180.0;
+    /// Scale a piece grows in from (`scale(0.88)`).
+    pub(crate) const PIECE_ENTER_SCALE: f64 = 0.88;
+    /// Land-flash duration (`.piece.land.flash{animation:landFlash .5s ease-out}`).
+    pub(crate) const LAND_FLASH_MS: f64 = 500.0;
+    /// The flash's peak keyframe, as a fraction of [`LAND_FLASH_MS`]
+    /// (`@keyframes landFlash{ 40%{ … } }`).
+    pub(crate) const LAND_FLASH_PEAK: f64 = 0.4;
+    /// The flash's easing (`animation:landFlash .5s ease-out`).
+    pub(crate) const LAND_FLASH_EASE: Curve = Curve::EaseOut;
+    /// Peak glow blur radius in logical px (`box-shadow:0 0 24px 6px`), used
+    /// directly as `PaintScene::draw_shadow`'s `std_dev` — the same
+    /// CSS-blur-px-as-`blur_std_dev` treatment `frust_theme`'s Glyph
+    /// elevation table applies to the source's own shadow recipes.
+    pub(crate) const LAND_FLASH_BLUR: f64 = 24.0;
+    /// Peak glow spread in logical px (the `6px` in the same rule): how far
+    /// the glow's rounded rect grows past the piece's own box.
+    pub(crate) const LAND_FLASH_SPREAD: f64 = 6.0;
+    /// The glow ink's alpha (`--amber-glow: rgba(255,182,39,0.35)`) — the
+    /// accent at 35%, so it resolves from `ColorScheme::primary` rather than
+    /// being a second amber constant.
+    pub(crate) const AMBER_GLOW_ALPHA: f64 = 0.35;
+
+    // ---- Reduced motion (the source's `if(reduced)` branch) ---------------
+
+    /// How long the reduced-motion path holds the static icon before
+    /// revealing the finished screen (`setTimeout(…, 200)`).
+    pub(crate) const REDUCED_HOLD_MS: f64 = 200.0;
+
     /// The reference frame the source's per-frame constants were authored
     /// against (60 Hz). The rain scales its per-frame row advance by
     /// `delta / REFERENCE_FRAME_MS` so a 120 Hz device falls at the same
@@ -195,6 +241,16 @@ pub(crate) mod spec {
     /// index (`0..DISTINCT_LEN`) — the two brand-glyph copies fold onto the
     /// same shaped glyph, which is what makes the pool *weighted* rather than
     /// merely longer.
+    /// The `index`th piece's stagger, from [`PIECE_DELAYS_MS`].
+    ///
+    /// An index past the table's end reuses the last entry rather than
+    /// panicking: the table is the source's eight `.piece` elements, and the
+    /// orchestrator staggers whatever piece list it is handed (a ninth piece
+    /// would land with the eighth rather than take the whole sequence down).
+    pub(crate) fn piece_delay_ms(index: usize) -> f64 {
+        PIECE_DELAYS_MS[index.min(PIECE_DELAYS_MS.len() - 1)]
+    }
+
     pub(crate) fn pool_to_distinct(pool_index: usize) -> usize {
         let plain = RAIN_GLYPHS.len();
         if pool_index < plain {
