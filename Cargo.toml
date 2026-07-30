@@ -1,3 +1,9 @@
+# Empty workspace table: pins this crate as its own workspace root so Cargo
+# doesn't walk up into the frust repo's root workspace (this app lives at
+# `apps/muxr-app`, nested inside the frust checkout) — same shape as
+# `examples/huddle/Cargo.toml`'s `[workspace]` table.
+[workspace]
+
 [package]
 name = "muxr"
 version = "0.1.0"
@@ -27,7 +33,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # neutral-themed), or swap them for `"material"`/`"cupertino"` plus the
 # matching `frust::set_default_theme(...)` call to use one of the other two
 # built-in design systems instead.
-frust = { path = "/Users/ed/Dev/f0x.it.llc/frust", default-features = false, features = ["glyph", "material", "cupertino", "glyph-fonts"] }
+frust = { path = "../../crates/frust", default-features = false, features = ["glyph", "glyph-fonts"] }
 
 # `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,
@@ -36,7 +42,7 @@ frust = { path = "/Users/ed/Dev/f0x.it.llc/frust", default-features = false, fea
 # `../../plugins/clean-signals-frust` walks back up to the repo root and
 # down into the plugin's own directory — mirrors `frust-shared-preferences`'s
 # dependency line in the default `Cargo.toml.tmpl`).
-clean-signals-frust = { path = "/Users/ed/Dev/f0x.it.llc/frust/../../plugins/clean-signals-frust" }
+clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
 # `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
 # Version-Pin Policy) — this app path-deps into a **sibling checkout**
@@ -48,7 +54,7 @@ clean-signals-frust = { path = "/Users/ed/Dev/f0x.it.llc/frust/../../plugins/cle
 # **Dev-machine-only while `clean-signals` is unpublished**: this project
 # will not build without that sibling checkout present (see `frust create
 # --arch clean-signals`'s help text).
-clean-signals = { path = "/Users/ed/Dev/f0x.it.llc/frust/../../../clean-signals-rs/crates/clean-signals" }
+clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
 
 # `log` facade dependency for the release-only `lean` feature below — mirrors
 # the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes

@@ -35,5 +35,11 @@ scheme = "muxr"
 
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `com.it.f0x.muxr`).
-# [ios]
 # identifier = "com.it.f0x.muxr"
+
+# `team` is the Apple Developer Team ID (ByneApp, LLC) — read by
+# `frust-drive`'s `ios_build::team` module (precedence: `FRUST_IOS_TEAM` env
+# → this `[ios] team` → auto-detected `DEVELOPMENT_TEAM`) to codesign a
+# device `frust build ios`/`frust run -d <iphone>`.
+[ios]
+team = "87MFQ5L648"
