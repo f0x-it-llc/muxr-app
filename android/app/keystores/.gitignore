@@ -1,0 +1,6 @@
+# Everything in this directory is local-only (keystores, key.properties)
+# except this file, the README, and the example — see README.md.
+*
+!.gitignore
+!README.md
+!key.properties.example
