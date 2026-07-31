@@ -26,15 +26,19 @@
 //! what publishes `features::connect::di`'s repository plus the app-scoped
 //! `ConnectionController` the screen resolves in its own `init`. Not *building*
 //! it is deliberate — the cold-start splash claim is spent on a launch's first
-//! build, so this suite never plays a splash.
+//! build, so this suite never plays a splash. Because the fixture drives its
+//! **own** navigator (see above), it then calls
+//! [`muxr::routes::install_app_router`] over that controller, re-pointing the
+//! app's one path-pushing handle at it: the screen therefore pushes through the
+//! real route table and the real session guard, and this harness observes the
+//! result as a depth change.
 //!
-//! # Local frame helpers
+//! # Surface size
 //!
-//! `support::frame`/`settle` pin the 800×600 surface in `support::W`/`H`; the
-//! Connect screen is ~830px tall, so its last saved-server row would fall
-//! outside a 600px viewport and be untappable. The helpers below are
-//! `support`'s, re-spelled against a taller [`SURFACE`] — a size-parameterized
-//! `frame` in the shared harness would delete them.
+//! The Connect screen is ~830px tall, so at `support`'s default 800×600 its
+//! last saved-server row would fall outside the viewport and be untappable —
+//! every frame here goes through `support`'s `*_sized` helpers at [`SURFACE`]
+//! instead.
 //!
 //! # What is asserted where
 //!
@@ -43,24 +47,23 @@
 //! can assert `Router::resolve` directly. Here a push is observed as a depth
 //! change plus the connection facts that came with it.
 
-use std::any::Any;
-
 use frust::{
     Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, SizedBox, Stack, any,
     navigator,
 };
 use frust_core::accesskit::{Node, Role, Toggled};
-use frust_core::{FrameTime, NamedKey, RenderRoot};
+use frust_core::{NamedKey, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::expect_connection_controller;
 use muxr::features::connect::presentation::pages::connect_page;
+use muxr::routes::install_app_router;
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
-use support::{RecScene, SETTLE_MS, char_key, ms, named_key, serial, setup, tap};
+use support::{char_key, named_key, serial, settle_sized, setup, tap};
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
 /// tall enough for the whole screen (~830px of pieces) to lay out unclipped —
@@ -122,10 +125,15 @@ struct Harness {
 
 impl Harness {
     /// Run the real composition root's `init` (DI + the app-scoped connection
-    /// controller), then mount the screen and render its first settled frame.
+    /// controller), re-point the app's nav handle at this fixture's own
+    /// navigator, then mount the screen and render its first settled frame.
     fn mount() -> Self {
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
+        // The screen resolves `routes::app_nav()` in its own `init`; this makes
+        // that handle the app's real router over *this* navigator, guard and
+        // all (see the module docs).
+        let _router = install_app_router(&nav, expect_connection_controller());
         let nav_for_navigator = nav.clone();
         let nav_for_screen = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
@@ -145,23 +153,17 @@ impl Harness {
         harness
     }
 
-    /// One frame at `frame_time` (`support::frame_at`, at [`SURFACE`]).
-    fn frame_at(&mut self, frame_time: FrameTime) -> RecScene {
-        self.root.rebuild(&mut self.logic, &mut self.state);
-        let tcx: &mut dyn Any = &mut self.tcx;
-        self.root.layout_with_text(SURFACE, tcx);
-        let mut scene = RecScene::default();
-        self.root.paint(&mut scene, frame_time);
-        scene
-    }
-
     /// Drive a pushed/popped page past the navigator's input-blocking
-    /// transition (`support::settle`, at [`SURFACE`]): seed the clock, complete
-    /// the transition during paint, then finalize it on the following rebuild.
+    /// transition, at [`SURFACE`]: seed the clock, complete the transition
+    /// during paint, then finalize it on the following rebuild.
     fn settle(&mut self) {
-        self.frame_at(FrameTime::ZERO);
-        self.frame_at(ms(SETTLE_MS));
-        self.frame_at(ms(SETTLE_MS));
+        settle_sized(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            SURFACE,
+        );
     }
 
     /// A full tap at `point`.

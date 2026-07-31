@@ -29,8 +29,15 @@
 //!
 //! Locating an overlay's chrome uses one extra trick over `ui_substrate.rs`'s:
 //! the screen underneath paints plenty of its own rects, so each test diffs the
-//! frame *before* opening an overlay against the one after ([`added`]) and
-//! addresses only what the overlay itself added.
+//! frame *before* opening an overlay against the one after
+//! (`support::added`) and addresses only what the overlay itself added.
+//!
+//! Because the fixture drives its own navigator, [`Harness::mount`] also calls
+//! [`muxr::routes::install_app_router`] over that controller — the app's one
+//! path-pushing handle, which the screen resolves in its `Component::init`,
+//! then points at *this* navigator, carrying the real route table and the real
+//! session guard with it (that guard is what
+//! [`attach_pushes_the_terminal_route_and_the_guard_still_applies`] exercises).
 //!
 //! # Async
 //!
@@ -42,20 +49,21 @@
 use std::time::{Duration, Instant};
 
 use frust::{AnyView, Component, NavigatorController, SizedBox, Stack, any, navigator};
-use frust_core::accesskit::Node;
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::presentation::pages::sessions_page;
+use muxr::routes::install_app_router;
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    RecScene, center, char_key, frame, largest, named_key, node_labels, pointer, pump_frames,
-    serial, settle, setup, smallest, tap,
+    EPSILON, RecScene, added, by_width, center, char_key, frame, largest, named_key,
+    node_centers_by_label, node_labels, node_values, pointer, pump_frames, serial, settle, setup,
+    smallest, tap,
 };
 
 /// A point in the top-left corner — scrim on every overlay this screen pushes
@@ -67,8 +75,6 @@ const PANEL_PADDING: f64 = 20.0;
 /// `glyph::list`'s leading glyph box edge, transcribed: one 32×32 rounded rect
 /// per picker row, which is how a test counts the rows a sheet listed.
 const LIST_GLYPH_BOX: f64 = 32.0;
-/// Geometry comparison tolerance, in logical px.
-const EPSILON: f64 = 0.5;
 /// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -78,71 +84,6 @@ const SEEDED: [&str; 4] = ["dev", "jumping-peach", "herdr", "minefit-api"];
 // ---------------------------------------------------------------------------
 // Local harness helpers
 // ---------------------------------------------------------------------------
-
-/// Every semantics **value** the current tree carries. `tests/support` has
-/// `node_labels` (a node's `label`) but not this: `frust`'s `text` widget is a
-/// `Role::Label` node carrying its run in `value`, per accesskit guidance — so
-/// asserting "this session's name is on screen" needs the value side.
-///
-/// A private copy rather than a `support` addition: `support/` is read-only to
-/// this task (flagged in the completion summary — it belongs there).
-fn node_values<S: 'static, V: frust_core::View<S>>(root: &RenderRoot<S, V>) -> Vec<String> {
-    root.semantics()
-        .nodes
-        .iter()
-        .filter_map(|(_, node)| node.value().map(str::to_string))
-        .collect()
-}
-
-/// The centers of **every** semantics node labelled `label`, in pass order —
-/// `support`'s `node_center_by_label` returns only the first, and this screen
-/// renders one "Attach"/"Rename"/"Kill" per card.
-fn node_centers_by_label<S: 'static, V: frust_core::View<S>>(
-    root: &RenderRoot<S, V>,
-    label: &str,
-) -> Vec<Point> {
-    root.semantics()
-        .nodes
-        .iter()
-        .filter(|(_, node)| node.label() == Some(label))
-        .filter_map(|(_, node): &(_, Node)| node.bounds())
-        .map(|b| Point::new((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0))
-        .collect()
-}
-
-/// The rects in `after` that weren't in `before` — an overlay's own chrome,
-/// isolated from the screen painting underneath it (which is unchanged while
-/// an overlay is up, since it is a `Stack` sibling rather than a covered
-/// navigator page).
-fn added(before: &[(Point, Size)], after: &[(Point, Size)]) -> Vec<(Point, Size)> {
-    let mut remaining: Vec<(Point, Size)> = before.to_vec();
-    let mut new = Vec::new();
-    for rect in after {
-        match remaining.iter().position(|candidate| same(candidate, rect)) {
-            Some(index) => {
-                remaining.swap_remove(index);
-            }
-            None => new.push(*rect),
-        }
-    }
-    new
-}
-
-/// Whether two recorded rects are the same one, within [`EPSILON`].
-fn same(a: &(Point, Size), b: &(Point, Size)) -> bool {
-    (a.0.x - b.0.x).abs() < EPSILON
-        && (a.0.y - b.0.y).abs() < EPSILON
-        && (a.1.width - b.1.width).abs() < EPSILON
-        && (a.1.height - b.1.height).abs() < EPSILON
-}
-
-/// The first rect whose width matches `width` within [`EPSILON`].
-fn by_width(rects: &[(Point, Size)], width: f64) -> Option<(Point, Size)> {
-    rects
-        .iter()
-        .copied()
-        .find(|(_, size)| (size.width - width).abs() < EPSILON)
-}
 
 /// A mock connect target. `offer_credential` decides whether the credential
 /// banner is offered on this connection.
@@ -179,6 +120,10 @@ impl Harness {
         // cold-start splash) is ever involved.
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
+        // Re-point the app's one path-pushing handle (`routes::app_nav`, which
+        // the screen resolves in its own `init`) at this fixture's navigator,
+        // real route table and real session guard included.
+        let _router = install_app_router(&nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             let screen_nav = logic_nav.clone();
@@ -405,9 +350,13 @@ fn the_seeded_sessions_render_as_cards() {
         values.iter().any(|v| v == "mock.example:7777"),
         "the strip prints the endpoint: {values:?}"
     );
+    // The TLS posture is a *badge* (a `Role::Status` node, hence a label), so
+    // its hue can be variant-coded off `ServerInfo::trust_mode` — the mock
+    // connects trust-on-first-use, the one posture that skips validation, and
+    // the redesign's `.warn-badge` is what it earns.
     assert!(
-        values.iter().any(|v| v == "Trust on first use"),
-        "…and the TLS label: {values:?}"
+        labels.iter().any(|l| l == "Trust on first use"),
+        "…and the TLS posture badge: {labels:?}"
     );
     assert!(
         labels.iter().any(|l| l == "42 ms"),

@@ -31,30 +31,24 @@
 //!
 //! # Navigating to `/sessions`
 //!
-//! The screen builds its own [`Router`] over `crate::routes::build_routes` —
-//! the app's real route table — driving the very same [`NavigatorController`]
-//! the app's router drives, and pushes the location through it. Two things force
-//! this shape:
+//! Through [`crate::routes::Nav`], the app's one path-pushing handle: the
+//! screen resolves it with [`app_nav`](crate::routes::app_nav) in
+//! [`Component::init`] — where every app-scoped dependency is resolved — keeps
+//! it in [`ConnectState`], and lends it to
+//! [`ConnectController::connect`] from the CTA's press handler. That push runs
+//! the app's real route table **and** its real session guard, exactly as a deep
+//! link to `/sessions` would; the guard is capture-based (see
+//! `crate::routes::session_guard_with`), so it is safe to consult from a press
+//! handler's owner-less call stack.
 //!
-//! - The composition root (`src/lib.rs`) publishes its `Router` nowhere; a route
-//!   builder receives only the [`NavigatorController`], which has no
-//!   location-based API. A `Router` is a *stateless resolver* over a route table
-//!   (every navigation-stack fact lives on the controller), so a second one over
-//!   the same controller and the same table navigates identically.
-//! - Resolving a sibling feature's page builder directly would import
-//!   `features::sessions::presentation`, which the cross-feature rule forbids.
+//! Two things this screen deliberately does **not** do: build a `Router` of its
+//! own (there is one `Router` in this app, the composition root's), and call a
+//! sibling feature's page builder directly (the cross-feature rule forbids
+//! importing `features::sessions::presentation`).
 //!
-//! **The session guard is deliberately not re-attached here.**
-//! `crate::routes::session_guard` reads the app-scoped connection controller out
-//! of reactive *context*, and a press handler runs outside any ambient reactive
-//! owner (`frust-shell-desktop` dispatches events outside
-//! `ReactiveRuntime::with_owner`), so consulting it from here would panic on
-//! desktop. It also has nothing to decide: this push happens in the same call
-//! that flipped `connected` to `true`. The app's own router keeps the guard for
-//! every other way into `/sessions`.
-//!
-//! Publishing the composition root's `Router` through context (from `src/lib.rs`)
-//! would delete this whole seam; that file is not this task's to edit.
+//! The raw [`frust::NavigatorController`] is still held beside the handle: a
+//! sheet is a pushed page *builder*, not a path, so
+//! `crate::ui::sheet::show_sheet` needs the controller itself.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -64,8 +58,7 @@ use frust::authoring::Color;
 use frust::authoring::text::TextStyle;
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Padding,
-    Router, SizedBox, Stack, any, button, component, inflexible, safe_area, scroll_view, text,
-    use_context,
+    SizedBox, Stack, any, button, component, inflexible, safe_area, scroll_view, text, use_context,
 };
 
 use super::chrome::panel;
@@ -75,6 +68,7 @@ use crate::AppState;
 use crate::connection::expect_connection_controller;
 use crate::failure::AppFailure;
 use crate::features::connect::di::SavedServers;
+use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::sheet::show_sheet;
 
@@ -141,9 +135,9 @@ struct ConnectScreen {
 pub struct ConnectState {
     /// The hosted view model, disposed with this component (`use_controller`).
     controller: Arc<ConnectController>,
-    /// The app's route table over the live navigator — see the module docs'
-    /// navigation note. `Rc` because a press closure captures it.
-    router: Rc<Router<AppState>>,
+    /// The app's one path-pushing handle — see the module docs' navigation
+    /// note. Clonable (an `Rc` bump), so a press closure captures its own copy.
+    app_nav: Nav,
     /// The raw navigator, for `crate::ui::sheet::show_sheet` (which pushes a
     /// transparent page rather than resolving a location).
     nav: frust::NavigatorController<AppState>,
@@ -167,10 +161,11 @@ impl Component for ConnectScreen {
 
         ConnectState {
             controller,
-            router: Rc::new(Router::with_controller(
-                &self.nav,
-                crate::routes::build_routes(self.nav.clone()),
-            )),
+            // Resolved here for the same reason the two above are: `init` is
+            // the screen's one dependency-resolution point (`app_nav` reads no
+            // reactive context, but a press handler resolving its own handles
+            // is the habit this app does not want).
+            app_nav: app_nav(),
             nav: self.nav.clone(),
         }
     }
@@ -181,8 +176,8 @@ impl Component for ConnectScreen {
             controller: Arc::clone(&state.controller),
             on_connect: {
                 let controller = Arc::clone(&state.controller);
-                let router = Rc::clone(&state.router);
-                Rc::new(move || controller.connect(&router))
+                let nav = state.app_nav.clone();
+                Rc::new(move || controller.connect(&nav))
             },
         };
         any(Stack(vec![

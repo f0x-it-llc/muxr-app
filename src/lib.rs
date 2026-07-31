@@ -16,8 +16,11 @@
 //! app-scoped mock [`connection::ConnectionController`] via
 //! [`connection::provide_connection_controller`], calls each feature's own
 //! [`features::connect::di::provide`]-shaped wiring stub, then builds the
-//! [`Router`]/[`NavigatorController`] pair (wiring `routes::session_guard` as
-//! the router's top-level redirect) and resolves the start location once;
+//! [`Router`]/[`NavigatorController`] pair through
+//! [`routes::install_app_router`] (which wires the session guard — closed over
+//! that connection controller — as the router's top-level redirect, and
+//! publishes the router as the app-wide [`routes::Nav`] handle every screen
+//! pushes paths through) and resolves the start location once;
 //! `Component::build` mounts [`shell::root_view`] over it, plus — on the
 //! first build of a cold start — the splash overlay
 //! ([`AppState::splash_plan`], [`ui::splash::sequence`]). No feature
@@ -36,9 +39,9 @@
 pub mod connection;
 pub mod failure;
 pub mod features;
+pub mod routes;
 pub mod ui;
 
-mod routes;
 mod shell;
 
 use std::rc::Rc;
@@ -65,13 +68,16 @@ const START_LOCATION: &str = "/";
 const SPLASH_SEED: u64 = 0x6D75_7872; // "muxr"
 
 /// Muxr's retained state (the framework's `Component::State`): the
-/// stack-style [`Router`] every screen navigates through. `Rc` so a screen's
-/// `on_press` closures (rebuilt fresh every `build`) can cheaply clone a
-/// handle — see `examples/huddle`'s `HuddleState::nav` for the same shape
-/// (there wrapping a `RouterDeepLinks`; muxr has no deep-link source to wire
-/// yet, so this wraps the plain `Router` directly).
+/// stack-style [`Router`] every screen navigates through. `Rc` so the same
+/// router can be shared with [`routes::app_nav`]'s handle without a second
+/// one existing — see `examples/huddle`'s `HuddleState::nav` for the same
+/// shape (there wrapping a `RouterDeepLinks`; muxr has no deep-link source to
+/// wire yet, so this wraps the plain `Router` directly).
 pub struct AppState {
-    /// The stack-style router every route navigates through.
+    /// The stack-style router every route navigates through — the *same*
+    /// `Rc` [`routes::Nav`] wraps (see that module's docs: a screen reaches it
+    /// through [`routes::app_nav`], because a `Component`'s callbacks never
+    /// see this outer state).
     pub nav: Rc<Router<AppState>>,
     /// What this launch's cold-start splash should be. `None` until the
     /// **first build** resolves it — see [`AppState::splash_plan`] for why
@@ -150,9 +156,10 @@ impl Component for MuxrApp {
     fn init(&self) -> AppState {
         // App-scoped mock connection state, published once under the root
         // owner (see `connection`'s module docs) — reachable from any screen
-        // via `use_context`, and from `routes::session_guard` the same way
-        // (it has no `&mut AppState` to reach one through any other way).
-        connection::provide_connection_controller();
+        // via `use_context`, and handed *by value* to the session guard below,
+        // which must stay safe to consult from a press handler's owner-less
+        // call stack and so never reads context itself.
+        let connection = connection::provide_connection_controller();
 
         // Each feature's own composition-root wiring seam — empty today (see
         // each `di.rs`'s doc), grows real repo construction once a feature's
@@ -164,12 +171,12 @@ impl Component for MuxrApp {
 
         // The controller is created *before* the route table (so every
         // route's page can push through the same controller the router
-        // drives).
+        // drives). `install_app_router` builds the table + the guarded router
+        // over it and publishes the router as the app-wide `routes::Nav` every
+        // screen resolves in its own `Component::init` — this is the app's
+        // ONE `Router`, and the only place one is ever constructed.
         let controller = NavigatorController::new();
-        let routes = routes::build_routes(controller.clone());
-        // The session guard is a top-level redirect (see `routes::session_guard`'s
-        // doc) — resolved before matching, ahead of any per-route redirect.
-        let router = Router::with_controller(&controller, routes).redirect(routes::session_guard);
+        let router = routes::install_app_router(&controller, connection);
         // Resolves the start location once (see `START_LOCATION`).
         router.handle_location(START_LOCATION);
 
@@ -177,7 +184,7 @@ impl Component for MuxrApp {
         // `AppState::splash_plan` for the ordering that forces it into the
         // first `build`.
         AppState {
-            nav: Rc::new(router),
+            nav: router,
             splash: None,
             icon: None,
             splash_done: RwSignal::new(false),

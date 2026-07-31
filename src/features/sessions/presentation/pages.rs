@@ -34,11 +34,14 @@
 //!
 //! # Navigating to `/terminal`
 //!
-//! See [`push_terminal`]. Short version: a `NavigatorController` pushes page
-//! *builders*, a `Router` resolves *paths*, and the app's own `Router` lives
-//! in `AppState` — on the far side of the component boundary above. So this
-//! screen rebuilds a router over `crate::routes`' own table (guard included),
-//! attached to the same shared controller.
+//! A `NavigatorController` pushes page *builders*; only a `Router` resolves
+//! *paths* (and runs the guard attached to it), and the app's one `Router`
+//! lives in `AppState` — on the far side of the component boundary above. So
+//! the composition root publishes it as [`crate::routes::Nav`], which this
+//! screen resolves once in [`Component::init`] and keeps in [`SessionsState`];
+//! [`push_terminal`] is the one place that spells the location. Every push
+//! therefore runs the app's real table and its real (capture-based, owner-free)
+//! session guard.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,14 +50,15 @@ use clean_signals_frust::{use_controller, use_failure_listener, use_interval};
 use frust::glyph::app_bar;
 use frust::{
     AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    Get, NavigatorController, Padding, Router, SizedBox, any, button, component, flexible,
-    inflexible, safe_area, scroll_view, spawn_local,
+    Get, NavigatorController, Padding, SizedBox, any, button, component, flexible, inflexible,
+    safe_area, scroll_view, spawn_local,
 };
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
+use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
@@ -64,7 +68,7 @@ use super::pieces;
 
 /// The route this screen attaches into. The session id rides as a query param
 /// (`Location::parse` splits it off before matching, so the flat `/terminal`
-/// route and `crate::routes::session_guard`'s own `loc.path` check are both
+/// route and `crate::routes`' own session-guard `loc.path` check are both
 /// unaffected) — the terminal screen ignores it today and will read it from
 /// `RouteParams` when it has a session to attach to.
 const TERMINAL_ROUTE: &str = "/terminal";
@@ -93,10 +97,14 @@ pub struct SessionsScreen {
     nav: NavigatorController<AppState>,
 }
 
-/// The Sessions screen's retained state: three handles and nothing else.
+/// The Sessions screen's retained state: four handles and nothing else.
 pub struct SessionsState {
-    /// The app's navigator — every push this screen makes goes through it.
+    /// The app's navigator — every page *builder* this screen pushes (the two
+    /// dialogs, the picker sheet) goes through it.
     pub nav: NavigatorController<AppState>,
+    /// The app's one path-pushing handle — how this screen reaches
+    /// `/terminal` (see the module docs' navigation note).
+    pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SessionsController>,
     /// The app-scoped connection handle, for the server strip and the
@@ -140,6 +148,9 @@ impl Component for SessionsScreen {
 
         SessionsState {
             nav: self.nav.clone(),
+            // Resolved here, with every other app-scoped dependency — never
+            // from inside a press handler.
+            app_nav: app_nav(),
             controller,
             connection: expect_connection_controller(),
         }
@@ -224,7 +235,7 @@ fn pause_for_push(state: &SessionsState) {
 /// query param.
 pub(super) fn attach(state: &mut SessionsState, id: &str) {
     pause_for_push(state);
-    push_terminal(&state.nav, id);
+    push_terminal(&state.app_nav, id);
 }
 
 /// Open the create-session dialog (the app bar's `+`, the list's
@@ -293,19 +304,23 @@ pub(super) fn open_picker(state: &mut SessionsState) {
     pause_for_push(state);
     let controller = Arc::clone(&state.controller);
     let nav = state.nav.clone();
+    let app_nav = state.app_nav.clone();
     show_sheet(&state.nav, move || {
         // Tracked read inside the sheet's page builder — the navigator re-runs
         // it every rebuild, so a session killed behind the sheet drops out of
         // it on the next frame.
         let sessions = controller.sessions.get();
         let row_nav = nav.clone();
+        let row_app_nav = app_nav.clone();
         let rows = pieces::picker_rows(&sessions, move |id| {
             // Pop the sheet, then push the terminal route: both ops land in
             // the same drain, so the stack goes sheet → terminal in one
             // rebuild. The poll stays paused throughout (the mark taken when
-            // the sheet opened is shallower than either depth).
+            // the sheet opened is shallower than either depth). Both handles
+            // drive the same navigator — the pop is a stack op, the push is a
+            // guarded path resolution.
             row_nav.pop();
-            push_terminal(&row_nav, id);
+            push_terminal(&row_app_nav, id);
         });
         any(FlexView::new(
             Axis::Vertical,
@@ -319,42 +334,16 @@ pub(super) fn open_picker(state: &mut SessionsState) {
     });
 }
 
-/// Push the `/terminal` route for session `id` onto the app's page stack.
+/// Push the `/terminal` route for session `id` onto the app's page stack,
+/// through the app's one guarded [`Nav`] handle.
 ///
-/// # Why this rebuilds a `Router`
-///
-/// Three facts meet here, and the shape falls out of them:
-///
-/// 1. A [`NavigatorController`] pushes page **builders**, never paths — only a
-///    [`Router`] resolves a path against a route table (and runs the
-///    redirects attached to it, `crate::routes::session_guard` among them).
-/// 2. The app's own `Router` lives in `AppState` (`crate::AppState::nav`), and
-///    this screen is a `Component`: its callbacks see [`SessionsState`], never
-///    the outer app state (`frust_core::component`'s state boundary). There is
-///    no route from here to that handle.
-/// 3. Resolving the route by hand instead would mean calling the *terminal*
-///    feature's own page builder — which `docs/ARCHITECTURE.md`'s cross-feature
-///    rule forbids outright (a feature never imports a sibling's
-///    `presentation`).
-///
-/// So this rebuilds a router over `crate::routes`' **own** table and **own**
-/// guard, attached to the *same* shared [`NavigatorController`] — the push
-/// therefore lands on the app's real navigator, through the app's real route
-/// table, with the app's real guard applied (an unauthenticated attach bounces
-/// to `/`, exactly as a deep link to `/terminal` would).
-///
-/// It is cheap and side-effect-free: `Router::with_controller` is a plain value
-/// construction that never touches the controller, the table is four closures,
-/// a resolved page owns its builder outright (so the router can be dropped the
-/// moment it has enqueued the push), and this runs per *tap*, never per frame.
-///
-/// The seam that would remove it entirely — the composition root handing every
-/// screen a path-pushing handle (or publishing the `Router` in context) — lives
-/// in `src/routes.rs`/`src/lib.rs`, outside this feature.
-fn push_terminal(nav: &NavigatorController<AppState>, id: &str) {
-    Router::with_controller(nav, crate::routes::build_routes(nav.clone()))
-        .redirect(crate::routes::session_guard)
-        .push(&format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}"));
+/// The one place this location is spelled — both attach paths (a card's Attach
+/// button and a picker row) come through here, so the format and the guarded
+/// route they resolve against cannot drift apart. The push runs the app's real
+/// route table with its real session guard applied, so an unauthenticated
+/// attach bounces to `/` exactly as a deep link to `/terminal` would.
+fn push_terminal(nav: &Nav, id: &str) {
+    nav.push(&format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}"));
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 //!
 //! | Piece | Redesign element |
 //! |---|---|
-//! | [`server_strip`] | `.conn-row` — endpoint, TLS label, latency badge |
+//! | [`server_strip`] | `.conn-row` — endpoint, TLS posture badge, latency badge |
 //! | [`credential_banner`] | the save-credential offer (no HTML block; see below) |
 //! | [`session_card`] | `.sess-card` — avatar, name, chips, counts, pane pills, actions |
 //! | [`new_session_row`] | `.new-sess-btn` — the dashed "+ new session" row |
@@ -47,7 +47,7 @@ use frust::{
     button, flexible, inflexible, text,
 };
 
-use crate::connection::ServerInfo;
+use crate::connection::{ServerInfo, TrustMode};
 use crate::features::sessions::domain::entities::{Session, SessionStatus};
 
 use super::pages::SessionsState;
@@ -127,7 +127,7 @@ pub(super) fn column(children: Vec<AnyView<SessionsState>>) -> FlexView<Sessions
 // `.conn-row` — the server-info strip
 // ---------------------------------------------------------------------------
 
-/// The connected server's facts: endpoint + a live dot, the TLS posture label,
+/// The connected server's facts: endpoint + a live dot, the TLS posture badge,
 /// the daemon version, and the round-trip latency badge — read from
 /// [`crate::connection::ConnectionController::server_info`], which is
 /// app-scoped precisely because this screen renders it (see that module's
@@ -163,16 +163,31 @@ pub(super) fn server_strip(info: Option<&ServerInfo>) -> AnyView<SessionsState> 
         )),
     ]);
     let bottom = row(vec![
-        inflexible(text(info.tls_label.clone()).style(inked(
-            &theme.type_scale.label_small,
-            scheme.on_surface_variant,
-        ))),
+        inflexible(badge(
+            info.tls_label.clone(),
+            trust_variant(info.trust_mode),
+        )),
         spacer(),
         inflexible(
             text(info.version.clone()).style(inked(&theme.type_scale.label_small, fg_dim(&theme))),
         ),
     ]);
     any(column(vec![any(top), any(bottom)]).cross_axis(CrossAxisAlignment::Stretch))
+}
+
+/// The badge hue the server strip prints a TLS posture in — `.warn-badge` (the
+/// redesign's amber "insecure" pill) for the one posture that actually skips
+/// certificate validation, a quiet neutral wash for the two that don't.
+///
+/// Branches on the [`TrustMode`] **variant**, never on
+/// [`ServerInfo::tls_label`]: the label is display text (and the Connect
+/// screen's own trust selector marks the same posture with the same
+/// `BadgeVariant::Warning` chip, from the same enum).
+fn trust_variant(mode: TrustMode) -> BadgeVariant {
+    match mode {
+        TrustMode::TrustOnFirstUse => BadgeVariant::Warning,
+        TrustMode::System | TrustMode::Pinned => BadgeVariant::Neutral,
+    }
 }
 
 // ---------------------------------------------------------------------------
