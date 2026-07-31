@@ -44,17 +44,14 @@ frust = { path = "../../crates/frust", default-features = false, features = ["gl
 # dependency line in the default `Cargo.toml.tmpl`).
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
-# `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
-# Version-Pin Policy) — this app path-deps into a **sibling checkout**
-# (`../clean-signals-rs`, next to this Frust checkout) at the exact same
-# path `clean-signals-frust`'s own `clean-signals` dependency resolves
-# (both by path, relative to different starting points but the same real
-# absolute directory), so Cargo unifies both into one crate identity — the
-# type-identity rule `examples/huddle/Cargo.toml` documents at length.
-# **Dev-machine-only while `clean-signals` is unpublished**: this project
-# will not build without that sibling checkout present (see `frust create
-# --arch clean-signals`'s help text).
-clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
+# `clean-signals` is git+rev-pinned to its public repo — the EXACT same
+# spec `plugins/clean-signals-frust` (and `examples/huddle`) use, so Cargo
+# unifies every consumer into one crate identity (the type-identity rule
+# `examples/huddle/Cargo.toml` documents at length). This replaced the old
+# sibling-checkout path dep when the frust ecosystem migrated to the git
+# pin (frust PR #20); bump the `rev` only in lockstep with
+# `clean-signals-frust`'s own pin, never independently.
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 
 # `log` facade dependency for the release-only `lean` feature below — mirrors
 # the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes
