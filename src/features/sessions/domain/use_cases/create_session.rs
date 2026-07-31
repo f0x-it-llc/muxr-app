@@ -1,5 +1,6 @@
-//! [`CreateSession`] — creates a session by name (the app bar's `+` action and
-//! the list's "+ new session" row, both through the name-input dialog).
+//! [`CreateSession`] — creates a session by name (the list's dashed
+//! "+ new session" row and the empty state's action, both through the
+//! name-input dialog).
 //!
 //! The name arrives already trimmed and non-blank (`ui::dialogs`'s
 //! `name_input_dialog` cannot submit anything else), so this use case adds no
