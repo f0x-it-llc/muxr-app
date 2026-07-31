@@ -11,6 +11,28 @@
 //! interactive screens even though today's route-smoke tests only need
 //! [`frame`]/[`setup`]/[`serial`].
 //!
+//! # Overlay helpers (dialogs / sheets / toasts)
+//!
+//! [`frame`] always paints at `FrameTime::ZERO`, which is fine for static
+//! screens but freezes anything driven off the frame clock — including the
+//! navigator's own push/pop transition, during which it **blocks all input**.
+//! [`frame_at`] paints at an explicit time and [`settle`] drives a pushed
+//! overlay past its transition so a test can then tap it.
+//!
+//! Locating what to tap has two routes, and which one works depends on where
+//! the target sits:
+//!
+//! - **Semantics** ([`node_labels`]/[`node_center_by_label`]/
+//!   [`node_center_by_role`]) — reads labels and bounds straight off the
+//!   accessibility tree, and is the only way to assert *what a toast said*
+//!   (a recording `PaintScene` sees glyph runs, not strings). It does **not**
+//!   see anything inside a `Navigator`: `NavigatorWidget` contributes no
+//!   `Widget::semantics` and forwards none of its pages' (a framework gap —
+//!   every pushed page is invisible to accessibility).
+//! - **Recorded geometry** ([`largest`]/[`smallest`]/[`by_width`] over
+//!   [`RecScene::rounded`]/[`RecScene::strokes`]) — what a test must use for a
+//!   pushed page (dialog/sheet) until that gap closes.
+//!
 //! Not every test uses every helper.
 #![allow(dead_code)]
 
@@ -19,6 +41,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use frust_core::accesskit::{Node, Role};
 use frust_core::{
     FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
     PointerEvent, PointerPhase, RenderRoot, View,
@@ -26,8 +49,8 @@ use frust_core::{
 use frust_reactive::{FrameWaker, ReactiveRuntime};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
-use kurbo::{Point, Rect, Size};
-use peniko::Color;
+use kurbo::{Point, Rect, Shape, Size};
+use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;
 
 pub const W: f64 = 800.0;
@@ -35,12 +58,17 @@ pub const H: f64 = 600.0;
 
 /// A GPU-free paint target: counts glyph runs (one per painted `Text` — enough
 /// to observe whether a page's placeholder text painted) and records
-/// rounded-rect chrome (each `TextInput` field and `Button`) so a test can
-/// locate a button to tap it.
+/// rounded-rect chrome (each `TextInput` field and filled `Button`) so a test
+/// can locate a button to tap it, plus stroked outlines
+/// ([`RecScene::strokes`]) — a Glyph ghost/danger button has a **transparent**
+/// fill and is invisible in `rounded`, so its border is the only geometry it
+/// paints.
 #[derive(Default)]
 pub struct RecScene {
     pub glyph_runs: usize,
     pub rounded: Vec<(Point, Size)>,
+    /// `(origin, bounding-box size)` per stroked path — see the struct docs.
+    pub strokes: Vec<(Point, Size)>,
 }
 
 impl PaintScene for RecScene {
@@ -53,6 +81,44 @@ impl PaintScene for RecScene {
         self.glyph_runs += 1;
     }
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
+    fn stroke_path(&mut self, origin: Point, path: &kurbo::BezPath, _width: f64, _brush: &Brush) {
+        let bounds = path.bounding_box();
+        self.strokes
+            .push((origin, Size::new(bounds.width(), bounds.height())));
+    }
+}
+
+/// The recorded rect with the largest area, or `None` when nothing was
+/// recorded — an overlay's own panel is always the biggest thing it paints, so
+/// this is how a test finds it without hardcoding geometry.
+pub fn largest(rects: &[(Point, Size)]) -> Option<(Point, Size)> {
+    rects
+        .iter()
+        .copied()
+        .max_by(|a, b| area(a).total_cmp(&area(b)))
+}
+
+/// The recorded rect with the smallest area — e.g. the one action button in a
+/// dialog that paints a border, against the panel border around it.
+pub fn smallest(rects: &[(Point, Size)]) -> Option<(Point, Size)> {
+    rects
+        .iter()
+        .copied()
+        .min_by(|a, b| area(a).total_cmp(&area(b)))
+}
+
+/// The first recorded rect whose width matches `width` (within half a pixel) —
+/// the deterministic way to pick a full-content-width child (a dialog's text
+/// field) out of a frame.
+pub fn by_width(rects: &[(Point, Size)], width: f64) -> Option<(Point, Size)> {
+    rects
+        .iter()
+        .copied()
+        .find(|(_, size)| (size.width - width).abs() < 0.5)
+}
+
+fn area((_, size): &(Point, Size)) -> f64 {
+    size.width * size.height
 }
 
 /// One frame: rebuild the tree from `state`, lay it out shaping real text, and
@@ -69,6 +135,105 @@ pub fn frame<S: 'static, V: View<S>>(
     let mut scene = RecScene::default();
     root.paint(&mut scene, FrameTime::ZERO);
     scene
+}
+
+/// One frame painted at an explicit `frame_time` — [`frame`]'s
+/// clock-advancing sibling, for anything driven off `PaintCtx::frame_time`
+/// (navigator transitions, a dialog's enter staging, a toast's timeline).
+///
+/// Deliberately a separate function rather than a parameter on [`frame`]:
+/// every existing test calls `frame` and none of them should have to change.
+pub fn frame_at<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    frame_time: FrameTime,
+) -> RecScene {
+    root.rebuild(logic, state);
+    let tcx_any: &mut dyn Any = tcx;
+    root.layout_with_text(Size::new(W, H), tcx_any);
+    let mut scene = RecScene::default();
+    root.paint(&mut scene, frame_time);
+    scene
+}
+
+/// How far past a push/pop the [`settle`] helper runs its clock — comfortably
+/// past every transition/enter duration in the framework (the longest is the
+/// navigator's own ~400ms preset).
+pub const SETTLE_MS: f64 = 2_000.0;
+
+/// Drive a freshly pushed (or popped) overlay past its transition: one frame
+/// seeding the clock at zero, one at [`SETTLE_MS`] (which *completes* the
+/// transition during paint), and one more whose **rebuild** finalizes it.
+///
+/// **Required before tapping a pushed page.** While a transition is in flight
+/// the navigator suppresses all routing to pages, so a tap sent too early is
+/// silently swallowed — and a transition isn't done when its last frame
+/// paints, but when the following rebuild finalizes it. That third frame is
+/// the difference between a test that taps a live sheet and one that taps a
+/// blocked navigator and passes for the wrong reason.
+pub fn settle<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+) -> RecScene {
+    frame_at(root, logic, state, tcx, FrameTime::ZERO);
+    frame_at(root, logic, state, tcx, ms(SETTLE_MS));
+    frame_at(root, logic, state, tcx, ms(SETTLE_MS))
+}
+
+/// A [`FrameTime`] `ms` milliseconds after the epoch.
+pub fn ms(ms: f64) -> FrameTime {
+    FrameTime::from_nanos((ms * 1_000_000.0) as u64)
+}
+
+/// Every semantics label the current tree carries, in pass order — the
+/// accessible text of the frame, and the only way to assert *what* a toast or
+/// dialog said (a recording `PaintScene` sees glyph runs, not strings).
+pub fn node_labels<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<String> {
+    root.semantics()
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().map(str::to_string))
+        .collect()
+}
+
+/// The center of the first semantics node labelled `label` — where a tap must
+/// land to hit that button/row. `None` when nothing carries the label.
+pub fn node_center_by_label<S: 'static, V: View<S>>(
+    root: &RenderRoot<S, V>,
+    label: &str,
+) -> Option<Point> {
+    node_center(root, |node| node.label() == Some(label))
+}
+
+/// The center of the first semantics node with `role` — for a node that has no
+/// label of its own (a `TextInput` exposes only its value).
+pub fn node_center_by_role<S: 'static, V: View<S>>(
+    root: &RenderRoot<S, V>,
+    role: Role,
+) -> Option<Point> {
+    node_center(root, |node| node.role() == role)
+}
+
+/// Shared body of the two `node_center_*` helpers: the center of the first
+/// node matching `pred` that carries bounds.
+fn node_center<S: 'static, V: View<S>>(
+    root: &RenderRoot<S, V>,
+    pred: impl Fn(&Node) -> bool,
+) -> Option<Point> {
+    root.semantics().nodes.iter().find_map(|(_, node)| {
+        if !pred(node) {
+            return None;
+        }
+        let bounds = node.bounds()?;
+        Some(Point::new(
+            (bounds.x0 + bounds.x1) / 2.0,
+            (bounds.y0 + bounds.y1) / 2.0,
+        ))
+    })
 }
 
 /// A no-op-but-recording frame waker (see [`ReactiveRuntime::init`]). The global
