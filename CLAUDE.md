@@ -30,6 +30,9 @@ full command set, flavor identifiers, and signing setup.
 
 ## Agent Guardrails
 
+- Every screen follows the canonical pattern in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)'s
+  "Building a Screen" section (per-screen `Component`, `use_controller` lifecycle, container-free
+  DI via `provide_context`/`di.rs`) — do not invent a different composition or DI shape.
 - Feature code follows strict inward-only layering (`domain` framework-free, `data` implements
   `domain` repositories, `presentation` is the only layer touching `frust` widgets/signals) —
   see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full rule.
