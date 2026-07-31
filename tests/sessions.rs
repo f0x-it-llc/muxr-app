@@ -664,11 +664,12 @@ fn a_long_press_opens_the_management_sheet_without_attaching() {
     );
     sheet.destructive_row();
 
-    // The sheet is up and the cards are still cards: the long-press did *not*
-    // also fire the tap, or `/terminal` would be on the stack instead.
+    // Exactly **one** page was pushed: had the press also fired the tap,
+    // `/terminal` would be on the stack too and dismissing the sheet would
+    // leave the navigator at depth 2 rather than back at the list.
     h.tap(SCRIM_POINT);
     h.flush();
-    assert_eq!(h.depth(), 1, "a scrim tap dismisses it");
+    assert_eq!(h.depth(), 1, "a scrim tap dismisses it, and nothing else");
     assert!(
         node_values(&h.root).iter().any(|v| v == SEEDED[0]),
         "…back to the list, not to the terminal"

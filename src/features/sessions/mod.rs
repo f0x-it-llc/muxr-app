@@ -1,7 +1,8 @@
 //! The `sessions` feature slice — muxr's `/sessions` route: the list of a
-//! connected server's terminal sessions, with create/rename/kill, the
-//! server-info + latency strip, the save-credential offer, a picker sheet, and
-//! the attach path into `/terminal`.
+//! connected server's terminal sessions, with create/rename/kill (a card tap
+//! attaches, a long-press opens the management sheet those two live in), the
+//! fixed server-info + latency strip, the save-credential offer, and the attach
+//! path into `/terminal`.
 //!
 //! `{domain, data, presentation}`, per the clean-architecture convention
 //! `examples/huddle` establishes (see its `src/README-phase-c.md`):
