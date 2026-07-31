@@ -43,14 +43,20 @@ use frust::{RwSignal, Set};
 use crate::failure::AppFailure;
 
 /// Mock latency [`ConnectionController::connect`] fills [`ServerInfo`] with —
-/// Sessions renders it; there is no real round trip yet to time.
-const MOCK_LATENCY_MS: u32 = 42;
-/// Mock server version string [`ConnectionController::connect`] fills
-/// [`ServerInfo`] with — Settings later renders it.
-const MOCK_SERVER_VERSION: &str = "muxrd/mock";
+/// Sessions' `conn-row` renders it; there is no real round trip yet to time.
+/// `docs/redesign.html`'s sessions strip prints `36ms`, so the mock says 36.
+const MOCK_LATENCY_MS: u32 = 36;
+/// Mock multiplexer version string [`ConnectionController::connect`] fills
+/// [`ServerInfo`] with — the value `docs/redesign.html`'s sessions strip
+/// prints (`zellij 0.44.3 · 36ms`). It names the **multiplexer** the daemon
+/// fronts rather than the daemon build, because that is what the strip's meta
+/// text says; the real client will read it off the `muxrd` handshake.
+const MOCK_SERVER_VERSION: &str = "zellij 0.44.3";
 
-/// A mock server's connection facts — Sessions renders [`Self::latency_ms`]
-/// today; Settings renders the rest once it has a real screen.
+/// A mock server's connection facts — Sessions' `conn-row` strip renders
+/// [`Self::endpoint`], [`Self::version`], [`Self::latency_ms`] and (for the one
+/// posture that skips certificate validation) [`Self::trust_mode`]; Settings
+/// renders the rest once it has a real screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerInfo {
     /// `host:port`, as dialed.
@@ -63,7 +69,9 @@ pub struct ServerInfo {
     /// A human label for [`Self::trust_mode`] (e.g. "System trust"), derived
     /// once here so every screen prints the same words.
     pub tls_label: String,
-    /// The mock `muxrd` version string.
+    /// The multiplexer version behind the connection (`"zellij 0.44.3"`) —
+    /// the first half of the sessions strip's dim meta text
+    /// (`zellij 0.44.3 · 36ms`; [`Self::latency_ms`] is the other half).
     pub version: String,
     /// Mock round-trip latency, milliseconds.
     pub latency_ms: u32,
@@ -251,6 +259,10 @@ mod tests {
         );
         assert_eq!(info.tls_label, "Trust on first use");
         assert_eq!(info.latency_ms, MOCK_LATENCY_MS);
+        assert_eq!(
+            info.version, MOCK_SERVER_VERSION,
+            "the strip's meta text reads the multiplexer version off here"
+        );
     }
 
     #[test]
