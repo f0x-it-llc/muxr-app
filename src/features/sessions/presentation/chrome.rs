@@ -134,9 +134,9 @@ impl<State: 'static> PanelView<State> {
     ///
     /// Calling this **reserves** the accent's width whether or not there is a
     /// colour to paint there — the source's `border-left:2px solid transparent`
-    /// — so a running and an idle card put their content in exactly the same
-    /// place, and only the colour differs. A panel that never calls this (the
-    /// pane pills, the strip) reserves nothing.
+    /// — so an idle card's surface starts exactly where a running card's does
+    /// and the list's left edge never jogs by 2px from row to row. A panel that
+    /// never calls this (the pane pills, the strip) reserves nothing.
     pub(super) fn left_accent(mut self, color: Option<Color>) -> Self {
         self.accent = color;
         self.accent_reserved = true;
