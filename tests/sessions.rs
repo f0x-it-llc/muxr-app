@@ -13,10 +13,16 @@
 //! So [`Harness`] mounts the screen as the **bottom layer of a `Stack`**, with
 //! an otherwise-empty navigator — driven by the *same* `NavigatorController`
 //! the screen is handed — stacked over it. The screen's own chrome therefore
-//! stays reachable by semantics label (badges, alerts, the top bar's icon) and
-//! by text value (every run), while the dialogs/sheet/route pushes the screen
-//! makes are still exercised **end to end** through a real navigator — located,
-//! like `ui_substrate.rs`'s, by painted geometry.
+//! stays reachable by semantics label (badges, alerts) and by text value (every
+//! run), while the dialogs/sheet/route pushes the screen makes are still
+//! exercised **end to end** through a real navigator — located, like
+//! `ui_substrate.rs`'s, by painted geometry.
+//!
+//! The fixture deliberately mounts **no top bar**: the muxr bar is app shell
+//! chrome now (`muxr::shell::root_view`'s band), so everything it carries —
+//! the host title, the brand, the `⚙` — is asserted in
+//! `tests/navigation_motion.rs` instead. What this suite still owes the bar is
+//! the *negative*: that the screen grew none of it back.
 //!
 //! The navigator's base page is a **full-bleed, childless** `SizedBox`, which
 //! matters twice: it paints nothing and handles nothing, so every tap falls
@@ -481,14 +487,13 @@ fn the_conn_row_prints_the_connections_facts() {
         values.iter().any(|v| v == "zellij 0.44.3 \u{b7} 36ms"),
         "…and the dim version · latency meta: {values:?}"
     );
-    // The top bar's centered title is the host *without* its port.
+    // The bar that titles the host (and the brand beside it) is the *shell's*
+    // now, not this screen's — `tests/navigation_motion.rs` owns those
+    // assertions. What must stay true here is that this screen mounts no bar
+    // of its own: nothing on it prints the brand wordmark.
     assert!(
-        values.iter().any(|v| v == "mock.example"),
-        "the top bar titles the host: {values:?}"
-    );
-    assert!(
-        values.iter().any(|v| v == "muxr"),
-        "…beside the brand wordmark: {values:?}"
+        !values.iter().any(|v| v == "muxr"),
+        "the screen no longer mounts a top bar of its own: {values:?}"
     );
 
     // The TLS posture is a *badge* (a `Role::Status` node, hence a label). The
@@ -833,22 +838,24 @@ fn killing_every_session_shows_the_empty_state_and_creates_from_it() {
 }
 
 // ---------------------------------------------------------------------------
-// 6 — the top bar's settings slot
+// 6 — the settings slot moved out (see `tests/navigation_motion.rs`)
 // ---------------------------------------------------------------------------
 
+/// The `⚙` that reaches `/settings` is the *shell bar*'s trailing action now
+/// (`muxr::routes::BarAction::Settings`), not this screen's — so it must not be
+/// reachable from anything this screen mounts. Its behavior is asserted in
+/// `tests/navigation_motion.rs`, where the bar actually lives.
 #[test]
-fn the_top_bars_gear_pushes_a_page() {
+fn the_screen_carries_no_settings_affordance_of_its_own() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let h = Harness::connected();
 
-    h.tap_label("\u{2699}");
-    h.settle();
-
-    // `/settings` is unguarded, so this lands even without a connection; which
-    // *route* it resolved to is asserted where the location is spelled
-    // (`pages`' own unit test), since a pushed page contributes no semantics.
-    assert_eq!(h.depth(), 2, "the gear pushes a page");
+    let labels = node_labels(&h.root);
+    assert!(
+        !labels.iter().any(|l| l == "\u{2699}"),
+        "the gear moved to the shell's bar: {labels:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

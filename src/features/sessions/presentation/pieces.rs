@@ -325,7 +325,12 @@ fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
 /// The host half of a `host:port` endpoint — what the top bar's centered title
 /// shows (`100.71.31.57`, while the strip under it prints the whole
 /// `100.71.31.57:50051`).
-pub(super) fn host_of(endpoint: &str) -> &str {
+///
+/// `pub(crate)` rather than `pub(super)` because the bar moved out of this
+/// screen: `crate::routes`' `BarTitle::ConnectedHost` resolves `/sessions`'
+/// title through this one function rather than minting a second copy of the
+/// split beside the shell.
+pub(crate) fn host_of(endpoint: &str) -> &str {
     endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host)
 }
 

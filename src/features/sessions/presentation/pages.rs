@@ -9,12 +9,12 @@
 //! parity), and whose `build` is pure arrangement over
 //! [`super::pieces`]' elements.
 //!
-//! # The screen's three bands
+//! # The screen's two bands (the third is the shell's)
 //!
 //! ```text
 //! ┌─────────────────────────────┐
-//! │ ▪▪ muxr   100.71.31.57   ⚙  │  ui::topbar — brand, host, settings
-//! ├─────────────────────────────┤
+//! │ ▪▪ muxr   100.71.31.57   ⚙  │  crate::shell's persistent bar — NOT this
+//! ├─────────────────────────────┤  screen's; it titles every route
 //! │ ● 100.71.31.57:50051  …     │  .conn-row — FIXED, outside the scroll
 //! ├─────────────────────────────┤
 //! │ ┃ D  dev      running zellij│  the scrolling list: cards, the offer
@@ -22,6 +22,14 @@
 //! │ + new session (dashed)      │
 //! └─────────────────────────────┘
 //! ```
+//!
+//! The bar above the strip belongs to [`crate::shell`], not here: it is
+//! persistent chrome whose title crossfades across route changes, so mounting a
+//! second copy per screen would fight it. This screen therefore starts at the
+//! strip, and keeps `safe_area(..).top(false)` on its body because the shell's
+//! bar is what consumes the status-bar inset (`crate::ui::topbar`'s own module
+//! docs). The `⚙` that reaches `/settings` moved with the bar — it is
+//! `/sessions`' route metadata now (`crate::routes::BarAction`).
 //!
 //! The strip is deliberately **not** a list item: it describes the connection
 //! the list belongs to, so scrolling the list must not scroll it away
@@ -45,9 +53,9 @@
 //!   and credential offer) is [`crate::connection`]'s controller, resolved
 //!   from context. [`SessionsState`] itself holds neither — only [`Actions`]'
 //!   three handles plus the connection.
-//! - **Every push this screen makes** — the terminal route, `/settings`, the
-//!   two dialogs, the management sheet — goes through [`Actions`], and pauses
-//!   the controller's mock poll first (see [`SessionsController`]'s module docs
+//! - **Every push this screen makes** — the terminal route, the two dialogs,
+//!   the management sheet — goes through [`Actions`], and pauses the
+//!   controller's mock poll first (see [`SessionsController`]'s module docs
 //!   for why that pause has to be explicit).
 //!
 //! # The component state boundary, and what it means for callbacks
@@ -89,7 +97,6 @@ use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
-use crate::ui::topbar::muxr_topbar;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
 use super::pieces;
@@ -102,13 +109,6 @@ use super::pieces;
 const TERMINAL_ROUTE: &str = "/terminal";
 /// The query key [`TERMINAL_ROUTE`] carries the session id under.
 const SESSION_QUERY_KEY: &str = "session";
-/// Where the top bar's trailing icon goes.
-const SETTINGS_ROUTE: &str = "/settings";
-/// …and the glyph it wears (`.topbar-icon`'s `⚙`).
-const SETTINGS_GLYPH: &str = "\u{2699}";
-/// The top bar's title while no connection is up — unreachable behind the
-/// session guard, but the bar always has a title slot to fill.
-const DISCONNECTED_TITLE: &str = "muxrd";
 
 /// `.sessions-list{padding:14px 16px}`.
 const LIST_PAD_X: f64 = 16.0;
@@ -245,24 +245,15 @@ impl Component for SessionsScreen {
             list.push(pieces::new_session_row(&colors));
         }
 
-        let title = info
-            .as_ref()
-            .map(|info| pieces::host_of(&info.endpoint).to_string())
-            .unwrap_or_else(|| DISCONNECTED_TITLE.to_string());
-        let bar = muxr_topbar::<SessionsState>(title)
-            .action(SETTINGS_GLYPH, |state: &mut SessionsState| {
-                state.actions.open_settings()
-            });
-
-        // The bar consumes the top window inset itself (`ui::topbar`'s own
-        // module docs), so the body's safe area disables its top edge to avoid
-        // double-padding it.
+        // The *shell's* bar consumes the top window inset on this screen's
+        // behalf (`crate::ui::topbar`'s own module docs), so the body's safe
+        // area disables its top edge to avoid double-padding it.
         let scroller = any(safe_area(scroll_view(Padding(
             EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
             FlexView::new(Axis::Vertical, gapped(list)).cross_axis(CrossAxisAlignment::Stretch),
         )))
         .top(false));
-        let page = pieces::page_tone(
+        any(pieces::page_tone(
             FlexView::new(
                 Axis::Vertical,
                 vec![
@@ -272,12 +263,7 @@ impl Component for SessionsScreen {
             )
             .cross_axis(CrossAxisAlignment::Stretch),
             &colors,
-        );
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![inflexible(any(bar)), flexible(1, page)],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
+        ))
     }
 }
 
@@ -310,12 +296,6 @@ impl Actions {
     pub fn attach(&self, id: &str) {
         self.pause_for_push();
         push_terminal(&self.app_nav, id);
-    }
-
-    /// Open `/settings` — the top bar's `⚙`.
-    pub fn open_settings(&self) {
-        self.pause_for_push();
-        self.app_nav.push(SETTINGS_ROUTE);
     }
 
     /// Open the create-session dialog (the dashed row and the empty state's
@@ -524,12 +504,5 @@ mod tests {
         assert!(!ManageAction::Attach.destructive());
         assert!(!ManageAction::Rename.destructive());
         assert!(ManageAction::Kill.destructive());
-    }
-
-    #[test]
-    fn the_settings_route_is_the_apps_own() {
-        // The top bar's ⚙ pushes a *route*, so it runs the real table (and its
-        // guard). `/settings` is deliberately unguarded — see `crate::routes`.
-        assert_eq!(frust::Location::parse(SETTINGS_ROUTE).path, SETTINGS_ROUTE);
     }
 }

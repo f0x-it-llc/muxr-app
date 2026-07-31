@@ -1,27 +1,20 @@
-//! The `/terminal` route's placeholder page: a Glyph [`app_bar`] titled
-//! "Terminal" over centered page-name text. Phase 2 replaces this with the
-//! real terminal surface.
+//! The `/terminal` route's placeholder page: centered page-name text under
+//! the shell's own bar. Phase 2 replaces this with the real terminal surface.
 
-use frust::glyph::app_bar;
-use frust::{
-    Align, Alignment, AnyView, Axis, FlexView, NavigatorController, any, flexible, inflexible,
-    safe_area, text,
-};
+use frust::{Align, Alignment, AnyView, NavigatorController, any, safe_area, text};
 
 use crate::AppState;
 
 /// The Terminal feature's placeholder page. Takes the [`NavigatorController`]
 /// (unused today — see `crate::routes::build_routes`'s dual-use shape); a
 /// later task pushes through it once Terminal has somewhere to navigate to.
+///
+/// **No bar of its own.** `crate::shell` mounts the one persistent
+/// `crate::ui::topbar` above the navigator and titles this route `terminal`
+/// with a `‹` from `crate::routes::route_meta` (the mock's `⋮` joins that bar's
+/// trailing slot in Phase 3) — a page-owned `glyph::app_bar` here would stack a
+/// second bar under it. That shell bar consumes the top window inset, which is
+/// why the body's safe area still disables its own top edge.
 pub fn terminal_page(_controller: NavigatorController<AppState>) -> AnyView<AppState> {
-    let bar = any(app_bar::<AppState>("Terminal"));
-    // `bar` consumes the top window inset itself (`glyph::app_bar`'s own
-    // module docs), so `body`'s safe area disables its own top edge to avoid
-    // double-padding it — mirrors `examples/glyph-catalog`'s
-    // `variation_frame` composition.
-    let body = any(safe_area(Align(Alignment::CENTER, text("Terminal").size(20.0))).top(false));
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(bar), flexible(1, body)],
-    ))
+    any(safe_area(Align(Alignment::CENTER, text("Terminal").size(20.0))).top(false))
 }

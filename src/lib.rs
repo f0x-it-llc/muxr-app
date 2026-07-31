@@ -20,9 +20,11 @@
 //! [`routes::install_app_router`] (which wires the session guard — closed over
 //! that connection controller — as the router's top-level redirect, and
 //! publishes the router as the app-wide [`routes::Nav`] handle every screen
-//! pushes paths through) and resolves the start location once;
-//! `Component::build` mounts [`shell::root_view`] over it, plus — on the
-//! first build of a cold start — the splash overlay
+//! pushes paths through, and whose route-meta mirror the shell's persistent
+//! top bar reads) and resolves the start location once;
+//! `Component::build` mounts [`shell::root_view`] over it — the
+//! `[top bar, navigator]` band plus the toast layer — plus, on the
+//! first build of a cold start, the splash overlay
 //! ([`AppState::splash_plan`], [`ui::splash::sequence`]). No feature
 //! repository exists yet to construct here — a real one joins this function
 //! the same way `examples/huddle`'s `HuddleApp::init` constructs and
@@ -45,6 +47,7 @@ pub mod ui;
 mod shell;
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal};
 
@@ -79,6 +82,16 @@ pub struct AppState {
     /// through [`routes::app_nav`], because a `Component`'s callbacks never
     /// see this outer state).
     pub nav: Rc<Router<AppState>>,
+    /// The app's own [`routes::Nav`] handle — resolved once here, with every
+    /// other app-scoped dependency, and read by [`shell::root_view`] for the
+    /// persistent top bar (which route is on top, and what its `‹`/`⚙` do).
+    /// The same handle every screen resolves through [`routes::app_nav`], so
+    /// the bar and the screens share one route-meta mirror.
+    nav_handle: routes::Nav,
+    /// The app-scoped mock connection handle, for the bar's `/sessions` host
+    /// title. Resolved in `init` (never from a build-time context read), the
+    /// same discipline every screen follows.
+    connection: Arc<connection::ConnectionController>,
     /// What this launch's cold-start splash should be. `None` until the
     /// **first build** resolves it — see [`AppState::splash_plan`] for why
     /// that is deliberately not `Component::init`.
@@ -176,7 +189,7 @@ impl Component for MuxrApp {
         // screen resolves in its own `Component::init` — this is the app's
         // ONE `Router`, and the only place one is ever constructed.
         let controller = NavigatorController::new();
-        let router = routes::install_app_router(&controller, connection);
+        let router = routes::install_app_router(&controller, Arc::clone(&connection));
         // Resolves the start location once (see `START_LOCATION`).
         router.handle_location(START_LOCATION);
 
@@ -185,6 +198,11 @@ impl Component for MuxrApp {
         // first `build`.
         AppState {
             nav: router,
+            // Published by `install_app_router` a line above; resolved here so
+            // `build` never reaches for a thread-local (and so the shell's bar
+            // shares the screens' one route-meta mirror).
+            nav_handle: routes::app_nav(),
+            connection,
             splash: None,
             icon: None,
             splash_done: RwSignal::new(false),
@@ -202,6 +220,8 @@ impl Component for MuxrApp {
             &controller,
             move || routes::home_page(initial_controller.clone()),
             overlay,
+            &state.nav_handle,
+            &state.connection,
         )
     }
 }
