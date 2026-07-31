@@ -50,15 +50,23 @@
 //! # Real components vs. hand-composed
 //!
 //! Facade/Glyph components carry the pieces wherever one fits — [`text`] for
-//! every run, [`text_input`] for both fields, [`button`] for the CTA,
-//! [`radio`] for the trust rows (the mock's `.radio-opt`/`.radio-dot` shape
-//! exactly), [`glyph::badge`] for the "insecure"/"read-only" chips, and
-//! [`GestureDetector`] for the tappable saved rows. The rest of the mock is
-//! borders and washes with no catalog counterpart (there is no Glyph toggle, and
-//! the `material` catalog's `Switch` is not compiled into this app — see
-//! `Cargo.toml`'s `default-features = false, features = ["glyph", …]`), so those
-//! compose from [`super::chrome`]'s panel/swatch primitives, with
+//! every run, [`text_input`] for both fields, [`glyph::badge`] for the
+//! "insecure"/"read-only" chips, and [`GestureDetector`] for the tappable
+//! saved rows and trust rows. The rest of the mock is borders and washes with
+//! no catalog counterpart (there is no Glyph toggle, and the `material`
+//! catalog's `Switch` is not compiled into this app — see `Cargo.toml`'s
+//! `default-features = false, features = ["glyph", …]`), so those compose from
+//! [`super::chrome`]'s panel/swatch primitives, with
 //! [`frust::motion::AnimatedOpacity`] carrying the toggle's on/off crossfade.
+//!
+//! Three pieces of chrome are hand-composed *against* a shipping widget, each
+//! for a recorded framework gap rather than a preference: the CTA (see
+//! [`connect_button`] — `ButtonWidget` pins a stretched label at its leading
+//! edge, FINDINGS #15), the trust rows (see [`trust_selector`] — `RadioWidget`
+//! styles its label with `TextStyle::default()`), and the heading's subtitle
+//! (see [`super::chrome::centered_paragraph`] — nothing in `frust` centers a *wrapped*
+//! paragraph). Each carries its own `Role` node through `super::chrome` so the
+//! accessibility tree is no poorer for it.
 //!
 //! # Tokens
 //!
@@ -69,11 +77,13 @@
 //! (`docs/splash.html` is older than `docs/redesign.html`), the redesign wins
 //! — see [`Palette::page`] and `super::pages`' `LAYER_GAP`.
 //!
-//! Two type sizes are deliberately the Glyph role rather than the mock's
-//! number: `.field input{font-size:12px}` and `.connect .sub{11.5px}` become
-//! `body_medium` (13) and `body_small` (11), because the Glyph scale's
-//! mobile-legibility floor is a framework policy this app does not relitigate
-//! per screen.
+//! Three type sizes are deliberately the Glyph role rather than the mock's
+//! number: `.field input{font-size:12px}` and `.radio-opt{font-size:12px}`
+//! become `body_medium` (13), and `.connect .sub{11.5px}` becomes `body_small`
+//! (11), because the Glyph scale's mobile-legibility floor is a framework
+//! policy this app does not relitigate per screen. The CTA's whole
+//! `12.5px/600/0.03em` line resolves to one role instead
+//! (`label_large_emphasized`) — see [`connect_button`].
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -84,11 +94,12 @@ use frust::glyph::{BadgeVariant, badge};
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, Padding, SizedBox, StatusPalette, Theme, any, button, flexible, inflexible, radio, text,
-    text_input,
+    Get, Padding, SizedBox, StatusPalette, Theme, any, flexible, inflexible, text, text_input,
 };
 
-use super::chrome::{panel, swatch, switch_semantics};
+use super::chrome::{
+    centered_paragraph, panel, press_target, radio_semantics, swatch, switch_semantics,
+};
 use super::controller::ConnectController;
 use crate::connection::TrustMode;
 use crate::features::connect::domain::entities::SavedServer;
@@ -171,10 +182,34 @@ const SAVED_LINE_GAP: f64 = 2.0;
 const OPTIONS_GAP: f64 = 22.0;
 /// `.radio-opt{padding:9px 0}`.
 const RADIO_PAD_Y: f64 = 9.0;
+/// `.radio-opt{gap:9px}` — the ring to its label.
+const RADIO_GAP: f64 = 9.0;
+/// `.radio-dot{width:16px;height:16px}` — the ring's outer box.
+const RADIO_RING: f64 = 16.0;
+/// `.radio-dot{border:1.5px solid}` — the mock's one non-hairline border.
+const RADIO_RING_BORDER: f64 = 1.5;
+/// `.radio-dot.sel::after{inset:3px}` — the selected dot's inset inside the
+/// ring, which makes the dot itself `RADIO_RING - 2 * RADIO_DOT_INSET` wide.
+const RADIO_DOT_INSET: f64 = 3.0;
+/// `.btn-primary{padding:13px}` — the CTA's vertical padding. With Glyph's
+/// `label_large` line box (18px) the bar lands at 44px tall: the source's own
+/// ~44 at a browser-default line box, and exactly the platform minimum tap
+/// target. The horizontal half of that padding is not needed — the label is
+/// centered in a full-bleed bar, not inset from its leading edge.
+const CTA_PAD_Y: f64 = 13.0;
 
 /// The remember row's copy — also the toggle's accessibility label, so the
 /// switch announces the thing the row is about rather than "switch".
 const REMEMBER_LABEL: &str = "Remember for 4 weeks";
+
+/// `.connect .sub` — the heading's explanatory paragraph. `pub` because
+/// `tests/connect.rs`'s line-centering suite reads the very lines this string
+/// wraps into; a copy there could drift.
+pub const SUBTITLE: &str = "Enter credentials to attach to a remote zellij or herdr session.";
+
+/// `.btn-primary`'s label. `pub` for the same reason [`SUBTITLE`] is — the CTA
+/// is located by its accessibility label in `tests/connect.rs`.
+pub const CONNECT_LABEL: &str = "→ connect";
 
 /// `.field input[placeholder]` — the server-URL field's ghost text. `pub`
 /// because it is the exact string `tests/connect.rs`'s shaping suite measures
@@ -231,6 +266,11 @@ struct Palette {
     /// The bright accent fill (`primary_container`, Glyph's accent-role split
     /// — the *fill* half, never `primary`, which is accent ink).
     amber: Color,
+    /// `#241a04` — the near-black ink the source pairs with a filled amber
+    /// surface (`.btn-primary{color:#241a04}`), reached through the *paired*
+    /// role rather than the hex: `on_primary_container` is exactly this value
+    /// under Glyph dark, and the light theme's own (`#2a1c04`) under light.
+    on_amber: Color,
     /// `--amber-faint`, derived (see [`AMBER_FAINT_ALPHA`]).
     amber_faint: Color,
     /// `--amber-border`, derived (see [`AMBER_BORDER_ALPHA`]).
@@ -256,6 +296,7 @@ fn palette(theme: &Theme) -> Palette {
         rule: scheme.outline_variant,
         overlay: scheme.surface_container_highest,
         amber: scheme.primary_container,
+        on_amber: scheme.on_primary_container,
         amber_faint: scheme.primary.with_alpha(AMBER_FAINT_ALPHA),
         amber_border: scheme.primary.with_alpha(AMBER_BORDER_ALPHA),
         fg: scheme.on_surface,
@@ -392,8 +433,14 @@ pub fn server_badge<S: 'static>(theme: &Theme) -> AnyView<S> {
     any(Align(Alignment::CENTER, box_))
 }
 
-/// Piece 2 — `.heading`: the screen's title and its one-line explanation,
-/// both centered. Pure copy — no [`Live`].
+/// Piece 2 — `.heading`: the screen's title and its explanation, both
+/// centered. Pure copy — no [`Live`].
+///
+/// The title is one line and centers as a block ([`Align`]); the subtitle
+/// wraps on a phone and centers **per line**, which no composition can express
+/// — see [`super::chrome::centered_paragraph`] for the framework gap and the
+/// workaround. On device the second line hugged the leading edge under the
+/// `Align`-only treatment, which is the defect this closes.
 pub fn heading<S: 'static>(theme: &Theme) -> AnyView<S> {
     let colors = palette(theme);
     backed(
@@ -403,10 +450,9 @@ pub fn heading<S: 'static>(theme: &Theme) -> AnyView<S> {
                 text("Connect to server").style(inked(&theme.type_scale.title_medium, colors.fg)),
             )),
             v_gap::<S>(HEADING_GAP),
-            any(Align(
-                Alignment::CENTER,
-                text("Enter credentials to attach to a remote zellij or herdr session.")
-                    .style(inked(&theme.type_scale.body_small, colors.fg_muted)),
+            any(centered_paragraph(
+                SUBTITLE,
+                inked(&theme.type_scale.body_small, colors.fg_muted),
             )),
         ]),
         &colors,
@@ -616,7 +662,7 @@ pub fn remember_row<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S
                 inflexible(toggle),
             ])),
             v_gap::<S>(OPTIONS_GAP),
-            trust_selector(live),
+            trust_selector(theme, live),
         ]),
         &colors,
     )
@@ -675,40 +721,75 @@ fn toggle_art<S: 'static>(colors: &Palette, on: bool) -> AnyView<S> {
     ]))
 }
 
-/// The `.radio-opt` block: one row per [`TrustMode`], the riskiest one carrying
-/// the mock's `.warn-chip`.
+/// The `.radio-opt` block: the mock's **two** rows, the riskier one carrying
+/// its `.warn-chip`, plus the caption that stands in for a selection the user
+/// cannot make by hand.
 ///
-/// Three rows where the mock draws two: `TrustMode` is a three-way enum
-/// (`System`/`TrustOnFirstUse`/`Pinned`) and the mock predates the pinned-cert
-/// pairing flow, so "Trust anyway" is split into the two postures it actually
-/// covers. The chip stays on the one that genuinely skips validation.
+/// # Two rows over a three-way enum, on purpose
 ///
-/// Built from [`radio`] rather than [`frust::glyph::segmented_control`]: the
-/// mock's own shape is a stacked radio list with a per-row trailing chip, which
-/// a segmented control (one pill, equal-width labels, no per-segment slot)
-/// cannot render.
-fn trust_selector<S: 'static>(live: Option<&Live>) -> AnyView<S> {
+/// [`TrustMode`] has three postures but only two are a *manual* choice:
+/// `System` ("Public domain (CA)") and `TrustOnFirstUse` ("Trust anyway", the
+/// one that genuinely skips certificate validation, hence the chip).
+/// [`TrustMode::Pinned`] is deliberately **not** selectable here — in the muxr
+/// product a pinned certificate arrives with the thing that pinned it (a QR
+/// pairing URI's `tm=pin`, or a saved server that was paired earlier), never
+/// from a user picking "pinned" against a certificate they don't have yet.
+/// Offering it as a row would be an affordance with nothing behind it.
+///
+/// # The pinned state still has to render
+///
+/// Tapping a pinned saved row *does* set the posture, so the selector must
+/// show something honest when neither row owns the current mode: both rows
+/// read unselected and a small non-interactive caption names the posture and
+/// where it came from ([`PINNED_CAPTION`]). Tapping either row from there
+/// simply leaves pinned, like any other switch of posture.
+///
+/// Hand-composed rather than `frust::radio`: `RadioWidget` builds its label with a
+/// bare `text(..)` and so shapes it at `TextStyle::default()` (16px, no theme
+/// role), which the design's 12px `--fg` row cannot be reached from, and its
+/// 20px ring/2px stroke/5px dot are fixed constants. The row's parts —
+/// `.radio-dot`'s 16px 1.5px-bordered ring, an inset-3px amber dot, the
+/// `margin-left:auto` chip — are all transcribable here, and
+/// [`super::chrome::radio_semantics`] contributes the `Role::RadioButton` node the
+/// composition would otherwise lose.
+fn trust_selector<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+    let colors = palette(theme);
     let selected = live.map_or(TrustMode::System, |live| live.controller.trust_mode.get());
-    let rows = TRUST_MODES
+    let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS
         .iter()
-        .map(|&mode| trust_row(mode, selected == mode, live))
+        .map(|&mode| trust_row(theme, &colors, mode, selected == mode, live))
         .collect();
+    if !TRUST_OPTIONS.contains(&selected) {
+        rows.push(any(
+            text(PINNED_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))
+        ));
+    }
     any(column::<S>(rows))
 }
 
-/// Every [`TrustMode`], in the order the selector stacks them: safest first.
-const TRUST_MODES: [TrustMode; 3] = [
-    TrustMode::System,
-    TrustMode::TrustOnFirstUse,
-    TrustMode::Pinned,
-];
+/// The manually selectable [`TrustMode`]s, in the order the selector stacks
+/// them: safest first. See [`trust_selector`] for why `Pinned` is absent.
+const TRUST_OPTIONS: [TrustMode; 2] = [TrustMode::System, TrustMode::TrustOnFirstUse];
+
+/// What the selector says instead of a selection while the form carries
+/// [`TrustMode::Pinned`] — the posture a QR pairing or a saved server brings
+/// with it. Non-interactive: there is nothing here to choose.
+///
+/// `pub` for the same reason [`SERVER_URL_PLACEHOLDER`] is: `tests/connect.rs`
+/// asserts on this exact run when it taps the seeded pinned server, and a copy
+/// there could drift.
+pub const PINNED_CAPTION: &str = "pinned certificate — from the saved server";
 
 /// This mode's `.radio-opt` label.
+///
+/// [`TrustMode::Pinned`] is never a row (see [`trust_selector`]); its arm is
+/// the noun the rest of the app already prints for that posture, kept total so
+/// a fourth posture cannot be added without deciding what it is called.
 fn trust_option_label(mode: TrustMode) -> &'static str {
     match mode {
-        // The mock's own string for the CA-verified row.
+        // The mock's own strings for the two rows it draws.
         TrustMode::System => "Public domain (CA)",
-        TrustMode::TrustOnFirstUse => "Trust on first use",
+        TrustMode::TrustOnFirstUse => "Trust anyway",
         TrustMode::Pinned => "Pinned certificate",
     }
 }
@@ -723,19 +804,41 @@ fn trust_meta_label(mode: TrustMode) -> &'static str {
     }
 }
 
-/// One `.radio-opt` row.
+/// One `.radio-opt` row: the ring, the label, and — on the risky posture —
+/// the trailing `.warn-chip`, pressable across its whole width.
 ///
-/// Takes no [`Palette`]: both halves theme themselves — [`radio`] resolves its
-/// ring/dot from `outline`/`primary`, and [`badge`] resolves the warning wash
-/// from `StatusPalette` — so there is nothing here for the piece's own resolved
-/// inks to do.
-fn trust_row<S: 'static>(mode: TrustMode, selected: bool, live: Option<&Live>) -> AnyView<S> {
-    let mut option = radio::<S>(selected, trust_option_label(mode));
-    if let Some(live) = live {
-        let controller = Arc::clone(&live.controller);
-        option = option.on_select(move |_state: &mut S| controller.select_trust_mode(mode));
-    }
-    let mut items = vec![flexible(1, any(option))];
+/// The label is `body_medium`, not a raw 12px: the source says
+/// `.radio-opt{font-size:12px}`, and this module's Tokens rule takes the Glyph
+/// role over the mock's number wherever they disagree — the same substitution
+/// (and the same 12→13 step) the two `.field input`s already make, so the row
+/// and the field it sits under read at one size rather than two.
+fn trust_row<S: 'static>(
+    theme: &Theme,
+    colors: &Palette,
+    mode: TrustMode,
+    selected: bool,
+    live: Option<&Live>,
+) -> AnyView<S> {
+    let label = trust_option_label(mode);
+    let option = row::<S>(vec![
+        inflexible(radio_dot::<S>(colors, selected)),
+        inflexible(h_gap::<S>(RADIO_GAP)),
+        inflexible(any(
+            text(label).style(inked(&theme.type_scale.body_medium, colors.fg))
+        )),
+    ]);
+    // The `Role::RadioButton` node covers the ring and its label only, so the
+    // chip beside it keeps contributing its own `Role::Status` node — a leaf
+    // radio wrapped around the whole row would swallow it (the same reason
+    // `switch_semantics` is a leaf: what it wraps has nothing to announce).
+    let option: AnyView<S> = match live {
+        None => any(option),
+        Some(_) => any(radio_semantics(option, label, selected)),
+    };
+    // The flexible option is what pushes the chip to the trailing edge —
+    // `.radio-opt .warn-chip{margin-left:auto}` with no `space-between` to
+    // reach for (`Flex`'s v1 `MainAxisAlignment` has only `Start`).
+    let mut items = vec![flexible(1, option)];
     // `.radio-opt .warn-chip` — only on the posture that actually skips
     // certificate validation.
     //
@@ -753,39 +856,102 @@ fn trust_row<S: 'static>(mode: TrustMode, selected: bool, live: Option<&Live>) -
         items.push(inflexible(h_gap::<S>(SAVED_GAP)));
         items.push(inflexible(any(badge("insecure", BadgeVariant::Warning))));
     }
-    any(Padding(
-        EdgeInsets::symmetric(0.0, RADIO_PAD_Y),
-        row::<S>(items),
-    ))
+    let body = Padding(EdgeInsets::symmetric(0.0, RADIO_PAD_Y), row::<S>(items));
+    match live {
+        // Splash: the static art, exactly as the mock draws it — no recognizer
+        // (and, above, no `Role::RadioButton` node either), since there is
+        // nothing there to operate. The same rule the remember toggle follows.
+        None => any(body),
+        Some(live) => {
+            let controller = Arc::clone(&live.controller);
+            // Pressable across the whole row, chip included — the recognizer
+            // sits outside the flex, not on the option alone.
+            any(GestureDetector(body)
+                .on_tap(move |_state: &mut S| controller.select_trust_mode(mode)))
+        }
+    }
+}
+
+/// `.radio-dot`: a 16px ring, hairline-and-a-half in `--border-bright`, whose
+/// selected state re-inks the ring amber and drops an inset-3px amber dot into
+/// it (`.radio-dot.sel::after{inset:3px}`).
+fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
+    let ring_size = Size::new(RADIO_RING, RADIO_RING);
+    let ring_ink = if selected {
+        colors.amber
+    } else {
+        colors.outline
+    };
+    let ring = swatch(ring_size, Color::TRANSPARENT, RADIO_RING / 2.0)
+        .border(ring_ink)
+        .border_width(RADIO_RING_BORDER);
+    if !selected {
+        return any(ring);
+    }
+    let dot = RADIO_RING - 2.0 * RADIO_DOT_INSET;
+    any(frust::Stack(vec![
+        any(ring),
+        any(Padding(
+            EdgeInsets::all(RADIO_DOT_INSET),
+            swatch(Size::new(dot, dot), colors.amber, dot / 2.0),
+        )),
+    ]))
 }
 
 /// Piece 6 — `.btn-primary`: the amber CTA, firing [`Live::on_connect`].
 ///
-/// A real [`button`] (Glyph-themed through `ButtonStyle::Primary`'s
-/// `primary`/`on_primary` roles — the source's `#ffb627` on `#241a04`), so
-/// the press feedback, disabled/loading states and accessibility role all
-/// come from the framework rather than being repainted here. **Centered at
-/// its natural width** rather than stretched full-bleed like the source's
-/// block-level button: `ButtonWidget` pins its label at the leading padding
-/// (FINDINGS #15), so a stretched button would render a left-hugged label in a
-/// full-width bar.
+/// **Full-bleed and 44px tall**, the source's own block-level button: an amber
+/// (`primary_container`) bar at `--radius-sm`, `CTA_PAD_Y` of vertical
+/// padding, and a centered `label_large_emphasized` label in the paired
+/// `on_primary_container` ink — Glyph's button role is 12.5px/500 and its
+/// `_emphasized` sibling steps that to the 600 the source asks for, so the
+/// whole `12.5px/600` line is a role rather than three literals. Its own
+/// tracking (0.125px) stands in for the source's `0.03em`, per the Tokens
+/// rule.
 ///
-// TODO(#15 adoption): the label-centering fix has landed frust-side but is not
-// in this machine's `frust` dev yet. When it is, drop the `Align` and let the
-// button stretch to the layer width (`.btn-primary` is block-level with
-// `text-align:center`). Deliberately *not* faked with a hand-painted
-// full-width bar in the meantime: that would throw away the press feedback,
-// the disabled/loading states and the `Role::Button` node.
-pub fn connect_button<S: 'static>(_theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+/// # Hand-composed, and why
+///
+/// `ButtonWidget` pins its label at the leading padding (FINDINGS #15), so a
+/// *stretched* `frust::button` renders a left-hugged label in a full-width bar —
+/// which is why this piece previously stayed centered at its natural width.
+/// Ed's round-2 device gate directs the bar full-width and taller regardless,
+/// so the CTA is composed here instead: `panel` paints the fill,
+/// [`super::chrome::press_target`] supplies the pressed tint and the
+/// `Role::Button` node, and `Align` centers the label the framework would
+/// not.
+///
+/// What that costs, and knowingly: `ButtonWidget`'s press *scale* (this dips
+/// tone instead) and its disabled/loading states — neither of which this
+/// screen drives (the form validates on press rather than gating the button).
+///
+// TODO(#15 adoption): swap back to `frust::button` when the label-alignment
+// fix reaches this checkout — a stretched real button then gives back the
+// scale feedback and the loading/disabled states for free, and this
+// composition (and `chrome::press_target` with it) can go.
+pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+    let colors = palette(theme);
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
-    any(Align(
-        Alignment::CENTER,
-        button("→ connect", move |_state: &mut S| {
-            if let Some(on_connect) = &on_connect {
-                on_connect();
-            }
-        }),
-    ))
+    let label = text(CONNECT_LABEL).style(inked(
+        &theme.type_scale.label_large_emphasized,
+        colors.on_amber,
+    ));
+    let bar = panel(
+        Padding(
+            EdgeInsets::symmetric(0.0, CTA_PAD_Y),
+            Align(Alignment::CENTER, label),
+        ),
+        colors.amber,
+        theme.shape.small,
+    );
+    any(
+        press_target(bar, CONNECT_LABEL, colors.on_amber, theme.shape.small).on_press(
+            move |_state: &mut S| {
+                if let Some(on_connect) = &on_connect {
+                    on_connect();
+                }
+            },
+        ),
+    )
 }
 
 /// Piece 7 — `.saved-hdr` + `.saved-row`: the saved-server list, each row
@@ -971,6 +1137,9 @@ mod tests {
         assert_eq!(colors.success, Color::from_rgb8(0x5f, 0xd8, 0x8f));
         assert_eq!(colors.amber, Color::from_rgb8(0xff, 0xb6, 0x27));
         assert!((colors.amber_faint.components[3] - AMBER_FAINT_ALPHA).abs() < 1e-6);
+        // `.btn-primary{color:#241a04}` — the CTA's ink, reached through the
+        // role paired with the fill above rather than as a fourth hex.
+        assert_eq!(colors.on_amber, Color::from_rgb8(0x24, 0x1a, 0x04));
     }
 
     #[test]
@@ -1022,20 +1191,77 @@ mod tests {
         const { assert!(KNOB == 15.0) };
     }
 
+    /// Every posture, for the label-uniqueness sweep below — the *selector*
+    /// offers only [`TRUST_OPTIONS`].
+    const ALL_TRUST_MODES: [TrustMode; 3] = [
+        TrustMode::System,
+        TrustMode::TrustOnFirstUse,
+        TrustMode::Pinned,
+    ];
+
     #[test]
     fn every_trust_mode_has_its_own_pair_of_labels() {
-        let mut options: Vec<&str> = TRUST_MODES
+        let mut options: Vec<&str> = ALL_TRUST_MODES
             .iter()
             .copied()
             .map(trust_option_label)
             .collect();
-        let mut metas: Vec<&str> = TRUST_MODES.iter().copied().map(trust_meta_label).collect();
+        let mut metas: Vec<&str> = ALL_TRUST_MODES
+            .iter()
+            .copied()
+            .map(trust_meta_label)
+            .collect();
         options.sort_unstable();
         options.dedup();
         metas.sort_unstable();
         metas.dedup();
-        assert_eq!(options.len(), TRUST_MODES.len());
-        assert_eq!(metas.len(), TRUST_MODES.len());
+        assert_eq!(options.len(), ALL_TRUST_MODES.len());
+        assert_eq!(metas.len(), ALL_TRUST_MODES.len());
+    }
+
+    #[test]
+    fn the_selector_offers_the_two_manual_postures_and_never_pinned() {
+        // The product rule (see `trust_selector`): a pinned certificate
+        // arrives with the thing that pinned it — a QR pairing URI or a saved
+        // server — and is never hand-picked, so it must not be a row.
+        assert_eq!(TRUST_OPTIONS.len(), 2, "the mock draws exactly two rows");
+        assert!(
+            !TRUST_OPTIONS.contains(&TrustMode::Pinned),
+            "pinned is not a manual choice"
+        );
+        assert_eq!(trust_option_label(TRUST_OPTIONS[0]), "Public domain (CA)");
+        assert_eq!(trust_option_label(TRUST_OPTIONS[1]), "Trust anyway");
+        // …and the state it *can* still arrive in has copy of its own, or the
+        // selector would render two unselected rows and no explanation.
+        assert!(!PINNED_CAPTION.is_empty());
+    }
+
+    #[test]
+    fn the_selected_radio_dot_stays_inside_its_ring() {
+        // `inset:3px` on a 16px ring leaves a 10px dot; a wider inset than the
+        // ring's own radius would be a negative-size layout panic in waiting.
+        const { assert!(2.0 * RADIO_DOT_INSET < RADIO_RING) };
+        const { assert!(RADIO_RING_BORDER < RADIO_RING / 2.0) };
+    }
+
+    #[test]
+    fn the_cta_clears_the_minimum_tap_target() {
+        // `CTA_PAD_Y` twice plus Glyph's `label_large` line box (18px) is the
+        // bar's height — 44px, the platform minimum. A padding tweak that
+        // dropped it under that is the regression this catches.
+        let line_box = match Theme::glyph_baseline()
+            .type_scale
+            .label_large_emphasized
+            .line_height
+        {
+            frust::authoring::text::LineHeight::Absolute(px) => f64::from(px),
+            other => panic!("the Glyph button role carries an absolute line box, got {other:?}"),
+        };
+        assert!(
+            2.0 * CTA_PAD_Y + line_box >= 44.0,
+            "the CTA is {}px tall",
+            2.0 * CTA_PAD_Y + line_box
+        );
     }
 
     #[test]

@@ -59,14 +59,18 @@
 //! A bare `TextContext` is exactly what a `TextInputWidget` owns, so this is
 //! the field's own shaping environment and not an approximation of it.
 
+use std::any::Any;
+use std::collections::BTreeMap;
+
 use frust::Theme;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
     Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, SizedBox, Stack, any,
     navigator,
 };
-use frust_core::accesskit::{Node, Role, Toggled};
-use frust_core::{NamedKey, RenderRoot};
+use frust_core::accesskit::{Node, Rect, Role, Toggled};
+use frust_core::{FrameTime, NamedKey, PaintScene, RenderRoot};
+use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -74,7 +78,8 @@ use peniko::Color;
 use muxr::connection::expect_connection_controller;
 use muxr::features::connect::presentation::pages::connect_page;
 use muxr::features::connect::presentation::pieces::{
-    SERVER_URL_PLACEHOLDER, TOKEN_PLACEHOLDER, field_text_style,
+    CONNECT_LABEL, PINNED_CAPTION, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER,
+    field_text_style, heading,
 };
 use muxr::routes::install_app_router;
 use muxr::ui::toasts::app_toasts;
@@ -100,13 +105,25 @@ const INVALID_URL: &str = "not-an-endpoint";
 /// `AppFailure::Network`'s user-facing message — what a rejected form toasts.
 const NETWORK_TOAST: &str = "Connection problem — please try again.";
 
-/// The trust-selector rows' labels (`pieces::trust_option_label`).
+/// The trust selector's **two** rows (`pieces::trust_option_label`) — the
+/// mock's own pair. `TrustMode::Pinned` is deliberately not one of them; see
+/// `pieces::trust_selector`.
 const SYSTEM_TRUST: &str = "Public domain (CA)";
-const PINNED_TRUST: &str = "Pinned certificate";
+const INSECURE_TRUST: &str = "Trust anyway";
+/// The chip the insecure row carries (`glyph::badge` → `Role::Status`).
+const INSECURE_CHIP: &str = "insecure";
 
-/// The CTA's and the QR affordance's labels.
-const CONNECT_LABEL: &str = "→ connect";
+/// The QR affordance's label. The CTA's is `pieces::CONNECT_LABEL`, imported
+/// rather than copied.
 const QR_LABEL: &str = "▣";
+
+/// `.connect{padding:30px 22px}` — the layer's horizontal inset, transcribed
+/// (the constant itself is private to `presentation::pages`). What the CTA
+/// spans the width *between*.
+const LAYER_PAD_X: f64 = 22.0;
+/// The platform minimum tap target, in logical px — the floor the full-bleed
+/// CTA has to clear.
+const MIN_TAP_TARGET: f64 = 44.0;
 
 /// The seeded store's third row — pinned and read-only, so tapping it changes
 /// *both* the URL and the trust mode away from their defaults.
@@ -245,6 +262,50 @@ impl Harness {
             .unwrap_or_else(|| panic!("no trust row labelled {label:?}"))
     }
 
+    /// Every trust row's label, in tree order — the selector's whole offer.
+    fn trust_rows(&self) -> Vec<String> {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == Role::RadioButton)
+            .filter_map(|(_, node)| node.label().map(str::to_string))
+            .collect()
+    }
+
+    /// Whether any node in the tree carries `value` — how a plain `text` run
+    /// (the pinned caption) is read back, since `text` reports its content as
+    /// a `Role::Label` node's *value*.
+    fn shows_value(&self, value: &str) -> bool {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.value() == Some(value))
+    }
+
+    /// Whether a `Role::Status` node (a `glyph::badge`) labelled `label` is on
+    /// screen.
+    fn shows_chip(&self, label: &str) -> bool {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.role() == Role::Status && node.label() == Some(label))
+    }
+
+    /// The bounds of the first node matching `pred` — the geometry read-back
+    /// for chrome whose *size* is the assertion (the full-bleed CTA).
+    fn bounds(&self, what: &str, pred: impl Fn(&Node) -> bool) -> Rect {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .find(|(_, node)| pred(node))
+            .and_then(|(_, node)| node.bounds())
+            .unwrap_or_else(|| panic!("no bounds for {what}"))
+    }
+
     /// Whether the remember toggle reads as on — the `Role::Switch` node
     /// `chrome::switch_semantics` contributes over the composed art.
     fn remember_on(&self) -> bool {
@@ -297,6 +358,24 @@ fn typing_a_server_url_survives_the_rebuild_it_wakes() {
 }
 
 #[test]
+fn the_selector_offers_the_mocks_two_rows_and_flags_the_insecure_one() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+
+    assert_eq!(
+        harness.trust_rows(),
+        vec![SYSTEM_TRUST.to_string(), INSECURE_TRUST.to_string()],
+        "the selector offers exactly the design's two rows, safest first — \
+         `TrustMode::Pinned` is never hand-picked (see pieces::trust_selector)"
+    );
+    assert!(
+        harness.shows_chip(INSECURE_CHIP),
+        "the posture that skips certificate validation carries its warn chip"
+    );
+}
+
+#[test]
 fn selecting_a_trust_mode_sticks() {
     let _g = serial();
     let _ambient = setup();
@@ -306,18 +385,23 @@ fn selecting_a_trust_mode_sticks() {
         harness.trust_selected(SYSTEM_TRUST),
         "the form starts on the safe posture"
     );
-    assert!(!harness.trust_selected(PINNED_TRUST));
+    assert!(!harness.trust_selected(INSECURE_TRUST));
 
-    harness.tap_node("the pinned-certificate row", |node| {
-        node.role() == Role::RadioButton && node.label() == Some(PINNED_TRUST)
+    harness.tap_node("the trust-anyway row", |node| {
+        node.role() == Role::RadioButton && node.label() == Some(INSECURE_TRUST)
     });
 
-    // `Radio` is a controlled component — it never self-selects, so the row
-    // reading as selected after a rebuild means the controller's signal moved.
-    assert!(harness.trust_selected(PINNED_TRUST));
+    // The row is a controlled component like the `Radio` it replaced — it
+    // never self-selects, so the row reading as selected after a rebuild means
+    // the controller's signal moved.
+    assert!(harness.trust_selected(INSECURE_TRUST));
     assert!(
         !harness.trust_selected(SYSTEM_TRUST),
         "the selection is exclusive"
+    );
+    assert!(
+        harness.shows_chip(INSECURE_CHIP),
+        "and the chip stays with the row it flags"
     );
 }
 
@@ -340,15 +424,78 @@ fn tapping_a_saved_server_refills_the_url_and_its_trust_mode() {
         Some(PINNED_ENDPOINT),
         "the row filled the server-URL field"
     );
+    // The posture it carried is one the selector deliberately does not offer
+    // as a row, so the selector must render *honestly* rather than pretend:
+    // neither row selected, and the caption naming where the posture came
+    // from (see pieces::trust_selector's pinned-state note).
     assert!(
-        harness.trust_selected(PINNED_TRUST),
-        "…and carried its own trust posture with it"
+        !harness.trust_selected(SYSTEM_TRUST) && !harness.trust_selected(INSECURE_TRUST),
+        "a pinned posture must not light a phantom selection"
+    );
+    assert!(
+        harness.shows_value(PINNED_CAPTION),
+        "…and says so instead: {:?}",
+        harness.trust_rows()
+    );
+}
+
+#[test]
+fn switching_away_from_a_pinned_server_leaves_the_pinned_state() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    harness.tap_node("the pinned saved-server row", |node| {
+        node.role() == Role::Label && node.value() == Some(PINNED_ENDPOINT)
+    });
+    harness.tap_node("the public-CA row", |node| {
+        node.role() == Role::RadioButton && node.label() == Some(SYSTEM_TRUST)
+    });
+
+    assert!(
+        harness.trust_selected(SYSTEM_TRUST),
+        "tapping a row out of the pinned state simply selects that row"
+    );
+    assert!(
+        !harness.shows_value(PINNED_CAPTION),
+        "and the caption goes with the state it explained"
     );
 }
 
 // ---------------------------------------------------------------------------
 // The connect flow
 // ---------------------------------------------------------------------------
+
+#[test]
+fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+
+    // `.btn-primary` is block-level: it fills the layer between its two 22px
+    // paddings rather than hugging its label (Ed's round-2 device gate).
+    let cta = harness.bounds("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    let layer = SURFACE.width - 2.0 * LAYER_PAD_X;
+    assert!(
+        (cta.width() - layer).abs() < 0.5,
+        "the CTA spans {:.1}px of a {layer:.1}px layer",
+        cta.width()
+    );
+    assert!(
+        cta.height() >= MIN_TAP_TARGET,
+        "the CTA is {:.1}px tall, under the {MIN_TAP_TARGET}px minimum",
+        cta.height()
+    );
+
+    // …and it is still the *only* full-bleed button: the QR affordance keeps
+    // its own natural size, so "the CTA" is unambiguous above.
+    let fab = harness.bounds("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+    assert!(fab.width() < layer / 2.0, "the FAB did not stretch too");
+}
 
 #[test]
 fn an_invalid_url_toasts_and_never_navigates() {
@@ -526,6 +673,111 @@ fn the_qr_sheet_also_dismisses_on_escape() {
     harness.settle();
 
     assert_eq!(harness.nav.depth(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The heading's centered subtitle
+// ---------------------------------------------------------------------------
+
+/// A phone-width surface for the heading alone — narrow enough that the
+/// subtitle actually wraps, which is the whole point (at [`SURFACE`]'s 800px
+/// it fits on one line and centering a single line proves nothing about the
+/// second one).
+const NARROW: Size = Size::new(260.0, 400.0);
+
+/// Glyph size of the subtitle's own type role (`body_small` under Glyph =
+/// caption/11), used to pick its runs out of a frame that also paints the
+/// 15px title.
+const SUBTITLE_SIZE: f32 = 11.0;
+
+/// A paint target that records where each glyph landed: `(font_size, x, y)` in
+/// absolute logical px, one entry per glyph.
+#[derive(Default)]
+struct GlyphScene {
+    glyphs: Vec<(f32, f64, f64)>,
+}
+
+impl PaintScene for GlyphScene {
+    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+    fn draw_text(&mut self, _origin: Point, _text: &str) {}
+    fn draw_glyph_run(&mut self, run: GlyphRun) {
+        // A run's glyph positions are run-local; its transform places the run.
+        let offset = run.transform.translation();
+        for glyph in &run.glyphs {
+            self.glyphs.push((
+                run.font_size,
+                offset.x + f64::from(glyph.x),
+                offset.y + f64::from(glyph.y),
+            ));
+        }
+    }
+}
+
+/// The subtitle's laid-out lines as `(leftmost x, rightmost x)` pairs, plus the
+/// box the paragraph was given — the heading piece rendered alone at
+/// [`NARROW`].
+///
+/// Lines are grouped by baseline: the paragraph draws one run per line, each at
+/// its own y.
+fn subtitle_lines() -> (Vec<(f64, f64)>, Rect) {
+    let theme = Theme::glyph_baseline();
+    let mut logic = move |_state: &mut ()| heading::<()>(&theme);
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut state = ();
+    let mut tcx = TextContext::new();
+    root.rebuild(&mut logic, &mut state);
+    root.layout_with_text(NARROW, &mut tcx as &mut dyn Any);
+    let mut scene = GlyphScene::default();
+    root.paint(&mut scene, FrameTime::ZERO);
+
+    let mut by_line: BTreeMap<i64, (f64, f64)> = BTreeMap::new();
+    for (size, x, y) in scene.glyphs {
+        if (size - SUBTITLE_SIZE).abs() > f32::EPSILON {
+            continue;
+        }
+        let line = by_line.entry(y.round() as i64).or_insert((x, x));
+        line.0 = line.0.min(x);
+        line.1 = line.1.max(x);
+    }
+
+    let box_ = root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.value() == Some(SUBTITLE))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the subtitle contributes one Role::Label node carrying its run");
+    (by_line.into_values().collect(), box_)
+}
+
+#[test]
+fn the_subtitle_centers_every_line_it_wraps_onto() {
+    // The device defect: `.sub` is `text-align:center`, but `TextView` has no
+    // paragraph alignment and `TextContext::layout` hardcodes
+    // `parley::Alignment::Start`, so under the old `Align(CENTER, text(..))`
+    // treatment only the *block* was centered — the second line hugged the
+    // leading edge. See `chrome::centered_paragraph`.
+    let (lines, box_) = subtitle_lines();
+    assert!(
+        lines.len() >= 2,
+        "the subtitle must actually wrap at {NARROW:?} for this to mean \
+         anything, got {} line(s)",
+        lines.len()
+    );
+
+    for (index, (first, last)) in lines.iter().enumerate() {
+        let left = first - box_.x0;
+        let right = box_.x1 - last;
+        // `last` is the final glyph's *pen* position, so `right` runs one
+        // advance long — hence a tolerance of one em rather than a hairline.
+        // A start-aligned line would read `left == 0` against a `right` of the
+        // whole leftover (~100px here), which this separates cleanly.
+        assert!(
+            (left - right).abs() <= f64::from(SUBTITLE_SIZE),
+            "line {index} sits {left:.1}px from the left edge and {right:.1}px \
+             from the right — it is not centered"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
