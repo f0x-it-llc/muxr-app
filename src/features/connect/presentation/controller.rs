@@ -40,14 +40,14 @@
 use std::sync::Arc;
 
 use clean_signals::ControllerCore;
-use frust::{GetUntracked, Router, RwSignal, Set};
+use frust::{GetUntracked, RwSignal, Set};
 
-use crate::AppState;
 use crate::connection::{ConnectTarget, ConnectionController, TrustMode};
 use crate::failure::AppFailure;
 use crate::features::connect::di::SavedServers;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::connect::domain::use_cases::parse_endpoint::parse_endpoint;
+use crate::routes::Nav;
 use crate::ui::toasts::app_toasts;
 
 /// Where a successful connect lands. The Sessions route's own spelling lives in
@@ -175,21 +175,24 @@ impl ConnectController {
     }
 
     /// Validate the form and, if it holds up, open the (mock) connection and
-    /// navigate to [`SESSIONS_LOCATION`].
+    /// navigate to [`SESSIONS_LOCATION`] — through the app's one guarded
+    /// router (see `crate::routes`), so this push resolves exactly as a deep
+    /// link to the same path would.
     ///
-    /// `router` is passed in rather than held: [`Router`] is `Rc`-backed and so
-    /// neither `Send` nor `Sync`, while this controller must be both
-    /// (`use_controller`'s bound). The screen owns the handle in its own
-    /// `Component::State` and lends it here.
+    /// `nav` is passed in rather than held: [`Nav`] wraps an `Rc`-backed
+    /// `Router` and so is neither `Send` nor `Sync`, while this controller must
+    /// be both (`use_controller`'s bound). The screen resolves the handle in
+    /// its own `Component::init`, keeps it in its `Component::State`, and lends
+    /// it here.
     ///
     /// A rejection raises the failure as a toast and lights [`Self::invalid`];
     /// nothing navigates and no connection opens.
-    pub fn connect(&self, router: &Router<AppState>) {
+    pub fn connect(&self, nav: &Nav) {
         match self.validated_target() {
             Ok(target) => {
                 self.invalid.set(false);
                 self.connection.connect(target);
-                router.push(SESSIONS_LOCATION);
+                nav.push(SESSIONS_LOCATION);
             }
             Err(failure) => {
                 self.invalid.set(true);

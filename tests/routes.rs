@@ -1,16 +1,19 @@
 //! Route smoke tests: each of the 4 routes' placeholder page renders text
 //! headlessly (no GPU, no window) — driven through the full `MuxrApp` shell
 //! via `tests/support/mod.rs` (lifted from `examples/huddle`'s own harness of
-//! the same shape). The bottom half proves `muxr::routes::session_guard`'s
-//! behavior directly against `Router::resolve` (pure — no navigator side
-//! effects), so no scene inspection is needed to tell Connect apart from a
-//! guarded route's own placeholder.
+//! the same shape). The middle section proves the session guard's behavior
+//! directly against `Router::resolve` (pure — no navigator side effects), so no
+//! scene inspection is needed to tell Connect apart from a guarded route's own
+//! placeholder; the last section proves the same guard applies to the handle
+//! screens actually push through (`muxr::routes::app_nav`), and that the handle
+//! drives the app's own navigator rather than a copy of it.
 
 use frust::{AnyView, Component, Resolution};
 use frust_core::RenderRoot;
 use frust_text::TextContext;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::routes::{Nav, app_nav};
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -85,7 +88,7 @@ fn shell_builds_at_the_connect_route_by_default() {
 }
 
 // ---------------------------------------------------------------------------
-// Session guard (`muxr::routes::session_guard`)
+// Session guard (`muxr::routes::session_guard_with`)
 // ---------------------------------------------------------------------------
 
 /// A mock connect target — plain data, none of its fields matter to the guard
@@ -104,7 +107,18 @@ fn mock_target() -> ConnectTarget {
 /// resolution (every location this suite resolves is a real route or a
 /// redirect to one).
 fn resolved_path(state: &AppState, raw: &str) -> String {
-    match state.nav.resolve(raw) {
+    matched_path(state.nav.resolve(raw))
+}
+
+/// [`resolved_path`] through the app's published [`Nav`] handle — the object
+/// every screen actually pushes with.
+fn resolved_path_through(nav: &Nav, raw: &str) -> String {
+    matched_path(nav.resolve(raw))
+}
+
+/// The matched path out of a [`Resolution`], or a panic.
+fn matched_path(resolution: Resolution<AppState>) -> String {
+    match resolution {
         Resolution::Matched { location, .. } => location.path,
         Resolution::Error { location } => {
             panic!("expected a matched resolution for {location:?}, got Resolution::Error")
@@ -188,5 +202,71 @@ fn root_and_settings_are_never_redirected() {
         resolved_path(&state, "/settings"),
         "/settings",
         "/settings is never redirected once connected either"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The published nav handle (`muxr::routes::app_nav`)
+// ---------------------------------------------------------------------------
+
+/// The handle every screen pushes through is the **same guarded router** the
+/// tests above resolve against — there is no second, unguarded path into
+/// `/sessions`/`/terminal` any more.
+#[test]
+fn a_push_through_the_app_nav_handle_is_guarded_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let _state = MuxrApp.init();
+    let nav = app_nav();
+
+    assert_eq!(
+        resolved_path_through(&nav, "/sessions"),
+        "/",
+        "an unauthenticated push through the handle bounces to Connect"
+    );
+    assert_eq!(
+        resolved_path_through(&nav, "/terminal?session=s-1"),
+        "/",
+        "…query param and all (the guard matches on the path)"
+    );
+
+    expect_connection_controller().connect(mock_target());
+
+    assert_eq!(
+        resolved_path_through(&nav, "/sessions"),
+        "/sessions",
+        "a connected push through the handle lands"
+    );
+    assert_eq!(
+        resolved_path_through(&nav, "/terminal?session=s-1"),
+        "/terminal",
+        "…and so does the attach location"
+    );
+}
+
+/// …and pushing through it drives the app's **own** navigator: the handle
+/// wraps the router `AppState::nav` holds, not a second one over the same
+/// controller.
+#[test]
+fn a_push_through_the_app_nav_handle_lands_on_the_apps_own_navigator() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = MuxrApp.init();
+    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut tcx = TextContext::new();
+    frame(&mut root, &mut logic, &mut state, &mut tcx);
+    assert_eq!(state.nav.controller().depth(), 1, "only the start location");
+
+    // `/settings` is unguarded, so this asserts the plumbing rather than the
+    // redirect the test above covers.
+    app_nav().push("/settings");
+    frame(&mut root, &mut logic, &mut state, &mut tcx);
+
+    assert_eq!(
+        state.nav.controller().depth(),
+        2,
+        "the push the handle made landed on the app's own page stack"
     );
 }
