@@ -40,6 +40,7 @@
 
 use std::rc::Rc;
 
+use frust::authoring::text::LineHeight;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, Widget,
@@ -65,6 +66,11 @@ const BRAND_GAP: f64 = 7.0;
 /// type-scale role, so it overrides the display role's size (and only that;
 /// family/weight stay Space Mono 700, which *is* what the role carries).
 const BRAND_SIZE: f32 = 13.0;
+/// …and its line box, tightened to match. The display role carries a 36px
+/// line height for a 32px face; left alone it would give the wordmark a
+/// 36px-tall box inside a 46px bar, so what "centered" means would depend on
+/// where the shaper puts a baseline inside that box rather than on the bar.
+const BRAND_LINE_HEIGHT: f32 = 18.0;
 /// `.topbar-icon{width:30px;height:30px}` — the trailing slot's box.
 const ICON_SLOT: f64 = 30.0;
 /// Minimum clear space between the centered title and either side zone, in
@@ -90,6 +96,7 @@ pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State
     let scheme = theme.scheme();
     let mut brand_style = theme.type_scale.display_small.clone();
     brand_style.size = BRAND_SIZE;
+    brand_style.line_height = LineHeight::Absolute(BRAND_LINE_HEIGHT);
     brand_style.color = scheme.primary;
     let mut title_style = theme.type_scale.label_large.clone();
     title_style.color = scheme.on_surface;
