@@ -14,7 +14,7 @@
 //! ```text
 //! ┌─────────────────────────────┐
 //! │ ▪▪ muxr   100.71.31.57   ⚙  │  crate::shell's persistent bar — NOT this
-//! ├─────────────────────────────┤  screen's; it titles every route
+//! ├─────────────────────────────┤  screen's; it floats over this page
 //! │ ● 100.71.31.57:50051  …     │  .conn-row — FIXED, outside the scroll
 //! ├─────────────────────────────┤
 //! │ ┃ D  dev      running zellij│  the scrolling list: cards, the offer
@@ -25,11 +25,15 @@
 //!
 //! The bar above the strip belongs to [`crate::shell`], not here: it is
 //! persistent chrome whose title crossfades across route changes, so mounting a
-//! second copy per screen would fight it. This screen therefore starts at the
-//! strip, and keeps `safe_area(..).top(false)` on its body because the shell's
-//! bar is what consumes the status-bar inset (`crate::ui::topbar`'s own module
-//! docs). The `⚙` that reaches `/settings` moved with the bar — it is
-//! `/sessions`' route metadata now (`crate::routes::BarAction`).
+//! second copy per screen would fight it. It *floats* over this page rather
+//! than displacing it (`crate::shell::root_view`'s reflow note), so the page
+//! runs the full surface and reserves the band the bar covers with
+//! [`topbar_clearance`] — under which the strip sits, exactly where it did when
+//! the shell still handed the page a shortened box. The body keeps
+//! `safe_area(..).top(false)` because that clearance already contributes the
+//! status-bar inset the bar consumes (`crate::ui::topbar`'s own module docs).
+//! The `⚙` that reaches `/settings` moved with the bar — it is `/sessions`'
+//! route metadata now (`crate::routes::BarAction`).
 //!
 //! The strip is deliberately **not** a list item: it describes the connection
 //! the list belongs to, so scrolling the list must not scroll it away
@@ -97,6 +101,7 @@ use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
+use crate::ui::topbar::topbar_clearance;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
 use super::pieces;
@@ -253,15 +258,22 @@ impl Component for SessionsScreen {
             FlexView::new(Axis::Vertical, gapped(list)).cross_axis(CrossAxisAlignment::Stretch),
         )))
         .top(false));
+        // The page tone stays **outside** the clearance so it fills the whole
+        // surface, bar band included: the bar slides in over it (see
+        // `crate::shell::root_view`), and a page that stopped at the clearance
+        // would flash the shell's own clear colour through the gap for the
+        // length of that entrance.
         any(pieces::page_tone(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(pieces::server_strip(info.as_ref(), &colors)),
-                    flexible(1, scroller),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Stretch),
+            topbar_clearance(
+                FlexView::new(
+                    Axis::Vertical,
+                    vec![
+                        inflexible(pieces::server_strip(info.as_ref(), &colors)),
+                        flexible(1, scroller),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Stretch),
+            ),
             &colors,
         ))
     }

@@ -19,10 +19,20 @@
 //! `ui_substrate.rs`'s, by painted geometry.
 //!
 //! The fixture deliberately mounts **no top bar**: the muxr bar is app shell
-//! chrome now (`muxr::shell::root_view`'s band), so everything it carries —
-//! the host title, the brand, the `⚙` — is asserted in
-//! `tests/navigation_motion.rs` instead. What this suite still owes the bar is
-//! the *negative*: that the screen grew none of it back.
+//! chrome now (a fixed-index child of `muxr::shell::root_view`'s root `Stack`,
+//! floating over the navigator), so everything it carries — the host title, the
+//! brand, the `⚙` — is asserted in `tests/navigation_motion.rs` instead. What
+//! this suite still owes the bar is the *negative*: that the screen grew none
+//! of it back.
+//!
+//! The screen does, however, reserve the band that bar covers
+//! (`ui::topbar::topbar_clearance`, which every bar-bearing page wraps its body
+//! in now that the bar floats rather than displacing it), so **everything this
+//! suite locates geometrically sits 46px lower than it did when the shell
+//! handed the page a shortened box**. Every probe here is relative — widths,
+//! before/after diffs, semantics-derived tap points — so the shift is invisible
+//! to them; the resting seam itself is asserted in `navigation_motion.rs`,
+//! which mounts the real shell and can see the bar it must line up with.
 //!
 //! The navigator's base page is a **full-bleed, childless** `SizedBox`, which
 //! matters twice: it paints nothing and handles nothing, so every tap falls

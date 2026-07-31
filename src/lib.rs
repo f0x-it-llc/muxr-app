@@ -22,8 +22,8 @@
 //! publishes the router as the app-wide [`routes::Nav`] handle every screen
 //! pushes paths through, and whose route-meta mirror the shell's persistent
 //! top bar reads) and resolves the start location once;
-//! `Component::build` mounts [`shell::root_view`] over it — the
-//! `[top bar, navigator]` band plus the toast layer — plus, on the
+//! `Component::build` mounts [`shell::root_view`] over it — the full-height
+//! navigator, the top bar floating over it, and the toast layer — plus, on the
 //! first build of a cold start, the splash overlay
 //! ([`AppState::splash_plan`], [`ui::splash::sequence`]). No feature
 //! repository exists yet to construct here — a real one joins this function
