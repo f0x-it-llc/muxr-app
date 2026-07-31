@@ -12,15 +12,20 @@
 //! the seam [`shell::root_view`] and [`routes::build_routes`] are left thin
 //! to grow into.
 //!
-//! This file is the **composition root**: `Component::init` builds the
-//! [`Router`]/[`NavigatorController`] pair and resolves the start location
-//! once; `Component::build` mounts [`shell::root_view`] over it, plus — on
-//! the first build of a cold start — the splash overlay
+//! This file is the **composition root**: `Component::init` publishes the
+//! app-scoped mock [`connection::ConnectionController`] via
+//! [`connection::provide_connection_controller`], calls each feature's own
+//! [`features::connect::di::provide`]-shaped wiring stub, then builds the
+//! [`Router`]/[`NavigatorController`] pair (wiring `routes::session_guard` as
+//! the router's top-level redirect) and resolves the start location once;
+//! `Component::build` mounts [`shell::root_view`] over it, plus — on the
+//! first build of a cold start — the splash overlay
 //! ([`AppState::splash_plan`], [`ui::splash::sequence`]). No feature
 //! repository exists yet to construct here — a real one joins this function
 //! the same way `examples/huddle`'s `HuddleApp::init` constructs and
 //! `provide_context`s each feature's repository, once a feature's `data`
-//! layer has one to build.
+//! layer has one to build; each feature's own `di.rs` is the seam that will
+//! grow it, called from here.
 //!
 //! **Dev-machine-only scaffold**: this variant's `Cargo.toml` path-deps into
 //! the Frust checkout that generated it, plus a sibling `clean-signals-rs`
@@ -28,6 +33,7 @@
 //! [`frust::app!`]'s invocation below or `main.rs`; add features above it
 //! instead.
 
+pub mod connection;
 pub mod failure;
 pub mod features;
 pub mod ui;
@@ -142,12 +148,28 @@ impl Component for MuxrApp {
     type State = AppState;
 
     fn init(&self) -> AppState {
+        // App-scoped mock connection state, published once under the root
+        // owner (see `connection`'s module docs) — reachable from any screen
+        // via `use_context`, and from `routes::session_guard` the same way
+        // (it has no `&mut AppState` to reach one through any other way).
+        connection::provide_connection_controller();
+
+        // Each feature's own composition-root wiring seam — empty today (see
+        // each `di.rs`'s doc), grows real repo construction once a feature's
+        // `data` layer has one to build.
+        features::connect::di::provide();
+        features::sessions::di::provide();
+        features::terminal::di::provide();
+        features::settings::di::provide();
+
         // The controller is created *before* the route table (so every
         // route's page can push through the same controller the router
         // drives).
         let controller = NavigatorController::new();
         let routes = routes::build_routes(controller.clone());
-        let router = Router::with_controller(&controller, routes);
+        // The session guard is a top-level redirect (see `routes::session_guard`'s
+        // doc) — resolved before matching, ahead of any per-route redirect.
+        let router = Router::with_controller(&controller, routes).redirect(routes::session_guard);
         // Resolves the start location once (see `START_LOCATION`).
         router.handle_location(START_LOCATION);
 

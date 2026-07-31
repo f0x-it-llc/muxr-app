@@ -16,7 +16,7 @@
 //! width. The page paints its own `--bg-void` background — the shell clears
 //! to `ColorScheme::surface` (Glyph's card tone), not the page tone.
 
-use frust::{AnyView, Stack, any, safe_area};
+use frust::{AnyView, NavigatorController, Stack, any, safe_area};
 
 use super::pieces::{active_theme, connect_pieces};
 use crate::AppState;
@@ -53,7 +53,11 @@ pub fn connect_layout(pieces: Vec<AnyView<AppState>>) -> AnyView<AppState> {
 }
 
 /// The Connect screen: the page background under the eight laid-out pieces.
-pub fn connect_page() -> AnyView<AppState> {
+/// Takes the [`NavigatorController`] (unused today — see `crate::routes`'s
+/// `home_page` dual-use shape) so its signature matches the other three
+/// features' `_page` builders; Wave 2's connect flow pushes through it on a
+/// successful connect.
+pub fn connect_page(_controller: NavigatorController<AppState>) -> AnyView<AppState> {
     let theme = active_theme();
     any(Stack(vec![
         any(page_backdrop()),
