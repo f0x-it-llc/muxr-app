@@ -44,13 +44,17 @@ frust = { path = "../../crates/frust", default-features = false, features = ["gl
 # dependency line in the default `Cargo.toml.tmpl`).
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
-# `clean-signals` is git+rev-pinned to its public repo — the EXACT same
-# spec `plugins/clean-signals-frust` (and `examples/huddle`) use, so Cargo
-# unifies every consumer into one crate identity (the type-identity rule
-# `examples/huddle/Cargo.toml` documents at length). This replaced the old
-# sibling-checkout path dep when the frust ecosystem migrated to the git
-# pin (frust PR #20); bump the `rev` only in lockstep with
-# `clean-signals-frust`'s own pin, never independently.
+# `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
+# Version-Pin Policy), so it is **git+rev-pinned to the public repo** — the
+# exact same spec `clean-signals-frust`'s own `clean-signals` dependency uses,
+# so Cargo unifies both into one crate identity. That identity rule is
+# load-bearing, not cosmetic: two sources for `clean-signals` give
+# `ControllerCore`/`Failure` two distinct types and `use_controller` stops
+# accepting this app's controllers (the exact error a mismatch produces). The
+# framework moved all four of its own consumers off the `../clean-signals-rs`
+# sibling-checkout path onto this pin (frust `4a6a484`); this app is the fifth
+# consumer and follows it. Bump the rev here and in the plugin together, never
+# one alone — `examples/huddle/Cargo.toml` documents the rule at length.
 clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 
 # `log` facade dependency for the release-only `lean` feature below — mirrors
