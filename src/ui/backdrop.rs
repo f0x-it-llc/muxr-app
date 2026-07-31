@@ -13,7 +13,23 @@
 //! 2. **The shell clears to `ColorScheme::surface`**, which is Glyph's
 //!    `--bg-surface` (`#161a23`) — the card/input tone, not the page tone.
 //!    Both the Connect screen and the splash overlay are authored against
-//!    `--bg-void` (`#0a0c11`), so the app paints its own page background.
+//!    `--bg-base` (`#10131a`), so the app paints its own page background.
+//!
+//! # Which page tone, and why it moved
+//!
+//! `docs/redesign.html` paints the phone's whole screen `--bg-base`
+//! (`.screen{background:var(--bg-base)}`) and gives the `.connect` column no
+//! backing of its own; the older `docs/splash.html` mock used `--bg-void` for
+//! both. The redesign is the visual ground truth for the screen, so this
+//! backdrop resolves `--bg-base` and `features::connect`'s pieces back
+//! themselves with the *same* role (`Palette::page`) — over the page that reads
+//! as no backing at all, exactly as the redesign draws it, while still giving
+//! the splash's rain something opaque to land on.
+//!
+//! **One function serves both renderings on purpose.** The splash overlay and
+//! the `/` route paint the same tone by construction, so the handoff cannot
+//! develop a one-frame colour step; a second, splash-only backdrop would be
+//! free to drift. See `features::connect::presentation::pieces`' module docs.
 //!
 //! The splash additionally needs an **opaque, input-blocking** layer: the
 //! navigator (already rendering the finished Connect screen) stays mounted
@@ -33,7 +49,8 @@ use frust::authoring::{
 const INTRINSIC: f64 = 1.0e7;
 
 /// The app's page background: a full-bleed fill of the active theme's
-/// `surface_container_lowest` (Glyph's `--bg-void`, the page tone).
+/// `surface_container_low` (Glyph's `--bg-base`, the page tone — see the
+/// [module docs](self)).
 ///
 /// Resolves the theme at **build** time through `use_context::<Theme>()` (the
 /// app-code delivery path, mirroring `examples/glyph-catalog`'s own root
@@ -43,7 +60,7 @@ pub fn page_backdrop<State: 'static>() -> BackdropView<State> {
     let color = frust::use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)
         .scheme()
-        .surface_container_lowest;
+        .surface_container_low;
     BackdropView {
         color,
         block_input: false,
@@ -146,6 +163,20 @@ mod tests {
         // The loose (min-zero) constraint a `Stack` hands every child.
         let bc = BoxConstraints::loose(Size::new(390.0, 844.0));
         assert_eq!(widget.layout(&mut ctx, &bc), Size::new(390.0, 844.0));
+    }
+
+    #[test]
+    fn the_page_tone_is_glyphs_bg_base_not_the_void() {
+        // `--bg-base` #10131a, reached through the role rather than the hex.
+        // The splash overlay and the `/` route both mount this one function,
+        // so this pins the tone on *both* sides of the handoff at once.
+        let view = page_backdrop::<()>();
+        assert_eq!(view.color, Color::from_rgb8(0x10, 0x13, 0x1a));
+        assert_ne!(
+            view.color,
+            Theme::glyph_baseline().scheme().surface_container_lowest,
+            "the page tone is `--bg-base`, not the darker `--bg-void`"
+        );
     }
 
     #[test]
