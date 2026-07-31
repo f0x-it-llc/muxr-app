@@ -29,7 +29,9 @@ scheme = "muxr"
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
 # Without key.properties, release builds fall back to debug signing (a loud
-# Gradle warning is logged per release variant, see android/app/build.gradle.kts).
+# Gradle warning is logged for every release-artifact task Gradle exposes for
+# the variant — assemble/bundle/package<Flavor>Release, see
+# android/app/build.gradle.kts).
 # CLI-gate caveat: `frust build --release` instead gates on `android/key.properties`
 # (a different path this Gradle rig never reads) — do NOT create it to appease
 # the CLI; Gradle ignores it and ships a silently debug-signed release (see

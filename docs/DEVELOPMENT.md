@@ -79,9 +79,12 @@ Release signing reads `android/app/keystores/key.properties` (gitignored; see
 `develop.*`/`prod.*` keys (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`), or the
 equivalent `DEVELOP_*`/plain `*_KEYSTORE_*` env vars for CI. With neither present, both flavors'
 release builds fall back to debug signing so a keystore-less dev machine still builds — Gradle
-logs a loud per-variant warning (`[muxr] release variant <variantName> is DEBUG-SIGNED: ...`)
-whenever this fallback fires for a `Release` build type, so the fallback is never silent. Real
-keystores are generated once and stored externally — never committed.
+logs a loud warning (`[muxr] release variant <variantName> is DEBUG-SIGNED: ...`) whenever this
+fallback fires, covering every release-artifact entry point Gradle's own task-naming convention
+exposes for the variant: `assemble<Flavor>Release` (APK), `bundle<Flavor>Release` (the AAB —
+the Play-listing artifact; the `frust` CLI's own `appbundle` artifact maps to this task), and any
+`package<Flavor>Release*` task (the direct packaging tasks `assemble`/`bundle` build on top of).
+Real keystores are generated once and stored externally — never committed.
 
 **Signing-path conflict with the `frust` CLI:** the CLI's own release gate
 (`frust-drive`'s `android_build::signing`) checks for `android/key.properties` — a different

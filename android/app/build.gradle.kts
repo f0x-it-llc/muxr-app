@@ -272,19 +272,41 @@ androidComponents {
         // was requested, so `logger.warn` called directly in this block would
         // fire for e.g. `productionRelease` even when only
         // `assembleDevelopDebug` was requested. Instead this hooks `doFirst`
-        // onto the variant's own `assemble<Variant>` task (the stable,
-        // documented AGP task-naming convention), so the warning only prints
-        // when that variant is actually assembled — directly, via the bare
-        // `assemble`/`build` aggregate, or from an IDE run configuration.
+        // onto every release-artifact entry point for the variant: the
+        // stable, documented AGP task-naming convention gives us
+        // `assemble<Variant>` (APK), `bundle<Variant>` (the AAB — the Play
+        // artifact; the Frust CLI's own `appbundle` artifact maps to
+        // `bundle<Flavor><Mode>`), and `package<Variant>*` (the packaging
+        // tasks, including `package<Variant>Bundle` which backs the AAB).
+        // `bundle`/`package` do NOT depend on `assemble`, so a bare
+        // `./gradlew :app:bundleProductionRelease` would otherwise silently
+        // ship a debug-signed AAB — hooking all three covers every direct
+        // invocation, the bare `assemble`/`bundle`/`build` aggregates, and an
+        // IDE run configuration. If more than one of these tasks runs in the
+        // same invocation (e.g. `bundle` also triggers its `package*Bundle`
+        // task), the warning prints once per task that actually runs — a
+        // couple of repeated lines in that case, which reads as emphasis
+        // rather than spam.
         if (variant.buildType == "release") {
+            // Unknown flavor name (a future flavor not yet wired into the
+            // `when` above) defaults to `true` — fail loud rather than
+            // silently skip the tripwire until that flavor's signing is
+            // wired up here.
             val isDebugFallback = when (variant.flavorName) {
                 "develop" -> developSigningIsDebugFallback
                 "production" -> productionSigningIsDebugFallback
-                else -> false
+                else -> true
             }
             if (isDebugFallback) {
-                val assembleTaskName = "assemble" + variant.name.replaceFirstChar { it.uppercase() }
-                tasks.matching { it.name == assembleTaskName }.configureEach {
+                val variantNameCapitalized = variant.name.replaceFirstChar { it.uppercase() }
+                val assembleTaskName = "assemble$variantNameCapitalized"
+                val bundleTaskName = "bundle$variantNameCapitalized"
+                val packageTaskPrefix = "package$variantNameCapitalized"
+                tasks.matching {
+                    it.name == assembleTaskName ||
+                        it.name == bundleTaskName ||
+                        it.name.startsWith(packageTaskPrefix)
+                }.configureEach {
                     doFirst {
                         logger.warn(
                             "[muxr] release variant ${variant.name} is DEBUG-SIGNED: no " +
