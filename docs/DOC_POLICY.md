@@ -17,9 +17,10 @@ single-crate app, not a workspace, and the reading path stays short deliberately
 
 `docs/ARCHITECTURE.md`'s target was raised from 110 to 135 on 2026-07-31: its "Building a Screen
 (canonical pattern)" section is permanent, load-bearing content (the app-structure charter every
-Phase-2+ screen and, post-open-sourcing, every frust app author is meant to copy), not transient
-bloat to compact away. The cold-start splash section was compacted in the same pass to make room;
-the cap is unchanged (140/150 lines currently — still headroom, no override needed).
+screen and, post-open-sourcing, every frust app author is meant to copy), not transient bloat to
+compact away. A 2026-07-31 docs-close pass folded in the session guard/`Nav` seam, the `connection`
+module, three new `ui/` modules, and two new charter bullets — real content, not bloat — compacting
+Shell/Tests/Design References to absorb it; landed at 148/150, still no override needed.
 
 ## Doc Units
 
