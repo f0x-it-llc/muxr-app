@@ -317,6 +317,20 @@ pub fn node_centers_by_label<S: 'static, V: View<S>>(
         .collect()
 }
 
+/// Every semantics **role** the current tree carries, in pass order.
+///
+/// [`node_labels`]/[`node_values`]' third sibling, for chrome whose presence is
+/// the assertion and whose text is not: a shell bar that is *hidden* on one
+/// route contributes no `Role::TitleBar` node at all, which is the cheapest
+/// honest read on "there is no bar here".
+pub fn node_roles<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<Role> {
+    root.semantics()
+        .nodes
+        .iter()
+        .map(|(_, node)| node.role())
+        .collect()
+}
+
 /// The center of the first semantics node with `role` — for a node that has no
 /// label of its own (a `TextInput` exposes only its value).
 pub fn node_center_by_role<S: 'static, V: View<S>>(

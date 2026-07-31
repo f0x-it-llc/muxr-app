@@ -7,6 +7,11 @@
 //! placeholder; the last section proves the same guard applies to the handle
 //! screens actually push through (`muxr::routes::app_nav`), and that the handle
 //! drives the app's own navigator rather than a copy of it.
+//!
+//! The shell's persistent top bar is deliberately **not** exercised here: these
+//! tests navigate with a bare `Router::go`, which is the one navigation entry
+//! point that never records the bar's route-meta mirror (only
+//! `muxr::routes::Nav` does). `tests/navigation_motion.rs` owns the bar.
 
 use frust::{AnyView, Component, Resolution};
 use frust_core::RenderRoot;
@@ -58,7 +63,8 @@ fn terminal_route_renders_its_placeholder() {
     let scene = render_route("/terminal");
     assert!(
         scene.glyph_runs > 0,
-        "the Terminal placeholder (app bar title + centered page text) renders text"
+        "the Terminal placeholder (centered page text — its bar is the shell's \
+         now, and a bare `Router::go` never records the bar mirror) renders text"
     );
 }
 
@@ -67,7 +73,8 @@ fn settings_route_renders_its_placeholder() {
     let scene = render_route("/settings");
     assert!(
         scene.glyph_runs > 0,
-        "the Settings placeholder (app bar title + centered page text) renders text"
+        "the Settings placeholder (centered page text — its bar is the shell's \
+         now, and a bare `Router::go` never records the bar mirror) renders text"
     );
 }
 
