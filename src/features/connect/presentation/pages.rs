@@ -13,9 +13,10 @@
 //! [`super::pieces`]); the layout itself is pure arrangement and never builds
 //! one, which is what keeps the two trees honest.
 //!
-//! Transcribed from `docs/splash.html`'s `.ui-layer` rule: a top-anchored
-//! column, `padding:30px 22px`, `gap:20px`, children stretched to the layer
-//! width. The page paints its own `--bg-void` background — the shell clears
+//! Transcribed from `docs/redesign.html`'s `.connect` rule (and
+//! `docs/splash.html`'s `.ui-layer`, which is the same box): a top-anchored
+//! column, `padding:30px 22px`, `gap:22px`, children stretched to the layer
+//! width. The page paints its own `--bg-base` background — the shell clears
 //! to `ColorScheme::surface` (Glyph's card tone), not the page tone.
 //!
 //! # The screen's three layers
@@ -72,12 +73,19 @@ use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::sheet::show_sheet;
 
-/// `.ui-layer{padding:30px 22px}` — horizontal.
+/// `.connect{padding:30px 22px}` (`.ui-layer`'s too) — horizontal.
 const LAYER_PAD_X: f64 = 22.0;
-/// `.ui-layer{padding:30px 22px}` — vertical.
+/// `.connect{padding:30px 22px}` (`.ui-layer`'s too) — vertical.
 const LAYER_PAD_Y: f64 = 30.0;
-/// `.ui-layer{gap:20px}` — between consecutive pieces.
-const LAYER_GAP: f64 = 20.0;
+/// `.connect{gap:22px}` — between consecutive pieces.
+///
+/// The one number the two mocks disagree on: `docs/splash.html`'s older
+/// `.ui-layer` says `gap:20px`, `docs/redesign.html`'s `.connect` says 22.
+/// The redesign is the screen's visual ground truth, and this constant is the
+/// *shared* seam — the splash lays its staggering copies out through this very
+/// function — so both renderings move together and the handoff stays a single
+/// picture. Forking them is the one thing this seam exists to prevent.
+const LAYER_GAP: f64 = 22.0;
 /// `.fab{right:20px;bottom:20px}` — the QR affordance's inset from the screen's
 /// safe area.
 const FAB_MARGIN: f64 = 20.0;

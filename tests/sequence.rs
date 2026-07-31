@@ -65,6 +65,16 @@ const FRAME_NS_120: u64 = 8_333_333;
 const REDUCED_HOLD_MS: f64 = 200.0;
 /// The heading piece's stagger (`spec::PIECE_DELAYS_MS[2]`, likewise).
 const HEADING_DELAY_MS: f64 = 260.0;
+/// How many blurred halos a **settled** Connect screen paints, land flashes
+/// excluded: one, the saved-server row's `.dot-ok`
+/// (`box-shadow:0 0 5px var(--success)`).
+///
+/// The splash's copy of piece 7 renders the mock's single stand-in row
+/// (`pieces::splash_placeholder_row`), so this is one dot and not the live
+/// repository's three. Asserting the exact residue rather than zero keeps the
+/// original claim — that every *land flash* has faded — intact: a flash left
+/// running would push this above one.
+const RESTING_SHADOWS: usize = 1;
 
 /// A recording paint target: the flattened glyph-id stream (for text
 /// assertions), plus a count of every other draw kind the splash emits.
@@ -319,7 +329,10 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
         "the finished overlay is the Connect screen"
     );
     assert_eq!(last.images, 0, "the icon is long gone");
-    assert_eq!(last.shadows, 0, "every land flash has faded");
+    assert_eq!(
+        last.shadows, RESTING_SHADOWS,
+        "every land flash has faded, leaving only the saved row's own dot glow"
+    );
     assert!(
         !needs_frame,
         "a finished sequence stops requesting frames — nothing left to animate"
@@ -448,7 +461,11 @@ fn reduced_motion_collapses_the_sequence_on_its_first_frame() {
     assert!(done.get(), "the cue fires immediately under reduced motion");
     for (index, (scene, needs_frame)) in frames.iter().enumerate() {
         assert_eq!(scene.images, 0, "no icon animation");
-        assert_eq!(scene.shadows, 0, "no land flashes");
+        assert_eq!(
+            scene.shadows, RESTING_SHADOWS,
+            "no land flashes — only the resting dot glow, which is chrome \
+             rather than motion and so survives reduced motion"
+        );
         // The firing frame asks for the one frame that acts on its write; from
         // the next one on there is nothing left to animate.
         assert!(

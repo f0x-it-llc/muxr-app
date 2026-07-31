@@ -65,12 +65,20 @@
 //! `Theme::glyph_baseline()`'s tokens are canonical where they and the
 //! source's CSS disagree (radii, type sizes, ink). Two of the source's colors
 //! have no `ColorScheme` role and are derived from one that does, by alpha,
-//! with the derivation noted at the constant.
+//! with the derivation noted at the constant. Where the two *mocks* disagree
+//! (`docs/splash.html` is older than `docs/redesign.html`), the redesign wins
+//! — see [`Palette::page`] and `super::pages`' `LAYER_GAP`.
+//!
+//! Two type sizes are deliberately the Glyph role rather than the mock's
+//! number: `.field input{font-size:12px}` and `.connect .sub{11.5px}` become
+//! `body_medium` (13) and `body_small` (11), because the Glyph scale's
+//! mobile-legibility floor is a framework policy this app does not relitigate
+//! per screen.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::authoring::text::TextStyle;
+use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::authoring::{Color, Size};
 use frust::glyph::{BadgeVariant, badge};
 use frust::motion::AnimatedOpacity;
@@ -168,6 +176,15 @@ const RADIO_PAD_Y: f64 = 9.0;
 /// switch announces the thing the row is about rather than "switch".
 const REMEMBER_LABEL: &str = "Remember for 4 weeks";
 
+/// `.field input[placeholder]` — the server-URL field's ghost text. `pub`
+/// because it is the exact string `tests/connect.rs`'s shaping suite measures
+/// (see [`field_font_family`]); a copy there could drift.
+pub const SERVER_URL_PLACEHOLDER: &str = "zelli.example.com:50051";
+/// `.field input[placeholder]` — the token field's. See
+/// [`SERVER_URL_PLACEHOLDER`]; this one is the all-letter control the device
+/// rendered correctly.
+pub const TOKEN_PLACEHOLDER: &str = "paste or scan a token";
+
 // ---------------------------------------------------------------------------
 // Token derivations
 // ---------------------------------------------------------------------------
@@ -192,9 +209,17 @@ const FG_DIM_ALPHA: f32 = 0.62;
 /// active theme (see [`palette`]).
 #[derive(Clone, Copy)]
 struct Palette {
-    /// `--bg-void`: the page tone, backing each piece so the splash's rain
+    /// `--bg-base`: the page tone, backing each piece so the splash's rain
     /// can't bleed through its text mid-assembly.
-    void: Color,
+    ///
+    /// The *same* role [`crate::ui::backdrop::page_backdrop`] paints, on
+    /// purpose: over the route's own backdrop these backings are invisible
+    /// (`docs/redesign.html` gives `.connect` no background of its own —
+    /// `.screen{background:var(--bg-base)}` is the whole page), while the
+    /// splash still gets something opaque between its rain and the assembling
+    /// text. `docs/splash.html`'s older `--bg-void` for both is superseded —
+    /// see that backdrop's module docs.
+    page: Color,
     /// `--border-bright`: every hairline border in the mock.
     outline: Color,
     /// `--border`: the fainter rule under the "saved servers" header
@@ -226,7 +251,7 @@ struct Palette {
 fn palette(theme: &Theme) -> Palette {
     let scheme = theme.scheme();
     Palette {
-        void: scheme.surface_container_lowest,
+        page: scheme.surface_container_low,
         outline: scheme.outline,
         rule: scheme.outline_variant,
         overlay: scheme.surface_container_highest,
@@ -303,10 +328,11 @@ fn row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-/// A full-width piece backing: the `background:var(--bg-void)` every
-/// text-bearing `.piece` carries, square-cornered like the source's.
+/// A full-width piece backing in the page tone, square-cornered like the
+/// source's. See [`Palette::page`] for why this is the page's own colour
+/// rather than a second one.
 fn backed<S: 'static>(child: impl frust::View<S>, colors: &Palette) -> AnyView<S> {
-    any(panel(child, colors.void, 0.0))
+    any(panel(child, colors.page, 0.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +365,7 @@ pub fn connect_mark<S: 'static>(theme: &Theme) -> AnyView<S> {
     ]);
     let tile = panel(
         Padding(EdgeInsets::all(MARK_PAD), grid),
-        colors.void,
+        colors.page,
         theme.shape.medium,
     )
     .border(colors.outline);
@@ -359,7 +385,7 @@ pub fn server_badge<S: 'static>(theme: &Theme) -> AnyView<S> {
     ]);
     let box_ = panel(
         Padding(EdgeInsets::symmetric(BADGE_PAD_X, BADGE_PAD_Y), lines),
-        colors.void,
+        colors.page,
         theme.shape.small,
     )
     .border(colors.outline);
@@ -402,7 +428,7 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
     field(
         theme,
         "SERVER URL",
-        "zelli.example.com:50051",
+        SERVER_URL_PLACEHOLDER,
         invalid,
         value,
         move |next| {
@@ -419,6 +445,11 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
 /// The source marks this input `type="password"`; `frust`'s `TextInput` has no
 /// obscured mode (FINDINGS #20), so the token renders in the clear — a known,
 /// filed gap rather than a decision.
+///
+// TODO(#20 adoption): swap the plain input for the obscured mode the moment
+// this machine's `frust` dev carries it. Deliberately *not* faked here — a
+// hand-masked value would have to shadow the controller's real one and would
+// still leak through the IME surface `TextInputWidget` publishes.
 pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let value = live
         .map(|live| live.controller.token.get())
@@ -427,7 +458,7 @@ pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S>
     field(
         theme,
         "LOGIN TOKEN",
-        "paste or scan a token",
+        TOKEN_PLACEHOLDER,
         false,
         value,
         move |next| {
@@ -446,6 +477,19 @@ pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S>
 /// `on_change` is invoked with the requested text; a splash-composed field
 /// passes one that drops it, so the field always re-renders its placeholder
 /// (`readonly` in the source).
+///
+/// # Chrome the app cannot reach (FINDINGS #16 family)
+///
+/// `.field input` asks for `padding:11px 12px`, a 1px `border-bright` hairline
+/// and, on focus, `border-color:var(--amber-border)` plus a
+/// `box-shadow:0 0 0 3px var(--amber-faint)` halo. `TextInputWidget` bakes its
+/// own `PAD_X`/`PAD_Y` (8/6), `BORDER_W` (1.5) and focus treatment (an accent
+/// border, no halo) into private constants, and exposes only
+/// [`text_input`]'s `text_style`. What *does* land: the radius is already
+/// `--radius-sm` (6px), the fill is themed from `surface` (`--bg-surface`) and
+/// the idle border from `outline` (`--border-bright`) — so the colours are
+/// right and only the metrics are off. Nothing here can close the rest
+/// app-side; it is a framework gap, not a decision.
 fn field<S: 'static>(
     theme: &Theme,
     label: &str,
@@ -463,11 +507,74 @@ fn field<S: 'static>(
             any(
                 text_input::<S, _>(value, move |_state: &mut S, next: String| on_change(next))
                     .placeholder(placeholder)
-                    .text_style(inked(&theme.type_scale.body_medium, colors.fg)),
+                    .text_style(field_text_style(theme, colors.fg)),
             ),
         ]),
         &colors,
     )
+}
+
+/// The body style both fields shape their content **and** their placeholder
+/// with — `body_medium` re-inked, with one deliberate change to its family.
+/// See [`field_font_family`].
+///
+/// `pub` so `tests/connect.rs`'s placeholder-shaping suite can shape the real
+/// strings with the real style, rather than a copy that could drift out from
+/// under the very defect it guards.
+pub fn field_text_style(theme: &Theme, ink: Color) -> TextStyle {
+    let mut style = inked(&theme.type_scale.body_medium, ink);
+    style.family = field_font_family(&style.family);
+    style
+}
+
+/// `family` with a **resolvable terminal fallback** appended
+/// ([`GenericSlot::SansSerif`]) — the app-side half of the "the placeholder's
+/// digits are individually wide-spaced" defect.
+///
+/// # The defect, and its two causes
+///
+/// On device the server-URL placeholder rendered `zelli.example.com: 5 0 0 5 1`
+/// while the token field's all-letter placeholder was fine. Two framework facts
+/// compose into it:
+///
+/// 1. **`TextInputWidget` owns a private `TextContext::new()`** (its module docs
+///    explain why: edits must apply during the clockless event pass, where no
+///    shared context is threaded). `frust::register_app_fonts` — which
+///    `glyph_theme::install()` uses to publish the bundled IBM Plex Mono /
+///    Space Mono faces — is drained only into the *shell's* shared context. So
+///    the Glyph faces never reach any text field: every `text` run on this
+///    screen shapes as IBM Plex Mono, and the two fields alone do not.
+/// 2. **fontique 0.11 leaves `GenericFamily::Monospace` empty on Android**: its
+///    `DEFAULT_GENERIC_FAMILIES` maps the slot to the literal family name
+///    `"monospace"`, which the `/system/fonts` scan never produces, and the
+///    `fonts.xml` alias pass that could supply it runs *after* the generic map
+///    is built.
+///
+/// Together, the Glyph type scale's `["IBM Plex Mono"] + monospace` stack
+/// resolves to **nothing** inside a field on Android. parley then falls back
+/// per cluster, splitting the string into two runs — the letters onto the Latin
+/// fallback, the digits onto one that advances them a full em. Measured
+/// headlessly at 13px (`tests/connect.rs`'s placeholder suite): letters
+/// ~2.9–10.8px, digits exactly **13.0** each.
+///
+/// Appending a generic that *does* resolve everywhere collapses it back to one
+/// run at the letters' own advances (measured: digits 7.23px, identical to the
+/// letters' proportional metrics). Mono is still preferred and still wins
+/// wherever it resolves — desktop and iOS reach a real monospace through the
+/// generic slot — so this costs the fields nothing where nothing was broken.
+///
+/// **Scoped to the fields on purpose**: every other run on this screen goes
+/// through `text`, which shapes against the shell's font-registered context and
+/// resolves IBM Plex Mono correctly. Widening this would swap a correct family
+/// for a fallback stack in the places that don't need it.
+fn field_font_family(family: &FontFamily) -> FontFamily {
+    let mut names: Vec<FamilyName> = match family {
+        FontFamily::SystemUi => vec![FamilyName::Generic(GenericSlot::SystemUi)],
+        FontFamily::Named(names) => names.iter().cloned().map(FamilyName::Named).collect(),
+        FontFamily::NamedWithGeneric(names) => names.clone(),
+    };
+    names.push(FamilyName::Generic(GenericSlot::SansSerif));
+    FontFamily::NamedWithGeneric(names)
 }
 
 /// Piece 5 — `.remember-row` plus the `.radio-opt` block under it: the
@@ -515,15 +622,26 @@ pub fn remember_row<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S
     )
 }
 
-/// The `.toggle` pill at `on`: a track that crossfades from `--bg-overlay` to
-/// the faint amber wash, and a knob that crossfades between its two parked
-/// positions.
+/// The `.toggle` pill at `on`: a 36×21 track that crossfades from
+/// `--bg-overlay` to the faint amber wash, and a 15px knob that crossfades
+/// between its two parked positions.
 ///
 /// Position is animated by **opacity**, not by offset: `frust::motion` ships
 /// `AnimatedOpacity`/`AnimatedScale` and no animated-offset wrapper, so two
 /// knobs are drawn (one per end) and faded against each other. Both timings
 /// default from `Theme.motion`, which is what makes the whole control collapse
 /// under `reduce_motion` for free (`docs/CODE_STANDARDS.md`'s transition rule).
+///
+/// # Both tracks fade; neither is a floor
+///
+/// `.toggle.on{background:var(--amber-faint)}` *replaces* the off track's
+/// `--bg-overlay`, and `--amber-faint` is `rgba(255,182,39,0.12)` — 12% alpha.
+/// Painting it over an opaque `--bg-overlay` composites 88% of the dark track
+/// straight back through, which is exactly the "on toggle with a dark track"
+/// the device showed; the same goes for the amber border over the neutral
+/// `outline` one. So the **off** track is faded out by its own
+/// `AnimatedOpacity` rather than left underneath as an opaque base, and at rest
+/// the on state is the amber wash over the page tone, as authored.
 fn toggle_art<S: 'static>(colors: &Palette, on: bool) -> AnyView<S> {
     // `border-radius:999px` — a pill. The Glyph shape scale spells `full` as
     // `f64::INFINITY`, so the drawable radius is half the track.
@@ -544,7 +662,7 @@ fn toggle_art<S: 'static>(colors: &Palette, on: bool) -> AnyView<S> {
     };
     let (on_opacity, off_opacity) = if on { (1.0, 0.0) } else { (0.0, 1.0) };
     any(frust::Stack(vec![
-        any(off_track),
+        any(AnimatedOpacity::<S, _>(off_opacity, off_track)),
         any(AnimatedOpacity::<S, _>(on_opacity, on_track)),
         any(AnimatedOpacity::<S, _>(
             off_opacity,
@@ -620,6 +738,17 @@ fn trust_row<S: 'static>(mode: TrustMode, selected: bool, live: Option<&Live>) -
     let mut items = vec![flexible(1, any(option))];
     // `.radio-opt .warn-chip` — only on the posture that actually skips
     // certificate validation.
+    //
+    // The chip is `glyph::badge`, not a hand-rolled pill, and it is knowingly
+    // a shade larger than the mock's one-off `.warn-chip` (10.5px/9×4 medium
+    // against 9px/6×2): those are the Glyph catalog's *own* authored `.badge`
+    // metrics, and this module's Tokens rule makes the design system canonical
+    // where it and a mock's ad-hoc rule disagree. It is also the identical
+    // chip the Sessions strip renders for the identical posture, so forking one
+    // of them to chase 1.5px would be the worse outcome. The one genuine gap:
+    // `BadgeVariant::Warning` paints no border, where `.warn-chip` asks for a
+    // 1px `--warning-border` — `resolve_badge_colors` returns `None` for every
+    // variant but `Neutral`, and the app cannot supply one.
     if mode == TrustMode::TrustOnFirstUse {
         items.push(inflexible(h_gap::<S>(SAVED_GAP)));
         items.push(inflexible(any(badge("insecure", BadgeVariant::Warning))));
@@ -640,6 +769,13 @@ fn trust_row<S: 'static>(mode: TrustMode, selected: bool, live: Option<&Live>) -
 /// block-level button: `ButtonWidget` pins its label at the leading padding
 /// (FINDINGS #15), so a stretched button would render a left-hugged label in a
 /// full-width bar.
+///
+// TODO(#15 adoption): the label-centering fix has landed frust-side but is not
+// in this machine's `frust` dev yet. When it is, drop the `Align` and let the
+// button stretch to the layer width (`.btn-primary` is block-level with
+// `text-align:center`). Deliberately *not* faked with a hand-painted
+// full-width bar in the meantime: that would throw away the press feedback,
+// the disabled/loading states and the `Role::Button` node.
 pub fn connect_button<S: 'static>(_theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
     any(Align(
@@ -718,7 +854,12 @@ fn saved_row<S: 'static>(
         server.port
     );
     let mut items = vec![
-        inflexible(any(swatch(Size::new(DOT, DOT), colors.success, DOT / 2.0))),
+        // `.dot-ok{box-shadow:0 0 5px var(--success)}` — the glow is part of
+        // the dot, not decoration: it is what reads as "live" at 7px. Same
+        // treatment, same constants, as the Sessions strip's own dot.
+        inflexible(any(
+            swatch(Size::new(DOT, DOT), colors.success, DOT / 2.0).glow(colors.success)
+        )),
         inflexible(h_gap::<S>(SAVED_GAP)),
         flexible(
             1,
@@ -824,12 +965,61 @@ mod tests {
     fn the_palette_resolves_glyphs_page_tone_and_status_hue() {
         let theme = Theme::glyph_baseline();
         let colors = palette(&theme);
-        // `--bg-void` #0a0c11 and `--success` #5fd88f, reached through roles
+        // `--bg-base` #10131a and `--success` #5fd88f, reached through roles
         // rather than hexes.
-        assert_eq!(colors.void, Color::from_rgb8(0x0a, 0x0c, 0x11));
+        assert_eq!(colors.page, Color::from_rgb8(0x10, 0x13, 0x1a));
         assert_eq!(colors.success, Color::from_rgb8(0x5f, 0xd8, 0x8f));
         assert_eq!(colors.amber, Color::from_rgb8(0xff, 0xb6, 0x27));
         assert!((colors.amber_faint.components[3] - AMBER_FAINT_ALPHA).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_pieces_back_themselves_in_the_very_tone_the_backdrop_paints() {
+        // The route mounts `ui::backdrop::page_backdrop` under these pieces;
+        // if the two tones ever diverge the screen bands into eight visible
+        // blocks, and the splash/route handoff steps colour mid-frame.
+        let theme = Theme::glyph_baseline();
+        assert_eq!(
+            palette(&theme).page,
+            theme.scheme().surface_container_low,
+            "the piece backing and `page_backdrop` resolve the same role"
+        );
+    }
+
+    #[test]
+    fn a_fields_font_stack_always_ends_in_a_resolvable_generic() {
+        // The whole of `field_font_family`'s defect: a stack that resolves to
+        // nothing sends parley per-cluster, and the digits come back a full em
+        // wide. A generic that resolves on every target platform is the floor
+        // that cannot happen under.
+        let theme = Theme::glyph_baseline();
+        let style = field_text_style(&theme, Color::WHITE);
+        let FontFamily::NamedWithGeneric(names) = &style.family else {
+            panic!("a field's family must be a stack ending in a generic slot");
+        };
+        assert_eq!(
+            names.last(),
+            Some(&FamilyName::Generic(GenericSlot::SansSerif)),
+            "got {names:?}"
+        );
+        // …without giving up the mono the Glyph body role asks for first.
+        assert!(
+            names.contains(&FamilyName::Named("IBM Plex Mono".to_string())),
+            "the bundled Glyph face is still preferred: {names:?}"
+        );
+        assert!(
+            names.contains(&FamilyName::Generic(GenericSlot::Monospace)),
+            "…and so is a platform monospace, before the rescue: {names:?}"
+        );
+    }
+
+    #[test]
+    fn the_toggle_track_is_the_sources_own_pill() {
+        // `.toggle{width:36px;height:21px}` with a 15px knob — the numbers the
+        // device gate reads as "visibly larger" if one of them drifts.
+        const { assert!(TOGGLE_W == 36.0) };
+        const { assert!(TOGGLE_H == 21.0) };
+        const { assert!(KNOB == 15.0) };
     }
 
     #[test]

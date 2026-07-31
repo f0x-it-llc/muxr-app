@@ -46,7 +46,21 @@
 //! Sessions page rather than the error page) is `tests/routes.rs`'s job — it
 //! can assert `Router::resolve` directly. Here a push is observed as a depth
 //! change plus the connection facts that came with it.
+//!
+//! # The placeholder-shaping suite
+//!
+//! The last section drives no widgets at all: it shapes the two fields' real
+//! placeholder strings with the fields' real [`TextStyle`] through a bare
+//! [`TextContext`], and reads the per-glyph advances back off the resulting
+//! glyph runs. That is the deliberate reproduction of a device defect
+//! (`zelli.example.com: 5 0 0 5 1`) whose cause is a font stack resolving to
+//! nothing — see `pieces::field_font_family` for the full mechanism.
+//!
+//! A bare `TextContext` is exactly what a `TextInputWidget` owns, so this is
+//! the field's own shaping environment and not an approximation of it.
 
+use frust::Theme;
+use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
     Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, SizedBox, Stack, any,
     navigator,
@@ -55,9 +69,13 @@ use frust_core::accesskit::{Node, Role, Toggled};
 use frust_core::{NamedKey, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
+use peniko::Color;
 
 use muxr::connection::expect_connection_controller;
 use muxr::features::connect::presentation::pages::connect_page;
+use muxr::features::connect::presentation::pieces::{
+    SERVER_URL_PLACEHOLDER, TOKEN_PLACEHOLDER, field_text_style,
+};
 use muxr::routes::install_app_router;
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
@@ -75,7 +93,7 @@ const SURFACE: Size = Size::new(800.0, 1200.0);
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 
 /// The URL the happy path types — the mock's own placeholder.
-const VALID_URL: &str = "zelli.example.com:50051";
+const VALID_URL: &str = SERVER_URL_PLACEHOLDER;
 /// …and one that cannot be a dial target (no `:port`).
 const INVALID_URL: &str = "not-an-endpoint";
 
@@ -508,4 +526,144 @@ fn the_qr_sheet_also_dismisses_on_escape() {
     harness.settle();
 
     assert_eq!(harness.nav.depth(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder shaping — the digit-spacing defect
+// ---------------------------------------------------------------------------
+
+/// How far apart two advances may be and still count as "the same width", in
+/// logical px. Generous: this is separating ~7px letters from a ~13px full-em
+/// digit, not measuring hinting.
+const ADVANCE_EPSILON: f64 = 0.75;
+
+/// Every consecutive glyph advance in `text` shaped at `style`, flattened
+/// across runs, in visual order.
+///
+/// The last entry is the final glyph's own advance, taken from the laid-out
+/// width — a run-splitting fallback would otherwise hide inside the last
+/// glyph, which has no successor to be measured against.
+fn advances(text: &str, style: &TextStyle) -> Vec<f64> {
+    // A bare context is precisely what `TextInputWidget` builds for itself
+    // (`TextInputView::build` → `TextContext::new()`), and nothing ever
+    // registers the app's fonts into it — see the module docs.
+    let mut cx = TextContext::new();
+    let layout = cx.layout(text, style, None);
+    let mut xs: Vec<f64> = layout
+        .to_scene_runs(Point::ZERO)
+        .iter()
+        .flat_map(|run| run.glyphs.iter().map(|glyph| f64::from(glyph.x)))
+        .collect();
+    xs.push(layout.size().width);
+    xs.windows(2).map(|pair| pair[1] - pair[0]).collect()
+}
+
+/// The advances of just the characters of `text` that satisfy `pick`.
+fn advances_where(text: &str, style: &TextStyle, pick: impl Fn(char) -> bool) -> Vec<f64> {
+    text.chars()
+        .zip(advances(text, style))
+        .filter(|(c, _)| pick(*c))
+        .map(|(_, advance)| advance)
+        .collect()
+}
+
+/// The style both fields actually shape with.
+fn field_style() -> TextStyle {
+    field_text_style(&Theme::glyph_baseline(), Color::WHITE)
+}
+
+#[test]
+fn the_server_url_placeholder_never_advances_its_digits_a_full_em() {
+    // The device defect, stated as an inequality: the digits of
+    // `zelli.example.com:50051` rendered one full em apart (13.0px at the
+    // 13px body role) while the letters around them stayed ~7px, which reads
+    // as `zelli.example.com: 5 0 0 5 1`. A digit advancing its own font size
+    // is the signature of the string having been split across a fallback font
+    // that the primary stack failed to cover.
+    let style = field_style();
+    let em = f64::from(style.size);
+    let digits = advances_where(SERVER_URL_PLACEHOLDER, &style, |c| c.is_ascii_digit());
+
+    assert_eq!(digits.len(), 5, "50051 is five digits");
+    for advance in &digits {
+        assert!(
+            *advance < em - ADVANCE_EPSILON,
+            "a digit advanced {advance:.3}px at a {em}px font size — the \
+             placeholder's font stack resolved to nothing and parley fell \
+             back per cluster (see pieces::field_font_family)"
+        );
+    }
+}
+
+#[test]
+fn the_server_url_placeholder_shapes_as_one_run_with_its_letters() {
+    // The positive half: digits and letters come from the *same* font, so
+    // their advances are drawn from one set of metrics. This is what makes
+    // the run a single legible string rather than two interleaved ones.
+    let style = field_style();
+    let digits = advances_where(SERVER_URL_PLACEHOLDER, &style, |c| c.is_ascii_digit());
+    let widest_letter = advances_where(SERVER_URL_PLACEHOLDER, &style, |c| c.is_ascii_alphabetic())
+        .into_iter()
+        .fold(0.0_f64, f64::max);
+
+    for advance in digits {
+        assert!(
+            advance <= widest_letter + ADVANCE_EPSILON,
+            "a digit advanced {advance:.3}px against a widest letter of \
+             {widest_letter:.3}px — the digits are on a different font"
+        );
+    }
+}
+
+#[test]
+fn the_token_placeholder_stays_the_control_it_was_on_device() {
+    // The all-letter placeholder rendered correctly on the device that showed
+    // the defect. Keeping it asserted means a regression that broke *both*
+    // fields could not be mistaken for the digit-only one.
+    let style = field_style();
+    let widths = advances(TOKEN_PLACEHOLDER, &style);
+    let em = f64::from(style.size);
+    assert_eq!(widths.len(), TOKEN_PLACEHOLDER.chars().count());
+    for advance in widths {
+        assert!(advance < em, "{advance:.3}px at a {em}px font size");
+    }
+}
+
+#[test]
+fn a_stack_that_resolves_to_nothing_is_what_blows_the_digits_up() {
+    // The counter-example that gives the three tests above their teeth: the
+    // *same* string, shaped with a stack that cannot resolve, splits into more
+    // than one run and advances its digits a full em. Without this, the
+    // assertions above would pass on any machine whose generic `monospace`
+    // happens to resolve — which is every machine except the one that showed
+    // the bug.
+    let broken = TextStyle {
+        family: FontFamily::Named(vec!["No Such Family 1234".to_string()]),
+        ..field_style()
+    };
+    let em = f64::from(broken.size);
+    let digits = advances_where(SERVER_URL_PLACEHOLDER, &broken, |c| c.is_ascii_digit());
+    assert!(
+        digits
+            .iter()
+            .all(|advance| *advance >= em - ADVANCE_EPSILON),
+        "expected the unresolvable stack to advance digits a full {em}px em, \
+         got {digits:?} — if this stops holding, parley's per-cluster fallback \
+         changed and `field_font_family`'s workaround should be re-measured"
+    );
+
+    // …and the fix is one appended, resolvable generic, nothing more.
+    let rescued = TextStyle {
+        family: FontFamily::NamedWithGeneric(vec![
+            FamilyName::Named("No Such Family 1234".to_string()),
+            FamilyName::Generic(GenericSlot::SansSerif),
+        ]),
+        ..field_style()
+    };
+    let digits = advances_where(SERVER_URL_PLACEHOLDER, &rescued, |c| c.is_ascii_digit());
+    assert!(
+        digits.iter().all(|advance| *advance < em - ADVANCE_EPSILON),
+        "a resolvable terminal generic must collapse the fallback split, got \
+         {digits:?}"
+    );
 }
