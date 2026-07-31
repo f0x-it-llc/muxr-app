@@ -19,18 +19,25 @@
 //! [`frame_at`] paints at an explicit time and [`settle`] drives a pushed
 //! overlay past its transition so a test can then tap it.
 //!
+//! Each of those three lays out at the default [`surface`] (800×600); the
+//! `*_sized` variants take the surface explicitly, for a suite whose screen is
+//! taller than 600px and would otherwise lay its last row out below the fold,
+//! untappable.
+//!
 //! Locating what to tap has two routes, and which one works depends on where
 //! the target sits:
 //!
-//! - **Semantics** ([`node_labels`]/[`node_center_by_label`]/
-//!   [`node_center_by_role`]) — reads labels and bounds straight off the
-//!   accessibility tree, and is the only way to assert *what a toast said*
-//!   (a recording `PaintScene` sees glyph runs, not strings). It does **not**
-//!   see anything inside a `Navigator`: `NavigatorWidget` contributes no
-//!   `Widget::semantics` and forwards none of its pages' (a framework gap —
-//!   every pushed page is invisible to accessibility).
+//! - **Semantics** ([`node_labels`]/[`node_values`]/[`node_center_by_label`]/
+//!   [`node_centers_by_label`]/[`node_center_by_role`]) — reads labels, values
+//!   and bounds straight off the accessibility tree, and is the only way to
+//!   assert *what a toast said* (a recording `PaintScene` sees glyph runs, not
+//!   strings). It does **not** see anything inside a `Navigator`:
+//!   `NavigatorWidget` contributes no `Widget::semantics` and forwards none of
+//!   its pages' (a framework gap — every pushed page is invisible to
+//!   accessibility).
 //! - **Recorded geometry** ([`largest`]/[`smallest`]/[`by_width`] over
-//!   [`RecScene::rounded`]/[`RecScene::strokes`]) — what a test must use for a
+//!   [`RecScene::rounded`]/[`RecScene::strokes`], plus [`added`] to diff an
+//!   overlay's own chrome out of a busy frame) — what a test must use for a
 //!   pushed page (dialog/sheet) until that gap closes.
 //!
 //! Not every test uses every helper.
@@ -55,6 +62,16 @@ use reactive_graph::owner::Owner;
 
 pub const W: f64 = 800.0;
 pub const H: f64 = 600.0;
+
+/// Geometry comparison tolerance, in logical px — what "the same recorded
+/// rect" means to [`by_width`]/[`same`] and to any suite matching painted
+/// chrome by size.
+pub const EPSILON: f64 = 0.5;
+
+/// The default surface every un-sized frame helper lays out at ([`W`]×[`H`]).
+pub fn surface() -> Size {
+    Size::new(W, H)
+}
 
 /// A GPU-free paint target: counts glyph runs (one per painted `Text` — enough
 /// to observe whether a page's placeholder text painted) and records
@@ -107,34 +124,68 @@ pub fn smallest(rects: &[(Point, Size)]) -> Option<(Point, Size)> {
         .min_by(|a, b| area(a).total_cmp(&area(b)))
 }
 
-/// The first recorded rect whose width matches `width` (within half a pixel) —
+/// The first recorded rect whose width matches `width` (within [`EPSILON`]) —
 /// the deterministic way to pick a full-content-width child (a dialog's text
 /// field) out of a frame.
 pub fn by_width(rects: &[(Point, Size)], width: f64) -> Option<(Point, Size)> {
     rects
         .iter()
         .copied()
-        .find(|(_, size)| (size.width - width).abs() < 0.5)
+        .find(|(_, size)| (size.width - width).abs() < EPSILON)
+}
+
+/// The rects in `after` that weren't in `before` — an overlay's own chrome,
+/// isolated from whatever screen is painting underneath it. Matching is
+/// one-to-one (each `before` rect is consumed by at most one `after` rect), so
+/// a screen that paints five identical rows stays five rows.
+pub fn added(before: &[(Point, Size)], after: &[(Point, Size)]) -> Vec<(Point, Size)> {
+    let mut remaining: Vec<(Point, Size)> = before.to_vec();
+    let mut new = Vec::new();
+    for rect in after {
+        match remaining.iter().position(|candidate| same(candidate, rect)) {
+            Some(index) => {
+                remaining.swap_remove(index);
+            }
+            None => new.push(*rect),
+        }
+    }
+    new
+}
+
+/// Whether two recorded rects are the same one, within [`EPSILON`].
+pub fn same(a: &(Point, Size), b: &(Point, Size)) -> bool {
+    (a.0.x - b.0.x).abs() < EPSILON
+        && (a.0.y - b.0.y).abs() < EPSILON
+        && (a.1.width - b.1.width).abs() < EPSILON
+        && (a.1.height - b.1.height).abs() < EPSILON
 }
 
 fn area((_, size): &(Point, Size)) -> f64 {
     size.width * size.height
 }
 
-/// One frame: rebuild the tree from `state`, lay it out shaping real text, and
-/// record the paint output.
+/// One frame at the default [`surface`]: rebuild the tree from `state`, lay it
+/// out shaping real text, and record the paint output.
 pub fn frame<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
     state: &mut S,
     tcx: &mut TextContext,
 ) -> RecScene {
-    root.rebuild(logic, state);
-    let tcx_any: &mut dyn Any = tcx;
-    root.layout_with_text(Size::new(W, H), tcx_any);
-    let mut scene = RecScene::default();
-    root.paint(&mut scene, FrameTime::ZERO);
-    scene
+    frame_sized(root, logic, state, tcx, surface())
+}
+
+/// [`frame`] at an explicit surface `size` — for a screen taller than the
+/// default 600px, whose lower rows would otherwise lay out below the fold and
+/// be untappable.
+pub fn frame_sized<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    size: Size,
+) -> RecScene {
+    frame_at_sized(root, logic, state, tcx, size, FrameTime::ZERO)
 }
 
 /// One frame painted at an explicit `frame_time` — [`frame`]'s
@@ -150,9 +201,22 @@ pub fn frame_at<S: 'static, V: View<S>>(
     tcx: &mut TextContext,
     frame_time: FrameTime,
 ) -> RecScene {
+    frame_at_sized(root, logic, state, tcx, surface(), frame_time)
+}
+
+/// [`frame_at`] at an explicit surface `size` — the one function the whole
+/// frame family bottoms out in.
+pub fn frame_at_sized<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    size: Size,
+    frame_time: FrameTime,
+) -> RecScene {
     root.rebuild(logic, state);
     let tcx_any: &mut dyn Any = tcx;
-    root.layout_with_text(Size::new(W, H), tcx_any);
+    root.layout_with_text(size, tcx_any);
     let mut scene = RecScene::default();
     root.paint(&mut scene, frame_time);
     scene
@@ -179,9 +243,20 @@ pub fn settle<S: 'static, V: View<S>>(
     state: &mut S,
     tcx: &mut TextContext,
 ) -> RecScene {
-    frame_at(root, logic, state, tcx, FrameTime::ZERO);
-    frame_at(root, logic, state, tcx, ms(SETTLE_MS));
-    frame_at(root, logic, state, tcx, ms(SETTLE_MS))
+    settle_sized(root, logic, state, tcx, surface())
+}
+
+/// [`settle`] at an explicit surface `size` — see [`frame_sized`].
+pub fn settle_sized<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    size: Size,
+) -> RecScene {
+    frame_at_sized(root, logic, state, tcx, size, FrameTime::ZERO);
+    frame_at_sized(root, logic, state, tcx, size, ms(SETTLE_MS));
+    frame_at_sized(root, logic, state, tcx, size, ms(SETTLE_MS))
 }
 
 /// A [`FrameTime`] `ms` milliseconds after the epoch.
@@ -200,6 +275,19 @@ pub fn node_labels<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<Strin
         .collect()
 }
 
+/// Every semantics **value** the current tree carries, in pass order.
+/// [`node_labels`]'s other half: frust's `text` widget contributes a
+/// `Role::Label` node carrying its run in `value` (accesskit guidance), so
+/// "this name is on screen" is a value assertion, while a button/badge/alert
+/// title is a label one.
+pub fn node_values<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<String> {
+    root.semantics()
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.value().map(str::to_string))
+        .collect()
+}
+
 /// The center of the first semantics node labelled `label` — where a tap must
 /// land to hit that button/row. `None` when nothing carries the label.
 pub fn node_center_by_label<S: 'static, V: View<S>>(
@@ -207,6 +295,22 @@ pub fn node_center_by_label<S: 'static, V: View<S>>(
     label: &str,
 ) -> Option<Point> {
     node_center(root, |node| node.label() == Some(label))
+}
+
+/// The centers of **every** semantics node labelled `label`, in pass order —
+/// [`node_center_by_label`]'s all-matches sibling, for a screen that renders
+/// the same affordance once per row (an "Attach"/"Rename"/"Kill" per card).
+pub fn node_centers_by_label<S: 'static, V: View<S>>(
+    root: &RenderRoot<S, V>,
+    label: &str,
+) -> Vec<Point> {
+    root.semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.label() == Some(label))
+        .filter_map(|(_, node): &(_, Node)| node.bounds())
+        .map(|b| Point::new((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0))
+        .collect()
 }
 
 /// The center of the first semantics node with `role` — for a node that has no
