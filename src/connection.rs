@@ -55,7 +55,13 @@ const MOCK_SERVER_VERSION: &str = "muxrd/mock";
 pub struct ServerInfo {
     /// `host:port`, as dialed.
     pub endpoint: String,
-    /// A human label for [`ConnectTarget::trust_mode`] (e.g. "System trust").
+    /// The connection's TLS verification posture, carried through from
+    /// [`ConnectTarget::trust_mode`]. **This** is what a screen branches on
+    /// (a warning-hued badge for the posture that skips validation);
+    /// [`Self::tls_label`] is display text only — never match on it.
+    pub trust_mode: TrustMode,
+    /// A human label for [`Self::trust_mode`] (e.g. "System trust"), derived
+    /// once here so every screen prints the same words.
     pub tls_label: String,
     /// The mock `muxrd` version string.
     pub version: String,
@@ -131,6 +137,15 @@ impl ConnectionController {
         }
     }
 
+    /// A fresh, **unpublished** controller — `#[cfg(test)]`-only, so
+    /// [`provide_connection_controller`] stays the single production
+    /// construction site. `crate::routes`' guard test needs one it can hold
+    /// without any reactive owner or context in play.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self::new()
+    }
+
     /// Mock-connect to `target`. Never fails (see the module docs' Failure
     /// seam note): fills [`Self::server_info`] with mock data derived from
     /// `target`, flips [`Self::connected`], and — only when
@@ -141,6 +156,7 @@ impl ConnectionController {
         let endpoint = format!("{}:{}", target.host, target.port);
         self.server_info.set(Some(ServerInfo {
             endpoint,
+            trust_mode: target.trust_mode,
             tls_label,
             version: MOCK_SERVER_VERSION.to_string(),
             latency_ms: MOCK_LATENCY_MS,
@@ -177,11 +193,18 @@ impl AsRef<ControllerCore<AppFailure>> for ConnectionController {
     }
 }
 
-/// Construct the app's one [`ConnectionController`] and publish it under the
-/// root owner. Called exactly once, from `MuxrApp::init` — see the
-/// [module docs](self).
-pub fn provide_connection_controller() {
-    provide_controller(Arc::new(ConnectionController::new()));
+/// Construct the app's one [`ConnectionController`], publish it under the root
+/// owner, and hand it straight back. Called exactly once, from `MuxrApp::init`
+/// — see the [module docs](self).
+///
+/// The return value is not a convenience: `crate::routes`' session guard is
+/// closed over this `Arc` at construction rather than reading it from context
+/// at navigation time (see `routes::session_guard_with`), and the composition
+/// root is the one place that already holds it.
+pub fn provide_connection_controller() -> Arc<ConnectionController> {
+    let controller = Arc::new(ConnectionController::new());
+    provide_controller(Arc::clone(&controller));
+    controller
 }
 
 /// Recover the app-scoped [`ConnectionController`] [`provide_connection_controller`]
@@ -221,6 +244,11 @@ mod tests {
             .get_untracked()
             .expect("connect fills server_info");
         assert_eq!(info.endpoint, "mock.example:7777");
+        assert_eq!(
+            info.trust_mode,
+            TrustMode::TrustOnFirstUse,
+            "the target's posture rides through as a variant, not just a label"
+        );
         assert_eq!(info.tls_label, "Trust on first use");
         assert_eq!(info.latency_ms, MOCK_LATENCY_MS);
     }
