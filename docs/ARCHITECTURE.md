@@ -67,6 +67,40 @@ mountable pieces, arranged by `connect_layout`), no domain/data logic behind it 
 three features are placeholder pages (a Glyph `app_bar` over centered text). A controller (view
 model) joins a feature's presentation once its domain layer has real logic to drive.
 
+## Building a Screen (canonical pattern)
+
+Every screen from Phase 2 on is built this way — the shape every implementor (and, once this
+repo is a public example, every frust app author) should copy. This is normative, not aspirational;
+huddle (`examples/huddle`) is the framework's own reference implementation of the same shape.
+
+- **Per-screen stateful Component** (Flutter `StatefulWidget` parity). A route builder is a plain
+  `fn(...) -> AnyView<AppState>` returning `any(component(XScreen))`; `XScreen` is `impl Component`
+  with its own `type State`. `component()`'s `ComponentView<C>` implements `View<Outer>` for **any**
+  `Outer` state — `AnyView<AppState>` at the route seam is a boundary the adapter crosses, not a
+  constraint on what a screen may itself own.
+- **Lifecycle mapping.** `Component::init` + `clean_signals_frust::use_controller(factory)` gives
+  `initState`/`dispose` parity: `factory` runs once on route mount (inside `init`), and the
+  controller is auto-disposed via `on_cleanup` on unmount.
+- **State-split rule.** Non-reactive UI state (scroll position, an open sheet, a focused field)
+  lives in the Component's retained `State`; async/observed state (repository results, in-flight
+  requests) lives in the hosted controller's `RwSignal`s.
+- **DI: container-free composition root** (decided; `nject` evaluated and declined). App-scoped
+  singletons (repositories, the future connection controller) are constructed once in the root
+  `Component::init` and published via `provide_context`/`provide_controller`; a screen's own
+  controller comes from `use_controller` in its own `init`, resolving those app-scoped deps with
+  `use_context` inside the factory closure — huddle's exact shape, keeping construction single-site
+  even though every route/`nav.push` closure reaches it. Use cases take plain constructor injection
+  (`Arc<dyn Repo>`). Each feature exposes a small hand-written `di.rs` wiring function — greppable,
+  compile-time-checked, no container crate; none exist yet, Phase 2's later tasks add the first.
+- **Rebuild model** (framework facts). A signal write wakes one whole-app tracked rebuild, so
+  `build` must stay cheap; window size/rotation/insets/theme are layout/paint-time inputs and never
+  re-run `build`, and flexible layouts already adapt to them without one. A *structurally* adaptive
+  (phone-vs-tablet) tree needs frust's responsive primitive, still in progress frust-side — not
+  available to reach for yet.
+- **Cross-feature rule** (unchanged, restated here as part of the same discipline): a feature never
+  imports a sibling's `presentation`; genuinely app-scoped state lives in an app-level module beside
+  `failure.rs`, reached via context, not folded into one feature's own state.
+
 ## Shared UI — `src/ui/`
 
 - **`backdrop`** — the app's full-bleed page background (`page_backdrop`), shared by the Connect
@@ -76,18 +110,13 @@ model) joins a feature's presentation once its domain layer has real logic to dr
 
 ### Cold-Start Splash — `src/ui/splash/`
 
-A five-beat sequence, driven off one master clock: the real app icon springs in, holds, then
-dissolves into a glyph burst; amber matrix rain takes over and gradually thins; the Connect
-screen's eight pieces stagger in on a spring, each with a landing flash; the sequence ends once
-both the rain's tail and the assembly have finished, and the overlay unmounts onto a frame
-pixel-identical to the route it hands off to. Each beat (icon, burst, rain) is an independently
-mountable, independently testable widget; the orchestrator only sequences them.
-
-Gated to play **once per process launch**, only when the app cold-starts on `/` — a process-wide
-flag claims the decision exactly once, so a later warm navigation back to `/` never replays it.
-`Theme::motion.reduce_motion` collapses the whole sequence to a brief static-icon hold instead.
-Every timing/geometry constant is transcribed once, in `ui/splash/mod.rs::spec`, from
-`docs/splash.html` — the design reference — so no value is retyped at a use site.
+A five-beat sequence (icon spring-in → glyph burst → amber matrix rain → the Connect screen's
+eight pieces staggering in → handoff), driven off one master clock; each beat is an independently
+mountable, independently testable widget, sequenced by the orchestrator, and the overlay unmounts
+onto a frame pixel-identical to the route it hands off to. Plays once per process launch, gated by
+a process-wide flag so a later warm nav back to `/` never replays it; `Theme::motion.reduce_motion`
+collapses it to a brief static-icon hold. Every timing/geometry constant is transcribed once, in
+`ui/splash/mod.rs::spec`, from `docs/splash.html` — the design reference.
 
 ## Tests — `tests/`
 
