@@ -3,6 +3,11 @@
 //! No `frust::` reactive/widget types here — the data layer stays as
 //! framework-free as `domain` (see `crate::features::connect::domain`'s
 //! module doc), differing only in that it may depend on an external
-//! transport/storage crate. Empty until Phase 2 wires a real implementation.
+//! transport/storage crate.
+//!
+//! One implementation today: [`repositories::mock_saved_servers`], an in-memory
+//! saved-server store. Nothing persists yet — secure credential storage is a
+//! later phase (`docs/ARCHITECTURE.md`'s Planned section), and the mock is what
+//! lets the Connect screen be real before it exists.
 
 pub mod repositories;

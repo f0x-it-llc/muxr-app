@@ -1,15 +1,23 @@
-//! The Connect screen's two hand-rolled paint primitives: a bordered,
-//! rounded, filled **panel** (single-child) and a fixed-size **swatch**
-//! (leaf).
+//! The Connect screen's hand-rolled primitives: a bordered, rounded, filled
+//! **panel** (single-child), a fixed-size **swatch** (leaf), and a
+//! **switch-semantics** wrapper.
 //!
 //! `docs/splash.html`'s Connect mock is mostly borders and washes —
 //! `.connect-mark`'s tile and its four grid cells, `.connect-badge`'s box,
 //! `.toggle`'s pill and knob, `.dot-ok`, and the `background:var(--bg-void)`
 //! backing every full-width piece carries so the amber rain can't bleed
 //! through its text while it lands. No facade widget paints an arbitrary
-//! filled/bordered rect, so these two [`View`]/[`Widget`] pairs — authored
+//! filled/bordered rect, so these [`View`]/[`Widget`] pairs — authored
 //! through [`frust::authoring`], the same seam
 //! `examples/huddle`'s `ui::fill_box` uses — fill the gap.
+//!
+//! [`switch_semantics`] closes the accessibility hole that composition opens:
+//! a toggle assembled from swatches and a `GestureDetector` paints and presses
+//! correctly but contributes **no** accessibility node at all (a
+//! `GestureDetector` only forwards its child's, and a swatch has none), so a
+//! screen reader would find no control there. It contributes the one
+//! `Role::Switch` node the composed pile is worth. Delete it the day
+//! `frust::glyph` grows a real switch.
 //!
 //! **Feature-local on purpose.** They live beside the pieces that need them
 //! rather than in `crate::ui`; `examples/huddle` promoted its own `fill_box`
@@ -21,9 +29,10 @@
 //! once per build, so these stay dumb about theming.
 
 use frust::authoring::{
-    AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, LayoutCtx,
-    PaintCtx, PaintScene, Point, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any,
-    build_child, rebuild_child, teardown_child,
+    Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, Toggled, View, Widget, any, build_child, rebuild_child,
+    route_event_single, teardown_child,
 };
 
 /// Hairline border width in logical px (`1px solid` on every bordered rule in
@@ -152,10 +161,16 @@ impl Widget for PanelWidget {
         self.child.paint_child(ctx, scene);
     }
 
-    // No `event` impl: every Connect piece is static presentation today (the
-    // interactive upgrade lands in Phase 2), and the two interactive widgets
-    // the pieces *do* nest (`text_input`, `button`) are reached through their
-    // own parents, never through a panel.
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A decorative single-child container still MUST route, or every
+        // control it backs is silently unreachable: the panel paints a fill and
+        // nothing else, so a widget nested under one (the URL/token fields, the
+        // remember toggle, the trust rows, a saved-server row) is only pressable
+        // through here. `route_event_single` owns the capture/focus fast paths
+        // and the blur-on-outside-tap rule — never re-hit-test a captured child
+        // by hand.
+        route_event_single(&mut self.child, ctx, event)
+    }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // A transparent container still MUST forward, or the child's whole
@@ -251,6 +266,106 @@ impl Widget for SwatchWidget {
         if let Some(border) = self.border {
             stroke_border(scene, origin, size, self.radius, border);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Switch semantics — an accessibility node over a hand-composed toggle
+// ---------------------------------------------------------------------------
+
+/// Give `child` — a hand-composed toggle's art plus its press recognizer — the
+/// one accessibility node it cannot grow itself: a labelled, toggled
+/// [`Role::Switch`] advertising the [`Action::Click`] it fires.
+///
+/// Layout, paint and event routing are pure pass-through; only
+/// [`Widget::semantics`] does anything. See the [module docs](self).
+pub fn switch_semantics<State: 'static, V: View<State>>(
+    child: V,
+    label: impl Into<String>,
+    on: bool,
+) -> SwitchSemanticsView<State> {
+    SwitchSemanticsView {
+        child: any(child),
+        label: label.into(),
+        on,
+    }
+}
+
+/// The declarative half of [`switch_semantics`].
+pub struct SwitchSemanticsView<State: 'static> {
+    child: AnyView<State>,
+    label: String,
+    on: bool,
+}
+
+/// The retained half of [`switch_semantics`].
+pub struct SwitchSemanticsWidget {
+    child: ChildPod,
+    label: String,
+    on: bool,
+}
+
+impl<State: 'static> View<State> for SwitchSemanticsView<State> {
+    type Element = SwitchSemanticsWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> SwitchSemanticsWidget {
+        SwitchSemanticsWidget {
+            child: build_child(&self.child, ctx),
+            label: self.label.clone(),
+            on: self.on,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut SwitchSemanticsWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if prev.label != self.label || prev.on != self.on {
+            element.label = self.label.clone();
+            element.on = self.on;
+            // Semantics-only: the accessibility tree is rebuilt off a paint
+            // pass, so PAINT is what republishes the node.
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut SwitchSemanticsWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for SwitchSemanticsWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.child.set_origin(Point::ZERO);
+        bc.constrain(size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A leaf node, deliberately: the composed art underneath has nothing to
+        // announce, and exposing four unlabelled swatches inside a switch would
+        // be noise rather than detail.
+        ctx.push_node(Role::Switch, |node| {
+            node.set_label(self.label.as_str());
+            node.set_toggled(if self.on {
+                Toggled::True
+            } else {
+                Toggled::False
+            });
+            node.add_action(Action::Click);
+        });
     }
 }
 
