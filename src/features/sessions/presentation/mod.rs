@@ -7,10 +7,15 @@
 //!   section mandates).
 //! - [`controllers`] — [`controllers::SessionsController`], the hosted view
 //!   model: the session list, the four mutations, and the mock poll's gate.
-//! - `pieces` — the screen's individual visual elements, transcribed from
-//!   `docs/redesign.html`'s sessions/picker blocks. Private: only `pages`
-//!   arranges them.
+//! - [`pieces`] — the screen's individual visual elements, transcribed from
+//!   `docs/redesign.html`'s sessions block. `pub` only for the two picker-sheet
+//!   builders the terminal screen inherits in Phase 3 (see its module docs);
+//!   everything else there is `pub(super)`, arranged by `pages` alone.
+//! - `chrome` — the screen's hand-rolled panel/swatch/dashed-box primitives,
+//!   for the boxes the Glyph catalog has no counterpart for. Private: only
+//!   `pieces` paints with them.
 
+mod chrome;
 pub mod controllers;
 pub mod pages;
-mod pieces;
+pub mod pieces;
