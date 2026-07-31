@@ -1,6 +1,6 @@
 //! `muxr_topbar` — the app's branded top bar (`docs/redesign.html`'s
-//! `.topbar`), mounted **once** by [`crate::shell`] as persistent chrome above
-//! the navigator rather than by each screen.
+//! `.topbar`), mounted **once** by [`crate::shell`] as persistent chrome
+//! **floating over** the navigator rather than by each screen.
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────┐
@@ -27,12 +27,44 @@
 //! # Hidden, never unmounted
 //!
 //! [`TopBarView::hidden`] is the `/` state, and it is a *flag* rather than an
-//! absent child on purpose: the shell's band is `[bar, navigator]`, and a band
-//! whose child count changed would shift the navigator's positional index and
-//! make `Stack`/`Flex` reconciliation tear the whole live navigator down (the
-//! same class of bug `crate::shell::root_view`'s stable-`Stack` invariant
-//! exists for). A hidden bar lays out to [`Size::ZERO`], paints nothing, routes
-//! nothing, and contributes no semantics node.
+//! absent child on purpose: the bar is a fixed-index child of the shell's root
+//! `Stack`, and a `Stack` whose child count changed would shift every later
+//! child's positional index and make reconciliation tear the live navigator
+//! down (the bug `crate::shell::root_view`'s stable-`Stack` invariant exists
+//! for). A **fully** hidden bar lays out to [`Size::ZERO`], paints nothing,
+//! routes nothing, and contributes no semantics node.
+//!
+//! # Entrance and exit (why the bar animates itself)
+//!
+//! The bar does **not** displace the page under it — it floats over a
+//! full-height navigator and each bar-bearing page reserves its own top
+//! clearance ([`topbar_clearance`]). So a route change that gains or loses the
+//! bar must not be a discrete 46px reflow of the page: the bar instead slides
+//! in from fully above the top edge (its own inset-extended height) while
+//! fading up, and reverses on the way out.
+//!
+//! Its timings and curves are **GlyphSlide's** — the very pattern the page
+//! transition under it runs ([`GLYPH_SLIDE_ENTER`]/[`GLYPH_SLIDE_EXIT`],
+//! imported rather than transcribed; the curves are transcribed because
+//! `frust-widgets`' own are private) — so bar and page read as one motion.
+//! They are matched, **not** frame-coupled: a `NavigatorController` exposes no
+//! transition progress to read (FINDINGS #40), so nothing app-side can drive
+//! the bar off the page's own driver. Same numbers, two clocks started in the
+//! same rebuild.
+//!
+//! **Reduced motion** collapses the reveal exactly the way every framework
+//! pattern collapses — the theme's `MotionScheme::reduce_motion`, the
+//! framework's own [`REDUCE_MOTION_DURATION`], linear, and no geometric motion
+//! at all (a pure fade). The bar re-derives that collapse rather than calling
+//! it because neither `nav::transition::resolve_spec` nor `PatternSwitcher`'s
+//! internal branch is reachable through the `frust::`/`frust::authoring`
+//! facade an app widget is limited to.
+//!
+//! **A mid-reveal bar takes no input and publishes no semantics.** It paints
+//! (that is the whole point) but a half-shown bar sitting over a page must not
+//! swallow a tap meant for the page under it, and an accessibility node whose
+//! affordances route nowhere is worse than no node. Both come back the frame
+//! the reveal settles.
 //!
 //! # Crossfades (the `glyph::app_bar` behavior, reused not reimplemented)
 //!
@@ -71,9 +103,10 @@
 //! to its own height and offsets its content **below** the inset, while the
 //! background paints the full extended height — exactly what `glyph::app_bar`
 //! does (see its module docs' "Top-inset consumption"), and what Flutter's
-//! `AppBar` does. Content beneath this bar therefore never needs a top
-//! `SafeArea` edge; a screen under it composes its body with
-//! `safe_area(..).top(false)`.
+//! `AppBar` does. Since the bar floats *over* the page rather than beside it,
+//! that same sum is what a bar-bearing page reserves at its own top:
+//! [`topbar_clearance`] is the one helper the three such screens share, so the
+//! two numbers cannot drift apart.
 
 use std::rc::Rc;
 
@@ -83,15 +116,22 @@ use frust::authoring::{
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, Widget,
     any, build_child, rebuild_child, route_event, teardown_child,
 };
-use frust::motion::patterns::{PatternLayer, TransitionPattern};
-use frust::motion::switcher::pattern_switcher;
+use frust::motion::patterns::{
+    GLYPH_SLIDE_ENTER, GLYPH_SLIDE_EXIT, PatternLayer, TransitionPattern,
+};
+use frust::motion::switcher::{REDUCE_MOTION_DURATION, pattern_switcher};
 use frust::{
-    Align, Alignment, Axis, ButtonStyle, ChildKey, CrossAxisAlignment, Curve, FlexView, SizedBox,
-    Theme, Timing, button, inflexible, text,
+    Align, Alignment, AnimationController, Axis, ButtonStyle, ChildKey, CrossAxisAlignment, Curve,
+    EdgeInsets, FlexView, Padding, SizedBox, Theme, Timing, button, inflexible, safe_area, text,
 };
 
 /// `.topbar{height:46px}` — the content band, below the status-bar inset.
-const BAR_HEIGHT: f64 = 46.0;
+///
+/// `pub` because a page under the bar has to reserve exactly this much (plus
+/// the status-bar inset the bar also consumes) at its own top — see
+/// [`topbar_clearance`], the wrapper every such page uses instead of spelling
+/// the sum itself.
+pub const BAR_HEIGHT: f64 = 46.0;
 /// `.topbar{padding:0 16px}`.
 const PAD_X: f64 = 16.0;
 /// `.brand-mark{width:16px;height:16px}`.
@@ -150,6 +190,109 @@ fn crossfade_timing() -> Timing {
         std::time::Duration::from_millis(CROSSFADE_MS),
         CROSSFADE_CURVE,
     )
+}
+
+// ---------------------------------------------------------------------------
+// The bar's own entrance/exit (see the module docs)
+// ---------------------------------------------------------------------------
+
+/// The reveal's slide-in easing — `motion::patterns`' `GLYPH_SLIDE_SPATIAL`
+/// (the Glyph `spatial` curve, `Cubic(0.05,0.7,0.1,1)`), transcribed: the
+/// durations beside it are `pub` in `frust-widgets`, the curves are not.
+const REVEAL_SPATIAL_CURVE: Curve = Curve::Cubic(0.05, 0.7, 0.1, 1.0);
+/// The reveal's fade-in easing — `GLYPH_SLIDE_EFFECTS` (the Glyph `effects`
+/// curve, `Cubic(0.2,0,0,1)`), transcribed for the same reason.
+const REVEAL_EFFECTS_CURVE: Curve = Curve::Cubic(0.2, 0.0, 0.0, 1.0);
+/// The reveal's exit easing — `GLYPH_SLIDE_EXIT_CURVE` (the Glyph `exit`
+/// curve, `Cubic(0.3,0,1,1)`), driving both the slide-out and the exit fade.
+const REVEAL_EXIT_CURVE: Curve = Curve::Cubic(0.3, 0.0, 1.0, 1.0);
+
+/// Where the bar paints at reveal progress `p` — `0.0` fully above the top
+/// edge and transparent, `1.0` at rest — travelling `extent` (its own
+/// inset-extended height, so a hidden bar is *entirely* off the top of the
+/// screen rather than merely displaced).
+///
+/// `showing` picks the direction's easing family, exactly as `GlyphSlide`
+/// splits its slower spatial entrance from its faster exit: an entrance eases
+/// `p` on the spatial curve for the offset and the effects curve for the fade;
+/// an exit eases the *remaining* progress on the exit curve for both.
+///
+/// `reduce_motion` collapses it to a pure linear fade with **no** geometric
+/// motion — the framework's own rule (see the [module docs](self)).
+fn reveal_layer(p: f64, showing: bool, extent: f64, reduce_motion: bool) -> PatternLayer {
+    let p = p.clamp(0.0, 1.0);
+    if reduce_motion {
+        return PatternLayer {
+            dx: 0.0,
+            dy: 0.0,
+            alpha: p as f32,
+            scale: 1.0,
+        };
+    }
+    let (travelled, alpha) = if showing {
+        (
+            REVEAL_SPATIAL_CURVE.transform(p),
+            REVEAL_EFFECTS_CURVE.transform(p),
+        )
+    } else {
+        // The exit runs on one curve for both channels, measured from the
+        // still-shown state: at `p == 1.0` nothing has moved yet.
+        let gone = REVEAL_EXIT_CURVE.transform(1.0 - p);
+        (1.0 - gone, 1.0 - gone)
+    };
+    PatternLayer {
+        dx: 0.0,
+        dy: -(1.0 - travelled) * extent,
+        alpha: alpha as f32,
+        scale: 1.0,
+    }
+}
+
+/// One in-flight reveal: a `0→1` driver plus the visual range it maps onto.
+///
+/// The range is what makes an *interrupted* reveal value-continuous — a flip
+/// mid-flight starts a fresh driver from wherever the bar was actually
+/// painting, the same "value continuity, not velocity continuity" contract
+/// `frust::motion`'s own implicit animations document.
+struct Reveal {
+    /// The `0→1` progress driver (linear: the easing lives in
+    /// [`reveal_layer`], which needs the raw progress to split its two
+    /// channels the way `GlyphSlide` does).
+    driver: AnimationController,
+    /// The painted reveal this transition started from.
+    from: f64,
+    /// The reveal it is heading to (`1.0` showing, `0.0` hiding).
+    to: f64,
+    /// Whether it collapsed to the reduced-motion fade — resolved once at the
+    /// start, stable for the whole transition (`PatternSwitcher`'s rule).
+    reduced: bool,
+}
+
+impl Reveal {
+    /// Stage a reveal from `from` to `to`, at the theme's motion policy.
+    fn start(from: f64, to: f64, reduce_motion: bool) -> Self {
+        let showing = to > from;
+        let duration = if reduce_motion {
+            REDUCE_MOTION_DURATION
+        } else if showing {
+            GLYPH_SLIDE_ENTER
+        } else {
+            GLYPH_SLIDE_EXIT
+        };
+        let mut driver = AnimationController::new(duration);
+        driver.forward();
+        Reveal {
+            driver,
+            from,
+            to,
+            reduced: reduce_motion,
+        }
+    }
+
+    /// Whether this reveal is bringing the bar on screen.
+    fn showing(&self) -> bool {
+        self.to > self.from
+    }
 }
 
 /// The title crossfade's staging: the incoming run slides in from `±14px`
@@ -263,6 +406,37 @@ fn active_theme() -> Theme {
 /// band.
 fn content_y(top_inset: f64, height: f64) -> f64 {
     top_inset + (BAR_HEIGHT - height) / 2.0
+}
+
+/// `body` with the top clearance a bar-bearing page owes reserved above it:
+/// the status-bar inset **plus** [`BAR_HEIGHT`], which is exactly the box the
+/// floating bar occupies.
+///
+/// The one place that sum is spelled. The bar no longer displaces the page
+/// (see [`crate::shell::root_view`]), so each of the three bar-bearing screens
+/// pads its own top instead — and three screens computing "46 plus the inset"
+/// independently is three chances to drift, most of them invisible until a
+/// device with a different status bar shows up. `/` (Connect) is bar-less and
+/// wraps nothing.
+///
+/// Composed out of framework widgets rather than hand-rolled: an outer
+/// [`safe_area`] restricted to its top edge contributes the inset, an inner
+/// [`Padding`] the band. `body` may keep its own `safe_area(..).top(false)`
+/// for the other three edges — nesting is harmless, since a `SafeArea` deflates
+/// constraints without consuming the window insets its descendants read.
+pub fn topbar_clearance<State: 'static, V: View<State>>(body: V) -> AnyView<State> {
+    any(safe_area(Padding(
+        EdgeInsets {
+            left: 0.0,
+            top: BAR_HEIGHT,
+            right: 0.0,
+            bottom: 0.0,
+        },
+        body,
+    ))
+    .left(false)
+    .right(false)
+    .bottom(false))
 }
 
 /// The declarative half of the top bar. See [`muxr_topbar`].
@@ -465,11 +639,29 @@ pub struct TopBarWidget {
     /// `[leading, title]`, plus the action when one is attached — one flat pod
     /// list so [`route_event`]/semantics can walk it.
     children: Vec<ChildPod>,
+    /// Each pod's at-rest origin, recorded by `layout` so `paint` can slide the
+    /// whole bar by the reveal offset without a relayout per frame. Parallel to
+    /// [`Self::children`]; empty while the bar is fully hidden (nothing is laid
+    /// out then).
+    rest_origins: Vec<Point>,
     /// Whether the leading slot is the 30×30 `‹` box rather than the brand.
     back: bool,
     hidden: bool,
     surface: Color,
     rule: Color,
+    /// The painted reveal: `0.0` fully above the top edge, `1.0` at rest.
+    reveal: f64,
+    /// The in-flight reveal, `None` at rest. Created on the first **paint**
+    /// after a visibility flip, not on the rebuild that staged it: a
+    /// `BuildCtx` carries no theme to resolve `reduce_motion` from (the
+    /// deferred-driver idiom `frust::motion`'s switcher and the navigator both
+    /// use).
+    reveal_anim: Option<Reveal>,
+    /// A visibility flip the last rebuild staged, awaiting that first paint.
+    reveal_pending: bool,
+    /// The bar's own inset-extended height, recorded by `layout` — the
+    /// distance a reveal travels.
+    extent: f64,
 }
 
 /// The index of each fixed pod in [`TopBarWidget::children`].
@@ -490,10 +682,18 @@ impl<State: 'static> View<State> for TopBarView<State> {
         }
         TopBarWidget {
             children,
+            rest_origins: Vec::new(),
             back: self.back,
             hidden: self.hidden,
             surface: self.surface,
             rule: self.rule,
+            // A first mount never animates: the bar is simply already where the
+            // route says it belongs (this is also the frame a cold start's
+            // splash covers).
+            reveal: if self.hidden { 0.0 } else { 1.0 },
+            reveal_anim: None,
+            reveal_pending: false,
+            extent: 0.0,
         }
     }
 
@@ -533,9 +733,16 @@ impl<State: 'static> View<State> for TopBarView<State> {
             }
             (None, None) => {}
         }
-        if prev.back != self.back || prev.hidden != self.hidden {
+        if prev.back != self.back {
             element.back = self.back;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.hidden != self.hidden {
+            // A visibility flip is a *reveal*, never a jump: the next paint
+            // resolves the theme's motion policy and starts the animation from
+            // wherever the bar is painting right now (see `Reveal`).
             element.hidden = self.hidden;
+            element.reveal_pending = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.surface != self.surface || prev.rule != self.rule {
@@ -559,11 +766,35 @@ impl<State: 'static> View<State> for TopBarView<State> {
     }
 }
 
+impl TopBarWidget {
+    /// Whether a reveal is staged or running — the bar is on screen and moving.
+    fn revealing(&self) -> bool {
+        self.reveal_pending || self.reveal_anim.is_some()
+    }
+
+    /// Whether the bar occupies a box at all: shown, or mid-reveal in either
+    /// direction. A **fully** hidden bar is `false` and lays out to nothing.
+    fn occupies_a_box(&self) -> bool {
+        !self.hidden || self.revealing()
+    }
+
+    /// Whether the bar is settled on screen — the one state in which it takes
+    /// input and publishes semantics (see the [module docs](self)).
+    fn settled_open(&self) -> bool {
+        !self.hidden && !self.revealing()
+    }
+}
+
 impl Widget for TopBarWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        if self.hidden {
+        if !self.occupies_a_box() {
             // Zero-height, children unlaid — `paint`/`event`/`semantics` all
-            // short-circuit on the same flag, so nothing reads their geometry.
+            // short-circuit on the same predicate, so nothing reads their
+            // geometry. (A reveal that *ends* hidden leaves the last full box
+            // behind until the next relayout: harmless, since a bar that is
+            // neither painting nor routing has nothing to give away, and any
+            // later rebuild corrects it.)
+            self.rest_origins.clear();
             return bc.constrain(Size::ZERO);
         }
         let width = if bc.max().width.is_finite() {
@@ -617,15 +848,56 @@ impl Widget for TopBarWidget {
             centered(title_size.height),
         ));
 
-        bc.constrain(Size::new(width, content_top + BAR_HEIGHT))
+        // The rest pose `paint` slides away from, and the distance it slides.
+        self.rest_origins = self.children.iter().map(ChildPod::origin).collect();
+        self.extent = content_top + BAR_HEIGHT;
+        bc.constrain(Size::new(width, self.extent))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        if self.hidden {
+        if !self.occupies_a_box() {
             return;
         }
-        let origin = ctx.origin();
+        // Start a staged reveal now a theme is in scope: `reduce_motion` and
+        // the entrance/exit duration are paint-time reads (module docs).
+        if self.reveal_pending {
+            let reduce = Theme::from_paint_ctx(ctx)
+                .map(|theme| theme.motion.reduce_motion)
+                .unwrap_or(false);
+            let to = if self.hidden { 0.0 } else { 1.0 };
+            self.reveal_anim = Some(Reveal::start(self.reveal, to, reduce));
+            self.reveal_pending = false;
+        }
+
+        // Advance it, and let the frame clock — not the rebuild — decide when
+        // the bar has arrived.
+        let mut layer = PatternLayer {
+            dx: 0.0,
+            dy: 0.0,
+            alpha: 1.0,
+            scale: 1.0,
+        };
+        if let Some(reveal) = self.reveal_anim.as_mut() {
+            let animating = reveal.driver.advance(ctx.frame_time());
+            self.reveal = reveal.from + (reveal.to - reveal.from) * reveal.driver.value_clamped();
+            layer = reveal_layer(self.reveal, reveal.showing(), self.extent, reveal.reduced);
+            if animating {
+                ctx.request_frame();
+            } else {
+                self.reveal = reveal.to;
+                self.reveal_anim = None;
+                // One more frame so the settled pose (and the semantics/input
+                // that come back with it) is the one on screen.
+                ctx.request_frame();
+            }
+        }
+
+        let origin = Point::new(ctx.origin().x, ctx.origin().y + layer.dy);
         let size = ctx.size();
+        let faded = layer.alpha < 1.0;
+        if faded {
+            scene.push_layer(ctx.origin(), size, layer.alpha);
+        }
         // The surface runs the full extended height, so it sits under the
         // status bar (see the module docs' inset note).
         scene.fill_rect(origin, size, self.surface);
@@ -638,13 +910,26 @@ impl Widget for TopBarWidget {
             self.rule,
         );
 
-        for child in &mut self.children {
+        // Slide the slots with the surface. Pod origins (rather than a
+        // `push_transform`) for the same reason `frust::motion`'s switcher
+        // stages its children that way: paint and hit-testing move together.
+        let aligned = self.rest_origins.len() == self.children.len();
+        for (index, child) in self.children.iter_mut().enumerate() {
+            if aligned {
+                let rest = self.rest_origins[index];
+                child.set_origin(Point::new(rest.x, rest.y + layer.dy));
+            }
             child.paint_child(ctx, scene);
+        }
+        if faded {
+            scene.pop_layer();
         }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if self.hidden {
+        if !self.settled_open() {
+            // Hidden, or mid-reveal: a bar that is only half-arrived must not
+            // eat a tap meant for the page it floats over (module docs).
             return EventResult::Ignored;
         }
         // Only the leading/trailing slots are interactive, but routing to every
@@ -654,8 +939,9 @@ impl Widget for TopBarWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        if self.hidden {
-            // `/` has no bar at all, in the accessibility tree as on screen.
+        if !self.settled_open() {
+            // `/` has no bar at all, in the accessibility tree as on screen —
+            // and a mid-reveal bar routes nothing, so it publishes nothing.
             return;
         }
         ctx.push_container(
@@ -724,6 +1010,78 @@ mod tests {
         let (back, _) = TitleShift.resolve(0.0, true, Size::ZERO);
         assert_eq!(forward.dx, TITLE_SHIFT);
         assert_eq!(back.dx, -TITLE_SHIFT, "a pop enters from the leading edge");
+    }
+
+    #[test]
+    fn the_clearance_reserves_exactly_the_bars_own_box() {
+        // The seam three screens share with the bar: what a bar-bearing page
+        // pads at its top must be exactly what the floating bar occupies. At a
+        // zero window inset that is the 46px band and nothing else — the inset
+        // half of the sum is the *same* `WindowInsets::padding().top` both
+        // sides resolve (`TopBarWidget::layout` adds it, the wrapper's own
+        // top-only `safe_area` contributes it), which `LayoutCtx::new` cannot
+        // fake here (the setter is `pub(crate)`).
+        const CHILD: f64 = 100.0;
+        let view: AnyView<()> = topbar_clearance(SizedBox::<()>(Some(CHILD), Some(CHILD)));
+        let mut next_id = 0u64;
+        let mut widget = view.build(&mut BuildCtx::new(&mut next_id));
+        let mut ctx = LayoutCtx::new();
+        let size = widget.layout(&mut ctx, &BoxConstraints::loose(Size::new(390.0, 844.0)));
+
+        assert_eq!(size, Size::new(CHILD, CHILD + BAR_HEIGHT));
+    }
+
+    #[test]
+    fn the_reveal_starts_fully_above_the_bar_and_settles_flush() {
+        // The entrance's endpoints, as geometry: at rest the bar is exactly
+        // where layout put it and fully opaque; at progress zero it is its own
+        // whole height above the top edge (never merely nudged) and invisible.
+        const EXTENT: f64 = 46.0 + 47.0;
+        let settled = reveal_layer(1.0, true, EXTENT, false);
+        assert_eq!((settled.dy, settled.alpha), (0.0, 1.0));
+        assert_eq!(settled.dx, 0.0, "the reveal is vertical only");
+
+        let start = reveal_layer(0.0, true, EXTENT, false);
+        assert_eq!(start.dy, -EXTENT);
+        assert_eq!(start.alpha, 0.0);
+
+        // …and the exit runs the same range backwards: still flush at 1.0
+        // (nothing has left yet), fully gone at 0.0.
+        let leaving = reveal_layer(1.0, false, EXTENT, false);
+        assert_eq!((leaving.dy, leaving.alpha), (0.0, 1.0));
+        let gone = reveal_layer(0.0, false, EXTENT, false);
+        assert_eq!((gone.dy, gone.alpha), (-EXTENT, 0.0));
+    }
+
+    #[test]
+    fn reduced_motion_fades_the_bar_without_moving_it() {
+        // Glyph's hard accessibility rule, at this seam: a reduced reveal is a
+        // pure linear fade — the bar never travels, in either direction.
+        for showing in [true, false] {
+            for p in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let layer = reveal_layer(p, showing, 93.0, true);
+                assert_eq!(layer.dy, 0.0, "reduced motion never moves the bar");
+                assert_eq!(layer.dx, 0.0);
+                assert_eq!(layer.alpha, p as f32, "…it only fades it, linearly");
+            }
+        }
+    }
+
+    #[test]
+    fn the_exit_clears_faster_than_the_entrance_arrives() {
+        // GlyphSlide's own asymmetry, inherited: exits run on the faster exit
+        // curve over a shorter duration, so at the same fraction of its own
+        // timeline a leaving bar has travelled further than an arriving one.
+        assert!(GLYPH_SLIDE_EXIT < GLYPH_SLIDE_ENTER);
+        let arriving = reveal_layer(0.5, true, 100.0, false);
+        let leaving = reveal_layer(0.5, false, 100.0, false);
+        assert!(
+            leaving.dy < arriving.dy,
+            "half-way through, the exit is further gone ({}) than the entrance \
+             is arrived ({})",
+            leaving.dy,
+            arriving.dy
+        );
     }
 
     #[test]

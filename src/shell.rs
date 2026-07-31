@@ -2,24 +2,22 @@
 //! (the 4-tab bottom navigation bar) to fit stack-style navigation: muxr has
 //! no tabs, so the one piece of always-mounted chrome is the **top bar**.
 //!
-//! [`root_view`] is the seam this module exists for. Three things occupy it
-//! today. The app-wide toast layer ([`crate::ui::toasts`]) and the cold-start
-//! splash stack **above** the navigator — the splash only while it plays, with
-//! the navigator still rendering `/` underneath for the whole sequence, which
-//! is what lets the overlay simply disappear at the end (see
-//! [`crate::ui::splash::sequence`]'s handoff note). The third, the muxr top bar
-//! ([`crate::ui::topbar`]), sits **beside** it: navigator and bar share a
-//! vertical band, so the bar is chrome the pages scroll under rather than over.
+//! [`root_view`] is the seam this module exists for, and it is one `Stack` all
+//! the way down: a full-height navigator, the muxr top bar
+//! ([`crate::ui::topbar`]) **floating over** it, the app-wide toast layer
+//! ([`crate::ui::toasts`]) over that, and the cold-start splash over
+//! everything — the splash only while it plays, with the navigator still
+//! rendering `/` underneath for the whole sequence, which is what lets the
+//! overlay simply disappear at the end (see
+//! [`crate::ui::splash::sequence`]'s handoff note).
 //!
-//! Both arrangements answer to the same invariant: the root is *always* a
-//! `Stack` and the band is *always* `[bar, navigator]`, with or without an
-//! overlay and with or without a visible bar (see [`root_view`]'s doc for why
-//! neither container can ever be optional).
+//! One invariant covers the lot: the root is *always* a `Stack`, its first
+//! three children are *always* `[navigator, bar, toasts]` in that order, and
+//! only the overlay tail ever grows or shrinks (see [`root_view`]'s doc for
+//! why none of the three can be optional, and why the bar floats rather than
+//! sharing a band with the navigator).
 
-use frust::{
-    AnyView, Axis, CrossAxisAlignment, FlexView, NavigatorController, Stack, any, flexible,
-    inflexible, navigator,
-};
+use frust::{AnyView, NavigatorController, Stack, any, navigator};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
@@ -30,8 +28,9 @@ use crate::ui::topbar::muxr_topbar;
 /// `.topbar-icon`'s `⚙` — the Sessions bar's trailing action.
 const SETTINGS_GLYPH: &str = "\u{2699}";
 
-/// The app's entire root content: a `[top bar, navigator]` band, the app-wide
-/// toast layer over it, and `overlay` stacked over both when there is one.
+/// The app's entire root content: a full-height navigator, the top bar
+/// floating over it, the app-wide toast layer over that, and `overlay` stacked
+/// over everything when there is one.
 ///
 /// `initial` is only ever invoked on the very first build (the controller's
 /// stack is already non-empty by then — see `lib.rs`'s `Component::init`,
@@ -42,25 +41,36 @@ const SETTINGS_GLYPH: &str = "\u{2699}";
 /// top and which way the last change travelled; the connection controller
 /// supplies `/sessions`' host title.
 ///
-/// **Layer order is `[band, toasts, overlay?]`, and the first two indices are
-/// fixed.** The toast layer ([`crate::ui::toasts::toast_layer`]) sits above the
-/// band so a toast floats over whatever screen (and bar) is on top, and below
-/// the splash overlay so a toast raised during a cold start doesn't punch
-/// through it. It is *always* present (an idle [`frust::glyph::toast_host`]
-/// paints nothing, requests no frames, and — never overriding `Widget::event` —
-/// passes every pointer event straight through to the band underneath), which
-/// is what keeps it out of the stable-container invariant below: only the
-/// growable **tail** (the overlay) ever appears or disappears.
+/// # Why the bar floats instead of sharing a band with the navigator
 ///
-/// # The stable-container invariant (two containers, one rule)
+/// It used to be the first child of a `Flex[bar, navigator]` band, which made
+/// the bar's visibility a **layout** fact: arriving at `/sessions` shrank the
+/// navigator by `46px + top inset`, so the bar snapped into existence and
+/// shoved the incoming page down a frame before the page transition had
+/// started to play, and leaving jerked it back up. (Round 3 of the design
+/// review caught it in a slow-motion capture; the transition's own cross-fade
+/// had been hiding most of it.)
 ///
-/// **The root always returns a `Stack`, never a bare navigator, and the band
-/// always holds exactly two children, never one.** `AnyView` erases the
-/// concrete view type, and `AnyView::rebuild` tears down and rebuilds the whole
-/// element the instant that erased type changes between two builds
-/// (frust-core's `dyn_rebuild`) — while `Stack`/`Flex` reconcile *positionally*,
-/// so a child that changes index is reconciled against a different view type
-/// and suffers the same fate.
+/// Floating the bar takes that reflow off the table entirely: **the navigator
+/// is always the full surface**, so a page's box never depends on which route
+/// is on top, and the bar animates its own entrance and exit
+/// ([`crate::ui::topbar`]) in the page transition's own Glyph timings instead.
+/// The cost is that a bar-bearing page now owes itself the top clearance the
+/// band used to hand it — one shared wrapper,
+/// [`topbar_clearance`](crate::ui::topbar::topbar_clearance), so the three such
+/// screens cannot drift (`/`, bar-less, wraps nothing). The redesign's fixed
+/// conn-row strip is unaffected: it sits immediately under that clearance,
+/// exactly where the band used to put it.
+///
+/// # The stable-`Stack` invariant (indices 0–2 fixed, only the tail grows)
+///
+/// **The root always returns a `Stack`, never a bare navigator, and its first
+/// three children are always `[navigator, bar, toast layer]`.** `AnyView`
+/// erases the concrete view type, and `AnyView::rebuild` tears down and
+/// rebuilds the whole element the instant that erased type changes between two
+/// builds (frust-core's `dyn_rebuild`) — while `Stack` reconciles
+/// *positionally*, so a child that changes index is reconciled against a
+/// different view type and suffers the same fate.
 ///
 /// Both halves of the invariant follow:
 ///
@@ -70,28 +80,25 @@ const SETTINGS_GLYPH: &str = "\u{2699}";
 ///   live navigator subtree (every route's retained widget state) only to
 ///   rebuild it fresh one frame later — exactly the frame the design promises
 ///   is a no-op.
-/// - If the band dropped its bar child on the bar-less `/` route, the navigator
-///   would move between index 1 and index 0 on every arrival at and departure
-///   from Connect, and positional reconciliation would tear it down each time.
-///   So the bar is *always* mounted and merely
+/// - If the bar were dropped from the child list on the bar-less `/` route,
+///   the toast layer would move between index 2 and index 1 on every arrival
+///   at and departure from Connect, and positional reconciliation would tear
+///   it down each time. So the bar is *always* mounted and merely
 ///   [hidden](crate::ui::topbar::TopBarView::hidden) — zero height, no paint,
-///   no semantics — on a route with no bar.
+///   no events, no semantics — on a route with no bar.
 ///
-/// Keeping both containers fixed means the erased types never change across
-/// either handoff: positional reconciliation rebuilds the common indices — the
-/// band, the bar and the navigator — in place, and only the shrunk tail (the
-/// overlay) is torn down.
+/// The toast layer is likewise *always* present (an idle
+/// [`frust::glyph::toast_host`] paints nothing, requests no frames, and —
+/// never overriding `Widget::event` — passes every pointer event straight
+/// through), so it is a fixed index rather than a second growable slot. It
+/// sits above the bar so a toast floats over whatever screen *and* chrome is
+/// on top, and below the splash overlay so a toast raised during a cold start
+/// doesn't punch through it — the splash covering the bar being guaranteed by
+/// the same ordering, not by the bar happening to be hidden on `/`.
 ///
-/// # Known wart: the band reflows the page under a bar that appears
-///
-/// The navigator is the band's flexible child, so mounting or unmounting the
-/// bar changes its height by `46px + top inset` — and the route *leaving* a
-/// bar-less `/` relayouts to the shorter box mid-transition. The Glyph slide
-/// fades the leaving page out over the first ~44% of the transition, which
-/// hides most of it, but it is a real reflow rather than a pure slide. The
-/// alternative (a bar floating over a full-height navigator) would put every
-/// screen's own scroll content under the bar instead, which the redesign's
-/// fixed conn-row strip directly contradicts.
+/// Keeping all three fixed means the erased types never change across either
+/// handoff: positional reconciliation rebuilds indices 0–2 in place, and only
+/// the shrunk tail (the overlay) is torn down.
 pub fn root_view(
     controller: &NavigatorController<AppState>,
     initial: impl Fn() -> AnyView<AppState> + 'static,
@@ -99,15 +106,11 @@ pub fn root_view(
     nav: &Nav,
     connection: &ConnectionController,
 ) -> AnyView<AppState> {
-    let band = any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(shell_bar(nav, connection)),
-            flexible(1, any(navigator(controller, initial))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch));
-    let mut children = vec![band, toast_layer()];
+    let mut children = vec![
+        any(navigator(controller, initial)),
+        shell_bar(nav, connection),
+        toast_layer(),
+    ];
     children.extend(overlay);
     any(Stack(children))
 }
@@ -115,7 +118,8 @@ pub fn root_view(
 /// This frame's top bar, assembled from the route on top.
 ///
 /// A route with no metadata (`/` — see [`crate::routes::route_meta`]) still
-/// mounts a bar; it is simply hidden, which is the invariant above. Every
+/// mounts a bar; it is simply hidden, which is the invariant above (and what
+/// it animates *to*, rather than snapping). Every
 /// affordance the bar carries acts through [`Nav`], so the mirror the bar reads
 /// stays the same one the navigation updates.
 fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> {

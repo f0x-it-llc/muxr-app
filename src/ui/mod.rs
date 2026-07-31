@@ -14,9 +14,10 @@
 //! [`splash::sequence`] is the orchestrator `crate::shell` mounts over the
 //! navigator on a cold start; everything else under [`splash`] is one of the
 //! sequence's independently mountable beats. [`toasts::toast_layer`] is one of
-//! the two things `crate::shell` mounts permanently — between the navigator and
-//! the splash — and [`topbar`] is the other, *beside* the navigator in the
-//! shell's band.
+//! the two things `crate::shell` mounts permanently — between the bar and the
+//! splash — and [`topbar`] is the other, *floating over* the navigator between
+//! it and the toasts (see [`crate::shell::root_view`] for the layer order and
+//! why the bar no longer shares a band with the navigator).
 //!
 //! [`dialogs`] and [`sheet`] are the **presentation substrate** every screen
 //! shares: a feature's `presentation` layer calls into them rather than
