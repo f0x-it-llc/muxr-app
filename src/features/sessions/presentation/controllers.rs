@@ -235,6 +235,10 @@ mod tests {
     use super::*;
     use crate::features::sessions::data::repositories::MockSessionsRepository;
 
+    /// How many sessions the mock repository seeds (the redesign's three
+    /// cards) — named here so a reseed moves one constant, not six literals.
+    const SEEDED_COUNT: usize = 3;
+
     /// The test-wiring composition root: the mock repository behind the domain
     /// trait object. `#[cfg(test)]`-only wiring, so `di.rs` stays the only
     /// production site where presentation meets `data` (huddle's convention).
@@ -260,7 +264,7 @@ mod tests {
 
         block_on(c.refresh());
 
-        assert_eq!(c.sessions.get_untracked().len(), 4);
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
         assert!(c.loaded.get_untracked());
     }
 
@@ -277,7 +281,7 @@ mod tests {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), SEEDED_COUNT + 1);
         assert!(names.contains(&"staging".to_string()), "{names:?}");
     }
 
@@ -289,7 +293,7 @@ mod tests {
 
         block_on(c.rename(id.clone(), "dev-2".to_string()));
 
-        assert_eq!(c.sessions.get_untracked().len(), 4);
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
         assert_eq!(c.session(&id).map(|s| s.name), Some("dev-2".to_string()));
     }
 

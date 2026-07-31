@@ -19,6 +19,9 @@
 //! [`frame_at`] paints at an explicit time and [`settle`] drives a pushed
 //! overlay past its transition so a test can then tap it.
 //!
+//! [`long_press`] is the gesture counterpart: a press that spans two paints so
+//! the framework's paint-clock hold timer actually crosses its threshold.
+//!
 //! Each of those three lays out at the default [`surface`] (800×600); the
 //! `*_sized` variants take the surface explicitly, for a suite whose screen is
 //! taller than 600px and would otherwise lay its last row out below the fold,
@@ -28,7 +31,8 @@
 //! the target sits:
 //!
 //! - **Semantics** ([`node_labels`]/[`node_values`]/[`node_center_by_label`]/
-//!   [`node_centers_by_label`]/[`node_center_by_role`]) — reads labels, values
+//!   [`node_centers_by_label`]/[`node_centers_by_value`]/[`node_center_by_role`])
+//!   — reads labels, values
 //!   and bounds straight off the accessibility tree, and is the only way to
 //!   assert *what a toast said* (a recording `PaintScene` sees glyph runs, not
 //!   strings). It does **not** see anything inside a `Navigator`:
@@ -338,6 +342,56 @@ fn node_center<S: 'static, V: View<S>>(
             (bounds.y0 + bounds.y1) / 2.0,
         ))
     })
+}
+
+/// How far past the framework's long-press threshold
+/// (`frust_widgets::gesture`'s `LONG_PRESS_MS`, 500ms) [`long_press`] holds its
+/// synthetic press. Transcribed rather than imported: the constant is private
+/// to that module, and a test that held for *exactly* the threshold would be
+/// asserting on floating-point equality.
+pub const HELD_MS: f64 = 600.0;
+
+/// A full long-press at `p`: press, hold past [`HELD_MS`], release.
+///
+/// **The two frames in the middle are the whole point.** A `GestureDetector`
+/// measures a hold across *paints* — the only pass carrying a clock — so the
+/// first frame records the press epoch and the second (at `HELD_MS`) marks the
+/// threshold as passed; the callback itself fires on the **next pointer
+/// event**, which is the `Up` below (`frust_widgets::gesture`'s
+/// "fire-on-release" contract). A test that sent Down/Up with no frames between
+/// them would produce an ordinary tap, and one that painted only once would
+/// never cross the threshold.
+///
+/// A press resolved as a long-press never *also* fires `on_tap`, so this is
+/// also how a test proves the tap path stayed untaken.
+pub fn long_press<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    logic: &mut impl FnMut(&mut S) -> V,
+    state: &mut S,
+    tcx: &mut TextContext,
+    p: Point,
+) {
+    root.event(state, &pointer(PointerPhase::Down, p));
+    frame_at(root, logic, state, tcx, FrameTime::ZERO);
+    frame_at(root, logic, state, tcx, ms(HELD_MS));
+    root.event(state, &pointer(PointerPhase::Up, p));
+}
+
+/// The centers of every semantics node whose **value** is `value`, in pass
+/// order — [`node_centers_by_label`]'s value-side sibling, for chrome composed
+/// out of plain `text` runs (a card's name, the dashed new-session row) rather
+/// than out of a labelled control.
+pub fn node_centers_by_value<S: 'static, V: View<S>>(
+    root: &RenderRoot<S, V>,
+    value: &str,
+) -> Vec<Point> {
+    root.semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.value() == Some(value))
+        .filter_map(|(_, node): &(_, Node)| node.bounds())
+        .map(|b| Point::new((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0))
+        .collect()
 }
 
 /// A no-op-but-recording frame waker (see [`ReactiveRuntime::init`]). The global

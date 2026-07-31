@@ -5,10 +5,20 @@
 //! renders from it. Every field here exists because `docs/redesign.html`'s
 //! **sessions** block paints it: the card's name and avatar initial
 //! ([`Session::name`]/[`Session::initial`]), its two chips
-//! ([`Session::status`]/[`Session::backend`]), the `.sess-meta` counts row and
-//! the `.pane-pill` previews ([`LayoutSummary`]), and the creation label
-//! ([`Session::created`]). Nothing is modelled speculatively — a field with no
-//! pixel behind it isn't here.
+//! ([`Session::status`]/[`Session::backend`]), and the `.sess-meta` counts row
+//! plus the `.pane-pill` previews ([`LayoutSummary`]). Nothing is modelled
+//! speculatively — a field with no pixel behind it isn't here, which is why
+//! there is no creation timestamp: the redesigned card prints no `created`
+//! line.
+//!
+//! # The varying third metric
+//!
+//! The `.sess-meta` row's first two spans are always panes and tabs; the third
+//! **varies by what the session actually is** — `◎ N clients` for a running
+//! zellij session, `◆ N spaces` for a herdr one, `N tabs saved` for an idle
+//! resurrectible one. That is a difference in the *facts a daemon reports*, not
+//! a rendering choice, so it is modelled here as [`ThirdMetric`] — one enum on
+//! [`LayoutSummary`] rather than three mostly-zero count fields.
 //!
 //! # Mock era
 //!
@@ -29,10 +39,6 @@ pub struct Session {
     pub id: String,
     /// The session's user-facing name (`.sess-name`), the one a rename edits.
     pub name: String,
-    /// A pre-formatted creation label (`"2026-07-02"`) rather than a timestamp
-    /// type: this crate has no date dependency, the daemon will send an
-    /// already-human string, and the card only ever prints it.
-    pub created: String,
     /// Whether the session is live or merely resurrectible (`.sess-card.running`
     /// vs `.sess-card.idle`).
     pub status: SessionStatus,
@@ -112,20 +118,63 @@ pub struct LayoutSummary {
     pub tabs: u32,
     /// Open panes across every tab (`▣ N panes`).
     pub panes: u32,
-    /// Clients currently attached (`◎ N clients`).
-    pub clients: u32,
+    /// The `.sess-meta` row's varying third span — see [`ThirdMetric`] and the
+    /// [module docs](self).
+    pub third: ThirdMetric,
     /// Up to two pane titles the card previews as `.pane-pill`s. Empty for an
-    /// idle session (the mock's `jumping-peach` row shows none).
+    /// idle session (the mock's `jumping-peach` row shows none, and the card
+    /// draws no pills row at all for one).
     pub preview: Vec<String>,
 }
 
 impl LayoutSummary {
-    /// The one-line counts summary the card's `.sess-meta` row prints.
+    /// The `▣ N panes` span.
+    pub fn panes_label(&self) -> String {
+        format!("\u{25a3} {} panes", self.panes)
+    }
+
+    /// The `◧ N tabs` span.
+    pub fn tabs_label(&self) -> String {
+        format!("\u{25e7} {} tabs", self.tabs)
+    }
+
+    /// All three `.sess-meta` spans on one line — what a *single-line* row
+    /// (the picker sheet's `sub` line) prints, as against the card's own
+    /// three-span row, which lays each label out separately with the
+    /// redesign's 12px gap.
     pub fn counts_line(&self) -> String {
         format!(
-            "\u{25a3} {} panes   \u{25e7} {} tabs   \u{25ce} {} clients",
-            self.panes, self.tabs, self.clients
+            "{}   {}   {}",
+            self.panes_label(),
+            self.tabs_label(),
+            self.third.label()
         )
+    }
+}
+
+/// The `.sess-meta` row's third span: **which** fact it carries depends on the
+/// session, not on the screen (see the [module docs](self)). A daemon reports
+/// attached clients for a running zellij session, spaces for a herdr one, and
+/// how many tabs a resurrectible session has saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThirdMetric {
+    /// `◎ N clients` — clients currently attached to a running zellij session.
+    Clients(u32),
+    /// `◆ N spaces` — a running herdr session's spaces.
+    Spaces(u32),
+    /// `N tabs saved` — what an idle, resurrectible session kept. Glyphless in
+    /// the redesign, deliberately: it is a stored count, not a live one.
+    TabsSaved(u32),
+}
+
+impl ThirdMetric {
+    /// The span this metric renders as.
+    pub fn label(self) -> String {
+        match self {
+            ThirdMetric::Clients(n) => format!("\u{25ce} {n} clients"),
+            ThirdMetric::Spaces(n) => format!("\u{25c6} {n} spaces"),
+            ThirdMetric::TabsSaved(n) => format!("{n} tabs saved"),
+        }
     }
 }
 
@@ -149,13 +198,12 @@ mod tests {
         Session {
             id: "s-1".to_string(),
             name: name.to_string(),
-            created: "2026-07-02".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Zellij,
             layout: LayoutSummary {
                 tabs: 4,
                 panes: 9,
-                clients: 0,
+                third: ThirdMetric::Clients(0),
                 preview: vec!["btop".to_string()],
             },
         }
@@ -178,6 +226,27 @@ mod tests {
         assert!(line.contains("9 panes"), "{line}");
         assert!(line.contains("4 tabs"), "{line}");
         assert!(line.contains("0 clients"), "{line}");
+    }
+
+    #[test]
+    fn each_third_metric_prints_its_own_span() {
+        // The three shapes `docs/redesign.html`'s three cards draw, in order.
+        assert_eq!(ThirdMetric::Clients(0).label(), "\u{25ce} 0 clients");
+        assert_eq!(ThirdMetric::Spaces(5).label(), "\u{25c6} 5 spaces");
+        assert_eq!(ThirdMetric::TabsSaved(0).label(), "0 tabs saved");
+    }
+
+    #[test]
+    fn the_meta_spans_are_addressable_one_by_one() {
+        // The card lays the three spans out separately (12px gap), so each has
+        // to be printable on its own — `counts_line` is the joined form the
+        // picker sheet's single-line row uses.
+        let layout = session("dev").layout;
+        assert_eq!(layout.panes_label(), "\u{25a3} 9 panes");
+        assert_eq!(layout.tabs_label(), "\u{25e7} 4 tabs");
+        let line = layout.counts_line();
+        assert!(line.starts_with(&layout.panes_label()), "{line}");
+        assert!(line.ends_with(&layout.third.label()), "{line}");
     }
 
     #[test]

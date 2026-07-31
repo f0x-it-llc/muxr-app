@@ -1,11 +1,13 @@
 //! [`MockSessionsRepository`] — the in-memory
 //! [`SessionsRepository`] the mock era runs on.
 //!
-//! Seeds four sessions with deliberately varied tab/pane/client counts (so the
-//! cards exercise every shape `docs/redesign.html`'s sessions block draws:
-//! running with pane previews, running with many panes, idle with none) and
-//! mutates that set in place on create/rename/kill, so the screen proves a real
-//! round trip rather than patching its own signal.
+//! Seeds **exactly** the three sessions `docs/redesign.html`'s sessions block
+//! draws — `dev` (running zellij, two pane pills, `◎ 0 clients`),
+//! `jumping-peach` (idle resurrectible, no pills, `0 tabs saved`) and `herdr`
+//! (running herdr, `◆ 5 spaces`) — so the screen and the mock are the same
+//! picture, and every card shape the redesign shows is reachable. It mutates
+//! that set in place on create/rename/kill, so the screen proves a real round
+//! trip rather than patching its own signal.
 //!
 //! # Framework-free, and deliberately not `frust`-aware
 //!
@@ -39,17 +41,12 @@ use std::time::Duration;
 
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
-    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus,
+    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
-
-/// The creation label a freshly created session gets. A constant rather than
-/// "today": this crate has no date dependency, and a fixed string keeps the
-/// headless tests deterministic.
-const MOCK_CREATED_TODAY: &str = "2026-07-31";
 
 /// An in-memory [`SessionsRepository`]. See the [module docs](self).
 pub struct MockSessionsRepository {
@@ -61,7 +58,7 @@ pub struct MockSessionsRepository {
 }
 
 impl MockSessionsRepository {
-    /// A repository seeded with [`seed`]'s four sessions.
+    /// A repository seeded with [`seed`]'s three sessions.
     pub fn seeded() -> Self {
         let sessions = seed();
         let next_id = AtomicU32::new(sessions.len() as u32 + 1);
@@ -99,80 +96,63 @@ impl Default for MockSessionsRepository {
     }
 }
 
-/// The seeded session set: the redesign's three cards (`dev`, `jumping-peach`,
-/// `herdr`) plus one more so the list is long enough to scroll on a phone.
+/// The seeded session set — `docs/redesign.html`'s three cards, transcribed
+/// 1:1 (counts, pane previews and all), in the order it draws them.
 fn seed() -> Vec<Session> {
     vec![
         Session {
             id: "s-1".to_string(),
             name: "dev".to_string(),
-            created: "2026-07-02".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Zellij,
             layout: LayoutSummary {
                 tabs: 4,
                 panes: 9,
-                clients: 0,
+                third: ThirdMetric::Clients(0),
                 preview: vec!["btop".to_string(), "ed@precision:~".to_string()],
             },
         },
         Session {
             id: "s-2".to_string(),
             name: "jumping-peach".to_string(),
-            created: "2026-06-18".to_string(),
             status: SessionStatus::Resurrectible,
             backend: SessionBackend::Zellij,
             layout: LayoutSummary {
                 tabs: 0,
                 panes: 0,
-                clients: 0,
+                third: ThirdMetric::TabsSaved(0),
                 preview: Vec::new(),
             },
         },
         Session {
             id: "s-3".to_string(),
             name: "herdr".to_string(),
-            created: "2026-07-14".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Herdr,
             layout: LayoutSummary {
                 tabs: 2,
                 panes: 3,
-                clients: 1,
+                third: ThirdMetric::Spaces(5),
                 preview: vec![
                     "\u{b7}\u{b7}\u{b7}".to_string(),
                     "\u{b7}\u{b7}\u{b7}".to_string(),
                 ],
             },
         },
-        Session {
-            id: "s-4".to_string(),
-            name: "minefit-api".to_string(),
-            created: "2026-05-30".to_string(),
-            status: SessionStatus::Running,
-            backend: SessionBackend::Zellij,
-            layout: LayoutSummary {
-                tabs: 1,
-                panes: 2,
-                clients: 2,
-                preview: vec!["cargo watch".to_string()],
-            },
-        },
     ]
 }
 
-/// A session created at runtime: empty layout, today's label, running.
+/// A session created at runtime: one empty tab, running, no clients yet.
 fn new_session(id: String, name: String) -> Session {
     Session {
         id,
         name,
-        created: MOCK_CREATED_TODAY.to_string(),
         status: SessionStatus::Running,
         backend: SessionBackend::Zellij,
         layout: LayoutSummary {
             tabs: 1,
             panes: 1,
-            clients: 0,
+            third: ThirdMetric::Clients(0),
             preview: Vec::new(),
         },
     }
@@ -236,6 +216,9 @@ impl SessionsRepository for MockSessionsRepository {
 mod tests {
     use super::*;
 
+    /// How many sessions [`seed`] ships — the redesign's three cards.
+    const SEEDED_COUNT: usize = 3;
+
     /// Drive one repository call to completion on a current-thread runtime —
     /// these are pure data-layer tests, with no frust runtime in play.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
@@ -247,25 +230,34 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_has_four_sessions_with_varied_layouts() {
+    fn the_seed_is_the_redesigns_three_cards_verbatim() {
         let repo = MockSessionsRepository::seeded();
         let sessions = block_on(repo.list_sessions()).expect("the mock never fails to list");
 
-        assert_eq!(sessions.len(), 4);
-        let tabs: Vec<u32> = sessions.iter().map(|s| s.layout.tabs).collect();
-        let panes: Vec<u32> = sessions.iter().map(|s| s.layout.panes).collect();
-        assert!(
-            tabs.iter().collect::<std::collections::HashSet<_>>().len() > 1,
-            "the seeded tab counts vary: {tabs:?}"
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["dev", "jumping-peach", "herdr"]);
+
+        // Card 1 — running zellij, two pane pills, a client count.
+        assert!(sessions[0].status.is_live());
+        assert_eq!(sessions[0].backend, SessionBackend::Zellij);
+        assert_eq!(sessions[0].layout.panes, 9);
+        assert_eq!(sessions[0].layout.tabs, 4);
+        assert_eq!(sessions[0].layout.third, ThirdMetric::Clients(0));
+        assert_eq!(
+            sessions[0].layout.preview,
+            vec!["btop".to_string(), "ed@precision:~".to_string()]
         );
-        assert!(
-            panes.iter().collect::<std::collections::HashSet<_>>().len() > 1,
-            "the seeded pane counts vary: {panes:?}"
-        );
-        assert!(
-            sessions.iter().any(|s| !s.status.is_live()),
-            "at least one seeded session is idle, so the dimmed card is reachable"
-        );
+
+        // Card 2 — idle: no pills at all, and a saved-tab count instead.
+        assert!(!sessions[1].status.is_live());
+        assert!(sessions[1].layout.preview.is_empty());
+        assert_eq!(sessions[1].layout.third, ThirdMetric::TabsSaved(0));
+
+        // Card 3 — herdr, which counts spaces rather than clients.
+        assert_eq!(sessions[2].backend, SessionBackend::Herdr);
+        assert_eq!(sessions[2].layout.third, ThirdMetric::Spaces(5));
+        assert_eq!(sessions[2].layout.panes, 3);
+        assert_eq!(sessions[2].layout.tabs, 2);
     }
 
     #[test]
@@ -276,7 +268,7 @@ mod tests {
 
         assert_eq!(created.name, "staging");
         let sessions = repo.snapshot();
-        assert_eq!(sessions.len(), 5);
+        assert_eq!(sessions.len(), SEEDED_COUNT + 1);
         assert_eq!(
             sessions.last().map(|s| s.id.as_str()),
             Some(created.id.as_str())
@@ -293,7 +285,7 @@ mod tests {
         let failure = block_on(repo.create_session("   ".to_string())).expect_err("blank rejected");
 
         assert!(matches!(failure, AppFailure::Internal(_)));
-        assert_eq!(repo.snapshot().len(), 4, "nothing was appended");
+        assert_eq!(repo.snapshot().len(), SEEDED_COUNT, "nothing was appended");
     }
 
     #[test]
@@ -326,7 +318,7 @@ mod tests {
         .expect_err("an unknown id is a bug, and reports as one");
 
         assert!(matches!(failure, AppFailure::Internal(_)));
-        assert_eq!(repo.snapshot().len(), 4);
+        assert_eq!(repo.snapshot().len(), SEEDED_COUNT);
     }
 
     #[test]
@@ -335,14 +327,14 @@ mod tests {
         block_on(repo.kill_session("s-2".to_string())).expect("kill succeeds");
 
         let sessions = repo.snapshot();
-        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions.len(), SEEDED_COUNT - 1);
         assert!(sessions.iter().all(|s| s.id != "s-2"));
     }
 
     #[test]
     fn killing_every_session_empties_the_store() {
         let repo = MockSessionsRepository::seeded();
-        for id in ["s-1", "s-2", "s-3", "s-4"] {
+        for id in ["s-1", "s-2", "s-3"] {
             block_on(repo.kill_session(id.to_string())).expect("kill succeeds");
         }
 
@@ -355,6 +347,6 @@ mod tests {
         let failure = block_on(repo.kill_session("nope".to_string())).expect_err("unknown id");
 
         assert!(matches!(failure, AppFailure::Internal(_)));
-        assert_eq!(repo.snapshot().len(), 4);
+        assert_eq!(repo.snapshot().len(), SEEDED_COUNT);
     }
 }

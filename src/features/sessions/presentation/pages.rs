@@ -9,28 +9,56 @@
 //! parity), and whose `build` is pure arrangement over
 //! [`super::pieces`]' elements.
 //!
+//! # The screen's three bands
+//!
+//! ```text
+//! ┌─────────────────────────────┐
+//! │ ▪▪ muxr   100.71.31.57   ⚙  │  ui::topbar — brand, host, settings
+//! ├─────────────────────────────┤
+//! │ ● 100.71.31.57:50051  …     │  .conn-row — FIXED, outside the scroll
+//! ├─────────────────────────────┤
+//! │ ┃ D  dev      running zellij│  the scrolling list: cards, the offer
+//! │ ┃ ▣ 9 panes ◧ 4 tabs ◎ 0 …  │  banner, and the dashed new-session row
+//! │ + new session (dashed)      │
+//! └─────────────────────────────┘
+//! ```
+//!
+//! The strip is deliberately **not** a list item: it describes the connection
+//! the list belongs to, so scrolling the list must not scroll it away
+//! (`docs/redesign.html` puts it outside `.scroll` for the same reason). The
+//! page tone behind both is `--bg-base`, painted by the screen: the shell
+//! clears to `--bg-surface`, which is the *card* tone, so a screen that painted
+//! no background would render cards with no visible edge at all.
+//!
+//! # Interaction model
+//!
+//! There are no per-card buttons. **Tap a card to attach** (`/terminal`);
+//! **long-press it for the management sheet** (Attach / Rename… / Kill…), which
+//! is where the two dialogs are reached from. Create has exactly two entry
+//! points — the dashed row at the end of the list, and the empty state — since
+//! the stock app bar (and the `+` and `Switch` actions it carried) is gone.
+//!
 //! # What lives where
 //!
 //! - **Observed state** (the session list, its loaded flag) is the hosted
 //!   controller's signals; **app-scoped** state (the connection's server info
 //!   and credential offer) is [`crate::connection`]'s controller, resolved
-//!   from context. [`SessionsState`] itself holds neither — only the three
-//!   handles, plus the navigator this screen pushes through.
-//! - **Every push this screen makes** — the terminal route, the two dialogs,
-//!   the picker sheet — goes through the same [`NavigatorController`] the
-//!   route builder handed in, and pauses the controller's mock poll first
-//!   (see [`SessionsController`]'s module docs for why that pause has to be
-//!   explicit).
+//!   from context. [`SessionsState`] itself holds neither — only [`Actions`]'
+//!   three handles plus the connection.
+//! - **Every push this screen makes** — the terminal route, `/settings`, the
+//!   two dialogs, the management sheet — goes through [`Actions`], and pauses
+//!   the controller's mock poll first (see [`SessionsController`]'s module docs
+//!   for why that pause has to be explicit).
 //!
 //! # The component state boundary, and what it means for callbacks
 //!
 //! A `Component`'s subtree is bound to its own `State`, so this screen's own
-//! buttons take `&mut SessionsState`. The **overlays** it pushes are a
+//! gestures take `&mut SessionsState`. The **overlays** it pushes are a
 //! different story: a dialog/sheet is a page on the *app's* navigator, so its
 //! callbacks receive `&mut AppState` and can't see [`SessionsState`] at all.
-//! That is exactly why every overlay callback here captures an
-//! `Arc<SessionsController>` and acts through it — the controller is the
-//! shared object on both sides of the boundary.
+//! That is exactly why every action lives on [`Actions`] — a small clonable
+//! bundle of handles that a sheet row can capture and act through, with the
+//! same method body serving both sides of the boundary.
 //!
 //! # Navigating to `/terminal`
 //!
@@ -38,7 +66,7 @@
 //! *paths* (and runs the guard attached to it), and the app's one `Router`
 //! lives in `AppState` — on the far side of the component boundary above. So
 //! the composition root publishes it as [`crate::routes::Nav`], which this
-//! screen resolves once in [`Component::init`] and keeps in [`SessionsState`];
+//! screen resolves once in [`Component::init`] and keeps in [`Actions`];
 //! [`push_terminal`] is the one place that spells the location. Every push
 //! therefore runs the app's real table and its real (capture-based, owner-free)
 //! session guard.
@@ -47,11 +75,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener, use_interval};
-use frust::glyph::app_bar;
 use frust::{
-    AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    Get, NavigatorController, Padding, SizedBox, any, button, component, flexible, inflexible,
-    safe_area, scroll_view, spawn_local,
+    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
+    NavigatorController, Padding, SizedBox, any, component, flexible, inflexible, safe_area,
+    scroll_view, spawn_local,
 };
 
 use crate::AppState;
@@ -62,6 +89,7 @@ use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
+use crate::ui::topbar::muxr_topbar;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
 use super::pieces;
@@ -74,14 +102,23 @@ use super::pieces;
 const TERMINAL_ROUTE: &str = "/terminal";
 /// The query key [`TERMINAL_ROUTE`] carries the session id under.
 const SESSION_QUERY_KEY: &str = "session";
+/// Where the top bar's trailing icon goes.
+const SETTINGS_ROUTE: &str = "/settings";
+/// …and the glyph it wears (`.topbar-icon`'s `⚙`).
+const SETTINGS_GLYPH: &str = "\u{2699}";
+/// The top bar's title while no connection is up — unreachable behind the
+/// session guard, but the bar always has a title slot to fill.
+const DISCONNECTED_TITLE: &str = "muxrd";
 
 /// `.sessions-list{padding:14px 16px}`.
 const LIST_PAD_X: f64 = 16.0;
 const LIST_PAD_Y: f64 = 14.0;
 /// `.sessions-list{gap:12px}` — between consecutive list children.
 const LIST_GAP: f64 = 12.0;
-/// The gap between the picker sheet's heading and its rows.
+/// The gap between the management sheet's heading and its rows, and between
+/// the rows themselves.
 const SHEET_GAP: f64 = 14.0;
+const SHEET_ROW_GAP: f64 = 4.0;
 
 /// The Sessions screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that
@@ -97,19 +134,33 @@ pub struct SessionsScreen {
     nav: NavigatorController<AppState>,
 }
 
-/// The Sessions screen's retained state: four handles and nothing else.
+/// The Sessions screen's retained state: the action bundle and the app-scoped
+/// connection handle, and nothing else.
 pub struct SessionsState {
+    /// Everything this screen can *do*, and the handles it needs to do it —
+    /// see [`Actions`].
+    pub actions: Actions,
+    /// The app-scoped connection handle, for the strip, the top bar's title
+    /// and the credential offer (see [`crate::connection`]).
+    pub connection: Arc<ConnectionController>,
+}
+
+/// Every navigation this screen performs, plus the three handles they need.
+///
+/// Cloneable on purpose: a card's gesture reaches these through
+/// `&mut SessionsState`, while a *sheet row* — a page on the app's navigator,
+/// which only ever sees `&mut AppState` — captures a clone and calls the very
+/// same method. One body, both sides of the component boundary.
+#[derive(Clone)]
+pub struct Actions {
     /// The app's navigator — every page *builder* this screen pushes (the two
-    /// dialogs, the picker sheet) goes through it.
+    /// dialogs, the management sheet) goes through it.
     pub nav: NavigatorController<AppState>,
-    /// The app's one path-pushing handle — how this screen reaches
-    /// `/terminal` (see the module docs' navigation note).
+    /// The app's one path-pushing handle — how this screen reaches `/terminal`
+    /// and `/settings` (see the module docs' navigation note).
     pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SessionsController>,
-    /// The app-scoped connection handle, for the server strip and the
-    /// credential offer (see [`crate::connection`]).
-    pub connection: Arc<ConnectionController>,
 }
 
 impl Component for SessionsScreen {
@@ -147,11 +198,13 @@ impl Component for SessionsScreen {
         });
 
         SessionsState {
-            nav: self.nav.clone(),
-            // Resolved here, with every other app-scoped dependency — never
-            // from inside a press handler.
-            app_nav: app_nav(),
-            controller,
+            actions: Actions {
+                nav: self.nav.clone(),
+                // Resolved here, with every other app-scoped dependency —
+                // never from inside a press handler.
+                app_nav: app_nav(),
+                controller,
+            },
             connection: expect_connection_controller(),
         }
     }
@@ -160,52 +213,71 @@ impl Component for SessionsScreen {
         // Page-driven poll resume (see `SessionsController`'s module docs).
         // A plain atomic, deliberately not a signal: a tracked write here
         // would re-dirty the very frame that made it.
-        state.controller.observe_depth(state.nav.depth());
+        state
+            .actions
+            .controller
+            .observe_depth(state.actions.nav.depth());
 
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.
-        let sessions = state.controller.sessions.get();
-        let loaded = state.controller.loaded.get();
+        let sessions = state.actions.controller.sessions.get();
+        let loaded = state.actions.controller.loaded.get();
         let offer = state.connection.credential_offer.get();
         let info = state.connection.server_info.get();
 
-        let mut children = vec![pieces::server_strip(info.as_ref())];
+        let theme = pieces::active_theme();
+        let colors = pieces::palette(&theme);
+
+        // The scrolling half: the offer banner (when there is one), then either
+        // the empty state or every card plus the dashed create row.
+        let mut list = Vec::new();
         if let Some(label) = &offer {
-            children.push(pieces::credential_banner(label));
+            list.push(pieces::credential_banner(label));
         }
         if loaded && sessions.is_empty() {
-            children.push(pieces::empty_view());
+            list.push(pieces::empty_view());
         } else {
-            children.extend(sessions.iter().map(pieces::session_card));
-            children.push(pieces::new_session_row());
+            list.extend(
+                sessions
+                    .iter()
+                    .map(|session| pieces::session_card(session, &colors)),
+            );
+            list.push(pieces::new_session_row(&colors));
         }
 
-        let bar = app_bar::<SessionsState>("Sessions").actions(vec![
-            any(
-                button("Switch", |state: &mut SessionsState| open_picker(state))
-                    .style(ButtonStyle::Ghost)
-                    .small(),
-            ),
-            any(
-                button("+", |state: &mut SessionsState| open_create_dialog(state))
-                    .style(ButtonStyle::Primary)
-                    .small(),
-            ),
-        ]);
+        let title = info
+            .as_ref()
+            .map(|info| pieces::host_of(&info.endpoint).to_string())
+            .unwrap_or_else(|| DISCONNECTED_TITLE.to_string());
+        let bar = muxr_topbar::<SessionsState>(title)
+            .action(SETTINGS_GLYPH, |state: &mut SessionsState| {
+                state.actions.open_settings()
+            });
 
-        // The bar consumes the top window inset itself (`glyph::app_bar`'s own
+        // The bar consumes the top window inset itself (`ui::topbar`'s own
         // module docs), so the body's safe area disables its top edge to avoid
-        // double-padding it — the same composition the placeholder this screen
-        // replaced used.
-        let body = any(safe_area(scroll_view(Padding(
+        // double-padding it.
+        let scroller = any(safe_area(scroll_view(Padding(
             EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
-            FlexView::new(Axis::Vertical, gapped(children)).cross_axis(CrossAxisAlignment::Stretch),
+            FlexView::new(Axis::Vertical, gapped(list)).cross_axis(CrossAxisAlignment::Stretch),
         )))
         .top(false));
+        let page = pieces::page_tone(
+            FlexView::new(
+                Axis::Vertical,
+                vec![
+                    inflexible(pieces::server_strip(info.as_ref(), &colors)),
+                    flexible(1, scroller),
+                ],
+            )
+            .cross_axis(CrossAxisAlignment::Stretch),
+            &colors,
+        );
         any(FlexView::new(
             Axis::Vertical,
-            vec![inflexible(any(bar)), flexible(1, body)],
-        ))
+            vec![inflexible(any(bar)), flexible(1, page)],
+        )
+        .cross_axis(CrossAxisAlignment::Stretch))
     }
 }
 
@@ -225,123 +297,196 @@ fn gapped(views: Vec<AnyView<SessionsState>>) -> Vec<FlexChild<SessionsState>> {
 // Actions (each one a push, so each one pauses the poll first)
 // ---------------------------------------------------------------------------
 
-/// Pause the mock poll for whatever this screen is about to push, marking the
-/// depth to resume at. See [`SessionsController`]'s module docs.
-fn pause_for_push(state: &SessionsState) {
-    state.controller.pause_until_depth(state.nav.depth());
-}
+impl Actions {
+    /// Pause the mock poll for whatever is about to be pushed, marking the
+    /// depth to resume at. See [`SessionsController`]'s module docs.
+    fn pause_for_push(&self) {
+        self.controller.pause_until_depth(self.nav.depth());
+    }
 
-/// Attach to `id`: push the `/terminal` route, carrying the session id as a
-/// query param.
-pub(super) fn attach(state: &mut SessionsState, id: &str) {
-    pause_for_push(state);
-    push_terminal(&state.app_nav, id);
-}
+    /// Attach to `id`: push the `/terminal` route, carrying the session id as
+    /// a query param. A card tap and the management sheet's own Attach row
+    /// both land here.
+    pub fn attach(&self, id: &str) {
+        self.pause_for_push();
+        push_terminal(&self.app_nav, id);
+    }
 
-/// Open the create-session dialog (the app bar's `+`, the list's
-/// "+ new session" row, and the empty state's action all land here).
-pub(super) fn open_create_dialog(state: &mut SessionsState) {
-    pause_for_push(state);
-    let controller = Arc::clone(&state.controller);
-    name_input_dialog(
-        &state.nav,
-        "New session",
-        "",
-        move |_app: &mut AppState, name: String| {
-            let handle = Arc::clone(&controller);
-            spawn_local(async move { handle.create(name).await });
-        },
-    );
-}
+    /// Open `/settings` — the top bar's `⚙`.
+    pub fn open_settings(&self) {
+        self.pause_for_push();
+        self.app_nav.push(SETTINGS_ROUTE);
+    }
 
-/// Open the rename dialog for `id`, seeded with that session's *current*
-/// name — re-read from the controller rather than captured, so a card built
-/// several frames ago can't seed a stale name.
-pub(super) fn open_rename_dialog(state: &mut SessionsState, id: &str) {
-    let Some(session) = state.controller.session(id) else {
-        // The card was built from a list that no longer holds this session
-        // (a poll landed between paint and tap). Nothing to rename.
-        return;
-    };
-    pause_for_push(state);
-    let controller = Arc::clone(&state.controller);
-    let id = id.to_string();
-    name_input_dialog(
-        &state.nav,
-        "Rename session",
-        session.name,
-        move |_app: &mut AppState, name: String| {
-            let handle = Arc::clone(&controller);
-            let id = id.clone();
-            spawn_local(async move { handle.rename(id, name).await });
-        },
-    );
-}
+    /// Open the create-session dialog (the dashed row and the empty state's
+    /// action both land here).
+    pub fn open_create_dialog(&self) {
+        self.pause_for_push();
+        let controller = Arc::clone(&self.controller);
+        name_input_dialog(
+            &self.nav,
+            "New session",
+            "",
+            move |_app: &mut AppState, name: String| {
+                let handle = Arc::clone(&controller);
+                spawn_local(async move { handle.create(name).await });
+            },
+        );
+    }
 
-/// Open the kill confirmation for `id`.
-pub(super) fn open_kill_dialog(state: &mut SessionsState, id: &str) {
-    pause_for_push(state);
-    let controller = Arc::clone(&state.controller);
-    let id = id.to_string();
-    confirm_dialog(
-        &state.nav,
-        "Kill session?",
-        "Any attached client is disconnected immediately.",
-        "Kill",
-        move |_app: &mut AppState| {
-            let handle = Arc::clone(&controller);
-            let id = id.clone();
-            spawn_local(async move { handle.kill(id).await });
-        },
-    );
-}
+    /// Open the rename dialog for `id`, seeded with that session's *current*
+    /// name — re-read from the controller rather than captured, so a sheet
+    /// opened several frames ago can't seed a stale name.
+    pub fn open_rename_dialog(&self, id: &str) {
+        let Some(session) = self.controller.session(id) else {
+            // The card was built from a list that no longer holds this session
+            // (a poll landed between paint and tap). Nothing to rename.
+            return;
+        };
+        self.pause_for_push();
+        let controller = Arc::clone(&self.controller);
+        let id = id.to_string();
+        name_input_dialog(
+            &self.nav,
+            "Rename session",
+            session.name,
+            move |_app: &mut AppState, name: String| {
+                let handle = Arc::clone(&controller);
+                let id = id.clone();
+                spawn_local(async move { handle.rename(id, name).await });
+            },
+        );
+    }
 
-/// Open the session-picker sheet: the same list in one line per row, as a
-/// modal bottom sheet (`ui::sheet`, itself a documented workaround for the
-/// missing Glyph sheet widget). Selecting a row pops the sheet and takes the
-/// *same* attach path a card's Attach button does.
-pub(super) fn open_picker(state: &mut SessionsState) {
-    pause_for_push(state);
-    let controller = Arc::clone(&state.controller);
-    let nav = state.nav.clone();
-    let app_nav = state.app_nav.clone();
-    show_sheet(&state.nav, move || {
-        // Tracked read inside the sheet's page builder — the navigator re-runs
-        // it every rebuild, so a session killed behind the sheet drops out of
-        // it on the next frame.
-        let sessions = controller.sessions.get();
-        let row_nav = nav.clone();
-        let row_app_nav = app_nav.clone();
-        let rows = pieces::picker_rows(&sessions, move |id| {
-            // Pop the sheet, then push the terminal route: both ops land in
-            // the same drain, so the stack goes sheet → terminal in one
-            // rebuild. The poll stays paused throughout (the mark taken when
-            // the sheet opened is shallower than either depth). Both handles
-            // drive the same navigator — the pop is a stack op, the push is a
-            // guarded path resolution.
-            row_nav.pop();
-            push_terminal(&row_app_nav, id);
-        });
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(pieces::picker_heading(sessions.len())),
+    /// Open the kill confirmation for `id`.
+    pub fn open_kill_dialog(&self, id: &str) {
+        self.pause_for_push();
+        let controller = Arc::clone(&self.controller);
+        let id = id.to_string();
+        confirm_dialog(
+            &self.nav,
+            "Kill session?",
+            "Any attached client is disconnected immediately.",
+            "Kill",
+            move |_app: &mut AppState| {
+                let handle = Arc::clone(&controller);
+                let id = id.clone();
+                spawn_local(async move { handle.kill(id).await });
+            },
+        );
+    }
+
+    /// Open the per-session management sheet — what a **long-press** on a card
+    /// raises, and the only route to rename/kill now that the card carries no
+    /// buttons.
+    ///
+    /// Each row pops the sheet first and then does its work, so the stack goes
+    /// sheet → dialog (or sheet → `/terminal`) in one rebuild: both ops land in
+    /// the same drain, and the poll stays paused throughout, since the mark
+    /// taken when the sheet opened is shallower than either depth.
+    pub fn open_manage_sheet(&self, id: &str) {
+        let Some(session) = self.controller.session(id) else {
+            return;
+        };
+        self.pause_for_push();
+        let actions = self.clone();
+        let name = session.name;
+        let id = id.to_string();
+        show_sheet(&self.nav, move || {
+            let heading = pieces::sheet_heading(name.clone());
+            let rows = [
+                sheet_action(&actions, &id, ManageAction::Attach),
+                sheet_action(&actions, &id, ManageAction::Rename),
+                sheet_action(&actions, &id, ManageAction::Kill),
+            ];
+            let mut children = vec![
+                inflexible(heading),
                 inflexible(SizedBox::<AppState>(None, Some(SHEET_GAP))),
-                inflexible(rows),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
-    });
+            ];
+            for (index, row) in rows.into_iter().enumerate() {
+                if index > 0 {
+                    children.push(inflexible(SizedBox::<AppState>(None, Some(SHEET_ROW_GAP))));
+                }
+                children.push(inflexible(row));
+            }
+            any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+        });
+    }
+}
+
+/// The three things the management sheet can do to a session.
+#[derive(Clone, Copy)]
+enum ManageAction {
+    Attach,
+    Rename,
+    Kill,
+}
+
+impl ManageAction {
+    /// The row's label. The two that push a dialog carry the platform ellipsis
+    /// convention ("more input needed"); Attach acts immediately.
+    fn label(self) -> &'static str {
+        match self {
+            ManageAction::Attach => "Attach",
+            ManageAction::Rename => "Rename\u{2026}",
+            ManageAction::Kill => "Kill\u{2026}",
+        }
+    }
+
+    /// Whether the row is the destructive one.
+    fn destructive(self) -> bool {
+        matches!(self, ManageAction::Kill)
+    }
+}
+
+/// One management-sheet row, wired to `action` for session `id`.
+fn sheet_action(actions: &Actions, id: &str, action: ManageAction) -> AnyView<AppState> {
+    let actions = actions.clone();
+    let id = id.to_string();
+    pieces::sheet_row(
+        action.label(),
+        action.destructive(),
+        move |_app: &mut AppState| {
+            // Close the sheet first: the dialog (or the terminal route) takes its
+            // place in the same rebuild — see `open_manage_sheet`'s docs.
+            actions.nav.pop();
+            match action {
+                ManageAction::Attach => actions.attach(&id),
+                ManageAction::Rename => actions.open_rename_dialog(&id),
+                ManageAction::Kill => actions.open_kill_dialog(&id),
+            }
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The screen-state shims the pieces' own callbacks call
+// ---------------------------------------------------------------------------
+
+/// Attach to `id` — a card tap.
+pub(super) fn attach(state: &mut SessionsState, id: &str) {
+    state.actions.attach(id);
+}
+
+/// Open the create-session dialog — the dashed row and the empty state.
+pub(super) fn open_create_dialog(state: &mut SessionsState) {
+    state.actions.open_create_dialog();
+}
+
+/// Open the management sheet for `id` — a card long-press.
+pub(super) fn open_manage_sheet(state: &mut SessionsState, id: &str) {
+    state.actions.open_manage_sheet(id);
 }
 
 /// Push the `/terminal` route for session `id` onto the app's page stack,
 /// through the app's one guarded [`Nav`] handle.
 ///
-/// The one place this location is spelled — both attach paths (a card's Attach
-/// button and a picker row) come through here, so the format and the guarded
-/// route they resolve against cannot drift apart. The push runs the app's real
-/// route table with its real session guard applied, so an unauthenticated
-/// attach bounces to `/` exactly as a deep link to `/terminal` would.
+/// The one place this location is spelled — both attach paths (a card tap and
+/// the management sheet's Attach row) come through here, so the format and the
+/// guarded route they resolve against cannot drift apart. The push runs the
+/// app's real route table with its real session guard applied, so an
+/// unauthenticated attach bounces to `/` exactly as a deep link to `/terminal`
+/// would.
 fn push_terminal(nav: &Nav, id: &str) {
     nav.push(&format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}"));
 }
@@ -363,5 +508,28 @@ mod tests {
             loc.query.get(SESSION_QUERY_KEY).map(String::as_str),
             Some("s-1")
         );
+    }
+
+    #[test]
+    fn the_management_sheet_offers_exactly_three_rows_one_of_them_destructive() {
+        let labels: Vec<&str> = [
+            ManageAction::Attach,
+            ManageAction::Rename,
+            ManageAction::Kill,
+        ]
+        .into_iter()
+        .map(ManageAction::label)
+        .collect();
+        assert_eq!(labels, ["Attach", "Rename\u{2026}", "Kill\u{2026}"]);
+        assert!(!ManageAction::Attach.destructive());
+        assert!(!ManageAction::Rename.destructive());
+        assert!(ManageAction::Kill.destructive());
+    }
+
+    #[test]
+    fn the_settings_route_is_the_apps_own() {
+        // The top bar's ⚙ pushes a *route*, so it runs the real table (and its
+        // guard). `/settings` is deliberately unguarded — see `crate::routes`.
+        assert_eq!(frust::Location::parse(SETTINGS_ROUTE).path, SETTINGS_ROUTE);
     }
 }
