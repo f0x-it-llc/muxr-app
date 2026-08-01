@@ -140,6 +140,17 @@ pub enum BarAction {
     /// `/settings`, which is why it lives in route metadata rather than on the
     /// Sessions screen (which no longer owns a bar at all).
     Settings,
+    /// `⋮` — opens the terminal screen's overflow menu (Panes & tabs / Rename
+    /// session / Detach session).
+    ///
+    /// `docs/terminal.html` v2 moved that menu off the terminal's own head row
+    /// and onto the **app** bar, which is why it is route metadata; the menu
+    /// itself still belongs to the feature, so `crate::shell` only forwards the
+    /// press to
+    /// [`open_terminal_menu`](crate::features::terminal::presentation::pages::open_terminal_menu)
+    /// (the same shell-forwards/feature-owns split the `⚙` follows in the
+    /// other direction).
+    TerminalMenu,
 }
 
 /// Everything the shell's persistent top bar needs to render one route.
@@ -192,7 +203,7 @@ pub fn route_meta(path: &str) -> Option<RouteMeta> {
         "/terminal" => Some(RouteMeta {
             title: BarTitle::Fixed("terminal"),
             leading: BarLeading::Back,
-            action: None,
+            action: Some(BarAction::TerminalMenu),
         }),
         SETTINGS_ROUTE => Some(RouteMeta {
             title: BarTitle::Fixed("server settings"),
@@ -237,6 +248,22 @@ pub struct BarState {
     /// *above* the navigator, so without this it stayed lit and tappable under
     /// an open sheet.
     pub overlay_active: bool,
+    /// Whether the route on top has asked the bar to get out of the way
+    /// entirely — the terminal screen's **fullscreen** state, published
+    /// through [`Nav::set_fullscreen`].
+    ///
+    /// A *second input to the bar's existing hidden flag*, not a second hide
+    /// mechanism: `crate::shell` ORs this with "this route has no bar at all"
+    /// and hands the sum to [`crate::ui::topbar::TopBarView::hidden`], so the
+    /// bar plays exactly the reveal it already plays when leaving a titled
+    /// route for `/`. It rides here rather than in [`RouteMeta`] because it is
+    /// per-*screen-state*, not per-route: the same `/terminal` is both
+    /// fullscreen and not over its lifetime.
+    ///
+    /// The screen clears it on unmount (its `Component`'s `on_cleanup`), which
+    /// is what stops a back-nav out of fullscreen from stranding a hidden bar
+    /// on the route below.
+    pub fullscreen: bool,
 }
 
 /// The page transition **every** path navigation through [`Nav`] carries: the
@@ -283,6 +310,8 @@ struct NavState {
     /// [`Nav::push`] reads a depth that is too *shallow*, which answers
     /// `false` and needs no help.)
     pending_pop: bool,
+    /// The query of the most recent path navigation — see [`Nav::param`].
+    query: RouteParams,
 }
 
 impl NavState {
@@ -320,13 +349,16 @@ impl NavState {
         !self.pending_pop && live > self.route_depth()
     }
 
-    /// The current bar state: the deepest recorded entry's metadata, plus
-    /// whether `live` shows an overlay above it.
-    fn bar(&self, live: usize) -> BarState {
+    /// The current bar state: the deepest recorded entry's metadata, whether
+    /// `live` shows an overlay above it, and the topmost screen's
+    /// `fullscreen` request (which lives outside this mirror — see
+    /// [`Nav::fullscreen`]).
+    fn bar(&self, live: usize, fullscreen: bool) -> BarState {
         BarState {
             meta: self.stack.last().and_then(|(_, meta)| *meta),
             direction: self.direction,
             overlay_active: self.overlay_active(live),
+            fullscreen,
         }
     }
 }
@@ -349,6 +381,35 @@ pub struct Nav {
     /// The mirror's published, trackable face — what wakes the shell's rebuild
     /// when a navigation retitles the bar.
     current: RwSignal<BarState>,
+    /// The topmost screen's fullscreen request — see [`BarFullscreen`]. A
+    /// signal of its own rather than a [`NavState`] field precisely because it
+    /// is the one piece of bar state a screen must be able to clear from a
+    /// `Send + Sync` context (see that type's docs).
+    fullscreen: RwSignal<bool>,
+}
+
+/// A `Send + Sync` handle to just the bar's fullscreen flag — see
+/// [`BarState::fullscreen`].
+///
+/// [`Nav`] itself is `Rc`-backed and so can be captured by neither
+/// [`frust::on_cleanup`] nor anything else `Send + Sync`-bounded, and clearing
+/// this flag on unmount is exactly a cleanup's job (a screen that left
+/// fullscreen set would strand a hidden bar on the route it popped back to).
+/// An [`RwSignal`] *is* `Send + Sync + Copy`, so the flag lives in one and this
+/// hands out a named, single-purpose face of it rather than the raw signal.
+///
+/// Writing it wakes the shell's rebuild on its own: [`Nav::bar`] reads it
+/// **tracked** every frame, which is the whole subscription.
+#[derive(Clone, Copy)]
+pub struct BarFullscreen(RwSignal<bool>);
+
+impl BarFullscreen {
+    /// Ask the bar to animate away (`true`) or come back (`false`).
+    pub fn set(self, fullscreen: bool) {
+        if self.0.get_untracked() != fullscreen {
+            self.0.set(fullscreen);
+        }
+    }
 }
 
 impl Nav {
@@ -374,7 +435,7 @@ impl Nav {
                 self.router
                     .controller()
                     .push_with(move || leaf.build(), route_transition());
-                self.record_push(&location.path);
+                self.record_push(&location);
             }
             Resolution::Error { .. } => self.router.push(location),
         }
@@ -394,18 +455,21 @@ impl Nav {
     /// `handle_location` the splash hands off over — which must not animate.
     pub fn go(&self, location: &str) {
         self.router.go(location);
-        let meta = match self.router.resolve(location) {
-            Resolution::Matched { location, .. } => route_meta(&location.path),
-            Resolution::Error { .. } => None,
+        let (meta, query) = match self.router.resolve(location) {
+            Resolution::Matched { location, .. } => {
+                (route_meta(&location.path), location.query.clone())
+            }
+            Resolution::Error { .. } => (None, RouteParams::new()),
         };
         let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
         state.stack = vec![(1, meta)];
+        state.query = query;
         state.direction = BarDirection::Forward;
         // A `go` resets the whole stack, so nothing survives above the route
         // it lands on — including the staleness a queued pop would leave.
         state.pending_pop = false;
-        let bar = state.bar(live.min(1));
+        let bar = state.bar(live.min(1), self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -428,7 +492,7 @@ impl Nav {
         // `NavState::pending_pop`).
         state.pending_pop = true;
         let live = state.route_depth();
-        let bar = state.bar(live);
+        let bar = state.bar(live, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -451,9 +515,13 @@ impl Nav {
     /// that from waking a rebuild per frame.
     pub fn bar(&self) -> BarState {
         let live = self.router.controller().depth();
+        // Tracked, like `current` below: this is the *only* subscription the
+        // fullscreen flag has, and it is what makes a screen's
+        // `set_fullscreen` wake the rebuild that animates the bar away.
+        let fullscreen = self.fullscreen.get();
         let mut state = self.state.borrow_mut();
         state.reconcile(live);
-        let reconciled = state.bar(live);
+        let reconciled = state.bar(live, fullscreen);
         drop(state);
         self.publish(reconciled);
         self.current.get()
@@ -467,15 +535,45 @@ impl Nav {
     /// applies its op (so two pushes in one frame would otherwise record the
     /// same depth), while the mirror alone cannot see the transparent pages
     /// pushed straight through the controller.
-    fn record_push(&self, path: &str) {
+    fn record_push(&self, location: &Location) {
         let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
         let deepest = state.route_depth().max(live);
-        state.stack.push((deepest + 1, route_meta(path)));
+        state.stack.push((deepest + 1, route_meta(&location.path)));
         state.direction = BarDirection::Forward;
-        let bar = state.bar(live);
+        state.query = location.query.clone();
+        let bar = state.bar(live, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
+    }
+
+    /// The `?key=…` value the most recent path navigation carried, if any.
+    ///
+    /// **Read it in a screen's `Component::init`, and nowhere else.** A route
+    /// builder receives only the *path* params
+    /// ([`RouteParams`] captured from `:segment`s) — frust's own
+    /// `ResolvedPage` never carries the query through to it, so a route like
+    /// `/terminal?session=s-1` cannot read its own parameter the ordinary way
+    /// (a framework gap, filed). This is the app-side answer, and it is exact
+    /// precisely at `init` time: a page is built during the very push that
+    /// recorded it, so "the most recent navigation" *is* this screen's own.
+    /// Read later — after another push landed — it would answer for that one
+    /// instead, which is why nothing else calls it.
+    pub fn param(&self, key: &str) -> Option<String> {
+        self.state.borrow().query.get(key).cloned()
+    }
+
+    /// The `Send + Sync` handle to the bar's fullscreen flag — what a screen
+    /// hands to its `on_cleanup`. See [`BarFullscreen`].
+    pub fn fullscreen(&self) -> BarFullscreen {
+        BarFullscreen(self.fullscreen)
+    }
+
+    /// Publish the topmost screen's fullscreen request to the shell's bar —
+    /// see [`BarState::fullscreen`]. Idempotent: re-setting the current value
+    /// wakes nothing.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        self.fullscreen().set(fullscreen);
     }
 
     /// Publish `bar` if it differs from what is already published — an
@@ -531,8 +629,10 @@ pub fn install_app_router(
                 last_seen_depth: 0,
                 direction: BarDirection::Forward,
                 pending_pop: false,
+                query: RouteParams::new(),
             })),
             current: RwSignal::new(BarState::default()),
+            fullscreen: RwSignal::new(false),
         });
     });
     router
@@ -704,14 +804,19 @@ mod tests {
     }
 
     #[test]
-    fn the_gear_lives_on_sessions_and_nowhere_else() {
+    fn the_gear_lives_on_sessions_and_the_kebab_on_the_terminal() {
         // `/settings` has exactly one entry point in the app, and since the
         // Sessions screen no longer owns a bar it has to be route metadata.
+        // `/terminal`'s `⋮` is there for the mirror-image reason: v2 of its
+        // mock moved the overflow menu onto the app bar.
         assert_eq!(
             route_meta("/sessions").and_then(|m| m.action),
             Some(BarAction::Settings)
         );
-        assert_eq!(route_meta("/terminal").and_then(|m| m.action), None);
+        assert_eq!(
+            route_meta("/terminal").and_then(|m| m.action),
+            Some(BarAction::TerminalMenu)
+        );
         assert_eq!(route_meta(SETTINGS_ROUTE).and_then(|m| m.action), None);
     }
 
@@ -736,6 +841,7 @@ mod tests {
             last_seen_depth,
             direction: BarDirection::Forward,
             pending_pop: false,
+            query: RouteParams::new(),
         }
     }
 
@@ -751,9 +857,9 @@ mod tests {
             3,
         );
         assert!(state.reconcile(2), "the /settings entry is dropped");
-        assert_eq!(state.bar(2).meta, route_meta("/sessions"));
+        assert_eq!(state.bar(2, false).meta, route_meta("/sessions"));
         assert_eq!(
-            state.bar(2).direction,
+            state.bar(2, false).direction,
             BarDirection::Back,
             "…and the bar crossfades backwards"
         );
@@ -769,10 +875,10 @@ mod tests {
         // reconciles.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 1);
         assert!(!state.reconcile(1), "nothing is dropped at a stale depth");
-        assert_eq!(state.bar(1).meta, route_meta("/sessions"));
+        assert_eq!(state.bar(1, false).meta, route_meta("/sessions"));
         // …and once the navigator applies it, the entry is still there.
         assert!(!state.reconcile(2));
-        assert_eq!(state.bar(2).meta, route_meta("/sessions"));
+        assert_eq!(state.bar(2, false).meta, route_meta("/sessions"));
     }
 
     #[test]
@@ -782,9 +888,9 @@ mod tests {
         // covered route's entry with it.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         assert!(!state.reconcile(3), "the sheet pushed depth to 3");
-        assert_eq!(state.bar(3).meta, route_meta("/sessions"));
+        assert_eq!(state.bar(3, false).meta, route_meta("/sessions"));
         assert!(!state.reconcile(2), "…and dismissing it drops nothing");
-        assert_eq!(state.bar(2).meta, route_meta("/sessions"));
+        assert_eq!(state.bar(2, false).meta, route_meta("/sessions"));
     }
 
     #[test]
@@ -793,7 +899,7 @@ mod tests {
         // (absent) metadata, so the bar hides rather than titling a route the
         // push never reached.
         let state = mirror(&[(2, route_meta(CONNECT_LOCATION))], 2);
-        assert_eq!(state.bar(2).meta, None);
+        assert_eq!(state.bar(2, false).meta, None);
     }
 
     // -----------------------------------------------------------------------
@@ -806,19 +912,19 @@ mod tests {
         // mirror entry, so the gap between the live depth and the deepest
         // recorded route IS "an overlay is up".
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
-        assert!(!state.bar(2).overlay_active, "no overlay at rest");
+        assert!(!state.bar(2, false).overlay_active, "no overlay at rest");
 
         state.reconcile(3);
-        assert!(state.bar(3).overlay_active, "the sheet dims the bar");
+        assert!(state.bar(3, false).overlay_active, "the sheet dims the bar");
         assert_eq!(
-            state.bar(3).meta,
+            state.bar(3, false).meta,
             route_meta("/sessions"),
             "…without retitling it"
         );
 
         state.reconcile(2);
         assert!(
-            !state.bar(2).overlay_active,
+            !state.bar(2, false).overlay_active,
             "dismissing it gives the bar back"
         );
     }
@@ -829,11 +935,11 @@ mod tests {
         // flag is a comparison, not a counter, so it simply stays set.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         state.reconcile(4);
-        assert!(state.bar(4).overlay_active);
+        assert!(state.bar(4, false).overlay_active);
         state.reconcile(3);
-        assert!(state.bar(3).overlay_active, "one is still up");
+        assert!(state.bar(3, false).overlay_active, "one is still up");
         state.reconcile(2);
-        assert!(!state.bar(2).overlay_active);
+        assert!(!state.bar(2, false).overlay_active);
     }
 
     #[test]
@@ -853,17 +959,17 @@ mod tests {
         state.stack.pop();
         state.pending_pop = true;
         assert!(
-            !state.bar(3).overlay_active,
+            !state.bar(3, false).overlay_active,
             "the stale depth is a queued pop, not a sheet"
         );
 
         // …and the moment the navigator applies it, depth is authoritative
         // again — including for a sheet opened right afterwards.
         state.reconcile(2);
-        assert!(!state.bar(2).overlay_active);
+        assert!(!state.bar(2, false).overlay_active);
         state.reconcile(3);
         assert!(
-            state.bar(3).overlay_active,
+            state.bar(3, false).overlay_active,
             "a real overlay still registers once the pop has landed"
         );
     }
@@ -871,8 +977,28 @@ mod tests {
     #[test]
     fn the_default_bar_state_is_lit_and_live() {
         // `BarState::default` seeds the published signal before the first
-        // navigation; a bar that started out flagged modal would be inert
-        // until something happened to clear it.
+        // navigation; a bar that started out flagged modal (or hidden) would
+        // be inert until something happened to clear it.
         assert!(!BarState::default().overlay_active);
+        assert!(!BarState::default().fullscreen);
+    }
+
+    #[test]
+    fn the_fullscreen_flag_is_orthogonal_to_the_route_it_rides_over() {
+        // The whole channel, as arithmetic: the flag changes *only* that
+        // field, so the bar keeps titling whatever route is on top and comes
+        // straight back when the screen clears it on unmount.
+        let state = mirror(&[(2, route_meta("/terminal"))], 2);
+        assert!(!state.bar(2, false).fullscreen);
+
+        let bar = state.bar(2, true);
+        assert!(bar.fullscreen);
+        assert_eq!(bar.meta, route_meta("/terminal"), "…without retitling");
+        assert!(!bar.overlay_active);
+
+        assert!(
+            !state.bar(2, false).fullscreen,
+            "unmount gives the bar back"
+        );
     }
 }
