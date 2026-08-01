@@ -522,8 +522,14 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
 /// caret-ing a field with nothing behind it. The live screen's copy stays
 /// enabled.
 pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+    // `.get()` returns the tracked `Zeroizing<String>` clone; `TextInputView`
+    // takes a plain `String` by value, so this copies it out into one. That
+    // transient render copy is the already-tracked #20/#31 display surface
+    // (obscured on screen, still reachable through the platform IME) — not a
+    // new leak `Zeroizing` needs to chase, since the render pass is what
+    // draws the field either way.
     let value = live
-        .map(|live| live.controller.token.get())
+        .map(|live| live.controller.token.get().as_str().to_owned())
         .unwrap_or_default();
     let controller = live.map(|live| Arc::clone(&live.controller));
     field(

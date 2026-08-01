@@ -145,4 +145,7 @@ runs the real table and guard.
 - Real `terminal`/`settings` screens, replacing today's placeholders.
 - QR-code pairing for host + token entry.
 - Secure credential storage.
+- The login-token field is cleared from memory on both connect and disconnect
+  today, but not yet masked against OS-level surfaces (IME suggestions,
+  recents capture) — that needs platform plumbing this app doesn't have yet.
 - Terminal grid rendering.
