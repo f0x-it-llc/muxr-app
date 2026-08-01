@@ -885,15 +885,28 @@ const SHADOW_ALPHA: f32 = 0.4;
 const BAR_PAD_X: f64 = 16.0;
 const BAR_SLOT: f64 = 30.0;
 
-/// One in-flight fullscreen transition: a linear `0→1` driver plus the range
-/// it maps onto and the curve the geometry is shaped by.
+/// One in-flight fullscreen transition: a linear `0→1` driver, the curve that
+/// eases its progress, and the `from..to` range the eased progress is then
+/// interpolated across.
 ///
 /// The same shape (and for the same reason) as `crate::ui::topbar`'s `Reveal`
 /// and `crate::ui::sheet`'s `ModalStage`: the range is what makes an
 /// *interrupted* transition value-continuous — a second tap mid-flight starts a
-/// fresh driver from wherever the card actually is, the "value continuity, not
-/// velocity continuity" contract `frust::motion`'s implicit animations
-/// document.
+/// fresh driver from wherever the card actually is (see [`start`](Self::start)),
+/// the "value continuity, not velocity continuity" contract `frust::motion`'s
+/// implicit animations document.
+///
+/// **Ease the progress, not the position.** [`value`](Self::value) applies
+/// `curve` to the driver's own `0..=1` progress *before* mapping the result
+/// onto `from..to` — curving the already-interpolated position instead
+/// (`curve.transform(from + (to - from) · t)`) curves the wrong quantity.
+/// Glyph's `spatial` curve is an authored overshoot that exceeds `1.0` on
+/// roughly `t ∈ [0.45, 1.0]` (e.g. `y(0.5) ≈ 1.01`, `y(0.65) ≈ 1.04`); fed a
+/// *position* input, a collapse (`from = 1, to = 0`) would sit in that
+/// overshoot band for the whole first half of the driver's run and clamp
+/// flush to `1.0` there — the card stalling in place before it visibly moves,
+/// rather than animating through its full duration as this type's continuity
+/// claim (and the entry direction's mirror-image symmetry) requires.
 ///
 /// **Timings are the theme's, not the mock's.** `docs/terminal.html` animates
 /// on `.32–.38s cubic-bezier(0.34,1.4,0.55,1)`; Glyph's `durations.slow`
@@ -917,6 +930,12 @@ const FALLBACK_SPATIAL: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 
 impl FullscreenStage {
     /// Stage a transition from `from` to `to` under `theme`'s motion policy.
+    ///
+    /// `from` must be the last **painted** progress (`self.progress` at the
+    /// call site below, never a raw driver `t`) — an interrupted stage's own
+    /// `value()` reads `from` at `t = 0` (see below), so seeding anything
+    /// other than the on-screen value would itself reintroduce a visible
+    /// jump on interruption.
     fn start(from: f64, to: f64, theme: Option<&Theme>) -> Self {
         let duration = theme.map_or(FALLBACK_SLOW, |theme| {
             Duration::from_secs_f64(theme.motion.durations.slow / 1000.0)
@@ -933,12 +952,19 @@ impl FullscreenStage {
 
     /// The eased `0..=1` geometry fraction this frame.
     ///
-    /// Clamped on purpose: Glyph's `spatial` curve is an authored overshoot,
-    /// and "past fullscreen" is not a geometry that exists — a negative wrap
-    /// padding would push the card off its own screen.
+    /// Eases the driver's own progress, **then** interpolates `from..to` —
+    /// see the type docs for why the reverse order is wrong. `t = 0` always
+    /// returns exactly `from` and `t = 1` always returns exactly `to`
+    /// (`curve.transform` is endpoint-preserving), which is what makes a
+    /// freshly-[`start`](Self::start)ed stage value-continuous with whatever
+    /// was last painted.
+    ///
+    /// Clamped once, at the end: Glyph's `spatial` curve is an authored
+    /// overshoot, and "past fullscreen" is not a geometry that exists — a
+    /// negative wrap padding would push the card off its own screen.
     fn value(&self) -> f64 {
-        let raw = self.from + (self.to - self.from) * self.driver.value_clamped();
-        self.curve.transform(raw.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+        let eased = self.curve.transform(self.driver.value_clamped());
+        (self.from + (self.to - self.from) * eased).clamp(0.0, 1.0)
     }
 }
 
@@ -1548,6 +1574,86 @@ mod tests {
         assert_eq!(entering.value(), 0.0);
         let leaving = FullscreenStage::start(1.0, 0.0, Some(&theme));
         assert_eq!(leaving.value(), 1.0);
+    }
+
+    /// `60ms` into a fresh entrance: mid-flight, inside Glyph's `spatial`
+    /// overshoot band, and never past `1.0` before the final clamp — the
+    /// number the interruption tests below seed from.
+    fn painted_mid_entrance(theme: &Theme) -> f64 {
+        let mut entering = FullscreenStage::start(0.0, 1.0, Some(theme));
+        // The first `advance` after `start` only seeds the clock (a fresh
+        // driver's own documented zero-delta rule) — the second is what
+        // actually elapses 60ms.
+        entering.driver.advance(FrameTime::from_nanos(0));
+        entering.driver.advance(FrameTime::from_nanos(60_000_000));
+        entering.value()
+    }
+
+    #[test]
+    fn collapsing_leaves_1_0_well_before_half_the_duration_rather_than_stalling() {
+        // The bug this guards against: curving the *interpolated position*
+        // (`curve.transform(from + (to - from) * t)`) feeds a collapse's
+        // `from = 1.0` into the curve's own `[0.45, 1.0]` overshoot band for
+        // the whole first half of `durations.slow`, clamping flush to `1.0`
+        // there — the card sits motionless before it ever visibly moves.
+        let theme = Theme::glyph_baseline();
+        let mut collapsing = FullscreenStage::start(1.0, 0.0, Some(&theme));
+        collapsing.driver.advance(FrameTime::from_nanos(0));
+        // 80ms of the 340ms `durations.slow` — comfortably inside the band
+        // the old formula stalled through.
+        collapsing.driver.advance(FrameTime::from_nanos(80_000_000));
+        let value = collapsing.value();
+        assert!(
+            value < 0.9,
+            "80ms in, the collapse should already have left 1.0: {value}"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_stage_starts_exactly_at_the_painted_value_it_seeds_from() {
+        // The bug this guards against: seeding a fresh stage's `from` with an
+        // already-*eased* value and curving it a second time. Since the
+        // painted value of an in-flight entrance often lands inside Glyph's
+        // `spatial` overshoot band, re-easing it snaps the card straight to
+        // fullscreen the instant a collapse interrupts it — before any time
+        // has passed.
+        let theme = Theme::glyph_baseline();
+        let seed = painted_mid_entrance(&theme);
+        assert!((0.0..1.0).contains(&seed), "60ms in, mid-flight: {seed}");
+
+        let interrupted = FullscreenStage::start(seed, 0.0, Some(&theme));
+        assert_eq!(
+            interrupted.value(),
+            seed,
+            "a freshly-seeded stage must read exactly what was last painted, \
+             not that value curved a second time"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_collapse_never_lets_its_value_climb_back_toward_the_seed() {
+        let theme = Theme::glyph_baseline();
+        let seed = painted_mid_entrance(&theme);
+        let mut collapsing = FullscreenStage::start(seed, 0.0, Some(&theme));
+        assert_eq!(collapsing.value(), seed);
+
+        let mut last = seed;
+        // Cumulative milliseconds since the interrupt — the last two are
+        // past the 340ms duration, so the driver settles exactly on target.
+        for cumulative_ms in [0u64, 10, 30, 50, 80, 120, 170, 250, 340, 500] {
+            collapsing
+                .driver
+                .advance(FrameTime::from_nanos(cumulative_ms * 1_000_000));
+            let value = collapsing.value();
+            assert!((0.0..=1.0).contains(&value), "{value}");
+            assert!(
+                value <= last + 1e-9,
+                "value climbed back from {last} to {value} at {cumulative_ms}ms \
+                 after the interrupt"
+            );
+            last = value;
+        }
+        assert!(last.abs() < 1e-6, "settles flush at the target: {last}");
     }
 
     #[test]
