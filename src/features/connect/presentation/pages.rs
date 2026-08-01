@@ -352,7 +352,10 @@ fn qr_affordance(
         Padding(
             EdgeInsets::all(FAB_MARGIN),
             icon_button(SCAN_MARK, FAB_LABEL, move |_state: &mut ConnectState| {
-                show_sheet(&app_nav, &nav, qr_sheet_body)
+                // The body ignores the sheet's own handle: this sheet carries
+                // no closer of its own (the scrim and back are its only
+                // dismissals), so nothing inside it ever asks to close.
+                show_sheet(&app_nav, &nav, |_sheet| qr_sheet_body())
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA

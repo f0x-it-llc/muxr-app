@@ -92,7 +92,32 @@
 //! alternative (keeping a page-level fade purely so back has *something* to
 //! play) would double-composite the scrim's own fade against the page's and
 //! make the one number this file owns unreadable.
+//!
+//! # One sheet, one dismissal — [`SheetHandle`]
+//!
+//! A sheet stays interactive until its pop actually *lands*, and a pop lands a
+//! rebuild after it is enqueued — so every dismissal path races every other
+//! one. A second tap on a row, a close button pressed while a delayed close is
+//! already pending, a scrim tap during that same window, an Android back press
+//! mid-beat: each of them used to call [`NavigatorController::pop`] on its own,
+//! and the second one through popped **the page under the sheet** — the route
+//! itself, which reads to the user as the app silently bouncing back a screen
+//! (and left a phantom `dismiss_overlay` report against an overlay that was
+//! already gone).
+//!
+//! So a sheet is not closed by whoever happens to be holding a navigator; it is
+//! closed through [`SheetHandle`] — the identity [`show_sheet`] mints per sheet
+//! *instance* and hands to its body builder. Every path goes through
+//! [`SheetHandle::close`], which pops (and reports the dismissal to the overlay
+//! accounting) **at most once per instance** and is an ordinary no-op after
+//! that: a duplicate close is a routine user race, not a bug to panic on.
+//! [`show_sheet`]'s own completion callback latches the same handle, so a close
+//! still in flight when the page goes away some other way cannot pop anything
+//! either, and [`SheetHandle::close_after`] is the delayed close ("let the
+//! selection visibly move first") with latest-wins re-timing on top of the same
+//! gate.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -342,33 +367,52 @@ fn finite_or_zero(v: f64) -> f64 {
 /// staged exit below reports it *closing* the rebuild before the pop lands,
 /// and the pusher's own completion callback ends it whichever way it actually
 /// went away (`crate::routes`' "Overlay accounting" section is the whole
-/// rationale). A body that closes the sheet *itself* calls [`close_sheet`]
-/// rather than `nav.pop()`, for the same reason.
+/// rationale).
+///
+/// # The body builder's [`SheetHandle`]
+///
+/// `build_body` is handed the sheet's own handle, and closing the sheet from
+/// inside it is [`SheetHandle::close`] — never a bare `nav.pop()`, which would
+/// be both unaccounted *and* ungated (see the [module docs](self)' "One sheet,
+/// one dismissal"). The handle is minted here rather than returned because
+/// every closer this app has lives in the body: a row that acts and dismisses,
+/// a close button, the delayed close after a tab selection lands.
 ///
 /// ```ignore
-/// show_sheet(&state.app_nav, &state.nav, move || {
-///     any(text("Pair a new host").size(13.5))
+/// show_sheet(&state.app_nav, &state.nav, move |sheet| {
+///     let sheet = sheet.clone();
+///     any(button("Done", move |_state: &mut AppState| {
+///         sheet.close();
+///     }))
 /// });
 /// ```
 pub fn show_sheet<State: 'static>(
     app_nav: &Nav,
     nav: &NavigatorController<State>,
-    build_body: impl Fn() -> AnyView<State> + 'static,
+    build_body: impl Fn(&SheetHandle) -> AnyView<State> + 'static,
 ) {
     app_nav.begin_overlay();
-    let dismiss_nav = nav.clone();
-    let dismiss_app_nav = app_nav.clone();
+    let pop_nav = nav.clone();
+    let pop_app_nav = app_nav.clone();
+    // The one accounted pop, behind the one gate: telling the accounting a
+    // rebuild before the pop lands is what lets the bar light up on the frame
+    // the sheet finishes leaving instead of waiting for the next input.
+    let sheet = SheetHandle::new(move || {
+        pop_app_nav.dismiss_overlay();
+        pop_nav.pop();
+    });
+    let body_sheet = sheet.clone();
+    let dismiss_sheet = sheet.clone();
     let done_app_nav = app_nav.clone();
     nav.push_transparent_for_result(
         move || {
-            let pop_nav = dismiss_nav.clone();
-            let app_nav = dismiss_app_nav.clone();
             // The staged exit's own dismissal (a scrim tap, `Escape`, an
-            // outside-press release) is one of the app-owned seams: telling
-            // the accounting a rebuild before the pop lands is what lets the
-            // bar light up on the frame the sheet finishes leaving instead of
-            // waiting for the next input.
-            any(sheet_scaffold(build_body()).on_dismiss(move || close_sheet(&app_nav, &pop_nav)))
+            // outside-press release) is one of the app-owned seams, and goes
+            // through the very same gate the body's own closers do.
+            let scrim_sheet = dismiss_sheet.clone();
+            any(sheet_scaffold(build_body(&body_sheet)).on_dismiss(move || {
+                scrim_sheet.close();
+            }))
         },
         TransitionSpec::NONE,
         // The sheet answers through its body's own callbacks (which own
@@ -376,23 +420,115 @@ pub fn show_sheet<State: 'static>(
         // callback is for is the accounting's authoritative half — the
         // navigator delivers it exactly once per pushed page, however that
         // page went away (an action, a scrim tap, `Escape`, an Android back
-        // press straight through `BackPolicy::Pop`).
-        move |_state: &mut State, _result: PopResult| done_app_nav.end_overlay(),
+        // press straight through `BackPolicy::Pop`) — and, with it, the
+        // latch: whichever way the page went, a close still in flight must
+        // not land on whatever is under it now.
+        move |_state: &mut State, _result: PopResult| {
+            sheet.mark_closed();
+            done_app_nav.end_overlay();
+        },
     );
 }
 
-/// Close a sheet from its own body — the accounted `nav.pop()`.
+/// One live sheet's identity, and the one gate every dismissal path goes
+/// through — see the [module docs](self)' "One sheet, one dismissal".
 ///
-/// Every in-body close (a row that acts and dismisses, a close button, a
-/// delayed pop after a selection lands) goes through here rather than popping
-/// the controller directly, so the shell's bar learns the sheet is going a
-/// rebuild before [`NavigatorController::depth`] does. Popping directly is not
-/// *wrong* — [`show_sheet`]'s completion callback still ends the accounting —
-/// it just costs that path its synchronous un-dim, leaving the bar dimmed and
-/// inert until the next input.
-pub fn close_sheet<State: 'static>(app_nav: &Nav, nav: &NavigatorController<State>) {
-    app_nav.dismiss_overlay();
-    nav.pop();
+/// Cloneable and shared (`Rc`): the body builder is re-invoked on every
+/// rebuild while the sheet is up, so each row, button and delayed close
+/// captures its own clone of the *same* instance. Two sheets opened in
+/// sequence are two handles, which is exactly the granularity the gate needs.
+#[derive(Clone)]
+pub struct SheetHandle {
+    inner: Rc<SheetGuard>,
+}
+
+/// [`SheetHandle`]'s shared interior: the latch, the pending-close ticket, and
+/// the accounted pop they gate.
+struct SheetGuard {
+    /// Whether this sheet instance has already been closed — set by the first
+    /// [`SheetHandle::close`] and by [`SheetHandle::mark_closed`], never
+    /// cleared (a sheet is closed exactly once, then the handle is spent).
+    closed: Cell<bool>,
+    /// The newest delayed close's ticket. [`SheetHandle::close_after`] takes
+    /// one on the way in and fires only if it is still the newest when its
+    /// delay elapses — "latest wins", so a second selection extends the wait
+    /// rather than stacking a second close behind the first.
+    pending: Cell<u64>,
+    /// The accounted pop: `Nav::dismiss_overlay` then
+    /// `NavigatorController::pop`. Boxed (rather than the controller itself)
+    /// so the handle stays free of the navigator's `State` parameter — a sheet
+    /// body passes it around, and every one of those call sites would
+    /// otherwise carry the app's state type for no reason.
+    close: Box<dyn Fn()>,
+}
+
+impl SheetHandle {
+    /// Mint a handle whose one dismissal runs `close`.
+    fn new(close: impl Fn() + 'static) -> Self {
+        SheetHandle {
+            inner: Rc::new(SheetGuard {
+                closed: Cell::new(false),
+                pending: Cell::new(0),
+                close: Box::new(close),
+            }),
+        }
+    }
+
+    /// Close the sheet: report the dismissal to the overlay accounting and
+    /// enqueue the pop — **at most once per sheet instance**.
+    ///
+    /// Returns whether *this* call is the one that closed it. A `false` is the
+    /// guarded no-op every duplicate dismissal lands in (a second row tap
+    /// inside the one-rebuild window a queued pop leaves open, a close button
+    /// pressed while a delayed close is pending, a timer that woke after a
+    /// scrim tap already took the sheet away), and it is ordinary rather than
+    /// exceptional — hence a returned `bool` and not a `debug_assert!`, which
+    /// would turn a double tap into a crash in every debug build.
+    ///
+    /// Skips the panel's exit staging, exactly as `glyph::dialog`'s action
+    /// buttons do (see the [module docs](self)) — only the cancel routes play
+    /// the slide back down, and those reach here through the scaffold's own
+    /// `on_dismiss` once it has played.
+    pub fn close(&self) -> bool {
+        if self.inner.closed.replace(true) {
+            return false;
+        }
+        (self.inner.close)();
+        true
+    }
+
+    /// Close the sheet `delay` from now — the "let the selection visibly move
+    /// first" close (`docs/terminal.html`'s `setTimeout(closeSheet, 260)`).
+    ///
+    /// **Latest wins.** Each call takes a fresh ticket, and only the newest
+    /// ticket's wait actually closes: a second selection inside the window
+    /// re-times the one pending close rather than queueing a second one behind
+    /// it. The close itself still goes through [`close`](Self::close), so even
+    /// a superseded or stale wait cannot pop twice.
+    ///
+    /// `async` rather than self-spawning on purpose: its one caller already
+    /// runs inside a spawned task (it awaits the selection landing first), and
+    /// awaiting keeps that ordering — "the selection has moved, *now* start
+    /// the beat" — visible at the call site.
+    pub async fn close_after(&self, delay: Duration) {
+        let ticket = self.inner.pending.get() + 1;
+        self.inner.pending.set(ticket);
+        clean_signals::time::sleep(delay).await;
+        if self.inner.pending.get() == ticket {
+            self.close();
+        }
+    }
+
+    /// Latch the handle without popping anything — the sheet's page has gone
+    /// away through a route this app didn't drive (an Android back press
+    /// straight through `BackPolicy::Pop`), or through one it did.
+    ///
+    /// [`show_sheet`]'s completion callback is where this runs, because that
+    /// is the one seam the navigator delivers exactly once per pushed page,
+    /// however it went away.
+    fn mark_closed(&self) {
+        self.inner.closed.set(true);
+    }
 }
 
 /// The sheet chrome around `body`: scrim, bottom-anchored panel, drag handle,
@@ -770,6 +906,45 @@ mod tests {
         for alpha in [SCRIM_ALPHA, HANDLE_ALPHA] {
             assert!((0.0..=1.0).contains(&alpha));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The dismissal gate
+    // -----------------------------------------------------------------------
+
+    /// A handle whose "pop" only counts itself — the accounted pop
+    /// (`dismiss_overlay` + `NavigatorController::pop`) is what
+    /// [`show_sheet`] installs here, so counting invocations *is* counting
+    /// pops and overlay-dismissal reports.
+    fn counting_handle() -> (SheetHandle, Rc<Cell<usize>>) {
+        let pops = Rc::new(Cell::new(0usize));
+        let counted = Rc::clone(&pops);
+        (
+            SheetHandle::new(move || counted.set(counted.get() + 1)),
+            pops,
+        )
+    }
+
+    #[test]
+    fn a_sheet_pops_once_however_many_times_it_is_told_to_close() {
+        // The defect this gate exists for: the second close used to pop the
+        // page *under* the sheet — the route itself.
+        let (sheet, pops) = counting_handle();
+        assert!(sheet.close(), "the first close is the one that closes it");
+        assert!(!sheet.close(), "…and every later one is a no-op");
+        assert!(!sheet.clone().close(), "…through any clone of the handle");
+        assert_eq!(pops.get(), 1, "exactly one pop, one dismissal report");
+    }
+
+    #[test]
+    fn a_latched_handle_pops_nothing_at_all() {
+        // The page went away some other way (an Android back press through
+        // `BackPolicy::Pop`); a close still in flight must not land on
+        // whatever is under it now.
+        let (sheet, pops) = counting_handle();
+        sheet.mark_closed();
+        assert!(!sheet.close(), "the sheet is already gone");
+        assert_eq!(pops.get(), 0);
     }
 
     #[test]

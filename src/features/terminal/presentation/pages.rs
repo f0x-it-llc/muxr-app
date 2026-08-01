@@ -94,7 +94,7 @@ use crate::features::terminal::domain::entities::TabEntry;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
-use crate::ui::sheet::{close_sheet, show_sheet};
+use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
 use super::chrome::{WRAP_PAD, term_box};
@@ -210,6 +210,11 @@ pub struct Actions {
     /// coordinates — written by `super::chrome::terminal_stage` on every
     /// layout, read when the menu opens. See [`Actions::open_menu`].
     pub anchor: Rc<Cell<Rect>>,
+    /// Whether a detach has already claimed this screen's one pop — see
+    /// [`Actions::detach`]. Shared (`Rc`) across every clone of the bundle, so
+    /// the menu, the sheet and the bar are all talking about the same latch:
+    /// one mount of this screen leaves `/terminal` at most once.
+    detaching: Rc<Cell<bool>>,
 }
 
 thread_local! {
@@ -280,6 +285,7 @@ impl Component for TerminalScreen {
             app_nav,
             controller,
             anchor: Rc::new(Cell::new(Rect::ZERO)),
+            detaching: Rc::new(Cell::new(false)),
         };
         // Publish for the app bar's `⋮` (see the module docs).
         TERMINAL_CHROME.with(|cell| *cell.borrow_mut() = Some(actions.clone()));
@@ -458,20 +464,28 @@ impl Actions {
     /// the sheet being rebuilt by hand.
     pub fn open_sheet(&self) {
         let actions = self.clone();
-        show_sheet(&self.app_nav, &self.nav, move || actions.sheet_body());
+        show_sheet(&self.app_nav, &self.nav, move |sheet| {
+            actions.sheet_body(sheet)
+        });
     }
 
     /// Switch the card to `key` and close the sheet a beat later, so the
     /// selection visibly moves first (`setTimeout(closeSheet, 260)`).
-    pub fn switch_tab(&self, key: &str) {
+    ///
+    /// The sheet stays live for that whole beat, so the tap can be repeated —
+    /// and it is [`SheetHandle::close_after`] that makes repeating it safe.
+    /// **Latest tap wins**: a second pill re-times the one pending close off
+    /// its own selection (the beat is there to be *seen*, and the second
+    /// selection is the one the user is looking at) rather than stacking a
+    /// second close behind the first, and the gate underneath means the
+    /// superseded wait cannot pop the `/terminal` route on its way out.
+    pub fn switch_tab(&self, sheet: &SheetHandle, key: &str) {
         let controller = Arc::clone(&self.controller);
-        let nav = self.nav.clone();
-        let app_nav = self.app_nav.clone();
+        let sheet = sheet.clone();
         let key = key.to_string();
         spawn_local(async move {
             controller.switch_tab(key).await;
-            clean_signals::time::sleep(SHEET_CLOSE_DELAY).await;
-            close_sheet(&app_nav, &nav);
+            sheet.close_after(SHEET_CLOSE_DELAY).await;
         });
     }
 
@@ -511,13 +525,27 @@ impl Actions {
     }
 
     /// Detach from the attached session: pop back to the list, then say so.
+    ///
+    /// **One pop per mount**, latched through [`Actions::detaching`] — the
+    /// same single-shot rule the sheet's own dismissal follows
+    /// ([`SheetHandle::close`]), and for the same reason: the detach is async,
+    /// the menu can be reopened while it is in flight, and a second landing
+    /// pop would take `/sessions` off the stack too rather than merely
+    /// arriving there twice. A detach the repository *refuses* re-arms the
+    /// latch, since nothing moved and the user is entitled to try again.
     pub fn detach(&self) {
+        if self.detaching.replace(true) {
+            return;
+        }
         let controller = Arc::clone(&self.controller);
         let nav = self.app_nav.clone();
+        let detaching = Rc::clone(&self.detaching);
         spawn_local(async move {
             if controller.detach().await {
                 nav.pop();
                 app_toasts().show(DETACHED_TOAST);
+            } else {
+                detaching.set(false);
             }
         });
     }
@@ -533,7 +561,7 @@ impl Actions {
     /// The "panes & tabs" sheet's body — `docs/terminal.html`'s
     /// `#pickerSheet`, top to bottom, minus the handle the scaffold already
     /// draws.
-    fn sheet_body(&self) -> AnyView<AppState> {
+    fn sheet_body(&self, sheet: &SheetHandle) -> AnyView<AppState> {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
         // Tracked reads: switching a tab from inside the sheet re-runs this
@@ -542,7 +570,7 @@ impl Actions {
         let tabs = self.controller.tabs.get();
         let active = self.controller.active_tab.get();
 
-        let mut children = vec![self.top_row(&colors), pieces::v_gap(SECTION_TOP_GAP)];
+        let mut children = vec![self.top_row(sheet, &colors), pieces::v_gap(SECTION_TOP_GAP)];
 
         children.push(pieces::section_label(SECTION_SPACES, &colors));
         children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
@@ -573,6 +601,7 @@ impl Actions {
             .iter()
             .map(|tab| {
                 let actions = self.clone();
+                let sheet = sheet.clone();
                 let key = tab.key.clone();
                 pieces::pill(
                     tab.pill_label(),
@@ -582,7 +611,7 @@ impl Actions {
                         PillState::Idle
                     },
                     &colors,
-                    move |_app: &mut AppState| actions.switch_tab(&key),
+                    move |_app: &mut AppState| actions.switch_tab(&sheet, &key),
                 )
             })
             .collect();
@@ -607,12 +636,13 @@ impl Actions {
         any(pieces::column(children))
     }
 
-    /// The sheet's top row, whose close button pops it.
-    fn top_row(&self, colors: &Palette) -> AnyView<AppState> {
-        let nav = self.nav.clone();
-        let app_nav = self.app_nav.clone();
+    /// The sheet's top row, whose close button pops it — through the same one
+    /// gate a pill's delayed close uses, so pressing it mid-beat closes the
+    /// sheet once and leaves the route alone.
+    fn top_row(&self, sheet: &SheetHandle, colors: &Palette) -> AnyView<AppState> {
+        let sheet = sheet.clone();
         pieces::sheet_top_row(colors, move |_app: &mut AppState| {
-            close_sheet(&app_nav, &nav)
+            sheet.close();
         })
     }
 

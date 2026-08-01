@@ -91,7 +91,7 @@ use crate::features::settings::domain::entities::{
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
-use crate::ui::sheet::{close_sheet, show_sheet};
+use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
@@ -438,16 +438,23 @@ impl Actions {
     /// vocabulary, and [`row_tapped`] is its one caller.
     fn open_picker(&self, kind: PickerKind) {
         let actions = self.clone();
-        show_sheet(&self.app_nav, &self.nav, move || {
+        show_sheet(&self.app_nav, &self.nav, move |sheet| {
             let theme = pieces::active_theme();
             let colors = pieces::palette(&theme);
             let picker = actions.picker(kind);
             let picking = actions.clone();
+            let sheet = sheet.clone();
             pieces::picker_sheet(&picker, &colors, move |_app: &mut AppState, index| {
                 // Close first, then persist: the sheet's own exit staging and a
                 // repository round trip should not overlap (the same ordering
                 // the sessions management sheet's rows use).
-                close_sheet(&picking.app_nav, &picking.nav);
+                //
+                // Through the sheet's own gate, which is what makes the close
+                // single-shot: a pop only lands at the *next* rebuild, so a
+                // second row tap inside that one-frame window would otherwise
+                // pop the `/settings` route out from under the picker
+                // (`crate::ui::sheet`'s "One sheet, one dismissal").
+                sheet.close();
                 picking.pick(kind, index);
             })
         });
