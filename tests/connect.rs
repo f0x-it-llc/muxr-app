@@ -61,6 +61,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use frust::Theme;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
@@ -75,7 +76,9 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
 
-use muxr::connection::expect_connection_controller;
+use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
+use muxr::features::connect::presentation::controller::ConnectController;
 use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
 use muxr::features::connect::presentation::pieces::{
     CONNECT_LABEL, PINNED_CAPTION, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER,
@@ -682,6 +685,126 @@ fn a_valid_url_connects_and_lands_on_sessions() {
     assert!(
         app_toasts().pending_untracked().is_empty(),
         "a clean connect raises nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Token hygiene (review F5): clear on connect/disconnect, zeroizing holder
+// ---------------------------------------------------------------------------
+
+/// A [`ConnectTarget`] mirroring `crate::connection`'s own test fixture —
+/// this suite drives [`muxr::connection::ConnectionController::connect`]
+/// directly for the disconnect-edge test below, bypassing
+/// [`ConnectController::connect`] entirely so the two controllers' edges
+/// stay observably distinct.
+fn mock_target() -> ConnectTarget {
+    ConnectTarget {
+        host: "mock.example".to_string(),
+        port: 7777,
+        trust_mode: TrustMode::TrustOnFirstUse,
+        label: "Mock rig".to_string(),
+        offer_credential: false,
+    }
+}
+
+#[test]
+fn a_successful_connect_clears_the_login_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    type_url(&mut harness, VALID_URL);
+    harness.tap_node("the login token field", |node| {
+        node.role() == Role::PasswordInput
+    });
+    harness.type_text("s3cr3t");
+    assert_ne!(
+        harness.field_values()[1],
+        String::new(),
+        "the token landed on the controller before connecting"
+    );
+
+    harness.tap_node("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+
+    assert!(
+        expect_connection_controller().connected.get_untracked(),
+        "the connect itself still went through"
+    );
+    assert_eq!(
+        harness.field_values()[1],
+        String::new(),
+        "the token field is scrubbed the instant a connection opens with it \
+         (`ConnectController::connect`'s `Ok` branch)"
+    );
+}
+
+#[test]
+fn a_disconnect_via_the_connection_controller_clears_the_login_token() {
+    // Drives `ConnectionController::connect`/`disconnect` directly rather than
+    // through `ConnectController::connect` — the task's own carve-out (the
+    // real trigger is Settings' Disconnect button, which this headless Connect
+    // suite has no reason to mount): the true→false edge is what
+    // `ConnectScreen::build` watches, regardless of what flips it.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    harness.tap_node("the login token field", |node| {
+        node.role() == Role::PasswordInput
+    });
+    harness.type_text("leftover");
+    assert_ne!(
+        harness.field_values()[1],
+        String::new(),
+        "the token landed before any connection was opened"
+    );
+
+    let connection = expect_connection_controller();
+    connection.connect(mock_target());
+    harness.settle();
+    assert_ne!(
+        harness.field_values()[1],
+        String::new(),
+        "connecting through the connection controller directly (never through \
+         `ConnectController::connect`) must not, by itself, touch the token — \
+         only the screen's own connect edge does that"
+    );
+
+    connection.disconnect();
+    harness.settle();
+
+    assert_eq!(
+        harness.field_values()[1],
+        String::new(),
+        "the disconnect edge (`connection.connected` true→false) scrubs the \
+         token even though `ConnectController::connect` never ran — \
+         `ConnectScreen` stays mounted+reconciled under whatever covers it, \
+         and its own `build` is what watches this edge"
+    );
+}
+
+#[test]
+fn set_token_then_clear_token_round_trips_to_an_empty_buffer() {
+    // A controller-level check of the two setters themselves, independent of
+    // any mounted screen: `set_token` wraps in a fresh `Zeroizing<String>`,
+    // and `clear_token` (both edges above call it) always lands on an empty
+    // one rather than leaving whatever was typed.
+    let _g = serial();
+    let _ambient = setup();
+    let connection = muxr::connection::provide_connection_controller();
+    let controller =
+        ConnectController::new(Arc::new(MockSavedServersRepository::seeded()), connection);
+
+    controller.set_token("s3cr3t".to_string());
+    assert_eq!(controller.token.get_untracked().as_str(), "s3cr3t");
+
+    controller.clear_token();
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        "",
+        "clearing after setting leaves an empty buffer, not the old one"
     );
 }
 

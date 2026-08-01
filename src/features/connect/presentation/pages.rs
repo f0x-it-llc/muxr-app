@@ -60,16 +60,16 @@ use clean_signals_frust::use_controller;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView,
-    IconSource, Padding, SizedBox, Stack, any, component, icon, inflexible, safe_area, scroll_view,
-    text, use_context,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
+    GetUntracked, IconSource, Padding, SizedBox, Stack, any, component, icon, inflexible,
+    safe_area, scroll_view, text, use_context,
 };
 
 use super::chrome::panel;
 use super::controller::ConnectController;
 use super::pieces::{Live, active_theme, connect_pieces_with};
 use crate::AppState;
-use crate::connection::expect_connection_controller;
+use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::SavedServers;
 use crate::routes::{Nav, app_nav};
@@ -208,9 +208,10 @@ struct ConnectScreen {
 /// The Connect screen's retained state.
 ///
 /// Per the charter's state-split rule this holds only the **non-reactive**
-/// half — two navigation handles and the controller handle. Every observed
-/// value (the form's fields, the saved list, the validation flag) lives in
-/// [`ConnectController`]'s signals instead, so a write wakes a rebuild.
+/// half — three navigation/connection handles, the controller handle, and one
+/// plain `bool`. Every *observed* value (the form's fields, the saved list,
+/// the validation flag) lives in [`ConnectController`]'s signals instead, so a
+/// write wakes a rebuild.
 pub struct ConnectState {
     /// The hosted view model, disposed with this component (`use_controller`).
     controller: Arc<ConnectController>,
@@ -220,6 +221,19 @@ pub struct ConnectState {
     /// The raw navigator, for `crate::ui::sheet::show_sheet` (which pushes a
     /// transparent page rather than resolving a location).
     nav: frust::NavigatorController<AppState>,
+    /// The app-scoped connection handle, held only so [`Component::build`] can
+    /// watch [`ConnectionController::connected`]'s true→false edge (a
+    /// Disconnect, e.g. Settings') and scrub the login-token field then — see
+    /// [`ConnectController::token`]'s doc for the full token-hygiene picture.
+    /// `ConnectController::connect` drives this same handle itself; this copy
+    /// exists purely to read it back.
+    connection: Arc<ConnectionController>,
+    /// Whether `connection.connected` read `true` the last time `build` ran —
+    /// the previous-observed value the disconnect edge above is detected
+    /// against. Seeded from the connected state at mount, so a screen that
+    /// somehow mounted already-connected does not misfire a spurious clear on
+    /// its first build.
+    was_connected: bool,
 }
 
 impl Component for ConnectScreen {
@@ -234,8 +248,10 @@ impl Component for ConnectScreen {
             "features::connect::di::provide must run in MuxrApp::init before the / route mounts",
         );
         let connection = expect_connection_controller();
-        let controller = use_controller::<ConnectController, AppFailure>(move || {
-            ConnectController::new(repository, connection)
+        let was_connected = connection.connected.get_untracked();
+        let controller = use_controller::<ConnectController, AppFailure>({
+            let connection = Arc::clone(&connection);
+            move || ConnectController::new(repository, connection)
         });
 
         ConnectState {
@@ -246,11 +262,28 @@ impl Component for ConnectScreen {
             // is the habit this app does not want).
             app_nav: app_nav(),
             nav: self.nav.clone(),
+            connection,
+            was_connected,
         }
     }
 
     fn build(&self, state: &mut ConnectState) -> AnyView<ConnectState> {
         let theme = active_theme();
+
+        // Login-token hygiene (review F5), the disconnect half: `connect()`
+        // clears the token on its own edge, but a Disconnect (Settings' flow
+        // calls `ConnectionController::disconnect`) can flip `connected` back
+        // to `false` while this screen stays mounted+reconciled underneath
+        // whatever covers it — the whole-app rebuild model keeps a covered
+        // route's own `build` reconciling. A **tracked** read here (not
+        // `get_untracked`) is what lets a later write wake this component's
+        // own next rebuild, per the reactive-read rule.
+        let connected = state.connection.connected.get();
+        if state.was_connected && !connected {
+            state.controller.clear_token();
+        }
+        state.was_connected = connected;
+
         let live = Live {
             controller: Arc::clone(&state.controller),
             on_connect: {

@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use clean_signals::ControllerCore;
 use frust::{GetUntracked, RwSignal, Set};
+use zeroize::Zeroizing;
 
 use crate::connection::{ConnectTarget, ConnectionController, TrustMode};
 use crate::failure::AppFailure;
@@ -73,8 +74,19 @@ pub struct ConnectController {
     connection: Arc<ConnectionController>,
     /// The server-URL field's text (`host:port`).
     pub url: RwSignal<String>,
-    /// The login-token field's text.
-    pub token: RwSignal<String>,
+    /// The login-token field's text — the form's one secret, so it is a
+    /// [`Zeroizing`]-wrapped `String` rather than a plain one: replacing or
+    /// dropping the wrapper scrubs the buffer instead of leaving stale
+    /// plaintext parked in a freed allocation. That covers the *at-rest*
+    /// half; [`Self::clear_token`] covers the *when* — called on both the
+    /// connect edge ([`Self::connect`]'s `Ok` branch) and the disconnect edge
+    /// (`super::pages::ConnectScreen::build`'s `connection.connected`
+    /// true→false watch), so a mounted-but-covered Connect screen (Sessions
+    /// stacks over it rather than replacing it) never keeps a stale token
+    /// alive across either transition. What this does **not** cover — the
+    /// platform IME's own suggestion/recents surface — is recorded in
+    /// `docs/ARCHITECTURE.md`'s Planned section (FINDINGS #31).
+    pub token: RwSignal<Zeroizing<String>>,
     /// The selected TLS posture.
     pub trust_mode: RwSignal<TrustMode>,
     /// Whether a successful connect should offer to remember this server.
@@ -96,7 +108,7 @@ impl ConnectController {
             repository,
             connection,
             url: RwSignal::new(String::new()),
-            token: RwSignal::new(String::new()),
+            token: RwSignal::new(Zeroizing::new(String::new())),
             trust_mode: RwSignal::new(DEFAULT_TRUST_MODE),
             remember: RwSignal::new(DEFAULT_REMEMBER),
             saved: RwSignal::new(Vec::new()),
@@ -125,9 +137,21 @@ impl ConnectController {
         }
     }
 
-    /// Set the login-token field.
+    /// Set the login-token field. Wraps `token` in a fresh [`Zeroizing`] —
+    /// the signal's previous wrapper is dropped (and so scrubbed) by the
+    /// replace.
     pub fn set_token(&self, token: String) {
-        self.token.set(token);
+        self.token.set(Zeroizing::new(token));
+    }
+
+    /// Scrub the login-token field back to empty. See [`Self::token`]'s doc
+    /// for the two edges that call this (`Self::connect`'s success branch,
+    /// and the screen's own disconnect-edge watch) and what scrubbing does
+    /// and does not cover. A fresh `Zeroizing::new(String::new())` rather
+    /// than mutating the held buffer in place: the signal's replace still
+    /// drops (and so zeroizes) the stale one.
+    pub fn clear_token(&self) {
+        self.token.set(Zeroizing::new(String::new()));
     }
 
     /// Select `mode` as the connection's TLS posture.
@@ -191,6 +215,10 @@ impl ConnectController {
         match self.validated_target() {
             Ok(target) => {
                 self.invalid.set(false);
+                // Login-token hygiene (review F5): the token's job ends the
+                // instant a connection opens with it — see `Self::token`'s
+                // doc for the other edge this pairs with.
+                self.clear_token();
                 self.connection.connect(target);
                 nav.push(SESSIONS_LOCATION);
             }

@@ -64,6 +64,16 @@ clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = 
 # unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
 log = "0.4"
 
+# Login-token hygiene (review F5, app-side half): `ConnectController::token`
+# wraps its `String` in `zeroize::Zeroizing` so the buffer is scrubbed on
+# every drop/overwrite rather than left as stale plaintext in a freed
+# allocation, on top of the explicit clear-on-connect/clear-on-disconnect
+# calls that own the *when* — see that controller's module docs. Default
+# features (`alloc`) are all this needs; already a transitive dependency
+# elsewhere in the wider Frust workspace lock, so this pin adds no new
+# supply-chain surface.
+zeroize = "1"
+
 # Test-harness-only, NOT an escape hatch: the headless screen tests
 # (`tests/*.rs`) drive Frust's `RenderRoot` directly (`tests/support/mod.rs` —
 # the desktop shell's own rebuild/layout/paint seam, no GPU, no window) and
