@@ -755,9 +755,10 @@ impl Widget for BrandMarkWidget {
 /// around it — and a bare `GestureDetector` contributes no accessibility node
 /// of its own, which would leave every chrome affordance in the app
 /// unreachable to a screen reader. So this is a leaf press target over one
-/// icon pod, the same shape (and for the same reason) as
-/// `features::connect::presentation::chrome`'s `press_target`, differing only
-/// in that it *owns* the mark it paints rather than wrapping arbitrary art.
+/// icon pod: it captures the press, tints itself while held, and contributes
+/// the `Role::Button` node a plain `GestureDetector` cannot — differing from
+/// composed-art chrome elsewhere only in that it *owns* the mark it paints
+/// rather than wrapping arbitrary art.
 ///
 /// **Lives here, beside the bar that needed it first**, and is `pub` because
 /// the Connect FAB is its second caller — `examples/huddle`'s own convention

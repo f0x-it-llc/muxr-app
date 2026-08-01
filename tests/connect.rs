@@ -76,17 +76,17 @@ use kurbo::{Point, Size};
 use peniko::Color;
 
 use muxr::connection::expect_connection_controller;
-use muxr::features::connect::presentation::pages::connect_page;
+use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
 use muxr::features::connect::presentation::pieces::{
     CONNECT_LABEL, PINNED_CAPTION, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER,
-    field_text_style, heading,
+    connect_pieces, field_text_style, heading,
 };
 use muxr::routes::install_app_router;
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
-use support::{RecScene, char_key, named_key, serial, settle_sized, setup, tap};
+use support::{RecScene, char_key, frame_sized, named_key, serial, settle_sized, setup, tap};
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
 /// tall enough for the whole screen (~830px of pieces) to lay out unclipped —
@@ -249,14 +249,17 @@ impl Harness {
         self.settle();
     }
 
-    /// Every `TextInput` node's current value, in tree order (0 = server URL,
-    /// 1 = login token).
+    /// Every `TextInput`/`PasswordInput` node's current value, in tree order
+    /// (0 = server URL, 1 = login token). The token field obscures (#20
+    /// adopted), so its node reports as `Role::PasswordInput` rather than
+    /// `Role::TextInput` and its value is the *masked* mirror — an empty
+    /// value masks to itself, so this still reads `""` for an untyped token.
     fn field_values(&self) -> Vec<String> {
         self.root
             .semantics()
             .nodes
             .iter()
-            .filter(|(_, node)| node.role() == Role::TextInput)
+            .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
             .filter_map(|(_, node)| node.value().map(str::to_string))
             .collect()
     }
@@ -364,6 +367,47 @@ fn typing_a_server_url_survives_the_rebuild_it_wakes() {
         harness.field_values(),
         vec![VALID_URL.to_string(), String::new()],
         "the URL landed on the controller's signal, and only that field changed"
+    );
+}
+
+#[test]
+fn the_token_field_masks_its_glyphs_but_stays_editable() {
+    // #20 adopted: the login token field obscures now. `TextInputWidget`
+    // reports `Role::PasswordInput` (not `TextInput`) and publishes the
+    // *masked* mirror as its accessible value — the harness's only window
+    // onto rendered text content (`a recording PaintScene sees glyph runs,
+    // not strings` — the module docs above), so this is the mask's
+    // observable proof: the real text never surfaces as a readable value.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    harness.tap_node("the login token field", |node| {
+        node.role() == Role::PasswordInput
+    });
+    harness.type_text("s3cr3t");
+
+    let masked = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::PasswordInput)
+        .and_then(|(_, node)| node.value().map(str::to_string))
+        .expect("the token field contributes a PasswordInput node");
+    assert_eq!(
+        masked,
+        "\u{2022}".repeat("s3cr3t".chars().count()),
+        "the reported value is one mask bullet per typed character, not the \
+         real text"
+    );
+
+    // …and the round trip still lands on the controller: retyping the same
+    // masked field must not have silently made it read-only.
+    assert_eq!(
+        harness.field_values(),
+        vec![String::new(), masked],
+        "the live token field stays editable while obscured"
     );
 }
 
@@ -749,6 +793,87 @@ fn the_qr_sheet_also_dismisses_on_escape() {
     harness.settle();
 
     assert_eq!(harness.nav.depth(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The splash's static mock fields (#16 adopted)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_live_screens_fields_stay_enabled() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+
+    let disabled: Vec<bool> = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
+        .map(|(_, node)| node.is_disabled())
+        .collect();
+    assert_eq!(
+        disabled,
+        vec![false, false],
+        "the live screen's two fields both take input normally"
+    );
+}
+
+#[test]
+fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
+    // `connect_pieces` (== `connect_pieces_with(theme, None)`) is exactly what
+    // the cold-start splash assembles — no navigator, no controller, and
+    // (per the module docs) no callback here reads the state it's handed, so
+    // a bare `()` state and a standalone `RenderRoot` reproduce it directly
+    // (mirroring `subtitle_lines`'s own standalone-piece pattern below).
+    let _g = serial();
+    let _ambient = setup();
+
+    let theme = Theme::glyph_baseline();
+    let mut logic = move |_state: &mut ()| connect_layout(connect_pieces::<()>(&theme));
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut state = ();
+    let mut tcx = TextContext::new();
+    frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+
+    let fields: Vec<(Role, bool)> = root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
+        .map(|(_, node)| (node.role(), node.is_disabled()))
+        .collect();
+    assert_eq!(fields.len(), 2, "the splash mock still renders both fields");
+    assert!(
+        fields.iter().all(|(_, disabled)| *disabled),
+        "the splash's static fields (#16 adopted) must present as disabled — \
+         a stray tap during the staggering entrance must not focus or caret a \
+         field with nothing behind it: {fields:?}"
+    );
+
+    // A direct tap on either field's center must not move focus onto it —
+    // the disabled gate *is* the focus gate (`TextInputView::enabled`'s
+    // module docs: a `Down` inside a disabled field neither requests focus
+    // nor captures the pointer).
+    let centers: Vec<Point> = root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
+        .filter_map(|(_, node)| node.bounds())
+        .map(|b| Point::new((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0))
+        .collect();
+    assert_eq!(centers.len(), 2, "both fields carry bounds to tap");
+    for point in centers {
+        tap(&mut root, &mut state, point);
+    }
+    frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+    assert!(
+        root.semantics().focus.is_none(),
+        "a disabled field must not become the tree's focus node after a \
+         direct tap"
+    );
 }
 
 // ---------------------------------------------------------------------------
