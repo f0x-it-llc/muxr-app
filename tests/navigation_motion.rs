@@ -57,6 +57,8 @@
 //! here runs a warm start.
 
 use std::any::Any;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use frust::{AnyView, Component, SizedBox, Theme, any};
@@ -69,7 +71,7 @@ use kurbo::{Point, Size};
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::routes::app_nav;
 use muxr::ui::dialogs::confirm_dialog;
-use muxr::ui::sheet::show_sheet;
+use muxr::ui::sheet::{SheetHandle, show_sheet};
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -284,6 +286,17 @@ impl Harness {
     /// animation still in flight) or a tracked write since the rebuild
     /// (`TrackedScope::is_dirty`), which are precisely the two conditions that
     /// shell turns into a `request_redraw`.
+    ///
+    /// # The one request that does not count as "still converging"
+    ///
+    /// A frame whose **every** request was `TickClass::CosmeticLoop`
+    /// (`PaintOutcome::needs_frame_paced_only`) reports `false` here. That is
+    /// the framework's own name for a loop that never settles by design — on
+    /// `/terminal` it is the caret's 1.1s blink — and the mobile frame gate
+    /// throttles it for exactly that reason. Counting it would make
+    /// [`Harness::park`] unusable on the one screen the menu → sheet chain
+    /// lives on, and it costs nothing: a paced-only frame is by construction a
+    /// frame in which no transition, no reveal and no staging is in flight.
     fn requested_frame(&mut self) -> (RecScene, bool) {
         self.clock += FRAME_MS;
         let root = &mut self.root;
@@ -295,7 +308,8 @@ impl Harness {
         self.root.layout_with_text(support::surface(), tcx);
         let mut scene = RecScene::default();
         let outcome = self.root.paint(&mut scene, ms(self.clock));
-        let more = outcome.needs_frame || self.scope.is_dirty();
+        let converging = outcome.needs_frame && !outcome.needs_frame_paced_only;
+        let more = converging || self.scope.is_dirty();
         (scene, more)
     }
 
@@ -833,6 +847,212 @@ fn a_back_press_that_bypassed_the_sheet_cannot_strand_a_dimmed_bar() {
     h.tap_label(GEAR);
     h.settle();
     assert_eq!(h.depth(), covered_depth + 1, "the ⚙ works again");
+}
+
+// ---------------------------------------------------------------------------
+// 3d — the accounting consults the ops already queued before it mutates
+// ---------------------------------------------------------------------------
+//
+// Section 3c asserts that a *closed* modal gives the bar back. This one covers
+// the two places where the app **adds** state the same accounting could later
+// erase — a route recorded in the mirror, and an overlay counted into it — and
+// both defects it pins shut are one-rebuild staleness read as fact:
+//
+// - `NavigatorController::depth` still counts a page whose pop is queued, so a
+//   handler that closes an overlay *and* pushes a route (the Sessions Attach
+//   row, verbatim) recorded that route one too deep — permanently — and the
+//   next depth fall past it evicted the route's own bar entry;
+// - a depth fall nobody observed stays unspent in the mirror, so an overlay
+//   opened out of the overlay before it (the terminal's menu → sheet chain)
+//   handed its own fresh count to the backstop as the thing to clamp, and its
+//   dismissal then stranded a dimmed, inert bar.
+//
+// Both are asserted at the parking point, with no courtesy frames.
+
+/// Open the app's real sheet over `h` and hand back the [`SheetHandle`] its
+/// body's rows close it through — captured out of the body builder exactly as
+/// a row captures one (`features::sessions`' `sheet_action`).
+fn open_sheet_with_handle(h: &mut Harness) -> SheetHandle {
+    let captured: Rc<RefCell<Option<SheetHandle>>> = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&captured);
+    show_sheet(&app_nav(), h.state.nav.controller(), move |sheet| {
+        *sink.borrow_mut() = Some(sheet.clone());
+        any(SizedBox::<AppState>(Some(SHEET_BODY), Some(SHEET_BODY)))
+    });
+    h.park();
+    let handle = captured.borrow().clone();
+    handle.expect("the sheet's body builder ran and minted a handle")
+}
+
+/// A harmless pointer move — the input pass that hands a pushed page's
+/// **pop-completion callback** over (`NavigatorWidget::event` flushes the
+/// results queued at the previous rebuild, which is where `Nav::end_overlay`
+/// runs). Production gets one from the user's next touch; a test that drives
+/// the navigator from outside a handler has to supply it.
+const IDLE_MOVE: Point = Point::new(4.0, 400.0);
+
+#[test]
+fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    let covered_depth = h.depth();
+
+    let sheet = open_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), covered_depth + 1, "the sheet is its own page");
+
+    // The Attach row's own two calls (`features::sessions`' `sheet_action`:
+    // `sheet.close(); actions.attach(&id)`), run against the **real** handle
+    // and back to back — which is the whole shape that matters: no frame lands
+    // between them, so the close's queued controller pop is still counted by
+    // `depth()` while the push below is being recorded. (Driven from here
+    // rather than by pressing a row: a sheet's body lives inside the navigator,
+    // where nothing is addressable by semantics.)
+    sheet.close();
+    app_nav().push("/settings");
+    h.park();
+
+    assert_eq!(
+        h.depth(),
+        covered_depth + 1,
+        "the sheet's page went and the route's took its place"
+    );
+    assert_titled(&h, "server settings");
+
+    // The next input pass — the user's next touch — delivers the sheet's
+    // pop-completion callback (`Nav::end_overlay`), settling the accounting.
+    h.dispatch(&pointer(PointerPhase::Move, IDLE_MOVE));
+
+    // And now the eviction the mis-recorded depth used to cause: the *first*
+    // overlay to open and close over that route (on `/terminal` it is the ⋮
+    // menu) drops the live depth back past the entry, and a retain measured
+    // against a too-deep record takes the route's own bar with it.
+    let overlay = open_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), covered_depth + 2, "the overlay is its own page");
+    assert!(
+        !h.has_bar(),
+        "…and it dims the bar over the route: {:?}",
+        node_roles(&h.root)
+    );
+
+    overlay.close();
+    h.park();
+
+    assert_eq!(h.depth(), covered_depth + 1, "the overlay popped, alone");
+    assert_titled(&h, "server settings");
+    assert!(
+        h.labels().iter().any(|l| l == BACK),
+        "…back affordance and all — the route's own entry survived: {:?}",
+        h.labels()
+    );
+    assert!(
+        !h.values().iter().any(|v| v == HOST),
+        "…and the bar did not fall back to the route underneath: {:?}",
+        h.values()
+    );
+}
+
+/// The terminal route's overflow affordance, by its accessible name —
+/// transcribed from `crate::shell`, like [`BACK`]/[`GEAR`] above.
+const TERMINAL_MENU: &str = "Terminal menu";
+/// `frust::glyph::menu`'s own panel gutter and item-row height, transcribed
+/// (both are private to that module, and a test that imported them could not
+/// catch one of them changing).
+///
+/// # Why this suite pixel-hunts a menu row where `tests/terminal.rs` refuses to
+///
+/// That suite selects a row by popping the menu page with its documented
+/// `PopResult::of(index)` contract, because it only needs the *action* a row
+/// runs. This one needs the widget's own dismissal path: the menu pops **itself
+/// from inside its paint**, with no app seam in between, and that self-pop is
+/// precisely the unobserved depth fall the defect below turns on. So the row is
+/// pressed for real — and a row is reachable by neither semantics (it lives in
+/// the navigator) nor a rect of its own (the panel paints its rows internally),
+/// leaving its geometry: the first item is one [`MENU_PANEL_PAD`] into the
+/// panel, [`MENU_ROW_H`] tall.
+const MENU_PANEL_PAD: f64 = 6.0;
+const MENU_ROW_H: f64 = 34.0;
+
+#[test]
+fn the_terminal_menus_own_sheet_is_not_wiped_by_the_fall_the_menu_left_behind() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+
+    h.push("/terminal?session=s-1");
+    let covered_depth = h.depth();
+    let before = h.park();
+    assert_titled(&h, "terminal");
+
+    // The real ⋮, opening the real `frust::glyph` menu — accounted like the
+    // app's own overlays (`Nav::begin_overlay`/`end_overlay`), but with **no**
+    // synchronous half: a menu dismissal is popped from inside the widget's own
+    // paint, so the app never gets to report it closing.
+    h.tap_label(TERMINAL_MENU);
+    let open = h.park();
+    assert_eq!(h.depth(), covered_depth + 1, "the menu is its own page");
+    assert!(
+        !h.has_bar(),
+        "…and it dims the bar it is anchored to: {:?}",
+        node_roles(&h.root)
+    );
+
+    // "Panes & tabs" — the menu's first row, and the one that chains straight
+    // into another overlay.
+    let panel =
+        largest(&added(&before.rounded, &open.rounded)).expect("the menu paints its own panel");
+    let first_row = Point::new(
+        panel.0.x + panel.1.width / 2.0,
+        panel.0.y + MENU_PANEL_PAD + MENU_ROW_H / 2.0,
+    );
+    h.tap_parked(first_row);
+
+    assert_eq!(h.depth(), covered_depth, "the menu popped itself");
+    assert!(
+        !h.has_bar(),
+        "…and the bar stays dimmed on the way out — its count is only cleared \
+         by the completion callback, which has not run yet: {:?}",
+        node_roles(&h.root)
+    );
+
+    // The hand-off pass: the navigator flushes the menu's pop-completion
+    // callback, which is `Nav::end_overlay` **and** the `open_sheet` that
+    // begins the next overlay, back to back. Production gets this pass from the
+    // user's next touch (see `IDLE_MOVE`); the frames after it are the ones the
+    // sheet's own push asks for.
+    h.dispatch(&pointer(PointerPhase::Move, IDLE_MOVE));
+    h.park();
+
+    assert_eq!(
+        h.depth(),
+        covered_depth + 1,
+        "the sheet took the menu's place"
+    );
+    assert!(
+        !h.has_bar(),
+        "…and the bar never flashes lit across the hand-off: {:?}",
+        node_roles(&h.root)
+    );
+
+    // THE assertion. The sheet's own count is what `Nav::dismiss_overlay` needs
+    // in order to light the bar a rebuild before the pop lands — and the count
+    // only exists if the menu's unobserved fall was spent *before* it was
+    // taken. Wiped, this dismissal leaves the bar dimmed and inert until
+    // unrelated input, which is exactly where the loop parks.
+    h.tap_parked(SHEET_SCRIM_POINT);
+
+    assert_eq!(h.depth(), covered_depth, "the scrim tap popped the sheet");
+    assert!(
+        h.has_bar(),
+        "…and the bar is lit and addressable again with no further input: {:?}",
+        node_roles(&h.root)
+    );
+    assert_titled(&h, "terminal");
+    h.tap_label(BACK);
+    h.settle();
+    assert_eq!(h.depth(), covered_depth - 1, "…and its ‹ pops the route");
 }
 
 #[test]
