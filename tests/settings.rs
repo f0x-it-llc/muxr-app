@@ -348,6 +348,27 @@ impl Harness {
     fn depth(&self) -> usize {
         self.nav.depth()
     }
+
+    /// Push a stand-in for the route a picker sheet floats over, and answer the
+    /// depth the stack now rests at.
+    ///
+    /// A navigator always keeps one page (`NavigatorController::pop`: "a pop of
+    /// the last/root page is ignored"), so an unwanted *second* pop against the
+    /// bare harness is silently absorbed and [`Harness::depth`] never moves. In
+    /// the app there is always a route under the sheet — `/settings` — and that
+    /// page coming off is the defect the race below exists for. This page
+    /// stands in for it. (`tests/terminal.rs` carries the same helper, for the
+    /// same reason.)
+    fn push_route_floor(&mut self) -> usize {
+        self.nav.push(|| {
+            any(SizedBox::<AppState>(
+                Some(f64::INFINITY),
+                Some(f64::INFINITY),
+            ))
+        });
+        self.settle();
+        self.depth()
+    }
 }
 
 /// The chrome a pushed overlay added to the frame — the screen underneath is
@@ -422,13 +443,20 @@ fn open_picker(h: &mut Harness, row: &str) -> Chrome {
 /// Every `.pick-row` is one line tall, so the selected row's own height is the
 /// pitch — see the [module docs](self).
 fn pick(h: &mut Harness, sheet: &Chrome, selected: usize, target: usize) {
+    h.tap(pick_row(sheet, selected, target));
+    h.flush();
+}
+
+/// Where option `target`'s row sits, given the picker's own selected row and
+/// the index it sits at — [`pick`]'s geometry, factored out so a test can tap
+/// the same row twice.
+fn pick_row(sheet: &Chrome, selected: usize, target: usize) -> Point {
     let (origin, size) = sheet.selected_pick_row();
     let offset = target as f64 - selected as f64;
-    h.tap(Point::new(
+    Point::new(
         origin.x + size.width / 2.0,
         origin.y + offset * size.height + size.height / 2.0,
-    ));
-    h.flush();
+    )
 }
 
 /// Open a dialog by tapping the node labelled `label`, then return the rects
@@ -826,6 +854,35 @@ fn picking_an_option_persists_it_and_updates_the_row() {
         h.pump_until_values(expected, |values| values.iter().any(|v| v == expected));
         assert_eq!(h.depth(), 1, "{row}: the sheet closed behind the choice");
     }
+}
+
+#[test]
+fn a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route() {
+    // The picker's close is immediate, but a pop only *lands* at the next
+    // rebuild — so for one whole frame the row that just closed the sheet is
+    // still there to be tapped again. That second tap used to pop the
+    // `/settings` route out from under the picker; `ui::sheet`'s dismissal gate
+    // is what makes it a no-op (see that module's "One sheet, one dismissal").
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let floor = h.push_route_floor();
+
+    let before = h.frame();
+    h.tap_value("cursor style");
+    let after = h.settle();
+    let sheet = Chrome::diff(&before, &after);
+    assert_eq!(h.depth(), floor + 1, "the picker is up over the route");
+
+    // Twice, with no frame in between — the whole point.
+    let row = pick_row(&sheet, 0, 2);
+    h.tap(row);
+    h.tap(row);
+    h.flush();
+
+    assert_eq!(h.depth(), floor, "one pop, and the route is still under it");
+    // …and the pick itself still lands exactly once, unchanged.
+    h.pump_until_values("bar", |values| values.iter().any(|v| v == "bar"));
 }
 
 #[test]

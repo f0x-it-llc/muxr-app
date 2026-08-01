@@ -63,6 +63,7 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::terminal::presentation::pages::{open_terminal_menu, terminal_page};
 use muxr::routes::{BarAction, app_nav, install_app_router, route_meta};
+use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -125,6 +126,18 @@ const ROW_DETACH: usize = 3;
 /// The mounted navigator's depth with no overlay up: its own (empty, full-bleed)
 /// initial page.
 const REST_DEPTH: usize = 1;
+
+/// `presentation::pages`' own `SHEET_CLOSE_DELAY`, transcribed (it is private
+/// there, and a test that imported it could not catch it changing): how long a
+/// tab pill leaves the sheet up so the selection visibly moves first.
+const CLOSE_DELAY: Duration = Duration::from_millis(260);
+
+/// What a landed detach says, transcribed from `presentation::pages`.
+const DETACHED_TOAST: &str = "detached";
+
+/// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
+/// card prints once the *second* of two rapid pill taps has landed.
+const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
 
 /// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
@@ -393,6 +406,63 @@ impl Harness {
         self.choose_menu_row(ROW_PANES);
         let after = self.settle();
         (before, after)
+    }
+
+    /// Push a stand-in for the route a sheet floats over, and answer the depth
+    /// the stack now rests at.
+    ///
+    /// **Without it a stray pop is invisible.** A navigator always keeps one
+    /// page (`NavigatorController::pop`'s own contract: "a pop of the
+    /// last/root page is ignored"), so a second, unwanted pop against the bare
+    /// harness is silently absorbed and [`Harness::depth`] never moves. The
+    /// app's real stack never looks like that — `/terminal` is always under the
+    /// sheet, and *that* page coming off is exactly the defect the races below
+    /// exist for. This page stands in for it, so a stray pop shows up as a
+    /// depth that fell through the floor.
+    fn push_route_floor(&mut self) -> usize {
+        self.nav.push(|| {
+            any(SizedBox::<AppState>(
+                Some(f64::INFINITY),
+                Some(f64::INFINITY),
+            ))
+        });
+        self.settle();
+        self.depth()
+    }
+
+    /// Pump real frames for at least `span` of wall clock.
+    ///
+    /// The delayed close runs on the executor's own timer, so "the late close
+    /// has had every chance to fire" is a wall-clock fact rather than a frame
+    /// count — this is what makes an assertion *after* it a statement about
+    /// the guard and not about the pump.
+    fn pump_for(&mut self, span: Duration) {
+        let until = Instant::now() + span;
+        while Instant::now() < until {
+            pump_frames(
+                &mut self.root,
+                &mut self.logic,
+                &mut self.state,
+                &mut self.tcx,
+                1,
+            );
+        }
+    }
+
+    /// The sheet's own close button, located the way
+    /// [`the_sheets_close_button_dismisses_it`] locates it: the one 26px disc
+    /// it paints (it lives inside the navigator, so it has no semantics node).
+    fn close_disc(&mut self) -> Point {
+        let scene = self.frame();
+        let disc = scene
+            .rounded
+            .iter()
+            .copied()
+            .find(|(_, size)| {
+                (size.width - 26.0).abs() < EPSILON && (size.height - 26.0).abs() < EPSILON
+            })
+            .expect("the sheet's 26px close disc");
+        center(disc)
     }
 
     /// Unmount the screen — the harness's stand-in for a back-nav off
@@ -940,6 +1010,105 @@ fn the_scrim_dismisses_the_sheet_too() {
 }
 
 // ---------------------------------------------------------------------------
+// 6b — the sheet closes once, whatever happens during the close beat
+// ---------------------------------------------------------------------------
+//
+// A tab pill leaves the sheet up for `CLOSE_DELAY` so the selection visibly
+// moves first, and the sheet stays fully interactive for that whole beat. Every
+// test here fires a *second* dismissal inside it and asserts the same two
+// things: the sheet closes once, and the page under it (the `/terminal` route
+// in the app, [`Harness::push_route_floor`]'s stand-in here) is still there
+// afterwards. Before `ui::sheet`'s dismissal gate, each of these popped it.
+
+#[test]
+fn a_second_tab_pill_inside_the_close_beat_still_closes_the_sheet_only_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    let floor = h.push_route_floor();
+
+    let (before, after) = h.open_sheet();
+    assert_eq!(h.depth(), floor + 1, "the sheet is up over the route");
+    let sheet = added(&before.rounded, &after.rounded);
+    let pills = pills(&sheet);
+    // Reading order: the four space pills, then the tabs — `1 btop` first,
+    // `2 minefit-api` second. Both taps land inside the same close beat.
+    h.tap(center(pills[4]));
+    h.tap(center(pills[5]));
+
+    // Latest tap wins: the second selection is the one that lands…
+    h.pump_until_values("the minefit tab", |values| {
+        values.iter().any(|v| v == MINEFIT_TITLE)
+    });
+    // …one close fires (`<=`, not `==`: two stacked closes can land in the
+    // same rebuild, and this test must report *that* rather than time out)…
+    h.pump_until("the sheet to close", |h| h.depth() <= floor);
+    // …and the superseded one, given every chance to wake, lands on nothing.
+    h.pump_for(2 * CLOSE_DELAY);
+
+    assert_eq!(
+        h.depth(),
+        floor,
+        "the second close never popped the route under the sheet"
+    );
+    assert!(
+        h.shows(MINEFIT_TITLE) && !h.shows(BTOP_TITLE),
+        "the second selection is the one applied: {:?}",
+        h.values()
+    );
+}
+
+#[test]
+fn a_scrim_dismissal_inside_the_close_beat_leaves_the_route_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    let floor = h.push_route_floor();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    h.tap(center(pills(&sheet)[4]));
+    // The sheet is still up — and still dismissible — for the whole beat.
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), floor, "the scrim closed it, once");
+
+    h.pump_for(2 * CLOSE_DELAY);
+    assert_eq!(
+        h.depth(),
+        floor,
+        "…and the pill's late close found the sheet already gone"
+    );
+}
+
+#[test]
+fn the_close_button_inside_the_close_beat_leaves_the_route_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    let floor = h.push_route_floor();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    h.tap(center(pills(&sheet)[4]));
+    let close = h.close_disc();
+    h.tap(close);
+    h.flush();
+    assert_eq!(h.depth(), floor, "the close button closed it, once");
+
+    h.pump_for(2 * CLOSE_DELAY);
+    assert_eq!(
+        h.depth(),
+        floor,
+        "…and the pill's late close found the sheet already gone"
+    );
+    assert!(
+        !node_labels(&h.root).iter().any(|l| l == CLOSE),
+        "the sheet is gone, not reopened"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 7 — rename and detach
 // ---------------------------------------------------------------------------
 
@@ -1019,6 +1188,44 @@ fn the_menus_detach_row_pops_the_terminal_route() {
         None,
         "the terminal route came off the stack"
     );
+}
+
+#[test]
+fn a_second_detach_while_the_first_is_in_flight_pops_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    // Detach is async (a repository round trip) and the menu can be reopened
+    // while it is in flight — two landings would pop `/sessions` off the stack
+    // as well as `/terminal`. Neither `choose_menu_row` nor `settle` pumps the
+    // task queue, so both requests are made before either can land.
+    h.open_menu();
+    h.choose_menu_row(ROW_DETACH);
+    h.open_menu();
+    h.choose_menu_row(ROW_DETACH);
+
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while app_nav().bar().meta.is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the detach"
+        );
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    // Give a second landing every chance to arrive before counting.
+    h.pump_for(2 * CLOSE_DELAY);
+
+    // The detach's own toast is raised on the same line as the pop, so
+    // counting toasts *is* counting pops (the app's stack itself is behind the
+    // record-only navigator here — see the module docs).
+    let detached = app_toasts()
+        .pending_untracked()
+        .into_iter()
+        .filter(|message| message == DETACHED_TOAST)
+        .count();
+    assert_eq!(detached, 1, "one detach, one pop, one toast");
 }
 
 // ---------------------------------------------------------------------------
