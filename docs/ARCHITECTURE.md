@@ -74,13 +74,19 @@ whether a sheet or dialog covers the titled route. A pop that bypasses `Nav` (an
 corrected on the next depth-fall reconcile; a transparent overlay push adds page-stack depth with no
 mirror entry, which is exactly what dims the bar without retitling it. Because the navigator's own
 depth is one rebuild stale by construction, `Nav` additionally counts its own overlays
-*synchronously* — `begin_overlay`/`dismiss_overlay`/`end_overlay` bracket every app-owned modal's
-push/dismiss/completion — so the bar un-dims the instant a dismissal is enqueued rather than a frame
-later; the depth-fall reconcile is the backstop, clamping the counters flat whenever an unaccounted
-dismissal (an overlay pushed with no helper, an OS back press) would otherwise strand a dimmed,
-inert bar. `Nav::fullscreen()`/`set_fullscreen` publish a screen's fullscreen request (the terminal
-screen's expand/collapse), and every path push carries a themed Glyph screen transition, collapsed
-to a linear cross-fade under `reduce_motion`.
+*synchronously* on **app-owned** dismissal paths — `begin_overlay`/`dismiss_overlay`/`end_overlay`
+bracket a helper's own push/dismiss/completion — so the bar un-dims the instant such a dismissal is
+enqueued rather than a frame later. A dismissal the framework completes entirely on its own (a Glyph
+dialog's own scrim tap/`Escape`, a menu popping itself) has no `dismiss_overlay` hook to call and only
+un-dims on the next input pass, once its completion callback lands — a framework dismiss-hook seam,
+still pending. Both counters also consult the navigator's own queued-but-undrained ops before adding
+to themselves: a push is recorded against the depth the navigator will actually land at once its
+queued pops drain, and a new overlay's count is taken only after reconciling any depth fall nothing
+has observed yet. The depth-fall reconcile itself is the backstop, clamping the counters flat
+whenever an unaccounted dismissal (an overlay pushed with no helper, an OS back press) would
+otherwise strand a dimmed, inert bar. `Nav::fullscreen()`/`set_fullscreen` publish a screen's
+fullscreen request (the terminal screen's expand/collapse), and every path push carries a themed
+Glyph screen transition, collapsed to a linear cross-fade under `reduce_motion`.
 
 ## Feature Slices — `src/features/<feature>/`
 
@@ -97,10 +103,14 @@ All four are now full slices — mock repositories behind domain traits, a clean
 and a per-screen `Component` (see Building a Screen, below) — over mock data; the real `muxrd` gRPC
 layer is not wired yet (see Planned). A `domain` → sibling-`domain` edge is a deliberate, narrow
 widening of the table above, used twice: `connect`'s domain re-exports `crate::connection::TrustMode`
-rather than re-minting it, and `terminal`'s `LoadWorkspace`/`RenameAttachedSession` use cases inject
-`sessions`' own `SessionsRepository` — a session's *name* has exactly one owner (the `sessions` list
-and its store), so the terminal screen's rename writes through it rather than minting a second,
-driftable name. Neither edge crosses into a sibling's `data` or `presentation`.
+rather than re-minting it, and `terminal`'s domain re-exports `sessions`' own `SessionsRepository`/
+`RenameRequest` so its `LoadWorkspace`/`RenameAttachedSession` use cases can inject that repository —
+a session's *name* has exactly one owner (the `sessions` list and its store), so the terminal screen's
+rename writes through it rather than minting a second, driftable name. Neither edge crosses into a
+sibling's `data` or `presentation`. A third widening sits outside the layer table entirely: each
+feature's `di.rs` is composition-root wiring, not a table layer, and `terminal`'s page resolves
+`sessions::di::expect_sessions_repository()` there directly in its `Component::init` — the same
+accessor `sessions`' own screen calls — rather than re-routing a copy through `terminal`'s own `di.rs`.
 
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, a mock-mirror
   repository, the fullscreen seam, the "panes & tabs" sheet, and the app bar's overflow menu
@@ -160,13 +170,16 @@ example, every frust app author) should copy. Normative, not aspirational; huddl
   `Role::Button` over a single icon pod) — now at three call sites (the bar's own slots, the Connect
   FAB, the terminal panes sheet's close button); promoting it out to its own `crate::ui` module is a
   known, deliberately deferred refactor.
-- **`sheet`** — a hand-composed modal bottom sheet (`show_sheet`/`close_sheet`/`sheet_scaffold`): the
-  documented workaround for frust's missing Glyph sheet primitive. Owns `ModalStage`, the one timing
-  source every modal-adjacent animation shares — the sheet's own scrim-fade/panel-slide, the Glyph
-  dialog's dim, and the floating top bar's overlay tint all stage off it, so a sheet, a dialog and
-  the bar dim and settle together. `show_sheet`/`close_sheet` and `dialogs`' helpers now take the
-  app's `&Nav` alongside the navigator, purely for the overlay accounting the shell's bar reads
-  (Navigation, above) — nothing else about app state crosses that boundary.
+- **`sheet`** — a hand-composed modal bottom sheet (`show_sheet`/`sheet_scaffold`): the documented
+  workaround for frust's missing Glyph sheet primitive. Owns `ModalStage`, the one timing source every
+  modal-adjacent animation shares — the sheet's own scrim-fade/panel-slide, the Glyph dialog's dim,
+  and the floating top bar's overlay tint all stage off it, so a sheet, a dialog and the bar dim and
+  settle together. Dismissal is gated through a `SheetHandle` `show_sheet` mints per sheet instance
+  and hands to the body builder: `SheetHandle::close`/`close_after` pop (and report to the overlay
+  accounting) **at most once per instance**, since a duplicate close used to pop the route under the
+  sheet instead. `show_sheet` and `dialogs`' helpers take the app's `&Nav` alongside the navigator,
+  purely for the overlay accounting the shell's bar reads (Navigation, above) — nothing else about app
+  state crosses that boundary.
 - **`dialogs`** — Flutter-parity confirm/name-input modals (`confirm_dialog`/`name_input_dialog`)
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
@@ -225,9 +238,9 @@ suite runs the real table and guard.
 - QR-code pairing for host + token entry.
 - Secure, persisted credential/preference storage — `settings`'s preferences repository is
   in-memory only.
-- The login-token field is cleared from memory on both connect and disconnect today, but not yet
-  masked against OS-level surfaces (IME suggestions, recents capture) — that needs platform plumbing
-  this app doesn't have yet.
+- The login-token field's controller-held buffer is cleared and zeroized on both connect and
+  disconnect today; transient copies on the render pass and the platform IME surface (suggestions,
+  recents capture) still hold plaintext until platform-level masking plumbing lands.
 - A `herdr` wire-version field on `ServerInfo` — the settings screen's `herdr version` row is a
   screen-local constant until then.
 - Structural (side-by-side, two-column) responsive layouts, once frust's responsive primitive and a
