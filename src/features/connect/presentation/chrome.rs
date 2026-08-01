@@ -1,8 +1,7 @@
 //! The Connect screen's hand-rolled primitives: a bordered, rounded, filled
 //! **panel** (single-child), a fixed-size **swatch** (leaf, optionally
-//! glowing), a **centered paragraph**, a **press target**, and the
-//! **control-semantics** wrapper behind [`switch_semantics`]/
-//! [`radio_semantics`].
+//! glowing), a **centered paragraph**, and the **control-semantics** wrapper
+//! behind [`switch_semantics`]/[`radio_semantics`].
 //!
 //! The Connect mock is mostly borders and washes — `.connect-mark`'s tile and
 //! its four grid cells, `.connect-badge`'s box, `.toggle`'s pill and knob,
@@ -22,12 +21,6 @@
 //! composed pile is worth, over one shared [`ControlSemanticsView`] body.
 //! Delete them the day `frust::glyph` grows a real switch/radio.
 //!
-//! [`press_target`] is the interactive counterpart: the pressed *visual* and
-//! the `Role::Button` node a `GestureDetector` alone cannot supply (it exposes
-//! no press state and contributes no node), for chrome that has to be
-//! hand-composed rather than reached through [`frust::button`] — see
-//! [`super::pieces`]'s `connect_button`.
-//!
 //! [`centered_paragraph`] is the multi-line-centering one: `TextView` exposes
 //! no paragraph alignment and `TextContext::layout` hardcodes
 //! `parley::Alignment::Start`, so a wrapped run's second line always hugs the
@@ -42,15 +35,20 @@
 //! Each takes already-resolved [`Color`]s/[`TextStyle`]s: their callers
 //! ([`super::pieces`]) resolve every one from the active [`frust::Theme`]
 //! once per build, so these stay dumb about theming.
-
-use std::rc::Rc;
+//!
+//! **A fourth primitive, `press_target`, lived here** — the CTA's pressed
+//! visual and `Role::Button` node, for the hand-composed button `ButtonWidget`
+//! couldn't yet render with a centered label (FINDINGS #15). `#15` shipped,
+//! `pieces::connect_button` adopted the real `frust::button`, and
+//! `press_target` had no caller left, so it was deleted with it rather than
+//! kept as an orphaned helper.
 
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx,
-    PaintScene, Point, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, Toggled, View,
-    Widget, any, build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, Toggled, View, Widget, any, build_child, rebuild_child,
+    route_event_single, teardown_child,
 };
 
 /// Hairline border width in logical px (`1px solid` on every bordered rule in
@@ -493,196 +491,6 @@ impl ControlKind {
 }
 
 // ---------------------------------------------------------------------------
-// Press target — a pressable `Role::Button` surface over composed art
-// ---------------------------------------------------------------------------
-
-/// Make `child` — already-composed art — a pressable [`Role::Button`] labelled
-/// `label`: it captures the press, tints itself with `tint` while held, and
-/// fires [`PressTargetView::on_press`] on a release inside its bounds.
-///
-/// The press treatment is the framework's own
-/// [`PRESSED_OPACITY`] wash (a mechanism, not a Material decision — see its
-/// doc) painted over the art at `radius`, rather than `Button`'s scale pivot:
-/// scaling needs an `AnimationController` this leaf has no reason to own, and a
-/// full-bleed bar dipping in tone reads the same.
-///
-/// **A leaf press target, like `frust`'s own `Button` over its label**: it does
-/// not route events into `child`, so `child` must be decoration (text, swatches)
-/// and never another control. Layout is pass-through.
-pub fn press_target<State: 'static, V: View<State>>(
-    child: V,
-    label: impl Into<String>,
-    tint: Color,
-    radius: f64,
-) -> PressTargetView<State> {
-    PressTargetView {
-        child: any(child),
-        label: label.into(),
-        tint,
-        radius,
-        on_press: None,
-    }
-}
-
-/// A view-held, typed press callback, erased to an [`ErasedCallback`] on
-/// build — the shape `frust-widgets`' own `Button`/`Radio` hold theirs in.
-type OnPress<State> = Rc<dyn Fn(&mut State)>;
-
-/// The declarative half of [`press_target`].
-pub struct PressTargetView<State: 'static> {
-    child: AnyView<State>,
-    label: String,
-    tint: Color,
-    radius: f64,
-    on_press: Option<OnPress<State>>,
-}
-
-impl<State: 'static> PressTargetView<State> {
-    /// Fire `on_press(state)` on a release inside this target's bounds
-    /// (`docs/CODE_STANDARDS.md`'s fire-on-up-inside rule). A target with none
-    /// still paints, presses and announces itself — the shape the splash's
-    /// inert copy of the CTA needs.
-    pub fn on_press<F: Fn(&mut State) + 'static>(mut self, on_press: F) -> Self {
-        self.on_press = Some(Rc::new(on_press));
-        self
-    }
-}
-
-/// The retained half of [`press_target`].
-pub struct PressTargetWidget {
-    child: ChildPod,
-    label: String,
-    tint: Color,
-    radius: f64,
-    /// The pressed *visual*; follows the pointer in/out while captured.
-    pressed: bool,
-    /// Armed by a `Down` (alongside `capture_pointer`), cleared on
-    /// `Up`/`Cancel` — gates `Move`/`Up` so a hover never latches or fires.
-    captured: bool,
-    on_press: Option<ErasedCallback>,
-}
-
-/// Whether `pos` (widget-local) falls inside a `size`-sized box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
-}
-
-impl<State: 'static> View<State> for PressTargetView<State> {
-    type Element = PressTargetWidget;
-
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> PressTargetWidget {
-        PressTargetWidget {
-            child: build_child(&self.child, ctx),
-            label: self.label.clone(),
-            tint: self.tint,
-            radius: self.radius,
-            pressed: false,
-            captured: false,
-            on_press: self.on_press.as_ref().map(erase_callback),
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut PressTargetWidget,
-        ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        // Closures are not comparable — always reinstall the adapter.
-        element.on_press = self.on_press.as_ref().map(erase_callback);
-        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
-        if prev.label != self.label || prev.tint != self.tint || prev.radius != self.radius {
-            element.label = self.label.clone();
-            element.tint = self.tint;
-            element.radius = self.radius;
-            flags |= ChangeFlags::PAINT;
-        }
-        flags
-    }
-
-    fn teardown(&self, element: &mut PressTargetWidget, ctx: &mut BuildCtx<'_>) {
-        teardown_child(&self.child, &mut element.child, ctx);
-    }
-}
-
-impl Widget for PressTargetWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let size = self.child.layout_child(ctx, bc);
-        self.child.set_origin(Point::ZERO);
-        bc.constrain(size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.child.paint_child(ctx, scene);
-        if self.pressed {
-            scene.fill_rounded_rect(
-                ctx.origin(),
-                ctx.size(),
-                self.radius,
-                self.tint.with_alpha(PRESSED_OPACITY),
-            );
-        }
-    }
-
-    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let InputEvent::Pointer(pointer) = event else {
-            return EventResult::Ignored;
-        };
-        match pointer.phase {
-            PointerPhase::Down => {
-                self.pressed = true;
-                self.captured = true;
-                ctx.capture_pointer();
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Move => {
-                if !self.captured {
-                    return EventResult::Ignored;
-                }
-                self.pressed = inside(pointer.position, ctx.size());
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Up => {
-                if !self.captured {
-                    return EventResult::Ignored;
-                }
-                if inside(pointer.position, ctx.size())
-                    && let Some(on_press) = self.on_press.as_mut()
-                {
-                    (on_press)(ctx);
-                }
-                self.pressed = false;
-                self.captured = false;
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Cancel => {
-                if !self.captured {
-                    return EventResult::Ignored;
-                }
-                // Flags only — a `Cancel` arm never touches state
-                // (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
-                self.pressed = false;
-                self.captured = false;
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-        }
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // One labelled Button node, like `frust`'s own `Button` over its label
-        // pod: the art underneath has nothing of its own to announce.
-        ctx.push_node(Role::Button, |node| {
-            node.set_label(self.label.as_str());
-            node.add_action(Action::Click);
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Centered paragraph — per-line centering `text` cannot express
 // ---------------------------------------------------------------------------
 
@@ -950,148 +758,6 @@ mod tests {
         assert_eq!(
             widget.layout(&mut ctx, &BoxConstraints::tight(Size::new(20.0, 20.0))),
             Size::new(20.0, 20.0)
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Press target
-    // -----------------------------------------------------------------------
-
-    /// A press target over no art, with a counter for a callback — the CTA's
-    /// own shape minus its panel.
-    fn press_widget(wired: bool) -> (PressTargetWidget, ()) {
-        let view = press_target::<(), _>(
-            swatch(Size::new(40.0, 20.0), Color::WHITE, 0.0),
-            "→ connect",
-            Color::BLACK,
-            6.0,
-        );
-        let view = if wired {
-            view.on_press(|_state: &mut ()| PRESSES.with(|n| n.set(n.get() + 1)))
-        } else {
-            view
-        };
-        let mut counter = 0u64;
-        (
-            View::<()>::build(&view, &mut BuildCtx::new(&mut counter)),
-            (),
-        )
-    }
-
-    thread_local! {
-        /// How many times the wired press target fired — a thread-local rather
-        /// than app state, so the callback stays a plain `Fn(&mut ())`.
-        static PRESSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    }
-
-    fn press_event(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
-        InputEvent::Pointer(frust::authoring::PointerEvent {
-            phase,
-            position: Point::new(x, y),
-            button: frust::authoring::PointerButton::Primary,
-        })
-    }
-
-    fn dispatch(widget: &mut PressTargetWidget, state: &mut dyn std::any::Any, ev: &InputEvent) {
-        let mut ctx = EventCtx::new(state, Point::ZERO, Size::new(40.0, 20.0));
-        widget.event(&mut ctx, ev);
-    }
-
-    #[test]
-    fn a_press_target_fires_on_up_inside_and_not_on_up_outside() {
-        PRESSES.with(|n| n.set(0));
-        let (mut widget, mut state) = press_widget(true);
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Down, 5.0, 5.0),
-        );
-        assert!(widget.pressed, "a Down tints the bar");
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Up, 5.0, 5.0),
-        );
-        assert_eq!(PRESSES.with(std::cell::Cell::get), 1);
-        assert!(!widget.pressed, "and the tint lifts with the finger");
-
-        // Released outside: the framework's fire-on-up-*inside* rule.
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Down, 5.0, 5.0),
-        );
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Up, 500.0, 5.0),
-        );
-        assert_eq!(PRESSES.with(std::cell::Cell::get), 1, "no second fire");
-    }
-
-    #[test]
-    fn a_cancelled_press_clears_the_tint_and_fires_nothing() {
-        PRESSES.with(|n| n.set(0));
-        let (mut widget, mut state) = press_widget(true);
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Down, 5.0, 5.0),
-        );
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Cancel, 5.0, 5.0),
-        );
-        assert!(!widget.pressed);
-        assert_eq!(PRESSES.with(std::cell::Cell::get), 0);
-        // …and a stray Up after the cancel must not fire either.
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Up, 5.0, 5.0),
-        );
-        assert_eq!(PRESSES.with(std::cell::Cell::get), 0);
-    }
-
-    #[test]
-    fn an_unwired_press_target_still_presses_without_panicking() {
-        // The splash's own copy of the CTA: art, a press tint, a Button node —
-        // and nothing behind it.
-        let (mut widget, mut state) = press_widget(false);
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Down, 5.0, 5.0),
-        );
-        dispatch(
-            &mut widget,
-            &mut state,
-            &press_event(PointerPhase::Up, 5.0, 5.0),
-        );
-        assert!(!widget.pressed);
-    }
-
-    #[test]
-    fn the_press_tint_paints_only_while_held() {
-        let (mut widget, _state) = press_widget(true);
-        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(40.0, 20.0));
-        let mut scene = RecScene::default();
-        widget.paint(&mut ctx, &mut scene);
-        let resting = scene.rounded.len();
-
-        widget.pressed = true;
-        let mut scene = RecScene::default();
-        widget.paint(&mut ctx, &mut scene);
-        assert_eq!(
-            scene.rounded.len(),
-            resting + 1,
-            "the pressed wash is one extra rounded rect over the art"
-        );
-        assert_eq!(
-            scene.rounded.last(),
-            Some(&(Point::ZERO, Size::new(40.0, 20.0))),
-            "…covering the whole target, painted last"
         );
     }
 

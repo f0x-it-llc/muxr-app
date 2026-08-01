@@ -7,11 +7,13 @@
   dependencies into that checkout (`../../crates/frust`, `../../plugins/clean-signals-frust`),
   a temporary pre-publication arrangement documented verbatim in `Cargo.toml`'s comments. Once
   Frust crates are published this app will depend on versions instead.
-- A `clean-signals-rs` checkout as a **sibling of the Frust checkout** (i.e.
-  `../../../clean-signals-rs` relative to this repo, branch `master`) — `clean-signals` itself
-  isn't published yet, and this app path-deps into it directly (`Cargo.toml`'s `[dependencies]`).
-  The app will not build without it present. This mirrors the Frust repo's own
-  `clean-signals-rs` sibling-checkout requirement (see its `docs/DEVELOPMENT.md`).
+- No `clean-signals-rs` sibling checkout is required: `clean-signals` itself isn't published
+  yet, so `Cargo.toml` git+rev-pins it directly (`rev = "910f626"` on `master`) to its public
+  repo — the identical spec `clean-signals-frust`'s own `clean-signals` dependency uses, so
+  Cargo unifies both into one crate identity (see `Cargo.toml`'s comment for why that identity
+  match is load-bearing). Bump this rev only in lockstep with the Frust checkout's
+  `plugins/clean-signals-frust` pin — never one alone. A local `clean-signals-rs` checkout is
+  still useful for iterating on `clean-signals` itself via a `[patch]` override, but is optional.
 - Rust (stable, 2024 edition) plus the Frust CLI (`frust`) for device builds/flavors.
 - Android: the Frust CLI's own Android prerequisites (NDK, `cargo-ndk`, JDK 17) — see the Frust
   checkout's `docs/DEVELOPMENT.md`.

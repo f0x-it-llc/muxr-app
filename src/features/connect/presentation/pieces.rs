@@ -34,10 +34,21 @@
 //! the trust selector starts on "Public domain (CA)", the fields start empty —
 //! so the overlay still unmounts onto the picture underneath it.
 //!
-//! The one deliberate divergence is piece 7: the splash's copy renders the
-//! mock's single stand-in row, the live screen renders the repository's list.
-//! It is the last piece in a top-anchored column, so every piece above it is
-//! positionally identical across the handoff.
+//! Two divergences are deliberate. Piece 7 (`saved_address`): the splash's
+//! copy renders the mock's single stand-in row, the live screen renders the
+//! repository's list — the last piece in a top-anchored column, so every
+//! piece above it is positionally identical across the handoff. Pieces 3/4
+//! (`server_url_field`/`token_field`, #16 adopted): the splash's copies render
+//! `.enabled(false)` so a stray tap during the staggering entrance cannot
+//! focus or caret a field with nothing behind it, where the live screen's stay
+//! enabled. Unlike every other `None`/`Live` split in this module (the art is
+//! byte-identical; only the wrapping recognizer/semantics differ), a disabled
+//! field also **dims** its own chrome — `TextInputView::enabled` has no
+//! undimmed "read-only" mode to reach for instead (see [`token_field`]'s doc)
+//! — so this one pops at the handoff (the border/placeholder alpha steps up
+//! the instant the live screen's enabled copy takes over). Flagged rather than
+//! silently accepted; closing it needs either a framework addition or
+//! accepting the pop.
 //!
 //! # Generic over the state type
 //!
@@ -50,7 +61,8 @@
 //! # Real components vs. hand-composed
 //!
 //! Facade/Glyph components carry the pieces wherever one fits — [`text`] for
-//! every run, [`text_input`] for both fields, [`glyph::badge`] for the
+//! every run, [`text_input`] for both fields, [`button`] for the CTA (#15
+//! adopted — see [`connect_button`]), [`glyph::badge`] for the
 //! "insecure"/"read-only" chips, and [`GestureDetector`] for the tappable
 //! saved rows and trust rows. The rest of the mock is borders and washes with
 //! no catalog counterpart (there is no Glyph toggle, and the `material`
@@ -59,14 +71,15 @@
 //! [`super::chrome`]'s panel/swatch primitives, with
 //! [`frust::motion::AnimatedOpacity`] carrying the toggle's on/off crossfade.
 //!
-//! Three pieces of chrome are hand-composed *against* a shipping widget, each
-//! for a recorded framework gap rather than a preference: the CTA (see
-//! [`connect_button`] — `ButtonWidget` pins a stretched label at its leading
-//! edge, FINDINGS #15), the trust rows (see [`trust_selector`] — `RadioWidget`
-//! styles its label with `TextStyle::default()`), and the heading's subtitle
-//! (see [`super::chrome::centered_paragraph`] — nothing in `frust` centers a *wrapped*
-//! paragraph). Each carries its own `Role` node through `super::chrome` so the
-//! accessibility tree is no poorer for it.
+//! Two pieces of chrome are still hand-composed *against* a shipping widget,
+//! each for a recorded framework gap rather than a preference: the trust rows
+//! (see [`trust_selector`] — `RadioWidget` styles its label with
+//! `TextStyle::default()`) and the heading's subtitle (see
+//! [`super::chrome::centered_paragraph`] — nothing in `frust` centers a
+//! *wrapped* paragraph). Each carries its own `Role` node through
+//! `super::chrome` so the accessibility tree is no poorer for it. The CTA used
+//! to be the third (`ButtonWidget` pinned a stretched label at its leading
+//! edge, FINDINGS #15) — adopted now; see [`connect_button`].
 //!
 //! # Tokens
 //!
@@ -94,12 +107,11 @@ use frust::glyph::{BadgeVariant, badge};
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, Padding, SizedBox, StatusPalette, Theme, any, flexible, inflexible, text, text_input,
+    Get, Padding, SizedBox, StatusPalette, Theme, any, button, flexible, inflexible, text,
+    text_input,
 };
 
-use super::chrome::{
-    centered_paragraph, panel, press_target, radio_semantics, swatch, switch_semantics,
-};
+use super::chrome::{centered_paragraph, panel, radio_semantics, swatch, switch_semantics};
 use super::controller::ConnectController;
 use crate::connection::TrustMode;
 use crate::features::connect::domain::entities::SavedServer;
@@ -191,12 +203,14 @@ const RADIO_RING_BORDER: f64 = 1.5;
 /// `.radio-dot.sel::after{inset:3px}` — the selected dot's inset inside the
 /// ring, which makes the dot itself `RADIO_RING - 2 * RADIO_DOT_INSET` wide.
 const RADIO_DOT_INSET: f64 = 3.0;
-/// `.btn-primary{padding:13px}` — the CTA's vertical padding. With Glyph's
-/// `label_large` line box (18px) the bar lands at 44px tall: the source's own
-/// ~44 at a browser-default line box, and exactly the platform minimum tap
-/// target. The horizontal half of that padding is not needed — the label is
-/// centered in a full-bleed bar, not inset from its leading edge.
-const CTA_PAD_Y: f64 = 13.0;
+/// The CTA's forced height, in logical px — Ed's round-2 device-gate
+/// directive: the platform minimum tap target, and the source's own `~44` at
+/// a browser-default line box under `.btn-primary{padding:13px}`.
+/// `ButtonWidget`'s own vertical padding (8px logical, unthemed and
+/// un-overridable — see [`connect_button`]) lands short of it at this
+/// label's size, so a [`SizedBox`] forces the floor instead of leaning on the
+/// button's own padding.
+const CTA_HEIGHT: f64 = 44.0;
 
 /// The remember row's copy — also the toggle's accessibility label, so the
 /// switch announces the thing the row is about rather than "switch".
@@ -264,13 +278,10 @@ struct Palette {
     /// `--bg-overlay`: the toggle track in its **off** state.
     overlay: Color,
     /// The bright accent fill (`primary_container`, Glyph's accent-role split
-    /// — the *fill* half, never `primary`, which is accent ink).
+    /// — the *fill* half, never `primary`, which is accent ink). Used
+    /// directly by every piece but the CTA now (`connect_button` adopted the
+    /// real `frust::button`, which resolves its own fill/ink — see its doc).
     amber: Color,
-    /// `#241a04` — the near-black ink the source pairs with a filled amber
-    /// surface (`.btn-primary{color:#241a04}`), reached through the *paired*
-    /// role rather than the hex: `on_primary_container` is exactly this value
-    /// under Glyph dark, and the light theme's own (`#2a1c04`) under light.
-    on_amber: Color,
     /// `--amber-faint`, derived (see [`AMBER_FAINT_ALPHA`]).
     amber_faint: Color,
     /// `--amber-border`, derived (see [`AMBER_BORDER_ALPHA`]).
@@ -296,7 +307,6 @@ fn palette(theme: &Theme) -> Palette {
         rule: scheme.outline_variant,
         overlay: scheme.surface_container_highest,
         amber: scheme.primary_container,
-        on_amber: scheme.on_primary_container,
         amber_faint: scheme.primary.with_alpha(AMBER_FAINT_ALPHA),
         amber_border: scheme.primary.with_alpha(AMBER_BORDER_ALPHA),
         fg: scheme.on_surface,
@@ -465,6 +475,9 @@ pub fn heading<S: 'static>(theme: &Theme) -> AnyView<S> {
 /// Its label inks `error` while [`ConnectController::invalid`] is set — the
 /// screen's whole validation surface, since `frust`'s `TextInput` exposes no
 /// error state of its own (FINDINGS #16 covers the neighbouring disabled gap).
+///
+/// Disabled for the splash's static copy (`live` is `None`) — see
+/// [`token_field`]'s doc and the [module docs](self)'s divergence note.
 pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let invalid = live.is_some_and(|live| live.controller.invalid.get());
     let value = live
@@ -475,8 +488,12 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
         theme,
         "SERVER URL",
         SERVER_URL_PLACEHOLDER,
-        invalid,
         value,
+        FieldOptions {
+            invalid,
+            obscured: false,
+            enabled: live.is_some(),
+        },
         move |next| {
             if let Some(controller) = &controller {
                 controller.set_url(next);
@@ -488,14 +505,22 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
 /// Piece 4 — the second `.field`: the login token, bound to
 /// [`ConnectController::token`].
 ///
-/// The source marks this input `type="password"`; `frust`'s `TextInput` has no
-/// obscured mode (FINDINGS #20), so the token renders in the clear — a known,
-/// filed gap rather than a decision.
+/// **Obscured (#20 adopted).** The source marks this input `type="password"`;
+/// the field now masks it the same way with [`TextInputView::obscured`].
 ///
-// TODO(#20 adoption): swap the plain input for the obscured mode the moment
-// this machine's `frust` dev carries it. Deliberately *not* faked here — a
-// hand-masked value would have to shadow the controller's real one and would
-// still leak through the IME surface `TextInputWidget` publishes.
+/// **Mock-only, still (FINDINGS #31).** Obscuring hides the *rendered*
+/// glyphs, not the platform IME's own suggestion strip, which still surfaces
+/// the real text as it's typed — a real credential would leak there before
+/// `frust` grows IME content-type plumbing to suppress it. This field only
+/// ever holds mock input through Phases 2–4, so the gap has no live
+/// consequence yet; it blocks adopting this field for a real credential, not
+/// this adoption itself.
+///
+/// **Disabled for the splash's static copy** (`live` is `None`) — see the
+/// [module docs](self)'s divergence note: `.enabled(false)` (#16 adopted)
+/// keeps a stray tap during the staggering entrance from focusing or
+/// caret-ing a field with nothing behind it. The live screen's copy stays
+/// enabled.
 pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let value = live
         .map(|live| live.controller.token.get())
@@ -505,8 +530,12 @@ pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S>
         theme,
         "LOGIN TOKEN",
         TOKEN_PLACEHOLDER,
-        false,
         value,
+        FieldOptions {
+            invalid: false,
+            obscured: true,
+            enabled: live.is_some(),
+        },
         move |next| {
             if let Some(controller) = &controller {
                 controller.set_token(next);
@@ -515,14 +544,34 @@ pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S>
     )
 }
 
+/// Per-field presentation flags [`field`] needs beyond its label/placeholder/
+/// value — bundled into one struct so `field`'s own parameter count stays
+/// under clippy's `too_many_arguments` threshold now that obscuring (#20) and
+/// the splash's disabled presentation (#16) are both per-field knobs
+/// alongside the server-URL field's pre-existing validation flag.
+struct FieldOptions {
+    /// Inks the label `error` while the form is invalid — only
+    /// [`server_url_field`] ever sets this.
+    invalid: bool,
+    /// Mask the rendered glyphs (password mode) — see
+    /// [`TextInputView::obscured`]; only [`token_field`] sets this.
+    obscured: bool,
+    /// Accept input at all. `false` for the splash's static copy (`live` is
+    /// `None`): see [`token_field`]'s doc. The live screen always passes
+    /// `true`.
+    enabled: bool,
+}
+
 /// A `.field`: an uppercase micro label over a placeholder-bearing input.
 ///
 /// The label is uppercased in the source (`text-transform:uppercase`) at the
 /// call site instead, since no `TextStyle` field expresses a transform.
 ///
 /// `on_change` is invoked with the requested text; a splash-composed field
-/// passes one that drops it, so the field always re-renders its placeholder
-/// (`readonly` in the source).
+/// passes one that drops it. The splash's own copy no longer needs to lean on
+/// that alone to stay static, either — `options.enabled` (`false` there)
+/// refuses focus/caret outright (#16 adopted), rather than merely getting
+/// overwritten by the next controlled-value rebuild.
 ///
 /// # Chrome the app cannot reach (FINDINGS #16 family)
 ///
@@ -540,12 +589,16 @@ fn field<S: 'static>(
     theme: &Theme,
     label: &str,
     placeholder: &str,
-    invalid: bool,
     value: String,
+    options: FieldOptions,
     on_change: impl Fn(String) + 'static,
 ) -> AnyView<S> {
     let colors = palette(theme);
-    let label_ink = if invalid { colors.error } else { colors.fg_dim };
+    let label_ink = if options.invalid {
+        colors.error
+    } else {
+        colors.fg_dim
+    };
     backed(
         column::<S>(vec![
             any(text(label).style(inked(&theme.type_scale.label_small, label_ink))),
@@ -553,7 +606,9 @@ fn field<S: 'static>(
             any(
                 text_input::<S, _>(value, move |_state: &mut S, next: String| on_change(next))
                     .placeholder(placeholder)
-                    .text_style(field_text_style(theme, colors.fg)),
+                    .text_style(field_text_style(theme, colors.fg))
+                    .obscured(options.obscured)
+                    .enabled(options.enabled),
             ),
         ]),
         &colors,
@@ -900,58 +955,60 @@ fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
 
 /// Piece 6 — `.btn-primary`: the amber CTA, firing [`Live::on_connect`].
 ///
-/// **Full-bleed and 44px tall**, the source's own block-level button: an amber
-/// (`primary_container`) bar at `--radius-sm`, `CTA_PAD_Y` of vertical
-/// padding, and a centered `label_large_emphasized` label in the paired
-/// `on_primary_container` ink — Glyph's button role is 12.5px/500 and its
-/// `_emphasized` sibling steps that to the 600 the source asks for, so the
-/// whole `12.5px/600` line is a role rather than three literals. Its own
-/// tracking (0.125px) stands in for the source's `0.03em`, per the Tokens
-/// rule.
+/// **Full-bleed and 44px tall**, the source's own block-level button. A
+/// [`SizedBox`] forces [`CTA_HEIGHT`] (see its own doc for why); the layer's
+/// stretch cross-axis (`connect_layout`'s `CrossAxisAlignment::Stretch`)
+/// already forces the width, so no explicit width is set here.
 ///
-/// # Hand-composed, and why
+/// # Adopted from the hand-composed CTA (#15)
 ///
-/// `ButtonWidget` pins its label at the leading padding (FINDINGS #15), so a
-/// *stretched* `frust::button` renders a left-hugged label in a full-width bar —
-/// which is why this piece previously stayed centered at its natural width.
-/// Ed's round-2 device gate directs the bar full-width and taller regardless,
-/// so the CTA is composed here instead: `panel` paints the fill,
-/// [`super::chrome::press_target`] supplies the pressed tint and the
-/// `Role::Button` node, and `Align` centers the label the framework would
-/// not.
+/// This used to be `panel` + `chrome::press_target`, because `ButtonWidget`
+/// pinned a stretched label at its leading padding (FINDINGS #15) and Ed's
+/// round-2 device gate wanted the bar full-width and taller regardless — so
+/// the CTA stayed hand-composed rather than losing the mock's centered label.
+/// [`ButtonView::label_alignment`] (shipped) closes that gap:
+/// `.label_alignment(Alignment::CENTER)` centers the label on **both** axes
+/// (`ButtonWidget`'s own stretch default only auto-centers *horizontally* —
+/// centering the forced-tall vertical axis always needs the explicit call).
+/// `chrome::press_target` had no other caller left in this app, so it was
+/// deleted with the composition it existed for.
 ///
-/// What that costs, and knowingly: `ButtonWidget`'s press *scale* (this dips
-/// tone instead) and its disabled/loading states — neither of which this
-/// screen drives (the form validates on press rather than gating the button).
+/// Adopting the real button also gives back its press-*scale* feedback (the
+/// hand-composed version dipped tone instead) and its disabled/loading states
+/// for free — neither of which this screen drives today (the form validates
+/// on press rather than gating the button), but both are now available
+/// without another rewrite.
 ///
-// TODO(#15 adoption): swap back to `frust::button` when the label-alignment
-// fix reaches this checkout — a stretched real button then gives back the
-// scale feedback and the loading/disabled states for free, and this
-// composition (and `chrome::press_target` with it) can go.
-pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
-    let colors = palette(theme);
+/// # Known gap: the label's typography, and the fill/ink under Glyph *light*
+///
+/// `ButtonView` has no per-instance color or text-style override yet (see the
+/// button crate's own module docs). Two consequences, neither closable from
+/// this call site:
+///
+/// - The label shapes at `TextStyle::default()` (16px/400/system-ui) rather
+///   than the mock's `label_large_emphasized` role (12.5px/600, the app's own
+///   type scale) — `ButtonView` has no `.text_style()` to redirect it.
+/// - `ButtonStyle::Primary` (the default, so no `.style()` call below) resolves
+///   fill/ink from `scheme.primary`/`scheme.on_primary`. Under Glyph's *dark*
+///   baseline (this app's canonical brightness — Glyph is dark-first) those
+///   are byte-identical to `scheme.primary_container`/`on_primary_container`
+///   (`Palette::amber`, the exact fill every other piece still paints with),
+///   the tokens this piece painted before. Under Glyph *light* they diverge:
+///   `primary` there is a darker "text" amber paired with a white
+///   `on_primary`, not the bright container fill with near-black ink — a
+///   real, currently-unreachable difference this app has no manual
+///   brightness toggle to trigger, but a
+///   system dark-mode switch could.
+pub fn connect_button<S: 'static>(_theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
-    let label = text(CONNECT_LABEL).style(inked(
-        &theme.type_scale.label_large_emphasized,
-        colors.on_amber,
-    ));
-    let bar = panel(
-        Padding(
-            EdgeInsets::symmetric(0.0, CTA_PAD_Y),
-            Align(Alignment::CENTER, label),
-        ),
-        colors.amber,
-        theme.shape.small,
-    );
-    any(
-        press_target(bar, CONNECT_LABEL, colors.on_amber, theme.shape.small).on_press(
-            move |_state: &mut S| {
-                if let Some(on_connect) = &on_connect {
-                    on_connect();
-                }
-            },
-        ),
-    )
+    any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
+        button(CONNECT_LABEL, move |_state: &mut S| {
+            if let Some(on_connect) = &on_connect {
+                on_connect();
+            }
+        })
+        .label_alignment(Alignment::CENTER),
+    ))
 }
 
 /// Piece 7 — `.saved-hdr` + `.saved-row`: the saved-server list, each row
@@ -1137,9 +1194,6 @@ mod tests {
         assert_eq!(colors.success, Color::from_rgb8(0x5f, 0xd8, 0x8f));
         assert_eq!(colors.amber, Color::from_rgb8(0xff, 0xb6, 0x27));
         assert!((colors.amber_faint.components[3] - AMBER_FAINT_ALPHA).abs() < 1e-6);
-        // `.btn-primary{color:#241a04}` — the CTA's ink, reached through the
-        // role paired with the fill above rather than as a fourth hex.
-        assert_eq!(colors.on_amber, Color::from_rgb8(0x24, 0x1a, 0x04));
     }
 
     #[test]
@@ -1246,22 +1300,12 @@ mod tests {
 
     #[test]
     fn the_cta_clears_the_minimum_tap_target() {
-        // `CTA_PAD_Y` twice plus Glyph's `label_large` line box (18px) is the
-        // bar's height — 44px, the platform minimum. A padding tweak that
-        // dropped it under that is the regression this catches.
-        let line_box = match Theme::glyph_baseline()
-            .type_scale
-            .label_large_emphasized
-            .line_height
-        {
-            frust::authoring::text::LineHeight::Absolute(px) => f64::from(px),
-            other => panic!("the Glyph button role carries an absolute line box, got {other:?}"),
-        };
-        assert!(
-            2.0 * CTA_PAD_Y + line_box >= 44.0,
-            "the CTA is {}px tall",
-            2.0 * CTA_PAD_Y + line_box
-        );
+        // Ed's round-2 directive: the CTA's forced height is the platform
+        // minimum tap target regardless of the real button's own (shorter)
+        // natural padding — see `connect_button`/`CTA_HEIGHT`'s docs. A future
+        // drop below the floor is the regression this catches, mirroring the
+        // FAB's own `const` assertion.
+        const { assert!(CTA_HEIGHT >= 44.0) };
     }
 
     #[test]
