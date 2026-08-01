@@ -99,7 +99,7 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
-use crate::ui::sheet::show_sheet;
+use crate::ui::sheet::{close_sheet, show_sheet};
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
@@ -316,6 +316,7 @@ impl Actions {
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
+            &self.app_nav,
             &self.nav,
             "New session",
             "",
@@ -339,6 +340,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
         name_input_dialog(
+            &self.app_nav,
             &self.nav,
             "Rename session",
             session.name,
@@ -356,6 +358,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
         confirm_dialog(
+            &self.app_nav,
             &self.nav,
             "Kill session?",
             "Any attached client is disconnected immediately.",
@@ -384,7 +387,7 @@ impl Actions {
         let actions = self.clone();
         let name = session.name;
         let id = id.to_string();
-        show_sheet(&self.nav, move || {
+        show_sheet(&self.app_nav, &self.nav, move || {
             let heading = pieces::sheet_heading(name.clone());
             let rows = [
                 sheet_action(&actions, &id, ManageAction::Attach),
@@ -441,7 +444,10 @@ fn sheet_action(actions: &Actions, id: &str, action: ManageAction) -> AnyView<Ap
         move |_app: &mut AppState| {
             // Close the sheet first: the dialog (or the terminal route) takes its
             // place in the same rebuild — see `open_manage_sheet`'s docs.
-            actions.nav.pop();
+            // Through `close_sheet` rather than a bare `pop`, so the shell's
+            // bar learns the sheet is going a rebuild before the navigator
+            // republishes its depth (`crate::routes`' overlay accounting).
+            close_sheet(&actions.app_nav, &actions.nav);
             match action {
                 ManageAction::Attach => actions.attach(&id),
                 ManageAction::Rename => actions.open_rename_dialog(&id),

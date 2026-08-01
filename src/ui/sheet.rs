@@ -11,10 +11,11 @@
 //! `pages/overlays.rs` does: a **transparent navigator page** carrying a
 //! bottom-anchored panel clamped to [`MAX_WIDTH`] on wide layouts. **When
 //! frust grows a Glyph sheet widget, delete this file and re-point
-//! [`show_sheet`]'s three call sites at it** — the API is deliberately one
-//! function taking a body builder so that swap is cheap. ([`ModalStage`] and
-//! [`SCRIM_ALPHA`] move up to `crate::ui` that day rather than going with it —
-//! see their own section.)
+//! [`show_sheet`]'s four call sites at it** — the API is deliberately one
+//! function taking a body builder so that swap is cheap (the replacement owes
+//! [`show_sheet`]'s overlay accounting too — see its own doc). ([`ModalStage`]
+//! and [`SCRIM_ALPHA`] move up to `crate::ui` that day rather than going with
+//! it — see their own section.)
 //!
 //! # What the scaffold adds over the catalog's hand-rolled version
 //!
@@ -105,6 +106,8 @@ use frust::{
     AnimationController, AnyView, Curve, FrameTime, NavigatorController, PopResult, Theme,
     TransitionSpec,
 };
+
+use crate::routes::Nav;
 
 /// M3/Flutter bottom-sheet width convention: edge-to-edge on narrow screens,
 /// capped and horizontally centered on wide ones (Material 3 gives modal
@@ -331,26 +334,65 @@ fn finite_or_zero(v: f64) -> f64 {
 /// the modal contract, [`SheetScaffoldWidget`] supplies the motion. See the
 /// [module docs](self)'s "The scrim fades; only the panel slides".
 ///
+/// # The two navigation handles
+///
+/// `nav` is what the page is pushed through (a sheet is a page *builder*, not a
+/// path). `app_nav` is the app's own [`Nav`], and carries the **overlay
+/// accounting** the shell's bar dims itself from: this call begins one, the
+/// staged exit below reports it *closing* the rebuild before the pop lands,
+/// and the pusher's own completion callback ends it whichever way it actually
+/// went away (`crate::routes`' "Overlay accounting" section is the whole
+/// rationale). A body that closes the sheet *itself* calls [`close_sheet`]
+/// rather than `nav.pop()`, for the same reason.
+///
 /// ```ignore
-/// show_sheet(&state.nav.controller().clone(), move || {
+/// show_sheet(&state.app_nav, &state.nav, move || {
 ///     any(text("Pair a new host").size(13.5))
 /// });
 /// ```
 pub fn show_sheet<State: 'static>(
+    app_nav: &Nav,
     nav: &NavigatorController<State>,
     build_body: impl Fn() -> AnyView<State> + 'static,
 ) {
+    app_nav.begin_overlay();
     let dismiss_nav = nav.clone();
+    let dismiss_app_nav = app_nav.clone();
+    let done_app_nav = app_nav.clone();
     nav.push_transparent_for_result(
         move || {
             let pop_nav = dismiss_nav.clone();
-            any(sheet_scaffold(build_body()).on_dismiss(move || pop_nav.pop()))
+            let app_nav = dismiss_app_nav.clone();
+            // The staged exit's own dismissal (a scrim tap, `Escape`, an
+            // outside-press release) is one of the app-owned seams: telling
+            // the accounting a rebuild before the pop lands is what lets the
+            // bar light up on the frame the sheet finishes leaving instead of
+            // waiting for the next input.
+            any(sheet_scaffold(build_body()).on_dismiss(move || close_sheet(&app_nav, &pop_nav)))
         },
         TransitionSpec::NONE,
         // The sheet answers through its body's own callbacks (which own
-        // `&mut State` already); the pop itself carries nothing.
-        |_state: &mut State, _result: PopResult| {},
+        // `&mut State` already); the pop itself carries nothing. What this
+        // callback is for is the accounting's authoritative half — the
+        // navigator delivers it exactly once per pushed page, however that
+        // page went away (an action, a scrim tap, `Escape`, an Android back
+        // press straight through `BackPolicy::Pop`).
+        move |_state: &mut State, _result: PopResult| done_app_nav.end_overlay(),
     );
+}
+
+/// Close a sheet from its own body — the accounted `nav.pop()`.
+///
+/// Every in-body close (a row that acts and dismisses, a close button, a
+/// delayed pop after a selection lands) goes through here rather than popping
+/// the controller directly, so the shell's bar learns the sheet is going a
+/// rebuild before [`NavigatorController::depth`] does. Popping directly is not
+/// *wrong* — [`show_sheet`]'s completion callback still ends the accounting —
+/// it just costs that path its synchronous un-dim, leaving the bar dimmed and
+/// inert until the next input.
+pub fn close_sheet<State: 'static>(app_nav: &Nav, nav: &NavigatorController<State>) {
+    app_nav.dismiss_overlay();
+    nav.pop();
 }
 
 /// The sheet chrome around `body`: scrim, bottom-anchored panel, drag handle,

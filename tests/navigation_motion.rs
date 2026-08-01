@@ -56,22 +56,27 @@
 //! burns that claim on a throwaway app before any fixture mounts, so every test
 //! here runs a warm start.
 
+use std::any::Any;
 use std::sync::OnceLock;
 
 use frust::{AnyView, Component, SizedBox, Theme, any};
-use frust_core::RenderRoot;
 use frust_core::accesskit::Role;
+use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot};
+use frust_reactive::TrackedScope;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::routes::app_nav;
+use muxr::ui::dialogs::confirm_dialog;
+use muxr::ui::sheet::show_sheet;
 use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, frame, frame_at, largest, ms, node_centers_by_label, node_labels,
-    node_roles, node_values, serial, settle, setup, tap,
+    EPSILON, RecScene, added, center, frame, frame_at, largest, ms, named_key,
+    node_centers_by_label, node_labels, node_roles, node_values, pointer, serial, settle, setup,
+    smallest, tap,
 };
 
 /// The mock connection every bar-titled test runs behind (the session guard
@@ -163,8 +168,13 @@ struct Harness {
     logic: Logic,
     state: AppState,
     tcx: TextContext,
-    /// A strictly-increasing clock for [`Harness::settle_modal`] — see there.
+    /// A strictly-increasing clock for [`Harness::settle_modal`] and
+    /// [`Harness::park`] — see there.
     clock: f64,
+    /// The scope every [`Harness::park`] frame rebuilds inside, so a signal
+    /// written after that rebuild is observable exactly as
+    /// `frust-shell-desktop` observes it. See [`Harness::requested_frame`].
+    scope: TrackedScope,
 }
 
 impl Harness {
@@ -184,6 +194,7 @@ impl Harness {
             state: MuxrApp.init(),
             tcx: TextContext::new(),
             clock: support::SETTLE_MS,
+            scope: TrackedScope::new(),
         };
         harness.frame();
         harness
@@ -240,16 +251,86 @@ impl Harness {
     ///
     /// [`support::settle`] paints its last two frames at the same timestamp,
     /// so a driver created on the second of them never sees the clock move
-    /// again. The bar's modality tint is exactly that case:
-    /// `BarState::overlay_active` is a **depth** fact, and
-    /// `NavigatorController::depth` is published by the navigator's own
-    /// rebuild — so the flag flips one rebuild *after* an overlay is pushed,
-    /// a frame later than a route change flips the bar's title.
+    /// again. The bar's modality **tint** is exactly that case: it is an
+    /// animation (`ModalStage` on the modal's own timings), and an animation
+    /// that never sees the clock advance never arrives.
+    ///
+    /// # It pumps for the tint, not for the flag
+    ///
+    /// It used to do both. `BarState::overlay_active` was a pure *depth* fact,
+    /// and `NavigatorController::depth` is published by the navigator's own
+    /// rebuild — one rebuild after the app logic that reads it — so the flag
+    /// also flipped a frame late in each direction, and these unconditional
+    /// frames were quietly covering that. On the **dismissal** side that was a
+    /// real defect wearing a test-shaped mask: production pays no such
+    /// courtesy, so the loop parked on the stale dimmed frame and the bar
+    /// stayed dark and inert until unrelated input.
+    ///
+    /// `crate::routes`' overlay accounting fixed the flag (it publishes
+    /// synchronously now, which is what schedules the frame), so this is a
+    /// convenience again: [`Harness::park`] is what asserts the flag, and it
+    /// pumps nothing.
     fn settle_modal(&mut self) {
         for _ in 0..2 {
             self.clock += support::SETTLE_MS;
             self.frame_at(self.clock);
         }
+    }
+
+    /// One frame, run the way `frust-shell-desktop`'s loop runs one: the
+    /// rebuild inside a [`TrackedScope`] (so a signal written *after* it is
+    /// observable), then layout, then paint. Returns the painted frame and
+    /// whether the app asked for another — `PaintOutcome::needs_frame` (an
+    /// animation still in flight) or a tracked write since the rebuild
+    /// (`TrackedScope::is_dirty`), which are precisely the two conditions that
+    /// shell turns into a `request_redraw`.
+    fn requested_frame(&mut self) -> (RecScene, bool) {
+        self.clock += FRAME_MS;
+        let root = &mut self.root;
+        let logic = &mut self.logic;
+        let state = &mut self.state;
+        let scope = &self.scope;
+        scope.track(|| root.rebuild(logic, state));
+        let tcx: &mut dyn Any = &mut self.tcx;
+        self.root.layout_with_text(support::surface(), tcx);
+        let mut scene = RecScene::default();
+        let outcome = self.root.paint(&mut scene, ms(self.clock));
+        let more = outcome.needs_frame || self.scope.is_dirty();
+        (scene, more)
+    }
+
+    /// Run frames for exactly as long as the app asks for them, and stop where
+    /// the desktop loop parks on `Wait`; returns the last frame painted.
+    ///
+    /// **The honest half of section 3c.** Every other helper here paints
+    /// frames unconditionally — a courtesy no shell pays: nothing renders
+    /// between one `request_redraw` and the next input. So whatever the bar
+    /// looks like at *this* point is what a user is looking at.
+    fn park(&mut self) -> RecScene {
+        for _ in 0..PARK_FRAME_CAP {
+            let (scene, more) = self.requested_frame();
+            if !more {
+                return scene;
+            }
+        }
+        panic!("the app never stopped asking for frames ({PARK_FRAME_CAP} of them)");
+    }
+
+    /// Deliver `event` and run the loop to its parking point — the two halves
+    /// of `ShellHandler::dispatch` (route the event, schedule a frame if it
+    /// dirtied anything) and nothing else.
+    fn dispatch(&mut self, event: &InputEvent) {
+        if self.root.event(&mut self.state, event).needs_redraw {
+            self.park();
+        }
+    }
+
+    /// A full tap at `point`, each half dispatched through the production
+    /// loop above (rather than [`support::tap`], which paints no frames at
+    /// all — an overlay's staged exit needs them).
+    fn tap_parked(&mut self, point: Point) {
+        self.dispatch(&pointer(PointerPhase::Down, point));
+        self.dispatch(&pointer(PointerPhase::Up, point));
     }
 
     fn values(&self) -> Vec<String> {
@@ -581,6 +662,177 @@ fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
     h.settle();
     assert_eq!(h.depth(), base_depth + 1, "the ⚙ pushes a page once more");
     assert_titled(&h, "server settings");
+}
+
+// ---------------------------------------------------------------------------
+// 3c — a closed modal gives the bar back, on the frames production actually runs
+// ---------------------------------------------------------------------------
+//
+// Section 3b asserts *what* the bar does under a modal; this one asserts
+// **when** — and it is the only section here that refuses the harness's
+// courtesy frames (see [`Harness::park`]).
+//
+// The defect it pins shut: `BarState::overlay_active` used to be a pure depth
+// fact, and `RenderRoot::rebuild` runs the whole app-logic closure — this bar
+// included — *before* the navigator drains its queued ops. So the one frame
+// that follows a modal's pop still published the dimmed state, nothing asked
+// for another, and the loop parked with the bar dark and its affordances inert
+// until unrelated input happened along. Every test below dismisses a **real**
+// overlay (the app's own `show_sheet`/`confirm_dialog`, not section 3b's inert
+// stand-in) and then asserts with no frames in between.
+
+/// The sheet body these tests open — big enough to place the panel, small
+/// enough to leave most of the surface scrim.
+const SHEET_BODY: f64 = 100.0;
+/// A point comfortably above any of those panels, and so on the scrim: the
+/// dismissal gesture (a press that both starts and ends outside the panel).
+const SHEET_SCRIM_POINT: Point = Point::new(4.0, 200.0);
+/// How far [`Harness::requested_frame`] advances the clock — one 60Hz frame,
+/// the cadence a desktop `request_redraw` actually produces.
+const FRAME_MS: f64 = 16.0;
+/// The frame budget [`Harness::park`] gives the app to stop asking. Ten
+/// seconds of frames: every animation in this app is a few hundred
+/// milliseconds, so hitting it means something is looping forever.
+const PARK_FRAME_CAP: usize = 600;
+
+/// Open the app's **real** bottom sheet over `h` (the same helper every screen
+/// calls), run to the parking point, and report where its panel is painting —
+/// the biggest rect the sheet *added* to the covered screen's own chrome.
+fn open_real_sheet(h: &mut Harness) -> (Point, Size) {
+    let before = h.park();
+    show_sheet(&app_nav(), h.state.nav.controller(), || {
+        any(SizedBox::<AppState>(Some(SHEET_BODY), Some(SHEET_BODY)))
+    });
+    let open = h.park();
+    assert!(
+        !h.has_bar(),
+        "a sheet dims the bar and takes its input: {:?}",
+        node_roles(&h.root)
+    );
+    largest(&added(&before.rounded, &open.rounded)).expect("the sheet paints its own panel")
+}
+
+#[test]
+fn a_sheet_dismissed_by_its_scrim_gives_the_bar_back_before_the_loop_parks() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    let covered_depth = h.depth();
+
+    open_real_sheet(&mut h);
+    assert_eq!(h.depth(), covered_depth + 1, "the sheet is its own page");
+
+    // The dismissal, and then *nothing*: the sheet's staged exit plays out
+    // inside this dispatch, the pop lands, and the loop stops exactly where
+    // the shell would park on `Wait`.
+    h.tap_parked(SHEET_SCRIM_POINT);
+
+    assert_eq!(h.depth(), covered_depth, "the scrim tap popped the sheet");
+    assert!(
+        h.has_bar(),
+        "…and the bar is lit and addressable again with no further input: {:?}",
+        node_roles(&h.root)
+    );
+    // Lit is half of it; live is the other half. The very affordance the
+    // modality suppressed works again.
+    h.tap_label(GEAR);
+    h.settle();
+    assert_eq!(h.depth(), covered_depth + 1, "the ⚙ pushes /settings again");
+    assert_titled(&h, "server settings");
+}
+
+#[test]
+fn escape_on_a_sheet_gives_the_bar_back_before_the_loop_parks() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    let covered_depth = h.depth();
+
+    // A press on the panel itself claims focus (and does not dismiss), which
+    // is what gives the key event a chain to travel — the same thing a real
+    // interaction with the sheet's own body does.
+    let panel = open_real_sheet(&mut h);
+    h.tap_parked(center(panel));
+    assert_eq!(h.depth(), covered_depth + 1, "a panel press keeps it open");
+
+    h.dispatch(&named_key(NamedKey::Escape));
+
+    assert_eq!(h.depth(), covered_depth, "Escape dismissed the sheet");
+    assert!(
+        h.has_bar(),
+        "…and the bar came back with it: {:?}",
+        node_roles(&h.root)
+    );
+}
+
+#[test]
+fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    let before = h.park();
+    let covered_depth = h.depth();
+
+    // The path with no staged frame at all: a dialog action pops immediately,
+    // so the *only* thing that can schedule the frame the lit bar is painted
+    // on is the accounting's own publish.
+    confirm_dialog(
+        &app_nav(),
+        h.state.nav.controller(),
+        "Kill session?",
+        "Any attached client is disconnected immediately.",
+        "Kill",
+        |_state: &mut AppState| {},
+    );
+    let open = h.park();
+    assert_eq!(h.depth(), covered_depth + 1, "the dialog is its own page");
+    assert!(!h.has_bar(), "…and the bar is inert under it");
+
+    // The danger action is the smallest thing the dialog added to the frame's
+    // stroked outlines (its panel's own border being the other one) — the
+    // `tests/ui_substrate.rs` idiom, diffed against the covered screen.
+    let action = smallest(&added(&before.strokes, &open.strokes))
+        .expect("the danger action strokes its border");
+    h.tap_parked(center(action));
+
+    assert_eq!(h.depth(), covered_depth, "the action closed the dialog");
+    assert!(
+        h.has_bar(),
+        "…and the bar is live again with no further input: {:?}",
+        node_roles(&h.root)
+    );
+}
+
+#[test]
+fn a_back_press_that_bypassed_the_sheet_cannot_strand_a_dimmed_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    let covered_depth = h.depth();
+
+    open_real_sheet(&mut h);
+
+    // The Android path (frust #41): `BackPolicy::Pop` pops the sheet's page
+    // out from under the widget, so neither its staged exit nor the app's own
+    // accounting ever hears about it. `NavState::reconcile`'s backstop is all
+    // that is left — the counter is clamped flat the moment the live depth
+    // falls back to the route stack, so the bar cannot be stranded dimmed and
+    // inert.
+    h.state.nav.controller().request_back();
+    h.settle();
+
+    assert_eq!(h.depth(), covered_depth, "the back press popped the sheet");
+    assert!(
+        h.has_bar(),
+        "…and the bar is live again: {:?}",
+        node_roles(&h.root)
+    );
+    h.tap_label(GEAR);
+    h.settle();
+    assert_eq!(h.depth(), covered_depth + 1, "the ⚙ works again");
 }
 
 #[test]

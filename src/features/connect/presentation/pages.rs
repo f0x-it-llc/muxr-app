@@ -49,7 +49,9 @@
 //!
 //! The raw [`frust::NavigatorController`] is still held beside the handle: a
 //! sheet is a pushed page *builder*, not a path, so
-//! `crate::ui::sheet::show_sheet` needs the controller itself.
+//! `crate::ui::sheet::show_sheet` needs the controller itself — and the
+//! [`Nav`] beside it, which carries the overlay accounting the shell's bar
+//! dims itself from (`crate::routes`' "Overlay accounting").
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -263,7 +265,7 @@ impl Component for ConnectScreen {
                 &theme,
                 Some(&live),
             )))),
-            qr_affordance(&state.nav),
+            qr_affordance(&state.app_nav, &state.nav),
         ]))
     }
 }
@@ -277,8 +279,12 @@ impl Component for ConnectScreen {
 /// that costs against the stock button — its press *scale* (this dips tone
 /// instead) and its loading/disabled states — this affordance never used, the
 /// same trade `super::pieces::connect_button` already records.
-fn qr_affordance(nav: &frust::NavigatorController<AppState>) -> AnyView<ConnectState> {
+fn qr_affordance(
+    app_nav: &Nav,
+    nav: &frust::NavigatorController<AppState>,
+) -> AnyView<ConnectState> {
     let nav = nav.clone();
+    let app_nav = app_nav.clone();
     let theme = active_theme();
     let scheme = theme.scheme();
     any(safe_area(Align(
@@ -286,7 +292,7 @@ fn qr_affordance(nav: &frust::NavigatorController<AppState>) -> AnyView<ConnectS
         Padding(
             EdgeInsets::all(FAB_MARGIN),
             icon_button(SCAN_MARK, FAB_LABEL, move |_state: &mut ConnectState| {
-                show_sheet(&nav, qr_sheet_body)
+                show_sheet(&app_nav, &nav, qr_sheet_body)
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA
