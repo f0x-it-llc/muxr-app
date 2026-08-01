@@ -363,7 +363,7 @@ fn name_input_dialog_blocks_an_empty_submit() {
 /// Open a sheet whose body is one filled (primary) button, and return the
 /// settled frame.
 fn open_sheet(h: &mut Harness) -> RecScene {
-    show_sheet(&h.nav(), &h.controller, || {
+    show_sheet(&h.nav(), &h.controller, |_sheet| {
         // A filled button, not bare text: it paints a rect (which is what
         // "the body rendered" is observed through here) and its press is the
         // proof that events reach the body at all.
@@ -491,7 +491,7 @@ fn scrim_alpha(scene: &RecScene) -> f32 {
 /// [`MID_STAGING_MS`] — mid-entrance.
 fn mid_entrance(theme: Theme) -> (Harness, RecScene) {
     let mut h = Harness::themed(Some(theme));
-    show_sheet(&h.nav(), &h.controller, || {
+    show_sheet(&h.nav(), &h.controller, |_sheet| {
         any(button("Split pane right", |state: &mut State| {
             state.confirmed += 1
         }))
@@ -547,7 +547,7 @@ fn the_scrims_rect_never_moves() {
     // panics unless exactly one full-bleed fill exists, so every probe below
     // is an assertion.
     let mut h = Harness::themed(Some(Theme::glyph_baseline()));
-    show_sheet(&h.nav(), &h.controller, || any(text("pair a host")));
+    show_sheet(&h.nav(), &h.controller, |_sheet| any(text("pair a host")));
     h.frame_at(0.0);
 
     let mut previous = 0.0_f32;
@@ -567,7 +567,7 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
     let _ambient = setup();
 
     let mut h = Harness::themed(Some(Theme::glyph_baseline()));
-    show_sheet(&h.nav(), &h.controller, || any(text("pair a host")));
+    show_sheet(&h.nav(), &h.controller, |_sheet| any(text("pair a host")));
     let settled = h.settle();
     let settled_panel = panel(&settled);
     assert_eq!(h.depth(), 2);

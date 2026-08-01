@@ -700,7 +700,7 @@ const PARK_FRAME_CAP: usize = 600;
 /// the biggest rect the sheet *added* to the covered screen's own chrome.
 fn open_real_sheet(h: &mut Harness) -> (Point, Size) {
     let before = h.park();
-    show_sheet(&app_nav(), h.state.nav.controller(), || {
+    show_sheet(&app_nav(), h.state.nav.controller(), |_sheet| {
         any(SizedBox::<AppState>(Some(SHEET_BODY), Some(SHEET_BODY)))
     });
     let open = h.park();

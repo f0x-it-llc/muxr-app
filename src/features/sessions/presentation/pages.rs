@@ -100,7 +100,7 @@ use crate::features::sessions::di::expect_sessions_repository;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
-use crate::ui::sheet::{close_sheet, show_sheet};
+use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
@@ -421,12 +421,12 @@ impl Actions {
         let actions = self.clone();
         let name = session.name;
         let id = id.to_string();
-        show_sheet(&self.app_nav, &self.nav, move || {
+        show_sheet(&self.app_nav, &self.nav, move |sheet| {
             let heading = pieces::sheet_heading(name.clone());
             let rows = [
-                sheet_action(&actions, &id, ManageAction::Attach),
-                sheet_action(&actions, &id, ManageAction::Rename),
-                sheet_action(&actions, &id, ManageAction::Kill),
+                sheet_action(&actions, sheet, &id, ManageAction::Attach),
+                sheet_action(&actions, sheet, &id, ManageAction::Rename),
+                sheet_action(&actions, sheet, &id, ManageAction::Kill),
             ];
             let mut children = vec![
                 inflexible(heading),
@@ -469,8 +469,14 @@ impl ManageAction {
 }
 
 /// One management-sheet row, wired to `action` for session `id`.
-fn sheet_action(actions: &Actions, id: &str, action: ManageAction) -> AnyView<AppState> {
+fn sheet_action(
+    actions: &Actions,
+    sheet: &SheetHandle,
+    id: &str,
+    action: ManageAction,
+) -> AnyView<AppState> {
     let actions = actions.clone();
+    let sheet = sheet.clone();
     let id = id.to_string();
     pieces::sheet_row(
         action.label(),
@@ -478,10 +484,13 @@ fn sheet_action(actions: &Actions, id: &str, action: ManageAction) -> AnyView<Ap
         move |_app: &mut AppState| {
             // Close the sheet first: the dialog (or the terminal route) takes its
             // place in the same rebuild — see `open_manage_sheet`'s docs.
-            // Through `close_sheet` rather than a bare `pop`, so the shell's
-            // bar learns the sheet is going a rebuild before the navigator
-            // republishes its depth (`crate::routes`' overlay accounting).
-            close_sheet(&actions.app_nav, &actions.nav);
+            // Through the sheet's own handle rather than a bare `pop`, so the
+            // shell's bar learns the sheet is going a rebuild before the
+            // navigator republishes its depth (`crate::routes`' overlay
+            // accounting) — and so a second row tap inside that same window
+            // cannot pop the route under it (`crate::ui::sheet`'s "One sheet,
+            // one dismissal").
+            sheet.close();
             match action {
                 ManageAction::Attach => actions.attach(&id),
                 ManageAction::Rename => actions.open_rename_dialog(&id),
