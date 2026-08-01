@@ -24,6 +24,22 @@
 //! current name (and write it back through the `sessions` feature's own
 //! repository). When real `muxrd` tab/pane state lands, the repository starts
 //! taking the id and nothing above this file changes shape.
+//!
+//! # Session-rename reuse (a documented layering tension)
+//!
+//! [`RenameRequest`] is **not** re-minted here: it is
+//! [`crate::features::sessions::domain::entities::RenameRequest`], the
+//! `sessions` feature's own request shape for its one rename write path — a
+//! session's *name* has exactly one owner (the `sessions` list and its
+//! store), so this screen's rename dialog fills the very struct that store
+//! reads rather than a second, driftable one. See
+//! `crate::features::terminal::domain`'s module docs for the full accounting
+//! of this `domain` → sibling `domain` widening (the same shape `connect`'s
+//! own `TrustMode` re-export uses); nothing below crosses into `sessions`'
+//! `data` or `presentation`, and `presentation::controller` reaches this type
+//! through here rather than naming `sessions::domain` itself.
+
+pub use crate::features::sessions::domain::entities::RenameRequest;
 
 /// One zellij *space* — the sheet's `spaces` pill row.
 #[derive(Clone, Debug, PartialEq, Eq)]

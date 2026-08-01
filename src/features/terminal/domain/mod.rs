@@ -11,6 +11,15 @@
 //! [`use_cases::RenameAttachedSession`]. That is a `domain` → sibling
 //! `domain` edge only; nothing here touches a sibling's `data` or
 //! `presentation`, and the framework-free rule is untouched.
+//!
+//! [`repositories::SessionsRepository`] and [`entities::RenameRequest`] are
+//! *re-exported* from those two modules rather than re-minted, mirroring
+//! `connect`'s own `TrustMode` re-export. `presentation::controller` needs
+//! both types too (to type its constructor and its rename call), and reaching
+//! past this `domain` into `sessions::domain` directly would put a sibling
+//! `domain` name in `presentation` — exactly the edge the layering table
+//! forbids. Importing them through `terminal::domain` instead keeps the
+//! widening to the one edge already sanctioned above.
 
 pub mod entities;
 pub mod repositories;

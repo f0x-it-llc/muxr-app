@@ -40,10 +40,10 @@ use clean_signals::{ControllerCore, RunOptions};
 use frust::{GetUntracked, RwSignal, Set};
 
 use crate::failure::AppFailure;
-use crate::features::sessions::domain::entities::RenameRequest;
-use crate::features::sessions::domain::repositories::SessionsRepository;
-use crate::features::terminal::domain::entities::{Space, TabEntry, TermLine, Workspace};
-use crate::features::terminal::domain::repositories::TerminalRepository;
+use crate::features::terminal::domain::entities::{
+    RenameRequest, Space, TabEntry, TermLine, Workspace,
+};
+use crate::features::terminal::domain::repositories::{SessionsRepository, TerminalRepository};
 use crate::features::terminal::domain::use_cases::{
     DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab,
 };
@@ -274,6 +274,16 @@ impl AsRef<ControllerCore<AppFailure>> for TerminalController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `#[cfg(test)]` exception, documented: this is the one place terminal's
+    // `presentation` names a sibling feature's `data` module (rather than the
+    // `terminal::domain` re-export every non-test import above goes through).
+    // A concrete `SessionsRepository` impl has to come from *somewhere* to
+    // build a real `TerminalController` in a test, and `sessions` itself
+    // already reaches its own `data` mock the identical way from its own
+    // `#[cfg(test)]` module (huddle's convention: `di.rs` is the only
+    // *production* site where `presentation` meets `data`). Test code never
+    // ships, so this is not the layering edge `docs/ARCHITECTURE.md` closes —
+    // it is test wiring standing in for the composition root.
     use crate::features::sessions::data::repositories::MockSessionsRepository;
     use crate::features::terminal::data::repositories::MockTerminalRepository;
 
