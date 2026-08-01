@@ -41,6 +41,7 @@
 pub mod connection;
 pub mod failure;
 pub mod features;
+pub mod responsive;
 pub mod routes;
 pub mod ui;
 

@@ -640,10 +640,11 @@ fn reduce_motion_collapses_the_sheet_to_a_pure_fade() {
 /// must never show.
 const INTERNAL_DETAIL: &str = "tls handshake to 10.0.0.4:50051 timed out";
 
-/// The toast layer alone (the same view `shell::root_view` stacks at index 1)
-/// over its own root: this asserts the bridge, not the shell wiring — and it
-/// keeps the host out of a navigator, whose missing `semantics` would
-/// otherwise hide the toast's own node.
+/// The toast layer alone (the same view `shell::root_view` stacks at index 2,
+/// over the navigator and the floating bar) over its own root: this asserts
+/// the bridge, not the shell wiring — and it keeps the host out of a
+/// navigator, whose missing `semantics` would otherwise hide the toast's own
+/// node.
 struct ToastHarness {
     root: RenderRoot<State, AnyView<State>>,
     logic: ToastLogic,
@@ -706,7 +707,8 @@ fn the_shell_mounts_the_toast_layer_over_the_navigator() {
 
     // The real composition root this time (as `tests/routes.rs` mounts it):
     // a failure raised anywhere in the app must surface through the layer
-    // `shell::root_view` stacks at index 1, with no per-screen wiring.
+    // `shell::root_view` stacks at index 2 (over the navigator and the
+    // floating bar), with no per-screen wiring.
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     let mut state = MuxrApp.init();
     let mut logic = |s: &mut AppState| MuxrApp.build(s);

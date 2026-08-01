@@ -66,11 +66,11 @@ use std::sync::Arc;
 use frust::Theme;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
-    Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, SizedBox, Stack, any,
-    navigator,
+    Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, SizedBox, Stack,
+    WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{FrameTime, NamedKey, PaintScene, RenderRoot};
+use frust_core::{FrameTime, NamedKey, PaintScene, RenderRoot, WindowInsets};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -135,6 +135,10 @@ const LAYER_PAD_X: f64 = 22.0;
 /// The platform minimum tap target, in logical px — the floor the full-bleed
 /// CTA has to clear.
 const MIN_TAP_TARGET: f64 = 44.0;
+/// The content column's max width past `crate::responsive::WIDE_BREAKPOINT_PX`
+/// (FINDINGS #21's width-clamp pass), transcribed (the constant itself is
+/// private to `presentation::pages`).
+const CONNECT_CLAMP_WIDTH: f64 = 520.0;
 
 /// The seeded store's third row — pinned and read-only, so tapping it changes
 /// *both* the URL and the trust mode away from their defaults.
@@ -158,6 +162,25 @@ fn empty_base_page() -> AnyView<AppState> {
         Alignment::CENTER,
         SizedBox::<AppState>(Some(0.0), Some(0.0)),
     ))
+}
+
+/// [`Harness::mount`], first publishing `metrics` into context when `Some` —
+/// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
+/// responsive width-clamp pass (FINDINGS #21). `None` leaves context unset,
+/// exactly the state every other test in this suite mounts under (no shell
+/// has published yet), so this helper is purely additive.
+fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
+    if let Some(metrics) = metrics {
+        provide_context(metrics);
+    }
+    Harness::mount()
+}
+
+/// A [`WindowMetrics`] whose size is [`SURFACE`] itself — a shell reporting
+/// the same window this harness actually paints at, so a clamp's centering
+/// math is checkable against real recorded geometry.
+fn metrics_at(size: Size) -> WindowMetrics {
+    WindowMetrics::new(size, 1.0, WindowInsets::default())
 }
 
 /// The Connect screen plus a live navigator over the same controller.
@@ -552,6 +575,60 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
         node.role() == Role::Button && node.label() == Some(QR_LABEL)
     });
     assert!(fab.width() < layer / 2.0, "the FAB did not stretch too");
+}
+
+// ---------------------------------------------------------------------------
+// Responsive width-clamp pass (FINDINGS #21)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wide_metrics_clamp_and_center_the_content_column() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
+
+    // The CTA is the layer's own full-bleed piece (see the test above), so its
+    // box is the cheapest honest read on where the *clamped* layer itself
+    // sits: centered, `CONNECT_CLAMP_WIDTH` wide, minus the layer's own
+    // `LAYER_PAD_X` padding on each side.
+    let cta = harness.bounds("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    let margin = (SURFACE.width - CONNECT_CLAMP_WIDTH) / 2.0;
+    assert!(
+        (cta.x0 - (margin + LAYER_PAD_X)).abs() < 0.5,
+        "the layer centers within the surface: CTA left edge at {:.1}, expected {:.1}",
+        cta.x0,
+        margin + LAYER_PAD_X
+    );
+    assert!(
+        (cta.width() - (CONNECT_CLAMP_WIDTH - 2.0 * LAYER_PAD_X)).abs() < 0.5,
+        "the CTA spans the clamped layer, not the whole surface: {:.1}",
+        cta.width()
+    );
+}
+
+#[test]
+fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    // Explicit narrow metrics, even though the harness still paints at the
+    // full-width `SURFACE` — proving the branch keys on the *published*
+    // width, not the paint surface, and lands exactly where the no-metrics
+    // baseline (`the_cta_spans_the_layer_and_clears_the_minimum_tap_target`)
+    // already does.
+    let harness = mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+
+    let cta = harness.bounds("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    let layer = SURFACE.width - 2.0 * LAYER_PAD_X;
+    assert!(
+        (cta.width() - layer).abs() < 0.5,
+        "narrow metrics take the same unclamped branch as no metrics: {:.1}",
+        cta.width()
+    );
+    assert!((cta.x0 - LAYER_PAD_X).abs() < 0.5, "{:?}", cta);
 }
 
 /// The mark the QR affordance used to set as a *text run*, and which each

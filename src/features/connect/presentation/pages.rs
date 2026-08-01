@@ -61,8 +61,8 @@ use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, IconSource, Padding, SizedBox, Stack, any, component, icon, inflexible,
-    safe_area, scroll_view, text, use_context,
+    GetUntracked, IconSource, Padding, SizedBox, Stack, WindowMetrics, any, component, icon,
+    inflexible, safe_area, scroll_view, text, use_context,
 };
 
 use super::chrome::panel;
@@ -72,6 +72,7 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::SavedServers;
+use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::sheet::show_sheet;
@@ -93,6 +94,14 @@ const LAYER_GAP: f64 = 22.0;
 /// `.fab{right:20px;bottom:20px}` — the QR affordance's inset from the screen's
 /// safe area.
 const FAB_MARGIN: f64 = 20.0;
+/// The content column's max width past [`WIDE_BREAKPOINT_PX`] (FINDINGS #21's
+/// conservative width-clamp pass) — a tablet/landscape/desktop window centers
+/// the form rather than stretching it edge to edge. The CTA and every field
+/// still stretch full-width *within* this clamp (`connect_layout`'s own
+/// stretch cross-axis is untouched); only the box around them narrows. No
+/// design mock exists for a structural two-pane Connect, so this is a plain
+/// clamp, not a layout switch — see `crate::responsive`'s module docs.
+const CONNECT_CLAMP_WIDTH: f64 = 520.0;
 /// The QR affordance's accessible name — what a screen reader announces, and
 /// what `tests/connect.rs` addresses the button by.
 pub const FAB_LABEL: &str = "Pair by QR code";
@@ -292,12 +301,30 @@ impl Component for ConnectScreen {
                 Rc::new(move || controller.connect(&nav))
             },
         };
+
+        // Responsive width-clamp pass (FINDINGS #21): read metrics once,
+        // branch on one page constant, never touch layout again — the
+        // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
+        // documents. `None` (no shell has published yet, or a bare test
+        // harness) takes the same branch as a genuinely narrow window.
+        let metrics = use_context::<WindowMetrics>();
+        let is_wide = metrics
+            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
+            .unwrap_or(false);
+
+        let content = connect_layout(connect_pieces_with(&theme, Some(&live)));
+        let content = if is_wide {
+            any(Align(
+                Alignment::CENTER,
+                SizedBox::<ConnectState>(Some(CONNECT_CLAMP_WIDTH), None).child(content),
+            ))
+        } else {
+            content
+        };
+
         any(Stack(vec![
             any(page_backdrop::<ConnectState>()),
-            any(scroll_view(connect_layout(connect_pieces_with(
-                &theme,
-                Some(&live),
-            )))),
+            any(scroll_view(content)),
             qr_affordance(&state.app_nav, &state.nav),
         ]))
     }

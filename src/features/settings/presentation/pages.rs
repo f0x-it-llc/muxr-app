@@ -74,8 +74,9 @@ use std::sync::Arc;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, NavigatorController,
-    Padding, any, component, inflexible, safe_area, scroll_view, spawn_local,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
+    NavigatorController, Padding, SizedBox, WindowMetrics, any, component, inflexible, safe_area,
+    scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -87,6 +88,7 @@ use crate::features::settings::di::{expect_auth_tokens_repository, expect_prefer
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
+use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::{close_sheet, show_sheet};
@@ -121,6 +123,15 @@ const DISCONNECTED_VALUE: &str = "not connected";
 /// The real `muxrd` handshake reports it — see the completion summary's
 /// findings.
 const HERDR_WIRE_VERSION: &str = "herdr-wire-v14";
+
+/// The groups column's max width past [`WIDE_BREAKPOINT_PX`] (FINDINGS #21's
+/// conservative width-clamp pass) — a tablet/landscape/desktop window centers
+/// the whole scrolling group list rather than stretching it edge to edge.
+/// There is only one scrolling column on this screen (unlike Sessions' strip
+/// and list split), so the whole body clamps together. No design mock exists
+/// for a structural two-column Settings, so this is a plain clamp, not a
+/// layout switch.
+const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The Settings screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that disposes
@@ -214,6 +225,16 @@ impl Component for SettingsScreen {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
 
+        // Responsive width-clamp pass (FINDINGS #21): read metrics once,
+        // branch on one page constant, never touch layout again — the
+        // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
+        // documents. `None` (no shell has published yet, or a bare test
+        // harness) takes the same branch as a genuinely narrow window.
+        let metrics = use_context::<WindowMetrics>();
+        let is_wide = metrics
+            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
+            .unwrap_or(false);
+
         let mut body = vec![pieces::group_label("connection", &colors)];
         body.extend(connection_rows(info.as_ref(), &colors));
 
@@ -236,7 +257,7 @@ impl Component for SettingsScreen {
         // The *shell's* bar consumes the top window inset on this screen's
         // behalf (`crate::ui::topbar`'s own module docs), so the body's safe
         // area disables its top edge to avoid double-padding it.
-        let scroller = safe_area(scroll_view(Padding(
+        let scroller: AnyView<SettingsState> = any(safe_area(scroll_view(Padding(
             EdgeInsets {
                 left: 0.0,
                 top: pieces::SCROLL_PAD_TOP,
@@ -246,7 +267,17 @@ impl Component for SettingsScreen {
             FlexView::new(Axis::Vertical, body.into_iter().map(inflexible).collect())
                 .cross_axis(CrossAxisAlignment::Stretch),
         )))
-        .top(false);
+        .top(false));
+        // Clamp/center the one scrolling column — see `SETTINGS_CLAMP_WIDTH`'s
+        // doc.
+        let scroller = if is_wide {
+            any(Align(
+                Alignment::CENTER,
+                SizedBox::<SettingsState>(Some(SETTINGS_CLAMP_WIDTH), None).child(scroller),
+            ))
+        } else {
+            scroller
+        };
         // The page tone stays **outside** the clearance so it fills the whole
         // surface, bar band included: the bar slides in over it, and a page
         // that stopped at the clearance would flash the shell's own clear
