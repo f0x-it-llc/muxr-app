@@ -1,26 +1,27 @@
 # Doc Policy
 
 **Set by:** agent
-**Scale:** small (~4.6k source LOC in `src/`, 1 package, 1 stack (Rust + Android/iOS shells) → 1 doc unit)
-**Structure:** flat
+**Scale:** medium (~23.5k source LOC in `src/`, 1 package, 1 stack (Rust + Android/iOS shells) →
+1 doc unit) — crossed the 15k small→medium boundary as all four feature slices (`connect`,
+`sessions`, `terminal`, `settings`) landed as full `{domain, data, presentation}` slices.
+**Structure:** flat — still one unit; the tier crossing changes the budget, not the shape.
 
 ## Budgets
 
 | Doc | Target | Cap |
 |-----|--------|-----|
-| `docs/ARCHITECTURE.md` | 135 | 150 |
-| `docs/DEVELOPMENT.md` | 90 | 120 |
-| `CLAUDE.md` | 60 | 80 |
+| `docs/ARCHITECTURE.md` | 220 | 260 |
+| `docs/DEVELOPMENT.md` | 100 | 130 |
+| `CLAUDE.md` | 65 | 85 |
 
-Tighter than the generic small-tier schema caps (250/400 core doc, 60/80 `CLAUDE.md`) — this is a
+Tighter than the generic medium-tier schema caps (350/500 core doc, 80/100 `CLAUDE.md`) — this is a
 single-crate app, not a workspace, and the reading path stays short deliberately.
 
-`docs/ARCHITECTURE.md`'s target was raised from 110 to 135 on 2026-07-31: its "Building a Screen
-(canonical pattern)" section is permanent, load-bearing content (the app-structure charter every
-screen and, post-open-sourcing, every frust app author is meant to copy), not transient bloat to
-compact away. A 2026-07-31 docs-close pass folded in the session guard/`Nav` seam, the `connection`
-module, three new `ui/` modules, and two new charter bullets — real content, not bloat — compacting
-Shell/Tests/Design References to absorb it; landed at 148/150, still no override needed.
+`docs/ARCHITECTURE.md`'s target was raised from 135 to 220 on 2026-08-01, alongside the small→medium
+move above: a docs-close pass rewrote Shell (the real four-slot floating-bar root, fixing a stale
+three-slot description two review dimensions had flagged), expanded Navigation (the overlay
+accounting model) and UI Substrate/Feature Slices (all four slices now full), and added Responsive —
+real, permanent content, not bloat. Landed at 236/260; re-check past 260 or on a fifth feature.
 
 ## Doc Units
 

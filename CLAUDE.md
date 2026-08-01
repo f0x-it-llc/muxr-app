@@ -2,10 +2,10 @@
 
 Muxr is a [Frust](https://github.com/f0x-it-llc/frust)-native rewrite of the muxr client: an
 app that attaches to and controls remote [zellij](https://zellij.dev) terminal-multiplexer
-sessions through `muxrd`, a TLS + bearer-auth gRPC backend. Development is UI-first: `connect`
-and `sessions` are interactive screens over mock data (a session guard bounces an
-unauthenticated push back to Connect); `terminal`/`settings` are still placeholders, and the real
-`muxrd` gRPC layer is not wired yet.
+sessions through `muxrd`, a TLS + bearer-auth gRPC backend. Development is UI-first: all four
+features (`connect`, `sessions`, `terminal`, `settings`) are full, interactive screens over mock
+data (a session guard bounces an unauthenticated push back to Connect); the real `muxrd` gRPC
+layer is not wired yet.
 
 ## Documentation
 
@@ -48,3 +48,6 @@ full command set, flavor identifiers, and signing setup.
   screens/state above them instead.
 - Only the composition root constructs a `Router` (`routes::install_app_router`) — a screen
   reaches it through `routes::app_nav()`, never by building its own.
+- Chrome icons (a bar affordance, a FAB, a row's trailing chevron) are always a `frust::icons`
+  vector or an app-supplied `IconSource` — never a font glyph; see
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)'s UI Substrate section.
