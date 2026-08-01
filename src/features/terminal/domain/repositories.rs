@@ -27,6 +27,22 @@
 //! Every method fails with the app-wide [`AppFailure`] vocabulary — the data
 //! layer owns the single mapping site into it, so nothing above ever sees a
 //! transport error type.
+//!
+//! # Session-repository reuse (a documented layering tension)
+//!
+//! [`SessionsRepository`] is **not** re-implemented or wrapped here: it is
+//! [`crate::features::sessions::domain::repositories::SessionsRepository`],
+//! the same contract `sessions`' own screen depends on, so this screen's
+//! rename writes through the one store a session's name actually lives in
+//! rather than a second, driftable path (see
+//! [`RenameAttachedSession`](super::use_cases::RenameAttachedSession)). See
+//! `crate::features::terminal::domain`'s module docs for the full accounting
+//! of this `domain` → sibling `domain` widening (the same shape `connect`'s
+//! own `TrustMode` re-export uses); nothing below crosses into `sessions`'
+//! `data` or `presentation`, and `presentation::controller` reaches this
+//! trait through here rather than naming `sessions::domain` itself.
+
+pub use crate::features::sessions::domain::repositories::SessionsRepository;
 
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{Space, TabEntry, TermLine};
