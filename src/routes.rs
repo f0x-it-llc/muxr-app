@@ -99,6 +99,28 @@
 //! [`NavState::reconcile`] clamps the counters flat the moment the live depth
 //! falls back to the route stack, so no dismissal, however it happened, can
 //! strand a dimmed bar.
+//!
+//! ## Consult the queued ops *before* mutating
+//!
+//! That clamp — and the mirror's own retain beside it — are both **erasing**
+//! operations gated on a depth that is one rebuild stale. So the two places
+//! that *add* coverage the eraser could later wipe have to read the queue
+//! first, and each does it in the way its own staleness demands:
+//!
+//! - [`NavState::record_push_depth`] discounts the pops already queued before
+//!   deciding how deep a landing route sits (a handler that closes an overlay
+//!   and pushes a route in one rebuild would otherwise record one too deep —
+//!   permanently);
+//! - [`NavState::begin_overlay`] reconciles *before* it increments, so an
+//!   unobserved depth fall is spent on the frame it belongs to rather than on
+//!   the next overlay's count.
+//!
+//! [`Nav::dismiss_overlay`] and [`Nav::end_overlay`] deliberately stay as they
+//! are, and the asymmetry is the point: they only ever move counters **toward
+//! zero**. A clamp that arrives a beat early can at worst duplicate what they
+//! were going to do anyway; it can never undo real state. Only
+//! [`Nav::begin_overlay`]'s increment and [`Nav::record_push`]'s stack entry
+//! create something the clamp/retain could erase, so only those two consult.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -431,6 +453,76 @@ impl NavState {
         self.stack.last().map_or(0, |(depth, _)| *depth)
     }
 
+    /// The depth a route landing *now* sits at: the deeper of the mirror's own
+    /// stack and the navigator's last-published depth **less the pops already
+    /// queued against it** ([`Self::overlays_closing`]/[`Self::pending_pop`]).
+    /// [`Nav::record_push`] records one past it.
+    ///
+    /// # Why the discount, and what it costs to skip
+    ///
+    /// `live` is advisory — published at the last rebuild — and the app can
+    /// have told the navigator to *drop* pages since. The Sessions management
+    /// sheet's **Attach** row is exactly that handler: it closes the sheet
+    /// ([`crate::ui::sheet::SheetHandle::close`], which enqueues a raw
+    /// controller pop and reports [`Nav::dismiss_overlay`]) and then pushes
+    /// `/terminal` — both in one rebuild, so `live` still counts the sheet's
+    /// page while the push is being recorded. Reading it undiscounted records
+    /// the route one too deep, and *permanently*: the mirror entry is never
+    /// re-derived. The next depth fall past it — the terminal's own ⋮ menu
+    /// opening and closing — makes [`Self::reconcile`]'s retain drop the
+    /// route's own entry, and the bar retitles to the route underneath, sticks
+    /// modal, and loses its back affordance.
+    ///
+    /// The raw `live` still feeds [`Self::bar`] at that call site: only the
+    /// *recorded* depth is a lasting fact, and
+    /// [`overlay_active`](Self::overlay_active) already discounts
+    /// [`Self::overlays_closing`] in its own terms.
+    ///
+    /// # The accepted boundary
+    ///
+    /// [`Self::pending_pop`] is a **bool**, so two bare [`Nav::pop`]s queued
+    /// before any drain discount as one and this answers one too deep again.
+    /// No call site in the app produces that shape (a `‹` press and the
+    /// terminal's detach each pop once, a rebuild apart), and widening the flag
+    /// to a counter would change what
+    /// [`overlay_active`](Self::overlay_active) reads — so it is documented
+    /// here rather than redesigned.
+    fn record_push_depth(&self, live: usize) -> usize {
+        let queued_pops = self.overlays_closing + usize::from(self.pending_pop);
+        self.route_depth().max(live.saturating_sub(queued_pops))
+    }
+
+    /// Count one more app-pushed overlay, draining any unobserved depth fall
+    /// **first** — [`Nav::begin_overlay`]'s whole body beyond the publish.
+    ///
+    /// The order is the fix. [`Self::reconcile`]'s backstop clamps the
+    /// counters flat on a depth fall, and a fall is only *spent* once
+    /// something reconciles at the fallen depth — so a fall nothing observed
+    /// is still sitting in [`Self::last_seen_depth`], waiting to be consumed
+    /// by whichever reconcile comes next. Incrementing before that reconcile
+    /// hands the fresh overlay's count to it as the thing it clamps.
+    ///
+    /// The terminal's **menu → sheet** chain is that trace: `frust::glyph`'s
+    /// menu pops itself from inside its own paint, the app never sees it, and
+    /// the loop can park before any [`Nav::bar`] read observes the drop. The
+    /// pop-completion callback then runs [`Nav::end_overlay`] and opens the
+    /// sheet in one pass; the sheet's `overlays += 1` lands *ahead* of the
+    /// reconcile that spends the menu's fall, and is wiped by it. The sheet
+    /// then dims the bar on the depth term alone — until its dismissal, where
+    /// [`Nav::dismiss_overlay`]'s `overlays_closing < overlays` guard finds
+    /// nothing to count, the depth term keeps answering `true`, and the loop
+    /// parks on a dimmed, inert bar. (A dialog whose `on_confirm` opens
+    /// another overlay carries the identical exposure.)
+    ///
+    /// Reconciling here is safe precisely because it is the *pre*-increment
+    /// state it reconciles: the clamp can only wipe counts that a fall has
+    /// already invalidated, and the retain only drops mirror entries deeper
+    /// than the live depth.
+    fn begin_overlay(&mut self, live: usize) {
+        self.reconcile(live);
+        self.overlays += 1;
+    }
+
     /// How many overlays the app believes are up right now: the ones it
     /// pushed, less the ones it has already told the navigator to pop (see
     /// [`Self::overlays`]/[`Self::overlays_closing`]).
@@ -562,6 +654,17 @@ impl Nav {
     /// Unlike [`push`](Self::push) this carries **no** transition: a `go`
     /// replaces the root, and the one caller of that today is the launch
     /// `handle_location` the splash hands off over — which must not animate.
+    ///
+    /// # What it leaves behind, knowingly
+    ///
+    /// The reset clears the queued-pop flag and the overlay counters (below)
+    /// but **not** [`NavState::last_seen_depth`], so a `go` off a deeper stack
+    /// leaves that reading high — an unobserved fall the next
+    /// [`reconcile`](NavState::reconcile) spends. Left as it is rather than
+    /// fixed: the app's one `go` is the launch `handle_location`, off a
+    /// one-page stack with no fall to leave behind, so it is latent rather
+    /// than live, and resetting it here would put a second owner on the flag
+    /// whose whole invariant is that `reconcile` alone moves it.
     pub fn go(&self, location: &str) {
         self.router.go(location);
         let (meta, query) = match self.router.resolve(location) {
@@ -646,15 +749,19 @@ impl Nav {
     /// Record a landed path navigation in the mirror.
     ///
     /// The recorded depth is one past whichever is deeper: the navigator's
-    /// last-published depth, or the deepest entry already recorded. Both halves
-    /// matter — `depth()` is stale between a press handler and the rebuild that
-    /// applies its op (so two pushes in one frame would otherwise record the
-    /// same depth), while the mirror alone cannot see the transparent pages
-    /// pushed straight through the controller.
+    /// last-published depth **less whatever pops are already queued against
+    /// it**, or the deepest entry already recorded. All three terms matter —
+    /// `depth()` is stale between a press handler and the rebuild that applies
+    /// its op (so two pushes in one frame would otherwise record the same
+    /// depth), the mirror alone cannot see the transparent pages pushed
+    /// straight through the controller, and a handler that closes an overlay
+    /// before pushing would otherwise record one too deep, for good. See
+    /// [`NavState::record_push_depth`], which owns the arithmetic and the
+    /// trace.
     fn record_push(&self, location: &Location) {
         let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
-        let deepest = state.route_depth().max(live);
+        let deepest = state.record_push_depth(live);
         state.stack.push((deepest + 1, route_meta(&location.path)));
         state.direction = BarDirection::Forward;
         state.query = location.query.clone();
@@ -674,10 +781,15 @@ impl Nav {
     /// (`NavigatorController::push_transparent_for_result`'s `on_result`,
     /// `frust::glyph::show_glyph_dialog`/`show_glyph_menu`'s `on_result`) —
     /// the one place that runs exactly once for every dismissal path there is.
+    ///
+    /// The count is taken **after** a reconcile, never before one: an overlay
+    /// opened out of the overlay before it (the terminal's menu → sheet chain)
+    /// would otherwise hand its own fresh count to the backstop as the stale
+    /// fall to clamp. [`NavState::begin_overlay`] carries that trace.
     pub fn begin_overlay(&self) {
         let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
-        state.overlays += 1;
+        state.begin_overlay(live);
         let bar = state.bar(live, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
@@ -1272,6 +1384,71 @@ mod tests {
         state.reconcile(2);
         assert_eq!(state.overlays, 1, "the stale depth clamps nothing");
         assert!(state.bar(2, false).overlay_active);
+    }
+
+    // -----------------------------------------------------------------------
+    // Consulting the queued ops before mutating (see the module docs)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_push_recorded_while_an_overlay_is_closing_lands_over_the_route_below_it() {
+        // THE Critical trace, as arithmetic. The Sessions Attach row closes the
+        // sheet and pushes `/terminal` in one handler: the sheet's pop is
+        // queued (so `live` still counts its page) while the push is recorded.
+        // Recording one too deep is permanent — the entry is never re-derived —
+        // and the next depth fall past it evicts the route's own entry.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 1;
+        state.reconcile(3); // the sheet's page is live
+
+        assert_eq!(
+            state.record_push_depth(3),
+            3,
+            "with the sheet staying up, a push lands over it"
+        );
+
+        state.overlays_closing = 1; // `dismiss_overlay`: the pop is enqueued
+        assert_eq!(
+            state.record_push_depth(3),
+            2,
+            "…but a sheet on its way out is a page the route does not stack on"
+        );
+
+        // …and the same discount answers for a queued *route* pop.
+        state.overlays = 0;
+        state.overlays_closing = 0;
+        state.pending_pop = true;
+        assert_eq!(state.record_push_depth(3), 2);
+    }
+
+    #[test]
+    fn a_fresh_overlay_spends_an_unobserved_fall_before_it_counts_itself() {
+        // The delegated Major: the terminal's menu pops itself from inside its
+        // own paint and the loop can park before any `bar` read sees the drop,
+        // leaving a fall nobody spent. The sheet the menu's completion callback
+        // opens must not be what spends it.
+        let mut state = mirror(&[(2, route_meta("/terminal"))], 3);
+        assert_eq!(state.overlays, 0, "the menu's own count is already cleared");
+
+        state.begin_overlay(2);
+        assert_eq!(state.overlays, 1, "the sheet is counted");
+        assert_eq!(
+            state.last_seen_depth, 2,
+            "…and the stale fall was spent on the way in, not on it"
+        );
+        assert!(state.bar(2, false).overlay_active, "so the bar is dimmed");
+
+        // The next reconcile has nothing left to clamp, which is the whole
+        // point: the sheet's own count survives to the dismissal, where
+        // `dismiss_overlay` needs it to light the bar synchronously.
+        state.reconcile(2);
+        assert_eq!(state.overlays, 1, "the count survives the next pass");
+        state.reconcile(3); // the sheet's page lands
+        state.overlays_closing = 1; // `dismiss_overlay`
+        assert!(
+            !state.bar(3, false).overlay_active,
+            "the dismissal lights the bar rather than stranding it dimmed"
+        );
     }
 
     #[test]
