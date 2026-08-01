@@ -17,7 +17,7 @@
 //! why none of the three can be optional, and why the bar floats rather than
 //! sharing a band with the navigator).
 
-use frust::{AnyView, NavigatorController, Stack, any, navigator};
+use frust::{AnyView, NavigatorController, Stack, any, icons, navigator};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
@@ -25,8 +25,13 @@ use crate::routes::{BarAction, BarDirection, BarLeading, Nav, SETTINGS_ROUTE};
 use crate::ui::toasts::toast_layer;
 use crate::ui::topbar::muxr_topbar;
 
-/// `.topbar-icon`'s `⚙` — the Sessions bar's trailing action.
-const SETTINGS_GLYPH: &str = "\u{2699}";
+/// `.topbar-icon`'s settings affordance: its accessible name.
+///
+/// The **mark** is `frust::icons::SETTINGS`, a vector — never the `⚙` glyph
+/// this slot used to set as text, which is absent from the bundled Glyph faces
+/// and so rendered differently on Android and not at all on iPhone. See
+/// `crate::ui::topbar`'s "Chrome icons are vectors" rule.
+const SETTINGS_LABEL: &str = "Settings";
 
 /// The app's entire root content: a full-height navigator, the top bar
 /// floating over it, the app-wide toast layer over that, and `overlay` stacked
@@ -130,7 +135,11 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> 
     let Some(meta) = state.meta else {
         return any(muxr_topbar::<AppState>("").hidden(true).reverse(reverse));
     };
-    let mut bar = muxr_topbar::<AppState>(meta.resolve_title(connection)).reverse(reverse);
+    // A sheet/dialog is pushed *inside* the navigator, which the bar floats
+    // over — so the bar has to mirror the modality itself (dim, and go inert).
+    let mut bar = muxr_topbar::<AppState>(meta.resolve_title(connection))
+        .reverse(reverse)
+        .overlay(state.overlay_active);
     bar = match meta.leading {
         BarLeading::Brand => bar,
         BarLeading::Back => {
@@ -141,9 +150,11 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> 
     bar = match meta.action {
         Some(BarAction::Settings) => {
             let nav = nav.clone();
-            bar.action(SETTINGS_GLYPH, move |_state: &mut AppState| {
-                nav.push(SETTINGS_ROUTE)
-            })
+            bar.action(
+                icons::SETTINGS,
+                SETTINGS_LABEL,
+                move |_state: &mut AppState| nav.push(SETTINGS_ROUTE),
+            )
         }
         None => bar,
     };

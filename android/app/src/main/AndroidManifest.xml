@@ -6,7 +6,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:theme="@android:style/Theme.NoTitleBar">
+        android:theme="@style/Theme.Muxr">
 
         <!-- Read by dev.frust.FrustActivity to load this app's Rust library. -->
         <meta-data android:name="dev.frust.nativeLibrary" android:value="muxr" />
@@ -17,7 +17,7 @@
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@android:style/Theme.NoTitleBar">
+            android:theme="@style/Theme.Muxr">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

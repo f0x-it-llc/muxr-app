@@ -55,11 +55,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use clean_signals_frust::use_controller;
-use frust::authoring::Color;
 use frust::authoring::text::TextStyle;
+use frust::authoring::{Color, Size};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Padding,
-    SizedBox, Stack, any, button, component, inflexible, safe_area, scroll_view, text, use_context,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView,
+    IconSource, Padding, SizedBox, Stack, any, component, icon, inflexible, safe_area, scroll_view,
+    text, use_context,
 };
 
 use super::chrome::panel;
@@ -72,6 +73,7 @@ use crate::features::connect::di::SavedServers;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::sheet::show_sheet;
+use crate::ui::topbar::icon_button;
 
 /// `.connect{padding:30px 22px}` (`.ui-layer`'s too) — horizontal.
 const LAYER_PAD_X: f64 = 22.0;
@@ -89,8 +91,75 @@ const LAYER_GAP: f64 = 22.0;
 /// `.fab{right:20px;bottom:20px}` — the QR affordance's inset from the screen's
 /// safe area.
 const FAB_MARGIN: f64 = 20.0;
-/// `.fab` renders `▣` — the mock's QR/pair glyph, reused as the button's label.
-const FAB_GLYPH: &str = "▣";
+/// The QR affordance's accessible name — what a screen reader announces, and
+/// what `tests/connect.rs` addresses the button by.
+pub const FAB_LABEL: &str = "Pair by QR code";
+/// The FAB's box, in logical px. The mock's `.fab` is a 46px disc; this is the
+/// same box, which also clears the 44px platform minimum tap target.
+const FAB_BOX: f64 = 46.0;
+/// The scan mark drawn inside it, in logical px.
+const FAB_MARK: f64 = 22.0;
+/// …and the same mark, larger, in the sheet's placeholder viewfinder.
+const VIEWFINDER_MARK: f64 = 44.0;
+
+/// `.fab` renders `▣` — the mock's QR/scan mark. **As a vector, never that
+/// glyph.**
+///
+/// The FAB used to set `▣` (`U+25A3`, "white square containing black small
+/// square") as a button label. It is in none of the bundled Glyph faces, so
+/// each platform resolved it through its own fallback chain and each drew a
+/// *different mark* — Ed's round-4 device gate caught Android and iOS
+/// disagreeing about what the app's primary pairing affordance even looks
+/// like. A font fallback chain is not something an app can specify, so the
+/// only fix is to stop asking for one (see `crate::ui::topbar`'s "Chrome icons
+/// are vectors" rule).
+///
+/// **Why an app-supplied source.** The vendored Material Symbols starter set
+/// (`frust::icons`) carries no QR/scan/viewfinder glyph at all — the closest
+/// is `image`, which reads as a photo. So this is authored here against the
+/// same 24×24 design box every generated entry uses, through the documented
+/// app-supply seam (`IconSource`/`IconData::from_path`), reproducing the
+/// mock's motif exactly: four corner brackets — the universal scan-frame —
+/// around a solid centre square, which is `▣`'s own "square containing a
+/// square" read at any size.
+///
+/// Authored as one `d` string of axis-aligned rectangles: eight bracket arms
+/// (two per corner, `BRACKET`-long and `STROKE`-thick, inset `INSET` from the
+/// box) plus the centre square. Every number below is the source of one
+/// subpath, and the unit test at the bottom of this module re-derives the
+/// bracket geometry from them so a typo cannot pass as art.
+const SCAN_MARK: IconSource = IconSource {
+    d: concat!(
+        // top-left corner: across, then down
+        "M4 4h7v2.5H4Z M4 4h2.5v7H4Z ",
+        // top-right
+        "M13 4h7v2.5h-7Z M17.5 4H20v7h-2.5Z ",
+        // bottom-left
+        "M4 17.5h2.5V20H4Z M4 13h2.5v7H4Z ",
+        // bottom-right
+        "M13 17.5h7V20h-7Z M17.5 13H20v7h-2.5Z ",
+        // the centre square
+        "M9 9h6v6H9Z",
+    ),
+    design: 24.0,
+};
+
+/// [`SCAN_MARK`]'s inset from its design box's edge, its bracket-arm length,
+/// and its arm thickness — the three numbers the `d` string above is built
+/// from, named so the tripwire below can re-derive it.
+const SCAN_INSET: f64 = 4.0;
+const SCAN_BRACKET: f64 = 7.0;
+const SCAN_STROKE: f64 = 2.5;
+
+// The mark reads as a scan *frame* only while its corner brackets stay
+// corners: an edge's two arms must leave a gap between them, and an arm must
+// be thinner than it is long. Checked at compile time, since the `d` string
+// above is authored by hand from exactly these numbers (the module's own test
+// re-derives the far arms' coordinates from them, and parses the result).
+const _: () = {
+    assert!(2.0 * SCAN_BRACKET < 24.0 - 2.0 * SCAN_INSET);
+    assert!(SCAN_STROKE < SCAN_BRACKET);
+};
 /// The QR sheet's viewfinder square, in logical px. An original constant: the
 /// mock has no camera screen to transcribe, and this is the largest square that
 /// still leaves the sheet's caption room on a 340px-wide phone.
@@ -202,18 +271,31 @@ impl Component for ConnectScreen {
 /// `.fab`: the amber QR/pair affordance, pinned to the screen's bottom-trailing
 /// safe area.
 ///
-/// A real [`button`] rather than hand-painted chrome, so the press feedback and
-/// the accessibility role come from the framework; its single-glyph label makes
-/// `ButtonWidget`'s leading-pinned label (FINDINGS #15) invisible here.
+/// An [`icon_button`] rather than [`button`]: the affordance is a **mark**, and
+/// `frust::button` takes a `String` label and nothing else, which is exactly
+/// how it came to be a font glyph in the first place (see [`SCAN_MARK`]). What
+/// that costs against the stock button — its press *scale* (this dips tone
+/// instead) and its loading/disabled states — this affordance never used, the
+/// same trade `super::pieces::connect_button` already records.
 fn qr_affordance(nav: &frust::NavigatorController<AppState>) -> AnyView<ConnectState> {
     let nav = nav.clone();
+    let theme = active_theme();
+    let scheme = theme.scheme();
     any(safe_area(Align(
         Alignment::BOTTOM_RIGHT,
         Padding(
             EdgeInsets::all(FAB_MARGIN),
-            button(FAB_GLYPH, move |_state: &mut ConnectState| {
+            icon_button(SCAN_MARK, FAB_LABEL, move |_state: &mut ConnectState| {
                 show_sheet(&nav, qr_sheet_body)
-            }),
+            })
+            // The mock's amber disc and the ink the design pairs with it — the
+            // same `primary_container`/`on_primary_container` pair the CTA
+            // resolves (see `super::pieces`' `Palette`).
+            .fill(scheme.primary_container)
+            .ink(scheme.on_primary_container)
+            .icon_size(FAB_MARK)
+            .box_size(Size::new(FAB_BOX, FAB_BOX))
+            .radius(FAB_BOX / 2.0),
         ),
     )))
 }
@@ -230,7 +312,10 @@ fn qr_sheet_body() -> AnyView<AppState> {
     let viewfinder = panel(
         SizedBox::<AppState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(Align(
             Alignment::CENTER,
-            text(FAB_GLYPH).style(inked(&theme.type_scale.headline_medium, scheme.primary)),
+            // The same vector the FAB draws, at viewfinder size — a scan frame
+            // is exactly what a camera placeholder wants, and it keeps this
+            // screen free of the font-fallback glyph entirely.
+            icon(SCAN_MARK).size(VIEWFINDER_MARK).color(scheme.primary),
         )),
         scheme.surface_container_lowest,
         theme.shape.medium,
@@ -266,4 +351,61 @@ fn inked(style: &TextStyle, color: Color) -> TextStyle {
     let mut style = style.clone();
     style.color = color;
     style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust::authoring::{BezPath, Shape};
+
+    /// Geometry tolerance, in design-box units.
+    const EPSILON: f64 = 1e-9;
+
+    #[test]
+    fn the_scan_mark_parses_into_nine_subpaths() {
+        // A malformed `d` is a *panic* at first paint (`IconData::resolve`
+        // treats a parse failure as the wiring bug it is), which on device
+        // means a crash rather than a wrong-looking FAB. This is the tripwire.
+        let path = BezPath::from_svg(SCAN_MARK.d).expect("the scan mark parses");
+        assert!(!path.elements().is_empty());
+        assert_eq!(
+            SCAN_MARK.d.matches('M').count(),
+            9,
+            "eight bracket arms plus the centre square"
+        );
+    }
+
+    #[test]
+    fn the_scan_mark_fills_its_design_box_symmetrically() {
+        // Every corner bracket sits `SCAN_INSET` in from its own edge, so the
+        // mark's bounds are that inset on all four sides — which is what makes
+        // it read as centred at any drawn size (the FAB's 22px and the
+        // viewfinder's 44px).
+        let path = BezPath::from_svg(SCAN_MARK.d).expect("the scan mark parses");
+        let bbox = path.bounding_box();
+        let far = SCAN_MARK.design - SCAN_INSET;
+        assert!((bbox.x0 - SCAN_INSET).abs() < EPSILON, "{bbox:?}");
+        assert!((bbox.y0 - SCAN_INSET).abs() < EPSILON, "{bbox:?}");
+        assert!((bbox.x1 - far).abs() < EPSILON, "{bbox:?}");
+        assert!((bbox.y1 - far).abs() < EPSILON, "{bbox:?}");
+    }
+
+    #[test]
+    fn the_far_brackets_sit_where_the_named_numbers_put_them() {
+        // The literal `d` above places its trailing/bottom arms at 13 and 17.5
+        // — which is `24 - 4 - 7` and `24 - 4 - 2.5`. The transcription's own
+        // tripwire, since the path data is authored by hand. (The "brackets
+        // stay corners" half is the `const _` assertion beside the constants.)
+        assert!((SCAN_MARK.design - SCAN_INSET - SCAN_BRACKET - 13.0).abs() < EPSILON);
+        assert!((SCAN_MARK.design - SCAN_INSET - SCAN_STROKE - 17.5).abs() < EPSILON);
+    }
+
+    #[test]
+    fn the_fab_clears_the_minimum_tap_target() {
+        // The mock's 46px disc is also the platform floor (44px) with room to
+        // spare; the mark inside it is decoration and has no floor of its own.
+        const MIN_TAP_TARGET: f64 = 44.0;
+        const { assert!(FAB_BOX >= MIN_TAP_TARGET) };
+        const { assert!(FAB_MARK < FAB_BOX) };
+    }
 }

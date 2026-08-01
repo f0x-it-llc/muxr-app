@@ -23,21 +23,24 @@
 //! helpers are generic over the app state precisely so a screen (or a test)
 //! brings its own.
 
-use frust::{AnyView, Component, NavigatorController, NavigatorView, any, button, navigator, text};
+use frust::{
+    AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator, text,
+};
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
+use peniko::Color;
 
 use muxr::failure::AppFailure;
 use muxr::ui::dialogs::{confirm_dialog, name_input_dialog};
-use muxr::ui::sheet::show_sheet;
+use muxr::ui::sheet::{SCRIM_ALPHA, show_sheet};
 use muxr::ui::toasts::{app_toasts, toast_layer};
 use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    RecScene, by_width, center, char_key, frame, largest, named_key, node_labels, pointer, serial,
-    settle, setup, smallest, tap,
+    RecScene, alpha_of, by_width, center, char_key, fills_at, frame, frame_at, largest, ms,
+    named_key, node_labels, pointer, serial, settle, setup, smallest, tap,
 };
 
 /// The panel gutter both overlays use, transcribed: `frust::glyph::dialog`'s
@@ -83,19 +86,43 @@ struct Harness {
 }
 
 impl Harness {
-    /// Mount the navigator and render its first frame.
+    /// Mount the navigator, unthemed, and render its first frame.
     fn mount() -> Self {
+        Self::themed(None)
+    }
+
+    /// Mount under `theme` — what the sheet-staging tests need, since a
+    /// `ModalStage`'s durations, easings and `reduce_motion` collapse are all
+    /// theme reads (an unthemed mount stages on the transcribed Glyph
+    /// fallbacks instead, which is what every other test here runs on).
+    fn themed(theme: Option<Theme>) -> Self {
         let controller: NavigatorController<State> = NavigatorController::new();
         let logic_controller = controller.clone();
+        let mut root: RenderRoot<State, NavigatorView<State>> = RenderRoot::new();
+        if let Some(theme) = theme {
+            root.set_theme(Box::new(theme));
+        }
         let mut harness = Harness {
             controller,
-            root: RenderRoot::new(),
+            root,
             logic: Box::new(move |_state: &mut State| navigator(&logic_controller, home)),
             state: State::default(),
             tcx: TextContext::new(),
         };
         harness.settle();
         harness
+    }
+
+    /// One frame painted at an explicit clock — how a staged animation is
+    /// caught mid-flight rather than settled.
+    fn frame_at(&mut self, at_ms: f64) -> RecScene {
+        frame_at(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            ms(at_ms),
+        )
     }
 
     /// Drive a pushed/popped page past its transition (and past a dialog's own
@@ -403,6 +430,186 @@ fn a_tap_on_the_sheet_panel_never_dismisses_it() {
     h.flush();
     assert_eq!(h.state.confirmed, 1, "…and it hit no control");
     assert_eq!(h.depth(), 2, "the sheet stays up");
+}
+
+// ---------------------------------------------------------------------------
+// sheet — the scrim fades, only the panel slides
+// ---------------------------------------------------------------------------
+
+/// How far into the sheet's entrance the staging probes paint. Comfortably
+/// inside the modal enter duration (Glyph's `durations.base`, 220ms) and past
+/// its start, so a partial frame is genuinely partial.
+const MID_STAGING_MS: f64 = 60.0;
+
+/// The sheet's scrim in `scene`: every plain fill covering the **whole**
+/// surface, which is where `SheetScaffoldWidget::paint` puts it on every frame
+/// regardless of staging. A scrim found anywhere else would be the defect this
+/// section exists for — the old whole-page `SlideUp` translated it with the
+/// panel, so it wiped up the screen instead of fading in place.
+fn scrim(scene: &RecScene) -> Vec<Color> {
+    fills_at(scene, Point::ZERO, support::surface())
+}
+
+/// The scrim's single alpha this frame, panicking if it painted anywhere but
+/// full-bleed (or more than once).
+fn scrim_alpha(scene: &RecScene) -> f32 {
+    let found = scrim(scene);
+    assert_eq!(
+        found.len(),
+        1,
+        "the sheet paints exactly one full-bleed scrim; all fills were {:?}",
+        scene
+            .fills
+            .iter()
+            .map(|(o, s, c)| (o.x, o.y, s.width, s.height, alpha_of(*c)))
+            .collect::<Vec<_>>()
+    );
+    alpha_of(found[0])
+}
+
+/// Push a sheet without settling it, and return the harness plus the frame at
+/// [`MID_STAGING_MS`] — mid-entrance.
+fn mid_entrance(theme: Theme) -> (Harness, RecScene) {
+    let mut h = Harness::themed(Some(theme));
+    show_sheet(&h.controller, || {
+        any(button("Split pane right", |state: &mut State| {
+            state.confirmed += 1
+        }))
+    });
+    h.frame_at(0.0);
+    let mid = h.frame_at(MID_STAGING_MS);
+    (h, mid)
+}
+
+#[test]
+fn the_panel_rises_while_the_scrim_fades_in_place() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (mut h, mid) = mid_entrance(Theme::glyph_baseline());
+    let mid_panel = panel(&mid);
+    let mid_scrim = scrim_alpha(&mid);
+
+    let settled = h.settle();
+    let settled_panel = panel(&settled);
+
+    // The panel is still on its way up…
+    assert!(
+        mid_panel.0.y > settled_panel.0.y + 0.5,
+        "mid-entrance the panel is still below its resting place ({} vs {})",
+        mid_panel.0.y,
+        settled_panel.0.y
+    );
+    // …while the scrim is *already* partially dimmed at FULL coverage. That
+    // pair is the whole point: under the old `PageTransition::SlideUp` the
+    // scrim was part of the page and so was displaced by exactly the same
+    // amount as the panel — a black rectangle wiping up the screen.
+    assert!(
+        mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
+        "mid-entrance the scrim is partly faded in ({mid_scrim} of \
+         {SCRIM_ALPHA})"
+    );
+    assert!(
+        (scrim_alpha(&settled) - SCRIM_ALPHA).abs() < 1e-6,
+        "…and settles at the modal's own alpha"
+    );
+    assert_eq!(h.depth(), 2, "the sheet is up throughout");
+}
+
+#[test]
+fn the_scrims_rect_never_moves() {
+    let _g = serial();
+    let _ambient = setup();
+
+    // The regression, stated as geometry rather than as a feeling: across the
+    // whole entrance the scrim's rect is byte-identical — origin at zero,
+    // size the full surface — and only its alpha differs. `scrim_alpha`
+    // panics unless exactly one full-bleed fill exists, so every probe below
+    // is an assertion.
+    let mut h = Harness::themed(Some(Theme::glyph_baseline()));
+    show_sheet(&h.controller, || any(text("pair a host")));
+    h.frame_at(0.0);
+
+    let mut previous = 0.0_f32;
+    for at in [10.0, 40.0, 90.0, 150.0, 210.0] {
+        let alpha = scrim_alpha(&h.frame_at(at));
+        assert!(
+            alpha >= previous,
+            "the entrance fade never runs backwards ({alpha} after {previous})"
+        );
+        previous = alpha;
+    }
+}
+
+#[test]
+fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut h = Harness::themed(Some(Theme::glyph_baseline()));
+    show_sheet(&h.controller, || any(text("pair a host")));
+    let settled = h.settle();
+    let settled_panel = panel(&settled);
+    assert_eq!(h.depth(), 2);
+
+    // A scrim tap stages the exit; the pop is deferred until it has played.
+    // Two frames: the first *starts* the driver (which epochs on its own first
+    // advance — a `PaintCtx` is the only pass carrying a clock), the second
+    // catches it in flight, comfortably inside the 150ms modal exit.
+    h.tap(SCRIM_POINT);
+    h.frame_at(support::SETTLE_MS);
+    let mid = h.frame_at(support::SETTLE_MS + 60.0);
+    assert_eq!(h.depth(), 2, "the sheet is still up while it leaves");
+
+    let mid_panel = panel(&mid);
+    let mid_scrim = scrim_alpha(&mid);
+    assert!(
+        mid_panel.0.y > settled_panel.0.y + 0.5,
+        "mid-exit the panel is on its way back down ({} vs {})",
+        mid_panel.0.y,
+        settled_panel.0.y
+    );
+    assert!(
+        mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
+        "…while the scrim fades out with it ({mid_scrim})"
+    );
+
+    // And it really does go.
+    h.flush();
+    assert_eq!(h.depth(), 1, "the exit popped the page when it finished");
+}
+
+#[test]
+fn reduce_motion_collapses_the_sheet_to_a_pure_fade() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut theme = Theme::glyph_baseline();
+    theme.motion.reduce_motion = true;
+    let (mut h, mid) = mid_entrance(theme);
+    let mid_panel = panel(&mid);
+    let mid_scrim = scrim_alpha(&mid);
+
+    let settled_panel = panel(&h.settle());
+
+    // Glyph's hard accessibility rule at this seam: the panel does not travel
+    // at all — it is already where it belongs on the very first frame — and
+    // only the fade plays. (The fade is what makes this an assertion rather
+    // than a vacuous read: something is still animating.)
+    assert!(
+        (mid_panel.0.y - settled_panel.0.y).abs() < 0.5,
+        "reduced motion must not slide the panel ({} vs {})",
+        mid_panel.0.y,
+        settled_panel.0.y
+    );
+    assert_eq!(
+        mid_panel.1, settled_panel.1,
+        "…nor stretch it (no overshoot to paint past)"
+    );
+    assert!(
+        mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
+        "…while the scrim still fades in ({mid_scrim})"
+    );
 }
 
 // ---------------------------------------------------------------------------

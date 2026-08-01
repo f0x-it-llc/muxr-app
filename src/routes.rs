@@ -213,14 +213,30 @@ pub enum BarDirection {
     Back,
 }
 
-/// One frame's worth of bar state: the route on top (if it has a bar) plus the
-/// direction the last change travelled.
+/// One frame's worth of bar state: the route on top (if it has a bar), the
+/// direction the last change travelled, and whether a modal covers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct BarState {
     /// The topmost *titled* route's metadata, or `None` for a bar-less route.
     pub meta: Option<RouteMeta>,
     /// The crossfade direction for this change.
     pub direction: BarDirection,
+    /// Whether a **transparent overlay** (a sheet, a dialog) sits above the
+    /// route the bar is titling — the live page-stack depth is deeper than the
+    /// top mirror entry's.
+    ///
+    /// The mirror already had everything needed to answer this: a modal is
+    /// pushed as a page *builder* straight through the
+    /// [`NavigatorController`], so it adds depth with **no** mirror entry (the
+    /// very property that keeps it from retitling the bar). The gap between
+    /// the two counts is therefore exactly "how many overlays are up".
+    ///
+    /// `crate::shell` hands it to [`crate::ui::topbar::TopBarView::overlay`],
+    /// which is what closes the modality hole the floating bar opened: the bar
+    /// is painted over by the navigator's own scrim nowhere, because it floats
+    /// *above* the navigator, so without this it stayed lit and tappable under
+    /// an open sheet.
+    pub overlay_active: bool,
 }
 
 /// The page transition **every** path navigation through [`Nav`] carries: the
@@ -254,6 +270,19 @@ struct NavState {
     last_seen_depth: usize,
     /// Which way the last change travelled.
     direction: BarDirection,
+    /// Set by [`Nav::pop`]: this handle dropped a route entry, but
+    /// [`NavigatorController::depth`] still reports the **pre**-pop value
+    /// until the next rebuild applies the queued op.
+    ///
+    /// [`Self::overlay_active`] is the one reader that cares. Its question —
+    /// "is the live depth deeper than the top route entry?" — is answered
+    /// `true` by both a real overlay push *and* by that one stale frame, and
+    /// the two are indistinguishable from depth alone. So the pop path says
+    /// so, and the flag clears itself the moment the live depth catches up.
+    /// (The mirror's other stale case is the opposite sign — a fresh
+    /// [`Nav::push`] reads a depth that is too *shallow*, which answers
+    /// `false` and needs no help.)
+    pending_pop: bool,
 }
 
 impl NavState {
@@ -263,6 +292,10 @@ impl NavState {
     fn reconcile(&mut self, live: usize) -> bool {
         let fell = live < self.last_seen_depth;
         self.last_seen_depth = live;
+        if self.pending_pop && live <= self.route_depth() {
+            // The queued pop has been applied; depth is authoritative again.
+            self.pending_pop = false;
+        }
         if !fell {
             return false;
         }
@@ -275,11 +308,25 @@ impl NavState {
         dropped
     }
 
-    /// The current bar state: the deepest recorded entry's metadata.
-    fn bar(&self) -> BarState {
+    /// The page-stack depth the *route* stack occupies — the deepest recorded
+    /// mirror entry, or `0` for an empty mirror.
+    fn route_depth(&self) -> usize {
+        self.stack.last().map_or(0, |(depth, _)| *depth)
+    }
+
+    /// Whether a transparent overlay sits above the top route — see
+    /// [`BarState::overlay_active`]. `live` is the navigator's own depth.
+    fn overlay_active(&self, live: usize) -> bool {
+        !self.pending_pop && live > self.route_depth()
+    }
+
+    /// The current bar state: the deepest recorded entry's metadata, plus
+    /// whether `live` shows an overlay above it.
+    fn bar(&self, live: usize) -> BarState {
         BarState {
             meta: self.stack.last().and_then(|(_, meta)| *meta),
             direction: self.direction,
+            overlay_active: self.overlay_active(live),
         }
     }
 }
@@ -351,10 +398,14 @@ impl Nav {
             Resolution::Matched { location, .. } => route_meta(&location.path),
             Resolution::Error { .. } => None,
         };
+        let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
         state.stack = vec![(1, meta)];
         state.direction = BarDirection::Forward;
-        let bar = state.bar();
+        // A `go` resets the whole stack, so nothing survives above the route
+        // it lands on — including the staleness a queued pop would leave.
+        state.pending_pop = false;
+        let bar = state.bar(live.min(1));
         drop(state);
         self.publish(bar);
     }
@@ -371,7 +422,13 @@ impl Nav {
         let mut state = self.state.borrow_mut();
         state.stack.pop();
         state.direction = BarDirection::Back;
-        let bar = state.bar();
+        // `depth()` still reports the pre-pop value until the next rebuild
+        // drains the queued op; without this the frame in between would read
+        // as "an overlay is up" and dim the bar it just retitled (see
+        // `NavState::pending_pop`).
+        state.pending_pop = true;
+        let live = state.route_depth();
+        let bar = state.bar(live);
         drop(state);
         self.publish(bar);
     }
@@ -384,15 +441,21 @@ impl Nav {
     /// once the navigator has applied it, i.e. one rebuild later) — that write
     /// is guarded by an inequality, so it happens at most once per real change
     /// and the following rebuild is clean.
+    ///
+    /// The publish is **unconditional** (rather than gated on the reconcile
+    /// having dropped something) because
+    /// [`overlay_active`](BarState::overlay_active) is a pure *depth* fact: a
+    /// sheet pushed straight through the [`NavigatorController`] changes it
+    /// without any navigation through this handle at all, so there is nothing
+    /// else that could notice. `publish`'s own inequality guard is what keeps
+    /// that from waking a rebuild per frame.
     pub fn bar(&self) -> BarState {
         let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
-        let changed = state.reconcile(live);
-        let reconciled = state.bar();
+        state.reconcile(live);
+        let reconciled = state.bar(live);
         drop(state);
-        if changed {
-            self.publish(reconciled);
-        }
+        self.publish(reconciled);
         self.current.get()
     }
 
@@ -407,10 +470,10 @@ impl Nav {
     fn record_push(&self, path: &str) {
         let live = self.router.controller().depth();
         let mut state = self.state.borrow_mut();
-        let deepest = state.stack.last().map_or(0, |(depth, _)| *depth).max(live);
+        let deepest = state.route_depth().max(live);
         state.stack.push((deepest + 1, route_meta(path)));
         state.direction = BarDirection::Forward;
-        let bar = state.bar();
+        let bar = state.bar(live);
         drop(state);
         self.publish(bar);
     }
@@ -467,6 +530,7 @@ pub fn install_app_router(
                 stack: Vec::new(),
                 last_seen_depth: 0,
                 direction: BarDirection::Forward,
+                pending_pop: false,
             })),
             current: RwSignal::new(BarState::default()),
         });
@@ -671,6 +735,7 @@ mod tests {
             stack: entries.to_vec(),
             last_seen_depth,
             direction: BarDirection::Forward,
+            pending_pop: false,
         }
     }
 
@@ -686,9 +751,9 @@ mod tests {
             3,
         );
         assert!(state.reconcile(2), "the /settings entry is dropped");
-        assert_eq!(state.bar().meta, route_meta("/sessions"));
+        assert_eq!(state.bar(2).meta, route_meta("/sessions"));
         assert_eq!(
-            state.bar().direction,
+            state.bar(2).direction,
             BarDirection::Back,
             "…and the bar crossfades backwards"
         );
@@ -704,10 +769,10 @@ mod tests {
         // reconciles.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 1);
         assert!(!state.reconcile(1), "nothing is dropped at a stale depth");
-        assert_eq!(state.bar().meta, route_meta("/sessions"));
+        assert_eq!(state.bar(1).meta, route_meta("/sessions"));
         // …and once the navigator applies it, the entry is still there.
         assert!(!state.reconcile(2));
-        assert_eq!(state.bar().meta, route_meta("/sessions"));
+        assert_eq!(state.bar(2).meta, route_meta("/sessions"));
     }
 
     #[test]
@@ -717,9 +782,9 @@ mod tests {
         // covered route's entry with it.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         assert!(!state.reconcile(3), "the sheet pushed depth to 3");
-        assert_eq!(state.bar().meta, route_meta("/sessions"));
+        assert_eq!(state.bar(3).meta, route_meta("/sessions"));
         assert!(!state.reconcile(2), "…and dismissing it drops nothing");
-        assert_eq!(state.bar().meta, route_meta("/sessions"));
+        assert_eq!(state.bar(2).meta, route_meta("/sessions"));
     }
 
     #[test]
@@ -728,6 +793,86 @@ mod tests {
         // (absent) metadata, so the bar hides rather than titling a route the
         // push never reached.
         let state = mirror(&[(2, route_meta(CONNECT_LOCATION))], 2);
-        assert_eq!(state.bar().meta, None);
+        assert_eq!(state.bar(2).meta, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // The overlay flag (the modality mirror)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_overlay_above_the_top_route_flags_the_bar_modal() {
+        // The whole rule, in one line of arithmetic: a sheet is depth with no
+        // mirror entry, so the gap between the live depth and the deepest
+        // recorded route IS "an overlay is up".
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        assert!(!state.bar(2).overlay_active, "no overlay at rest");
+
+        state.reconcile(3);
+        assert!(state.bar(3).overlay_active, "the sheet dims the bar");
+        assert_eq!(
+            state.bar(3).meta,
+            route_meta("/sessions"),
+            "…without retitling it"
+        );
+
+        state.reconcile(2);
+        assert!(
+            !state.bar(2).overlay_active,
+            "dismissing it gives the bar back"
+        );
+    }
+
+    #[test]
+    fn a_stacked_overlay_keeps_the_bar_modal_until_the_last_one_closes() {
+        // A sheet whose row opens a dialog: depth 4 over a depth-2 route. The
+        // flag is a comparison, not a counter, so it simply stays set.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.reconcile(4);
+        assert!(state.bar(4).overlay_active);
+        state.reconcile(3);
+        assert!(state.bar(3).overlay_active, "one is still up");
+        state.reconcile(2);
+        assert!(!state.bar(2).overlay_active);
+    }
+
+    #[test]
+    fn a_route_pop_never_reads_its_own_stale_depth_as_an_overlay() {
+        // The regression `pending_pop` exists for. `Nav::pop` drops the mirror
+        // entry immediately, but `depth()` still reports the pre-pop value
+        // until the next rebuild drains the queued op — which looks exactly
+        // like an overlay push. Without the flag the bar would dim and go
+        // inert for the frame right after a `‹` tap.
+        let mut state = mirror(
+            &[
+                (2, route_meta("/sessions")),
+                (3, route_meta(SETTINGS_ROUTE)),
+            ],
+            3,
+        );
+        state.stack.pop();
+        state.pending_pop = true;
+        assert!(
+            !state.bar(3).overlay_active,
+            "the stale depth is a queued pop, not a sheet"
+        );
+
+        // …and the moment the navigator applies it, depth is authoritative
+        // again — including for a sheet opened right afterwards.
+        state.reconcile(2);
+        assert!(!state.bar(2).overlay_active);
+        state.reconcile(3);
+        assert!(
+            state.bar(3).overlay_active,
+            "a real overlay still registers once the pop has landed"
+        );
+    }
+
+    #[test]
+    fn the_default_bar_state_is_lit_and_live() {
+        // `BarState::default` seeds the published signal before the first
+        // navigation; a bar that started out flagged modal would be inert
+        // until something happened to clear it.
+        assert!(!BarState::default().overlay_active);
     }
 }

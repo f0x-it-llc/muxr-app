@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Muxr's window theme — the **day** configuration.
+
+  Muxr is a permanently dark app: `MuxrApp`'s `setup` installs the Glyph dark
+  design system unconditionally, and there is no light variant of the design to
+  switch to. So this theme must not vary with the device's day/night setting,
+  which is exactly what the `values-night/` sibling of this file exists to
+  guarantee — see it for the whole story.
+
+  Everything lives in `Theme.Muxr.Base` below and both leaves are empty
+  children of it. That is deliberate: it is what makes a future divergence
+  between day and night a *deliberate* act rather than a one-line accident.
+
+  ## What this theme changes, and what it deliberately does not
+
+  The activity used to run on the bare platform `@android:style/Theme.NoTitleBar`,
+  which leaves `windowDrawsSystemBarBackgrounds` at `false` — meaning the
+  **system** draws the status/navigation bar backgrounds, opaquely and in its
+  own black, over an app that has already laid itself out edge-to-edge. That is
+  Ed's round-5 device finding: a pitch-black bar sitting on top of the app's own
+  chrome instead of the app's tone showing through.
+
+  So: the window takes ownership of those backgrounds and paints them
+  transparent. Nothing else moves.
+
+  **Inset semantics are untouched.** The Frust Android embedding
+  (`FrustActivity.onCreate`) calls `WindowCompat.setDecorFitsSystemWindows(window, false)`
+  and `FrustSurfaceView`'s `OnApplyWindowInsetsListener` reports the resulting
+  system-bar/cutout/IME occlusion into the framework, where the app's
+  `safe_area`s and `topbar_clearance` consume it. `windowDrawsSystemBarBackgrounds`
+  changes **who paints the bar background**, not what the window reports as
+  insets and not how content is fitted — so every one of those consumers sees
+  exactly what it saw before. This theme sets no `windowFullscreen`, no
+  `windowTranslucentStatus`/`windowTranslucentNavigation` (which *would* alter
+  fitting), and no `fitsSystemWindows`.
+-->
+<resources>
+
+    <!--
+      The shared base every configuration below inherits. Parented on the same
+      platform theme the manifest used to name directly, so nothing about the
+      window's decor (no title bar, not fullscreen — the embedding's docs are
+      explicit that `SystemUiMode.edgeToEdge` wants bars *visible*) changes.
+    -->
+    <style name="Theme.Muxr.Base" parent="@android:style/Theme.NoTitleBar">
+
+        <!--
+          Let the *window* draw the system-bar backgrounds instead of the
+          system. Without this the two colors below are ignored outright and
+          the platform paints its own opaque bars over the app.
+        -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+
+        <!--
+          …and draw them as nothing at all, so what shows behind the status bar
+          is the app's own painted tone: the top bar's surface, which already
+          runs the full inset-extended height (`ui::topbar`'s "Top-inset
+          consumption"), or a screen's own backdrop where there is no bar.
+        -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+
+        <!--
+          The navigation bar has the identical defect and takes the identical
+          fix. Safe here because the app is permanently dark AND already
+          reserves the gesture-nav inset (`ui::sheet`'s bottom safe area, every
+          page's `safe_area`), so nothing lands under the bar — only the app's
+          background tone does.
+        -->
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+
+        <!--
+          Force LIGHT status-bar icons in *every* configuration.
+
+          `windowLightStatusBar=true` means "the bar background is light, so
+          draw dark icons" — which is what a device in light mode would
+          otherwise pick, giving black icons on this app's black chrome. Muxr
+          is dark in both configurations, so this is `false` here and `false`
+          in `values-night/` too.
+
+          KNOWN LIMITATION, and the reason the `values-night/` file exists as
+          documentation as much as configuration: this attribute only seeds the
+          window's *initial* appearance. `FrustSurfaceView.updateSystemBarsAppearance`
+          re-derives both bar-icon appearances from the **device's**
+          `Configuration.uiMode` at surface-create and on every configuration
+          change, through `WindowInsetsControllerCompat`, and a runtime call
+          overrides a theme attribute. An app whose design system is not the
+          device's brightness therefore cannot hold this from `res/` alone —
+          filed against the framework rather than worked around here (the fix
+          is for that call to follow the *installed theme's* brightness, which
+          the shell already knows).
+        -->
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- The theme the manifest applies. Empty by design — see the file docs. -->
+    <style name="Theme.Muxr" parent="Theme.Muxr.Base" />
+
+</resources>

@@ -86,7 +86,7 @@ use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
-use support::{char_key, named_key, serial, settle_sized, setup, tap};
+use support::{RecScene, char_key, named_key, serial, settle_sized, setup, tap};
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
 /// tall enough for the whole screen (~830px of pieces) to lay out unclipped —
@@ -113,9 +113,17 @@ const INSECURE_TRUST: &str = "Trust anyway";
 /// The chip the insecure row carries (`glyph::badge` → `Role::Status`).
 const INSECURE_CHIP: &str = "insecure";
 
-/// The QR affordance's label. The CTA's is `pieces::CONNECT_LABEL`, imported
-/// rather than copied.
-const QR_LABEL: &str = "▣";
+/// The QR affordance's accessible name. Transcribed rather than imported (the
+/// CTA's is `pieces::CONNECT_LABEL`, which *is* the run it paints and so has to
+/// be the same string): this one is the button's *name*, and a test that
+/// imported it could not catch it changing.
+///
+/// It used to be `▣` — the mark was the label, because the affordance was a
+/// text run. That is the defect this round closed: the glyph is in none of the
+/// bundled faces, so Android and iOS each drew a different mark for the app's
+/// primary pairing affordance (and a screen reader read out the name of a
+/// character). It is a vector now, named in words.
+const QR_LABEL: &str = "Pair by QR code";
 
 /// `.connect{padding:30px 22px}` — the layer's horizontal inset, transcribed
 /// (the constant itself is private to `presentation::pages`). What the CTA
@@ -189,16 +197,18 @@ impl Harness {
     }
 
     /// Drive a pushed/popped page past the navigator's input-blocking
-    /// transition, at [`SURFACE`]: seed the clock, complete the transition
-    /// during paint, then finalize it on the following rebuild.
-    fn settle(&mut self) {
+    /// transition (and past an overlay's own enter/exit staging), at
+    /// [`SURFACE`]: seed the clock, complete the transition during paint, then
+    /// finalize it on the following rebuild. Returns the last frame's paint
+    /// record.
+    fn settle(&mut self) -> RecScene {
         settle_sized(
             &mut self.root,
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
             SURFACE,
-        );
+        )
     }
 
     /// A full tap at `point`.
@@ -495,6 +505,72 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
         node.role() == Role::Button && node.label() == Some(QR_LABEL)
     });
     assert!(fab.width() < layer / 2.0, "the FAB did not stretch too");
+}
+
+/// The mark the QR affordance used to set as a *text run*, and which each
+/// mobile platform's font-fallback chain resolved differently (or, on iPhone,
+/// not at all). Nothing on this screen may paint it again.
+const BANNED_GLYPH: &str = "\u{25a3}";
+
+#[test]
+fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    let fab = harness.bounds("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+    let scene = harness.settle();
+
+    // A `frust::icon` paints exactly one **filled path**, and nothing else on
+    // Connect paints one at all: every other piece is rounded rects (swatches,
+    // panels, the CTA bar) and stroked borders. So "the affordance is a
+    // vector" is literally "there is a filled path, and it is inside the FAB".
+    assert_eq!(
+        scene.paths.len(),
+        1,
+        "the scan mark is the screen's one vector: {:?}",
+        scene.paths
+    );
+    let (origin, size) = scene.paths[0];
+    assert!(
+        origin.x >= fab.x0 - 0.5
+            && origin.y >= fab.y0 - 0.5
+            && origin.x + size.width <= fab.x1 + 0.5
+            && origin.y + size.height <= fab.y1 + 0.5,
+        "the mark paints inside the FAB's own box: {origin:?}/{size:?} in \
+         {fab:?}"
+    );
+    assert!(
+        size.width > 0.0 && size.height > 0.0,
+        "…and it is a real shape, not a collapsed path: {size:?}"
+    );
+
+    // The other half: no run anywhere on the screen carries the old mark, so
+    // the glyph did not simply move somewhere else on the way past.
+    let values: Vec<String> = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.value().map(str::to_string))
+        .collect();
+    assert!(
+        !values.iter().any(|v| v.contains(BANNED_GLYPH)),
+        "no text run may carry {BANNED_GLYPH:?} any more: {values:?}"
+    );
+    let labels: Vec<String> = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.label().map(str::to_string))
+        .collect();
+    assert!(
+        !labels.iter().any(|l| l.contains(BANNED_GLYPH)),
+        "…nor may any accessible name: {labels:?}"
+    );
 }
 
 #[test]

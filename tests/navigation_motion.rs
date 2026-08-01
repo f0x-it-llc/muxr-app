@@ -79,12 +79,25 @@ use support::{
 const HOST: &str = "mock.example";
 const PORT: u16 = 7777;
 
-/// The bar's brand wordmark, and the `‹`/`⚙` slot glyphs — transcribed rather
-/// than imported: `ui::topbar`'s constants are the implementation's, and a test
-/// that imported them could not catch one of them changing.
+/// The bar's brand wordmark, and its two slot affordances' **accessible
+/// names** — transcribed rather than imported: `ui::topbar`'s constants are
+/// the implementation's, and a test that imported them could not catch one of
+/// them changing.
+///
+/// Both slots used to be labelled by the glyph they set as text (`‹`/`⚙`),
+/// because the mark *was* the label. They are vectors now (see `ui::topbar`'s
+/// "Chrome icons are vectors" rule) and carry names instead — which is also
+/// what a screen reader now announces in place of "single left-pointing angle
+/// quotation mark".
 const BRAND: &str = "muxr";
-const BACK: &str = "\u{2039}";
-const GEAR: &str = "\u{2699}";
+const BACK: &str = "Back";
+const GEAR: &str = "Settings";
+
+/// The two glyphs that used to stand in for those affordances. **Nothing in
+/// the bar may carry either again**: neither is in the bundled Glyph faces, so
+/// each platform's font-fallback chain answered differently (the `⚙` was
+/// simply absent on iPhone) — the round-4 device finding this suite pins shut.
+const BANNED_GLYPHS: [&str; 2] = ["\u{2039}", "\u{2699}"];
 
 /// How far into a transition the geometry probes paint. Early enough that the
 /// reduced-motion cross-fade (≤120ms) has **not** settled, so both frames
@@ -150,6 +163,8 @@ struct Harness {
     logic: Logic,
     state: AppState,
     tcx: TextContext,
+    /// A strictly-increasing clock for [`Harness::settle_modal`] — see there.
+    clock: f64,
 }
 
 impl Harness {
@@ -168,6 +183,7 @@ impl Harness {
             logic: Box::new(|state: &mut AppState| MuxrApp.build(state)),
             state: MuxrApp.init(),
             tcx: TextContext::new(),
+            clock: support::SETTLE_MS,
         };
         harness.frame();
         harness
@@ -217,6 +233,23 @@ impl Harness {
     fn push(&mut self, location: &str) {
         app_nav().push(location);
         self.settle();
+    }
+
+    /// Drive two more frames on a **strictly increasing** clock — what an
+    /// animation staged *during* a [`settle`] needs in order to finish.
+    ///
+    /// [`support::settle`] paints its last two frames at the same timestamp,
+    /// so a driver created on the second of them never sees the clock move
+    /// again. The bar's modality tint is exactly that case:
+    /// `BarState::overlay_active` is a **depth** fact, and
+    /// `NavigatorController::depth` is published by the navigator's own
+    /// rebuild — so the flag flips one rebuild *after* an overlay is pushed,
+    /// a frame later than a route change flips the bar's title.
+    fn settle_modal(&mut self) {
+        for _ in 0..2 {
+            self.clock += support::SETTLE_MS;
+            self.frame_at(self.clock);
+        }
     }
 
     fn values(&self) -> Vec<String> {
@@ -389,28 +422,201 @@ fn the_bars_gear_reaches_settings() {
 // 3 — the bar ignores overlays, and follows a pop it never saw
 // ---------------------------------------------------------------------------
 
+/// Push an inert transparent page over `h` — a stand-in for a sheet or a
+/// dialog: it adds page-stack depth, paints nothing worth recording, and
+/// swallows nothing, so whatever the bar does is the bar's own doing.
+fn open_overlay(h: &mut Harness) {
+    h.state
+        .nav
+        .controller()
+        .push_transparent(|| any(SizedBox::<AppState>(Some(10.0), Some(10.0))));
+    h.settle();
+}
+
 #[test]
-fn a_transparent_overlay_over_sessions_leaves_the_bar_alone() {
+fn a_transparent_overlay_over_sessions_never_retitles_the_bar() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::on_sessions();
     let covered_depth = h.depth();
 
     // A sheet/dialog is pushed as a page *builder* straight through the
-    // controller, never through `Nav` — so it adds depth with no route metadata
-    // and the bar keeps showing the route it covers.
-    h.state
-        .nav
-        .controller()
-        .push_transparent(|| any(SizedBox::<AppState>(Some(10.0), Some(10.0))));
+    // controller, never through `Nav` — so it adds depth with no route
+    // metadata, and the route the bar is *for* does not change. The bar goes
+    // modal while it is up (below); what must not happen is a retitle.
+    open_overlay(&mut h);
+    assert_eq!(h.depth(), covered_depth + 1, "the overlay is its own page");
+
+    h.state.nav.controller().pop();
     h.settle();
 
-    assert_eq!(h.depth(), covered_depth + 1, "the overlay is its own page");
+    assert_eq!(h.depth(), covered_depth, "…and dismissing it pops only it");
     assert_titled(&h, HOST);
     assert!(
         h.values().iter().any(|v| v == BRAND),
-        "…brand and all: {:?}",
+        "…leaving the covered route's own bar, brand and all: {:?}",
         h.values()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3b — the bar is modal-aware: dimmed AND inert under an overlay
+// ---------------------------------------------------------------------------
+
+/// Every plain fill covering exactly the bar's own box, in paint order. At a
+/// zero window inset that box is `W × BAR_HEIGHT` at the origin — which the
+/// bar's own surface fills on every frame, so a *second* one is the modality
+/// tint and nothing else (the sheet's own scrim is full-surface, and no page
+/// paints a rect of exactly this size at exactly this origin).
+fn bar_band_fills(scene: &RecScene) -> Vec<peniko::Color> {
+    support::fills_at(scene, Point::ZERO, Size::new(support::W, BAR_HEIGHT))
+}
+
+#[test]
+fn an_open_overlay_dims_the_bar_and_a_dismissal_lifts_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+
+    let lit = bar_band_fills(&h.frame());
+    assert_eq!(
+        lit.len(),
+        1,
+        "at rest the bar's band carries only its own surface: {lit:?}"
+    );
+
+    open_overlay(&mut h);
+    h.settle_modal();
+    let dimmed = bar_band_fills(&h.frame_at(h.clock));
+    assert_eq!(
+        dimmed.len(),
+        2,
+        "under a modal the bar paints a scrim over itself: {dimmed:?}"
+    );
+    // …at exactly the alpha the sheet dims the page under it with, which is
+    // the whole point of mirroring rather than inventing a "disabled" wash.
+    let tint = support::alpha_of(dimmed[1]);
+    assert!(
+        (tint - muxr::ui::sheet::SCRIM_ALPHA).abs() < 1e-6,
+        "the bar's tint is the modal's own scrim alpha, got {tint}"
+    );
+
+    h.state.nav.controller().pop();
+    h.settle();
+    h.settle_modal();
+
+    assert_eq!(
+        bar_band_fills(&h.frame_at(h.clock)).len(),
+        1,
+        "dismissing the modal takes the tint with it"
+    );
+}
+
+#[test]
+fn the_bars_tint_fades_rather_than_snapping_on() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+
+    open_overlay(&mut h);
+    // One frame a hair after the tint's driver started (`settle`'s own clock,
+    // which is where `open_overlay` left it): the scrim is on its way in, not
+    // already there — an instant dim could never produce a partial alpha.
+    let mid = h.frame_at(support::SETTLE_MS + 40.0);
+    let dimmed = bar_band_fills(&mid);
+    assert_eq!(dimmed.len(), 2, "the bar is tinting: {dimmed:?}");
+    let tint = support::alpha_of(dimmed[1]);
+    assert!(
+        tint > 0.0 && tint < muxr::ui::sheet::SCRIM_ALPHA - 1e-6,
+        "mid-fade the tint is partial ({tint} of {})",
+        muxr::ui::sheet::SCRIM_ALPHA
+    );
+}
+
+#[test]
+fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    let base_depth = h.depth();
+
+    // Where the ⚙ lives while the bar is live — recorded *before* the modal,
+    // because a modal bar publishes no node to find it by.
+    let gear = node_centers_by_label(&h.root, GEAR)
+        .first()
+        .copied()
+        .expect("the settings affordance is on screen");
+
+    open_overlay(&mut h);
+    assert!(
+        !h.has_bar(),
+        "a modal bar publishes no node: an affordance that routes nowhere is \
+         worse than none, and a screen reader must not be offered a way round \
+         the modality: {:?}",
+        node_roles(&h.root)
+    );
+
+    // The modality hole this closes: the bar floats *over* the navigator, so
+    // the modal cannot cover it — before this, that press pushed /settings out
+    // from under an open sheet.
+    tap(&mut h.root, &mut h.state, gear);
+    h.settle();
+
+    assert_eq!(
+        h.depth(),
+        base_depth + 1,
+        "the overlay is still the only thing on top — the ⚙ pushed nothing"
+    );
+    assert!(
+        !h.values().iter().any(|v| v == "server settings"),
+        "…and nothing retitled: {:?}",
+        h.values()
+    );
+
+    // Dismiss, and the very same press works again.
+    h.state.nav.controller().pop();
+    h.settle();
+    assert!(h.has_bar(), "the bar is live again");
+    h.tap_label(GEAR);
+    h.settle();
+    assert_eq!(h.depth(), base_depth + 1, "the ⚙ pushes a page once more");
+    assert_titled(&h, "server settings");
+}
+
+#[test]
+fn the_bar_carries_no_font_fallback_glyph_any_more() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+
+    // Both slots are vectors now; nothing in the accessibility tree may name
+    // itself with the marks they used to set as text (see `BANNED_GLYPHS`).
+    for glyph in BANNED_GLYPHS {
+        assert!(
+            !h.labels().iter().any(|l| l.contains(glyph)),
+            "{glyph:?} survives as a label: {:?}",
+            h.labels()
+        );
+        assert!(
+            !h.values().iter().any(|v| v.contains(glyph)),
+            "{glyph:?} survives as a run: {:?}",
+            h.values()
+        );
+    }
+
+    // …and the same on a back-led route, whose leading slot is the other one.
+    h.push("/settings");
+    for glyph in BANNED_GLYPHS {
+        assert!(
+            !h.labels().iter().any(|l| l.contains(glyph)),
+            "{glyph:?} survives on a pushed route: {:?}",
+            h.labels()
+        );
+    }
+    assert!(
+        h.labels().iter().any(|l| l == BACK),
+        "…the back affordance is still there, named: {:?}",
+        h.labels()
     );
 }
 
