@@ -858,6 +858,104 @@ fn unmounting_in_fullscreen_gives_the_bar_back() {
     );
 }
 
+#[test]
+fn collapsing_visibly_leaves_the_edge_well_before_half_the_transition() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    h.tap_label(EXPAND);
+    h.settle_motion(1_000.0);
+    h.tap_label(COLLAPSE);
+
+    // Seed the new stage's clock, then advance it 80ms into `durations.slow`
+    // (340ms) — comfortably inside the `t ∈ [0.45, 1.0]` band where Glyph's
+    // `spatial` curve overshoots past `1.0`. Easing the *interpolated
+    // position* (the bug `FullscreenStage::value` fixed) pins the card flush
+    // against the edge for the whole first half of the transition; easing
+    // the *driver's progress* (the fix) already has it visibly off the edge
+    // by here.
+    h.frame_at(3_000.0);
+    h.frame_at(3_080.0);
+    let (origin, _, _) = card(&h.frame_at(3_081.0));
+    assert!(
+        origin.x > WRAP_PAD * 0.25,
+        "the card should have visibly left the fullscreen edge by 80ms: {origin:?}"
+    );
+}
+
+#[test]
+fn entering_fullscreen_moves_monotonically_and_stays_in_bounds() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    h.tap_label(EXPAND);
+    // Seed the driver's clock, then sample the wrap padding across the whole
+    // transition and a little past it.
+    h.frame_at(0.0);
+    let mut pads = Vec::new();
+    for at_ms in [10.0, 40.0, 90.0, 150.0, 250.0, 400.0, 600.0] {
+        pads.push(card(&h.frame_at(at_ms)).0.x);
+    }
+    for pair in pads.windows(2) {
+        assert!(
+            pair[1] <= pair[0] + EPSILON,
+            "the wrap padding should only shrink while entering fullscreen: {pads:?}"
+        );
+    }
+    for &pad in &pads {
+        assert!(
+            (-EPSILON..=WRAP_PAD + EPSILON).contains(&pad),
+            "padding out of its own `[0, {WRAP_PAD}]` range: {pad} in {pads:?}"
+        );
+    }
+}
+
+#[test]
+fn interrupting_an_expand_with_a_collapse_never_lets_the_card_climb_back() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    h.tap_label(EXPAND);
+    h.frame_at(0.0);
+    h.frame_at(60.0);
+    // ~60ms into the 340ms expand: mid-flight, not yet arrived.
+    let mid_expand = card(&h.frame_at(61.0)).0.x;
+    assert!(
+        mid_expand > EPSILON,
+        "should still be off the fully-expanded edge: {mid_expand:?}"
+    );
+
+    // Interrupt with a collapse. The bug this guards against: seeding the new
+    // stage's `from` with the *painted* (already-eased) value and running it
+    // through the curve a second time lands in the overshoot band and snaps
+    // the card straight back to full-bleed before it ever collapses — a
+    // regression from the interrupt point rather than a continuation past it.
+    h.tap_label(COLLAPSE);
+    let mut pads = vec![mid_expand];
+    for at_ms in [
+        1_000.0, 1_010.0, 1_040.0, 1_090.0, 1_150.0, 1_250.0, 1_400.0, 1_600.0,
+    ] {
+        pads.push(card(&h.frame_at(at_ms)).0.x);
+    }
+    for pair in pads.windows(2) {
+        assert!(
+            pair[1] + EPSILON >= pair[0],
+            "the wrap padding regressed after the interrupt (fullscreen \
+             progress climbed back up rather than only ever collapsing \
+             further): {pads:?}"
+        );
+    }
+
+    // …and it still settles cleanly at the windowed rest state.
+    let (origin, size, radius) = card(&h.settle_motion(3_000.0));
+    assert!((origin.x - WRAP_PAD).abs() < EPSILON, "{origin:?}");
+    assert!((size.width - (SURFACE.width - 2.0 * WRAP_PAD)).abs() < EPSILON);
+    assert!((radius - CARD_RADIUS).abs() < EPSILON, "{radius}");
+}
+
 // ---------------------------------------------------------------------------
 // 5 — the app bar's overflow menu
 // ---------------------------------------------------------------------------
