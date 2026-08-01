@@ -81,8 +81,9 @@ use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::Rect;
 use frust::glyph::{MenuEntry, menu_item, menu_separator, show_glyph_menu};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, FlexView, Get, GetUntracked, NavigatorController,
-    PopResult, any, component, flexible, inflexible, on_cleanup, spawn_local,
+    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
+    NavigatorController, Padding, PopResult, WindowMetrics, any, component, flexible, inflexible,
+    on_cleanup, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -90,12 +91,13 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::TabEntry;
+use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
 use crate::ui::sheet::{close_sheet, show_sheet};
 use crate::ui::toasts::app_toasts;
 
-use super::chrome::term_box;
+use super::chrome::{WRAP_PAD, term_box};
 use super::controller::TerminalController;
 use super::pieces::{
     self, PANE_ROW_GAP, PILL_GAP, Palette, PillState, SECTION_BOTTOM_GAP, SECTION_TOP_GAP,
@@ -140,6 +142,23 @@ const ADD_TAB: &str = "+";
 /// (`docs/ARCHITECTURE.md`'s cross-feature rule). `tests/terminal.rs` asserts
 /// the round trip, which is what keeps the two spellings in step.
 const SESSION_QUERY_KEY: &str = "session";
+
+/// The wrap padding's wide-window target (FINDINGS #21's conservative
+/// clamp/padding-scaling pass) — `super::chrome::WRAP_PAD`'s (14px) windowed
+/// value, scaled up past [`WIDE_BREAKPOINT_PX`].
+///
+/// **The card itself stays full-bleed at any width — this screen gets no
+/// content-column clamp**, unlike the other three: only the breathing room
+/// around the card grows. Applied as an *extra* [`Padding`] wrapping
+/// `terminal_stage` from the outside, rather than widening `WRAP_PAD` itself,
+/// because that constant also drives the fullscreen transition's
+/// animated-to-zero geometry — widening it would widen the fullscreen target
+/// too, and fullscreen must keep the card edge-to-edge at any width.
+const WIDE_WRAP_PAD_PX: f64 = 22.0;
+
+const _: () = {
+    assert!(WIDE_WRAP_PAD_PX > WRAP_PAD);
+};
 
 /// The Terminal screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that
@@ -300,6 +319,23 @@ impl Component for TerminalScreen {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
 
+        // Responsive width-clamp pass (FINDINGS #21): read metrics once,
+        // branch on one page constant, never touch layout again — the
+        // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
+        // documents. `None` (no shell has published yet, or a bare test
+        // harness) takes the same branch as a genuinely narrow window.
+        // Fullscreen keeps the card edge-to-edge regardless of width — see
+        // `WIDE_WRAP_PAD_PX`'s doc.
+        let metrics = use_context::<WindowMetrics>();
+        let is_wide = metrics
+            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
+            .unwrap_or(false);
+        let extra_wrap_pad = if is_wide && !fullscreen {
+            WIDE_WRAP_PAD_PX - WRAP_PAD
+        } else {
+            0.0
+        };
+
         let card = FlexView::new(
             Axis::Vertical,
             vec![
@@ -314,21 +350,28 @@ impl Component for TerminalScreen {
         )
         .cross_axis(CrossAxisAlignment::Stretch);
 
+        let stage = super::chrome::terminal_stage(
+            card,
+            fullscreen,
+            colors.card,
+            colors.card_border,
+            Rc::clone(&state.actions.anchor),
+        );
+        // The card itself stays full-bleed (no clamp) at any width — only the
+        // wrap padding around it grows. Wrapped from the outside rather than
+        // widening `terminal_stage`'s own animated padding, which fullscreen
+        // must still animate to exactly zero regardless of window width.
+        let stage: AnyView<TerminalState> = if extra_wrap_pad > 0.0 {
+            any(Padding(EdgeInsets::all(extra_wrap_pad), stage))
+        } else {
+            any(stage)
+        };
+
         // The page tone stays **outside** the stage so it fills the whole
         // surface, bar band included: the bar slides in over it, and a page
         // that stopped at the clearance would flash the shell's own clear
         // colour through the gap for the length of that entrance.
-        any(term_box(
-            super::chrome::terminal_stage(
-                card,
-                fullscreen,
-                colors.card,
-                colors.card_border,
-                Rc::clone(&state.actions.anchor),
-            ),
-            colors.void,
-            0.0,
-        ))
+        any(term_box(stage, colors.void, 0.0))
     }
 }
 

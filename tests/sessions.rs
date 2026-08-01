@@ -73,8 +73,11 @@
 
 use std::time::{Duration, Instant};
 
-use frust::{AnyView, Component, NavigatorController, SizedBox, Stack, any, navigator};
-use frust_core::{NamedKey, PointerPhase, RenderRoot};
+use frust::{
+    AnyView, Component, NavigatorController, SizedBox, Stack, WindowMetrics, any, navigator,
+    provide_context,
+};
+use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
@@ -111,6 +114,10 @@ const ROW_BORDER_INSET: f64 = 1.0;
 const ACCENT_WIDTH: f64 = 2.0;
 /// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
+/// The scrolling list column's max width past
+/// `crate::responsive::WIDE_BREAKPOINT_PX` (FINDINGS #21's width-clamp pass),
+/// transcribed (the constant itself is private to `presentation::pages`).
+const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The seeded session names `data`'s mock repository ships — the redesign's
 /// three cards, in order.
@@ -132,6 +139,23 @@ fn mock_target(offer_credential: bool) -> ConnectTarget {
         label: "Mock rig".to_string(),
         offer_credential,
     }
+}
+
+/// A [`WindowMetrics`] whose size is `size` — see `mount_with_metrics`.
+fn metrics_at(size: Size) -> WindowMetrics {
+    WindowMetrics::new(size, 1.0, WindowInsets::default())
+}
+
+/// [`Harness::mount`], first publishing `metrics` into context when `Some` —
+/// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
+/// responsive width-clamp pass (FINDINGS #21). `None` leaves context unset,
+/// exactly the state every other test in this suite mounts under (no shell
+/// has published yet), so this helper is purely additive.
+fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
+    if let Some(metrics) = metrics {
+        provide_context(metrics);
+    }
+    Harness::mount()
 }
 
 /// The app-logic closure `RenderRoot::rebuild` drives.
@@ -921,5 +945,89 @@ fn accepting_the_credential_offer_clears_it_and_confirms_by_toast() {
             .iter()
             .any(|m| m.contains("Mock rig") && m.contains("mock")),
         "…and says so, honestly labelled as a mock save: {pending:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8 — responsive width-clamp pass (FINDINGS #21)
+// ---------------------------------------------------------------------------
+
+/// [`card_backs`]'s clamp-aware sibling: a card's surface fill, generalized
+/// over the box the list column is actually laid out at (`card_backs` bakes
+/// in `support::W`, which the clamp deliberately narrows).
+fn card_backs_in(scene: &RecScene, left: f64, width: f64) -> Vec<(Point, Size)> {
+    let card_width = width - ACCENT_WIDTH;
+    scene
+        .rounded
+        .iter()
+        .copied()
+        .filter(|(origin, size)| {
+            (size.width - card_width).abs() < EPSILON
+                && (origin.x - (left + ACCENT_WIDTH)).abs() < EPSILON
+        })
+        .collect()
+}
+
+#[test]
+fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(metrics_at(support::surface())));
+    expect_connection_controller().connect(mock_target(false));
+    h.await_sessions();
+
+    let scene = h.frame();
+    let margin = (support::W - SESSIONS_CLAMP_WIDTH) / 2.0;
+    let list_left = margin + LIST_PAD_X;
+    let list_width = SESSIONS_CLAMP_WIDTH - 2.0 * LIST_PAD_X;
+    let cards = card_backs_in(&scene, list_left, list_width);
+    assert_eq!(
+        cards.len(),
+        SEEDED.len(),
+        "every seeded card still renders, just narrower and centered"
+    );
+
+    // The conn-row strip is the module's deliberate exception: it stays
+    // full-bleed regardless of the list column's own clamp (see
+    // `SESSIONS_CLAMP_WIDTH`'s doc in `presentation::pages`). The strip's
+    // panel itself paints no fill (`Color::TRANSPARENT`, so nothing lands in
+    // `scene.rounded` for it directly), but its leading success dot
+    // (`pieces::DOT`-sized, the one 7×7 rounded fill in this frame) is
+    // painted at the strip's own `STRIP_PAD_X` — unaffected by any centering
+    // margin — which is exactly the full-bleed proof.
+    const STRIP_PAD_X: f64 = 16.0;
+    const DOT: f64 = 7.0;
+    let dot = scene
+        .rounded
+        .iter()
+        .find(|(_, size)| (size.width - DOT).abs() < EPSILON && (size.height - DOT).abs() < EPSILON)
+        .copied()
+        .expect("the strip's success dot paints its own rounded fill");
+    assert!(
+        (dot.0.x - STRIP_PAD_X).abs() < EPSILON,
+        "the strip is not centered/clamped like the list column: {dot:?}"
+    );
+}
+
+#[test]
+fn narrow_metrics_leave_the_list_column_unclamped_like_no_metrics_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    // Explicit narrow metrics, even though the harness still paints at the
+    // full-width default surface — proving the branch keys on the
+    // *published* width, not the paint surface.
+    let mut h = mount_with_metrics(Some(metrics_at(Size::new(
+        400.0,
+        support::surface().height,
+    ))));
+    expect_connection_controller().connect(mock_target(false));
+    h.await_sessions();
+
+    let scene = h.frame();
+    let cards = card_backs(&scene);
+    assert_eq!(
+        cards.len(),
+        SEEDED.len(),
+        "narrow metrics take the same unclamped branch as no metrics at all"
     );
 }

@@ -50,11 +50,11 @@
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, Resolution, SizedBox, Stack, any,
-    navigator,
+    AnyView, Component, GetUntracked, NavigatorController, Resolution, SizedBox, Stack,
+    WindowMetrics, any, navigator, provide_context,
 };
-use frust_core::accesskit::Toggled;
-use frust_core::{NamedKey, PointerPhase, RenderRoot};
+use frust_core::accesskit::{Node, Rect, Toggled};
+use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_reactive::ReactiveRuntime;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -86,6 +86,14 @@ const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 const PANEL_PADDING: f64 = 20.0;
 /// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
+/// The groups column's max width past
+/// `crate::responsive::WIDE_BREAKPOINT_PX` (FINDINGS #21's width-clamp pass),
+/// transcribed (the constant itself is private to `presentation::pages`).
+const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
+/// `.disconnect-btn`'s own horizontal margin, transcribed (private to
+/// `presentation::pieces`) — what the Disconnect button spans the width
+/// *between*, inside whatever box the scroller itself is laid out at.
+const ROW_PAD_X: f64 = 16.0;
 
 /// The seeded token names `data`'s mock repository ships — the redesign's two
 /// `.token-item`s, in order.
@@ -112,6 +120,35 @@ fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
         label: "Mock rig".to_string(),
         offer_credential: false,
     }
+}
+
+/// A [`WindowMetrics`] whose size is `size` — see `mount_with_metrics`.
+fn metrics_at(size: Size) -> WindowMetrics {
+    WindowMetrics::new(size, 1.0, WindowInsets::default())
+}
+
+/// [`Harness::mount`], first publishing `metrics` into context when `Some` —
+/// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
+/// responsive width-clamp pass (FINDINGS #21). `None` leaves context unset,
+/// exactly the state every other test in this suite mounts under (no shell
+/// has published yet), so this helper is purely additive.
+fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
+    if let Some(metrics) = metrics {
+        provide_context(metrics);
+    }
+    Harness::mount()
+}
+
+/// The bounds of the first node labelled `label` — `tests/connect.rs`'s
+/// `Harness::bounds` idiom, free-standing here since this suite's `Harness`
+/// doesn't already carry one.
+fn bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) -> Rect {
+    root.semantics()
+        .nodes
+        .iter()
+        .find(|(_, node): &&(_, Node)| node.label() == Some(label))
+        .and_then(|(_, node)| node.bounds())
+        .unwrap_or_else(|| panic!("nothing labelled {label:?}"))
 }
 
 /// The app-logic closure `RenderRoot::rebuild` drives.
@@ -891,4 +928,54 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
         ),
         Resolution::Error { .. } => panic!("/sessions is a real route"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 7 — responsive width-clamp pass (FINDINGS #21)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wide_metrics_clamp_and_center_the_groups_column() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(metrics_at(SURFACE)));
+    h.frame();
+
+    // Disconnect is the screen's last, full-width row — the cheapest honest
+    // read on where the clamped column itself sits: centered,
+    // `SETTINGS_CLAMP_WIDTH` wide, minus the row's own `ROW_PAD_X` margin on
+    // each side.
+    let disconnect = bounds_by_label(&h.root, "Disconnect");
+    let margin = (SURFACE.width - SETTINGS_CLAMP_WIDTH) / 2.0;
+    assert!(
+        (disconnect.x0 - (margin + ROW_PAD_X)).abs() < 0.5,
+        "the column centers within the surface: left edge at {:.1}, expected {:.1}",
+        disconnect.x0,
+        margin + ROW_PAD_X
+    );
+    assert!(
+        (disconnect.width() - (SETTINGS_CLAMP_WIDTH - 2.0 * ROW_PAD_X)).abs() < 0.5,
+        "Disconnect spans the clamped column, not the whole surface: {:.1}",
+        disconnect.width()
+    );
+}
+
+#[test]
+fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    // Explicit narrow metrics, even though the harness still paints at the
+    // full-width `SURFACE` — proving the branch keys on the *published*
+    // width, not the paint surface.
+    let mut h = mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    h.frame();
+
+    let disconnect = bounds_by_label(&h.root, "Disconnect");
+    let expected_width = SURFACE.width - 2.0 * ROW_PAD_X;
+    assert!(
+        (disconnect.width() - expected_width).abs() < 0.5,
+        "narrow metrics take the same unclamped branch as no metrics: {:.1}",
+        disconnect.width()
+    );
+    assert!((disconnect.x0 - ROW_PAD_X).abs() < 0.5, "{:?}", disconnect);
 }

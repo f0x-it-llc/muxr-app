@@ -51,9 +51,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, NavigatorController, PopResult, SizedBox, Stack, Theme, any, navigator,
+    AnyView, Component, NavigatorController, PopResult, SizedBox, Stack, Theme, WindowMetrics, any,
+    navigator, provide_context,
 };
-use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot};
+use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -104,6 +105,12 @@ const CLOSE: &str = "Close";
 /// transcribed — the two numbers fullscreen animates to zero.
 const WRAP_PAD: f64 = 14.0;
 const CARD_RADIUS: f64 = 22.0;
+/// The wrap padding's wide-window target past
+/// `crate::responsive::WIDE_BREAKPOINT_PX` (FINDINGS #21's width-clamp pass),
+/// transcribed (private to `presentation::pages`) — the card itself stays
+/// full-bleed at any width; only the space around it grows from
+/// [`WRAP_PAD`]'s 14px to this.
+const WIDE_WRAP_PAD: f64 = 22.0;
 /// `.cur{width:7px;height:13px}` — the caret's own box, which is how a frame
 /// is asked whether the caret is lit.
 const CARET: Size = Size::new(7.0, 13.0);
@@ -133,6 +140,11 @@ fn mock_target() -> ConnectTarget {
     }
 }
 
+/// A [`WindowMetrics`] whose size is `size` — see `Harness::mount_with_metrics`.
+fn metrics_at(size: Size) -> WindowMetrics {
+    WindowMetrics::new(size, 1.0, WindowInsets::default())
+}
+
 /// The screen, an overlay navigator over it, and everything a frame needs.
 struct Harness {
     /// The **mounted** navigator: the screen's overlays land here.
@@ -152,6 +164,19 @@ impl Harness {
     /// to [`SESSION_ID`] and with the first load already landed.
     fn mount() -> Self {
         Self::themed(Theme::glyph_baseline())
+    }
+
+    /// [`Harness::mount`], first publishing `metrics` into context when
+    /// `Some` — the shape `muxr`'s pages read via
+    /// `use_context::<WindowMetrics>()` for the responsive width-clamp pass
+    /// (FINDINGS #21). `None` leaves context unset, exactly the state every
+    /// other test in this suite mounts under (no shell has published yet),
+    /// so this is purely additive.
+    fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Self {
+        if let Some(metrics) = metrics {
+            provide_context(metrics);
+        }
+        Self::mount()
     }
 
     /// [`mount`](Self::mount) under an explicit theme — how the suite drives
@@ -1106,4 +1131,64 @@ fn a_frame_needs_no_settling_before_the_first_load_lands() {
         "the card is there from frame one"
     );
     let _ = FrameTime::ZERO;
+}
+
+// ---------------------------------------------------------------------------
+// 10 — responsive width-clamp pass (FINDINGS #21)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
+
+    let (origin, size, _) = card(&h.frame());
+    assert!(
+        (origin.x - WIDE_WRAP_PAD).abs() < EPSILON,
+        "the wrap padding grew to the wide target: {origin:?}"
+    );
+    assert!(
+        (size.width - (SURFACE.width - 2.0 * WIDE_WRAP_PAD)).abs() < EPSILON,
+        "…and the card narrowed by the same amount, not clamped to a fixed \
+         column: {size:?}"
+    );
+}
+
+#[test]
+fn fullscreen_stays_edge_to_edge_even_with_wide_metrics() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
+
+    h.tap_label(EXPAND);
+    let (origin, size, radius) = card(&h.settle_motion(1_000.0));
+
+    assert!(
+        origin.x.abs() < EPSILON,
+        "wide metrics never widen fullscreen's own zero pad: {origin:?}"
+    );
+    assert!(
+        (size.width - SURFACE.width).abs() < EPSILON,
+        "…still the full screen: {size:?}"
+    );
+    assert!(radius < EPSILON);
+}
+
+#[test]
+fn narrow_metrics_leave_the_wrap_padding_unchanged_like_no_metrics_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    // Explicit narrow metrics, even though the harness still paints at the
+    // full-width `SURFACE` — proving the branch keys on the *published*
+    // width, not the paint surface.
+    let mut h = Harness::mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+
+    let (origin, size, radius) = card(&h.frame());
+    assert!(
+        (origin.x - WRAP_PAD).abs() < EPSILON,
+        "narrow metrics take the same unwidened branch as no metrics: {origin:?}"
+    );
+    assert!((size.width - (SURFACE.width - 2.0 * WRAP_PAD)).abs() < EPSILON);
+    assert!((radius - CARD_RADIUS).abs() < EPSILON);
 }

@@ -88,15 +88,16 @@ use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener, use_interval};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
-    NavigatorController, Padding, SizedBox, any, component, flexible, inflexible, safe_area,
-    scroll_view, spawn_local,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
+    FlexView, Get, NavigatorController, Padding, SizedBox, WindowMetrics, any, component, flexible,
+    inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
+use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::{close_sheet, show_sheet};
@@ -124,6 +125,19 @@ const LIST_GAP: f64 = 12.0;
 /// the rows themselves.
 const SHEET_GAP: f64 = 14.0;
 const SHEET_ROW_GAP: f64 = 4.0;
+
+/// The scrolling list column's max width past [`WIDE_BREAKPOINT_PX`]
+/// (FINDINGS #21's conservative width-clamp pass) — a tablet/landscape/desktop
+/// window centers the card list rather than stretching it edge to edge.
+///
+/// **The conn-row strip (`server_strip`) stays full-bleed on purpose.** It is
+/// the screen's own persistent chrome, not a list item (see the module docs'
+/// "two bands" note) — the strip describing the connection reads more like a
+/// header bar than a content card, so it is left spanning the whole window
+/// while only the scrolling list clamps and centers under it. No design mock
+/// exists for a structural two-pane Sessions, so this is a plain clamp on the
+/// scroller alone, not a layout switch.
+const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The Sessions screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that
@@ -233,6 +247,16 @@ impl Component for SessionsScreen {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
 
+        // Responsive width-clamp pass (FINDINGS #21): read metrics once,
+        // branch on one page constant, never touch layout again — the
+        // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
+        // documents. `None` (no shell has published yet, or a bare test
+        // harness) takes the same branch as a genuinely narrow window.
+        let metrics = use_context::<WindowMetrics>();
+        let is_wide = metrics
+            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
+            .unwrap_or(false);
+
         // The scrolling half: the offer banner (when there is one), then either
         // the empty state or every card plus the dashed create row.
         let mut list = Vec::new();
@@ -258,6 +282,16 @@ impl Component for SessionsScreen {
             FlexView::new(Axis::Vertical, gapped(list)).cross_axis(CrossAxisAlignment::Stretch),
         )))
         .top(false));
+        // Clamp/center the list column only — the conn-row strip beside it
+        // stays full-bleed (see `SESSIONS_CLAMP_WIDTH`'s doc).
+        let scroller = if is_wide {
+            any(Align(
+                Alignment::CENTER,
+                SizedBox::<SessionsState>(Some(SESSIONS_CLAMP_WIDTH), None).child(scroller),
+            ))
+        } else {
+            scroller
+        };
         // The page tone stays **outside** the clearance so it fills the whole
         // surface, bar band included: the bar slides in over it (see
         // `crate::shell::root_view`), and a page that stopped at the clearance
