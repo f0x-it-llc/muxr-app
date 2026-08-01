@@ -89,7 +89,7 @@ use crate::features::settings::domain::entities::{
 };
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
-use crate::ui::sheet::show_sheet;
+use crate::ui::sheet::{close_sheet, show_sheet};
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
@@ -407,7 +407,7 @@ impl Actions {
     /// vocabulary, and [`row_tapped`] is its one caller.
     fn open_picker(&self, kind: PickerKind) {
         let actions = self.clone();
-        show_sheet(&self.nav, move || {
+        show_sheet(&self.app_nav, &self.nav, move || {
             let theme = pieces::active_theme();
             let colors = pieces::palette(&theme);
             let picker = actions.picker(kind);
@@ -416,7 +416,7 @@ impl Actions {
                 // Close first, then persist: the sheet's own exit staging and a
                 // repository round trip should not overlap (the same ordering
                 // the sessions management sheet's rows use).
-                picking.nav.pop();
+                close_sheet(&picking.app_nav, &picking.nav);
                 picking.pick(kind, index);
             })
         });
@@ -541,6 +541,7 @@ impl Actions {
     pub fn open_create_token_dialog(&self) {
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
+            &self.app_nav,
             &self.nav,
             "New token",
             "",
@@ -561,6 +562,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let name = name.to_string();
         confirm_dialog(
+            &self.app_nav,
             &self.nav,
             "Revoke token?",
             "Any client still using this token is disconnected immediately.",
@@ -585,6 +587,7 @@ impl Actions {
         let connection = Arc::clone(&self.connection);
         let app_nav = self.app_nav.clone();
         confirm_dialog(
+            &self.app_nav,
             &self.nav,
             "Disconnect",
             "You will need the server's token to attach again.",

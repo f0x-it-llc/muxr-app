@@ -92,7 +92,7 @@ use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::TabEntry;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
-use crate::ui::sheet::show_sheet;
+use crate::ui::sheet::{close_sheet, show_sheet};
 use crate::ui::toasts::app_toasts;
 
 use super::chrome::term_box;
@@ -374,13 +374,28 @@ impl Actions {
     /// inert while it is open (`BarState::overlay_active`) — the app's modal
     /// convention, which also means a tap anywhere outside the panel (the
     /// dimmed bar included) dismisses it.
+    ///
+    /// It is accounted like the app's own overlays
+    /// ([`Nav::begin_overlay`](crate::routes::Nav::begin_overlay)/
+    /// [`end_overlay`](crate::routes::Nav::end_overlay)) even though it is
+    /// pushed by a **frust** helper: this call site is app code, and so is the
+    /// `on_result` below. What it cannot have is the *synchronous* half — a
+    /// menu dismissal is popped from inside `frust::glyph::menu`'s own paint,
+    /// with no app seam in between — so the bar lights up on the completion
+    /// callback rather than a rebuild earlier (see
+    /// [`Nav::dismiss_overlay`](crate::routes::Nav::dismiss_overlay)).
     pub fn open_menu(&self) {
         let actions = self.clone();
+        let done_app_nav = self.app_nav.clone();
+        self.app_nav.begin_overlay();
         show_glyph_menu(
             &self.nav,
             self.anchor.get(),
             menu_entries,
             move |_app: &mut AppState, result: PopResult| {
+                // Before the arms below: each of the first two opens an
+                // overlay of its own, and this one is gone.
+                done_app_nav.end_overlay();
                 match result.take::<usize>() {
                     Some(MENU_PANES_INDEX) => actions.open_sheet(),
                     Some(MENU_RENAME_INDEX) => actions.open_rename_dialog(),
@@ -400,7 +415,7 @@ impl Actions {
     /// the sheet being rebuilt by hand.
     pub fn open_sheet(&self) {
         let actions = self.clone();
-        show_sheet(&self.nav, move || actions.sheet_body());
+        show_sheet(&self.app_nav, &self.nav, move || actions.sheet_body());
     }
 
     /// Switch the card to `key` and close the sheet a beat later, so the
@@ -408,11 +423,12 @@ impl Actions {
     pub fn switch_tab(&self, key: &str) {
         let controller = Arc::clone(&self.controller);
         let nav = self.nav.clone();
+        let app_nav = self.app_nav.clone();
         let key = key.to_string();
         spawn_local(async move {
             controller.switch_tab(key).await;
             clean_signals::time::sleep(SHEET_CLOSE_DELAY).await;
-            nav.pop();
+            close_sheet(&app_nav, &nav);
         });
     }
 
@@ -436,6 +452,7 @@ impl Actions {
         };
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
+            &self.app_nav,
             &self.nav,
             RENAME_TITLE,
             current,
@@ -550,7 +567,10 @@ impl Actions {
     /// The sheet's top row, whose close button pops it.
     fn top_row(&self, colors: &Palette) -> AnyView<AppState> {
         let nav = self.nav.clone();
-        pieces::sheet_top_row(colors, move |_app: &mut AppState| nav.pop())
+        let app_nav = self.app_nav.clone();
+        pieces::sheet_top_row(colors, move |_app: &mut AppState| {
+            close_sheet(&app_nav, &nav)
+        })
     }
 
     /// One `.pill.add` — dashed, dim, and (this phase) a toast.

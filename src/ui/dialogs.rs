@@ -18,7 +18,10 @@
 //! Both helpers are generic over `State` (the `ui::backdrop` precedent), so
 //! Sessions' kill/rename and Settings' logout all reach for the same two
 //! functions with their own callbacks — none of this file knows about
-//! `AppState`.
+//! `AppState`. They do take the app's [`Nav`] beside the navigator, but only
+//! for the overlay accounting the shell's bar reads
+//! (`crate::routes`' "Overlay accounting" section); nothing here touches the
+//! app state behind it.
 //!
 //! # Framework gaps these helpers work around
 //!
@@ -39,6 +42,8 @@ use frust::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, Get, NavigatorController, PopResult, RwSignal,
     Set, SizedBox, any, button, flexible, inflexible, text_input,
 };
+
+use crate::routes::Nav;
 
 /// The shared cancel affordance's label — one spelling for every dialog here.
 const CANCEL_LABEL: &str = "Cancel";
@@ -63,8 +68,14 @@ const SUBMIT_DISABLED_STYLE: ButtonStyle = ButtonStyle::Ghost;
 /// State`) only on the confirm path — every dismissal route (cancel button,
 /// scrim tap, `Escape`, back press) closes the dialog and runs nothing.
 ///
+/// `app_nav` carries the overlay accounting the shell's bar dims itself from
+/// (see [`show_sheet`](crate::ui::sheet::show_sheet)'s "two navigation
+/// handles" and `crate::routes`' own section); `nav` is what the dialog page
+/// is pushed through.
+///
 /// ```ignore
 /// confirm_dialog(
+///     &app_nav,
 ///     &nav,
 ///     "Kill session?",
 ///     "Any attached client is disconnected immediately.",
@@ -73,6 +84,7 @@ const SUBMIT_DISABLED_STYLE: ButtonStyle = ButtonStyle::Ghost;
 /// );
 /// ```
 pub fn confirm_dialog<State: 'static>(
+    app_nav: &Nav,
     nav: &NavigatorController<State>,
     title: impl Into<String>,
     message: impl Into<String>,
@@ -85,27 +97,45 @@ pub fn confirm_dialog<State: 'static>(
     // Re-invoked on every navigator rebuild to diff the page's content, so
     // every captured value is cloned per call rather than moved.
     let page_nav = nav.clone();
+    let page_app_nav = app_nav.clone();
+    let done_app_nav = app_nav.clone();
+    app_nav.begin_overlay();
     show_glyph_dialog(
         nav,
         move || {
             let cancel_nav = page_nav.clone();
             let confirm_nav = page_nav.clone();
+            // Both actions are app-owned dismissal seams, so both tell the
+            // accounting a rebuild before the pop lands (see
+            // `Nav::dismiss_overlay`). The dialog's *own* scrim/Escape route
+            // pops from inside `frust::glyph::dialog` and cannot: those land
+            // on `end_overlay` below instead.
+            let cancel_app_nav = page_app_nav.clone();
+            let confirm_app_nav = page_app_nav.clone();
             glyph_dialog()
                 .title(title.clone())
                 .body(message.clone())
                 .action(any(button(CANCEL_LABEL, move |_state: &mut State| {
-                    cancel_nav.pop()
+                    cancel_app_nav.dismiss_overlay();
+                    cancel_nav.pop();
                 })
                 .style(ButtonStyle::Ghost)
                 .small()))
                 .action(any(button(
                     confirm_label.clone(),
-                    move |_state: &mut State| confirm_nav.pop_with_result(PopResult::of(true)),
+                    move |_state: &mut State| {
+                        confirm_app_nav.dismiss_overlay();
+                        confirm_nav.pop_with_result(PopResult::of(true));
+                    },
                 )
                 .style(ButtonStyle::Danger)
                 .small()))
         },
         move |state: &mut State, result: PopResult| {
+            // The accounting's authoritative half, first: this runs exactly
+            // once per pushed page, on every dismissal route there is, and
+            // `on_confirm` below may open an overlay of its own.
+            done_app_nav.end_overlay();
             // Only the confirm action pops with a payload; every dismissal
             // route pops empty.
             if result.take::<bool>().unwrap_or(false) {
@@ -127,7 +157,10 @@ pub fn confirm_dialog<State: 'static>(
 /// The in-flight text lives in an [`RwSignal`] created here rather than in app
 /// state: the field is a controlled component, and this signal is the only
 /// thing that has to survive the dialog page's rebuilds.
+///
+/// `app_nav` carries the overlay accounting — see [`confirm_dialog`].
 pub fn name_input_dialog<State: 'static>(
+    app_nav: &Nav,
     nav: &NavigatorController<State>,
     title: impl Into<String>,
     initial: impl Into<String>,
@@ -136,6 +169,9 @@ pub fn name_input_dialog<State: 'static>(
     let title = title.into();
     let value = RwSignal::new(initial.into());
     let page_nav = nav.clone();
+    let page_app_nav = app_nav.clone();
+    let done_app_nav = app_nav.clone();
+    app_nav.begin_overlay();
     show_glyph_dialog(
         nav,
         move || {
@@ -146,10 +182,15 @@ pub fn name_input_dialog<State: 'static>(
             let enter_nav = page_nav.clone();
             let submit_nav = page_nav.clone();
             let cancel_nav = page_nav.clone();
+            let enter_app_nav = page_app_nav.clone();
+            let submit_app_nav = page_app_nav.clone();
+            let cancel_app_nav = page_app_nav.clone();
             let field = text_input(current.clone(), move |_state: &mut State, next: String| {
                 value.set(next)
             })
-            .on_submit(move |_state: &mut State, typed: String| submit(&enter_nav, &typed));
+            .on_submit(move |_state: &mut State, typed: String| {
+                submit(&enter_app_nav, &enter_nav, &typed)
+            });
             let buttons = FlexView::new(
                 Axis::Horizontal,
                 vec![
@@ -159,9 +200,12 @@ pub fn name_input_dialog<State: 'static>(
                     // uses the same trick.
                     flexible(1, SizedBox::<State>(None, None)),
                     inflexible(
-                        button(CANCEL_LABEL, move |_state: &mut State| cancel_nav.pop())
-                            .style(ButtonStyle::Ghost)
-                            .small(),
+                        button(CANCEL_LABEL, move |_state: &mut State| {
+                            cancel_app_nav.dismiss_overlay();
+                            cancel_nav.pop();
+                        })
+                        .style(ButtonStyle::Ghost)
+                        .small(),
                     ),
                     inflexible(SizedBox::<State>(Some(ACTION_GAP), None)),
                     inflexible(
@@ -170,7 +214,7 @@ pub fn name_input_dialog<State: 'static>(
                             // this guard the behavioral one (see the module
                             // docs' framework-gap note).
                             if can_submit {
-                                submit(&submit_nav, &current);
+                                submit(&submit_app_nav, &submit_nav, &current);
                             }
                         })
                         .style(if can_submit {
@@ -198,6 +242,8 @@ pub fn name_input_dialog<State: 'static>(
                 .cross_axis(CrossAxisAlignment::Stretch)))
         },
         move |state: &mut State, result: PopResult| {
+            // The accounting's authoritative half — see `confirm_dialog`.
+            done_app_nav.end_overlay();
             if let Some(name) = result.take::<String>() {
                 on_submit(state, name);
             }
@@ -212,12 +258,14 @@ fn submittable(text: &str) -> bool {
 
 /// Pop the dialog page carrying the trimmed name, or do nothing when there is
 /// nothing to submit — the one gate both the Enter key and the submit button
-/// route through.
-fn submit<State: 'static>(nav: &NavigatorController<State>, typed: &str) {
+/// route through (and, with it, the one place that tells the overlay
+/// accounting a submit is closing this dialog).
+fn submit<State: 'static>(app_nav: &Nav, nav: &NavigatorController<State>, typed: &str) {
     let name = typed.trim();
     if name.is_empty() {
         return;
     }
+    app_nav.dismiss_overlay();
     nav.pop_with_result(PopResult::of(name.to_string()));
 }
 

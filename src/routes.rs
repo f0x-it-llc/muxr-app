@@ -71,6 +71,34 @@
 //! because [`NavigatorController::depth`] is advisory — published at the last
 //! rebuild, so it still reads the pre-push value at the moment a press handler
 //! records a push (see [`NavState::reconcile`]).
+//!
+//! # Overlay accounting — why depth alone cannot dim the bar
+//!
+//! That advisory depth is one rebuild stale *by construction*:
+//! `RenderRoot::rebuild` runs the whole app-logic closure — the shell's bar
+//! with it — **before** the navigator drains its queued ops. So the frame that
+//! applies a modal's pop still publishes the depth from before it, and since
+//! nothing else in a settled app asks for a frame, the loop parks there: bar
+//! dimmed, gear and `‹` inert, until unrelated input happens along.
+//!
+//! [`Nav`] therefore *counts its own overlays* beside the mirror
+//! ([`NavState::overlays`]/[`NavState::overlays_closing`]), and every change
+//! publishes. Three calls, in the order a modal lives:
+//!
+//! - [`Nav::begin_overlay`] — a helper pushed one;
+//! - [`Nav::dismiss_overlay`] — the app is popping one *now* (the synchronous
+//!   half: a tracked write here dirties the shell's scope, which schedules the
+//!   frame that paints the bar lit);
+//! - [`Nav::end_overlay`] — the navigator delivered that page's pop-completion
+//!   callback (the authoritative half: it runs exactly once per pushed page,
+//!   whichever way it was dismissed).
+//!
+//! The depth gap stays in the answer, because an overlay pushed straight
+//! through the [`NavigatorController`] — by a test, or by a frust helper the
+//! app has not wrapped — has no accounting at all. And
+//! [`NavState::reconcile`] clamps the counters flat the moment the live depth
+//! falls back to the route stack, so no dismissal, however it happened, can
+//! strand a dimmed bar.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -234,7 +262,8 @@ pub struct BarState {
     pub direction: BarDirection,
     /// Whether a **transparent overlay** (a sheet, a dialog) sits above the
     /// route the bar is titling — the live page-stack depth is deeper than the
-    /// top mirror entry's.
+    /// top mirror entry's, or the app's own overlay accounting says one is up
+    /// ([`NavState::overlays`]).
     ///
     /// The mirror already had everything needed to answer this: a modal is
     /// pushed as a page *builder* straight through the
@@ -310,6 +339,49 @@ struct NavState {
     /// [`Nav::push`] reads a depth that is too *shallow*, which answers
     /// `false` and needs no help.)
     pending_pop: bool,
+    /// How many overlays **this app's own helpers** ([`crate::ui::sheet`],
+    /// [`crate::ui::dialogs`], the terminal's overflow menu) have pushed and
+    /// not yet seen popped — the synchronous half of
+    /// [`BarState::overlay_active`], and the reason the bar can no longer stay
+    /// dimmed after a modal closes.
+    ///
+    /// The depth-derived answer alone is one rebuild stale **by
+    /// construction**: `RenderRoot::rebuild` runs the whole app-logic closure
+    /// (bar included) *before* the navigator drains its queued ops, so the
+    /// frame that applies a push or a pop still publishes the previous depth.
+    /// A push is harmless (the overlay's own entrance keeps frames coming);
+    /// a **pop** is not — the follow-up frame publishes the stale dimmed
+    /// state, nothing else asks for a frame, and the desktop loop parks with
+    /// the bar dimmed and inert until unrelated input.
+    ///
+    /// So the app counts its own overlays and each change *publishes*
+    /// ([`Nav::publish`]): a tracked write dirties the shell's scope, which is
+    /// what schedules the very frame the depth fact could not.
+    ///
+    /// Incremented by [`Nav::begin_overlay`], decremented by
+    /// [`Nav::end_overlay`] (the pusher's pop-completion callback — the one
+    /// place that runs exactly once for *every* dismissal path), and reset
+    /// wholesale by [`Self::reconcile`]'s backstop so a dismissal that reached
+    /// neither can never strand it high.
+    overlays: usize,
+    /// …of those, how many the app has already told the navigator to pop but
+    /// whose pop the navigator has not applied yet.
+    ///
+    /// [`Nav::dismiss_overlay`]'s half of the pair, and the one that makes the
+    /// un-dim **synchronous**: the app-owned dismissal seams (a sheet's
+    /// staged exit, a dialog's own action buttons, a sheet row that closes
+    /// itself) know a pop is coming a full rebuild before
+    /// [`NavigatorController::depth`] reflects it, so both terms of
+    /// [`Self::overlay_active`] discount it — the counter directly, and the
+    /// depth check by requiring the gap to exceed it.
+    ///
+    /// Cleared by [`Nav::end_overlay`] (the same completion callback that
+    /// drops [`Self::overlays`]) and by the reconcile backstop. A dismissal
+    /// path the app cannot observe (`frust::glyph::dialog`'s own scrim/Escape,
+    /// a menu, an Android back press) simply never sets it: that costs the
+    /// *synchronous* un-dim, never correctness — the completion callback and
+    /// the backstop still land it on the next pass.
+    overlays_closing: usize,
     /// The query of the most recent path navigation — see [`Nav::param`].
     query: RouteParams,
 }
@@ -324,6 +396,22 @@ impl NavState {
         if self.pending_pop && live <= self.route_depth() {
             // The queued pop has been applied; depth is authoritative again.
             self.pending_pop = false;
+        }
+        // The overlay accounting's backstop: the live depth has fallen back to
+        // (or below) the route stack, so nothing transparent is up — whatever
+        // the counters still believe. A dismissal that reached neither
+        // `Nav::end_overlay` nor `Nav::dismiss_overlay` (an Android back press
+        // straight through `BackPolicy::Pop`, a `Router::go` that replaced the
+        // overlay page and dropped its completion callback with it) cannot
+        // strand a dimmed, inert bar behind it.
+        //
+        // Depth-*fall* gated like the retain below, and for the same reason:
+        // an un-gated clamp would fire on the frame a sheet is pushed, when
+        // `live` is still the pre-push value and the counter is the only thing
+        // that knows better.
+        if fell && live <= self.route_depth() {
+            self.overlays = 0;
+            self.overlays_closing = 0;
         }
         if !fell {
             return false;
@@ -343,10 +431,31 @@ impl NavState {
         self.stack.last().map_or(0, |(depth, _)| *depth)
     }
 
+    /// How many overlays the app believes are up right now: the ones it
+    /// pushed, less the ones it has already told the navigator to pop (see
+    /// [`Self::overlays`]/[`Self::overlays_closing`]).
+    fn open_overlays(&self) -> usize {
+        self.overlays.saturating_sub(self.overlays_closing)
+    }
+
     /// Whether a transparent overlay sits above the top route — see
     /// [`BarState::overlay_active`]. `live` is the navigator's own depth.
+    ///
+    /// Two independent answers, either of which dims the bar:
+    ///
+    /// - the app's **own** accounting ([`Self::open_overlays`]), which is
+    ///   exact from the moment a helper pushes to the moment the app closes
+    ///   it, staleness and all;
+    /// - the **depth** gap, which still covers every overlay pushed straight
+    ///   through the [`NavigatorController`] without passing a helper.
+    ///
+    /// The depth gap is measured past [`Self::overlays_closing`] rather than
+    /// past zero: an overlay whose pop is queued is still counted by `live`
+    /// for one more rebuild, and reading that as "a modal is up" is exactly
+    /// the staleness this pair exists to erase.
     fn overlay_active(&self, live: usize) -> bool {
-        !self.pending_pop && live > self.route_depth()
+        self.open_overlays() > 0
+            || (!self.pending_pop && live > self.route_depth() + self.overlays_closing)
     }
 
     /// The current bar state: the deepest recorded entry's metadata, whether
@@ -467,8 +576,15 @@ impl Nav {
         state.query = query;
         state.direction = BarDirection::Forward;
         // A `go` resets the whole stack, so nothing survives above the route
-        // it lands on — including the staleness a queued pop would leave.
+        // it lands on — including the staleness a queued pop would leave, and
+        // including the overlay accounting. The latter is not merely tidy:
+        // `Router::go` *replaces* the top page, and a replaced page's
+        // pop-completion callback is dropped rather than delivered, so an
+        // overlay that was on top when this ran would otherwise leave its
+        // count behind with no callback left to clear it.
         state.pending_pop = false;
+        state.overlays = 0;
+        state.overlays_closing = 0;
         let bar = state.bar(live.min(1), self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
@@ -542,6 +658,70 @@ impl Nav {
         state.stack.push((deepest + 1, route_meta(&location.path)));
         state.direction = BarDirection::Forward;
         state.query = location.query.clone();
+        let bar = state.bar(live, self.fullscreen.get_untracked());
+        drop(state);
+        self.publish(bar);
+    }
+
+    // -- the overlay accounting (see `NavState::overlays`) ------------------
+
+    /// Record that an overlay page (a sheet, a dialog, a menu) has just been
+    /// pushed — call it from the helper that pushes one, before or after the
+    /// push itself.
+    ///
+    /// Pairs with [`end_overlay`](Self::end_overlay), which **must** be wired
+    /// to the pusher's own pop-completion callback
+    /// (`NavigatorController::push_transparent_for_result`'s `on_result`,
+    /// `frust::glyph::show_glyph_dialog`/`show_glyph_menu`'s `on_result`) —
+    /// the one place that runs exactly once for every dismissal path there is.
+    pub fn begin_overlay(&self) {
+        let live = self.router.controller().depth();
+        let mut state = self.state.borrow_mut();
+        state.overlays += 1;
+        let bar = state.bar(live, self.fullscreen.get_untracked());
+        drop(state);
+        self.publish(bar);
+    }
+
+    /// Record that the app has just told one of its own overlays to pop — call
+    /// it immediately before the `pop`/`pop_with_result` that closes it.
+    ///
+    /// This is the **synchronous** half of the accounting, and the only reason
+    /// the bar lights up without waiting for unrelated input: a pop is applied
+    /// at the *next* rebuild, whose app logic (the bar included) has already
+    /// run by then, and the pusher's completion callback is not delivered
+    /// until the input pass after that. Publishing here — a rebuild earlier
+    /// than either — is what dirties the shell's scope and schedules the frame
+    /// that paints a lit bar.
+    ///
+    /// Best-effort by design: a dismissal path the app never sees simply does
+    /// not call it, which costs that path its synchronous un-dim and nothing
+    /// else. Calling it more often than there are open overlays cannot
+    /// under-count either — it saturates.
+    pub fn dismiss_overlay(&self) {
+        let live = self.router.controller().depth();
+        let mut state = self.state.borrow_mut();
+        if state.overlays_closing < state.overlays {
+            state.overlays_closing += 1;
+        }
+        let bar = state.bar(live, self.fullscreen.get_untracked());
+        drop(state);
+        self.publish(bar);
+    }
+
+    /// Record that an overlay page has actually been popped — call it from the
+    /// pusher's pop-completion callback, which the navigator delivers exactly
+    /// once per pushed page, on every dismissal route (an action button, a
+    /// scrim tap, `Escape`, an Android back press).
+    ///
+    /// Saturating, like every other step here: the accounting's job is to be
+    /// unable to strand a dimmed bar, so every operation on it is safe to run
+    /// one time too many.
+    pub fn end_overlay(&self) {
+        let live = self.router.controller().depth();
+        let mut state = self.state.borrow_mut();
+        state.overlays = state.overlays.saturating_sub(1);
+        state.overlays_closing = state.overlays_closing.saturating_sub(1);
         let bar = state.bar(live, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
@@ -629,6 +809,8 @@ pub fn install_app_router(
                 last_seen_depth: 0,
                 direction: BarDirection::Forward,
                 pending_pop: false,
+                overlays: 0,
+                overlays_closing: 0,
                 query: RouteParams::new(),
             })),
             current: RwSignal::new(BarState::default()),
@@ -841,6 +1023,8 @@ mod tests {
             last_seen_depth,
             direction: BarDirection::Forward,
             pending_pop: false,
+            overlays: 0,
+            overlays_closing: 0,
             query: RouteParams::new(),
         }
     }
@@ -971,6 +1155,145 @@ mod tests {
         assert!(
             state.bar(3, false).overlay_active,
             "a real overlay still registers once the pop has landed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The overlay accounting (the synchronous half of the same flag)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_app_pushed_overlay_dims_the_bar_before_the_depth_reports_it() {
+        // `Nav::begin_overlay`'s half: the push is queued, so `depth()` still
+        // answers 2 — the counter is the only thing that knows a sheet is on
+        // its way in.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 1;
+        assert!(
+            state.bar(2, false).overlay_active,
+            "dimmed at the stale depth"
+        );
+        // …and it stays dimmed once the navigator catches up, now by both
+        // halves at once.
+        state.reconcile(3);
+        assert!(state.bar(3, false).overlay_active);
+    }
+
+    #[test]
+    fn closing_an_overlay_lifts_the_bar_a_rebuild_before_the_depth_falls() {
+        // THE regression this accounting exists for. The pop is queued from a
+        // scrim tap / an action button, so `depth()` still counts the overlay's
+        // page for one more rebuild — and that rebuild is the last one anything
+        // asks for. Reading it as "a modal is up" is what left the bar dimmed
+        // and inert until unrelated input.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 1;
+        state.reconcile(3);
+        assert!(state.bar(3, false).overlay_active);
+
+        // `Nav::dismiss_overlay`: still depth 3, but the app knows better.
+        state.overlays_closing = 1;
+        assert!(
+            !state.bar(3, false).overlay_active,
+            "the bar lights up on the frame the dismissal is enqueued"
+        );
+
+        // The pop lands; the completion callback clears both counts.
+        state.reconcile(2);
+        state.overlays = 0;
+        state.overlays_closing = 0;
+        assert!(!state.bar(2, false).overlay_active);
+    }
+
+    #[test]
+    fn a_stack_of_overlays_stays_dimmed_until_the_last_one_is_closing() {
+        // A sheet whose row opens a dialog: closing the dialog must not lift
+        // the bar off the sheet still underneath it.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 2;
+        state.reconcile(4);
+        assert!(state.bar(4, false).overlay_active);
+
+        state.overlays_closing = 1;
+        assert!(
+            state.bar(4, false).overlay_active,
+            "one of the two is on its way out; the other is still up"
+        );
+
+        // The dialog's pop lands and its completion callback runs.
+        state.reconcile(3);
+        state.overlays = 1;
+        state.overlays_closing = 0;
+        assert!(
+            state.bar(3, false).overlay_active,
+            "the sheet still dims it"
+        );
+
+        // Now the sheet itself.
+        state.overlays_closing = 1;
+        assert!(!state.bar(3, false).overlay_active);
+    }
+
+    #[test]
+    fn an_overlay_that_never_passed_a_helper_still_dims_the_bar() {
+        // The depth gap stays in the answer: a page pushed straight through
+        // the controller (a test's `push_transparent`, a frust helper the app
+        // has not wrapped) has no accounting at all.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.reconcile(3);
+        assert!(state.bar(3, false).overlay_active);
+        assert_eq!(state.overlays, 0, "…with nothing counted");
+    }
+
+    #[test]
+    fn a_dismissal_the_app_never_saw_cannot_strand_a_dimmed_bar() {
+        // The backstop, on the path item 7 of this fix leaves alone: an
+        // Android back press pops the sheet through `BackPolicy::Pop` without
+        // the widget — or the app — ever hearing about it, so neither
+        // `dismiss_overlay` nor (yet) `end_overlay` has run.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 3);
+        state.overlays = 1;
+        assert!(state.bar(3, false).overlay_active);
+
+        state.reconcile(2);
+        assert_eq!(state.overlays, 0, "the depth fall clamps the counter flat");
+        assert_eq!(state.overlays_closing, 0);
+        assert!(!state.bar(2, false).overlay_active, "…and the bar is live");
+    }
+
+    #[test]
+    fn the_backstop_never_fires_on_the_frame_an_overlay_is_pushed() {
+        // The clamp is depth-*fall* gated for the same reason the mirror's own
+        // retain is: on the frame a sheet is pushed, `depth()` still reports
+        // the pre-push value, and an un-gated clamp would wipe the one piece
+        // of state that knows a sheet is coming.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 1;
+        state.reconcile(2);
+        assert_eq!(state.overlays, 1, "the stale depth clamps nothing");
+        assert!(state.bar(2, false).overlay_active);
+    }
+
+    #[test]
+    fn a_route_pop_and_an_open_overlay_are_still_told_apart() {
+        // `pending_pop` suppresses the *depth* half only: a route pop whose
+        // stale depth looks like an overlay must stay lit, while a genuinely
+        // open overlay must stay dimmed even mid-pop.
+        let mut state = mirror(
+            &[
+                (2, route_meta("/sessions")),
+                (3, route_meta(SETTINGS_ROUTE)),
+            ],
+            3,
+        );
+        state.stack.pop();
+        state.pending_pop = true;
+        assert!(!state.bar(3, false).overlay_active);
+
+        state.overlays = 1;
+        assert!(
+            state.bar(3, false).overlay_active,
+            "an overlay the app counted is not a queued route pop"
         );
     }
 

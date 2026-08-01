@@ -21,7 +21,12 @@
 //!
 //! `State` is a small test-local struct, not `muxr::AppState`: all three
 //! helpers are generic over the app state precisely so a screen (or a test)
-//! brings its own.
+//! brings its own. They each take the app's `Nav` beside the navigator now —
+//! not for state, but for the overlay accounting the shell's bar dims itself
+//! from (`muxr::routes`' "Overlay accounting") — so each fixture installs the
+//! real composition root once to have one to hand ([`Harness::nav`]). The
+//! overlays under test are still pushed onto this harness's own controller,
+//! which is what keeps them addressable here.
 
 use frust::{
     AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator, text,
@@ -32,6 +37,7 @@ use kurbo::{Point, Size};
 use peniko::Color;
 
 use muxr::failure::AppFailure;
+use muxr::routes::{Nav, app_nav};
 use muxr::ui::dialogs::{confirm_dialog, name_input_dialog};
 use muxr::ui::sheet::{SCRIM_ALPHA, show_sheet};
 use muxr::ui::toasts::{app_toasts, toast_layer};
@@ -83,6 +89,9 @@ struct Harness {
     logic: NavLogic,
     state: State,
     tcx: TextContext,
+    /// The app's own composition root, kept alive purely so [`Harness::nav`]
+    /// has a live [`Nav`] to hand the overlay helpers (see the module docs).
+    _app: AppState,
 }
 
 impl Harness {
@@ -108,9 +117,18 @@ impl Harness {
             logic: Box::new(move |_state: &mut State| navigator(&logic_controller, home)),
             state: State::default(),
             tcx: TextContext::new(),
+            // Installs the app's one router and publishes its `Nav` on this
+            // thread (`routes::install_app_router`), which is all the overlay
+            // helpers want from it.
+            _app: MuxrApp.init(),
         };
         harness.settle();
         harness
+    }
+
+    /// The app-scoped [`Nav`] the overlay helpers account through.
+    fn nav(&self) -> Nav {
+        app_nav()
     }
 
     /// One frame painted at an explicit clock — how a staged animation is
@@ -192,6 +210,7 @@ fn content_child(scene: &RecScene) -> (Point, Size) {
 /// Open a confirm dialog over `h` and return the settled frame.
 fn open_confirm(h: &mut Harness) -> RecScene {
     confirm_dialog(
+        &h.nav(),
         &h.controller,
         "Kill session?",
         "Any attached client is disconnected immediately.",
@@ -251,6 +270,7 @@ fn confirm_dialog_scrim_tap_closes_without_running_the_action() {
 /// Open a name-input dialog over `h` and return the settled frame.
 fn open_name_input(h: &mut Harness) -> RecScene {
     name_input_dialog(
+        &h.nav(),
         &h.controller,
         "New session",
         "",
@@ -343,7 +363,7 @@ fn name_input_dialog_blocks_an_empty_submit() {
 /// Open a sheet whose body is one filled (primary) button, and return the
 /// settled frame.
 fn open_sheet(h: &mut Harness) -> RecScene {
-    show_sheet(&h.controller, || {
+    show_sheet(&h.nav(), &h.controller, || {
         // A filled button, not bare text: it paints a rect (which is what
         // "the body rendered" is observed through here) and its press is the
         // proof that events reach the body at all.
@@ -471,7 +491,7 @@ fn scrim_alpha(scene: &RecScene) -> f32 {
 /// [`MID_STAGING_MS`] — mid-entrance.
 fn mid_entrance(theme: Theme) -> (Harness, RecScene) {
     let mut h = Harness::themed(Some(theme));
-    show_sheet(&h.controller, || {
+    show_sheet(&h.nav(), &h.controller, || {
         any(button("Split pane right", |state: &mut State| {
             state.confirmed += 1
         }))
@@ -527,7 +547,7 @@ fn the_scrims_rect_never_moves() {
     // panics unless exactly one full-bleed fill exists, so every probe below
     // is an assertion.
     let mut h = Harness::themed(Some(Theme::glyph_baseline()));
-    show_sheet(&h.controller, || any(text("pair a host")));
+    show_sheet(&h.nav(), &h.controller, || any(text("pair a host")));
     h.frame_at(0.0);
 
     let mut previous = 0.0_f32;
@@ -547,7 +567,7 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
     let _ambient = setup();
 
     let mut h = Harness::themed(Some(Theme::glyph_baseline()));
-    show_sheet(&h.controller, || any(text("pair a host")));
+    show_sheet(&h.nav(), &h.controller, || any(text("pair a host")));
     let settled = h.settle();
     let settled_panel = panel(&settled);
     assert_eq!(h.depth(), 2);
