@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The API 27+ half of Muxr's window theme: `android:windowLightNavigationBar`,
+  the navigation bar's counterpart to the status bar's
+  `windowLightStatusBar` (which is API 23 and so lives in the base theme).
+
+  Split into its own qualified folder rather than guarded inline because the
+  attribute did not exist at this app's `minSdk` (24): a `values/` theme naming
+  it would ship an attribute a quarter of the supported range cannot read, and
+  lint says so. The base theme carries every configuration-invariant item, so
+  this file adds exactly one.
+
+  There is a `values-night-v27/` twin for the same reason `values-night/`
+  exists — a night-qualified resource outranks a version-qualified one, so
+  without the twin a device in night mode on API 27+ would resolve
+  `values-night/`'s definition and lose this item. See `values/themes.xml`.
+
+  Same recorded limitation as its status-bar sibling: this is the window's
+  *initial* appearance only — `FrustSurfaceView.updateSystemBarsAppearance`
+  re-derives both bar appearances from the device's `uiMode` at runtime.
+-->
+<resources>
+
+    <style name="Theme.Muxr" parent="Theme.Muxr.Base">
+        <!-- Light (bright) navigation-bar icons, in every configuration. -->
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+
+</resources>

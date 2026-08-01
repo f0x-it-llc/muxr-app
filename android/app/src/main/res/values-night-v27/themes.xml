@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The night, API 27+ corner of the qualifier matrix — identical to
+  `values-v27/themes.xml`, and identical for the same reason `values-night/` is
+  identical to `values/`: Muxr is permanently dark, so no window attribute may
+  vary with the device's day/night setting.
+
+  It exists because Android resolves a **night** qualifier ahead of a
+  **version** one: without this file, a device in night mode on API 27+ would
+  match `values-night/`'s definition of `Theme.Muxr` and silently drop the
+  `windowLightNavigationBar` item that `values-v27/` adds.
+
+  See `values/themes.xml` for the full rationale and the recorded framework
+  limitation on the bar-appearance attributes.
+-->
+<resources>
+
+    <style name="Theme.Muxr" parent="Theme.Muxr.Base">
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+
+</resources>

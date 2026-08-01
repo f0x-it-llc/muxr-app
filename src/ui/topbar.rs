@@ -15,6 +15,57 @@
 //! screen (`/`) deliberately has **no** bar: there the whole widget is
 //! [hidden](TopBarView::hidden) and lays out to zero height (see below).
 //!
+//! # Chrome icons are vectors. Font glyphs are for content text only.
+//!
+//! The bar's two affordances used to be **text runs** — a `‹` (`U+2039`) and a
+//! `⚙` (`U+2699`) set in the button label's own face. Neither is in the
+//! bundled Glyph faces (IBM Plex Mono / Space Mono), so each platform resolved
+//! them through its own fallback chain and each answered differently: the `⚙`
+//! was simply **absent on iPhone**, and the same string rendered as visibly
+//! different marks on Android and iOS. That is not a tuning problem — a font
+//! fallback chain is not a thing an app can specify — so every icon this bar
+//! paints is now a **vector**: a [`frust::icons`] `IconSource` (or an
+//! app-supplied one, [`CHEVRON_LEFT`]) filled as a path by [`icon_button`],
+//! identical on every platform by construction.
+//!
+//! **The rule this leaves behind, for the whole app:** *chrome* icons — a bar
+//! affordance, a FAB, a row's trailing chevron — are vectors. A **font glyph
+//! is only ever content text**, where the run is the content (the Sessions
+//! meta line's `▣ 9 panes`, the splash's brand rain) and a missing face
+//! degrades to a tofu box in a sentence rather than to an invisible button.
+//!
+//! # Modal-aware: the bar dims and goes inert under an overlay
+//!
+//! The bar floats **over** the navigator (see [`crate::shell::root_view`]), so
+//! a sheet or dialog pushed *inside* the navigator cannot cover it — it stayed
+//! fully lit and, worse, fully **tappable** under an open modal: the `⚙`
+//! navigated straight out from under a sheet. That is a modality hole, not a
+//! cosmetic one.
+//!
+//! [`TopBarView::overlay`] closes it, from the depth fact
+//! `crate::routes::BarState::overlay_active` publishes (live page-stack depth
+//! deeper than the top *route*'s). While it is set the bar:
+//!
+//! - paints the **same scrim** the modal itself paints
+//!   ([`crate::ui::sheet::SCRIM_ALPHA`] over `colors.scrim`), staged on the
+//!   **same** [`ModalStage`] timings the sheet and the Glyph dialog use — two
+//!   clocks started in the same rebuild rather than one shared driver, because
+//!   a `NavigatorController` exposes no transition progress to read (FINDINGS
+//!   #40), exactly as the bar's own reveal is matched to the page transition
+//!   under it;
+//! - takes **no input** and publishes **no semantics** — the same
+//!   *inert-node-absent* rule the hidden state follows, and for the same
+//!   reason: an accessibility node whose affordances route nowhere is worse
+//!   than no node, and here it would additionally sit *outside* the modal's
+//!   own `Role::Dialog` subtree, offering a screen reader a way around the
+//!   modality the visual scrim is announcing.
+//!
+//! Inertness is driven by the **flag**, not by the tint's animation: modality
+//! is binary, so the bar goes dead on the frame the overlay opens and comes
+//! back on the frame it closes, while the tint fades either way. A gesture
+//! pop or a scrim dismissal clears the flag through the mirror's own
+//! depth-fall reconcile — nothing here polls.
+//!
 //! # Why a hand-rolled widget rather than `glyph::app_bar`
 //!
 //! `frust::glyph::app_bar` is a 52px bar whose title is *left-aligned* next to
@@ -112,18 +163,21 @@ use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
 use frust::authoring::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, Widget,
-    any, build_child, rebuild_child, route_event, teardown_child,
+    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point,
+    PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
+    rebuild_child, route_event, teardown_child,
 };
 use frust::motion::patterns::{
     GLYPH_SLIDE_ENTER, GLYPH_SLIDE_EXIT, PatternLayer, TransitionPattern,
 };
 use frust::motion::switcher::{REDUCE_MOTION_DURATION, pattern_switcher};
 use frust::{
-    Align, Alignment, AnimationController, Axis, ButtonStyle, ChildKey, CrossAxisAlignment, Curve,
-    EdgeInsets, FlexView, Padding, SizedBox, Theme, Timing, button, inflexible, safe_area, text,
+    AnimationController, Axis, ChildKey, CrossAxisAlignment, Curve, EdgeInsets, FlexView, IconData,
+    IconSource, Padding, SizedBox, Theme, Timing, icon, inflexible, safe_area, text,
 };
+
+use crate::ui::sheet::{ModalStage, SCRIM_ALPHA};
 
 /// `.topbar{height:46px}` — the content band, below the status-bar inset.
 ///
@@ -155,6 +209,12 @@ const BRAND_SIZE: f32 = 13.0;
 const BRAND_LINE_HEIGHT: f32 = 18.0;
 /// `.topbar-icon{width:30px;height:30px}` — the leading/trailing icon box.
 const ICON_SLOT: f64 = 30.0;
+/// The drawn size of the vector inside that box, in logical px. An original
+/// value: `.topbar-icon` sets its glyph at 15px, and a Material Symbols
+/// outline at 15px reads thinner than a 15px glyph does, so the mark is drawn
+/// a step up — still comfortably inside the 30px box, with the box itself
+/// staying the tap target.
+const ICON_SIZE: f64 = 20.0;
 /// Minimum clear space between the centered title and either side zone, in
 /// logical px. An original value (the source's absolutely-positioned title can
 /// overlap; a real title has to be clamped instead).
@@ -164,9 +224,37 @@ const HAIRLINE: f64 = 1.0;
 
 /// The brand wordmark, and the accessibility name of the bar itself.
 const BRAND: &str = "muxr";
-/// The back affordance's glyph (`docs/redesign.html`'s settings topbar, the
-/// `.topbar-icon` holding a `‹`).
-pub const BACK_GLYPH: &str = "\u{2039}";
+
+/// The back affordance's accessible name — what a screen reader announces, and
+/// what a test addresses the button by.
+///
+/// A **word**, not the mark it draws: the slot used to carry the literal `‹`
+/// as its label (it *was* the label, since the affordance was a text run), and
+/// "single left-pointing angle quotation mark" is not a thing to read out.
+pub const BACK_LABEL: &str = "Back";
+
+/// The back affordance's mark: a chevron pointing at the leading edge, mirrored
+/// from `frust::icons::CHEVRON_RIGHT` about the centre of its own 24×24 design
+/// box (`x' = 24 - x`; the relative segments negate their `dx`).
+///
+/// **Why an app-supplied source rather than `icons::ARROW_BACK`.** The design
+/// (`docs/redesign.html`'s settings topbar) draws a *chevron*, and the vendored
+/// Material Symbols starter set carries `chevron_right` but no `chevron_left`,
+/// so the collection cannot express the mark the mock asks for. Mirroring the
+/// one it does carry keeps the stroke weight, the corner cuts and the optical
+/// size identical to the framework's own chevron — a hand-drawn substitute
+/// would match none of the three. `IconData::from_path` is the documented
+/// app-supply seam; an `IconSource` is the cheaper half of it (a `d` string
+/// needs no `kurbo` in app code), and the same seam the Connect FAB uses.
+pub const CHEVRON_LEFT: IconSource = IconSource {
+    d: "M 11.4 12 16 7.4 l -1.4 -1.4 -6 6 6 6 1.4 -1.4 -4.6 -4.6 Z",
+    design: ICON_DESIGN_BOX,
+};
+
+/// The side length of the square design box every icon here is authored
+/// against — Material Symbols' own 24, which [`frust::icons`]' generated
+/// entries all carry.
+const ICON_DESIGN_BOX: f64 = 24.0;
 
 /// Title-crossfade x-shift, logical px — `glyph/appbar.rs`'s `TITLE_SHIFT`
 /// (`.bn-title-a{translateX(-14px)}`), transcribed.
@@ -357,7 +445,9 @@ impl TransitionPattern for LeadingSwap {
 ///
 /// ```ignore
 /// muxr_topbar::<AppState>("100.71.31.57")
-///     .action("\u{2699}", |state: &mut AppState| state.push_settings())
+///     .action(icons::SETTINGS, "Settings", |state: &mut AppState| {
+///         state.push_settings()
+///     })
 /// ```
 pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State> {
     let theme = active_theme();
@@ -388,8 +478,12 @@ pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State
         action: None,
         direction_reverse: false,
         hidden: false,
+        overlay: false,
         surface: scheme.surface,
         rule: scheme.outline_variant,
+        scrim: scheme.scrim,
+        on_surface: scheme.on_surface,
+        slot_radius: theme.shape.small,
     }
 }
 
@@ -455,53 +549,71 @@ pub struct TopBarView<State: 'static> {
     direction_reverse: bool,
     /// Whether this bar renders at all — see the [module docs](self).
     hidden: bool,
+    /// Whether a modal covers the app: the bar dims itself to match and goes
+    /// inert — see the [module docs](self).
+    overlay: bool,
     /// `--bg-surface`: the bar's own background.
     surface: Color,
     /// `--border`: the hairline under it.
     rule: Color,
+    /// `colors.scrim`: the tone the overlay tint is mixed from — the modal's
+    /// own, so the bar dims in the same ink the page under it does.
+    scrim: Color,
+    /// The ink every slot icon inherits (`--fg`).
+    on_surface: Color,
+    /// The corner radius a slot's pressed wash is drawn at.
+    slot_radius: f64,
 }
 
 impl<State: 'static> TopBarView<State> {
-    /// Replace the brand with a `‹` firing `on_press` — every route pushed over
-    /// the stack's first titled one (see `crate::routes::BarLeading::Back`).
+    /// Replace the brand with a back chevron firing `on_press` — every route
+    /// pushed over the stack's first titled one (see
+    /// `crate::routes::BarLeading::Back`).
     pub fn back<F: Fn(&mut State) + 'static>(mut self, on_press: F) -> Self {
-        let on_press = Rc::new(on_press);
-        self.leading = Rc::new(any(Align(
-            Alignment::CENTER,
-            button(BACK_GLYPH, move |state: &mut State| on_press(state))
-                .style(ButtonStyle::Ghost)
-                .small(),
-        )));
-        self.leading_key = ChildKey::new(BACK_GLYPH);
+        self.leading = Rc::new(any(self.slot_icon(CHEVRON_LEFT, BACK_LABEL, on_press)));
+        self.leading_key = ChildKey::new(BACK_LABEL);
         self.back = true;
         self
     }
 
-    /// Put `glyph` (`⚙`, `⋮`, …) in the trailing icon slot, firing `on_press`
-    /// when it is tapped.
+    /// Put a vector `mark` (`icons::SETTINGS`, and Phase 3's
+    /// `icons::MORE_VERT`) in the trailing icon slot under the accessible name
+    /// `label`, firing `on_press` when it is tapped.
     ///
-    /// The slot is a small [`ButtonStyle::Ghost`] button centered in the
-    /// source's 30×30 box: transparent at rest (the source's `.topbar-icon`
+    /// The slot is an [`icon_button`] filling the source's 30×30
+    /// `.topbar-icon` box: transparent at rest (the source's `.topbar-icon`
     /// only fills on hover, which a touch screen has no notion of), a pressed
-    /// wash on tap, and — unlike a hand-composed gesture wrapper — one real
-    /// `Role::Button` node in the accessibility tree, which is also how a test
-    /// addresses it. The one deviation: the source sets the glyph at 15px,
-    /// while `frust::button` inks its label from the theme's button-label role
-    /// (12.5px) with no per-button override, so the glyph renders a shade
-    /// smaller than the mock's.
+    /// wash on tap, and one real `Role::Button` node in the accessibility tree
+    /// — which is also how a test addresses it.
     pub fn action<F: Fn(&mut State) + 'static>(
         mut self,
-        glyph: impl Into<String>,
+        mark: impl Into<IconData>,
+        label: impl Into<String>,
         on_press: F,
     ) -> Self {
-        let on_press = Rc::new(on_press);
-        self.action = Some(any(Align(
-            Alignment::CENTER,
-            button(glyph.into(), move |state: &mut State| on_press(state))
-                .style(ButtonStyle::Ghost)
-                .small(),
-        )));
+        self.action = Some(any(self.slot_icon(mark, label, on_press)));
         self
+    }
+
+    /// Paint the bar over an animated scrim and take no input while `overlay`
+    /// is set — the modality mirror. See the [module docs](self).
+    pub fn overlay(mut self, overlay: bool) -> Self {
+        self.overlay = overlay;
+        self
+    }
+
+    /// One `.topbar-icon` slot: `mark` inked in the bar's own on-surface tone,
+    /// in the 30×30 box the layout hands it.
+    fn slot_icon<F: Fn(&mut State) + 'static>(
+        &self,
+        mark: impl Into<IconData>,
+        label: impl Into<String>,
+        on_press: F,
+    ) -> IconButtonView<State> {
+        icon_button(mark, label, on_press)
+            .ink(self.on_surface)
+            .icon_size(ICON_SIZE)
+            .radius(self.slot_radius)
     }
 
     /// Run both crossfades backwards (the pop direction).
@@ -631,6 +743,272 @@ impl Widget for BrandMarkWidget {
 }
 
 // ---------------------------------------------------------------------------
+// Icon button — the app's one vector affordance
+// ---------------------------------------------------------------------------
+
+/// A pressable **vector** icon: `mark` centred in a box, labelled `label` for
+/// accessibility, firing `on_press` on a release inside its bounds.
+///
+/// This is the app's answer to "chrome icons are vectors" (see the
+/// [module docs](self)): `frust::button` takes a `String` label and nothing
+/// else, so the only way to press a `frust::icon` is to compose the press
+/// around it — and a bare `GestureDetector` contributes no accessibility node
+/// of its own, which would leave every chrome affordance in the app
+/// unreachable to a screen reader. So this is a leaf press target over one
+/// icon pod, the same shape (and for the same reason) as
+/// `features::connect::presentation::chrome`'s `press_target`, differing only
+/// in that it *owns* the mark it paints rather than wrapping arbitrary art.
+///
+/// **Lives here, beside the bar that needed it first**, and is `pub` because
+/// the Connect FAB is its second caller — `examples/huddle`'s own convention
+/// (promote a hand-rolled primitive only once a second consumer appears).
+/// A third caller is the moment to give it its own `crate::ui` module.
+///
+/// The press treatment is the framework's own [`PRESSED_OPACITY`] wash rather
+/// than `Button`'s scale pivot: scaling needs an `AnimationController` this
+/// leaf has no reason to own, and a 30px chrome mark dipping in tone reads the
+/// same.
+pub fn icon_button<State: 'static, F: Fn(&mut State) + 'static>(
+    mark: impl Into<IconData>,
+    label: impl Into<String>,
+    on_press: F,
+) -> IconButtonView<State> {
+    IconButtonView {
+        mark: mark.into(),
+        label: label.into(),
+        ink: None,
+        fill: Color::TRANSPARENT,
+        icon_size: ICON_DESIGN_BOX,
+        box_size: None,
+        radius: 0.0,
+        on_press: Rc::new(on_press),
+    }
+}
+
+/// The declarative half of [`icon_button`].
+pub struct IconButtonView<State: 'static> {
+    mark: IconData,
+    label: String,
+    /// The mark's ink; `None` lets [`frust::icon`] resolve `on_surface` from
+    /// the threaded theme (its own documented default).
+    ink: Option<Color>,
+    /// A resting background fill — [`Color::TRANSPARENT`] for bar chrome, an
+    /// accent for a FAB.
+    fill: Color,
+    icon_size: f64,
+    /// The tap target; `None` shrink-wraps to the mark.
+    box_size: Option<Size>,
+    radius: f64,
+    on_press: Rc<dyn Fn(&mut State)>,
+}
+
+impl<State: 'static> IconButtonView<State> {
+    /// Ink the mark explicitly, overriding the theme's `on_surface` default.
+    pub fn ink(mut self, ink: Color) -> Self {
+        self.ink = Some(ink);
+        self
+    }
+
+    /// Fill the button's box behind the mark (a FAB's accent disc).
+    pub fn fill(mut self, fill: Color) -> Self {
+        self.fill = fill;
+        self
+    }
+
+    /// Draw the mark at `size` logical px (default: its own 24px design box).
+    pub fn icon_size(mut self, size: f64) -> Self {
+        self.icon_size = size;
+        self
+    }
+
+    /// Give the button a fixed tap target rather than shrink-wrapping the mark
+    /// — the platform 44/48px minimum, or a design's own box.
+    pub fn box_size(mut self, size: Size) -> Self {
+        self.box_size = Some(size);
+        self
+    }
+
+    /// Round the fill and the pressed wash by `radius`.
+    pub fn radius(mut self, radius: f64) -> Self {
+        self.radius = radius;
+        self
+    }
+
+    /// The mark, as the pod this button paints and lays out.
+    fn mark_view(&self) -> AnyView<State> {
+        let mut view = icon(self.mark.clone()).size(self.icon_size);
+        if let Some(ink) = self.ink {
+            view = view.color(ink);
+        }
+        any(view)
+    }
+}
+
+/// The retained half of [`icon_button`].
+pub struct IconButtonWidget {
+    mark: ChildPod,
+    label: String,
+    fill: Color,
+    ink: Option<Color>,
+    icon_size: f64,
+    box_size: Option<Size>,
+    radius: f64,
+    /// The pressed *visual*; follows the pointer in and out while captured.
+    pressed: bool,
+    /// Armed by a `Down` (alongside `capture_pointer`), cleared on
+    /// `Up`/`Cancel` — gates `Move`/`Up` so a hover never latches or fires.
+    captured: bool,
+    on_press: ErasedCallback,
+}
+
+impl<State: 'static> View<State> for IconButtonView<State> {
+    type Element = IconButtonWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> IconButtonWidget {
+        IconButtonWidget {
+            mark: build_child(&self.mark_view(), ctx),
+            label: self.label.clone(),
+            fill: self.fill,
+            ink: self.ink,
+            icon_size: self.icon_size,
+            box_size: self.box_size,
+            radius: self.radius,
+            pressed: false,
+            captured: false,
+            on_press: erase_callback(&self.on_press),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut IconButtonWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        // Closures aren't comparable; reinstall the adapter every time.
+        element.on_press = erase_callback(&self.on_press);
+        // The icon pod diffs itself (`IconView::rebuild` skips re-parsing an
+        // unchanged `d`), so this just re-supplies the current mark.
+        let mut flags = rebuild_child(&prev.mark_view(), &self.mark_view(), &mut element.mark, ctx);
+        if prev.box_size != self.box_size || prev.icon_size != self.icon_size {
+            element.box_size = self.box_size;
+            element.icon_size = self.icon_size;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.fill != self.fill || prev.ink != self.ink || prev.radius != self.radius {
+            element.fill = self.fill;
+            element.ink = self.ink;
+            element.radius = self.radius;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.label != self.label {
+            element.label = self.label.clone();
+            // Semantics are recomputed off the paint pass, so a label change
+            // republishes through PAINT.
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut IconButtonWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.mark_view(), &mut element.mark, ctx);
+    }
+}
+
+/// Whether `pos` (widget-local) falls inside a `size`-sized box.
+fn inside(pos: Point, size: Size) -> bool {
+    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
+}
+
+impl Widget for IconButtonWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let mark_bc = BoxConstraints::tight(Size::new(self.icon_size, self.icon_size));
+        let mark = self.mark.layout_child(ctx, &mark_bc);
+        // A declared box is the tap target; without one the mark *is* the
+        // button. Either way a tight incoming constraint (a `.topbar-icon`
+        // slot) wins outright, and the mark centres in whatever results.
+        let size = bc.constrain(self.box_size.unwrap_or(mark));
+        self.mark.set_origin(Point::new(
+            (size.width - mark.width) / 2.0,
+            (size.height - mark.height) / 2.0,
+        ));
+        size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let origin = ctx.origin();
+        let size = ctx.size();
+        if self.fill != Color::TRANSPARENT {
+            scene.fill_rounded_rect(origin, size, self.radius, self.fill);
+        }
+        self.mark.paint_child(ctx, scene);
+        if self.pressed {
+            // Washed in the mark's own ink, so a ghost slot on a dark bar and
+            // an accent disc both darken rather than one of them glowing.
+            let wash = self.ink.unwrap_or(Color::BLACK);
+            scene.fill_rounded_rect(origin, size, self.radius, wash.with_alpha(PRESSED_OPACITY));
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let InputEvent::Pointer(pointer) = event else {
+            return EventResult::Ignored;
+        };
+        match pointer.phase {
+            PointerPhase::Down => {
+                self.pressed = true;
+                self.captured = true;
+                ctx.capture_pointer();
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Move => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
+                self.pressed = inside(pointer.position, ctx.size());
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Up => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
+                if inside(pointer.position, ctx.size()) {
+                    (self.on_press)(ctx);
+                }
+                self.pressed = false;
+                self.captured = false;
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            // Flags only — a `Cancel` arm never touches state
+            // (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
+            PointerPhase::Cancel => {
+                if !self.captured {
+                    return EventResult::Ignored;
+                }
+                self.pressed = false;
+                self.captured = false;
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+        }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // One labelled Button leaf, like `frust`'s own `Button` over its label
+        // pod: an icon is decorative on its own (`IconView` publishes nothing
+        // unlabelled), and the *name* of this control is what a screen reader
+        // needs — never the shape of its mark.
+        ctx.push_node(Role::Button, |node| {
+            node.set_label(self.label.as_str());
+            node.add_action(Action::Click);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The bar itself
 // ---------------------------------------------------------------------------
 
@@ -644,11 +1022,24 @@ pub struct TopBarWidget {
     /// [`Self::children`]; empty while the bar is fully hidden (nothing is laid
     /// out then).
     rest_origins: Vec<Point>,
-    /// Whether the leading slot is the 30×30 `‹` box rather than the brand.
+    /// Whether the leading slot is the 30×30 chevron box rather than the brand.
     back: bool,
     hidden: bool,
+    /// Whether a modal is up: the bar is inert **from this frame**, and its
+    /// tint animates toward [`Self::tint`]'s target.
+    overlay: bool,
     surface: Color,
     rule: Color,
+    scrim: Color,
+    /// The painted overlay tint: `0.0` untinted, `1.0` at full
+    /// [`SCRIM_ALPHA`].
+    tint: f64,
+    /// The in-flight tint staging, `None` at rest — resolved on the first
+    /// **paint** after a flip, like [`Self::reveal_anim`], and on the modal's
+    /// own [`ModalStage`] timings so bar and sheet dim together.
+    tint_anim: Option<ModalStage>,
+    /// An overlay flip the last rebuild staged, awaiting that first paint.
+    tint_pending: bool,
     /// The painted reveal: `0.0` fully above the top edge, `1.0` at rest.
     reveal: f64,
     /// The in-flight reveal, `None` at rest. Created on the first **paint**
@@ -685,11 +1076,16 @@ impl<State: 'static> View<State> for TopBarView<State> {
             rest_origins: Vec::new(),
             back: self.back,
             hidden: self.hidden,
+            overlay: self.overlay,
             surface: self.surface,
             rule: self.rule,
-            // A first mount never animates: the bar is simply already where the
-            // route says it belongs (this is also the frame a cold start's
-            // splash covers).
+            scrim: self.scrim,
+            // A first mount never animates either channel: the bar is simply
+            // already where (and as dim as) the route says it belongs — this
+            // is also the frame a cold start's splash covers.
+            tint: if self.overlay { 1.0 } else { 0.0 },
+            tint_anim: None,
+            tint_pending: false,
             reveal: if self.hidden { 0.0 } else { 1.0 },
             reveal_anim: None,
             reveal_pending: false,
@@ -745,9 +1141,18 @@ impl<State: 'static> View<State> for TopBarView<State> {
             element.reveal_pending = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        if prev.surface != self.surface || prev.rule != self.rule {
+        if prev.overlay != self.overlay {
+            // Inertness follows the flag immediately (modality is binary); only
+            // the tint animates, and only from the next paint — where a theme
+            // is in scope to resolve the modal timings from.
+            element.overlay = self.overlay;
+            element.tint_pending = true;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.surface != self.surface || prev.rule != self.rule || prev.scrim != self.scrim {
             element.surface = self.surface;
             element.rule = self.rule;
+            element.scrim = self.scrim;
             flags |= ChangeFlags::PAINT;
         }
         flags
@@ -778,10 +1183,32 @@ impl TopBarWidget {
         !self.hidden || self.revealing()
     }
 
-    /// Whether the bar is settled on screen — the one state in which it takes
-    /// input and publishes semantics (see the [module docs](self)).
+    /// Whether the bar is settled on screen **and** nothing modal covers the
+    /// app — the one state in which it takes input and publishes semantics
+    /// (see the [module docs](self)).
     fn settled_open(&self) -> bool {
-        !self.hidden && !self.revealing()
+        !self.hidden && !self.revealing() && !self.overlay
+    }
+
+    /// Advance the overlay tint one frame and report the alpha fraction to
+    /// paint it at (`0.0` untinted, `1.0` full [`SCRIM_ALPHA`]).
+    fn advance_tint(&mut self, ctx: &mut PaintCtx) -> f32 {
+        let Some(stage) = self.tint_anim.as_mut() else {
+            return self.tint as f32;
+        };
+        let animating = stage.advance(ctx.frame_time());
+        self.tint = stage.value();
+        let (_, alpha) = stage.shape(self.tint);
+        if animating {
+            ctx.request_frame();
+        } else {
+            self.tint = stage.target();
+            self.tint_anim = None;
+            // One more frame so the settled tint is the one on screen — the
+            // same courtesy the reveal pays itself.
+            ctx.request_frame();
+        }
+        alpha
     }
 }
 
@@ -858,15 +1285,22 @@ impl Widget for TopBarWidget {
         if !self.occupies_a_box() {
             return;
         }
+        let theme = Theme::from_paint_ctx(ctx);
         // Start a staged reveal now a theme is in scope: `reduce_motion` and
         // the entrance/exit duration are paint-time reads (module docs).
         if self.reveal_pending {
-            let reduce = Theme::from_paint_ctx(ctx)
+            let reduce = theme
                 .map(|theme| theme.motion.reduce_motion)
                 .unwrap_or(false);
             let to = if self.hidden { 0.0 } else { 1.0 };
             self.reveal_anim = Some(Reveal::start(self.reveal, to, reduce));
             self.reveal_pending = false;
+        }
+        // …and the overlay tint, on the modal's own timings (module docs).
+        if self.tint_pending {
+            let to = if self.overlay { 1.0 } else { 0.0 };
+            self.tint_anim = Some(ModalStage::start(self.tint, to, theme));
+            self.tint_pending = false;
         }
 
         // Advance it, and let the frame clock — not the rebuild — decide when
@@ -921,6 +1355,15 @@ impl Widget for TopBarWidget {
             }
             child.paint_child(ctx, scene);
         }
+
+        // The modality tint, over everything the bar just painted and inside
+        // its reveal layer, so a bar arriving under an open sheet fades in
+        // already dimmed rather than flashing lit.
+        let tint = self.advance_tint(ctx);
+        if tint > 0.0 {
+            scene.fill_rect(origin, size, self.scrim.with_alpha(SCRIM_ALPHA * tint));
+        }
+
         if faded {
             scene.pop_layer();
         }
@@ -928,8 +1371,11 @@ impl Widget for TopBarWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if !self.settled_open() {
-            // Hidden, or mid-reveal: a bar that is only half-arrived must not
-            // eat a tap meant for the page it floats over (module docs).
+            // Hidden, mid-reveal, or **under a modal**: a bar that is only
+            // half-arrived must not eat a tap meant for the page it floats
+            // over, and a bar behind a sheet's scrim must not act at all
+            // (module docs). Ignoring rather than swallowing is what lets the
+            // modal underneath treat the press as the outside-tap it is.
             return EventResult::Ignored;
         }
         // Only the leading/trailing slots are interactive, but routing to every
@@ -941,7 +1387,10 @@ impl Widget for TopBarWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         if !self.settled_open() {
             // `/` has no bar at all, in the accessibility tree as on screen —
-            // and a mid-reveal bar routes nothing, so it publishes nothing.
+            // a mid-reveal bar routes nothing, so it publishes nothing, and a
+            // bar under a modal publishes nothing for the stronger reason that
+            // a node here would sit *outside* the modal's own `Role::Dialog`
+            // subtree and offer a way round the modality (module docs).
             return;
         }
         ctx.push_container(
@@ -1081,6 +1530,108 @@ mod tests {
              is arrived ({})",
             leaving.dy,
             arriving.dy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Vector chrome
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_back_chevron_is_the_frameworks_own_chevron_mirrored() {
+        use frust::authoring::{BezPath, Shape};
+
+        let mine = BezPath::from_svg(CHEVRON_LEFT.d).expect("the back chevron parses");
+        let theirs =
+            BezPath::from_svg(frust::icons::CHEVRON_RIGHT.d).expect("the vendored one parses");
+        let (mine, theirs) = (mine.bounding_box(), theirs.bounding_box());
+
+        // A mirror about the design box's centre maps `x` to `design - x`, so
+        // the two bounding boxes swap across it and share their y band exactly.
+        // (The framework's own icon test already pins `theirs` inside the box;
+        // this pins that the transcription is a *reflection* and not a redraw.)
+        let design = CHEVRON_LEFT.design;
+        assert_eq!(CHEVRON_LEFT.design, frust::icons::CHEVRON_RIGHT.design);
+        assert!((mine.x0 - (design - theirs.x1)).abs() < 1e-9, "{mine:?}");
+        assert!((mine.x1 - (design - theirs.x0)).abs() < 1e-9, "{mine:?}");
+        assert!((mine.y0 - theirs.y0).abs() < 1e-9, "{mine:?}");
+        assert!((mine.y1 - theirs.y1).abs() < 1e-9, "{mine:?}");
+    }
+
+    #[test]
+    fn the_slot_mark_fits_the_slot_that_holds_it() {
+        // The tap target is the source's 30×30 `.topbar-icon` box; the vector
+        // is drawn inside it, so a mark bigger than its box would be clipped
+        // by the bar's own band before anyone noticed.
+        const { assert!(ICON_SIZE < ICON_SLOT) };
+        const { assert!(ICON_SLOT <= BAR_HEIGHT) };
+    }
+
+    #[test]
+    fn the_back_affordance_announces_a_word_and_not_a_mark() {
+        // The a11y half of the vector switch: the slot used to be labelled by
+        // the glyph it drew, which a screen reader would read out as the name
+        // of the character. A label is a *name*.
+        assert!(
+            BACK_LABEL.chars().all(|c| c.is_ascii_alphabetic()),
+            "{BACK_LABEL:?} is a name, not a mark"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The overlay tint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_bars_tint_is_the_very_scrim_the_modal_paints() {
+        // The one number this whole mirror rests on: the bar dims by exactly
+        // as much as the page under the sheet does, because it is the same
+        // constant and the same `colors.scrim` role. Anything else reads as a
+        // bar that is "sort of" disabled.
+        assert_eq!(SCRIM_ALPHA, crate::ui::sheet::SCRIM_ALPHA);
+        assert!((0.0..=1.0).contains(&SCRIM_ALPHA));
+    }
+
+    #[test]
+    fn an_overlay_makes_the_bar_inert_the_moment_it_opens() {
+        // Modality is binary: the flag alone gates input and semantics, so a
+        // bar whose tint has not started fading yet is *already* dead. (The
+        // tint's own animation is the sheet's `ModalStage`, tested there.)
+        let mut widget = TopBarWidget {
+            children: Vec::new(),
+            rest_origins: Vec::new(),
+            back: false,
+            hidden: false,
+            overlay: false,
+            surface: Color::BLACK,
+            rule: Color::BLACK,
+            scrim: Color::BLACK,
+            tint: 0.0,
+            tint_anim: None,
+            tint_pending: false,
+            reveal: 1.0,
+            reveal_anim: None,
+            reveal_pending: false,
+            extent: BAR_HEIGHT,
+        };
+        assert!(widget.settled_open(), "a settled bar takes input");
+
+        widget.overlay = true;
+        widget.tint_pending = true;
+        assert!(
+            !widget.settled_open(),
+            "…and stops the frame a modal opens, before the tint has moved"
+        );
+        assert!(
+            widget.occupies_a_box(),
+            "it still paints — dimmed, not gone"
+        );
+
+        widget.overlay = false;
+        widget.tint_pending = true;
+        assert!(
+            widget.settled_open(),
+            "…and comes back the frame the modal closes"
         );
     }
 

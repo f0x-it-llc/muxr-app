@@ -84,16 +84,34 @@ pub fn surface() -> Size {
 /// ([`RecScene::strokes`]) — a Glyph ghost/danger button has a **transparent**
 /// fill and is invisible in `rounded`, so its border is the only geometry it
 /// paints.
+///
+/// Two more channels, for chrome whose *colour* or whose *vector-ness* is the
+/// assertion (rather than its box):
+///
+/// - [`RecScene::fills`] — plain `fill_rect`s **with their colour**. A scrim is
+///   a full-coverage rect whose only frame-to-frame difference is its alpha, so
+///   a geometry-only recorder cannot tell a faded one from an opaque one (see
+///   [`alpha_of`]/[`fills_at`]).
+/// - [`RecScene::paths`] — filled vector paths, the one thing a
+///   `frust::icon` emits. "This affordance is a vector, not a font glyph" is
+///   exactly "it drew a path and contributed no run of its own".
 #[derive(Default)]
 pub struct RecScene {
     pub glyph_runs: usize,
     pub rounded: Vec<(Point, Size)>,
     /// `(origin, bounding-box size)` per stroked path — see the struct docs.
     pub strokes: Vec<(Point, Size)>,
+    /// `(origin, size, colour)` per plain filled rect — see the struct docs.
+    pub fills: Vec<(Point, Size, Color)>,
+    /// `(origin, bounding-box size)` per **filled** path — every `frust::icon`
+    /// paints exactly one.
+    pub paths: Vec<(Point, Size)>,
 }
 
 impl PaintScene for RecScene {
-    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+    fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
+        self.fills.push((origin, size, color));
+    }
     fn fill_rounded_rect(&mut self, origin: Point, size: Size, _radius: f64, _color: Color) {
         self.rounded.push((origin, size));
     }
@@ -102,11 +120,33 @@ impl PaintScene for RecScene {
         self.glyph_runs += 1;
     }
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
+    fn fill_path(&mut self, origin: Point, path: &kurbo::BezPath, _brush: &Brush) {
+        let bounds = path.bounding_box();
+        self.paths
+            .push((origin, Size::new(bounds.width(), bounds.height())));
+    }
     fn stroke_path(&mut self, origin: Point, path: &kurbo::BezPath, _width: f64, _brush: &Brush) {
         let bounds = path.bounding_box();
         self.strokes
             .push((origin, Size::new(bounds.width(), bounds.height())));
     }
+}
+
+/// Every plain fill in `scene` covering exactly `(origin, size)` (within
+/// [`EPSILON`]), in paint order — how a test picks one band's fills out of a
+/// frame that fills plenty of others.
+pub fn fills_at(scene: &RecScene, origin: Point, size: Size) -> Vec<Color> {
+    scene
+        .fills
+        .iter()
+        .filter(|(o, s, _)| same(&(*o, *s), &(origin, size)))
+        .map(|(_, _, color)| *color)
+        .collect()
+}
+
+/// A colour's alpha channel.
+pub fn alpha_of(color: Color) -> f32 {
+    color.components[3]
 }
 
 /// The recorded rect with the largest area, or `None` when nothing was

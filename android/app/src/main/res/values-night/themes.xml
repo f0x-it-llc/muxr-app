@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Muxr's window theme — the **night** configuration, and deliberately identical
+  to the day one in `res/values/themes.xml`.
+
+  This file carries no items of its own. That is the point, not an oversight:
+
+  - Muxr is permanently dark (the composition root installs the Glyph dark
+    design system unconditionally; there is no light variant of the design), so
+    every window attribute — the transparent bar backgrounds, and above all
+    `windowLightStatusBar=false` — must be the same in both configurations. A
+    device switched to light mode must NOT flip the status-bar icons to dark,
+    which is precisely the black-on-black bar Ed's round-5 device gate found.
+  - Both leaves being empty children of the one `Theme.Muxr.Base` means they
+    cannot silently drift: adding an item to either is a visible, deliberate
+    act, and the reviewer's question ("does night need to differ here?") gets
+    asked at the moment it matters.
+  - An explicit night file also documents the intent to the next reader, who
+    would otherwise have to know that *no* `values-night/` is what keeps the
+    theme configuration-invariant.
+
+  See `res/values/themes.xml` for what each attribute does, why inset semantics
+  are unaffected, and the recorded framework limitation on the icon-appearance
+  attributes (a runtime `WindowInsetsControllerCompat` call in the Frust
+  embedding re-derives them from the device's `uiMode` and overrides whatever a
+  theme seeds).
+-->
+<resources>
+
+    <style name="Theme.Muxr" parent="Theme.Muxr.Base" />
+
+</resources>
