@@ -2,5 +2,12 @@
 //! `domain::repositories` trait implementation, each owning its own
 //! failure-mapping site into [`crate::failure::AppFailure`]. No `frust::`
 //! signals/widgets here — same framework-free rule as `domain` (see
-//! `crate::features::terminal::domain`'s module doc). Empty until Phase 2
-//! wires a real implementation.
+//! `crate::features::terminal::domain`'s module doc).
+//!
+//! One today: [`MockTerminalRepository`], the in-memory store seeded from
+//! `docs/terminal.html`. The real `muxrd` client joins it here and
+//! `crate::features::terminal::di` picks which one is published.
+
+pub mod mock_terminal_repository;
+
+pub use mock_terminal_repository::MockTerminalRepository;

@@ -21,6 +21,7 @@ use frust::{AnyView, NavigatorController, Stack, any, icons, navigator};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
+use crate::features::terminal::presentation::pages::open_terminal_menu;
 use crate::routes::{BarAction, BarDirection, BarLeading, Nav, SETTINGS_ROUTE};
 use crate::ui::toasts::toast_layer;
 use crate::ui::topbar::muxr_topbar;
@@ -32,6 +33,15 @@ use crate::ui::topbar::muxr_topbar;
 /// and so rendered differently on Android and not at all on iPhone. See
 /// `crate::ui::topbar`'s "Chrome icons are vectors" rule.
 const SETTINGS_LABEL: &str = "Settings";
+
+/// The terminal route's overflow affordance: its accessible name.
+///
+/// The **mark** is `frust::icons::MORE_VERT`, a vector — never the `⋮` glyph
+/// `docs/terminal.html` sets as text, for the same reason the `⚙` above is a
+/// vector (see `crate::ui::topbar`'s "Chrome icons are vectors" rule). The
+/// menu it opens belongs to the terminal feature; this file only forwards the
+/// press (see [`shell_bar`]).
+const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 
 /// The app's entire root content: a full-height navigator, the top bar
 /// floating over it, the app-wide toast layer over that, and `overlay` stacked
@@ -137,8 +147,15 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> 
     };
     // A sheet/dialog is pushed *inside* the navigator, which the bar floats
     // over — so the bar has to mirror the modality itself (dim, and go inert).
+    //
+    // Fullscreen is a **second input to the same hidden flag** the bar-less
+    // `/` route sets above (never a second hide path): the terminal screen
+    // publishes it through the route-meta mirror, and the bar plays the very
+    // reveal it already plays on a route change. `crate::routes::BarState`'s
+    // own docs carry the rationale; the screen clears the flag on unmount.
     let mut bar = muxr_topbar::<AppState>(meta.resolve_title(connection))
         .reverse(reverse)
+        .hidden(state.fullscreen)
         .overlay(state.overlay_active);
     bar = match meta.leading {
         BarLeading::Brand => bar,
@@ -155,6 +172,12 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> 
                 SETTINGS_LABEL,
                 move |_state: &mut AppState| nav.push(SETTINGS_ROUTE),
             )
+        }
+        // Forward only: the terminal feature owns its own menu (its entries,
+        // its anchor rect and every action they run), exactly as `/settings`
+        // owns everything behind the `⚙`.
+        Some(BarAction::TerminalMenu) => {
+            bar.action(icons::MORE_VERT, TERMINAL_MENU_LABEL, open_terminal_menu)
         }
         None => bar,
     };

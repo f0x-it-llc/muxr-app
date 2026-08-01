@@ -3,6 +3,9 @@
 //! reactive/widget types here — the data layer stays as framework-free as
 //! `domain` (see `crate::features::terminal::domain`'s module doc),
 //! differing only in that it may depend on an external transport/storage
-//! crate. Empty until Phase 2 wires a real implementation.
+//! crate.
+//!
+//! One implementation today: `repositories::MockTerminalRepository`, seeded
+//! from `docs/terminal.html`. The real `muxrd` client lands beside it.
 
 pub mod repositories;

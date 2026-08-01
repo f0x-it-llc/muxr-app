@@ -95,6 +95,10 @@ pub fn surface() -> Size {
 /// - [`RecScene::paths`] — filled vector paths, the one thing a
 ///   `frust::icon` emits. "This affordance is a vector, not a font glyph" is
 ///   exactly "it drew a path and contributed no run of its own".
+/// - [`RecScene::rounded_fills`] — [`RecScene::rounded`]'s colour- *and*
+///   radius-carrying sibling. Most chrome in this app is a **rounded** fill, so
+///   a suite asserting on the *tone* of a card (or on a radius that animates)
+///   needs the same channel `fills` gives plain rects.
 #[derive(Default)]
 pub struct RecScene {
     pub glyph_runs: usize,
@@ -106,14 +110,19 @@ pub struct RecScene {
     /// `(origin, bounding-box size)` per **filled** path — every `frust::icon`
     /// paints exactly one.
     pub paths: Vec<(Point, Size)>,
+    /// `(origin, size, radius, colour)` per rounded fill, in paint order — see
+    /// the struct docs. Parallel to [`RecScene::rounded`], which stays
+    /// geometry-only so every existing suite reads unchanged.
+    pub rounded_fills: Vec<(Point, Size, f64, Color)>,
 }
 
 impl PaintScene for RecScene {
     fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
         self.fills.push((origin, size, color));
     }
-    fn fill_rounded_rect(&mut self, origin: Point, size: Size, _radius: f64, _color: Color) {
+    fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, color: Color) {
         self.rounded.push((origin, size));
+        self.rounded_fills.push((origin, size, radius, color));
     }
     fn draw_text(&mut self, _origin: Point, _text: &str) {}
     fn draw_glyph_run(&mut self, _run: GlyphRun) {
@@ -147,6 +156,19 @@ pub fn fills_at(scene: &RecScene, origin: Point, size: Size) -> Vec<Color> {
 /// A colour's alpha channel.
 pub fn alpha_of(color: Color) -> f32 {
     color.components[3]
+}
+
+/// Every rounded fill in `scene` painted in exactly `color`, as
+/// `(origin, size, radius)` in paint order — [`fills_at`]'s sibling for chrome
+/// whose **tone** is the assertion (a terminal card's `GlyphInk` body, a
+/// selected pill's amber wash) and whose box is not.
+pub fn rounded_in(scene: &RecScene, color: Color) -> Vec<(Point, Size, f64)> {
+    scene
+        .rounded_fills
+        .iter()
+        .filter(|(_, _, _, painted)| *painted == color)
+        .map(|(origin, size, radius, _)| (*origin, *size, *radius))
+        .collect()
 }
 
 /// The recorded rect with the largest area, or `None` when nothing was
