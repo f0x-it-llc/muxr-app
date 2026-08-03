@@ -104,7 +104,10 @@ android {
 
     defaultConfig {
         applicationId = "com.it.f0x.muxr"
-        minSdk = 24
+        // Frust's :frust-embedding library floor is 26 (Platform-Support
+        // Policy, frust docs/DEVELOPMENT.md) - AGP's manifest merger hard-fails
+        // on an app min below it.
+        minSdk = 26
         targetSdk = 36
         versionCode = versionCodeValue
         versionName = versionNameValue
