@@ -73,7 +73,7 @@ pub mod selection;
 pub mod style;
 pub mod widget;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -162,6 +162,18 @@ pub type SharedKeystrokeSource = Rc<RefCell<KeystrokeSource>>;
 /// place those two facts meet: [`dispatch`](Self::dispatch) sends the bytes and
 /// mirrors the source's own revision counter into the signal, one write per
 /// event, never one per byte.
+///
+/// # Read-only, and the scrub boundaries, live here too
+///
+/// Both are properties of *the session*, not of one widget: a read-only
+/// session must be inert whichever widget the platform is talking to, and the
+/// buffered keystrokes ([`input`]'s own "what is retained" docs) must be
+/// dropped the moment the session stops taking input. So
+/// [`read_only`](Self::read_only) is seam state — set by the grid from its own
+/// builder input, honoured by [`dispatch`](Self::dispatch) (the byte exit),
+/// [`absorb`](Self::absorb) and [`press_bar_key`](Self::press_bar_key) alike —
+/// and [`scrub`](Self::scrub) is the call the grid makes on a blur, on turning
+/// read-only, and on teardown.
 #[derive(Clone)]
 pub struct InputSeam {
     /// The shared source — the diff engine and the latch.
@@ -171,6 +183,17 @@ pub struct InputSeam {
     /// The source's revision, mirrored so a `build` that reads it rebuilds when
     /// the latch (or the mirror) moves.
     pub revision: RwSignal<u64>,
+    /// Whether this session refuses input entirely — see the type docs. A
+    /// `Cell` behind an `Rc`, like everything else here: it is written from
+    /// `build` and read from the event and paint passes, where there is no
+    /// `&mut` anything.
+    read_only: Rc<Cell<bool>>,
+    /// How many times a widget has claimed the focus path for this seam. The
+    /// grid compares it across its own blur edge to tell a **hand-off** (a key
+    /// cap took the surface — the session is still being typed into) from a
+    /// real blur (nothing holds it, so the buffers go). Monotonic; the value
+    /// itself means nothing.
+    focus_claim: Rc<Cell<u64>>,
 }
 
 impl InputSeam {
@@ -180,6 +203,8 @@ impl InputSeam {
             source: Rc::new(RefCell::new(KeystrokeSource::new())),
             feed,
             revision: RwSignal::new(0),
+            read_only: Rc::new(Cell::new(false)),
+            focus_claim: Rc::new(Cell::new(0)),
         }
     }
 
@@ -189,14 +214,82 @@ impl InputSeam {
     /// **The one place bytes leave the app**, so a caller never talks to the
     /// feed directly: bar taps and soft-keyboard characters take the identical
     /// route out (the latch having already been applied inside the source).
+    /// That is what makes it the right place for the read-only gate to be
+    /// final: no byte leaves a read-only session, whichever widget derived it.
     pub fn dispatch(&self, emission: &Emission) {
-        if !emission.bytes.is_empty() {
+        if !emission.bytes.is_empty() && !self.read_only() {
             self.feed.borrow_mut().send_input(&emission.bytes);
         }
         let revision = self.source.borrow().revision();
         if revision != self.revision.get_untracked() {
             self.revision.set(revision);
         }
+    }
+
+    /// Whether this session refuses input — see the type docs.
+    pub fn read_only(&self) -> bool {
+        self.read_only.get()
+    }
+
+    /// Publish the session's read-only posture — the grid's own
+    /// [`read_only`](TerminalGridView::read_only) builder input, threaded here
+    /// from its `build`/`rebuild` so the key bar and every other emitter
+    /// observe the same one.
+    ///
+    /// Turning it **on** scrubs: a session that has stopped taking input has
+    /// no reason to keep the last thing typed into it (review M6). Idempotent,
+    /// so the per-rebuild call costs nothing at a stable posture.
+    pub fn set_read_only(&self, read_only: bool) {
+        if self.read_only.replace(read_only) != read_only && read_only {
+            self.scrub();
+        }
+    }
+
+    /// Drop every keystroke the source is holding — see
+    /// [`KeystrokeSource::scrub`] for what that covers, and the type docs for
+    /// the boundaries it is called at.
+    ///
+    /// Deliberately does **not** mirror the source's revision into
+    /// [`revision`](Self::revision): the paint pass calls this (the grid's blur
+    /// edge), and a signal write from paint would wake a whole-app rebuild out
+    /// of a pass that must not schedule one. Nothing rendered reads the mirror
+    /// — only the latch does, and a scrub leaves the latch alone.
+    pub fn scrub(&self) {
+        self.source.borrow_mut().scrub();
+    }
+
+    /// Claim the focus path for this seam, returning the new claim — called by
+    /// every widget that requests focus on the session's behalf (the grid's
+    /// `Down`, a key cap's `Down`).
+    ///
+    /// See [`focus_claim`](Self::focus_claim) for what the grid does with it.
+    pub fn claim_focus(&self) -> u64 {
+        let claim = self.focus_claim.get().wrapping_add(1);
+        self.focus_claim.set(claim);
+        claim
+    }
+
+    /// The current focus claim — the value a widget records when it gains
+    /// focus and re-reads when it loses it. An unchanged claim across that
+    /// edge means nothing else took the surface, i.e. that really was a blur.
+    pub fn focus_claim(&self) -> u64 {
+        self.focus_claim.get()
+    }
+
+    /// Fold a key-bar press into the shared source and send whatever it
+    /// derived, or `None` when the session refuses input.
+    ///
+    /// The bar's counterpart to [`absorb`](Self::absorb), and for the same
+    /// reason: the gate belongs to the seam, not to the cap, so a cap mounted
+    /// over a read-only session is inert rather than depending on the screen
+    /// having remembered not to mount it.
+    pub fn press_bar_key(&self, key: BarKey) -> Option<Emission> {
+        if self.read_only() {
+            return None;
+        }
+        let emission = self.source.borrow_mut().on_bar_key(key);
+        self.dispatch(&emission);
+        Some(emission)
     }
 
     /// The armed modifiers — what the key bar draws its pips from.
@@ -249,7 +342,14 @@ impl InputSeam {
     /// holds the focus path drives the same [`KeystrokeSource`] and publishes
     /// the same [`ime_state`](Self::ime_state)**, so the platform sees one
     /// unbroken input surface no matter which one was tapped last.
+    ///
+    /// A read-only session absorbs nothing at all: the caller reports
+    /// `Ignored`, no snapshot reaches the diff engine, and nothing is
+    /// buffered.
     pub fn absorb(&self, event: &InputEvent) -> Option<Emission> {
+        if self.read_only() {
+            return None;
+        }
         let emission = {
             let mut source = self.source.borrow_mut();
             match event {

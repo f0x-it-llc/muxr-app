@@ -16,6 +16,18 @@
 //! tap really publishes an `ImeContentType::Terminal` surface, that a snapshot
 //! really reaches the source through the focus path, and that the bar and the
 //! soft keyboard really share one latch.
+//!
+//! It also pins the **security contracts** the keystroke-buffer review added
+//! (`input`'s own "what is retained" and Return/desync docs), at the level
+//! they are actually wired at rather than at the model's:
+//!
+//! - a Return leaves no `\n` anywhere in the buffers, and the next keystroke
+//!   diffs against an empty baseline;
+//! - a whole-buffer replacement snapshot sends **nothing** and re-publishes;
+//! - the buffers are scrubbed on a blur and on unmount — but *not* on a key
+//!   bar hand-off, which is the same session still being typed into;
+//! - read-only is a property of the session, so a key cap over one is inert
+//!   too.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -71,6 +83,12 @@ struct TermScreen {
     generation: RwSignal<u64>,
     bar_active: RwSignal<bool>,
     read_only: bool,
+    /// Mount the bar even over a read-only grid. Not a shape any real screen
+    /// has (a read-only terminal raises no keyboard, so the bar's own
+    /// `active` is false) — it exists to prove the **gate**, which lives on
+    /// the seam rather than on this wiring: a cap that somehow got mounted
+    /// over a read-only session must still be inert.
+    force_bar: bool,
 }
 
 impl Component for TermScreen {
@@ -82,7 +100,7 @@ impl Component for TermScreen {
         let generation = self.generation.get();
         // A read-only terminal has no keyboard, and therefore no bar — the
         // wiring a real screen owns, modelled here.
-        let active = self.bar_active.get() && !self.read_only;
+        let active = self.bar_active.get() && (!self.read_only || self.force_bar);
         let grid = terminal_grid(
             Rc::clone(&self.emulator),
             generation,
@@ -123,29 +141,49 @@ struct Mounted {
     published: u64,
     seam: InputSeam,
     bar_active: RwSignal<bool>,
+    /// Whether the screen is still on the tree — cleared by
+    /// [`unmount`](Self::unmount), the way `tests/terminal_live.rs` unmounts
+    /// its own screen.
+    mounted: Rc<std::cell::Cell<bool>>,
 }
 
 impl Mounted {
     fn new() -> Self {
-        Self::with_read_only(false)
+        Self::mount(false, false)
     }
 
     fn with_read_only(read_only: bool) -> Self {
+        Self::mount(read_only, false)
+    }
+
+    /// A read-only grid **with the key bar mounted over it** — see
+    /// [`TermScreen::force_bar`].
+    fn read_only_with_bar() -> Self {
+        Self::mount(true, true)
+    }
+
+    fn mount(read_only: bool, force_bar: bool) -> Self {
         let feed = Rc::new(RefCell::new(DemoFeed::manual()));
         let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
         let seam = InputSeam::new(Rc::clone(&feed) as SharedFeed);
         let generation = RwSignal::new(0u64);
         let bar_active = RwSignal::new(false);
+        let mounted = Rc::new(std::cell::Cell::new(true));
 
         let screen_seam = seam.clone();
         let screen_emulator = Rc::clone(&emulator);
+        let logic_mounted = Rc::clone(&mounted);
         let logic: Logic = Box::new(move |_state: &mut ()| {
+            if !logic_mounted.get() {
+                return any(frust::SizedBox::<()>(Some(0.0), Some(0.0)));
+            }
             any(component(TermScreen {
                 seam: screen_seam.clone(),
                 emulator: Rc::clone(&screen_emulator),
                 generation,
                 bar_active,
                 read_only,
+                force_bar,
             }))
         });
 
@@ -163,6 +201,7 @@ impl Mounted {
             published: 0,
             seam,
             bar_active,
+            mounted,
         };
         mounted.frame();
         // The replay's chunk 0 is due at t=0; drain it once so every later
@@ -293,6 +332,35 @@ impl Mounted {
             .unwrap_or_else(|| panic!("no key-bar cap labelled {label:?}"));
         self.tap(at);
     }
+
+    /// Tap somewhere that claims no focus, which is what frust reads as a
+    /// **blur** (`RenderRoot::event`: "no widget on the tapped path took
+    /// focus").
+    ///
+    /// The bar's own left padding: on the bar's band, so the tap lands, but
+    /// left of the first cap, so nothing claims. Requires the bar to be up —
+    /// its caps are how the band's `y` is found without recomputing the
+    /// screen's layout here.
+    fn tap_outside_everything(&mut self) {
+        let cap = node_center_by_label(&self.root, "Control")
+            .expect("the bar must be up to find the band");
+        self.tap(Point::new(1.0, cap.y));
+    }
+
+    /// How many UTF-16 units of the user's own typing the shared source is
+    /// still holding — the content-free scrub assertion (see
+    /// `KeystrokeSource::buffered_units`).
+    fn buffered_units(&self) -> usize {
+        self.seam.source.borrow().buffered_units()
+    }
+
+    /// Unmount the screen, exactly as `tests/terminal_live.rs` does: the logic
+    /// closure returns a different view, so the whole element tree — the grid
+    /// included — is torn down.
+    fn unmount(&mut self) {
+        self.mounted.set(false);
+        self.frame();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +458,66 @@ fn both_platforms_return_paths_send_carriage_return() {
     // Android: `IME_ACTION_DONE` arrives as a focus-routed Key(Enter).
     mounted.key(Key::Named(NamedKey::Enter));
     assert_eq!(mounted.drain_hex(), "0d");
+}
+
+#[test]
+fn a_return_leaves_no_newline_behind_and_the_next_key_starts_clean() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+
+    mounted.type_text("ls -la\n");
+    assert_eq!(mounted.drain_hex(), "6c73202d6c610d", "`ls -la`, then CR");
+
+    // CONTRACT (review M7, guard 1): the submitted line is dropped rather than
+    // kept as the next diff's baseline, so the literal `\n` iOS accumulates
+    // can never be replayed to the host by a bulk re-emission.
+    assert!(
+        !mounted.mirror().contains('\n'),
+        "no newline survives a Return: {:?}",
+        mounted.mirror()
+    );
+    assert_eq!(mounted.mirror(), "", "…because nothing survives one");
+    assert_eq!(mounted.buffered_units(), 0);
+
+    // …and the platform, having reconciled to that empty published state
+    // inside the same round trip, diffs its next keystroke against nothing.
+    mounted.type_text("x");
+    assert_eq!(
+        mounted.drain_hex(),
+        "78",
+        "one byte, not the whole line again"
+    );
+}
+
+#[test]
+fn a_whole_buffer_replacement_emits_nothing_and_re_publishes() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.type_text("rm -rf /tmp/x");
+    mounted.drain();
+
+    // What dictation (which rewrites the field per partial), a replace-span
+    // rewrite, or a bridge one frame behind all look like: one snapshot that
+    // replaces the whole buffer.
+    mounted.apply("wholly different text");
+    assert!(
+        mounted.drain().is_empty(),
+        "an oversized single edit is a desync, not intent: nothing is emitted"
+    );
+    assert_eq!(
+        mounted.mirror(),
+        "rm -rf /tmp/x",
+        "the mirror the source believes in is re-published, pulling the \
+         platform back into step"
+    );
+
+    // The session is still live: ordinary typing on the restored baseline works.
+    mounted.type_text("y");
+    assert_eq!(mounted.drain_hex(), "79");
 }
 
 #[test]
@@ -595,6 +723,81 @@ fn an_arrow_cap_leaves_the_latch_armed_for_the_character_after_it() {
 }
 
 // ---------------------------------------------------------------------------
+// Keystroke-buffer hygiene (review M6): the scrub boundaries
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_blur_scrubs_what_was_typed() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.set_bar(true);
+    mounted.type_text("hunter2");
+    mounted.drain();
+    assert!(mounted.buffered_units() > 0, "it is buffered while live");
+
+    // A tap that claims no focus is a blur, and the surface goes with it.
+    mounted.tap_outside_everything();
+    assert!(
+        mounted.root.ime_state().is_none(),
+        "the tap really did blur (no surface is published any more)"
+    );
+    assert_eq!(
+        mounted.buffered_units(),
+        0,
+        "a blurred session keeps none of it"
+    );
+    assert_eq!(mounted.mirror(), "");
+}
+
+#[test]
+fn a_key_bar_hand_off_is_not_a_blur_and_keeps_the_line_typeable() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.set_bar(true);
+    mounted.type_text("ls -l");
+    mounted.drain();
+
+    // A cap takes the focus path from the grid — the same session, still being
+    // typed into, so the buffers must survive it (scrubbing here would cost
+    // the user their next Backspace: a delete is only observable as a
+    // shortening, and an emptied mirror has nothing to shorten).
+    mounted.tap_cap("Left arrow");
+    assert_eq!(mounted.drain_hex(), "1b5b44");
+    assert_eq!(
+        mounted.mirror(),
+        "ls -l",
+        "the baseline survives a hand-off"
+    );
+
+    let mut shorter = mounted.mirror();
+    shorter.pop();
+    mounted.apply(&shorter);
+    assert_eq!(mounted.drain_hex(), "7f", "…so backspace still emits");
+}
+
+#[test]
+fn unmounting_the_grid_scrubs_the_session() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.type_text("hunter2");
+    mounted.drain();
+    assert!(mounted.buffered_units() > 0);
+
+    mounted.unmount();
+    assert_eq!(
+        mounted.buffered_units(),
+        0,
+        "the grid's own teardown drops what the session buffered"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Read-only
 // ---------------------------------------------------------------------------
 
@@ -623,6 +826,39 @@ fn a_read_only_grid_is_never_an_ime_client_and_emits_nothing() {
             .iter()
             .any(|label| label == "Escape"),
         "a read-only terminal has no key bar"
+    );
+}
+
+#[test]
+fn a_key_bar_cap_over_a_read_only_session_emits_nothing_either() {
+    let _serial = serial();
+    let _owner = setup();
+    // The bar mounted over a read-only grid — a shape no real screen produces
+    // (see `TermScreen::force_bar`), so that what is being asserted is the
+    // gate itself: read-only lives on the *seam*, so every emitter observes
+    // it, not just the grid whose builder input it came from.
+    let mut mounted = Mounted::read_only_with_bar();
+    mounted.set_bar(true);
+    assert!(
+        node_labels(&mounted.root)
+            .iter()
+            .any(|label| label == "Escape"),
+        "the bar really is mounted for this one"
+    );
+
+    mounted.tap_cap("Escape");
+    mounted.tap_cap("Up arrow");
+    assert!(
+        mounted.drain().is_empty(),
+        "a cap over a read-only session derives nothing and sends nothing"
+    );
+
+    // The latch key is inert too, so nothing is left armed for later.
+    mounted.tap_cap("Control");
+    assert_eq!(
+        mounted.toggled("Control"),
+        Some(Toggled::False),
+        "…and no latch is armed behind the gate"
     );
 }
 

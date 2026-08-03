@@ -70,6 +70,18 @@
 //! `read_only` grid — the widget claims no focus, publishes nothing and emits
 //! nothing: it is inert, exactly as it was.
 //!
+//! Two session-wide facts are **published onto the seam** from here rather
+//! than kept as widget state, because the key bar shares that session and must
+//! agree about both:
+//!
+//! - `read_only` (`build`/`rebuild` → [`InputSeam::set_read_only`]), so a
+//!   read-only session is inert at the seam's own byte exit and not merely at
+//!   this widget's `event` gate;
+//! - the **scrub boundaries** for what the source has buffered
+//!   ([`input`](super::input)'s "what is retained" docs): a blur
+//!   ([`note_focus_edge`](TerminalGridWidget::note_focus_edge)), turning
+//!   read-only, and this view's `teardown`.
+//!
 //! # Selection, the loupe, and who owns which half of the gesture
 //!
 //! Given a [`SelectionSeam`] (`.selection(..)`), the grid is also the selection
@@ -377,8 +389,13 @@ pub struct TerminalGridWidget {
     /// parent-relative) and published as the platform's candidate-placement
     /// hint.
     caret_rect: Option<Rect>,
-    /// Effective focus as of the last paint, for the blink-reset edge.
+    /// Effective focus as of the last paint, for the blink-reset edge — and,
+    /// now, for the blur scrub (see [`note_focus_edge`](Self::note_focus_edge)).
     was_focused: bool,
+    /// The seam's focus claim as of the last time this grid took focus. What
+    /// tells a hand-off to the key bar from a real blur — see
+    /// [`InputSeam::focus_claim`].
+    focus_claim: u64,
 }
 
 impl<State: 'static> View<State> for TerminalGridView {
@@ -389,6 +406,12 @@ impl<State: 'static> View<State> for TerminalGridView {
         // selected — see `SelectionSeam::observe_generation`.
         if let Some(seam) = self.selection.as_ref() {
             seam.observe_generation(self.generation);
+        }
+        // The read-only posture belongs to the session, not to this widget:
+        // published here so the key bar's caps are gated by the same flag
+        // (see `InputSeam::set_read_only`, which also scrubs when it rises).
+        if let Some(seam) = self.input.as_ref() {
+            seam.set_read_only(self.read_only);
         }
         TerminalGridWidget {
             generation: self.generation,
@@ -408,6 +431,7 @@ impl<State: 'static> View<State> for TerminalGridView {
             selection: self.selection.clone(),
             caret_rect: None,
             was_focused: self.focused,
+            focus_claim: self.input.as_ref().map_or(0, InputSeam::focus_claim),
         }
     }
 
@@ -467,6 +491,13 @@ impl<State: 'static> View<State> for TerminalGridView {
             element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
         }
+        // Republished every rebuild rather than only on the `clienthood` edge:
+        // the seam outlives this widget's element (a screen may rebuild the
+        // grid around it), and `set_read_only` is idempotent — only the
+        // false→true edge does anything, and what it does is scrub.
+        if let Some(seam) = self.input.as_ref() {
+            seam.set_read_only(self.read_only);
+        }
 
         // A new generation is new output — clear a held selection rather
         // than let it retarget under streaming content (see
@@ -478,6 +509,22 @@ impl<State: 'static> View<State> for TerminalGridView {
         }
 
         flags
+    }
+
+    /// The grid is going away: drop everything the session buffered.
+    ///
+    /// The **unmount scrub** (review M6). It lives here rather than on the
+    /// screen's `on_cleanup` for a mechanical reason: `on_cleanup` takes a
+    /// `Send + Sync` closure and every handle on this seam is `Rc`-backed, so
+    /// the cleanup could never hold one. `ComponentWidget::teardown` tears the
+    /// element tree down *before* it disposes the owner and drops `State`
+    /// (frust's `docs/CODE_STANDARDS.md`), so this runs first on the same
+    /// unmount — leaving the seam's own `Zeroizing` buffers to scrub again
+    /// when the last `Rc` finally drops, whichever order that happens in.
+    fn teardown(&self, element: &mut TerminalGridWidget, _ctx: &mut BuildCtx<'_>) {
+        if let Some(seam) = element.input.as_ref() {
+            seam.scrub();
+        }
     }
 }
 
@@ -551,6 +598,7 @@ impl Widget for TerminalGridWidget {
             // A freshly focused grid lights its caret at once rather than
             // inheriting whatever phase the last focus left behind.
             self.blink_from = None;
+            self.note_focus_edge(focused);
         }
 
         // The caret cell, in absolute coordinates, for the platform's
@@ -609,7 +657,9 @@ impl Widget for TerminalGridWidget {
         {
             return result;
         }
-        let Some(seam) = self.input.as_ref() else {
+        // Cloned, not borrowed: the arms below write `self.focus_claim` while
+        // the seam is in hand, and the clone is two `Rc` bumps.
+        let Some(seam) = self.input.clone() else {
             return EventResult::Ignored;
         };
         if self.read_only {
@@ -622,7 +672,10 @@ impl Widget for TerminalGridWidget {
                 }
                 // Every tap re-claims focus and re-publishes `active: true`, so
                 // a keyboard the user dismissed comes back on the next tap
-                // rather than needing a blur first.
+                // rather than needing a blur first. The claim is recorded so
+                // the next blur edge can tell a real blur from the key bar
+                // taking the surface (see `note_focus_edge`).
+                self.focus_claim = seam.claim_focus();
                 ctx.request_focus();
                 let state = seam.ime_state(self.caret_rect);
                 ctx.publish_ime_state(state);
@@ -790,6 +843,35 @@ impl TerminalGridWidget {
                 ctx.request_redraw();
                 Some(EventResult::Ignored)
             }
+        }
+    }
+
+    /// One end of a focus edge, as `paint` observed it: the **blur scrub**
+    /// (review M6), and the claim bookkeeping that keeps it honest.
+    ///
+    /// A blur is where buffered keystrokes stop being live, so it is a scrub
+    /// boundary — but a tap on a key bar cap *also* takes the focus path away
+    /// from this grid, and that one is a **hand-off**, not a blur: the same
+    /// session is still being typed into, and scrubbing there would silently
+    /// cost the user their next Backspace (a delete is only observable as a
+    /// shortening, and an emptied mirror has nothing to shorten). So the
+    /// seam's claim counter is what distinguishes them: unchanged across the
+    /// edge means nothing else took the surface.
+    ///
+    /// **Residual, recorded rather than papered over:** a cap holding the
+    /// focus path when the keyboard is dismissed tears down with the bar and
+    /// reports no blur of its own, so that path's scrub waits for the pane's
+    /// teardown (or the grid's next real blur). Every path that *submits* a
+    /// line already scrubs at the source, which is where a typed secret
+    /// actually ends.
+    fn note_focus_edge(&mut self, focused: bool) {
+        let Some(seam) = self.input.clone() else {
+            return;
+        };
+        if focused {
+            self.focus_claim = seam.focus_claim();
+        } else if seam.focus_claim() == self.focus_claim {
+            seam.scrub();
         }
     }
 
