@@ -242,13 +242,13 @@ grid through the "Demo session" cutover.
 
 - The `muxrd` connection/gRPC layer (TLS + bearer auth) — `connection.rs`'s controller is mock-only,
   and every feature's repositories are in-memory mocks standing in for it.
-- Cutting the terminal grid over to a real `muxrd` session (replacing `DemoFeed`), a scrollback view,
-  and a real session's read-only/threaded handling — the grid, its keystroke source and its
-  selection are built and demo-mounted (see Feature Slices' `terminal` entry); only the live
-  transport remains.
+- Cutting the terminal grid over to a real `muxrd` session (replacing `DemoFeed`) and a real
+  session's read-only/threaded handling — the grid, its keystroke source and its selection are built
+  and demo-mounted (see Feature Slices' `terminal` entry); only the live transport remains. Also
+  scrollback-anchored selection: `term::selection` addresses only the rendered screen today and
+  clears a held selection on new output rather than retarget it stale (its module docs record why).
 - QR-code pairing for host + token entry.
-- Secure, persisted credential/preference storage — `settings`'s preferences repository is
-  in-memory only.
+- Secure, persisted credential/preference storage — `settings`'s preferences repository is in-memory only.
 - The login-token field's controller-held buffer is cleared and zeroized on both connect and
   disconnect today; transient copies on the render pass and the platform IME surface (suggestions,
   recents capture) still hold plaintext until platform-level masking plumbing lands.

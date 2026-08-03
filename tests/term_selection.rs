@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use frust::authoring::{Affine, PaintScene, PointerPhase};
-use frust::{AnyView, GetUntracked, RwSignal, any};
+use frust::{AnyView, GetUntracked, RwSignal, Set, any};
 use frust_core::RenderRoot;
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
@@ -36,6 +36,7 @@ use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::presentation::term::chip::{
     CHIP_H, CHIP_W, COPIED_TOAST, CopySink, chip_rect, copy_chip,
 };
+use muxr::features::terminal::presentation::term::geometry::CellGeometry;
 use muxr::features::terminal::presentation::term::selection::{GridPoint, GridRange, segments};
 use muxr::features::terminal::presentation::term::widget::{
     LOUPE_H, LOUPE_MARGIN, LOUPE_SCALE, LOUPE_W, loupe_box, loupe_content_offset,
@@ -177,6 +178,9 @@ struct Mounted {
     tcx: TextContext,
     emulator: SharedEmulator,
     selection: SelectionSeam,
+    /// The feed pump's own generation counter — a test bumps it directly to
+    /// simulate new output arriving (see [`Mounted::advance_generation`]).
+    generation: RwSignal<u64>,
     /// What `Copy` handed the clipboard, in order — the injected sink (see the
     /// [module docs](self)).
     copied: Rc<RefCell<Vec<String>>>,
@@ -230,8 +234,19 @@ impl Mounted {
             tcx: TextContext::new(),
             emulator,
             selection,
+            generation,
             copied,
         }
+    }
+
+    /// Simulate the feed pump publishing a new generation — i.e. new output
+    /// arrived on the underlying session (see [`pump_wake`](
+    /// muxr::features::terminal::presentation::term::pump_wake), which this
+    /// mirrors at the one-signal-write granularity that matters here: the
+    /// value itself is a test-visible counter, not the wire format).
+    fn advance_generation(&mut self) {
+        let next = self.generation.get_untracked() + 1;
+        self.generation.set(next);
     }
 
     /// One frame at `at_ms` on the paint clock: rebuild, lay out at [`PHONE`],
@@ -805,6 +820,127 @@ fn a_read_only_grid_still_selects_and_still_copies() {
         !mounted.root.is_focus_active(),
         "…while still refusing focus, which is what read-only means for input"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Grid shrink: a held selection is clamped, never carried stale into Copy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.frame(0.0);
+
+    // `build` (row 0, cols 6..=10) dragged onto `local` (row 1) — a genuine
+    // multi-row selection whose BEGIN column (6) is about to outlive the grid
+    // it was resolved against.
+    mounted.hold(mounted.cell(0, 8));
+    mounted.event(PointerPhase::Move, mounted.cell(1, 5));
+    assert_eq!(
+        mounted.text(),
+        "build release\nusr local",
+        "sanity: selected"
+    );
+
+    // The grid shrinks under the held selection — a rotation, a font-size
+    // bump, a fullscreen collapse. `TerminalGridWidget::layout` resizes the
+    // emulator to the new geometry and then calls `SelectionSeam::set_metrics`
+    // with it, in that order; this simulates exactly that pair of calls
+    // directly, at a width narrower than the selection's own begin column.
+    let geo = mounted.selection.metrics().expect("laid out once already");
+    let narrow = CellGeometry { cols: 5, ..geo };
+    mounted
+        .emulator
+        .borrow_mut()
+        .resize(narrow.cols, narrow.rows);
+    mounted.selection.set_metrics(narrow);
+
+    // Before this fix, this call reached `vt100::Screen::contents_between`
+    // with a stale `begin.col` (6) past the new 5-col screen and panicked — a
+    // `u16` underflow in its multi-row branch (`cols - start_col`), under the
+    // dev profile's `overflow-checks` (the profile `cargo test` runs under).
+    let text = mounted.text();
+    assert!(
+        !text.is_empty(),
+        "the clamped selection still copies something: {text:?}"
+    );
+    assert!(
+        text.chars().all(|c| c != '\0'),
+        "no raw off-screen padding leaked through: {text:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Streaming output: a held selection is cleared, not silently retargeted
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_generation_bump_clears_a_held_selection_and_its_chip() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    let release = select_and_release(&mut mounted);
+    assert!(mounted.selection.range().is_some(), "sanity: selected");
+    assert_eq!(mounted.selection.chip_anchor(), Some(release));
+
+    // The feed pump publishes a new generation — new output arrived, and the
+    // rendered screen the selection's `GridPoint`s address may have scrolled
+    // underneath it.
+    mounted.advance_generation();
+    let scene = mounted.frame(900.0);
+
+    assert_eq!(
+        mounted.selection.range(),
+        None,
+        "a held selection is cleared rather than silently retargeted under \
+         streaming output"
+    );
+    assert!(
+        mounted.selection.chip_anchor().is_none(),
+        "…and its chip goes with it"
+    );
+    assert!(scene.pill().is_none(), "…gone from the paint too");
+    assert!(
+        !node_labels(&mounted.root).contains(&"Copy".to_string()),
+        "…and from the a11y tree"
+    );
+}
+
+#[test]
+fn a_generation_bump_with_nothing_selected_is_a_no_op() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.frame(0.0);
+
+    mounted.advance_generation();
+    mounted.frame(20.0);
+    // Nothing to assert going wrong here except that a hold still works
+    // exactly as it does with no generation bump in the picture at all — the
+    // bump had nothing to clear and touched nothing else.
+    mounted.hold(mounted.cell(0, 8));
+    assert_eq!(mounted.text(), "build");
+}
+
+#[test]
+fn a_rebuild_that_repeats_the_same_generation_does_not_clear_a_selection() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    select_and_release(&mut mounted);
+    assert!(mounted.selection.range().is_some(), "sanity: selected");
+
+    // Further frames with no `advance_generation` call are ordinary
+    // repaints/rebuilds of the same content — not new output — and must not
+    // touch the selection (the chip-paint tests above already rely on this,
+    // but it is the direct claim the M3 fix makes).
+    mounted.frame(720.0);
+    mounted.frame(740.0);
+
+    assert!(mounted.selection.range().is_some());
+    assert!(mounted.selection.chip_anchor().is_some());
 }
 
 // ---------------------------------------------------------------------------

@@ -301,6 +301,10 @@ pub struct SelectionState {
     chip: Option<Point>,
     /// Selection-click haptics fired — a test/diagnostic counter.
     haptics: u32,
+    /// The last content generation this seam observed (see
+    /// [`SelectionSeam::observe_generation`]). `None` until the grid's first
+    /// build — a fresh seam has nothing selected yet, so nothing to clear.
+    last_generation: Option<u64>,
 }
 
 /// Everything the grid widget, the long-press callback and the Copy chip must
@@ -343,8 +347,23 @@ impl SelectionSeam {
 
     /// Publish the cell box the grid just laid out at — the px→cell mapping
     /// every resolution below goes through. Called from `layout`.
+    ///
+    /// A held selection is clamped onto the new grid **here**, the instant a
+    /// shrink is observed — a rotation, a font-size bump, a fullscreen
+    /// collapse (`TerminalGridWidget::layout` resizes the emulator on any
+    /// cell-grid delta, then calls this with the geometry it resized to).
+    /// This is what stops a stale, off-screen `range` from ever reaching
+    /// [`selection::selected_text`] (a u16 underflow inside `vt100`'s own
+    /// `contents_between` on a shrink-then-Copy) or an equally stale
+    /// [`selection::segments`] paint — [`GridRange::clamp_to`] is a no-op
+    /// when the grid didn't shrink, so this costs nothing on the common,
+    /// unchanged-size path.
     pub fn set_metrics(&self, metrics: CellGeometry) {
-        self.state.borrow_mut().metrics = Some(metrics);
+        let mut state = self.state.borrow_mut();
+        state.metrics = Some(metrics);
+        if let Some(range) = state.range {
+            state.range = Some(range.clamp_to(metrics.cols, metrics.rows));
+        }
     }
 
     /// Record the finger at `at` (grid-local logical px), and whether it is
@@ -446,6 +465,34 @@ impl SelectionSeam {
             self.clear();
         }
         active
+    }
+
+    /// Note that the grid just observed content generation `generation`,
+    /// clearing a held selection if the generation moved since the last
+    /// observation (see [`selection`]'s "Streaming output clears a held
+    /// selection" module docs for why).
+    ///
+    /// A no-op unless BOTH hold: `generation` actually differs from the last
+    /// one this seam saw, and something is currently held (`is_active`) — a
+    /// generation bump with no selection has nothing to clear, and a rebuild
+    /// carrying the *same* generation (any app-wide rebuild the terminal
+    /// screen merely happens to sit under) is not new output and must not
+    /// touch a selection just because the widget repainted.
+    ///
+    /// Called once from [`TerminalGridView::build`](widget::TerminalGridView)
+    /// (seeding `last_generation` with nothing to clear yet) and once from
+    /// its `rebuild`, every time — this is where the generation the widget
+    /// carries is actually observed.
+    pub fn observe_generation(&self, generation: u64) {
+        let should_clear = {
+            let mut state = self.state.borrow_mut();
+            let moved = state.last_generation.is_some_and(|last| last != generation);
+            state.last_generation = Some(generation);
+            moved && (state.range.is_some() || state.chip.is_some())
+        };
+        if should_clear {
+            self.clear();
+        }
     }
 
     /// The selected cells, if any.
