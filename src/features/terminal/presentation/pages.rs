@@ -129,6 +129,7 @@ use frust::{
 use crate::AppState;
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
+use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::TabEntry;
@@ -385,12 +386,19 @@ impl Component for TerminalScreen {
         // the very push that recorded the query (see that method's docs for
         // why the query cannot arrive through the route builder at all).
         let session = app_nav.param(SESSION_QUERY_KEY);
-        // The screen-scoped view model, over the two app-scoped repositories
-        // `di` published. Auto-disposed on unmount via `on_cleanup`.
+        // The screen-scoped view model, over the three app-scoped
+        // repositories `di` published — `terminal`'s own, plus `sessions`'
+        // and `settings`' resolved directly through their own `di.rs`
+        // (`docs/ARCHITECTURE.md`'s Feature Slices section records both as
+        // the same `di.rs`-only widening). Resolved exactly **once**, here,
+        // not from inside `TerminalController::refresh_appearance`'s
+        // per-tick poll — the ad-hoc-DI pattern that method used to follow.
+        // Auto-disposed on unmount via `on_cleanup`.
         let controller = use_controller::<TerminalController, AppFailure>(move || {
             TerminalController::new(
                 expect_terminal_repository(),
                 expect_sessions_repository(),
+                expect_preferences_repository(),
                 session.clone(),
             )
         });

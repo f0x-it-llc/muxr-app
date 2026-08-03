@@ -32,6 +32,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use frust::{
@@ -507,6 +508,79 @@ fn a_settings_change_reaches_the_live_panes_widget_inputs() {
             .font_size
             .get_untracked(),
         14.0
+    );
+}
+
+/// Review finding M4: `refresh_appearance` used to `set()` both signals
+/// unconditionally on every poll tick, waking a tracked rebuild + unpaced
+/// frame every poll interval, forever, even while the live pane sat
+/// perfectly idle. Pins the fix's read-compare-then-write gate directly:
+/// invoking `TerminalController::refresh_appearance` twice in a row is
+/// exactly what two real poll ticks do (`LiveSession::enter`'s
+/// `use_interval` callback is nothing but
+/// `spawn_local(async move { poll.refresh_appearance().await })`), without
+/// waiting on that interval's own real-time cadence — this suite has no way
+/// to fake the background tokio runtime's timer, and a test that genuinely
+/// waited out two production-cadence ticks would be both slow and, at any
+/// shortened test-only cadence, testing a cadence nothing ships.
+#[test]
+fn an_idle_poll_with_unchanged_prefs_writes_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    h.frame();
+
+    let controller = debug_controller().expect("mounted");
+    let block_on = |fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a current-thread runtime")
+            .block_on(fut)
+    };
+
+    // Establish a real, non-default appearance first — otherwise the very
+    // first read would already match the seeded defaults and write nothing,
+    // proving nothing about the *gate* this test exists to pin.
+    let repository = expect_preferences_repository();
+    block_on(Box::pin(async move {
+        let _ = repository
+            .save_appearance(AppearancePrefs {
+                font_family: "Space Mono".to_string(),
+                font_size_px: 14,
+                cursor_style: SettingsCursorStyle::Underline,
+            })
+            .await;
+    }));
+
+    // First poll cycle: the store really changed since construction, so this
+    // tick must write both signals.
+    let first = Arc::clone(&controller);
+    block_on(Box::pin(async move { first.refresh_appearance().await }));
+    assert_eq!(
+        controller.cursor_style.get_untracked(),
+        GridCursorStyle::Underline
+    );
+    assert_eq!(controller.font_size.get_untracked(), 14.0);
+    let after_first = controller.appearance_writes();
+    assert!(
+        after_first >= 1,
+        "a real appearance change must write something"
+    );
+
+    // Two more identical poll cycles: nothing changed in the shared store
+    // since the first read landed, so read-compare-then-write must write
+    // neither signal on either tick — the idle-poll case M4 flagged.
+    let second = Arc::clone(&controller);
+    block_on(Box::pin(async move { second.refresh_appearance().await }));
+    let third = Arc::clone(&controller);
+    block_on(Box::pin(async move { third.refresh_appearance().await }));
+
+    assert_eq!(
+        controller.appearance_writes(),
+        after_first,
+        "two identical poll cycles must write nothing further"
     );
 }
 

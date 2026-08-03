@@ -38,8 +38,25 @@
 //! own `TrustMode` re-export uses); nothing below crosses into `sessions`'
 //! `data` or `presentation`, and `presentation::controller` reaches this type
 //! through here rather than naming `sessions::domain` itself.
+//!
+//! # Cursor-style reuse (a documented layering tension) — the third widening
+//!
+//! [`SettingsCursorStyle`] is likewise **not** re-minted here: it is the
+//! `settings` feature's own terminal-appearance cursor shape, re-exported
+//! under this qualified name (rather than bare `CursorStyle`) so it stays
+//! unambiguous beside `presentation::term::CursorStyle`, the live grid's own
+//! cursor-shape type the two are mapped between. A cursor shape has exactly
+//! one owner (the settings screen's own picker and its store), so the live
+//! pane's own cursor-style mapping fn reuses it rather than a second,
+//! driftable enum. Same accounting as the rename widening above
+//! (`crate::features::terminal::domain`'s module docs record it as the third
+//! use of this app's `domain` → sibling `domain` widening); nothing below
+//! crosses into `settings`' `data` or
+//! `presentation`, and `presentation::controller` reaches this type through
+//! here rather than naming a sibling's `domain` itself.
 
 pub use crate::features::sessions::domain::entities::RenameRequest;
+pub use crate::features::settings::domain::entities::CursorStyle as SettingsCursorStyle;
 
 /// One zellij *space* — the sheet's `spaces` pill row.
 #[derive(Clone, Debug, PartialEq, Eq)]

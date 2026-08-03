@@ -41,8 +41,18 @@
 //! own `TrustMode` re-export uses); nothing below crosses into `sessions`'
 //! `data` or `presentation`, and `presentation::controller` reaches this
 //! trait through here rather than naming `sessions::domain` itself.
+//!
+//! [`PreferencesRepository`] is re-exported the identical way, for the
+//! identical reason: it is
+//! [`crate::features::settings::domain::repositories::PreferencesRepository`],
+//! the `settings` feature's own device-local preferences store, which the
+//! live pane's appearance poll reads through a controller-held handle
+//! (`presentation::controller::TerminalController::refresh_appearance`)
+//! rather than a per-tick context lookup — see `crate::features::terminal::domain`'s
+//! module docs for the full widening accounting.
 
 pub use crate::features::sessions::domain::repositories::SessionsRepository;
+pub use crate::features::settings::domain::repositories::PreferencesRepository;
 
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{Space, TabEntry, TermLine};
