@@ -103,13 +103,15 @@ Four slices — `connect`, `sessions`, `terminal`, `settings` — each split int
 All four are now full slices — mock repositories behind domain traits, a clean-signals controller,
 and a per-screen `Component` (see Building a Screen, below) — over mock data; the real `muxrd` gRPC
 layer is not wired yet (see Planned). A `domain` → sibling-`domain` edge is a deliberate, narrow
-widening of the table above, used twice: `connect`'s domain re-exports `crate::connection::TrustMode`
-rather than re-minting it, and `terminal`'s domain re-exports `sessions`' own `SessionsRepository`/
-`RenameRequest` so a session's name has exactly one owner (the `sessions` list and its store) and the
-terminal screen's rename writes through it rather than minting a second, driftable name — neither
-edge crosses into a sibling's `data` or `presentation`. A third widening sits outside the layer table
-entirely: each feature's `di.rs` is composition-root wiring, and `terminal`'s page resolves
-`sessions::di::expect_sessions_repository()` directly rather than re-routing a copy through its own.
+widening of the table above, used three times: `connect`'s domain re-exports
+`crate::connection::TrustMode`; `terminal`'s domain re-exports `sessions`' own
+`SessionsRepository`/`RenameRequest` (one owner for a session's name); and `terminal`'s domain also
+re-exports `settings`' own `CursorStyle`/`PreferencesRepository` (the live pane maps a cursor shape
+and reads appearance prefs through the one store `settings` writes) — no edge crosses a sibling's
+`data` or `presentation`. A separate widening sits outside the layer table entirely: each feature's
+`di.rs` is composition-root wiring, and `terminal`'s page resolves both
+`sessions::di::expect_sessions_repository()` and `settings::di::expect_preferences_repository()`
+directly rather than re-routing copies through its own.
 
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, a mock-mirror
   repository, the fullscreen seam, the "panes & tabs" sheet, and the app bar's overflow menu
@@ -131,8 +133,7 @@ entirely: each feature's `di.rs` is composition-root wiring, and `terminal`'s pa
   terminal appearance, session poll) over an in-memory token repository and an in-memory preferences
   repository (persistence is Planned), a shared picker-sheet builder the last two groups' rows open,
   and the Disconnect flow — the production caller of `ConnectionController::disconnect`. Its
-  `herdr version` row is a screen-local constant, since `ServerInfo` carries only one
-  multiplexer-version field (a real herdr wire-version field is Planned).
+  `herdr version` row is a screen-local constant (see Planned).
 - **`sessions`** — its `presentation::pieces` still exports an unused `picker_rows`/`picker_heading`
   pair from a picker sheet the redesign superseded (switch/create moved onto the dashed new-session
   row and the empty state); kept for a future picker sheet to inherit rather than re-derive.
@@ -178,8 +179,7 @@ example, every frust app author) should copy. Normative, not aspirational; huddl
 - **`topbar`** — the shell's persistent branded bar (see Shell, above): brand-or-back leading slot, a
   crossfading centered title, one trailing icon slot, and the bar's own reveal animation. Hosts
   `icon_button`, the app's one vector press-target primitive (a labelled `Role::Button` over a single
-  icon pod) — now at three call sites; promoting it out to its own `crate::ui` module is a known,
-  deliberately deferred refactor.
+  icon pod) — now at three call sites (promoting it out is a deferred refactor; see Planned).
 - **`sheet`** — a hand-composed modal bottom sheet (`show_sheet`/`sheet_scaffold`): the documented
   workaround for frust's missing Glyph sheet primitive. Owns `ModalStage`, the timing source its own
   scrim-fade/panel-slide shares with the Glyph dialog's dim — the sheet's scrim is its own now,

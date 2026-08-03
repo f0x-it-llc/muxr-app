@@ -3,8 +3,13 @@
 //! Mirrors the shape `docs/ARCHITECTURE.md`'s **Building a Screen** section
 //! mandates and `features::sessions`' own controller establishes: a
 //! [`ControllerCore`] embedded by composition, the feature's four use cases
-//! constructed over two injected repositories, and the signals the screen
-//! renders. Hosted by the screen through `clean_signals_frust::use_controller`,
+//! constructed over two injected repositories, a third injected repository
+//! (`settings`' own preferences store, read directly by the appearance poll
+//! rather than through a use case), and the signals the screen renders. Every
+//! injected repository is resolved exactly **once**, by `pages.rs`'s
+//! `use_controller` factory — never re-resolved from inside a method this
+//! controller runs later (see [`refresh_appearance`](Self::refresh_appearance)'s
+//! own note). Hosted by the screen through `clean_signals_frust::use_controller`,
 //! so it is created on route mount and disposed on unmount.
 //!
 //! # Signals vs. plain state, and where the *animations* live
@@ -44,13 +49,13 @@ use clean_signals_frust::use_interval;
 use frust::{GetUntracked, RwSignal, Set, spawn_local};
 
 use crate::failure::AppFailure;
-use crate::features::settings::di::expect_preferences_repository;
-use crate::features::settings::domain::entities::CursorStyle as SettingsCursorStyle;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::domain::entities::{
-    RenameRequest, Space, TabEntry, TermLine, Workspace,
+    RenameRequest, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
 };
-use crate::features::terminal::domain::repositories::{SessionsRepository, TerminalRepository};
+use crate::features::terminal::domain::repositories::{
+    PreferencesRepository, SessionsRepository, TerminalRepository,
+};
 use crate::features::terminal::domain::use_cases::{
     DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab,
 };
@@ -105,34 +110,69 @@ pub struct TerminalController {
     /// Seeded with the shipped default (`12px`) for the same reason as
     /// [`cursor_style`](Self::cursor_style).
     pub font_size: RwSignal<f32>,
+    /// The device-local preferences repository — resolved **once** by
+    /// `pages.rs`'s `use_controller` factory (alongside the terminal/sessions
+    /// repositories above) and stored here, per `docs/ARCHITECTURE.md`'s
+    /// Building a Screen rule that an app-scoped dependency is resolved once
+    /// at construction, never re-resolved from inside a method that runs
+    /// later (see [`refresh_appearance`](Self::refresh_appearance), which
+    /// used to call `settings::di::expect_preferences_repository()` — a
+    /// `use_context` lookup — on every poll tick).
+    preferences: Arc<dyn PreferencesRepository + Send + Sync>,
+    /// Test/diagnostic-only: how many times [`refresh_appearance`](Self::refresh_appearance)
+    /// has actually written [`cursor_style`](Self::cursor_style)/
+    /// [`font_size`](Self::font_size) since construction — never read by
+    /// production code. Lets a headless test pin that an unchanged-prefs poll
+    /// writes nothing (see that method's own doc on the
+    /// read-compare-then-write gate this counts), without inventing a
+    /// heavier notify/version probe. Exposed read-only via
+    /// [`appearance_writes`](Self::appearance_writes), the same plain
+    /// `debug_`-style accessor `pages.rs` already uses
+    /// (`debug_controller`/`debug_live_probe`) for reaching real
+    /// composition-root state from `tests/*.rs` — those integration suites
+    /// link this crate without `cfg(test)`, so a literal `#[cfg(test)]` item
+    /// would be invisible to them.
+    appearance_writes: AtomicU64,
 }
 
-/// The shipped default font size, px — `settings::domain::entities::Preferences::defaults()`'s
-/// own `AppearancePrefs::font_size_px`, transcribed rather than reached for
-/// (this feature's `presentation` maps `settings`' values; it does not
-/// construct them — see [`TerminalController::refresh_appearance`]'s own
-/// note on this sibling-`domain` widening).
+/// The shipped default font size, px — settings' own `Preferences::defaults()`'s
+/// `AppearancePrefs::font_size_px`, transcribed rather than reached for (this
+/// feature's `presentation` maps `settings`' values; it does not construct
+/// them — see [`TerminalController::refresh_appearance`]'s own note on this
+/// sibling-`domain` widening).
 const DEFAULT_LIVE_FONT_SIZE: f32 = 12.0;
 
 /// How often the live pane re-reads the terminal-appearance prefs while
-/// mounted. `PreferencesRepository` has no subscribe/push seam (module docs,
-/// `crate::features::settings::domain::repositories`), so a short
-/// `clean_signals_frust::use_interval` poll is the established mechanism this
-/// app already uses for a periodic re-read (the `session poll` group's own
-/// pattern) — short enough that a `/settings` change reads back within one
-/// visible beat of a live pane that is otherwise cheap to poll.
-const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// mounted. [`PreferencesRepository`] has no subscribe/push seam (its own
+/// module docs), so a `clean_signals_frust::use_interval` poll is the
+/// established mechanism this app already uses for a periodic re-read.
+///
+/// **3s — matching `sessions`' own mock-poll cadence**
+/// (`sessions::presentation::controllers::POLL_PERIOD_SECS`, transcribed
+/// rather than imported: a feature never imports a sibling's `presentation`,
+/// same rule `pages.rs`'s `SESSION_QUERY_KEY` already follows). The original
+/// 250ms (12× that cadence) bought nothing: a `/settings` edit is only ever
+/// made from a *different*, pushed-on-top screen — this app has no way to
+/// view `/terminal` and `/settings` at once — so it can only ever land while
+/// this pane sits retained underneath, and the user sees it within one beat
+/// of popping back either way. [`refresh_appearance`](TerminalController::refresh_appearance)
+/// also now reads-compares-writes (below), so even this coarser cadence's
+/// idle ticks wake no signal, and no rebuild, once prefs settle.
+const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Map `settings`' own `CursorStyle` onto this feature's `term::CursorStyle`.
+/// Map `settings`' own `CursorStyle` (reached via
+/// [`entities::SettingsCursorStyle`](crate::features::terminal::domain::entities::SettingsCursorStyle),
+/// never `settings::domain` directly) onto this feature's `term::CursorStyle`.
 ///
 /// A narrow, documented sibling-`domain` widening — the same shape
 /// `docs/ARCHITECTURE.md` already records for `terminal`'s reuse of
-/// `sessions`' `RenameRequest`/`SessionsRepository`: a cursor shape has
-/// exactly one owner (the settings screen's own picker and its store), so
-/// this screen maps rather than re-minting a second choice set. Variants line
-/// up 1:1 (`term::CursorStyle`'s own doc), so the match is exhaustive and a
-/// variant added to one enum without the other fails to compile rather than
-/// silently falling back.
+/// `sessions`' `RenameRequest`/`SessionsRepository`, and the third use of
+/// that pattern this app records: a cursor shape has exactly one owner (the
+/// settings screen's own picker and its store), so this screen maps rather
+/// than re-minting a second choice set. Variants line up 1:1
+/// (`term::CursorStyle`'s own doc), so the match is exhaustive and a variant
+/// added to one enum without the other fails to compile rather than silently
+/// falling back.
 fn map_cursor_style(style: SettingsCursorStyle) -> term::CursorStyle {
     match style {
         SettingsCursorStyle::Block => term::CursorStyle::Block,
@@ -143,11 +183,13 @@ fn map_cursor_style(style: SettingsCursorStyle) -> term::CursorStyle {
 
 impl TerminalController {
     /// A fresh controller over the injected repositories (the composition root
-    /// built each once — see [`crate::features::terminal::di`] and
-    /// [`crate::features::sessions::di`]), attached to `session_id`.
+    /// built each once — see [`crate::features::terminal::di`],
+    /// [`crate::features::sessions::di`] and
+    /// [`crate::features::settings::di`]), attached to `session_id`.
     pub fn new(
         terminal: Arc<dyn TerminalRepository + Send + Sync>,
         sessions: Arc<dyn SessionsRepository + Send + Sync>,
+        preferences: Arc<dyn PreferencesRepository + Send + Sync>,
         session_id: Option<String>,
     ) -> Self {
         Self {
@@ -169,6 +211,8 @@ impl TerminalController {
             live: RwSignal::new(false),
             cursor_style: RwSignal::new(term::CursorStyle::Block),
             font_size: RwSignal::new(DEFAULT_LIVE_FONT_SIZE),
+            preferences,
+            appearance_writes: AtomicU64::new(0),
         }
     }
 
@@ -322,13 +366,49 @@ impl TerminalController {
     /// (see [`LiveSession::enter`]). A failed read leaves both signals at
     /// whatever they last held — the same "stale beats wrong" choice the
     /// settings screen's own controller makes for its preference signals.
+    ///
+    /// Reads [`preferences`](Self::preferences) — the handle `pages.rs`
+    /// resolved once at construction — rather than a `use_context` lookup:
+    /// this runs on every poll tick, and a context lookup from inside a
+    /// per-tick method is exactly the ad-hoc-DI pattern
+    /// `docs/ARCHITECTURE.md`'s Building a Screen section rules out.
+    ///
+    /// **Read-compare-then-write**: `Set::set` notifies unconditionally, with
+    /// no `PartialEq` gate of its own, and both signals are tracked reads in
+    /// `pages::TerminalScreen::build` — so writing either one unconditionally
+    /// on every tick would wake a whole-app rebuild + unpaced frame every
+    /// [`APPEARANCE_POLL_INTERVAL`], forever, even while the live pane sits
+    /// perfectly idle. Each signal is only `set()` when the freshly mapped
+    /// value actually differs from its current [`get_untracked`](GetUntracked::get_untracked)
+    /// reading — an idle poll (nothing changed since the last tick) writes
+    /// neither, so it wakes no signal and no rebuild. Bumps
+    /// [`appearance_writes`](Self::appearance_writes) exactly once per tick
+    /// that wrote anything, for the test-only probe that pins this.
     pub async fn refresh_appearance(&self) {
-        let Ok(prefs) = expect_preferences_repository().load_preferences().await else {
+        let Ok(prefs) = self.preferences.load_preferences().await else {
             return;
         };
-        self.cursor_style
-            .set(map_cursor_style(prefs.appearance.cursor_style));
-        self.font_size.set(prefs.appearance.font_size_px as f32);
+        let mut wrote = false;
+        let cursor = map_cursor_style(prefs.appearance.cursor_style);
+        if self.cursor_style.get_untracked() != cursor {
+            self.cursor_style.set(cursor);
+            wrote = true;
+        }
+        let font_size = prefs.appearance.font_size_px as f32;
+        if self.font_size.get_untracked() != font_size {
+            self.font_size.set(font_size);
+            wrote = true;
+        }
+        if wrote {
+            self.appearance_writes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Test/diagnostic-only accessor for
+    /// [`appearance_writes`](Self::appearance_writes) — see that field's own
+    /// doc. Never called by production code.
+    pub fn appearance_writes(&self) -> u64 {
+        self.appearance_writes.load(Ordering::Relaxed)
     }
 }
 
@@ -439,23 +519,26 @@ mod tests {
     // `#[cfg(test)]` exception, documented: this is the one place terminal's
     // `presentation` names a sibling feature's `data` module (rather than the
     // `terminal::domain` re-export every non-test import above goes through).
-    // A concrete `SessionsRepository` impl has to come from *somewhere* to
-    // build a real `TerminalController` in a test, and `sessions` itself
-    // already reaches its own `data` mock the identical way from its own
-    // `#[cfg(test)]` module (huddle's convention: `di.rs` is the only
-    // *production* site where `presentation` meets `data`). Test code never
-    // ships, so this is not the layering edge `docs/ARCHITECTURE.md` closes —
-    // it is test wiring standing in for the composition root.
+    // A concrete `SessionsRepository`/`PreferencesRepository` impl has to come
+    // from *somewhere* to build a real `TerminalController` in a test, and
+    // `sessions` itself already reaches its own `data` mock the identical way
+    // from its own `#[cfg(test)]` module (huddle's convention: `di.rs` is the
+    // only *production* site where `presentation` meets `data`). Test code
+    // never ships, so this is not the layering edge `docs/ARCHITECTURE.md`
+    // closes — it is test wiring standing in for the composition root.
     use crate::features::sessions::data::repositories::MockSessionsRepository;
+    use crate::features::settings::data::repositories::MockPreferencesRepository;
     use crate::features::terminal::data::repositories::MockTerminalRepository;
 
-    /// The test-wiring composition root: both mock repositories behind their
-    /// domain traits. `#[cfg(test)]`-only wiring, so `di.rs` stays the only
-    /// production site where presentation meets `data` (huddle's convention).
+    /// The test-wiring composition root: all three mock repositories behind
+    /// their domain traits. `#[cfg(test)]`-only wiring, so `di.rs` stays the
+    /// only production site where presentation meets `data` (huddle's
+    /// convention).
     fn controller(session_id: Option<&str>) -> TerminalController {
         TerminalController::new(
             Arc::new(MockTerminalRepository::seeded()),
             Arc::new(MockSessionsRepository::seeded()),
+            Arc::new(MockPreferencesRepository::seeded()),
             session_id.map(str::to_string),
         )
     }
@@ -558,6 +641,7 @@ mod tests {
         let c = TerminalController::new(
             Arc::new(MockTerminalRepository::seeded()),
             Arc::clone(&sessions) as Arc<dyn SessionsRepository + Send + Sync>,
+            Arc::new(MockPreferencesRepository::seeded()),
             Some("s-1".to_string()),
         );
         block_on(c.load());
@@ -614,7 +698,7 @@ mod tests {
     fn the_live_pane_seeds_the_shipped_appearance_defaults() {
         // Before the first `refresh_appearance` lands, the very first live
         // frame must still show the shipped default rather than a blank/wrong
-        // shape — see `settings::domain::entities::Preferences::defaults()`.
+        // shape — see settings' own `Preferences::defaults()`.
         let c = controller(None);
         assert_eq!(c.cursor_style.get_untracked(), term::CursorStyle::Block);
         assert_eq!(c.font_size.get_untracked(), DEFAULT_LIVE_FONT_SIZE);
