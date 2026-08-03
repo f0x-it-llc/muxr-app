@@ -260,9 +260,13 @@ fn key_cap<State: 'static>(
         border,
         armed,
         seam: seam.clone(),
+        // Through the seam, never `source.on_bar_key` + `dispatch` by hand:
+        // `press_bar_key` is where the session's read-only gate lives, so a
+        // cap mounted over a read-only session derives nothing rather than
+        // relying on the screen having remembered not to mount it (review's
+        // read-only minor).
         on_press: Rc::new(move |_state: &mut State| {
-            let emission = pressed_seam.source.borrow_mut().on_bar_key(key);
-            pressed_seam.dispatch(&emission);
+            pressed_seam.press_bar_key(key);
         }),
     }
 }
@@ -512,6 +516,12 @@ impl Widget for KeyCapWidget {
                 // Claim focus. NOT politeness — a `Down` that claims nothing is
                 // a blur, and a blur drops the whole IME surface and closes the
                 // keyboard this bar is docked to.
+                //
+                // Recorded on the seam first: this is a **hand-off**, not a
+                // blur of the session, and the claim is what stops the grid
+                // from scrubbing its buffers when it notices it lost the focus
+                // path on the next frame (`TerminalGridWidget::note_focus_edge`).
+                self.seam.claim_focus();
                 ctx.request_focus();
                 ctx.publish_ime_state(self.seam.ime_state(None));
                 self.pressed = true;
