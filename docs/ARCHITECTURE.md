@@ -14,9 +14,12 @@ the same inward-dependency slice, described below.
 `frust::app!(MuxrApp, setup = { frust::glyph_theme::install(); })` is the sole entry point, binding
 `MuxrApp` to Android/iOS/desktop and installing Glyph as the one design system first. `init`
 publishes the app-scoped `ConnectionController` (below), calls each feature's own `di::provide()`
-(every feature constructs its own mock repositories the same way), and builds the app's one
-`Router`; `build` mounts `shell::root_view` over it, plus — on a cold start's first build only — the
-splash overlay.
+(every feature constructs its own mock repositories the same way), and builds the app's route
+`Router` alongside a second navigator, the root overlay host (`AppState::overlays`, see Navigation).
+`build` mounts `shell::root_view` unchanged — its body and stable four-slot `Stack` invariant (see
+Shell, below) untouched — then wraps that whole output, as its caller, in
+`frust::overlay_host(&state.overlays, ..)`, so every menu/sheet/dialog renders above all chrome. Each
+screen resolves `overlays` once in its own `Component::init`, exactly like `nav`.
 
 `AppState` holds the `Router` handle plus the splash's own state; the plan is resolved lazily on the
 first `build`, not `init` — at `init` time the theme isn't applied yet, so a `reduce_motion` read
@@ -69,24 +72,23 @@ beside `failure.rs`/`responsive.rs` rather than inside `connect`, since more tha
 it.
 
 `Nav` also keeps a small route-meta mirror behind the shell's one persistent top bar: `RouteMeta`/
-`BarState` carry the bar's title/leading/action, the crossfade `direction`, and `overlay_active` —
-whether a sheet or dialog covers the titled route. A pop that bypasses `Nav` (an OS back gesture) is
-corrected on the next depth-fall reconcile; a transparent overlay push adds page-stack depth with no
-mirror entry, which is exactly what dims the bar without retitling it. Because the navigator's own
-depth is one rebuild stale by construction, `Nav` additionally counts its own overlays
-*synchronously* on **app-owned** dismissal paths — `begin_overlay`/`dismiss_overlay`/`end_overlay`
-bracket a helper's own push/dismiss/completion — so the bar un-dims the instant such a dismissal is
-enqueued rather than a frame later. A dismissal the framework completes entirely on its own (a Glyph
-dialog's own scrim tap/`Escape`, a menu popping itself) has no `dismiss_overlay` hook to call and only
-un-dims on the next input pass, once its completion callback lands — a framework dismiss-hook seam,
-still pending. Both counters also consult the navigator's own queued-but-undrained ops before adding
-to themselves: a push is recorded against the depth the navigator will actually land at once its
-queued pops drain, and a new overlay's count is taken only after reconciling any depth fall nothing
-has observed yet. The depth-fall reconcile itself is the backstop, clamping the counters flat
-whenever an unaccounted dismissal (an overlay pushed with no helper, an OS back press) would
-otherwise strand a dimmed, inert bar. `Nav::fullscreen()`/`set_fullscreen` publish a screen's
-fullscreen request (the terminal screen's expand/collapse), and every path push carries a themed
-Glyph screen transition, collapsed to a linear cross-fade under `reduce_motion`.
+`BarState` carry the bar's title/leading/action and the crossfade `direction`. A pop that bypasses
+`Nav` (an OS back gesture on a route page) is corrected on the next depth-fall reconcile, which
+clamps the mirror to `route_depth().max(live - pending_pop)` — the deeper of the mirror's own stack
+and the navigator's last-published depth, discounted by a pop already queued but not yet drained.
+`Nav::fullscreen()`/`set_fullscreen` publish a screen's fullscreen request (the terminal screen's
+expand/collapse), and every path push carries a themed Glyph screen transition, collapsed to a
+linear cross-fade under `reduce_motion`.
+
+Every sheet, dialog and menu is a page of the root `frust::overlay_host` (`AppState::overlays`,
+see Composition Root), never of this route stack, so none of the arithmetic above ever sees one. The
+host routes input, and publishes accessibility nodes, for its top page only: the app underneath an
+open overlay — the floating bar included — is genuinely inert rather than merely dimmed, and the
+overlay's own scrim paints over the bar at the root instead of the bar mirroring a tint onto itself.
+An Android back press reaches the host before the route navigator (R44: Host outranks Navigator), so
+back dismisses the overlay rather than popping the route beneath it, and an empty host defers the
+press bit for bit. A page's pop-completion callback — a menu popping itself and chaining straight
+into `show_sheet` — delivers on the pop's own frame, not the next input pass (frust #56).
 
 ## Feature Slices — `src/features/<feature>/`
 
@@ -142,12 +144,13 @@ example, every frust app author) should copy. Normative, not aspirational; huddl
 - **State-split rule.** Non-reactive UI state (scroll position, an open sheet, a focused field)
   lives in the retained `State`; async/observed state lives in the hosted controller's `RwSignal`s.
 - **App-scoped handles and overlay callbacks respect the component boundary.** A screen resolves
-  every app-scoped dependency (`routes::app_nav()`, `connection::expect_connection_controller()`, a
-  feature's own `di::expect_*`) once, in its own `Component::init`, and stores it in its `State` —
-  a press handler only reads a stored handle, since the desktop shell dispatches events with no
-  ambient reactive owner. A dialog/sheet a screen pushes is likewise a page on the *app's*
-  navigator, so its callback receives `&mut AppState`, never the screen's own `State` — a captured
-  `Arc<Controller>` carries results back across that boundary.
+  every app-scoped dependency (`routes::app_nav()`, the root overlay host's `overlays` handle,
+  `connection::expect_connection_controller()`, a feature's own `di::expect_*`) once, in its own
+  `Component::init`, and stores it in its `State` — a press handler only reads a stored handle,
+  since the desktop shell dispatches events with no ambient reactive owner. A dialog/sheet a screen
+  pushes is likewise a page on the *overlay host's* navigator, so its callback receives
+  `&mut AppState`, never the screen's own `State` — a captured `Arc<Controller>` carries results back
+  across that boundary.
 - **DI: container-free composition root** (decided; `nject` evaluated and declined). App-scoped
   singletons (the connection controller, each feature's repositories) are constructed once in the
   root `Component::init` and published via `provide_context`/`provide_controller`; a screen's own
@@ -165,21 +168,20 @@ example, every frust app author) should copy. Normative, not aspirational; huddl
 
 - **`backdrop`** — the app's full-bleed page background, shared by Connect and the splash overlay.
 - **`topbar`** — the shell's persistent branded bar (see Shell, above): brand-or-back leading slot, a
-  crossfading centered title, one trailing icon slot, and the bar's own reveal/overlay-tint
-  animations. Hosts `icon_button`, the app's one vector press-target primitive (a labelled
+  crossfading centered title, one trailing icon slot, and the bar's own reveal animation. Hosts
+  `icon_button`, the app's one vector press-target primitive (a labelled
   `Role::Button` over a single icon pod) — now at three call sites (the bar's own slots, the Connect
   FAB, the terminal panes sheet's close button); promoting it out to its own `crate::ui` module is a
   known, deliberately deferred refactor.
 - **`sheet`** — a hand-composed modal bottom sheet (`show_sheet`/`sheet_scaffold`): the documented
-  workaround for frust's missing Glyph sheet primitive. Owns `ModalStage`, the one timing source every
-  modal-adjacent animation shares — the sheet's own scrim-fade/panel-slide, the Glyph dialog's dim,
-  and the floating top bar's overlay tint all stage off it, so a sheet, a dialog and the bar dim and
-  settle together. Dismissal is gated through a `SheetHandle` `show_sheet` mints per sheet instance
-  and hands to the body builder: `SheetHandle::close`/`close_after` pop (and report to the overlay
-  accounting) **at most once per instance**, since a duplicate close used to pop the route under the
-  sheet instead. `show_sheet` and `dialogs`' helpers take the app's `&Nav` alongside the navigator,
-  purely for the overlay accounting the shell's bar reads (Navigation, above) — nothing else about app
-  state crosses that boundary.
+  workaround for frust's missing Glyph sheet primitive. Owns `ModalStage`, the timing source its own
+  scrim-fade/panel-slide shares with the Glyph dialog's dim — the sheet's scrim is its own now,
+  painted at the root over the bar rather than mirrored onto it (see Navigation, above). Dismissal is
+  gated through a `SheetHandle` `show_sheet` mints per sheet instance and hands to the body builder:
+  `SheetHandle::close`/`close_after` pop **at most once per instance**, since a duplicate close used
+  to pop the route under the sheet instead. `show_sheet` and `dialogs`' helpers take only the
+  navigator — the root overlay host's controller at every call site in this app — nothing else about
+  app state crosses that boundary.
 - **`dialogs`** — Flutter-parity confirm/name-input modals (`confirm_dialog`/`name_input_dialog`)
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`

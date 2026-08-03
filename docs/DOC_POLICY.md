@@ -18,10 +18,10 @@ Tighter than the generic medium-tier schema caps (350/500 core doc, 80/100 `CLAU
 single-crate app, not a workspace, and the reading path stays short deliberately.
 
 `docs/ARCHITECTURE.md`'s target was raised from 135 to 220 on 2026-08-01, alongside the small→medium
-move above: a docs-close pass rewrote Shell (the real four-slot floating-bar root, fixing a stale
-three-slot description two review dimensions had flagged), expanded Navigation (the overlay
-accounting model) and UI Substrate/Feature Slices (all four slices now full), and added Responsive —
-real, permanent content, not bloat. Landed at 236/260; re-check past 260 or on a fifth feature.
+move above (Shell/Navigation/UI Substrate/Feature Slices expanded, Responsive added — real content,
+not bloat). The 2026-08-03 overlay-host adoption deleted the app's overlay-accounting model wholesale
+and replaced it with host documentation of about the same size — a wash, not further growth. Landed
+at 251/260; re-check past 260 or on a fifth feature.
 
 ## Doc Units
 
