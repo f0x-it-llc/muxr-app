@@ -22,5 +22,6 @@
 //! widening to the one edge already sanctioned above.
 
 pub mod entities;
+pub mod feed;
 pub mod repositories;
 pub mod use_cases;
