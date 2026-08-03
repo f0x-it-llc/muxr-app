@@ -74,6 +74,43 @@
 //! `crate::ui::toasts::app_toasts` document, and for the same underlying
 //! reason: `provide_context` requires `Send + Sync`, which the `Rc`-backed
 //! `NavigatorController` in the bundle can never be.
+//!
+//! # Pane-content switch: the mock stays default, "Demo session" opts in
+//!
+//! The card's body renders [`pieces::card_body`] (the seeded mock transcript)
+//! for every existing route and navigation — untouched, and pinned by every
+//! one of `tests/terminal.rs`'s ~34 tests, which assert that exact content
+//! through this real composition root. The live [`term::terminal_surface`] is
+//! reached only by tapping the overflow menu's **`Demo session`** row
+//! ([`MENU_DEMO_INDEX`]), which flips [`TerminalController::live`] — the one
+//! flag [`TerminalScreen::build`] branches the card's body (and the key bar's
+//! mount) on.
+//!
+//! **Decision (deviates from the plan's literal suggestion):** the plan's
+//! default was a seeded "demo" row in the mock *session* list
+//! (`data::repositories::mock_terminal_repository`). Reading that
+//! repository's actual model, its `spaces`/`tabs` pill rows are exactly what
+//! `tests/terminal.rs`'s `the_menus_first_row_opens_the_sheet_with_every_pill_row_and_the_pane_item`
+//! pins by **count** (`3 + 1 + 4 + 1` pills) — any seeded row in either list
+//! changes that count and breaks an unmodifiable test. The overflow menu
+//! already carries exactly this shape of one-off screen action
+//! (`Panes & tabs`/`Rename session`/`Detach session`), asserted only by
+//! *label*, never by a total row count in `tests/terminal.rs` — so a fourth
+//! row is the cleaner, v2-consistent entry the module docs on this file's own
+//! task invited: additive, unobtrusive (one more overflow-menu row, the same
+//! shape as the other three), and public-safe (`Demo session` names nothing
+//! internal).
+//!
+//! [`LiveSession`] — the seams, the feed and the pump — is constructed
+//! **once**, lazily, inside `build` itself (guarded by `state.live.is_none()`
+//! — see [`TerminalScreen::build`]), not from the menu's own press handler:
+//! `Component::build` runs under this screen's own reactive `Owner`
+//! (`ComponentWidget::rebuild` wraps it in `owner.with`), which is what makes
+//! `spawn_feed_pump`'s and `clean_signals_frust::use_interval`'s own
+//! `on_cleanup` registrations bind to *this* screen and actually run on
+//! unmount — a press handler runs under no owner at all on desktop, and an
+//! `on_cleanup` registered there silently leaks (both functions' own
+//! "Ambient-Owner contract" docs).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -81,7 +118,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
-use frust::authoring::Rect;
+use frust::authoring::{Rect, WindowInsets};
 use frust::glyph::{MenuEntry, menu_item, menu_separator, show_glyph_menu};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
@@ -92,8 +129,10 @@ use frust::{
 use crate::AppState;
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
+use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::TabEntry;
+use crate::features::terminal::domain::feed::TerminalFeed;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
@@ -101,24 +140,32 @@ use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
 use super::chrome::{WRAP_PAD, term_box};
-use super::controller::TerminalController;
+use super::controller::{LiveSession, TerminalController};
+use super::keybar;
 use super::pieces::{
     self, PANE_ROW_GAP, PILL_GAP, Palette, PillState, SECTION_BOTTOM_GAP, SECTION_TOP_GAP,
 };
+use super::term;
 
 /// How long the sheet stays up after a tab pill is tapped, so the selection
 /// visibly moves before it closes — `setTimeout(closeSheet, 260)` in the mock.
 const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(260);
 
-/// The overflow menu's three rows, in order. Indices into the entry list
+/// The overflow menu's rows, in order. Indices into the entry list
 /// [`show_glyph_menu`] hands back, so they are named once rather than spelled
 /// at the match site.
 const MENU_PANES: &str = "Panes & tabs";
 const MENU_RENAME: &str = "Rename session";
 const MENU_DETACH: &str = "Detach session";
+/// The demo-session entry — see the [module docs](self)'s "Demo entry"
+/// note. Appended after its own separator rather than woven into the first
+/// three rows, so `MENU_RENAME_INDEX`/`MENU_DETACH_INDEX` (and every existing
+/// index-based test in `tests/terminal.rs`) stay exactly where they were.
+const MENU_DEMO: &str = "Demo session";
 const MENU_PANES_INDEX: usize = 0;
 const MENU_RENAME_INDEX: usize = 2;
 const MENU_DETACH_INDEX: usize = 3;
+const MENU_DEMO_INDEX: usize = 5;
 
 /// The rename dialog's title.
 const RENAME_TITLE: &str = "Rename session";
@@ -177,15 +224,22 @@ pub struct TerminalScreen {
     overlays: NavigatorController<AppState>,
 }
 
-/// The Terminal screen's retained state: the action bundle, and nothing else.
+/// The Terminal screen's retained state: the action bundle, and the live
+/// demo pane once one has been entered.
 ///
 /// The [state-split rule](crate::features::terminal::presentation::controller)
 /// in practice — the card's animation drivers are inside their own retained
 /// widgets, the observed state is in the controller's signals, and what is
-/// left here is the handles a press handler reads.
+/// left here is the handles a press handler reads plus [`live`](Self::live):
+/// the `Rc`-backed seams/feed [`LiveSession`] embeds cannot live on the
+/// controller at all (see that type's own doc), so this is where they land —
+/// `None` for the mock-only lifetime of a screen that never enters the demo
+/// pane, `Some` from the first `build` that observes
+/// `TerminalController::live` and never `None` again for this mount.
 pub struct TerminalState {
     /// Everything this screen can *do*, and the handles it needs to do it.
     pub actions: Actions,
+    live: Option<LiveSession>,
 }
 
 /// Every navigation and mutation this screen performs, plus the handles they
@@ -220,6 +274,60 @@ pub struct Actions {
     /// the menu, the sheet and the bar are all talking about the same latch:
     /// one mount of this screen leaves `/terminal` at most once.
     detaching: Rc<Cell<bool>>,
+    /// A test/diagnostic mirror of the live demo pane's emulator + feed, if
+    /// one has been entered — see [`LiveProbe`] and [`debug_live_probe`].
+    /// `Actions` is cloned into [`TERMINAL_CHROME`] at `init`, before any
+    /// `LiveSession` exists; this stays `Rc<RefCell<_>>` (rather than a plain
+    /// `Option`) so `TerminalScreen::build` can fill it in later and have
+    /// every existing clone — the thread-local's included — see the same
+    /// fill.
+    live_probe: Rc<RefCell<Option<LiveProbe>>>,
+}
+
+/// A test/diagnostic handle onto the live demo pane's emulator + feed —
+/// reached through the mounted screen's real composition root
+/// ([`debug_live_probe`]) rather than a widget-level handle, so a headless
+/// test can assert byte-correct replay/typing (`vt100::Screen::cell`, the
+/// same accessor `presentation::term`'s own unit tests use) and the resize
+/// test hook (`DemoFeed::last_resize`) against the actual mounted session.
+#[derive(Clone)]
+pub struct LiveProbe {
+    /// The VT emulator the live grid is rendering.
+    pub emulator: term::SharedEmulator,
+    /// The demo feed the grid's pump is draining — concrete, so
+    /// [`DemoFeed::last_resize`] and [`DemoFeed::fed_bytes`] are reachable.
+    pub feed: Rc<RefCell<DemoFeed>>,
+}
+
+/// The mounted screen's live demo pane, if one has been entered — see
+/// [`LiveProbe`]. `None` before "Demo session" is chosen, or when no terminal
+/// screen is mounted at all.
+pub fn debug_live_probe() -> Option<LiveProbe> {
+    TERMINAL_CHROME.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|actions| actions.live_probe.borrow().clone())
+    })
+}
+
+thread_local! {
+    /// Test-only override for the live pane's Copy sink — see
+    /// `term::chip`'s own doc on why production never swaps this out itself.
+    /// `None` (the default) leaves `term::copy_chip`'s system-clipboard sink
+    /// in place. Set with [`set_demo_copy_sink`] before mounting the screen.
+    static DEMO_COPY_SINK: RefCell<Option<term::CopySink>> = const { RefCell::new(None) };
+}
+
+/// Override the live demo pane's clipboard sink for a headless test, so
+/// `Copy` can be asserted without touching the real OS clipboard. Pass `None`
+/// to restore the production sink.
+pub fn set_demo_copy_sink(sink: Option<term::CopySink>) {
+    DEMO_COPY_SINK.with(|cell| *cell.borrow_mut() = sink);
+}
+
+/// The current override, if a test installed one — see [`set_demo_copy_sink`].
+fn demo_copy_sink() -> Option<term::CopySink> {
+    DEMO_COPY_SINK.with(|cell| cell.borrow().clone())
 }
 
 thread_local! {
@@ -246,6 +354,18 @@ static NEXT_CHROME_ID: AtomicU64 = AtomicU64::new(1);
 /// `⚙`'s route push follows). A press that arrives with no terminal screen
 /// mounted is silently ignored: the bar only ever carries this action on
 /// `/terminal`, so that is an unreachable race rather than a state to handle.
+/// Test/diagnostic accessor: the mounted screen's controller, if any — lets a
+/// headless test read `TerminalController::cursor_style`/`font_size`/`live`
+/// (e.g. the settings-reflect-into-the-live-pane acceptance test) through the
+/// same [`TERMINAL_CHROME`] handle [`open_terminal_menu`] already reads.
+pub fn debug_controller() -> Option<Arc<TerminalController>> {
+    TERMINAL_CHROME.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|actions| Arc::clone(&actions.controller))
+    })
+}
+
 pub fn open_terminal_menu(_state: &mut AppState) {
     let actions = TERMINAL_CHROME.with(|cell| cell.borrow().clone());
     if let Some(actions) = actions {
@@ -291,6 +411,7 @@ impl Component for TerminalScreen {
             controller,
             anchor: Rc::new(Cell::new(Rect::ZERO)),
             detaching: Rc::new(Cell::new(false)),
+            live_probe: Rc::new(RefCell::new(None)),
         };
         // Publish for the app bar's `⋮` (see the module docs).
         TERMINAL_CHROME.with(|cell| *cell.borrow_mut() = Some(actions.clone()));
@@ -313,11 +434,46 @@ impl Component for TerminalScreen {
             });
         });
 
-        TerminalState { actions }
+        TerminalState {
+            actions,
+            live: None,
+        }
     }
 
     fn build(&self, state: &mut TerminalState) -> AnyView<TerminalState> {
-        let controller = &state.actions.controller;
+        // Owned (not `&state.actions.controller`): the live-pane entry below
+        // needs `&mut state` at the same time this is read from, and an
+        // `Arc` clone is cheap (one refcount bump) next to a borrow-checker
+        // fight.
+        let controller = Arc::clone(&state.actions.controller);
+
+        // Pane-content switch (see the module docs' "Demo entry" note): a
+        // tracked read of `live`, so flipping it (the overflow menu's "Demo
+        // session" row) wakes this rebuild. `LiveSession` is constructed
+        // exactly once per mount, guarded by `state.live.is_none()` — see
+        // `LiveSession::enter`'s own doc on why this must happen here and not
+        // from the menu's press handler.
+        if controller.live.get() && state.live.is_none() {
+            let session = LiveSession::enter(&controller);
+            *state.actions.live_probe.borrow_mut() = Some(LiveProbe {
+                emulator: Rc::clone(&session.emulator),
+                feed: Rc::clone(&session.feed),
+            });
+            state.live = Some(session);
+        }
+        // Resize propagation: drain whatever the *previous* layout recorded
+        // (a rotation, a font-size change, the fullscreen transition) and
+        // forward it to the feed — the app-side stand-in for a real
+        // `SIGWINCH`. Unthrottled per the incumbent: no debounce, and a
+        // same-size layout leaves `take_pending_resize` at `None` (the
+        // emulator's own no-op-at-an-unchanged-size rule), so this only ever
+        // fires on an actual cell-grid delta.
+        if let Some(session) = state.live.as_ref()
+            && let Some((cols, rows)) = session.emulator.borrow_mut().take_pending_resize()
+        {
+            session.feed.borrow_mut().resize(cols, rows);
+        }
+
         // Tracked reads: a load, a tab switch or a fullscreen toggle is what
         // wakes this rebuild.
         let lines = controller.lines.get();
@@ -347,6 +503,38 @@ impl Component for TerminalScreen {
             0.0
         };
 
+        // The card's body: the mock transcript by default (untouched, and
+        // what every existing route/navigation still reaches), or the live
+        // grid once a demo session has been entered — see the module docs'
+        // "Pane-content switch" note.
+        let card_body: AnyView<TerminalState> = match state.live.as_ref() {
+            Some(session) => {
+                // Tracked: the pump's one write per wake is what repaints the
+                // live pane (`term`'s own module docs on the 30 Hz mechanism).
+                let generation = session.generation.get();
+                let grid = term::terminal_grid(
+                    Rc::clone(&session.emulator),
+                    generation,
+                    term::terminal_palette(&theme),
+                    controller.font_size.get(),
+                )
+                .cursor(controller.cursor_style.get())
+                .label(MENU_DEMO)
+                .input(session.input.clone())
+                .selection(session.selection.clone());
+                let mut chip = term::copy_chip(session.selection.clone());
+                if let Some(sink) = demo_copy_sink() {
+                    chip = chip.copy_sink(sink);
+                }
+                any(term::terminal_surface(
+                    session.selection.clone(),
+                    grid,
+                    chip,
+                ))
+            }
+            None => pieces::card_body(lines, epoch, &colors),
+        };
+
         let card = FlexView::new(
             Axis::Vertical,
             vec![
@@ -356,7 +544,7 @@ impl Component for TerminalScreen {
                     &colors,
                     toggle_fullscreen,
                 )),
-                flexible(1, pieces::card_body(lines, epoch, &colors)),
+                flexible(1, card_body),
             ],
         )
         .cross_axis(CrossAxisAlignment::Stretch);
@@ -382,7 +570,34 @@ impl Component for TerminalScreen {
         // surface, bar band included: the bar slides in over it, and a page
         // that stopped at the clearance would flash the shell's own clear
         // colour through the gap for the length of that entrance.
-        any(term_box(stage, colors.void, 0.0))
+        let page: AnyView<TerminalState> = any(term_box(stage, colors.void, 0.0));
+
+        // Key bar mount: a fixed slot beneath the card, live-mode only —
+        // the mock stays bar-free exactly as before, which is why the `None`
+        // arm returns `page` completely unwrapped rather than adding an
+        // always-zero-height sibling to a tree every one of
+        // `tests/terminal.rs`'s ~34 tests already pins.
+        match state.live.as_ref() {
+            Some(session) => {
+                // The keyboard's own reported height is the app's one proxy
+                // for "the IME is up" — v2 has no other text input on this
+                // screen to source a dedicated flag from (the module docs'
+                // own note on why this mirrors `keybar`'s internal read
+                // rather than inventing a second one).
+                let keyboard_up = use_context::<WindowInsets>()
+                    .map(|insets| insets.view_insets.bottom > 0.0)
+                    .unwrap_or(false);
+                any(FlexView::new(
+                    Axis::Vertical,
+                    vec![
+                        flexible(1, page),
+                        inflexible(keybar::key_bar(keyboard_up, &session.input)),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Stretch))
+            }
+            None => page,
+        }
     }
 }
 
@@ -410,6 +625,14 @@ impl Actions {
     pub fn toggle_fullscreen(&self) {
         let on = self.controller.toggle_fullscreen();
         self.app_nav.set_fullscreen(on);
+    }
+
+    /// Enter the live demo pane — the overflow menu's "Demo session" row.
+    /// Only flips the controller's flag; `TerminalScreen::build` is what
+    /// actually constructs the seams/feed the first time it observes it (see
+    /// that method's own doc on why a press handler cannot do that itself).
+    pub fn enter_demo(&self) {
+        self.controller.enter_live();
     }
 
     /// Open the app bar's overflow menu, anchored to the bar slot the `⋮`
@@ -446,6 +669,7 @@ impl Actions {
                     Some(MENU_PANES_INDEX) => actions.open_sheet(),
                     Some(MENU_RENAME_INDEX) => actions.open_rename_dialog(),
                     Some(MENU_DETACH_INDEX) => actions.detach(),
+                    Some(MENU_DEMO_INDEX) => actions.enter_demo(),
                     // Every other dismissal (scrim, Escape, back) pops empty.
                     _ => {}
                 }
@@ -662,12 +886,19 @@ impl Actions {
 /// *Detach* is deliberately **not** `menu_item_danger`: detaching leaves the
 /// session running (that is the whole difference from the sessions screen's
 /// Kill), so painting it in the error role would misdescribe it.
+///
+/// *Demo session* sits behind its own separator, after the first three: it is
+/// not a session-management action like the rest of the menu, so it is kept
+/// visually apart from them (see the module docs' "Demo entry" note on why it
+/// lives here at all rather than as a seeded pill row).
 fn menu_entries() -> Vec<MenuEntry> {
     vec![
         menu_item(MENU_PANES),
         menu_separator(),
         menu_item(MENU_RENAME),
         menu_item(MENU_DETACH),
+        menu_separator(),
+        menu_item(MENU_DEMO),
     ]
 }
 
@@ -676,10 +907,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_is_three_rows_with_one_separator_between_the_first_and_the_rest() {
+    fn the_menu_is_four_rows_with_a_separator_before_the_last_two_groups() {
         let entries = menu_entries();
-        assert_eq!(entries.len(), 4, "three rows plus the `.dd-sep`");
+        assert_eq!(entries.len(), 6, "four rows plus the two `.dd-sep`s");
         assert!(matches!(entries[1], MenuEntry::Separator));
+        assert!(matches!(entries[4], MenuEntry::Separator));
         let labels: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
@@ -687,7 +919,7 @@ mod tests {
                 MenuEntry::Separator => None,
             })
             .collect();
-        assert_eq!(labels, [MENU_PANES, MENU_RENAME, MENU_DETACH]);
+        assert_eq!(labels, [MENU_PANES, MENU_RENAME, MENU_DETACH, MENU_DEMO]);
     }
 
     #[test]
@@ -700,6 +932,7 @@ mod tests {
             (MENU_PANES_INDEX, MENU_PANES),
             (MENU_RENAME_INDEX, MENU_RENAME),
             (MENU_DETACH_INDEX, MENU_DETACH),
+            (MENU_DEMO_INDEX, MENU_DEMO),
         ] {
             match &entries[index] {
                 MenuEntry::Item(item) => assert_eq!(item.label, label),
