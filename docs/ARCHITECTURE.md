@@ -35,16 +35,16 @@ and rebuilt as a new view — so the navigator, bar and toasts stay at fixed ind
 lifetime, and only the overlay's pod is created/destroyed, letting the splash disappear without
 disturbing the live route underneath.
 
-The bar is chrome, not layout: floating it over a full-height navigator (rather than sharing a
-layout band with it, which used to make the bar's appearance a page-shoving reflow) means a page's
-box never depends on which route is on top. A bar-bearing page instead reserves its own top
-clearance via `ui::topbar::topbar_clearance` — the status-bar inset plus the bar's height, spelled
-once so `/sessions`/`/terminal`/`/settings` cannot drift apart (`/` is bar-less and wraps nothing).
-The bar is never unmounted on a bar-less route (that would also shift the toast layer's fixed index
-and tear it down); instead it is **hidden** — zero height, no paint, no events, no semantics — and it
-plays the identical reveal/hide animation whether the cause is a bar-less route or the terminal
-screen's own fullscreen request, a second input to the same flag published through
-`Nav::set_fullscreen`, never a second hide path.
+The bar is chrome, not layout: floating it over a full-height navigator (rather than sharing a layout
+band, which used to make its appearance a page-shoving reflow) means a page's box never depends on
+which route is on top. A bar-bearing page instead reserves its own top clearance via
+`ui::topbar::topbar_clearance` — the status-bar inset plus the bar's height, spelled once so
+`/sessions`/`/terminal`/`/settings` cannot drift apart (`/` is bar-less and wraps nothing). The bar is
+never unmounted on a bar-less route (that would shift the toast layer's fixed index and tear it down);
+instead it is **hidden** — zero height, no paint, no events, no semantics — and plays the identical
+reveal/hide animation whether the cause is a bar-less route or the terminal screen's own fullscreen
+request, a second input to the same flag published through `Nav::set_fullscreen`, never a second hide
+path.
 
 ## Failure Vocabulary — `src/failure.rs`
 
@@ -73,22 +73,21 @@ it.
 
 `Nav` also keeps a small route-meta mirror behind the shell's one persistent top bar: `RouteMeta`/
 `BarState` carry the bar's title/leading/action and the crossfade `direction`. A pop that bypasses
-`Nav` (an OS back gesture on a route page) is corrected on the next depth-fall reconcile, which
-clamps the mirror to `route_depth().max(live - pending_pop)` — the deeper of the mirror's own stack
-and the navigator's last-published depth, discounted by a pop already queued but not yet drained.
-`Nav::fullscreen()`/`set_fullscreen` publish a screen's fullscreen request (the terminal screen's
-expand/collapse), and every path push carries a themed Glyph screen transition, collapsed to a
-linear cross-fade under `reduce_motion`.
+`Nav` (an OS back gesture on a route page) is corrected on the next depth-fall reconcile, clamping the
+mirror to the deeper of its own stack and the navigator's last-published depth, discounted by any pop
+already queued but not yet drained. `Nav::fullscreen()`/`set_fullscreen` publish a screen's fullscreen
+request (the terminal screen's expand/collapse), and every path push carries a themed Glyph screen
+transition, collapsed to a linear cross-fade under `reduce_motion`.
 
 Every sheet, dialog and menu is a page of the root `frust::overlay_host` (`AppState::overlays`,
 see Composition Root), never of this route stack, so none of the arithmetic above ever sees one. The
 host routes input, and publishes accessibility nodes, for its top page only: the app underneath an
 open overlay — the floating bar included — is genuinely inert rather than merely dimmed, and the
 overlay's own scrim paints over the bar at the root instead of the bar mirroring a tint onto itself.
-An Android back press reaches the host before the route navigator (R44: Host outranks Navigator), so
-back dismisses the overlay rather than popping the route beneath it, and an empty host defers the
-press bit for bit. A page's pop-completion callback — a menu popping itself and chaining straight
-into `show_sheet` — delivers on the pop's own frame, not the next input pass (frust #56).
+An Android back press reaches the host before the route navigator, so back dismisses the overlay
+rather than popping the route beneath it, and an empty host defers the press bit for bit. A page's
+pop-completion callback — a menu popping itself and chaining straight into `show_sheet` — delivers on
+the pop's own frame, not the next input pass.
 
 ## Feature Slices — `src/features/<feature>/`
 
@@ -106,28 +105,37 @@ and a per-screen `Component` (see Building a Screen, below) — over mock data; 
 layer is not wired yet (see Planned). A `domain` → sibling-`domain` edge is a deliberate, narrow
 widening of the table above, used twice: `connect`'s domain re-exports `crate::connection::TrustMode`
 rather than re-minting it, and `terminal`'s domain re-exports `sessions`' own `SessionsRepository`/
-`RenameRequest` so its `LoadWorkspace`/`RenameAttachedSession` use cases can inject that repository —
-a session's *name* has exactly one owner (the `sessions` list and its store), so the terminal screen's
-rename writes through it rather than minting a second, driftable name. Neither edge crosses into a
-sibling's `data` or `presentation`. A third widening sits outside the layer table entirely: each
-feature's `di.rs` is composition-root wiring, not a table layer, and `terminal`'s page resolves
-`sessions::di::expect_sessions_repository()` there directly in its `Component::init` — the same
-accessor `sessions`' own screen calls — rather than re-routing a copy through `terminal`'s own `di.rs`.
+`RenameRequest` so a session's name has exactly one owner (the `sessions` list and its store) and the
+terminal screen's rename writes through it rather than minting a second, driftable name — neither
+edge crosses into a sibling's `data` or `presentation`. A third widening sits outside the layer table
+entirely: each feature's `di.rs` is composition-root wiring, and `terminal`'s page resolves
+`sessions::di::expect_sessions_repository()` directly rather than re-routing a copy through its own.
 
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, a mock-mirror
   repository, the fullscreen seam, the "panes & tabs" sheet, and the app bar's overflow menu
   (`frust::glyph::show_glyph_menu`, forwarded from `crate::shell` since the bar it opens from is app
-  chrome).
+  chrome). A second domain port, `domain::feed::TerminalFeed` — a byte-level stream, deliberately
+  separate from `TerminalRepository`'s one-shot model calls — has its first implementation,
+  `data::feeds::DemoFeed`, replaying an embedded fixture. `presentation::term` is the real grid: a
+  `vt100` emulator held off the signal graph, a ~30 Hz pump coalescing every wake into one signal
+  write, same-style run batching, cell geometry, and a `LAYOUT | PAINT` generation contract (the
+  cursor blink is its one paced, paint-only exception). `term::input` turns platform IME snapshots
+  into keystrokes via a last-known-state diff, gated by a one-shot Ctrl/Alt latch at the single emit
+  choke point; `term::selection`/`chip` add word-wise long-press selection, a re-render loupe and a
+  sensitive-clipboard Copy chip; `presentation::keybar` is the IME-active-only key bar, whose caps
+  claim focus and re-publish the IME surface on every tap — a pointer `Down` that claims no focus is a
+  blur that drops it, so docked chrome must do the same. The screen defaults to the mock transcript;
+  a "Demo session" overflow-menu row mounts this grid instead, built lazily inside `build` under the
+  screen's own `Owner` so its `on_cleanup` teardown fires on unmount.
 - **`settings`** — the connected server's settings screen: four groups (connection, auth tokens,
   terminal appearance, session poll) over an in-memory token repository and an in-memory preferences
   repository (persistence is Planned), a shared picker-sheet builder the last two groups' rows open,
   and the Disconnect flow — the production caller of `ConnectionController::disconnect`. Its
   `herdr version` row is a screen-local constant, since `ServerInfo` carries only one
   multiplexer-version field (a real herdr wire-version field is Planned).
-- **`sessions`** — its `presentation::pieces` still exports `picker_rows`/`picker_heading`, unused by
-  its own screen today: the redesign moved switch/create off the app bar (onto the dashed
-  new-session row and the empty state), superseding the picker sheet they built. Kept rather than
-  deleted so a future picker sheet can inherit the composition rather than re-derive it.
+- **`sessions`** — its `presentation::pieces` still exports an unused `picker_rows`/`picker_heading`
+  pair from a picker sheet the redesign superseded (switch/create moved onto the dashed new-session
+  row and the empty state); kept for a future picker sheet to inherit rather than re-derive.
 
 ## Building a Screen (canonical pattern)
 
@@ -169,19 +177,16 @@ example, every frust app author) should copy. Normative, not aspirational; huddl
 - **`backdrop`** — the app's full-bleed page background, shared by Connect and the splash overlay.
 - **`topbar`** — the shell's persistent branded bar (see Shell, above): brand-or-back leading slot, a
   crossfading centered title, one trailing icon slot, and the bar's own reveal animation. Hosts
-  `icon_button`, the app's one vector press-target primitive (a labelled
-  `Role::Button` over a single icon pod) — now at three call sites (the bar's own slots, the Connect
-  FAB, the terminal panes sheet's close button); promoting it out to its own `crate::ui` module is a
-  known, deliberately deferred refactor.
+  `icon_button`, the app's one vector press-target primitive (a labelled `Role::Button` over a single
+  icon pod) — now at three call sites; promoting it out to its own `crate::ui` module is a known,
+  deliberately deferred refactor.
 - **`sheet`** — a hand-composed modal bottom sheet (`show_sheet`/`sheet_scaffold`): the documented
   workaround for frust's missing Glyph sheet primitive. Owns `ModalStage`, the timing source its own
   scrim-fade/panel-slide shares with the Glyph dialog's dim — the sheet's scrim is its own now,
   painted at the root over the bar rather than mirrored onto it (see Navigation, above). Dismissal is
-  gated through a `SheetHandle` `show_sheet` mints per sheet instance and hands to the body builder:
-  `SheetHandle::close`/`close_after` pop **at most once per instance**, since a duplicate close used
-  to pop the route under the sheet instead. `show_sheet` and `dialogs`' helpers take only the
-  navigator — the root overlay host's controller at every call site in this app — nothing else about
-  app state crosses that boundary.
+  gated through a `SheetHandle` `show_sheet` mints per instance: `close`/`close_after` pop **at most
+  once**, since a duplicate close used to pop the route under the sheet instead. `show_sheet` and
+  `dialogs`' helpers take only the navigator — nothing else about app state crosses that boundary.
 - **`dialogs`** — Flutter-parity confirm/name-input modals (`confirm_dialog`/`name_input_dialog`)
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
@@ -196,10 +201,9 @@ it belongs to the feature that owns its entries, forwarded from `crate::shell`; 
 `MenuEntry` carries no icon slot, so every menu in the app today is icon-less.
 
 **Chrome icons are vectors; font glyphs are content text only.** A bar affordance, a FAB, or a row's
-trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` (the back chevron,
-the QR-scan mark, the fullscreen-toggle pair, the terminal pane mark) — never a font glyph, whose
-fallback chain differs per platform and once left a settings gear invisible on iPhone. A font glyph
-is only ever content *text* (a chip's `▣ 9 panes`, the splash's brand rain).
+trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` — never a font
+glyph, whose fallback chain differs per platform and once left a settings gear invisible on iPhone. A
+font glyph is only ever content *text* (a chip's `▣ 9 panes`, the splash's brand rain).
 
 ## Responsive — `src/responsive.rs`
 
@@ -223,7 +227,10 @@ accessibility tree); `shell_handoff.rs` is the widget-identity regression test f
 fixed indices. `connect.rs`/`sessions.rs`/`terminal.rs`/`settings.rs`/`ui_substrate.rs` exercise the
 four screens and the shared `ui/` modules, each mounting its screen beside its own navigator (so it
 stays visible to accessibility) and installing the app's real router over that navigator so the
-suite runs the real table and guard.
+suite runs the real table and guard. `term_widget.rs`/`term_input.rs`/`term_selection.rs` drive the
+real terminal grid, its keystroke source and its selection/copy model directly, headless against the
+real `vt100` emulator; `terminal_live.rs` mounts the whole `/terminal` screen and exercises the same
+grid through the "Demo session" cutover.
 
 ## Design References
 
@@ -235,8 +242,10 @@ suite runs the real table and guard.
 
 - The `muxrd` connection/gRPC layer (TLS + bearer auth) — `connection.rs`'s controller is mock-only,
   and every feature's repositories are in-memory mocks standing in for it.
-- Real terminal grid rendering — the terminal card renders mock typed lines today, not a live
-  PTY-driven grid.
+- Cutting the terminal grid over to a real `muxrd` session (replacing `DemoFeed`), a scrollback view,
+  and a real session's read-only/threaded handling — the grid, its keystroke source and its
+  selection are built and demo-mounted (see Feature Slices' `terminal` entry); only the live
+  transport remains.
 - QR-code pairing for host + token entry.
 - Secure, persisted credential/preference storage — `settings`'s preferences repository is
   in-memory only.
