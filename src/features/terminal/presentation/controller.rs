@@ -33,13 +33,20 @@
 //! screen, which is another way of saying it belongs to the screen's view
 //! model.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use clean_signals::{ControllerCore, RunOptions};
-use frust::{GetUntracked, RwSignal, Set};
+use clean_signals_frust::use_interval;
+use frust::{GetUntracked, RwSignal, Set, spawn_local};
 
 use crate::failure::AppFailure;
+use crate::features::settings::di::expect_preferences_repository;
+use crate::features::settings::domain::entities::CursorStyle as SettingsCursorStyle;
+use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::domain::entities::{
     RenameRequest, Space, TabEntry, TermLine, Workspace,
 };
@@ -47,6 +54,8 @@ use crate::features::terminal::domain::repositories::{SessionsRepository, Termin
 use crate::features::terminal::domain::use_cases::{
     DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab,
 };
+
+use super::term;
 
 /// The `/terminal` screen's view model. See the [module docs](self).
 pub struct TerminalController {
@@ -80,6 +89,56 @@ pub struct TerminalController {
     /// press handler (no reactive owner on desktop) never reads a signal it
     /// is about to write.
     next_epoch: AtomicU64,
+    /// Whether the card shows the live demo pane instead of the mock
+    /// transcript — see the [module docs](self)'s "Pane-content switch"
+    /// note and [`LiveSession`]. Entered once per mount, through the
+    /// overflow menu's "Demo session" row (`pages::Actions::enter_demo`);
+    /// there is no path back to the mock transcript within the same mount.
+    pub live: RwSignal<bool>,
+    /// The live pane's cursor shape, mapped from `settings`' own
+    /// `AppearancePrefs::cursor_style` (see [`refresh_appearance`](Self::refresh_appearance)).
+    /// Seeded with the shipped default (`Preferences::defaults()`'s own
+    /// `CursorStyle::Block`) so the very first live frame — before that
+    /// first read lands — never shows the wrong shape.
+    pub cursor_style: RwSignal<term::CursorStyle>,
+    /// The live pane's font size in px, mapped from `AppearancePrefs::font_size_px`.
+    /// Seeded with the shipped default (`12px`) for the same reason as
+    /// [`cursor_style`](Self::cursor_style).
+    pub font_size: RwSignal<f32>,
+}
+
+/// The shipped default font size, px — `settings::domain::entities::Preferences::defaults()`'s
+/// own `AppearancePrefs::font_size_px`, transcribed rather than reached for
+/// (this feature's `presentation` maps `settings`' values; it does not
+/// construct them — see [`TerminalController::refresh_appearance`]'s own
+/// note on this sibling-`domain` widening).
+const DEFAULT_LIVE_FONT_SIZE: f32 = 12.0;
+
+/// How often the live pane re-reads the terminal-appearance prefs while
+/// mounted. `PreferencesRepository` has no subscribe/push seam (module docs,
+/// `crate::features::settings::domain::repositories`), so a short
+/// `clean_signals_frust::use_interval` poll is the established mechanism this
+/// app already uses for a periodic re-read (the `session poll` group's own
+/// pattern) — short enough that a `/settings` change reads back within one
+/// visible beat of a live pane that is otherwise cheap to poll.
+const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Map `settings`' own `CursorStyle` onto this feature's `term::CursorStyle`.
+///
+/// A narrow, documented sibling-`domain` widening — the same shape
+/// `docs/ARCHITECTURE.md` already records for `terminal`'s reuse of
+/// `sessions`' `RenameRequest`/`SessionsRepository`: a cursor shape has
+/// exactly one owner (the settings screen's own picker and its store), so
+/// this screen maps rather than re-minting a second choice set. Variants line
+/// up 1:1 (`term::CursorStyle`'s own doc), so the match is exhaustive and a
+/// variant added to one enum without the other fails to compile rather than
+/// silently falling back.
+fn map_cursor_style(style: SettingsCursorStyle) -> term::CursorStyle {
+    match style {
+        SettingsCursorStyle::Block => term::CursorStyle::Block,
+        SettingsCursorStyle::Underline => term::CursorStyle::Underline,
+        SettingsCursorStyle::Bar => term::CursorStyle::Bar,
+    }
 }
 
 impl TerminalController {
@@ -107,6 +166,9 @@ impl TerminalController {
             fullscreen: RwSignal::new(false),
             reveal_epoch: RwSignal::new(0),
             next_epoch: AtomicU64::new(1),
+            live: RwSignal::new(false),
+            cursor_style: RwSignal::new(term::CursorStyle::Block),
+            font_size: RwSignal::new(DEFAULT_LIVE_FONT_SIZE),
         }
     }
 
@@ -241,6 +303,106 @@ impl TerminalController {
     fn replay_reveal(&self) {
         self.reveal_epoch
             .set(self.next_epoch.fetch_add(1, Ordering::Relaxed));
+    }
+
+    /// Enter the live demo pane. Idempotent from this signal's own point of
+    /// view (a second call is a no-op write); the *construction* of
+    /// [`LiveSession`] itself happens exactly once, guarded by the screen's
+    /// own `build` (`pages::TerminalScreen::build`) — never here, since a
+    /// controller method has no reactive owner to build `Rc`-backed seams
+    /// under (see [`LiveSession::enter`]'s own doc).
+    pub fn enter_live(&self) {
+        self.live.set(true);
+    }
+
+    /// Re-read the terminal-appearance prefs and update
+    /// [`cursor_style`](Self::cursor_style)/[`font_size`](Self::font_size).
+    /// Called once immediately on entering the live pane and then on
+    /// [`APPEARANCE_POLL_INTERVAL`]'s own cadence for the rest of the mount
+    /// (see [`LiveSession::enter`]). A failed read leaves both signals at
+    /// whatever they last held — the same "stale beats wrong" choice the
+    /// settings screen's own controller makes for its preference signals.
+    pub async fn refresh_appearance(&self) {
+        let Ok(prefs) = expect_preferences_repository().load_preferences().await else {
+            return;
+        };
+        self.cursor_style
+            .set(map_cursor_style(prefs.appearance.cursor_style));
+        self.font_size.set(prefs.appearance.font_size_px as f32);
+    }
+}
+
+/// Everything the live demo pane needs: the emulator, the feed, the input and
+/// selection seams, and the pump's repaint counter — constructed **once**, on
+/// first entering the pane (see [`LiveSession::enter`]), and dropped when the
+/// screen unmounts.
+///
+/// Deliberately **not** a [`TerminalController`] field: every handle here is
+/// `Rc`-backed (`presentation::term`'s own module docs explain why — the
+/// emulator/feed/seams are mutated during the event pass, where there is no
+/// reactive owner), and embedding one would make the controller `!Send`/
+/// `!Sync`, breaking `use_controller`'s own bound. It lives in the screen's
+/// own `TerminalState` instead — the state-split rule's "non-reactive UI
+/// state" case (`docs/ARCHITECTURE.md`'s Building a Screen section) —
+/// constructed lazily by `Component::build` and read back via `&state.live`.
+pub struct LiveSession {
+    /// The VT emulator the grid renders and the selection resolves against.
+    pub emulator: term::SharedEmulator,
+    /// The byte source — concrete (not the `SharedFeed` trait object) so a
+    /// test can read [`DemoFeed::last_resize`], the resize test hook, without
+    /// a widget-level handle (see `pages::LiveProbe`).
+    pub feed: Rc<RefCell<DemoFeed>>,
+    /// The grid's (and the key bar's) shared keystroke source.
+    pub input: term::InputSeam,
+    /// The grid's (and the Copy chip's) shared selection gesture.
+    pub selection: term::SelectionSeam,
+    /// The feed pump's repaint counter — a **tracked** read of this in
+    /// `Component::build` is what wakes the live pane's repaint (see
+    /// `presentation::term`'s module docs on the 30 Hz coalescing mechanism).
+    pub generation: RwSignal<u64>,
+}
+
+impl LiveSession {
+    /// Construct the seams + feed and start the feed pump and the appearance
+    /// poll.
+    ///
+    /// **Must run under the screen's own component owner** — i.e. only ever
+    /// from `Component::build` (never a press handler, which runs under no
+    /// owner at all on desktop, per `docs/ARCHITECTURE.md`'s Building a
+    /// Screen section) — so `spawn_feed_pump`'s and `use_interval`'s
+    /// `on_cleanup` registrations bind to the screen's own owner and actually
+    /// fire on unmount, per those two functions' own "Ambient-Owner
+    /// contract" docs. The caller (`pages::TerminalScreen::build`) guards
+    /// this so it runs at most once per mount, matching the rebuild model's
+    /// "construct once, not per build" rule.
+    pub fn enter(controller: &Arc<TerminalController>) -> Self {
+        let emulator: term::SharedEmulator =
+            Rc::new(RefCell::new(term::TerminalEmulator::with_defaults()));
+        let feed: Rc<RefCell<DemoFeed>> = Rc::new(RefCell::new(DemoFeed::new()));
+        let feed_dyn: term::SharedFeed = feed.clone();
+        let input = term::InputSeam::new(feed_dyn.clone());
+        let selection = term::SelectionSeam::new(Rc::clone(&emulator));
+        let generation = RwSignal::new(0u64);
+        term::spawn_feed_pump(feed_dyn, Rc::clone(&emulator), generation);
+
+        // One read right away — so the very first live frame already carries
+        // the current prefs rather than the constructor's fallback defaults —
+        // then keep polling for the rest of this mount.
+        let now = Arc::clone(controller);
+        spawn_local(async move { now.refresh_appearance().await });
+        let poll = Arc::clone(controller);
+        use_interval(APPEARANCE_POLL_INTERVAL, move || {
+            let poll = Arc::clone(&poll);
+            spawn_local(async move { poll.refresh_appearance().await });
+        });
+
+        Self {
+            emulator,
+            feed,
+            input,
+            selection,
+            generation,
+        }
     }
 }
 
@@ -438,5 +600,39 @@ mod tests {
         assert!(c.fullscreen.get_untracked());
         assert!(!c.toggle_fullscreen());
         assert!(!c.fullscreen.get_untracked());
+    }
+
+    #[test]
+    fn entering_live_flips_the_one_flag() {
+        let c = controller(None);
+        assert!(!c.live.get_untracked());
+        c.enter_live();
+        assert!(c.live.get_untracked());
+    }
+
+    #[test]
+    fn the_live_pane_seeds_the_shipped_appearance_defaults() {
+        // Before the first `refresh_appearance` lands, the very first live
+        // frame must still show the shipped default rather than a blank/wrong
+        // shape — see `settings::domain::entities::Preferences::defaults()`.
+        let c = controller(None);
+        assert_eq!(c.cursor_style.get_untracked(), term::CursorStyle::Block);
+        assert_eq!(c.font_size.get_untracked(), DEFAULT_LIVE_FONT_SIZE);
+    }
+
+    #[test]
+    fn every_settings_cursor_style_maps_to_its_term_counterpart() {
+        assert_eq!(
+            map_cursor_style(SettingsCursorStyle::Block),
+            term::CursorStyle::Block
+        );
+        assert_eq!(
+            map_cursor_style(SettingsCursorStyle::Underline),
+            term::CursorStyle::Underline
+        );
+        assert_eq!(
+            map_cursor_style(SettingsCursorStyle::Bar),
+            term::CursorStyle::Bar
+        );
     }
 }
