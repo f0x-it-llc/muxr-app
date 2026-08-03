@@ -31,6 +31,21 @@
 //!   `_onSelectionStart`, before it resolves a word, and this port keeps that
 //!   ordering (see [`SelectionSeam::begin`](super::SelectionSeam::begin)).
 //!
+//! # Streaming output clears a held selection
+//!
+//! Because a [`GridPoint`] addresses the rendered screen and nothing here
+//! buffer-anchors it, new output scrolling the screen underneath a held
+//! selection would silently retarget it — Copy would hand back whatever now
+//! sits at those rows, not what the user actually highlighted. Rather than
+//! try to tell "this repaint scrolled" apart from "this repaint didn't"
+//! (fragile, and not obviously reliable), [`SelectionSeam::observe_generation`]
+//! (in the [parent module](super)) drops a held selection outright the moment
+//! *any* new content generation arrives. That is a real behavior change from
+//! the Flutter incumbent, whose buffer-anchored selection was never cleared
+//! by output — this app has no scrollback buffer to anchor a selection to
+//! yet, so clearing is the honest, safe default until a scrollback view
+//! gives a selection something stable to hold onto.
+//!
 //! # Drag re-resolves BOTH ends
 //!
 //! Every move re-resolves the word at the **fixed anchor cell** and the word at
@@ -106,6 +121,34 @@ impl GridRange {
     /// Whether `at` falls inside this range (row-major, inclusive).
     pub fn contains(self, at: GridPoint) -> bool {
         at >= self.begin && at <= self.end
+    }
+
+    /// Clamp both ends onto a `cols` x `rows` grid.
+    ///
+    /// This is what lets [`SelectionSeam::set_metrics`](super::SelectionSeam::set_metrics)
+    /// keep a held selection valid the instant a grid shrinks under it — a
+    /// rotation, a font-size bump, a fullscreen collapse — rather than carry a
+    /// stale, off-screen `begin` forward into [`selected_text`] (which clamps
+    /// too, defensively, but the seam is what stops a shrink-then-Copy from
+    /// ever reaching a range this wide again).
+    ///
+    /// Each point clamps **independently** and neither is re-sorted: a range
+    /// that was `begin <= end` stays that way unless a row-only shrink
+    /// collapses both ends onto the same surviving row in an order that reads
+    /// reversed — [`selected_text`]/[`segments`] both already treat a reversed
+    /// range as "nothing selected" rather than a wrap-around, so a rare
+    /// row-shrink like that degrades to no text/no paint instead of a panic,
+    /// which is the same trade a caller handing this an already-reversed
+    /// range (a malformed input, never a real drag result) gets today.
+    #[must_use]
+    pub fn clamp_to(self, cols: u16, rows: u16) -> Self {
+        let last_col = cols.saturating_sub(1);
+        let last_row = rows.saturating_sub(1);
+        let clamp = |p: GridPoint| GridPoint::new(p.row.min(last_row), p.col.min(last_col));
+        Self {
+            begin: clamp(self.begin),
+            end: clamp(self.end),
+        }
     }
 }
 
@@ -261,19 +304,31 @@ pub fn segments(range: GridRange, cols: u16) -> Vec<Segment> {
 ///
 /// The one adaptation is the end bound: `contents_between`'s `end_col` is
 /// **exclusive** while a [`GridRange`] is inclusive, so this passes
-/// `end.col + 1`. Rows/columns past the screen are clamped, and a
-/// reversed/empty range yields an empty string rather than a panic.
+/// `end.col + 1`. Both `begin` and `end` are clamped onto the *current*
+/// screen (`GridRange::clamp_to`) before either reaches `contents_between` —
+/// `begin` used to be left unclamped here, which underflowed
+/// `contents_between`'s multi-row branch (`cols - start_col`, in `u16`) the
+/// moment a held selection outlived a grid shrink; `SelectionSeam::set_metrics`
+/// clamps the *stored* range the instant that happens too, so this is a
+/// backstop, not the only place it happens. A reversed/empty range yields an
+/// empty string rather than a panic.
 pub fn selected_text(screen: &vt100::Screen, range: GridRange) -> String {
     let (rows, cols) = screen.size();
-    if rows == 0 || cols == 0 || range.begin.row >= rows {
+    if rows == 0 || cols == 0 {
         return String::new();
     }
-    let end_row = range.end.row.min(rows - 1);
-    let end_col = range.end.col.min(cols - 1);
-    if range.begin.row > end_row || (range.begin.row == end_row && range.begin.col > end_col) {
+    let range = range.clamp_to(cols, rows);
+    if range.begin.row > range.end.row
+        || (range.begin.row == range.end.row && range.begin.col > range.end.col)
+    {
         return String::new();
     }
-    screen.contents_between(range.begin.row, range.begin.col, end_row, end_col + 1)
+    screen.contents_between(
+        range.begin.row,
+        range.begin.col,
+        range.end.row,
+        range.end.col + 1,
+    )
 }
 
 #[cfg(test)]
@@ -505,6 +560,45 @@ mod tests {
     }
 
     #[test]
+    fn clamp_to_pulls_both_ends_inside_a_shrunk_grid() {
+        let range = GridRange {
+            begin: GridPoint::new(0, 60),
+            end: GridPoint::new(2, 5),
+        };
+        assert_eq!(
+            range.clamp_to(40, 10),
+            GridRange {
+                begin: GridPoint::new(0, 39),
+                end: GridPoint::new(2, 5),
+            },
+            "begin clamps exactly like end already did"
+        );
+        // A grid that grew, or an already-in-bounds range, is untouched.
+        assert_eq!(range.clamp_to(80, 10), range);
+    }
+
+    #[test]
+    fn clamp_to_never_reorders_a_range_it_leaves_reversed() {
+        // A row-only shrink can collapse both ends onto the last surviving
+        // row in an order that now reads reversed by column — `clamp_to`
+        // leaves it that way rather than re-sorting; `selected_text`/
+        // `segments` both already treat a reversed range as nothing selected,
+        // so this degrades to no text/no paint instead of a panic, the same
+        // trade an already-reversed input gets today.
+        let range = GridRange {
+            begin: GridPoint::new(1, 50),
+            end: GridPoint::new(3, 2),
+        };
+        assert_eq!(
+            range.clamp_to(60, 2),
+            GridRange {
+                begin: GridPoint::new(1, 50),
+                end: GridPoint::new(1, 2),
+            }
+        );
+    }
+
+    #[test]
     fn pixels_map_to_cells_and_clamp_into_the_grid_rather_than_escaping_it() {
         let geo = geometry(8, 4);
         assert_eq!(cell_at(Point::new(0.0, 0.0), geo), GridPoint::new(0, 0));
@@ -604,6 +698,36 @@ mod tests {
                 }
             ),
             ""
+        );
+    }
+
+    #[test]
+    fn selected_text_clamps_a_stale_begin_after_a_shrink_instead_of_panicking() {
+        // 70 'x's — not a full 80-col row, so there is no wrap flag to reason
+        // about — a real newline, then a short second row: a genuine
+        // multi-row selection whose BEGIN column (60) is about to outlive an
+        // 80 -> 40 column shrink while its row does not need to.
+        let bytes = [vec![b'x'; 70], b"\r\nyz".to_vec()].concat();
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(&bytes);
+        // The grid shrinks under the held selection — a rotation, a
+        // font-size bump, a fullscreen collapse
+        // (`TerminalGridWidget::layout` resizes the emulator on any
+        // cell-grid delta).
+        parser.screen_mut().set_size(4, 40);
+
+        let range = GridRange {
+            begin: GridPoint::new(0, 60), // inside the `x` run, now off-screen
+            end: GridPoint::new(1, 1),    // the `z` in "yz"
+        };
+        // Before this fix, `contents_between`'s multi-row branch computed
+        // `cols - start_col` (`40 - 60`) in `u16` and underflowed here — a
+        // real panic under `overflow-checks` (the dev/test profile), reachable
+        // any time a multi-row selection outlives a grid shrink.
+        let text = selected_text(parser.screen(), range);
+        assert_eq!(
+            text, "x\nyz",
+            "begin clamps to the new width exactly like end already did"
         );
     }
 

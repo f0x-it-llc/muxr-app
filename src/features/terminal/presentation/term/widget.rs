@@ -93,6 +93,13 @@
 //! *input*; reading and copying a session you cannot type into is exactly what
 //! a read-only terminal is for, so the selection arms sit ahead of that gate.
 //!
+//! **Selection does not survive new output.** `build`/`rebuild` hand the
+//! generation they carry to [`SelectionSeam::observe_generation`], which
+//! drops a held selection (and its chip) the instant that generation moves —
+//! see [`selection`](super::selection)'s module docs for why a rendered-screen
+//! selection cannot safely retarget itself under streaming content instead.
+//!
+
 //! The **loupe** is a re-render, not a backdrop sample: a
 //! [`LOUPE_W`]x[`LOUPE_H`] rounded window floating [`LOUPE_LIFT`] above the
 //! finger, inside which the same runs are painted again under a
@@ -378,6 +385,11 @@ impl<State: 'static> View<State> for TerminalGridView {
     type Element = TerminalGridWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> TerminalGridWidget {
+        // Seed the seam's last-seen generation before anything can be
+        // selected — see `SelectionSeam::observe_generation`.
+        if let Some(seam) = self.selection.as_ref() {
+            seam.observe_generation(self.generation);
+        }
         TerminalGridWidget {
             generation: self.generation,
             emulator: Rc::clone(&self.emulator),
@@ -454,6 +466,15 @@ impl<State: 'static> View<State> for TerminalGridView {
         if clienthood {
             element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
+        }
+
+        // A new generation is new output — clear a held selection rather
+        // than let it retarget under streaming content (see
+        // `SelectionSeam::observe_generation`). A no-op both when the
+        // generation didn't move (any other app-wide rebuild this screen
+        // merely sits under) and when nothing is selected.
+        if let Some(seam) = self.selection.as_ref() {
+            seam.observe_generation(self.generation);
         }
 
         flags
