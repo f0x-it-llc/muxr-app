@@ -44,6 +44,30 @@ frust = { path = "../../crates/frust", default-features = false, features = ["gl
 # dependency line in the default `Cargo.toml.tmpl`).
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
+# The terminal screen's two OS-capability plugins, added the pubspec way — a
+# platform plugin is a dependency of the *app*, never something the `frust`
+# facade re-exports. Same temporary-path arrangement as `frust` above (see that
+# comment): these become version dependencies once the plugins are published.
+#
+# `frust-clipboard`: the Copy chip's clipboard write
+# (`features::terminal::presentation::term::chip`). Always
+# `Clipboard::set_text_sensitive`, never plain `set_text` — a terminal
+# selection is exactly the token-bearing content that plugin's security
+# section names, and the sensitive variant is what suppresses Android 13+'s
+# copied-text preview and blocks iOS Universal Clipboard from replicating it
+# to the user's other signed-in devices. No manifest, plist or permission is
+# needed for either platform's plain-text write.
+frust-clipboard = { path = "../../plugins/clipboard" }
+
+# `frust-haptics`: the selection-click tick a long-press fires
+# (`term::SelectionSeam::begin`). Fire-and-forget — the `Result` is ignored at
+# the one call site, and desktop reports `NotAvailable` by design. NOTE this
+# one *does* need an Android manifest addition, `android.permission.VIBRATE`
+# (a normal permission, granted at install with no runtime prompt), which the
+# `frust` TUI's Add Plugin dialog inserts into `android/app/src/main/
+# AndroidManifest.xml`.
+frust-haptics = { path = "../../plugins/haptics" }
+
 # `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
 # Version-Pin Policy), so it is **git+rev-pinned to the public repo** — the
 # exact same spec `clean-signals-frust`'s own `clean-signals` dependency uses,
