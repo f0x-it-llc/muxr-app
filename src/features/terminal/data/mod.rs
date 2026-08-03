@@ -5,7 +5,10 @@
 //! differing only in that it may depend on an external transport/storage
 //! crate.
 //!
-//! One implementation today: `repositories::MockTerminalRepository`, seeded
-//! from `docs/terminal.html`. The real `muxrd` client lands beside it.
+//! Two implementations today, one per `domain` port:
+//! `repositories::MockTerminalRepository` (the screen's model, seeded from
+//! `docs/terminal.html`) and `feeds::DemoFeed` (the grid's byte stream,
+//! replaying a checked-in fixture). The real `muxrd` client lands beside both.
 
+pub mod feeds;
 pub mod repositories;
