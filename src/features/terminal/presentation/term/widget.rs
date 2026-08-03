@@ -39,30 +39,56 @@
 //!   (Terminal.app, iTerm2, VTE): an unfocused terminal shows *where* the
 //!   cursor is without pretending to be taking input.
 //!
-//! Focus itself is a plain widget input, unwired until the terminal input task
-//! lands (nothing focuses the grid yet), so today's screens pass `false`.
+//! Focus is now two inputs ORed together: the plain `focused` builder (what a
+//! screen passes when it knows), and the pod's own recorded focus path
+//! (`PaintCtx::has_focus`), which is what a tap on the grid claims.
+//!
+//! # The grid is the IME client
+//!
+//! Given an [`InputSeam`] (and `read_only` clear), this widget *is* the
+//! terminal's keystroke source — the one place `request_focus` and
+//! `publish_ime_state` are called, because both are reachable only from inside
+//! a `Widget` impl:
+//!
+//! - a pointer `Down` claims focus and publishes an
+//!   [`ImeContentType::Terminal`] surface, which is what raises the soft
+//!   keyboard and what tells both platforms to switch off autocorrect, smart
+//!   quotes/dashes and autocapitalization;
+//! - every focus-routed `Key`/`Ime` event is handed to the shared
+//!   [`KeystrokeSource`](super::KeystrokeSource), whose bytes go straight to
+//!   the feed through [`InputSeam::dispatch`] — see [`input`](super::input) for
+//!   the diff engine, the latch and every rule they implement;
+//! - the surface is **re-published after every handled event and on every
+//!   focused paint**, exactly as `frust-widgets`' own `TextInput` does. That is
+//!   deliberately idempotent: both mobile bridges compare the published state
+//!   against their live mirror and do nothing when they already agree, so the
+//!   only publication that actually costs a platform `restartInput` is the one
+//!   following a window **re-anchor** (`Emission::reconciled`) — see
+//!   `KeystrokeSource`'s own rolling-window docs.
+//!
+//! Without a seam — every call site before the input task, and every
+//! `read_only` grid — the widget claims no focus, publishes nothing and emits
+//! nothing: it is inert, exactly as it was.
 //!
 //! # Not here
 //!
-//! No input handling (the grid is a leaf: `Widget::event` keeps its default
-//! `Ignored`, which is also the correct answer for an
-//! `InputEvent::Housekeeping` broadcast — a leaf has no children to forward one
-//! to and must never consume one), no selection, no scrollback view. Those are
-//! their own tasks.
+//! No selection, no scrollback view, no key repeat. Those are their own tasks.
+//! An `InputEvent::Housekeeping` broadcast is still `Ignored` — a leaf has no
+//! children to forward one to and must never consume one.
 
 use std::rc::Rc;
 
 use frust::authoring::text::{TextContext, TextLayout};
 use frust::authoring::{
-    BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Rect,
-    Role, SemanticsCtx, Shape, Size, View, Widget,
+    BoxConstraints, Brush, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx,
+    PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, SemanticsCtx, Shape, Size, View, Widget,
 };
 use frust::{FrameTime, Theme};
 
 use super::batch::{RunBatch, batch_screen};
 use super::geometry::{CellGeometry, measure_cell, solve_cell_geometry};
 use super::style::{CellStyle, TerminalPalette};
-use super::{CursorStyle, SharedEmulator};
+use super::{CursorStyle, InputSeam, SharedEmulator};
 
 /// The caret's blink period, in ms — one full on/off cycle.
 ///
@@ -110,6 +136,8 @@ pub struct TerminalGridView {
     cursor: CursorStyle,
     focused: bool,
     label: String,
+    input: Option<InputSeam>,
+    read_only: bool,
 }
 
 /// Build a grid view over `emulator` at `generation` (see
@@ -131,6 +159,8 @@ pub fn terminal_grid(
         cursor: CursorStyle::default(),
         focused: false,
         label: String::new(),
+        input: None,
+        read_only: false,
     }
 }
 
@@ -157,6 +187,31 @@ impl TerminalGridView {
         self.label = label.into();
         self
     }
+
+    /// Make this grid the session's **keystroke source**: a tap claims focus and
+    /// raises the keyboard, and every key/IME event becomes bytes on `seam`'s
+    /// feed (see the [module docs](self)).
+    ///
+    /// Without one the grid is a display surface only — no focus, no IME
+    /// surface, no emissions.
+    #[must_use]
+    pub fn input(mut self, seam: InputSeam) -> Self {
+        self.input = Some(seam);
+        self
+    }
+
+    /// A read-only grid: never an IME client, never an emitter, whatever seam
+    /// it was given.
+    ///
+    /// The **focus gate is the read-only gate** (`TextInput`'s own rule): a
+    /// widget that refuses focus is unreachable by `Key`/`Ime`, which are
+    /// focus-routed, so nothing downstream needs a second guard. A read-only
+    /// grid is inert, not a shield — it consumes nothing.
+    #[must_use]
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
 }
 
 /// The retained grid: re-batches and re-shapes the emulator's screen on every
@@ -181,6 +236,17 @@ pub struct TerminalGridWidget {
     /// first focused paint, and reset whenever focus changes so a freshly
     /// focused grid shows a lit caret immediately).
     blink_from: Option<FrameTime>,
+    /// The keystroke source + feed this grid emits through, when it is one (see
+    /// the [module docs](self)).
+    input: Option<InputSeam>,
+    read_only: bool,
+    /// The caret cell in **absolute** coordinates, captured during `paint` (the
+    /// only pass that knows the grid's absolute origin — `EventCtx::origin` is
+    /// parent-relative) and published as the platform's candidate-placement
+    /// hint.
+    caret_rect: Option<Rect>,
+    /// Effective focus as of the last paint, for the blink-reset edge.
+    was_focused: bool,
 }
 
 impl<State: 'static> View<State> for TerminalGridView {
@@ -200,6 +266,10 @@ impl<State: 'static> View<State> for TerminalGridView {
             geometry: None,
             cursor_cell: None,
             blink_from: None,
+            input: self.input.clone(),
+            read_only: self.read_only,
+            caret_rect: None,
+            was_focused: self.focused,
         }
     }
 
@@ -243,6 +313,18 @@ impl<State: 'static> View<State> for TerminalGridView {
             element.label.push_str(&self.label);
             // Semantics are re-collected after every layout/paint pass, so a
             // label change only needs the tree walked again.
+            flags |= ChangeFlags::PAINT;
+        }
+
+        // The seam holds `Rc`s and a signal — cheap to clone and not usefully
+        // comparable, so it is reinstalled every rebuild (the same rule
+        // `ExpandButtonView` applies to its callback). Only the *presence* of a
+        // seam and the read-only flag change what is painted or announced.
+        let clienthood =
+            prev.input.is_some() != self.input.is_some() || prev.read_only != self.read_only;
+        element.input = self.input.clone();
+        if clienthood {
+            element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
         }
 
@@ -303,6 +385,41 @@ impl Widget for TerminalGridWidget {
         let origin = ctx.origin();
         let size = ctx.size();
 
+        // Effective focus: the plain builder input OR the pod's own recorded
+        // focus path, which is what a tap on the grid claims. `has_focus` is
+        // authoritative for a *container-routed* blur — one that clears the
+        // pod's flag without ever reaching `event` — so a freshly blurred grid
+        // stops blinking on the very next frame.
+        let focused = self.focused || ctx.has_focus();
+        if focused != self.was_focused {
+            self.was_focused = focused;
+            // A freshly focused grid lights its caret at once rather than
+            // inheriting whatever phase the last focus left behind.
+            self.blink_from = None;
+        }
+
+        // The caret cell, in absolute coordinates, for the platform's
+        // candidate-placement hint (see the field's own doc).
+        self.caret_rect = self.cursor_cell.as_ref().and_then(|cell| {
+            (cell.row < geometry.rows && cell.col < geometry.cols).then(|| {
+                let x = origin.x + f64::from(cell.col) * geometry.width;
+                let y = origin.y + f64::from(cell.row) * geometry.height;
+                Rect::new(x, y, x + geometry.width, y + geometry.height)
+            })
+        });
+
+        // Republish the IME surface every painted frame while focused, so a
+        // platform mirror reseeded behind our back (a shell's steady-active
+        // reconcile) converges on what this widget believes it holds. Idempotent
+        // by construction — see the module docs.
+        if let Some(seam) = self.input.as_ref()
+            && !self.read_only
+            && ctx.has_focus()
+        {
+            let state = seam.ime_state(self.caret_rect);
+            ctx.publish_ime_state(state);
+        }
+
         // The derived geometry already fits the content box, so nothing should
         // reach this clip — it stays as the backstop that makes "nothing
         // outside the grid can paint" true by construction (a font floored at
@@ -337,11 +454,64 @@ impl Widget for TerminalGridWidget {
             }
         }
 
-        self.paint_cursor(ctx, scene, geometry);
+        self.paint_cursor(ctx, scene, geometry, focused);
 
         scene.pop_clip();
         // No `request_frame` for content: the feed pump's generation write is
         // the sole wake source (module docs, rule 2).
+    }
+
+    /// The keystroke source's event half — see the [module docs](self).
+    ///
+    /// A grid with no [`InputSeam`], or a `read_only` one, falls straight
+    /// through to `Ignored`: it claims no focus, so the focus-routed `Key`/`Ime`
+    /// events can never reach it in the first place.
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let Some(seam) = self.input.as_ref() else {
+            return EventResult::Ignored;
+        };
+        if self.read_only {
+            return EventResult::Ignored;
+        }
+        match event {
+            InputEvent::Pointer(pointer) => {
+                // No capture: the grid has no drag semantic yet (selection is
+                // its own task), and a `Cancel` must never touch state.
+                if pointer.phase != PointerPhase::Down || !inside(pointer.position, ctx.size()) {
+                    return EventResult::Ignored;
+                }
+                // Every tap re-claims focus and re-publishes `active: true`, so
+                // a keyboard the user dismissed comes back on the next tap
+                // rather than needing a blur first.
+                ctx.request_focus();
+                let state = seam.ime_state(self.caret_rect);
+                ctx.publish_ime_state(state);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            InputEvent::Key(_) | InputEvent::Ime(_) => {
+                if !ctx.has_focus() {
+                    return EventResult::Ignored;
+                }
+                // One shared fold, so the key bar's caps derive bytes exactly
+                // the same way this widget does (see [`InputSeam::absorb`]).
+                if seam.absorb(event).is_none() {
+                    return EventResult::Ignored;
+                }
+                // The publish is unconditional and idempotent: leaving a stale
+                // editing state behind would make a shell's steady-active
+                // reconcile push the *pre-keystroke* text back into the
+                // platform mirror.
+                let state = seam.ime_state(self.caret_rect);
+                ctx.publish_ime_state(state);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            InputEvent::Scroll { .. } => EventResult::Ignored,
+            // Not user input — this widget queues no deferred callback for the
+            // broadcast to run, so it simply falls through.
+            InputEvent::Housekeeping => EventResult::Ignored,
+        }
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -354,8 +524,18 @@ impl Widget for TerminalGridWidget {
             if !self.label.is_empty() {
                 node.set_label(self.label.as_str());
             }
+            // A grid that cannot take input says so, rather than looking like
+            // a live terminal to a screen reader.
+            if self.read_only || self.input.is_none() {
+                node.set_read_only();
+            }
         });
     }
+}
+
+/// Whether a widget-local `position` is inside a `size`-sized box.
+fn inside(position: Point, size: Size) -> bool {
+    position.x >= 0.0 && position.y >= 0.0 && position.x < size.width && position.y < size.height
 }
 
 impl TerminalGridWidget {
@@ -408,7 +588,13 @@ impl TerminalGridWidget {
 
     /// Paint the caret — the one thing here that may ask for another frame, and
     /// only ever as a paced cosmetic loop (see the [module docs](self)).
-    fn paint_cursor(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene, geo: CellGeometry) {
+    fn paint_cursor(
+        &mut self,
+        ctx: &mut PaintCtx,
+        scene: &mut dyn PaintScene,
+        geo: CellGeometry,
+        focused: bool,
+    ) {
         let Some(cell) = &self.cursor_cell else {
             return;
         };
@@ -419,7 +605,7 @@ impl TerminalGridWidget {
         let x = origin.x + f64::from(cell.col) * geo.width;
         let y = origin.y + f64::from(cell.row) * geo.height;
 
-        if !self.focused {
+        if !focused {
             // Hollow outline, inset by half the stroke so the whole line lands
             // inside the cell. No blink, no frame request.
             let half = CURSOR_OUTLINE_WIDTH / 2.0;

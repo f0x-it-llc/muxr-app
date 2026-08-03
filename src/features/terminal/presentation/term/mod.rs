@@ -14,8 +14,9 @@
 //! | [`style`] | [`TerminalPalette`] (the theme-token → ANSI-16 mapping table lives in its docs) and `CellStyle` |
 //! | [`batch`] | same-style run batching, and the four vt100 traps it has to get right |
 //! | [`geometry`] | the measured cell box, and the cols x rows an available box divides into |
-//! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret |
-//! | this module | the emulator wrapper, the 30 Hz feed pump, and [`CursorStyle`] |
+//! | [`input`] | the keystroke source's pure half: the snapshot diff, the Ctrl/Alt latch, the key-bar byte vocabulary |
+//! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret, and IME clienthood |
+//! | this module | the emulator wrapper, the 30 Hz feed pump, [`CursorStyle`], and the [`InputSeam`] the grid and the key bar share |
 //!
 //! # The 30 Hz coalescing mechanism, and why it is app-side
 //!
@@ -64,6 +65,7 @@
 
 pub mod batch;
 pub mod geometry;
+pub mod input;
 pub mod style;
 pub mod widget;
 
@@ -73,11 +75,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use frust::{RwSignal, Set, on_cleanup, spawn_blocking, spawn_local};
+use frust::authoring::{EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Rect};
+use frust::{GetUntracked, RwSignal, Set, on_cleanup, spawn_blocking, spawn_local};
 
 use crate::features::terminal::domain::feed::TerminalFeed;
 
 pub use geometry::{FALLBACK_COLS, FALLBACK_ROWS};
+pub use input::{BarKey, Emission, KeystrokeSource, ModifierLatch};
 pub use style::{TerminalPalette, terminal_palette};
 pub use widget::{TerminalGridView, TerminalGridWidget, terminal_grid};
 
@@ -123,6 +127,136 @@ pub type SharedEmulator = Rc<RefCell<TerminalEmulator>>;
 
 /// The feed, shared between the pump and whatever sends input to it.
 pub type SharedFeed = Rc<RefCell<dyn TerminalFeed>>;
+
+/// The keystroke source, shared between the grid widget (which is the IME
+/// client) and the key bar (which arms the same latch) — see [`InputSeam`].
+///
+/// An `Rc<RefCell<_>>` for the same reason the emulator is one: it is mutated
+/// during the *event* pass, where there is no reactive owner and no `&mut
+/// State`, and a signal per keystroke would wake a whole-app rebuild per
+/// keystroke.
+pub type SharedKeystrokeSource = Rc<RefCell<KeystrokeSource>>;
+
+/// Everything the grid widget and the key bar must agree on to be one keystroke
+/// source: the [`KeystrokeSource`] (and therefore the one modifier latch), the
+/// feed every byte leaves through, and the one signal a state change bumps.
+///
+/// # Why the signal is here and not in the source
+///
+/// [`input`] is deliberately framework-free — a pure diff engine with no
+/// reactive dependency — but the key bar's armed pips are *rendered*, so a
+/// latch change (whether from a bar tap or from a soft-keyboard character
+/// **consuming** the latch) has to wake a rebuild. This wrapper is the one
+/// place those two facts meet: [`dispatch`](Self::dispatch) sends the bytes and
+/// mirrors the source's own revision counter into the signal, one write per
+/// event, never one per byte.
+#[derive(Clone)]
+pub struct InputSeam {
+    /// The shared source — the diff engine and the latch.
+    pub source: SharedKeystrokeSource,
+    /// Where emitted bytes go.
+    pub feed: SharedFeed,
+    /// The source's revision, mirrored so a `build` that reads it rebuilds when
+    /// the latch (or the mirror) moves.
+    pub revision: RwSignal<u64>,
+}
+
+impl InputSeam {
+    /// A seam over `feed`, with a fresh source and a revision signal at zero.
+    pub fn new(feed: SharedFeed) -> Self {
+        Self {
+            source: Rc::new(RefCell::new(KeystrokeSource::new())),
+            feed,
+            revision: RwSignal::new(0),
+        }
+    }
+
+    /// Send `emission`'s bytes to the session and wake anything reading
+    /// [`revision`](Self::revision).
+    ///
+    /// **The one place bytes leave the app**, so a caller never talks to the
+    /// feed directly: bar taps and soft-keyboard characters take the identical
+    /// route out (the latch having already been applied inside the source).
+    pub fn dispatch(&self, emission: &Emission) {
+        if !emission.bytes.is_empty() {
+            self.feed.borrow_mut().send_input(&emission.bytes);
+        }
+        let revision = self.source.borrow().revision();
+        if revision != self.revision.get_untracked() {
+            self.revision.set(revision);
+        }
+    }
+
+    /// The armed modifiers — what the key bar draws its pips from.
+    pub fn latch(&self) -> ModifierLatch {
+        self.source.borrow().latch()
+    }
+
+    /// The editing state to publish to the platform right now.
+    pub fn published(&self) -> EditingState {
+        self.source.borrow().published()
+    }
+
+    /// **The** IME surface a terminal input widget publishes: the source's
+    /// reconciled editing state, an optional caret rect as the platform's
+    /// candidate-placement hint, and [`ImeContentType::Terminal`] — the hint
+    /// that switches off autocorrect, smart quotes/dashes, smart insert-delete
+    /// and autocapitalization, so a typed `"` arrives as `0x22`.
+    ///
+    /// Spelled once here rather than per widget: the grid and the key bar both
+    /// publish it (see [`absorb`](Self::absorb)), and two spellings would let
+    /// them disagree about the content type — which is a silent
+    /// corrupt-my-shell-command bug, not a cosmetic one.
+    ///
+    /// `active` is always `true`: this is only ever published by a widget that
+    /// holds (or is claiming) focus, and a blur drops the whole surface at the
+    /// render root instead.
+    pub fn ime_state(&self, caret: Option<Rect>) -> ImeState {
+        ImeState {
+            active: true,
+            editing: self.published(),
+            caret,
+            content_type: ImeContentType::Terminal,
+        }
+    }
+
+    /// Fold one **focus-routed** event into the source and send whatever it
+    /// derived, or `None` when `event` is not one.
+    ///
+    /// # Why more than one widget calls this
+    ///
+    /// Frust blurs on any pointer `Down` that claims no focus
+    /// (`RenderRoot::event`: "no widget on the tapped path took focus"), and a
+    /// blur drops `focus_active` *and* the whole published surface — so a key
+    /// bar whose caps claimed no focus would dismiss the very keyboard it is
+    /// docked to. Each cap therefore claims focus like the grid does, which
+    /// makes it the focus path's owner until the grid is tapped again, which in
+    /// turn makes it the widget `Key`/`Ime` events route to.
+    ///
+    /// That is fine — and it is why this lives on the seam: **whichever widget
+    /// holds the focus path drives the same [`KeystrokeSource`] and publishes
+    /// the same [`ime_state`](Self::ime_state)**, so the platform sees one
+    /// unbroken input surface no matter which one was tapped last.
+    pub fn absorb(&self, event: &InputEvent) -> Option<Emission> {
+        let emission = {
+            let mut source = self.source.borrow_mut();
+            match event {
+                InputEvent::Key(key) => source.on_key(&key.key, key.modifiers),
+                // `ApplyEditingState` is the mobile (state-sync) path;
+                // `Compose`/`Commit` are the desktop (winit) shapes;
+                // `Enabled`/`Disabled` bracket a composition.
+                InputEvent::Ime(ImeEvent::ApplyEditingState(state)) => source.on_snapshot(state),
+                InputEvent::Ime(ImeEvent::Commit(text)) => source.on_commit(text),
+                InputEvent::Ime(ImeEvent::Compose { text, .. }) => source.on_compose(text),
+                InputEvent::Ime(ImeEvent::Disabled) => source.on_composition_end(),
+                InputEvent::Ime(ImeEvent::Enabled) => Emission::default(),
+                _ => return None,
+            }
+        };
+        self.dispatch(&emission);
+        Some(emission)
+    }
+}
 
 /// A VT emulator sized to the grid on screen.
 ///
