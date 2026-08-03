@@ -34,37 +34,24 @@
 //! meta line's `▣ 9 panes`, the splash's brand rain) and a missing face
 //! degrades to a tofu box in a sentence rather than to an invisible button.
 //!
-//! # Modal-aware: the bar dims and goes inert under an overlay
+//! # Modality is not this widget's job
 //!
-//! The bar floats **over** the navigator (see [`crate::shell::root_view`]), so
-//! a sheet or dialog pushed *inside* the navigator cannot cover it — it stayed
-//! fully lit and, worse, fully **tappable** under an open modal: the `⚙`
-//! navigated straight out from under a sheet. That is a modality hole, not a
-//! cosmetic one.
+//! The bar floats **over** the route navigator (see
+//! [`crate::shell::root_view`]), so a sheet or dialog pushed *inside* that
+//! navigator could never cover it: it stayed lit and, worse, fully **tappable**
+//! under an open modal — the `⚙` navigated straight out from under a sheet.
+//! This widget used to close that hole itself, with a `overlay` flag that
+//! painted the modal's own scrim over the bar and withdrew its input and
+//! semantics.
 //!
-//! [`TopBarView::overlay`] closes it, from the depth fact
-//! `crate::routes::BarState::overlay_active` publishes (live page-stack depth
-//! deeper than the top *route*'s). While it is set the bar:
-//!
-//! - paints the **same scrim** the modal itself paints
-//!   ([`crate::ui::sheet::SCRIM_ALPHA`] over `colors.scrim`), staged on the
-//!   **same** [`ModalStage`] timings the sheet and the Glyph dialog use — two
-//!   clocks started in the same rebuild rather than one shared driver, because
-//!   a `NavigatorController` exposes no transition progress to read (FINDINGS
-//!   #40), exactly as the bar's own reveal is matched to the page transition
-//!   under it;
-//! - takes **no input** and publishes **no semantics** — the same
-//!   *inert-node-absent* rule the hidden state follows, and for the same
-//!   reason: an accessibility node whose affordances route nowhere is worse
-//!   than no node, and here it would additionally sit *outside* the modal's
-//!   own `Role::Dialog` subtree, offering a screen reader a way around the
-//!   modality the visual scrim is announcing.
-//!
-//! Inertness is driven by the **flag**, not by the tint's animation: modality
-//! is binary, so the bar goes dead on the frame the overlay opens and comes
-//! back on the frame it closes, while the tint fades either way. A gesture
-//! pop or a scrim dismissal clears the flag through the mirror's own
-//! depth-fall reconcile — nothing here polls.
+//! None of that survives the root overlay host (`crate::AppState::overlays`,
+//! FINDINGS #44). Every overlay is now a page of a navigator whose root page is
+//! the *whole app*, this bar included, and a navigator routes input — and
+//! publishes accessibility nodes — for its **top page only**. So an open
+//! overlay makes the bar inert and unaddressable structurally, and the
+//! overlay's own scrim is painted at the root, genuinely over the bar rather
+//! than mirrored onto it. A flag here would be a second, drifting answer to a
+//! question the host already answers.
 //!
 //! # Why a hand-rolled widget rather than `glyph::app_bar`
 //!
@@ -176,8 +163,6 @@ use frust::{
     AnimationController, Axis, ChildKey, CrossAxisAlignment, Curve, EdgeInsets, FlexView, IconData,
     IconSource, Padding, SizedBox, Theme, Timing, icon, inflexible, safe_area, text,
 };
-
-use crate::ui::sheet::{ModalStage, SCRIM_ALPHA};
 
 /// `.topbar{height:46px}` — the content band, below the status-bar inset.
 ///
@@ -478,10 +463,8 @@ pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State
         action: None,
         direction_reverse: false,
         hidden: false,
-        overlay: false,
         surface: scheme.surface,
         rule: scheme.outline_variant,
-        scrim: scheme.scrim,
         on_surface: scheme.on_surface,
         slot_radius: theme.shape.small,
     }
@@ -549,16 +532,10 @@ pub struct TopBarView<State: 'static> {
     direction_reverse: bool,
     /// Whether this bar renders at all — see the [module docs](self).
     hidden: bool,
-    /// Whether a modal covers the app: the bar dims itself to match and goes
-    /// inert — see the [module docs](self).
-    overlay: bool,
     /// `--bg-surface`: the bar's own background.
     surface: Color,
     /// `--border`: the hairline under it.
     rule: Color,
-    /// `colors.scrim`: the tone the overlay tint is mixed from — the modal's
-    /// own, so the bar dims in the same ink the page under it does.
-    scrim: Color,
     /// The ink every slot icon inherits (`--fg`).
     on_surface: Color,
     /// The corner radius a slot's pressed wash is drawn at.
@@ -592,13 +569,6 @@ impl<State: 'static> TopBarView<State> {
         on_press: F,
     ) -> Self {
         self.action = Some(any(self.slot_icon(mark, label, on_press)));
-        self
-    }
-
-    /// Paint the bar over an animated scrim and take no input while `overlay`
-    /// is set — the modality mirror. See the [module docs](self).
-    pub fn overlay(mut self, overlay: bool) -> Self {
-        self.overlay = overlay;
         self
     }
 
@@ -1026,21 +996,8 @@ pub struct TopBarWidget {
     /// Whether the leading slot is the 30×30 chevron box rather than the brand.
     back: bool,
     hidden: bool,
-    /// Whether a modal is up: the bar is inert **from this frame**, and its
-    /// tint animates toward [`Self::tint`]'s target.
-    overlay: bool,
     surface: Color,
     rule: Color,
-    scrim: Color,
-    /// The painted overlay tint: `0.0` untinted, `1.0` at full
-    /// [`SCRIM_ALPHA`].
-    tint: f64,
-    /// The in-flight tint staging, `None` at rest — resolved on the first
-    /// **paint** after a flip, like [`Self::reveal_anim`], and on the modal's
-    /// own [`ModalStage`] timings so bar and sheet dim together.
-    tint_anim: Option<ModalStage>,
-    /// An overlay flip the last rebuild staged, awaiting that first paint.
-    tint_pending: bool,
     /// The painted reveal: `0.0` fully above the top edge, `1.0` at rest.
     reveal: f64,
     /// The in-flight reveal, `None` at rest. Created on the first **paint**
@@ -1077,16 +1034,11 @@ impl<State: 'static> View<State> for TopBarView<State> {
             rest_origins: Vec::new(),
             back: self.back,
             hidden: self.hidden,
-            overlay: self.overlay,
             surface: self.surface,
             rule: self.rule,
-            scrim: self.scrim,
-            // A first mount never animates either channel: the bar is simply
-            // already where (and as dim as) the route says it belongs — this
-            // is also the frame a cold start's splash covers.
-            tint: if self.overlay { 1.0 } else { 0.0 },
-            tint_anim: None,
-            tint_pending: false,
+            // A first mount never animates: the bar is simply already where the
+            // route says it belongs — this is also the frame a cold start's
+            // splash covers.
             reveal: if self.hidden { 0.0 } else { 1.0 },
             reveal_anim: None,
             reveal_pending: false,
@@ -1142,18 +1094,9 @@ impl<State: 'static> View<State> for TopBarView<State> {
             element.reveal_pending = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        if prev.overlay != self.overlay {
-            // Inertness follows the flag immediately (modality is binary); only
-            // the tint animates, and only from the next paint — where a theme
-            // is in scope to resolve the modal timings from.
-            element.overlay = self.overlay;
-            element.tint_pending = true;
-            flags |= ChangeFlags::PAINT;
-        }
-        if prev.surface != self.surface || prev.rule != self.rule || prev.scrim != self.scrim {
+        if prev.surface != self.surface || prev.rule != self.rule {
             element.surface = self.surface;
             element.rule = self.rule;
-            element.scrim = self.scrim;
             flags |= ChangeFlags::PAINT;
         }
         flags
@@ -1184,32 +1127,10 @@ impl TopBarWidget {
         !self.hidden || self.revealing()
     }
 
-    /// Whether the bar is settled on screen **and** nothing modal covers the
-    /// app — the one state in which it takes input and publishes semantics
-    /// (see the [module docs](self)).
+    /// Whether the bar is settled on screen — the one state in which it takes
+    /// input and publishes semantics (see the [module docs](self)).
     fn settled_open(&self) -> bool {
-        !self.hidden && !self.revealing() && !self.overlay
-    }
-
-    /// Advance the overlay tint one frame and report the alpha fraction to
-    /// paint it at (`0.0` untinted, `1.0` full [`SCRIM_ALPHA`]).
-    fn advance_tint(&mut self, ctx: &mut PaintCtx) -> f32 {
-        let Some(stage) = self.tint_anim.as_mut() else {
-            return self.tint as f32;
-        };
-        let animating = stage.advance(ctx.frame_time());
-        self.tint = stage.value();
-        let (_, alpha) = stage.shape(self.tint);
-        if animating {
-            ctx.request_frame();
-        } else {
-            self.tint = stage.target();
-            self.tint_anim = None;
-            // One more frame so the settled tint is the one on screen — the
-            // same courtesy the reveal pays itself.
-            ctx.request_frame();
-        }
-        alpha
+        !self.hidden && !self.revealing()
     }
 }
 
@@ -1297,13 +1218,6 @@ impl Widget for TopBarWidget {
             self.reveal_anim = Some(Reveal::start(self.reveal, to, reduce));
             self.reveal_pending = false;
         }
-        // …and the overlay tint, on the modal's own timings (module docs).
-        if self.tint_pending {
-            let to = if self.overlay { 1.0 } else { 0.0 };
-            self.tint_anim = Some(ModalStage::start(self.tint, to, theme));
-            self.tint_pending = false;
-        }
-
         // Advance it, and let the frame clock — not the rebuild — decide when
         // the bar has arrived.
         let mut layer = PatternLayer {
@@ -1357,14 +1271,6 @@ impl Widget for TopBarWidget {
             child.paint_child(ctx, scene);
         }
 
-        // The modality tint, over everything the bar just painted and inside
-        // its reveal layer, so a bar arriving under an open sheet fades in
-        // already dimmed rather than flashing lit.
-        let tint = self.advance_tint(ctx);
-        if tint > 0.0 {
-            scene.fill_rect(origin, size, self.scrim.with_alpha(SCRIM_ALPHA * tint));
-        }
-
         if faded {
             scene.pop_layer();
         }
@@ -1372,11 +1278,11 @@ impl Widget for TopBarWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if !self.settled_open() {
-            // Hidden, mid-reveal, or **under a modal**: a bar that is only
-            // half-arrived must not eat a tap meant for the page it floats
-            // over, and a bar behind a sheet's scrim must not act at all
-            // (module docs). Ignoring rather than swallowing is what lets the
-            // modal underneath treat the press as the outside-tap it is.
+            // Hidden or mid-reveal: a bar that is only half-arrived must not
+            // eat a tap meant for the page it floats over. Ignoring rather
+            // than swallowing is what lets that page treat the press as its
+            // own. (A press *under an open overlay* never reaches here at all
+            // — the root host routes to its top page only; module docs.)
             return EventResult::Ignored;
         }
         // Only the leading/trailing slots are interactive, but routing to every
@@ -1388,10 +1294,10 @@ impl Widget for TopBarWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         if !self.settled_open() {
             // `/` has no bar at all, in the accessibility tree as on screen —
-            // a mid-reveal bar routes nothing, so it publishes nothing, and a
-            // bar under a modal publishes nothing for the stronger reason that
-            // a node here would sit *outside* the modal's own `Role::Dialog`
-            // subtree and offer a way round the modality (module docs).
+            // and a mid-reveal bar routes nothing, so it publishes nothing: an
+            // accessibility node whose affordances route nowhere is worse than
+            // no node. (Under an open overlay the host omits this whole subtree
+            // for the same reason, one level up; module docs.)
             return;
         }
         ctx.push_container(
@@ -1580,36 +1486,24 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The overlay tint
+    // Input and semantics follow the reveal, and nothing else
     // -----------------------------------------------------------------------
 
     #[test]
-    fn the_bars_tint_is_the_very_scrim_the_modal_paints() {
-        // The one number this whole mirror rests on: the bar dims by exactly
-        // as much as the page under the sheet does, because it is the same
-        // constant and the same `colors.scrim` role. Anything else reads as a
-        // bar that is "sort of" disabled.
-        assert_eq!(SCRIM_ALPHA, crate::ui::sheet::SCRIM_ALPHA);
-        assert!((0.0..=1.0).contains(&SCRIM_ALPHA));
-    }
-
-    #[test]
-    fn an_overlay_makes_the_bar_inert_the_moment_it_opens() {
-        // Modality is binary: the flag alone gates input and semantics, so a
-        // bar whose tint has not started fading yet is *already* dead. (The
-        // tint's own animation is the sheet's `ModalStage`, tested there.)
+    fn a_bar_mid_reveal_paints_but_takes_no_input() {
+        // The one predicate `event`/`semantics` gate on. A half-arrived bar
+        // still paints (that is the whole point of the reveal) but must not
+        // eat a tap meant for the page it floats over — and there is no
+        // *modality* term in it any more: an overlay is a page of the root
+        // host, which routes input to its top page only, so this bar never
+        // sees the press to begin with (module docs).
         let mut widget = TopBarWidget {
             children: Vec::new(),
             rest_origins: Vec::new(),
             back: false,
             hidden: false,
-            overlay: false,
             surface: Color::BLACK,
             rule: Color::BLACK,
-            scrim: Color::BLACK,
-            tint: 0.0,
-            tint_anim: None,
-            tint_pending: false,
             reveal: 1.0,
             reveal_anim: None,
             reveal_pending: false,
@@ -1617,22 +1511,21 @@ mod tests {
         };
         assert!(widget.settled_open(), "a settled bar takes input");
 
-        widget.overlay = true;
-        widget.tint_pending = true;
+        widget.hidden = true;
+        widget.reveal_pending = true;
         assert!(
             !widget.settled_open(),
-            "…and stops the frame a modal opens, before the tint has moved"
+            "…and stops the frame the exit is staged, before it has moved"
         );
         assert!(
             widget.occupies_a_box(),
-            "it still paints — dimmed, not gone"
+            "it still paints — leaving, not gone"
         );
 
-        widget.overlay = false;
-        widget.tint_pending = true;
+        widget.reveal_pending = false;
         assert!(
-            widget.settled_open(),
-            "…and comes back the frame the modal closes"
+            !widget.occupies_a_box(),
+            "a fully hidden bar lays out to nothing at all"
         );
     }
 

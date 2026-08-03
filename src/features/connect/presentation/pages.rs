@@ -49,13 +49,11 @@
 //!
 //! The raw [`frust::NavigatorController`] is still held beside the handle: a
 //! sheet is a pushed page *builder*, not a path, so
-//! `crate::ui::sheet::show_sheet` needs the controller itself — and the
-//! [`Nav`] beside it, which carries the overlay accounting the shell's bar
-//! dims itself from (`crate::routes`' "Overlay accounting"). That controller is
-//! the **root overlay host**'s (`crate::AppState::overlays`), not the route
+//! `crate::ui::sheet::show_sheet` needs the controller itself. That controller
+//! is the **root overlay host**'s (`crate::AppState::overlays`), not the route
 //! navigator's: the QR sheet is a page above every piece of app chrome, which
-//! is what keeps the floating top bar from staying tappable under it
-//! (FINDINGS #44).
+//! is what keeps the floating top bar from staying tappable under it, and what
+//! puts the sheet's own scrim over it (FINDINGS #44).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -330,7 +328,7 @@ impl Component for ConnectScreen {
         any(Stack(vec![
             any(page_backdrop::<ConnectState>()),
             any(scroll_view(content)),
-            qr_affordance(&state.app_nav, &state.overlays),
+            qr_affordance(&state.overlays),
         ]))
     }
 }
@@ -344,12 +342,8 @@ impl Component for ConnectScreen {
 /// that costs against the stock button — its press *scale* (this dips tone
 /// instead) and its loading/disabled states — this affordance never used, the
 /// same trade `super::pieces::connect_button` already records.
-fn qr_affordance(
-    app_nav: &Nav,
-    overlays: &frust::NavigatorController<AppState>,
-) -> AnyView<ConnectState> {
+fn qr_affordance(overlays: &frust::NavigatorController<AppState>) -> AnyView<ConnectState> {
     let overlays = overlays.clone();
-    let app_nav = app_nav.clone();
     let theme = active_theme();
     let scheme = theme.scheme();
     any(safe_area(Align(
@@ -360,7 +354,7 @@ fn qr_affordance(
                 // The body ignores the sheet's own handle: this sheet carries
                 // no closer of its own (the scrim and back are its only
                 // dismissals), so nothing inside it ever asks to close.
-                show_sheet(&app_nav, &overlays, |_sheet| qr_sheet_body())
+                show_sheet(&overlays, |_sheet| qr_sheet_body())
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA

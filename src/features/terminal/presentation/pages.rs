@@ -427,35 +427,21 @@ impl Actions {
     /// The menu is a transparent push onto the **root overlay host**, so it
     /// paints over the bar it is anchored to (rather than clipping under it),
     /// and the bar goes inert for free — the host routes input to its top page
-    /// only. It dims itself on top of that (`BarState::overlay_active`), the
-    /// app's modal convention, which also means a tap anywhere outside the
-    /// panel (the dimmed bar included) dismisses it.
+    /// only, which is also what makes a tap anywhere outside the panel (the
+    /// bar included) dismiss it. Unlike a sheet or a dialog the menu paints no
+    /// scrim of its own, by `frust::glyph::menu`'s own design: a menu is not a
+    /// dimming modal, so nothing under it dims — the bar least of all.
     ///
     /// The anchor rect is unaffected by the move: it is reported in **window**
     /// coordinates, and the host's root page spans the whole window exactly as
     /// the route navigator did.
-    ///
-    /// It is accounted like the app's own overlays
-    /// ([`Nav::begin_overlay`](crate::routes::Nav::begin_overlay)/
-    /// [`end_overlay`](crate::routes::Nav::end_overlay)) even though it is
-    /// pushed by a **frust** helper: this call site is app code, and so is the
-    /// `on_result` below. What it cannot have is the *synchronous* half — a
-    /// menu dismissal is popped from inside `frust::glyph::menu`'s own paint,
-    /// with no app seam in between — so the bar lights up on the completion
-    /// callback rather than a rebuild earlier (see
-    /// [`Nav::dismiss_overlay`](crate::routes::Nav::dismiss_overlay)).
     pub fn open_menu(&self) {
         let actions = self.clone();
-        let done_app_nav = self.app_nav.clone();
-        self.app_nav.begin_overlay();
         show_glyph_menu(
             &self.overlays,
             self.anchor.get(),
             menu_entries,
             move |_app: &mut AppState, result: PopResult| {
-                // Before the arms below: each of the first two opens an
-                // overlay of its own, and this one is gone.
-                done_app_nav.end_overlay();
                 match result.take::<usize>() {
                     Some(MENU_PANES_INDEX) => actions.open_sheet(),
                     Some(MENU_RENAME_INDEX) => actions.open_rename_dialog(),
@@ -475,9 +461,7 @@ impl Actions {
     /// the sheet being rebuilt by hand.
     pub fn open_sheet(&self) {
         let actions = self.clone();
-        show_sheet(&self.app_nav, &self.overlays, move |sheet| {
-            actions.sheet_body(sheet)
-        });
+        show_sheet(&self.overlays, move |sheet| actions.sheet_body(sheet));
     }
 
     /// Switch the card to `key` and close the sheet a beat later, so the
@@ -520,7 +504,6 @@ impl Actions {
         };
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
-            &self.app_nav,
             &self.overlays,
             RENAME_TITLE,
             current,
