@@ -12,10 +12,9 @@
 //! bottom-anchored panel clamped to [`MAX_WIDTH`] on wide layouts. **When
 //! frust grows a Glyph sheet widget, delete this file and re-point
 //! [`show_sheet`]'s four call sites at it** — the API is deliberately one
-//! function taking a body builder so that swap is cheap (the replacement owes
-//! [`show_sheet`]'s overlay accounting too — see its own doc). ([`ModalStage`]
-//! and [`SCRIM_ALPHA`] move up to `crate::ui` that day rather than going with
-//! it — see their own section.)
+//! function taking a body builder so that swap is cheap. ([`ModalStage`] and
+//! [`SCRIM_ALPHA`] would go with it: nothing outside this file stages on them
+//! any more — see their own section.)
 //!
 //! # What the scaffold adds over the catalog's hand-rolled version
 //!
@@ -100,17 +99,17 @@
 //! one. A second tap on a row, a close button pressed while a delayed close is
 //! already pending, a scrim tap during that same window, an Android back press
 //! mid-beat: each of them used to call [`NavigatorController::pop`] on its own,
-//! and the second one through popped **the page under the sheet** — the route
-//! itself, which reads to the user as the app silently bouncing back a screen
-//! (and left a phantom `dismiss_overlay` report against an overlay that was
-//! already gone).
+//! and the second one through popped **the page under the sheet** — with the
+//! sheet on the route navigator that was the route itself, which read to the
+//! user as the app silently bouncing back a screen; on the overlay host it is
+//! whatever overlay happens to be under it, or the app's own root page.
 //!
 //! So a sheet is not closed by whoever happens to be holding a navigator; it is
 //! closed through [`SheetHandle`] — the identity [`show_sheet`] mints per sheet
 //! *instance* and hands to its body builder. Every path goes through
-//! [`SheetHandle::close`], which pops (and reports the dismissal to the overlay
-//! accounting) **at most once per instance** and is an ordinary no-op after
-//! that: a duplicate close is a routine user race, not a bug to panic on.
+//! [`SheetHandle::close`], which pops **at most once per instance** and is an
+//! ordinary no-op after that: a duplicate close is a routine user race, not a
+//! bug to panic on.
 //! [`show_sheet`]'s own completion callback latches the same handle, so a close
 //! still in flight when the page goes away some other way cannot pop anything
 //! either, and [`SheetHandle::close_after`] is the delayed close ("let the
@@ -132,8 +131,6 @@ use frust::{
     TransitionSpec,
 };
 
-use crate::routes::Nav;
-
 /// M3/Flutter bottom-sheet width convention: edge-to-edge on narrow screens,
 /// capped and horizontally centered on wide ones (Material 3 gives modal
 /// bottom sheets a 640dp max width; Flutter's `BottomSheet` constrains
@@ -146,11 +143,10 @@ pub const MAX_WIDTH: f64 = 640.0;
 /// against the void surface); matched deliberately, so a sheet and a dialog
 /// dim the app identically.
 ///
-/// `pub` because the *shell's top bar* dims itself with it too: the bar floats
-/// **over** the navigator, so a modal pushed inside the navigator cannot cover
-/// it and has to be mirrored (see [`crate::ui::topbar`]'s overlay section).
-/// One constant, so "as dim as the page under the sheet" cannot drift into
-/// "nearly as dim".
+/// `pub` because it is the number the modal suites assert the painted scrim
+/// against (`tests/ui_substrate.rs`): "the sheet is fully dimmed" has to be
+/// spelled once, here, rather than transcribed into a test that would then pin
+/// its own copy.
 pub const SCRIM_ALPHA: f32 = 0.6;
 /// Panel padding on the left/right/bottom edges, in logical px — Glyph's roomy
 /// `--space-5` gutter (`glyph::dialog`'s `DIALOG_PADDING`). The top gutter is
@@ -192,11 +188,12 @@ fn handle_zone() -> f64 {
 // Shared modal staging (see the module docs' "scrim fades" section)
 // ---------------------------------------------------------------------------
 //
-// **This section outlives the rest of the file.** When frust grows a Glyph
-// sheet and everything below is deleted, [`ModalStage`] and [`SCRIM_ALPHA`]
-// move up to `crate::ui` — `crate::ui::topbar`'s overlay scrim stages on them
-// too, and that is the whole point: a bar dimming on its own clock would be a
-// second set of numbers to keep in step with this one.
+// [`ModalStage`] and [`SCRIM_ALPHA`] are this file's own now: the shell's top
+// bar used to stage its modality tint on them (a second clock, mirroring a
+// scrim it could not be covered by), and that whole mirror went with the root
+// overlay host — the sheet's scrim is painted at the root and covers the bar
+// itself. If frust grows a Glyph sheet and everything below is deleted, these
+// two go with it rather than moving up to `crate::ui`.
 
 /// Unthemed-fallback enter duration — Glyph's `durations.base`. Transcribed
 /// from `frust::glyph::dialog`'s own fallback, which is the same token; only a
@@ -359,20 +356,15 @@ fn finite_or_zero(v: f64) -> f64 {
 /// the modal contract, [`SheetScaffoldWidget`] supplies the motion. See the
 /// [module docs](self)'s "The scrim fades; only the panel slides".
 ///
-/// # The two navigation handles
+/// # The navigator it is pushed through
 ///
 /// `nav` is what the page is pushed through (a sheet is a page *builder*, not a
 /// path) — every caller in this app hands it the **root overlay host**'s
 /// controller (`crate::AppState::overlays`), so the sheet covers the shell's
-/// floating bar rather than sliding up under it (FINDINGS #44). It stays a
-/// plain parameter rather than a thread-local read because
-/// `tests/ui_substrate.rs` drives this helper over a bespoke navigator of its
-/// own. `app_nav` is the app's own [`Nav`], and carries the **overlay
-/// accounting** the shell's bar dims itself from: this call begins one, the
-/// staged exit below reports it *closing* the rebuild before the pop lands,
-/// and the pusher's own completion callback ends it whichever way it actually
-/// went away (`crate::routes`' "Overlay accounting" section is the whole
-/// rationale).
+/// floating bar rather than sliding up under it, and that bar goes inert for
+/// free (FINDINGS #44). It stays a plain parameter rather than a thread-local
+/// read because `tests/ui_substrate.rs` drives this helper over a bespoke
+/// navigator of its own.
 ///
 /// # The body builder's [`SheetHandle`]
 ///
@@ -384,7 +376,7 @@ fn finite_or_zero(v: f64) -> f64 {
 /// a close button, the delayed close after a tab selection lands.
 ///
 /// ```ignore
-/// show_sheet(&state.app_nav, &state.overlays, move |sheet| {
+/// show_sheet(&state.overlays, move |sheet| {
 ///     let sheet = sheet.clone();
 ///     any(button("Done", move |_state: &mut AppState| {
 ///         sheet.close();
@@ -392,28 +384,19 @@ fn finite_or_zero(v: f64) -> f64 {
 /// });
 /// ```
 pub fn show_sheet<State: 'static>(
-    app_nav: &Nav,
     nav: &NavigatorController<State>,
     build_body: impl Fn(&SheetHandle) -> AnyView<State> + 'static,
 ) {
-    app_nav.begin_overlay();
     let pop_nav = nav.clone();
-    let pop_app_nav = app_nav.clone();
-    // The one accounted pop, behind the one gate: telling the accounting a
-    // rebuild before the pop lands is what lets the bar light up on the frame
-    // the sheet finishes leaving instead of waiting for the next input.
-    let sheet = SheetHandle::new(move || {
-        pop_app_nav.dismiss_overlay();
-        pop_nav.pop();
-    });
+    // The one pop, behind the one gate.
+    let sheet = SheetHandle::new(move || pop_nav.pop());
     let body_sheet = sheet.clone();
     let dismiss_sheet = sheet.clone();
-    let done_app_nav = app_nav.clone();
     nav.push_transparent_for_result(
         move || {
             // The staged exit's own dismissal (a scrim tap, `Escape`, an
-            // outside-press release) is one of the app-owned seams, and goes
-            // through the very same gate the body's own closers do.
+            // outside-press release) goes through the very same gate the
+            // body's own closers do.
             let scrim_sheet = dismiss_sheet.clone();
             any(sheet_scaffold(build_body(&body_sheet)).on_dismiss(move || {
                 scrim_sheet.close();
@@ -422,16 +405,12 @@ pub fn show_sheet<State: 'static>(
         TransitionSpec::NONE,
         // The sheet answers through its body's own callbacks (which own
         // `&mut State` already); the pop itself carries nothing. What this
-        // callback is for is the accounting's authoritative half — the
-        // navigator delivers it exactly once per pushed page, however that
-        // page went away (an action, a scrim tap, `Escape`, an Android back
-        // press straight through `BackPolicy::Pop`) — and, with it, the
-        // latch: whichever way the page went, a close still in flight must
-        // not land on whatever is under it now.
-        move |_state: &mut State, _result: PopResult| {
-            sheet.mark_closed();
-            done_app_nav.end_overlay();
-        },
+        // callback is for is the **latch**: the navigator delivers it exactly
+        // once per pushed page, however that page went away (an action, a
+        // scrim tap, `Escape`, an Android back press straight through
+        // `BackPolicy::Pop`), so whichever way the page went, a close still in
+        // flight must not land on whatever is under it now.
+        move |_state: &mut State, _result: PopResult| sheet.mark_closed(),
     );
 }
 
@@ -459,11 +438,10 @@ struct SheetGuard {
     /// delay elapses — "latest wins", so a second selection extends the wait
     /// rather than stacking a second close behind the first.
     pending: Cell<u64>,
-    /// The accounted pop: `Nav::dismiss_overlay` then
-    /// `NavigatorController::pop`. Boxed (rather than the controller itself)
-    /// so the handle stays free of the navigator's `State` parameter — a sheet
-    /// body passes it around, and every one of those call sites would
-    /// otherwise carry the app's state type for no reason.
+    /// The one pop (`NavigatorController::pop`). Boxed (rather than the
+    /// controller itself) so the handle stays free of the navigator's `State`
+    /// parameter — a sheet body passes it around, and every one of those call
+    /// sites would otherwise carry the app's state type for no reason.
     close: Box<dyn Fn()>,
 }
 
@@ -479,8 +457,8 @@ impl SheetHandle {
         }
     }
 
-    /// Close the sheet: report the dismissal to the overlay accounting and
-    /// enqueue the pop — **at most once per sheet instance**.
+    /// Close the sheet: enqueue the pop — **at most once per sheet
+    /// instance**.
     ///
     /// Returns whether *this* call is the one that closed it. A `false` is the
     /// guarded no-op every duplicate dismissal lands in (a second row tap
@@ -917,10 +895,9 @@ mod tests {
     // The dismissal gate
     // -----------------------------------------------------------------------
 
-    /// A handle whose "pop" only counts itself — the accounted pop
-    /// (`dismiss_overlay` + `NavigatorController::pop`) is what
-    /// [`show_sheet`] installs here, so counting invocations *is* counting
-    /// pops and overlay-dismissal reports.
+    /// A handle whose "pop" only counts itself — a bare
+    /// `NavigatorController::pop` is what [`show_sheet`] installs here, so
+    /// counting invocations *is* counting pops.
     fn counting_handle() -> (SheetHandle, Rc<Cell<usize>>) {
         let pops = Rc::new(Cell::new(0usize));
         let counted = Rc::clone(&pops);
@@ -938,7 +915,7 @@ mod tests {
         assert!(sheet.close(), "the first close is the one that closes it");
         assert!(!sheet.close(), "…and every later one is a no-op");
         assert!(!sheet.clone().close(), "…through any clone of the handle");
-        assert_eq!(pops.get(), 1, "exactly one pop, one dismissal report");
+        assert_eq!(pops.get(), 1, "exactly one pop");
     }
 
     #[test]

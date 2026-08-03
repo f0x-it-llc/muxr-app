@@ -145,18 +145,20 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> 
     let Some(meta) = state.meta else {
         return any(muxr_topbar::<AppState>("").hidden(true).reverse(reverse));
     };
-    // A sheet/dialog is pushed *inside* the navigator, which the bar floats
-    // over — so the bar has to mirror the modality itself (dim, and go inert).
-    //
     // Fullscreen is a **second input to the same hidden flag** the bar-less
     // `/` route sets above (never a second hide path): the terminal screen
     // publishes it through the route-meta mirror, and the bar plays the very
     // reveal it already plays on a route change. `crate::routes::BarState`'s
     // own docs carry the rationale; the screen clears the flag on unmount.
+    //
+    // Modality needs no input here at all: every overlay is a page of the root
+    // host this whole view is the root page of (`crate::AppState::overlays`),
+    // which routes input and publishes semantics for its top page only — so an
+    // open overlay makes this bar inert and unaddressable without the bar
+    // knowing anything about it, and paints its own scrim over it.
     let mut bar = muxr_topbar::<AppState>(meta.resolve_title(connection))
         .reverse(reverse)
-        .hidden(state.fullscreen)
-        .overlay(state.overlay_active);
+        .hidden(state.fullscreen);
     bar = match meta.leading {
         BarLeading::Brand => bar,
         BarLeading::Back => {

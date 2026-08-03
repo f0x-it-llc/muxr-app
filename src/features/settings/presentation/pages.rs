@@ -441,7 +441,7 @@ impl Actions {
     /// vocabulary, and [`row_tapped`] is its one caller.
     fn open_picker(&self, kind: PickerKind) {
         let actions = self.clone();
-        show_sheet(&self.app_nav, &self.overlays, move |sheet| {
+        show_sheet(&self.overlays, move |sheet| {
             let theme = pieces::active_theme();
             let colors = pieces::palette(&theme);
             let picker = actions.picker(kind);
@@ -582,7 +582,6 @@ impl Actions {
     pub fn open_create_token_dialog(&self) {
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
-            &self.app_nav,
             &self.overlays,
             "New token",
             "",
@@ -603,7 +602,6 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let name = name.to_string();
         confirm_dialog(
-            &self.app_nav,
             &self.overlays,
             "Revoke token?",
             "Any client still using this token is disconnected immediately.",
@@ -628,7 +626,6 @@ impl Actions {
         let connection = Arc::clone(&self.connection);
         let app_nav = self.app_nav.clone();
         confirm_dialog(
-            &self.app_nav,
             &self.overlays,
             "Disconnect",
             "You will need the server's token to attach again.",

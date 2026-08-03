@@ -382,7 +382,6 @@ impl Actions {
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
-            &self.app_nav,
             &self.overlays,
             "New session",
             "",
@@ -406,7 +405,6 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
         name_input_dialog(
-            &self.app_nav,
             &self.overlays,
             "Rename session",
             session.name,
@@ -424,7 +422,6 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
         confirm_dialog(
-            &self.app_nav,
             &self.overlays,
             "Kill session?",
             "Any attached client is disconnected immediately.",
@@ -453,7 +450,7 @@ impl Actions {
         let actions = self.clone();
         let name = session.name;
         let id = id.to_string();
-        show_sheet(&self.app_nav, &self.overlays, move |sheet| {
+        show_sheet(&self.overlays, move |sheet| {
             let heading = pieces::sheet_heading(name.clone());
             let rows = [
                 sheet_action(&actions, sheet, &id, ManageAction::Attach),
@@ -516,11 +513,9 @@ fn sheet_action(
         move |_app: &mut AppState| {
             // Close the sheet first: the dialog (or the terminal route) takes its
             // place in the same rebuild — see `open_manage_sheet`'s docs.
-            // Through the sheet's own handle rather than a bare `pop`, so the
-            // shell's bar learns the sheet is going a rebuild before the
-            // navigator republishes its depth (`crate::routes`' overlay
-            // accounting) — and so a second row tap inside that same window
-            // cannot pop the route under it (`crate::ui::sheet`'s "One sheet,
+            // Through the sheet's own handle rather than a bare `pop`, so a
+            // second row tap inside the rebuild its queued pop leaves open
+            // cannot pop whatever is under it (`crate::ui::sheet`'s "One sheet,
             // one dismissal").
             sheet.close();
             match action {
