@@ -17,11 +17,11 @@
 Tighter than the generic medium-tier schema caps (350/500 core doc, 80/100 `CLAUDE.md`) — this is a
 single-crate app, not a workspace, and the reading path stays short deliberately.
 
-`docs/ARCHITECTURE.md`'s target was raised from 135 to 220 on 2026-08-01, alongside the small→medium
-move above (Shell/Navigation/UI Substrate/Feature Slices expanded, Responsive added — real content,
-not bloat). The 2026-08-03 overlay-host adoption deleted the app's overlay-accounting model wholesale
-and replaced it with host documentation of about the same size — a wash, not further growth. Landed
-at 251/260; re-check past 260 or on a fifth feature.
+`docs/ARCHITECTURE.md`'s target was raised from 135 to 220 on 2026-08-01 as real content grew
+(Shell/Navigation/UI Substrate/Feature Slices, Responsive). The terminal widget build (tasks 08–11)
+landed it at 260/260 exactly, offsetting new-subsystem content with trims elsewhere in the same pass.
+At the cap: the next addition of any size needs a split (hub-and-spoke, a `terminal`-specific doc)
+rather than another trim pass — re-check then, or on a fifth feature.
 
 ## Doc Units
 

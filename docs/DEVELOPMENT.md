@@ -6,7 +6,12 @@
   `apps/muxr-app` — `Cargo.toml`'s `frust`/`clean-signals-frust` dependencies are **path**
   dependencies into that checkout (`../../crates/frust`, `../../plugins/clean-signals-frust`),
   a temporary pre-publication arrangement documented verbatim in `Cargo.toml`'s comments. Once
-  Frust crates are published this app will depend on versions instead.
+  Frust crates are published this app will depend on versions instead. The terminal screen adds two
+  of the checkout's OS-capability plugins the same temporary way: `frust-clipboard`
+  (`../../plugins/clipboard`, the Copy chip's clipboard write) and `frust-haptics`
+  (`../../plugins/haptics`, the selection-click tick) — the latter needs Android's
+  `android.permission.VIBRATE`, already checked into `AndroidManifest.xml` (a normal permission,
+  granted at install with no runtime prompt).
 - No `clean-signals-rs` sibling checkout is required: `clean-signals` itself isn't published
   yet, so `Cargo.toml` git+rev-pins it directly (`rev = "910f626"` on `master`) to its public
   repo — the identical spec `clean-signals-frust`'s own `clean-signals` dependency uses, so
