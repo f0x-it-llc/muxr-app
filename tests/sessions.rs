@@ -183,14 +183,23 @@ impl Harness {
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-point the app's one path-pushing handle (`routes::app_nav`, which
         // the screen resolves in its own `init`) at this fixture's navigator,
-        // real route table and real session guard included.
-        let _router = install_app_router(&nav, expect_connection_controller());
+        // real route table and real session guard included — as both of
+        // production's navigators (see the `sessions_page` call below).
+        let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             any(Stack(vec![
-                sessions_page(screen_nav),
+                // One controller plays both of the screen's navigators here:
+                // the route stack it reads its poll depth off, and the root
+                // overlay host its dialogs/sheet are pages of (in production
+                // those are two, `AppState::nav` and `AppState::overlays` —
+                // see `tests/navigation_motion.rs`, which mounts the real
+                // shell). Collapsing them keeps every overlay a page of the
+                // one *mounted* navigator, which is what makes it drivable
+                // and locatable here.
+                sessions_page(screen_nav, logic_nav.clone()),
                 any(navigator(&overlay_nav, || {
                     // Full-bleed and childless — see the module docs.
                     any(SizedBox::<AppState>(

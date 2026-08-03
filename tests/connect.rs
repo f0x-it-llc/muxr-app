@@ -28,10 +28,13 @@
 //! it is deliberate — the cold-start splash claim is spent on a launch's first
 //! build, so this suite never plays a splash. Because the fixture drives its
 //! **own** navigator (see above), it then calls
-//! [`muxr::routes::install_app_router`] over that controller, re-pointing the
-//! app's one path-pushing handle at it: the screen therefore pushes through the
-//! real route table and the real session guard, and this harness observes the
-//! result as a depth change.
+//! [`muxr::routes::install_app_router`] over that controller — as both the
+//! route navigator and the root overlay host, where production has two
+//! (`muxr::AppState::nav` and `AppState::overlays`; the QR sheet is a page of
+//! the latter since FINDINGS #44) — re-pointing the app's one path-pushing
+//! handle at it: the screen therefore pushes through the real route table and
+//! the real session guard, and this harness observes the result as a depth
+//! change.
 //!
 //! # Surface size
 //!
@@ -202,7 +205,7 @@ impl Harness {
         // The screen resolves `routes::app_nav()` in its own `init`; this makes
         // that handle the app's real router over *this* navigator, guard and
         // all (see the module docs).
-        let _router = install_app_router(&nav, expect_connection_controller());
+        let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let nav_for_navigator = nav.clone();
         let nav_for_screen = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {

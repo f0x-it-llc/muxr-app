@@ -25,7 +25,8 @@
 //! `Component::build` mounts [`shell::root_view`] over it — the full-height
 //! navigator, the top bar floating over it, and the toast layer — plus, on the
 //! first build of a cold start, the splash overlay
-//! ([`AppState::splash_plan`], [`ui::splash::sequence`]). No feature
+//! ([`AppState::splash_plan`], [`ui::splash::sequence`]) — and wraps the lot in
+//! the **root overlay host** ([`AppState::overlays`]). No feature
 //! repository exists yet to construct here — a real one joins this function
 //! the same way `examples/huddle`'s `HuddleApp::init` constructs and
 //! `provide_context`s each feature's repository, once a feature's `data`
@@ -50,7 +51,7 @@ mod shell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal};
+use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
 
 use features::connect::presentation::pages::connect_layout;
 use features::connect::presentation::pieces::{active_theme, connect_pieces};
@@ -83,6 +84,26 @@ pub struct AppState {
     /// through [`routes::app_nav`], because a `Component`'s callbacks never
     /// see this outer state).
     pub nav: Rc<Router<AppState>>,
+    /// The **root overlay host**'s navigator: every menu, sheet and dialog in
+    /// the app is a page here, and this host wraps the entire root view — the
+    /// route navigator above, the floating top bar and the toast layer alike
+    /// (see [`Component::build`], and `frust::overlay_host`'s own docs).
+    ///
+    /// Overlays used to be pages of the *route* navigator, which the bar
+    /// floats **over** — so a menu clipped under the bar and the bar stayed
+    /// tappable while a modal was up (a bar press could kill an open sheet;
+    /// FINDINGS #44, device-proven on Xiaomi + OnePlus). A host above every
+    /// piece of chrome fixes both for free: the navigator routes input — and
+    /// forwards accessibility nodes — for its top page only, so the whole app
+    /// under an open overlay is inert to pointers *and* to assistive
+    /// technology, and `frust::overlay_host` additionally ranks this
+    /// controller ahead of the route navigator for the Android back press
+    /// (R44-back), so back dismisses the overlay rather than the page beneath
+    /// it. A host with no overlays open claims nothing and defers bit for bit.
+    ///
+    /// `pub` for the same reason [`Self::nav`] is: the headless suites drive
+    /// it (and assert that a route push never perturbs it).
+    pub overlays: NavigatorController<AppState>,
     /// The app's own [`routes::Nav`] handle — resolved once here, with every
     /// other app-scoped dependency, and read by [`shell::root_view`] for the
     /// persistent top bar (which route is on top, and what its `‹`/`⚙` do).
@@ -132,30 +153,69 @@ impl AppState {
         plan
     }
 
-    /// The splash overlay to stack over the navigator this frame, or `None`
-    /// once there is nothing left to show.
+    /// Everything this launch's splash needs, resolved once — or `None` for a
+    /// launch with no splash to play at all.
     ///
-    /// The full sequence assembles the *same* pieces through the *same*
-    /// layout function the `/` route renders, which is what makes the
-    /// unmount invisible — see [`crate::ui::splash::sequence`].
-    fn splash_overlay(&mut self) -> Option<AnyView<AppState>> {
+    /// The **mutable** half of the old `splash_overlay`, split out because the
+    /// overlay itself is now assembled inside the overlay host's page builder
+    /// (a `Fn` re-invoked on every rebuild), which can hold no `&mut AppState`.
+    /// The cue it hands over is plain `Copy`/`Clone` data, so
+    /// [`splash_overlay`] can re-derive the same view as often as the host asks
+    /// for it.
+    fn splash_cue(&mut self) -> Option<SplashCue> {
         let plan = self.splash_plan();
-        // Tracked read: the cue's single `set(true)` wakes this rebuild.
-        if plan == SplashPlan::Skip || self.splash_done.get() {
+        if plan == SplashPlan::Skip {
             return None;
         }
-        let art = self.icon.clone()?;
-        match plan {
-            SplashPlan::Full => Some(splash_sequence(
-                art,
-                SPLASH_SEED,
-                connect_pieces(&active_theme()),
-                connect_layout,
-                self.splash_done,
-            )),
-            SplashPlan::Reduced => Some(reduced_splash(art, self.splash_done)),
-            SplashPlan::Skip => None,
-        }
+        Some(SplashCue {
+            plan,
+            art: self.icon.clone()?,
+            done: self.splash_done,
+        })
+    }
+}
+
+/// What one launch's cold-start splash is made of, once
+/// [`AppState::splash_cue`] has decided — the input [`splash_overlay`] rebuilds
+/// the overlay from on every pass.
+#[derive(Clone)]
+struct SplashCue {
+    /// Which sequence to play (never [`SplashPlan::Skip`]: a skipped launch has
+    /// no cue at all).
+    plan: SplashPlan,
+    /// The decoded app icon, decoded once with the decision rather than per
+    /// rebuild (the contract [`splash_icon_art`] documents).
+    art: IconArt,
+    /// The sequence's own completion cue — read **tracked** by
+    /// [`splash_overlay`], so the single `set(true)` that ends the splash is
+    /// what unmounts it.
+    done: RwSignal<bool>,
+}
+
+/// The splash overlay to stack over the navigator this frame, or `None` once
+/// there is nothing left to show.
+///
+/// The full sequence assembles the *same* pieces through the *same* layout
+/// function the `/` route renders, which is what makes the unmount invisible —
+/// see [`crate::ui::splash::sequence`].
+fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
+    // Tracked read: the cue's single `set(true)` wakes this rebuild. It happens
+    // inside the overlay host's page builder now, which `RenderRoot::rebuild`
+    // runs within the shell's own `TrackedScope` exactly like the app logic
+    // above it — so the subscription is the same one it always was.
+    if cue.done.get() {
+        return None;
+    }
+    match cue.plan {
+        SplashPlan::Full => Some(splash_sequence(
+            cue.art.clone(),
+            SPLASH_SEED,
+            connect_pieces(&active_theme()),
+            connect_layout,
+            cue.done,
+        )),
+        SplashPlan::Reduced => Some(reduced_splash(cue.art.clone(), cue.done)),
+        SplashPlan::Skip => None,
     }
 }
 
@@ -190,7 +250,12 @@ impl Component for MuxrApp {
         // screen resolves in its own `Component::init` — this is the app's
         // ONE `Router`, and the only place one is ever constructed.
         let controller = NavigatorController::new();
-        let router = routes::install_app_router(&controller, Arc::clone(&connection));
+        // The root overlay host's own navigator, created beside the route one
+        // and handed to the route table with it: every screen pushes its
+        // menus/sheets/dialogs here rather than onto the route stack (see
+        // `AppState::overlays`).
+        let overlays = NavigatorController::new();
+        let router = routes::install_app_router(&controller, &overlays, Arc::clone(&connection));
         // Resolves the start location once (see `START_LOCATION`).
         router.handle_location(START_LOCATION);
 
@@ -199,6 +264,7 @@ impl Component for MuxrApp {
         // first `build`.
         AppState {
             nav: router,
+            overlays,
             // Published by `install_app_router` a line above; resolved here so
             // `build` never reaches for a thread-local (and so the shell's bar
             // shares the screens' one route-meta mirror).
@@ -212,18 +278,34 @@ impl Component for MuxrApp {
 
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
         let controller = state.nav.controller().clone();
-        // A separate clone for the navigator's `initial` closure (only ever
-        // invoked on the very first build).
-        let initial_controller = controller.clone();
-        let overlay = state.splash_overlay();
+        // The overlay host's page builder is a `Fn` the navigator re-invokes on
+        // every rebuild, so everything the former root needs is cloned out of
+        // `state` here and re-assembled inside it — including the splash, whose
+        // one mutable decision is spent on the way in (`AppState::splash_cue`).
+        let overlays = state.overlays.clone();
+        let nav_handle = state.nav_handle.clone();
+        let connection = Arc::clone(&state.connection);
+        let cue = state.splash_cue();
 
-        shell::root_view(
-            &controller,
-            move || routes::home_page(initial_controller.clone()),
-            overlay,
-            &state.nav_handle,
-            &state.connection,
-        )
+        // The whole former root — route navigator, floating bar, toast layer,
+        // splash — becomes the host's root page, which is what puts every
+        // overlay pushed onto `state.overlays` *above* all of it (FINDINGS
+        // #44). The host also outranks the route navigator for the back press
+        // (R44-back), and its own wiring runs before the inner navigator's
+        // because the page builder below runs inside it.
+        any(overlay_host(&state.overlays, move || {
+            // A separate clone for the route navigator's `initial` closure
+            // (only ever invoked on the very first build); Connect pushes its
+            // QR sheet onto the host, so that is the handle it is handed.
+            let initial_overlays = overlays.clone();
+            shell::root_view(
+                &controller,
+                move || routes::home_page(initial_overlays.clone()),
+                cue.as_ref().and_then(splash_overlay),
+                &nav_handle,
+                &connection,
+            )
+        }))
     }
 }
 

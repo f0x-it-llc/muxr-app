@@ -362,7 +362,12 @@ fn finite_or_zero(v: f64) -> f64 {
 /// # The two navigation handles
 ///
 /// `nav` is what the page is pushed through (a sheet is a page *builder*, not a
-/// path). `app_nav` is the app's own [`Nav`], and carries the **overlay
+/// path) — every caller in this app hands it the **root overlay host**'s
+/// controller (`crate::AppState::overlays`), so the sheet covers the shell's
+/// floating bar rather than sliding up under it (FINDINGS #44). It stays a
+/// plain parameter rather than a thread-local read because
+/// `tests/ui_substrate.rs` drives this helper over a bespoke navigator of its
+/// own. `app_nav` is the app's own [`Nav`], and carries the **overlay
 /// accounting** the shell's bar dims itself from: this call begins one, the
 /// staged exit below reports it *closing* the rebuild before the pop lands,
 /// and the pusher's own completion callback ends it whichever way it actually
@@ -379,7 +384,7 @@ fn finite_or_zero(v: f64) -> f64 {
 /// a close button, the delayed close after a tab selection lands.
 ///
 /// ```ignore
-/// show_sheet(&state.app_nav, &state.nav, move |sheet| {
+/// show_sheet(&state.app_nav, &state.overlays, move |sheet| {
 ///     let sheet = sheet.clone();
 ///     any(button("Done", move |_state: &mut AppState| {
 ///         sheet.close();
