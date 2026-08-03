@@ -1143,14 +1143,18 @@ impl Widget for TerminalStageWidget {
         if let Some(stage) = self.stage.as_mut() {
             let animating = stage.driver.advance(ctx.frame_time());
             self.progress = stage.value();
+            // `progress` is a LAYOUT input (padding/clearance/radius are
+            // computed in `layout`), so every step must request a layout
+            // pass, not just a repaint — shells honoring the layout-skip
+            // contract (Android) freeze the geometry on a bare
+            // `request_frame`. `request_layout` implies the frame.
             if animating {
-                ctx.request_frame();
+                ctx.request_layout();
             } else {
                 self.progress = if self.fullscreen { 1.0 } else { 0.0 };
                 self.stage = None;
-                // One more frame so the settled geometry is the one on screen
-                // (layout reads `progress`, so it needs a pass after this).
-                ctx.request_frame();
+                // One more pass so the settled geometry is the one on screen.
+                ctx.request_layout();
             }
         }
 
