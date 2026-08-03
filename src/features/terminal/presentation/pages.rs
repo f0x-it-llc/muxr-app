@@ -57,8 +57,11 @@
 //!
 //! A `Component`'s subtree is bound to its own `State`, so this screen's own
 //! gestures take `&mut TerminalState`. Its **overlays** are a different story:
-//! the menu, the sheet and the rename dialog are pages on the *app's*
-//! navigator, so their callbacks receive `&mut AppState` and cannot see
+//! the menu, the sheet and the rename dialog are pages on the *app's* root
+//! overlay host (`crate::AppState::overlays` — above every piece of chrome,
+//! which is what stopped the `⋮` menu clipping under the floating bar and the
+//! bar staying tappable beneath it, FINDINGS #44), so their callbacks receive
+//! `&mut AppState` and cannot see
 //! [`TerminalState`] at all. That is why every action lives on [`Actions`] — a
 //! small clonable bundle of handles either side can capture and act through
 //! (the `features::sessions` precedent).
@@ -163,15 +166,15 @@ const _: () = {
 /// The Terminal screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that
 /// disposes the hosted controller on unmount.
-pub fn terminal_page(controller: NavigatorController<AppState>) -> AnyView<AppState> {
-    any(component(TerminalScreen { nav: controller }))
+pub fn terminal_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
+    any(component(TerminalScreen { overlays }))
 }
 
 /// The Terminal screen `Component`. Stateless configuration — everything
 /// mutable lives in [`TerminalState`] and the controller it hosts.
 pub struct TerminalScreen {
-    /// The app's one navigator, handed in by the route builder.
-    nav: NavigatorController<AppState>,
+    /// The root overlay host's navigator, handed in by the route builder.
+    overlays: NavigatorController<AppState>,
 }
 
 /// The Terminal screen's retained state: the action bundle, and nothing else.
@@ -198,9 +201,11 @@ pub struct Actions {
     /// Which mount of the screen this bundle belongs to — see
     /// [`TERMINAL_CHROME`].
     id: u64,
-    /// The app's navigator — every page *builder* this screen pushes (the
-    /// menu, the sheet, the rename dialog) goes through it.
-    pub nav: NavigatorController<AppState>,
+    /// The root overlay host's navigator — every page *builder* this screen
+    /// pushes (the menu, the sheet, the rename dialog) goes through it, so
+    /// each lands above the app bar it is anchored to rather than under it
+    /// (`crate::AppState::overlays`).
+    pub overlays: NavigatorController<AppState>,
     /// The app's one path-pushing handle — how this screen pops back to
     /// `/sessions`, and how it publishes the bar's fullscreen flag.
     pub app_nav: Nav,
@@ -281,7 +286,7 @@ impl Component for TerminalScreen {
 
         let actions = Actions {
             id: NEXT_CHROME_ID.fetch_add(1, Ordering::Relaxed),
-            nav: self.nav.clone(),
+            overlays: self.overlays.clone(),
             app_nav,
             controller,
             anchor: Rc::new(Cell::new(Rect::ZERO)),
@@ -419,10 +424,16 @@ impl Actions {
     /// reads it back. Same shape as `examples/glyph-catalog`'s own
     /// `AnchorReporter`, minus the wrapper.
     ///
-    /// The menu is a transparent navigator push, so the bar dims and goes
-    /// inert while it is open (`BarState::overlay_active`) — the app's modal
-    /// convention, which also means a tap anywhere outside the panel (the
-    /// dimmed bar included) dismisses it.
+    /// The menu is a transparent push onto the **root overlay host**, so it
+    /// paints over the bar it is anchored to (rather than clipping under it),
+    /// and the bar goes inert for free — the host routes input to its top page
+    /// only. It dims itself on top of that (`BarState::overlay_active`), the
+    /// app's modal convention, which also means a tap anywhere outside the
+    /// panel (the dimmed bar included) dismisses it.
+    ///
+    /// The anchor rect is unaffected by the move: it is reported in **window**
+    /// coordinates, and the host's root page spans the whole window exactly as
+    /// the route navigator did.
     ///
     /// It is accounted like the app's own overlays
     /// ([`Nav::begin_overlay`](crate::routes::Nav::begin_overlay)/
@@ -438,7 +449,7 @@ impl Actions {
         let done_app_nav = self.app_nav.clone();
         self.app_nav.begin_overlay();
         show_glyph_menu(
-            &self.nav,
+            &self.overlays,
             self.anchor.get(),
             menu_entries,
             move |_app: &mut AppState, result: PopResult| {
@@ -464,7 +475,7 @@ impl Actions {
     /// the sheet being rebuilt by hand.
     pub fn open_sheet(&self) {
         let actions = self.clone();
-        show_sheet(&self.app_nav, &self.nav, move |sheet| {
+        show_sheet(&self.app_nav, &self.overlays, move |sheet| {
             actions.sheet_body(sheet)
         });
     }
@@ -510,7 +521,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             RENAME_TITLE,
             current,
             move |_app: &mut AppState, name: String| {

@@ -56,7 +56,7 @@
 //!   controller's signals; **app-scoped** state (the connection's server info
 //!   and credential offer) is [`crate::connection`]'s controller, resolved
 //!   from context. [`SessionsState`] itself holds neither — only [`Actions`]'
-//!   three handles plus the connection.
+//!   four handles plus the connection.
 //! - **Every push this screen makes** — the terminal route, the two dialogs,
 //!   the management sheet — goes through [`Actions`], and pauses the
 //!   controller's mock poll first (see [`SessionsController`]'s module docs
@@ -66,7 +66,8 @@
 //!
 //! A `Component`'s subtree is bound to its own `State`, so this screen's own
 //! gestures take `&mut SessionsState`. The **overlays** it pushes are a
-//! different story: a dialog/sheet is a page on the *app's* navigator, so its
+//! different story: a dialog/sheet is a page on the *app's* root overlay host
+//! (`crate::AppState::overlays`, above every piece of chrome), so its
 //! callbacks receive `&mut AppState` and can't see [`SessionsState`] at all.
 //! That is exactly why every action lives on [`Actions`] — a small clonable
 //! bundle of handles that a sheet row can capture and act through, with the
@@ -142,15 +143,25 @@ const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
 /// The Sessions screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that
 /// disposes the hosted controller on unmount.
-pub fn sessions_page(controller: NavigatorController<AppState>) -> AnyView<AppState> {
-    any(component(SessionsScreen { nav: controller }))
+pub fn sessions_page(
+    controller: NavigatorController<AppState>,
+    overlays: NavigatorController<AppState>,
+) -> AnyView<AppState> {
+    any(component(SessionsScreen {
+        nav: controller,
+        overlays,
+    }))
 }
 
 /// The Sessions screen `Component`. Stateless configuration — everything
 /// mutable lives in [`SessionsState`] and the controller it hosts.
 pub struct SessionsScreen {
-    /// The app's one navigator, handed in by the route builder.
+    /// The app's route navigator, handed in by the route builder — read for
+    /// its depth alone (see [`Actions::stack_depth`]).
     nav: NavigatorController<AppState>,
+    /// The root overlay host's navigator: every dialog and sheet this screen
+    /// opens is a page here (`crate::AppState::overlays`).
+    overlays: NavigatorController<AppState>,
 }
 
 /// The Sessions screen's retained state: the action bundle and the app-scoped
@@ -172,9 +183,15 @@ pub struct SessionsState {
 /// same method. One body, both sides of the component boundary.
 #[derive(Clone)]
 pub struct Actions {
-    /// The app's navigator — every page *builder* this screen pushes (the two
-    /// dialogs, the management sheet) goes through it.
+    /// The app's **route** navigator. Nothing is pushed through it — a route
+    /// goes through [`Nav`] and an overlay through [`Self::overlays`] — it is
+    /// held for its depth alone (see [`Actions::stack_depth`]).
     pub nav: NavigatorController<AppState>,
+    /// The root overlay host's navigator — every page *builder* this screen
+    /// pushes (the two dialogs, the management sheet) goes through it, so each
+    /// lands **above** the shell's floating bar rather than under it
+    /// (`crate::AppState::overlays`; FINDINGS #44).
+    pub overlays: NavigatorController<AppState>,
     /// The app's one path-pushing handle — how this screen reaches `/terminal`
     /// and `/settings` (see the module docs' navigation note).
     pub app_nav: Nav,
@@ -219,6 +236,7 @@ impl Component for SessionsScreen {
         SessionsState {
             actions: Actions {
                 nav: self.nav.clone(),
+                overlays: self.overlays.clone(),
                 // Resolved here, with every other app-scoped dependency —
                 // never from inside a press handler.
                 app_nav: app_nav(),
@@ -235,7 +253,7 @@ impl Component for SessionsScreen {
         state
             .actions
             .controller
-            .observe_depth(state.actions.nav.depth());
+            .observe_depth(state.actions.stack_depth());
 
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.
@@ -330,10 +348,24 @@ fn gapped(views: Vec<AnyView<SessionsState>>) -> Vec<FlexChild<SessionsState>> {
 // ---------------------------------------------------------------------------
 
 impl Actions {
+    /// How deep the app's page stack is, counting **both** navigators — the
+    /// one number the mock poll's pause/resume pair is expressed against.
+    ///
+    /// It has to be the sum now that overlays are pages of the root host
+    /// rather than of the route navigator: the route depth alone no longer
+    /// moves when a dialog or the management sheet opens, so a pause marked
+    /// against it would resume on the very next `build`. Both terms are read
+    /// the same way at both ends ([`pause_for_push`](Self::pause_for_push) and
+    /// [`Component::build`]'s `observe_depth`), so the arithmetic is exactly
+    /// the one-navigator arithmetic it replaces, plus a constant.
+    fn stack_depth(&self) -> usize {
+        self.nav.depth() + self.overlays.depth()
+    }
+
     /// Pause the mock poll for whatever is about to be pushed, marking the
     /// depth to resume at. See [`SessionsController`]'s module docs.
     fn pause_for_push(&self) {
-        self.controller.pause_until_depth(self.nav.depth());
+        self.controller.pause_until_depth(self.stack_depth());
     }
 
     /// Attach to `id`: push the `/terminal` route, carrying the session id as
@@ -351,7 +383,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             "New session",
             "",
             move |_app: &mut AppState, name: String| {
@@ -375,7 +407,7 @@ impl Actions {
         let id = id.to_string();
         name_input_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             "Rename session",
             session.name,
             move |_app: &mut AppState, name: String| {
@@ -393,7 +425,7 @@ impl Actions {
         let id = id.to_string();
         confirm_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             "Kill session?",
             "Any attached client is disconnected immediately.",
             "Kill",
@@ -421,7 +453,7 @@ impl Actions {
         let actions = self.clone();
         let name = session.name;
         let id = id.to_string();
-        show_sheet(&self.app_nav, &self.nav, move |sheet| {
+        show_sheet(&self.app_nav, &self.overlays, move |sheet| {
             let heading = pieces::sheet_heading(name.clone());
             let rows = [
                 sheet_action(&actions, sheet, &id, ManageAction::Attach),

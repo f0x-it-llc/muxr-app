@@ -48,6 +48,22 @@
 //!   `.dot-ok` is 7×7 too, which is why this reads the topmost one: the bar is
 //!   above the strip at rest and only travels further up.)
 //!
+//! # Two navigators, and which depth an assertion means
+//!
+//! The app has **two** page stacks since the root overlay host landed
+//! (`muxr::AppState::overlays`, FINDINGS #44): the *route* navigator
+//! (`AppState::nav`'s controller, [`Harness::depth`]) and the *host* above all
+//! the chrome, where every menu, sheet and dialog is a page
+//! ([`Harness::overlay_depth`], `1` at rest). The pair is what the sections
+//! below assert against, and the split is itself an assertion: **an overlay
+//! never perturbs the route stack**, which is why every overlay test here reads
+//! both numbers rather than the one it used to.
+//!
+//! It is also why an overlay makes the bar unaddressable *twice over*: the host
+//! forwards accessibility nodes (and routes input) for its top page only, so
+//! the whole app under an open overlay — the bar included — is omitted from the
+//! tree for free, on top of the bar's own `overlay_active` mirroring.
+//!
 //! # The cold-start splash, spent up front
 //!
 //! `MuxrApp`'s first *build* in a process claims the one cold-start splash, so
@@ -374,11 +390,22 @@ impl Harness {
         tap(&mut self.root, &mut self.state, point);
     }
 
-    /// The navigator's page-stack depth.
+    /// The **route** navigator's page-stack depth — never moved by an overlay
+    /// any more (see the module docs' two-navigator note).
     fn depth(&self) -> usize {
         self.state.nav.controller().depth()
     }
+
+    /// The **root overlay host**'s page-stack depth: [`REST_DEPTH`] with
+    /// nothing open (its one page being the whole app), one more per overlay.
+    fn overlay_depth(&self) -> usize {
+        self.state.overlays.depth()
+    }
 }
+
+/// The overlay host's depth with nothing open: its root page is the entire app
+/// (chrome, route navigator and all).
+const REST_DEPTH: usize = 1;
 
 /// Assert the bar is showing `title`, and nothing else is.
 fn assert_titled(h: &Harness, title: &str) {
@@ -517,14 +544,21 @@ fn the_bars_gear_reaches_settings() {
 // 3 — the bar ignores overlays, and follows a pop it never saw
 // ---------------------------------------------------------------------------
 
-/// Push an inert transparent page over `h` — a stand-in for a sheet or a
-/// dialog: it adds page-stack depth, paints nothing worth recording, and
-/// swallows nothing, so whatever the bar does is the bar's own doing.
+/// Push an inert transparent page onto the **overlay host** — a stand-in for a
+/// sheet or a dialog: it adds a page above every piece of chrome, paints
+/// nothing worth recording, and swallows nothing, so whatever the bar does is
+/// the bar's own doing.
 fn open_overlay(h: &mut Harness) {
     h.state
-        .nav
-        .controller()
+        .overlays
         .push_transparent(|| any(SizedBox::<AppState>(Some(10.0), Some(10.0))));
+    h.settle();
+}
+
+/// Dismiss whatever [`open_overlay`] put up — the host's own pop, standing in
+/// for a scrim tap on a real overlay.
+fn close_overlay(h: &mut Harness) {
+    h.state.overlays.pop();
     h.settle();
 }
 
@@ -535,17 +569,32 @@ fn a_transparent_overlay_over_sessions_never_retitles_the_bar() {
     let mut h = Harness::on_sessions();
     let covered_depth = h.depth();
 
-    // A sheet/dialog is pushed as a page *builder* straight through the
-    // controller, never through `Nav` — so it adds depth with no route
-    // metadata, and the route the bar is *for* does not change. The bar goes
-    // modal while it is up (below); what must not happen is a retitle.
+    // A sheet/dialog is pushed as a page *builder* straight through a
+    // controller, never through `Nav` — so it carries no route metadata, and
+    // the route the bar is *for* does not change. Since the host landed it does
+    // not even land on the same stack: the route depth is untouched, and only
+    // the host's grows. The bar goes modal while it is up (below); what must
+    // not happen is a retitle.
     open_overlay(&mut h);
-    assert_eq!(h.depth(), covered_depth + 1, "the overlay is its own page");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the overlay is its own page on the host"
+    );
+    assert_eq!(
+        h.depth(),
+        covered_depth,
+        "…and the route stack under it is untouched"
+    );
 
-    h.state.nav.controller().pop();
-    h.settle();
+    close_overlay(&mut h);
 
-    assert_eq!(h.depth(), covered_depth, "…and dismissing it pops only it");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "…and dismissing it pops only it"
+    );
+    assert_eq!(h.depth(), covered_depth, "the route stack, still untouched");
     assert_titled(&h, HOST);
     assert!(
         h.values().iter().any(|v| v == BRAND),
@@ -596,8 +645,7 @@ fn an_open_overlay_dims_the_bar_and_a_dismissal_lifts_it() {
         "the bar's tint is the modal's own scrim alpha, got {tint}"
     );
 
-    h.state.nav.controller().pop();
-    h.settle();
+    close_overlay(&mut h);
     h.settle_modal();
 
     assert_eq!(
@@ -613,11 +661,17 @@ fn the_bars_tint_fades_rather_than_snapping_on() {
     let _ambient = setup();
     let mut h = Harness::on_sessions();
 
-    open_overlay(&mut h);
-    // One frame a hair after the tint's driver started (`settle`'s own clock,
-    // which is where `open_overlay` left it): the scrim is on its way in, not
-    // already there — an instant dim could never produce a partial alpha.
-    let mid = h.frame_at(support::SETTLE_MS + 40.0);
+    // Pushed **without** settling, unlike everywhere else here: the host
+    // publishes its own depth before the page under it rebuilds, so the bar
+    // sees the modal on the very next frame and the tint's driver is created
+    // there — a settle would run the whole 220ms fade out before this probe.
+    h.state
+        .overlays
+        .push_transparent(|| any(SizedBox::<AppState>(Some(10.0), Some(10.0))));
+    h.frame_at(0.0);
+    // One frame a hair after that driver started: the scrim is on its way in,
+    // not already there — an instant dim could never produce a partial alpha.
+    let mid = h.frame_at(40.0);
     let dimmed = bar_band_fills(&mid);
     assert_eq!(dimmed.len(), 2, "the bar is tinting: {dimmed:?}");
     let tint = support::alpha_of(dimmed[1]);
@@ -626,6 +680,13 @@ fn the_bars_tint_fades_rather_than_snapping_on() {
         "mid-fade the tint is partial ({tint} of {})",
         muxr::ui::sheet::SCRIM_ALPHA
     );
+
+    // Leave the host empty. Not tidiness: the R44-back arbitration list is a
+    // process-wide (per-UI-thread) registry, and a *mounted* host left with a
+    // page on it keeps claiming back presses for every later test that shares
+    // this thread — including
+    // `an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone`.
+    close_overlay(&mut h);
 }
 
 #[test]
@@ -651,16 +712,24 @@ fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
         node_roles(&h.root)
     );
 
-    // The modality hole this closes: the bar floats *over* the navigator, so
-    // the modal cannot cover it — before this, that press pushed /settings out
-    // from under an open sheet.
+    // The modality hole this closes: the bar floats *over* the route
+    // navigator, so an overlay pushed **there** could never cover it — before
+    // the root host, that press pushed /settings out from under an open sheet.
+    // Two things stop it now: the bar mirrors the modality itself (it dims and
+    // withdraws its nodes), and the host routes input to its top page only, so
+    // the press never reaches the bar at all.
     tap(&mut h.root, &mut h.state, gear);
     h.settle();
 
+    // Asserted as "the route stack never moved" rather than the old "the
+    // overlay is still the only thing on top": the overlay is not on the route
+    // stack any more, so a ⚙ that *did* fire would show up here as a push
+    // rather than as a second page over the modal.
+    assert_eq!(h.depth(), base_depth, "the ⚙ pushed nothing");
     assert_eq!(
-        h.depth(),
-        base_depth + 1,
-        "the overlay is still the only thing on top — the ⚙ pushed nothing"
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "…and the overlay is still the only thing up"
     );
     assert!(
         !h.values().iter().any(|v| v == "server settings"),
@@ -669,8 +738,7 @@ fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
     );
 
     // Dismiss, and the very same press works again.
-    h.state.nav.controller().pop();
-    h.settle();
+    close_overlay(&mut h);
     assert!(h.has_bar(), "the bar is live again");
     h.tap_label(GEAR);
     h.settle();
@@ -714,7 +782,7 @@ const PARK_FRAME_CAP: usize = 600;
 /// the biggest rect the sheet *added* to the covered screen's own chrome.
 fn open_real_sheet(h: &mut Harness) -> (Point, Size) {
     let before = h.park();
-    show_sheet(&app_nav(), h.state.nav.controller(), |_sheet| {
+    show_sheet(&app_nav(), &h.state.overlays, |_sheet| {
         any(SizedBox::<AppState>(Some(SHEET_BODY), Some(SHEET_BODY)))
     });
     let open = h.park();
@@ -735,14 +803,24 @@ fn a_sheet_dismissed_by_its_scrim_gives_the_bar_back_before_the_loop_parks() {
     let covered_depth = h.depth();
 
     open_real_sheet(&mut h);
-    assert_eq!(h.depth(), covered_depth + 1, "the sheet is its own page");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the sheet is its own page on the host"
+    );
+    assert_eq!(h.depth(), covered_depth, "…over an untouched route stack");
 
     // The dismissal, and then *nothing*: the sheet's staged exit plays out
     // inside this dispatch, the pop lands, and the loop stops exactly where
     // the shell would park on `Wait`.
     h.tap_parked(SHEET_SCRIM_POINT);
 
-    assert_eq!(h.depth(), covered_depth, "the scrim tap popped the sheet");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "the scrim tap popped the sheet"
+    );
+    assert_eq!(h.depth(), covered_depth, "…and only the sheet");
     assert!(
         h.has_bar(),
         "…and the bar is lit and addressable again with no further input: {:?}",
@@ -769,11 +847,16 @@ fn escape_on_a_sheet_gives_the_bar_back_before_the_loop_parks() {
     // interaction with the sheet's own body does.
     let panel = open_real_sheet(&mut h);
     h.tap_parked(center(panel));
-    assert_eq!(h.depth(), covered_depth + 1, "a panel press keeps it open");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "a panel press keeps it open"
+    );
 
     h.dispatch(&named_key(NamedKey::Escape));
 
-    assert_eq!(h.depth(), covered_depth, "Escape dismissed the sheet");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "Escape dismissed the sheet");
+    assert_eq!(h.depth(), covered_depth, "…and left the route stack alone");
     assert!(
         h.has_bar(),
         "…and the bar came back with it: {:?}",
@@ -794,14 +877,19 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
     // on is the accounting's own publish.
     confirm_dialog(
         &app_nav(),
-        h.state.nav.controller(),
+        &h.state.overlays,
         "Kill session?",
         "Any attached client is disconnected immediately.",
         "Kill",
         |_state: &mut AppState| {},
     );
     let open = h.park();
-    assert_eq!(h.depth(), covered_depth + 1, "the dialog is its own page");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the dialog is its own page on the host"
+    );
+    assert_eq!(h.depth(), covered_depth, "…over an untouched route stack");
     assert!(!h.has_bar(), "…and the bar is inert under it");
 
     // The danger action is the smallest thing the dialog added to the frame's
@@ -811,7 +899,12 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
         .expect("the danger action strokes its border");
     h.tap_parked(center(action));
 
-    assert_eq!(h.depth(), covered_depth, "the action closed the dialog");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "the action closed the dialog"
+    );
+    assert_eq!(h.depth(), covered_depth, "…and only the dialog");
     assert!(
         h.has_bar(),
         "…and the bar is live again with no further input: {:?}",
@@ -819,8 +912,22 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
     );
 }
 
+/// **R44-back, end to end** — and the reason the root host had to be a `host`
+/// rather than one more navigator.
+///
+/// The press is delivered the way a platform delivers one: through
+/// `frust::push_back_press`, the process-wide source the facade's own wiring
+/// arbitrates behind (a root overlay host outranks every plain navigator, so an
+/// open overlay claims the press ahead of the route stack under it). Nothing
+/// here names a controller to pop — that choice **is** what is under test.
+///
+/// It doubles as the original defect's guard (frust #41): a back press pops the
+/// sheet's page through `BackPolicy::Pop`, bypassing the widget's own staged
+/// exit, so neither that exit nor `Nav::dismiss_overlay` ever hears about it and
+/// only the pusher's completion callback is left to clear the accounting. The
+/// bar must be lit and live again regardless.
 #[test]
-fn a_back_press_that_bypassed_the_sheet_cannot_strand_a_dimmed_bar() {
+fn an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::on_sessions();
@@ -828,17 +935,21 @@ fn a_back_press_that_bypassed_the_sheet_cannot_strand_a_dimmed_bar() {
     let covered_depth = h.depth();
 
     open_real_sheet(&mut h);
+    assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the sheet is up");
 
-    // The Android path (frust #41): `BackPolicy::Pop` pops the sheet's page
-    // out from under the widget, so neither its staged exit nor the app's own
-    // accounting ever hears about it. `NavState::reconcile`'s backstop is all
-    // that is left — the counter is clamped flat the moment the live depth
-    // falls back to the route stack, so the bar cannot be stranded dimmed and
-    // inert.
-    h.state.nav.controller().request_back();
+    frust::push_back_press();
     h.settle();
 
-    assert_eq!(h.depth(), covered_depth, "the back press popped the sheet");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "the back press dismissed the overlay"
+    );
+    assert_eq!(
+        h.depth(),
+        covered_depth,
+        "…and NOT the route under it (the #44 back bug)"
+    );
     assert!(
         h.has_bar(),
         "…and the bar is live again: {:?}",
@@ -875,7 +986,7 @@ fn a_back_press_that_bypassed_the_sheet_cannot_strand_a_dimmed_bar() {
 fn open_sheet_with_handle(h: &mut Harness) -> SheetHandle {
     let captured: Rc<RefCell<Option<SheetHandle>>> = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&captured);
-    show_sheet(&app_nav(), h.state.nav.controller(), move |sheet| {
+    show_sheet(&app_nav(), &h.state.overlays, move |sheet| {
         *sink.borrow_mut() = Some(sheet.clone());
         any(SizedBox::<AppState>(Some(SHEET_BODY), Some(SHEET_BODY)))
     });
@@ -900,15 +1011,20 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     let covered_depth = h.depth();
 
     let sheet = open_sheet_with_handle(&mut h);
-    assert_eq!(h.depth(), covered_depth + 1, "the sheet is its own page");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the sheet is its own page on the host"
+    );
 
     // The Attach row's own two calls (`features::sessions`' `sheet_action`:
     // `sheet.close(); actions.attach(&id)`), run against the **real** handle
     // and back to back — which is the whole shape that matters: no frame lands
-    // between them, so the close's queued controller pop is still counted by
-    // `depth()` while the push below is being recorded. (Driven from here
-    // rather than by pressing a row: a sheet's body lives inside the navigator,
-    // where nothing is addressable by semantics.)
+    // between them, so the close's queued pop is still counted (by the host's
+    // depth, and by `NavState::overlays_closing`) while the route push below is
+    // being recorded. (Driven from here rather than by pressing a row: a
+    // sheet's body lives inside a navigator, where nothing is addressable by
+    // semantics.)
     sheet.close();
     app_nav().push("/settings");
     h.park();
@@ -916,8 +1032,9 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     assert_eq!(
         h.depth(),
         covered_depth + 1,
-        "the sheet's page went and the route's took its place"
+        "the route pushed onto the stack the sheet never joined"
     );
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "…and the sheet's page went");
     assert_titled(&h, "server settings");
 
     // The next input pass — the user's next touch — delivers the sheet's
@@ -929,7 +1046,11 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     // menu) drops the live depth back past the entry, and a retain measured
     // against a too-deep record takes the route's own bar with it.
     let overlay = open_sheet_with_handle(&mut h);
-    assert_eq!(h.depth(), covered_depth + 2, "the overlay is its own page");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the overlay is its own page"
+    );
     assert!(
         !h.has_bar(),
         "…and it dims the bar over the route: {:?}",
@@ -939,7 +1060,8 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     overlay.close();
     h.park();
 
-    assert_eq!(h.depth(), covered_depth + 1, "the overlay popped, alone");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "the overlay popped");
+    assert_eq!(h.depth(), covered_depth + 1, "…and it alone");
     assert_titled(&h, "server settings");
     assert!(
         h.labels().iter().any(|l| l == BACK),
@@ -992,7 +1114,13 @@ fn the_terminal_menus_own_sheet_is_not_wiped_by_the_fall_the_menu_left_behind() 
     // paint, so the app never gets to report it closing.
     h.tap_label(TERMINAL_MENU);
     let open = h.park();
-    assert_eq!(h.depth(), covered_depth + 1, "the menu is its own page");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the menu is its own page on the host — above the bar it anchors to, \
+         rather than clipped under it"
+    );
+    assert_eq!(h.depth(), covered_depth, "…over an untouched route stack");
     assert!(
         !h.has_bar(),
         "…and it dims the bar it is anchored to: {:?}",
@@ -1009,11 +1137,19 @@ fn the_terminal_menus_own_sheet_is_not_wiped_by_the_fall_the_menu_left_behind() 
     );
     h.tap_parked(first_row);
 
-    assert_eq!(h.depth(), covered_depth, "the menu popped itself");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "the menu popped itself");
+    // **Rewritten with the host.** This used to assert the bar stayed *dimmed*
+    // between the menu and the sheet — a property of the old accounting rather
+    // than a promise: the menu's self-pop dropped the route depth where nothing
+    // was looking, so the count survived to cover the gap. The host publishes
+    // its own count before the page under it (the bar included) rebuilds, so
+    // the gap is now visible the frame it opens — and with nothing on screen to
+    // be modal about, a lit bar is the honest answer. What must not happen is
+    // the bar going *inert* while an overlay is up, which every assertion
+    // either side of this one still pins.
     assert!(
-        !h.has_bar(),
-        "…and the bar stays dimmed on the way out — its count is only cleared \
-         by the completion callback, which has not run yet: {:?}",
+        h.has_bar(),
+        "the menu is gone and nothing has replaced it yet: {:?}",
         node_roles(&h.root)
     );
 
@@ -1026,13 +1162,13 @@ fn the_terminal_menus_own_sheet_is_not_wiped_by_the_fall_the_menu_left_behind() 
     h.park();
 
     assert_eq!(
-        h.depth(),
-        covered_depth + 1,
+        h.overlay_depth(),
+        REST_DEPTH + 1,
         "the sheet took the menu's place"
     );
     assert!(
         !h.has_bar(),
-        "…and the bar never flashes lit across the hand-off: {:?}",
+        "…and the bar is modal again under it: {:?}",
         node_roles(&h.root)
     );
 
@@ -1043,7 +1179,12 @@ fn the_terminal_menus_own_sheet_is_not_wiped_by_the_fall_the_menu_left_behind() 
     // unrelated input, which is exactly where the loop parks.
     h.tap_parked(SHEET_SCRIM_POINT);
 
-    assert_eq!(h.depth(), covered_depth, "the scrim tap popped the sheet");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "the scrim tap popped the sheet"
+    );
+    assert_eq!(h.depth(), covered_depth, "…and the route stayed put");
     assert!(
         h.has_bar(),
         "…and the bar is lit and addressable again with no further input: {:?}",

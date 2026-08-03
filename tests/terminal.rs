@@ -11,9 +11,13 @@
 //! it sits a second, deliberately **unmounted** navigator, and that one is what
 //! `muxr::routes::install_app_router` is pointed at:
 //!
-//! - the **mounted** navigator is what the screen pushes its overlays through
-//!   (the overflow menu, the sheet, the rename dialog), so each is exercised
-//!   end to end and located, like every pushed page, by painted geometry;
+//! - the **mounted** navigator stands in for the app's root overlay host
+//!   (`muxr::AppState::overlays`), which is what the screen pushes its overlays
+//!   through (the overflow menu, the sheet, the rename dialog) since FINDINGS
+//!   #44 — so each is exercised end to end and located, like every pushed page,
+//!   by painted geometry. In production that host wraps the whole app rather
+//!   than sitting beside the screen; what it is *above* is asserted in
+//!   `tests/navigation_motion.rs`, which mounts the real shell;
 //! - the **record-only** navigator carries the app's one `Nav` handle. Pushing
 //!   `/terminal?session=s-1` through it records that query in the route-meta
 //!   mirror — which is the only way this screen can learn its session id
@@ -202,7 +206,7 @@ impl Harness {
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Never mounted — see the module docs.
         let record_only: NavigatorController<AppState> = NavigatorController::new();
-        let _router = install_app_router(&record_only, expect_connection_controller());
+        let _router = install_app_router(&record_only, &nav, expect_connection_controller());
         // Connected, so the session guard lets the push below resolve (and so
         // the recorded query survives — a bounced push records `/`'s, not
         // `/terminal`'s).
@@ -1418,7 +1422,7 @@ fn a_frame_needs_no_settling_before_the_first_load_lands() {
     let state = MuxrApp.init();
     let nav: NavigatorController<AppState> = NavigatorController::new();
     let record_only: NavigatorController<AppState> = NavigatorController::new();
-    let _router = install_app_router(&record_only, expect_connection_controller());
+    let _router = install_app_router(&record_only, &nav, expect_connection_controller());
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     root.set_theme(Box::new(Theme::glyph_baseline()));
     let logic_nav = nav.clone();

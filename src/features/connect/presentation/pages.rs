@@ -51,7 +51,11 @@
 //! sheet is a pushed page *builder*, not a path, so
 //! `crate::ui::sheet::show_sheet` needs the controller itself — and the
 //! [`Nav`] beside it, which carries the overlay accounting the shell's bar
-//! dims itself from (`crate::routes`' "Overlay accounting").
+//! dims itself from (`crate::routes`' "Overlay accounting"). That controller is
+//! the **root overlay host**'s (`crate::AppState::overlays`), not the route
+//! navigator's: the QR sheet is a page above every piece of app chrome, which
+//! is what keeps the floating top bar from staying tappable under it
+//! (FINDINGS #44).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -203,15 +207,15 @@ pub fn connect_layout<S: 'static>(pieces: Vec<AnyView<S>>) -> AnyView<S> {
 }
 
 /// The Connect screen: the `/` route's page. See the [module docs](self).
-pub fn connect_page(controller: frust::NavigatorController<AppState>) -> AnyView<AppState> {
-    any(component(ConnectScreen { nav: controller }))
+pub fn connect_page(overlays: frust::NavigatorController<AppState>) -> AnyView<AppState> {
+    any(component(ConnectScreen { overlays }))
 }
 
-/// The Connect screen `Component`. Stateless configuration — the navigator
+/// The Connect screen `Component`. Stateless configuration — the overlay-host
 /// handle the route builder was given, and nothing else; everything retained
 /// lives in [`ConnectState`].
 struct ConnectScreen {
-    nav: frust::NavigatorController<AppState>,
+    overlays: frust::NavigatorController<AppState>,
 }
 
 /// The Connect screen's retained state.
@@ -227,9 +231,10 @@ pub struct ConnectState {
     /// The app's one path-pushing handle — see the module docs' navigation
     /// note. Clonable (an `Rc` bump), so a press closure captures its own copy.
     app_nav: Nav,
-    /// The raw navigator, for `crate::ui::sheet::show_sheet` (which pushes a
-    /// transparent page rather than resolving a location).
-    nav: frust::NavigatorController<AppState>,
+    /// The root overlay host's navigator, for `crate::ui::sheet::show_sheet`
+    /// (which pushes a transparent page rather than resolving a location) —
+    /// see the module docs' navigation note.
+    overlays: frust::NavigatorController<AppState>,
     /// The app-scoped connection handle, held only so [`Component::build`] can
     /// watch [`ConnectionController::connected`]'s true→false edge (a
     /// Disconnect, e.g. Settings') and scrub the login-token field then — see
@@ -270,7 +275,7 @@ impl Component for ConnectScreen {
             // reactive context, but a press handler resolving its own handles
             // is the habit this app does not want).
             app_nav: app_nav(),
-            nav: self.nav.clone(),
+            overlays: self.overlays.clone(),
             connection,
             was_connected,
         }
@@ -325,7 +330,7 @@ impl Component for ConnectScreen {
         any(Stack(vec![
             any(page_backdrop::<ConnectState>()),
             any(scroll_view(content)),
-            qr_affordance(&state.app_nav, &state.nav),
+            qr_affordance(&state.app_nav, &state.overlays),
         ]))
     }
 }
@@ -341,9 +346,9 @@ impl Component for ConnectScreen {
 /// same trade `super::pieces::connect_button` already records.
 fn qr_affordance(
     app_nav: &Nav,
-    nav: &frust::NavigatorController<AppState>,
+    overlays: &frust::NavigatorController<AppState>,
 ) -> AnyView<ConnectState> {
-    let nav = nav.clone();
+    let overlays = overlays.clone();
     let app_nav = app_nav.clone();
     let theme = active_theme();
     let scheme = theme.scheme();
@@ -355,7 +360,7 @@ fn qr_affordance(
                 // The body ignores the sheet's own handle: this sheet carries
                 // no closer of its own (the scrim and back are its only
                 // dismissals), so nothing inside it ever asks to close.
-                show_sheet(&app_nav, &nav, |_sheet| qr_sheet_body())
+                show_sheet(&app_nav, &overlays, |_sheet| qr_sheet_body())
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA

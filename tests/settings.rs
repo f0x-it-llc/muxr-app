@@ -175,8 +175,12 @@ impl Harness {
         // Re-point the app's one path-pushing handle (`routes::app_nav`, which
         // the screen resolves in its own `init`) at this fixture's navigator,
         // real route table and real session guard included — which is what
-        // makes Disconnect's `go("/")` the app's real navigation.
-        let _router = install_app_router(&nav, expect_connection_controller());
+        // makes Disconnect's `go("/")` the app's real navigation. The one
+        // controller plays both of production's navigators (`AppState::nav` and
+        // the root overlay host `AppState::overlays`, where the dialogs and
+        // picker sheets are pages since FINDINGS #44), which is what keeps every
+        // overlay a page of the *mounted* navigator and so drivable here.
+        let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             let screen_nav = logic_nav.clone();

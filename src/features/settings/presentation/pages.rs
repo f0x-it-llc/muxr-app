@@ -54,8 +54,9 @@
 //!
 //! A `Component`'s subtree is bound to its own `State`, so this screen's own
 //! gestures take `&mut SettingsState`. The **overlays** it pushes are a
-//! different story: a dialog or picker sheet is a page on the *app's*
-//! navigator, so its callbacks receive `&mut AppState` and can't see
+//! different story: a dialog or picker sheet is a page on the *app's* root
+//! overlay host (`crate::AppState::overlays`, above every piece of chrome),
+//! so its callbacks receive `&mut AppState` and can't see
 //! [`SettingsState`] at all. That is why every action lives on [`Actions`] — a
 //! small clonable bundle of handles a sheet row can capture and act through,
 //! with the same method body serving both sides of the boundary.
@@ -136,15 +137,15 @@ const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 /// The Settings screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that disposes
 /// the hosted controller on unmount.
-pub fn settings_page(controller: NavigatorController<AppState>) -> AnyView<AppState> {
-    any(component(SettingsScreen { nav: controller }))
+pub fn settings_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
+    any(component(SettingsScreen { overlays }))
 }
 
 /// The Settings screen `Component`. Stateless configuration — everything
 /// mutable lives in [`SettingsState`] and the controller it hosts.
 pub struct SettingsScreen {
-    /// The app's one navigator, handed in by the route builder.
-    nav: NavigatorController<AppState>,
+    /// The root overlay host's navigator, handed in by the route builder.
+    overlays: NavigatorController<AppState>,
 }
 
 /// The Settings screen's retained state: the action bundle, and nothing else.
@@ -164,9 +165,11 @@ pub struct SettingsState {
 /// boundary.
 #[derive(Clone)]
 pub struct Actions {
-    /// The app's navigator — every page *builder* this screen pushes (the two
-    /// dialogs, the four picker sheets) goes through it.
-    pub nav: NavigatorController<AppState>,
+    /// The root overlay host's navigator — every page *builder* this screen
+    /// pushes (the two dialogs, the four picker sheets) goes through it, so
+    /// each lands above the shell's floating bar rather than under it
+    /// (`crate::AppState::overlays`).
+    pub overlays: NavigatorController<AppState>,
     /// The app's one path-pushing handle — how Disconnect reaches `/`.
     pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
@@ -203,7 +206,7 @@ impl Component for SettingsScreen {
 
         SettingsState {
             actions: Actions {
-                nav: self.nav.clone(),
+                overlays: self.overlays.clone(),
                 // Resolved here, with every other app-scoped dependency —
                 // never from inside a press handler (the desktop shell
                 // dispatches events with no ambient reactive owner).
@@ -438,7 +441,7 @@ impl Actions {
     /// vocabulary, and [`row_tapped`] is its one caller.
     fn open_picker(&self, kind: PickerKind) {
         let actions = self.clone();
-        show_sheet(&self.app_nav, &self.nav, move |sheet| {
+        show_sheet(&self.app_nav, &self.overlays, move |sheet| {
             let theme = pieces::active_theme();
             let colors = pieces::palette(&theme);
             let picker = actions.picker(kind);
@@ -580,7 +583,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             "New token",
             "",
             move |_app: &mut AppState, name: String| {
@@ -601,7 +604,7 @@ impl Actions {
         let name = name.to_string();
         confirm_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             "Revoke token?",
             "Any client still using this token is disconnected immediately.",
             "Revoke",
@@ -626,7 +629,7 @@ impl Actions {
         let app_nav = self.app_nav.clone();
         confirm_dialog(
             &self.app_nav,
-            &self.nav,
+            &self.overlays,
             "Disconnect",
             "You will need the server's token to attach again.",
             "Disconnect",

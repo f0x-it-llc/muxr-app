@@ -21,7 +21,11 @@
 //! `AppState`. They do take the app's [`Nav`] beside the navigator, but only
 //! for the overlay accounting the shell's bar reads
 //! (`crate::routes`' "Overlay accounting" section); nothing here touches the
-//! app state behind it.
+//! app state behind it. The navigator every screen hands in is the **root
+//! overlay host**'s (`crate::AppState::overlays`), so a dialog covers the
+//! shell's floating bar instead of appearing under it (FINDINGS #44) — which
+//! is a caller's choice, not this file's: `tests/ui_substrate.rs` drives both
+//! helpers over a navigator of its own.
 //!
 //! # Framework gaps these helpers work around
 //!

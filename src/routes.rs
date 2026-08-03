@@ -60,9 +60,12 @@
 //!   stack without telling anyone; the next reconcile sees the live depth fall
 //!   and drops every entry recorded deeper than it.
 //! - **A transparent utility push does not retitle the bar.** A sheet/dialog is
-//!   pushed as a *page builder* straight through the [`NavigatorController`],
-//!   never through [`Nav`], so it adds depth with **no** mirror entry — the bar
-//!   keeps showing the covered route's title, which is exactly right.
+//!   pushed as a *page builder* straight through a [`NavigatorController`],
+//!   never through [`Nav`], so it produces **no** mirror entry — the bar keeps
+//!   showing the covered route's title, which is exactly right. Since the root
+//!   overlay host landed (`crate::AppState::overlays`) it is not even on this
+//!   stack: an overlay adds depth to the *host*, and the route stack under it
+//!   is untouched.
 //! - **A guarded push retitles honestly.** The mirror records the *resolved*
 //!   (post-redirect) path, so an unauthenticated `/sessions` bounced to `/`
 //!   records `/`'s (absent) bar, not `/sessions`'.
@@ -93,12 +96,21 @@
 //!   callback (the authoritative half: it runs exactly once per pushed page,
 //!   whichever way it was dismissed).
 //!
-//! The depth gap stays in the answer, because an overlay pushed straight
-//! through the [`NavigatorController`] — by a test, or by a frust helper the
-//! app has not wrapped — has no accounting at all. And
-//! [`NavState::reconcile`] clamps the counters flat the moment the live depth
-//! falls back to the route stack, so no dismissal, however it happened, can
-//! strand a dimmed bar.
+//! A **depth** term stays in the answer beside the counters, because an overlay
+//! pushed straight through a controller — by a test, or by a frust helper the
+//! app has not wrapped — has no accounting at all. It reads the *host's* own
+//! count now ([`Nav::open_host_overlays`]) as well as the legacy route-depth
+//! gap, since that is where an overlay lives; and [`NavState::reconcile`]
+//! clamps the counters flat the moment **both** say nothing is up, so no
+//! dismissal, however it happened, can strand a dimmed bar.
+//!
+//! The host's count also arrives *earlier* than the route depth ever did: the
+//! host reconciles its own ops before the page under it — the bar included —
+//! rebuilds. So the bar is honest about the frame an overlay actually opens or
+//! closes, and the counters are left carrying only the **synchronous** half
+//! (the rebuild between an app-owned dismissal being enqueued and the pop
+//! landing). Removing them is a follow-up; nothing here depends on them being
+//! the only answer.
 //!
 //! ## Consult the queued ops *before* mutating
 //!
@@ -143,14 +155,15 @@ use crate::features::terminal::presentation::pages::terminal_page;
 const CONNECT_LOCATION: &str = "/";
 
 /// The `/` route (and the navigator's initial page): Connect. Takes the
-/// [`NavigatorController`] so this function fits both [`build_routes`]'s
-/// `"/"` closure and the navigator's `initial` closure identically (see
-/// `examples/huddle`'s `home_page` for the same dual-use shape); forwarded
-/// straight through to [`connect_page`], which uses it for the QR sheet it
-/// pushes (a sheet is a page builder, not a path — see [`Nav`] for the other
-/// half).
-pub(crate) fn home_page(controller: NavigatorController<AppState>) -> AnyView<AppState> {
-    connect_page(controller)
+/// **overlay host's** [`NavigatorController`] so this function fits both
+/// [`build_routes`]'s `"/"` closure and the navigator's `initial` closure
+/// identically (see `examples/huddle`'s `home_page` for the same dual-use
+/// shape); forwarded straight through to [`connect_page`], which uses it for
+/// the QR sheet it pushes (a sheet is a page builder, not a path — see [`Nav`]
+/// for the other half, and `crate::AppState::overlays` for why every overlay
+/// is a page of the host rather than of the route stack).
+pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
+    connect_page(overlays)
 }
 
 // ---------------------------------------------------------------------------
@@ -282,16 +295,16 @@ pub struct BarState {
     pub meta: Option<RouteMeta>,
     /// The crossfade direction for this change.
     pub direction: BarDirection,
-    /// Whether a **transparent overlay** (a sheet, a dialog) sits above the
-    /// route the bar is titling — the live page-stack depth is deeper than the
-    /// top mirror entry's, or the app's own overlay accounting says one is up
-    /// ([`NavState::overlays`]).
+    /// Whether a **transparent overlay** (a menu, a sheet, a dialog) covers the
+    /// route the bar is titling — the root overlay host has a page over the
+    /// app, the live route depth is deeper than the top mirror entry's, or the
+    /// app's own overlay accounting says one is up ([`NavState::overlays`]).
     ///
-    /// The mirror already had everything needed to answer this: a modal is
-    /// pushed as a page *builder* straight through the
-    /// [`NavigatorController`], so it adds depth with **no** mirror entry (the
-    /// very property that keeps it from retitling the bar). The gap between
-    /// the two counts is therefore exactly "how many overlays are up".
+    /// A modal is pushed as a page *builder* straight through a
+    /// [`NavigatorController`], so it produces **no** mirror entry (the very
+    /// property that keeps it from retitling the bar) — which is why "how many
+    /// overlays are up" is a count taken beside the mirror rather than read out
+    /// of it.
     ///
     /// `crate::shell` hands it to [`crate::ui::topbar::TopBarView::overlay`],
     /// which is what closes the modality hole the floating bar opened: the bar
@@ -341,11 +354,19 @@ struct NavState {
     /// navigation lands at, and the bar metadata for the route it landed on
     /// (`None` for a bar-less route like `/`).
     stack: Vec<(usize, Option<RouteMeta>)>,
-    /// The last navigator depth [`Self::reconcile`] observed. A *fall* below
-    /// this is what identifies a pop that bypassed [`Nav`] — a plain equality
-    /// check would misread the frame between a recorded push and the rebuild
-    /// that applies it, when `depth()` still reports the pre-push value.
+    /// The last **route** navigator depth [`Self::reconcile`] observed. A
+    /// *fall* below this is what identifies a pop that bypassed [`Nav`] — a
+    /// plain equality check would misread the frame between a recorded push and
+    /// the rebuild that applies it, when `depth()` still reports the pre-push
+    /// value.
     last_seen_depth: usize,
+    /// …and the last **overlay-host** count ([`Nav::open_host_overlays`])
+    /// [`Self::reconcile`] observed, for the same reason on the other stack: a
+    /// fall here is a dismissal, and the one piece of evidence that survives a
+    /// dismissal route the app never saw (an Android back press through the
+    /// host's `BackPolicy::Pop`, whose pop the route depth no longer reflects
+    /// at all).
+    last_seen_host: usize,
     /// Which way the last change travelled.
     direction: BarDirection,
     /// Set by [`Nav::pop`]: this handle dropped a route entry, but
@@ -410,28 +431,35 @@ struct NavState {
 
 impl NavState {
     /// Drop every entry recorded deeper than `live` — but only once the live
-    /// depth has actually *fallen* since the last observation (see
+    /// **route** depth has actually *fallen* since the last observation (see
     /// [`Self::last_seen_depth`]). Returns whether anything was dropped.
-    fn reconcile(&mut self, live: usize) -> bool {
+    ///
+    /// `host` is how many overlays are open on the root host
+    /// ([`Nav::open_host_overlays`]); it never touches the mirror's own retain
+    /// (an overlay has no mirror entry, and is not on this stack at all any
+    /// more) — only the overlay backstop below reads it.
+    fn reconcile(&mut self, live: usize, host: usize) -> bool {
         let fell = live < self.last_seen_depth;
+        let host_fell = host < self.last_seen_host;
         self.last_seen_depth = live;
+        self.last_seen_host = host;
         if self.pending_pop && live <= self.route_depth() {
             // The queued pop has been applied; depth is authoritative again.
             self.pending_pop = false;
         }
-        // The overlay accounting's backstop: the live depth has fallen back to
-        // (or below) the route stack, so nothing transparent is up — whatever
-        // the counters still believe. A dismissal that reached neither
+        // The overlay accounting's backstop: nothing transparent is up —
+        // neither on the host, nor (legacy) above the top route — whatever the
+        // counters still believe. A dismissal that reached neither
         // `Nav::end_overlay` nor `Nav::dismiss_overlay` (an Android back press
-        // straight through `BackPolicy::Pop`, a `Router::go` that replaced the
-        // overlay page and dropped its completion callback with it) cannot
-        // strand a dimmed, inert bar behind it.
+        // straight through the host's `BackPolicy::Pop`, a `Router::go` that
+        // replaced the overlay page and dropped its completion callback with
+        // it) cannot strand a dimmed, inert bar behind it.
         //
-        // Depth-*fall* gated like the retain below, and for the same reason:
-        // an un-gated clamp would fire on the frame a sheet is pushed, when
-        // `live` is still the pre-push value and the counter is the only thing
-        // that knows better.
-        if fell && live <= self.route_depth() {
+        // *Fall* gated — on either stack — like the retain below, and for the
+        // same reason: an un-gated clamp would fire on the frame a sheet is
+        // pushed, when neither count has caught up yet and the counter is the
+        // only thing that knows better.
+        if (fell || host_fell) && host == 0 && live <= self.route_depth() {
             self.overlays = 0;
             self.overlays_closing = 0;
         }
@@ -518,8 +546,8 @@ impl NavState {
     /// state it reconciles: the clamp can only wipe counts that a fall has
     /// already invalidated, and the retain only drops mirror entries deeper
     /// than the live depth.
-    fn begin_overlay(&mut self, live: usize) {
-        self.reconcile(live);
+    fn begin_overlay(&mut self, live: usize, host: usize) {
+        self.reconcile(live, host);
         self.overlays += 1;
     }
 
@@ -530,35 +558,43 @@ impl NavState {
         self.overlays.saturating_sub(self.overlays_closing)
     }
 
-    /// Whether a transparent overlay sits above the top route — see
-    /// [`BarState::overlay_active`]. `live` is the navigator's own depth.
+    /// Whether a transparent overlay covers the top route — see
+    /// [`BarState::overlay_active`]. `live` is the **route** navigator's own
+    /// depth, `host` how many overlays are open on the root host
+    /// ([`Nav::open_host_overlays`]).
     ///
-    /// Two independent answers, either of which dims the bar:
+    /// Three independent answers, any of which dims the bar:
     ///
     /// - the app's **own** accounting ([`Self::open_overlays`]), which is
     ///   exact from the moment a helper pushes to the moment the app closes
     ///   it, staleness and all;
-    /// - the **depth** gap, which still covers every overlay pushed straight
-    ///   through the [`NavigatorController`] without passing a helper.
+    /// - the **host's** own count, which covers every overlay pushed straight
+    ///   through the host controller without passing a helper (a test's raw
+    ///   `push_transparent`, a frust helper the app has not wrapped) — the job
+    ///   the route-depth gap below used to do, before overlays moved off the
+    ///   route stack;
+    /// - that legacy **depth** gap, kept because a transparent page pushed onto
+    ///   the *route* navigator still covers the bar exactly as it always did.
     ///
-    /// The depth gap is measured past [`Self::overlays_closing`] rather than
-    /// past zero: an overlay whose pop is queued is still counted by `live`
-    /// for one more rebuild, and reading that as "a modal is up" is exactly
-    /// the staleness this pair exists to erase.
-    fn overlay_active(&self, live: usize) -> bool {
+    /// Both depth-derived terms are measured past [`Self::overlays_closing`]
+    /// rather than past zero: an overlay whose pop is queued is still counted
+    /// by its navigator for one more rebuild, and reading that as "a modal is
+    /// up" is exactly the staleness this pair exists to erase.
+    fn overlay_active(&self, live: usize, host: usize) -> bool {
         self.open_overlays() > 0
+            || host > self.overlays_closing
             || (!self.pending_pop && live > self.route_depth() + self.overlays_closing)
     }
 
     /// The current bar state: the deepest recorded entry's metadata, whether
-    /// `live` shows an overlay above it, and the topmost screen's
+    /// `live`/`host` show an overlay over it, and the topmost screen's
     /// `fullscreen` request (which lives outside this mirror — see
     /// [`Nav::fullscreen`]).
-    fn bar(&self, live: usize, fullscreen: bool) -> BarState {
+    fn bar(&self, live: usize, host: usize, fullscreen: bool) -> BarState {
         BarState {
             meta: self.stack.last().and_then(|(_, meta)| *meta),
             direction: self.direction,
-            overlay_active: self.overlay_active(live),
+            overlay_active: self.overlay_active(live, host),
             fullscreen,
         }
     }
@@ -577,6 +613,11 @@ impl NavState {
 #[derive(Clone)]
 pub struct Nav {
     router: Rc<Router<AppState>>,
+    /// The **root overlay host**'s navigator (`crate::AppState::overlays`) —
+    /// read for its depth alone, by [`Self::open_host_overlays`]. Nothing here
+    /// ever pushes or pops it; a screen does that through the handle its route
+    /// builder was given.
+    overlays: NavigatorController<AppState>,
     /// The route-meta mirror, shared by every clone.
     state: Rc<RefCell<NavState>>,
     /// The mirror's published, trackable face — what wakes the shell's rebuild
@@ -614,6 +655,39 @@ impl BarFullscreen {
 }
 
 impl Nav {
+    /// How many overlays are open on the **root overlay host** right now: its
+    /// page-stack depth less its own root page, which is the whole app
+    /// (`crate::AppState::overlays`).
+    ///
+    /// # Why the mirror reads a second stack at all
+    ///
+    /// Two of this handle's properties were derived from the route
+    /// navigator's depth alone, back when an overlay *was* a page of it — "the
+    /// live depth is deeper than the deepest recorded route" meant exactly
+    /// "something transparent is up". Now that overlays are pages of the host,
+    /// that gap never opens, and both properties are lost unless the host's own
+    /// count is read beside it:
+    ///
+    /// - [`BarState::overlay_active`] catches an overlay pushed with **no**
+    ///   helper at all (a test's raw `push_transparent`, a frust helper the app
+    ///   has not wrapped), which no counter ever sees;
+    /// - [`NavState::reconcile`]'s backstop fires on a dismissal the app never
+    ///   heard about — an Android back press through the host's
+    ///   `BackPolicy::Pop` — which would otherwise leave the bar dimmed and
+    ///   inert until the next unrelated input handed the pusher's completion
+    ///   callback over.
+    ///
+    /// The two counts are kept **apart** rather than summed: the mirror's own
+    /// retain measures route entries against the route depth, and the two
+    /// stacks do not publish on the same beat (the host reconciles its ops
+    /// *before* the page under it rebuilds — the bar included — where the route
+    /// navigator publishes after). A summed depth dips across a
+    /// close-then-push handler and the retain evicts the route entry the push
+    /// just recorded.
+    fn open_host_overlays(&self) -> usize {
+        self.overlays.depth().saturating_sub(1)
+    }
+
     /// Push `location`'s page onto the stack, retaining the page below —
     /// guarded, like every other resolution through this router, and carrying
     /// [`route_transition`]'s Glyph slide.
@@ -674,6 +748,7 @@ impl Nav {
             Resolution::Error { .. } => (None, RouteParams::new()),
         };
         let live = self.router.controller().depth();
+        let host = self.open_host_overlays();
         let mut state = self.state.borrow_mut();
         state.stack = vec![(1, meta)];
         state.query = query;
@@ -688,7 +763,7 @@ impl Nav {
         state.pending_pop = false;
         state.overlays = 0;
         state.overlays_closing = 0;
-        let bar = state.bar(live.min(1), self.fullscreen.get_untracked());
+        let bar = state.bar(live.min(1), host, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -702,6 +777,7 @@ impl Nav {
     /// gesture).
     pub fn pop(&self) {
         self.router.controller().pop();
+        let host = self.open_host_overlays();
         let mut state = self.state.borrow_mut();
         state.stack.pop();
         state.direction = BarDirection::Back;
@@ -711,7 +787,7 @@ impl Nav {
         // `NavState::pending_pop`).
         state.pending_pop = true;
         let live = state.route_depth();
-        let bar = state.bar(live, self.fullscreen.get_untracked());
+        let bar = state.bar(live, host, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -734,13 +810,14 @@ impl Nav {
     /// that from waking a rebuild per frame.
     pub fn bar(&self) -> BarState {
         let live = self.router.controller().depth();
+        let host = self.open_host_overlays();
         // Tracked, like `current` below: this is the *only* subscription the
         // fullscreen flag has, and it is what makes a screen's
         // `set_fullscreen` wake the rebuild that animates the bar away.
         let fullscreen = self.fullscreen.get();
         let mut state = self.state.borrow_mut();
-        state.reconcile(live);
-        let reconciled = state.bar(live, fullscreen);
+        state.reconcile(live, host);
+        let reconciled = state.bar(live, host, fullscreen);
         drop(state);
         self.publish(reconciled);
         self.current.get()
@@ -760,12 +837,13 @@ impl Nav {
     /// trace.
     fn record_push(&self, location: &Location) {
         let live = self.router.controller().depth();
+        let host = self.open_host_overlays();
         let mut state = self.state.borrow_mut();
         let deepest = state.record_push_depth(live);
         state.stack.push((deepest + 1, route_meta(&location.path)));
         state.direction = BarDirection::Forward;
         state.query = location.query.clone();
-        let bar = state.bar(live, self.fullscreen.get_untracked());
+        let bar = state.bar(live, host, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -788,9 +866,10 @@ impl Nav {
     /// fall to clamp. [`NavState::begin_overlay`] carries that trace.
     pub fn begin_overlay(&self) {
         let live = self.router.controller().depth();
+        let host = self.open_host_overlays();
         let mut state = self.state.borrow_mut();
-        state.begin_overlay(live);
-        let bar = state.bar(live, self.fullscreen.get_untracked());
+        state.begin_overlay(live, host);
+        let bar = state.bar(live, host, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -812,11 +891,12 @@ impl Nav {
     /// under-count either — it saturates.
     pub fn dismiss_overlay(&self) {
         let live = self.router.controller().depth();
+        let host = self.open_host_overlays();
         let mut state = self.state.borrow_mut();
         if state.overlays_closing < state.overlays {
             state.overlays_closing += 1;
         }
-        let bar = state.bar(live, self.fullscreen.get_untracked());
+        let bar = state.bar(live, host, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -831,10 +911,11 @@ impl Nav {
     /// one time too many.
     pub fn end_overlay(&self) {
         let live = self.router.controller().depth();
+        let host = self.open_host_overlays();
         let mut state = self.state.borrow_mut();
         state.overlays = state.overlays.saturating_sub(1);
         state.overlays_closing = state.overlays_closing.saturating_sub(1);
-        let bar = state.bar(live, self.fullscreen.get_untracked());
+        let bar = state.bar(live, host, self.fullscreen.get_untracked());
         drop(state);
         self.publish(bar);
     }
@@ -896,6 +977,13 @@ thread_local! {
 /// plus the [`session_guard_with`] guard closed over `connection` — and publish
 /// it as this thread's [`Nav`].
 ///
+/// `overlays` is the **root overlay host**'s navigator
+/// (`crate::AppState::overlays`), and it is used twice here: threaded into the
+/// route table beside `controller` (a screen resolves it the same way it
+/// resolves everything else — once, from the handle its route builder was
+/// given; see [`build_routes`]), and kept on the published [`Nav`] so the bar
+/// mirror can read the host's depth ([`Nav::open_host_overlays`]).
+///
 /// Called once from `crate::MuxrApp::init`, which owns the returned handle as
 /// `crate::AppState::nav`. A headless test that drives its **own**
 /// [`NavigatorController`] (every screen suite in `tests/` does, to keep the
@@ -904,21 +992,24 @@ thread_local! {
 /// real table and the real guard rather than a second, drifting copy.
 pub fn install_app_router(
     controller: &NavigatorController<AppState>,
+    overlays: &NavigatorController<AppState>,
     connection: Arc<ConnectionController>,
 ) -> Rc<Router<AppState>> {
     // The route table is built *before* the router (so there is no
     // circularity), which is exactly why a page builder cannot be handed the
     // router — see the module docs.
-    let routes = build_routes(controller.clone());
+    let routes = build_routes(controller.clone(), overlays.clone());
     let router = Rc::new(
         Router::with_controller(controller, routes).redirect(session_guard_with(connection)),
     );
     APP_NAV.with(|cell| {
         *cell.borrow_mut() = Some(Nav {
             router: Rc::clone(&router),
+            overlays: overlays.clone(),
             state: Rc::new(RefCell::new(NavState {
                 stack: Vec::new(),
                 last_seen_depth: 0,
+                last_seen_host: 0,
                 direction: BarDirection::Forward,
                 pending_pop: false,
                 overlays: 0,
@@ -988,27 +1079,39 @@ pub(crate) fn session_guard_with(
     }
 }
 
-/// Build the full route table. `controller` is created *before* this table
-/// (so there is no circularity with the [`Router`] it attaches to) and cloned
-/// into every builder — all four page builders receive it today (see
-/// [`home_page`]'s doc): it is how a screen pushes a page *builder* (a dialog,
-/// a sheet), where [`Nav`] is how it pushes a *path*.
-pub(crate) fn build_routes(controller: NavigatorController<AppState>) -> Vec<Route<AppState>> {
+/// Build the full route table. Both navigators are created *before* this table
+/// (so there is no circularity with the [`Router`] either attaches to) and
+/// cloned into the builders that need them:
+///
+/// - `overlays` — the **root overlay host**'s controller, and how a screen
+///   pushes a page *builder* (a menu, a sheet, a dialog), where [`Nav`] is how
+///   it pushes a *path*. Every one of the four screens takes it, because every
+///   one of them opens an overlay.
+/// - `controller` — the *route* navigator. Only `/sessions` still takes it, and
+///   only to read [`NavigatorController::depth`]: its mock poll pauses for
+///   whatever it pushes and resumes when the stack falls back (see that
+///   screen's `Actions::stack_depth`). Nothing pushes through it here — a
+///   route push goes through [`Nav`], and an overlay through `overlays`.
+pub(crate) fn build_routes(
+    controller: NavigatorController<AppState>,
+    overlays: NavigatorController<AppState>,
+) -> Vec<Route<AppState>> {
     vec![
         Route::new("/", {
-            let controller = controller.clone();
-            move |_params: &RouteParams| home_page(controller.clone())
+            let overlays = overlays.clone();
+            move |_params: &RouteParams| home_page(overlays.clone())
         }),
         Route::new("/sessions", {
             let controller = controller.clone();
-            move |_params: &RouteParams| sessions_page(controller.clone())
+            let overlays = overlays.clone();
+            move |_params: &RouteParams| sessions_page(controller.clone(), overlays.clone())
         }),
         Route::new("/terminal", {
-            let controller = controller.clone();
-            move |_params: &RouteParams| terminal_page(controller.clone())
+            let overlays = overlays.clone();
+            move |_params: &RouteParams| terminal_page(overlays.clone())
         }),
         Route::new("/settings", move |_params: &RouteParams| {
-            settings_page(controller.clone())
+            settings_page(overlays.clone())
         }),
     ]
 }
@@ -1133,6 +1236,7 @@ mod tests {
         NavState {
             stack: entries.to_vec(),
             last_seen_depth,
+            last_seen_host: 0,
             direction: BarDirection::Forward,
             pending_pop: false,
             overlays: 0,
@@ -1152,15 +1256,15 @@ mod tests {
             ],
             3,
         );
-        assert!(state.reconcile(2), "the /settings entry is dropped");
-        assert_eq!(state.bar(2, false).meta, route_meta("/sessions"));
+        assert!(state.reconcile(2, 0), "the /settings entry is dropped");
+        assert_eq!(state.bar(2, 0, false).meta, route_meta("/sessions"));
         assert_eq!(
-            state.bar(2, false).direction,
+            state.bar(2, 0, false).direction,
             BarDirection::Back,
             "…and the bar crossfades backwards"
         );
         // Idempotent: a second reconcile at the same depth changes nothing.
-        assert!(!state.reconcile(2));
+        assert!(!state.reconcile(2, 0));
     }
 
     #[test]
@@ -1170,11 +1274,14 @@ mod tests {
         // push it still reports the PRE-push value. Only a depth *fall*
         // reconciles.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 1);
-        assert!(!state.reconcile(1), "nothing is dropped at a stale depth");
-        assert_eq!(state.bar(1, false).meta, route_meta("/sessions"));
+        assert!(
+            !state.reconcile(1, 0),
+            "nothing is dropped at a stale depth"
+        );
+        assert_eq!(state.bar(1, 0, false).meta, route_meta("/sessions"));
         // …and once the navigator applies it, the entry is still there.
-        assert!(!state.reconcile(2));
-        assert_eq!(state.bar(2, false).meta, route_meta("/sessions"));
+        assert!(!state.reconcile(2, 0));
+        assert_eq!(state.bar(2, 0, false).meta, route_meta("/sessions"));
     }
 
     #[test]
@@ -1183,10 +1290,10 @@ mod tests {
         // it adds depth with no mirror entry — and popping it must not take the
         // covered route's entry with it.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
-        assert!(!state.reconcile(3), "the sheet pushed depth to 3");
-        assert_eq!(state.bar(3, false).meta, route_meta("/sessions"));
-        assert!(!state.reconcile(2), "…and dismissing it drops nothing");
-        assert_eq!(state.bar(2, false).meta, route_meta("/sessions"));
+        assert!(!state.reconcile(3, 0), "the sheet pushed depth to 3");
+        assert_eq!(state.bar(3, 0, false).meta, route_meta("/sessions"));
+        assert!(!state.reconcile(2, 0), "…and dismissing it drops nothing");
+        assert_eq!(state.bar(2, 0, false).meta, route_meta("/sessions"));
     }
 
     #[test]
@@ -1195,7 +1302,7 @@ mod tests {
         // (absent) metadata, so the bar hides rather than titling a route the
         // push never reached.
         let state = mirror(&[(2, route_meta(CONNECT_LOCATION))], 2);
-        assert_eq!(state.bar(2, false).meta, None);
+        assert_eq!(state.bar(2, 0, false).meta, None);
     }
 
     // -----------------------------------------------------------------------
@@ -1208,19 +1315,22 @@ mod tests {
         // mirror entry, so the gap between the live depth and the deepest
         // recorded route IS "an overlay is up".
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
-        assert!(!state.bar(2, false).overlay_active, "no overlay at rest");
+        assert!(!state.bar(2, 0, false).overlay_active, "no overlay at rest");
 
-        state.reconcile(3);
-        assert!(state.bar(3, false).overlay_active, "the sheet dims the bar");
+        state.reconcile(3, 0);
+        assert!(
+            state.bar(3, 0, false).overlay_active,
+            "the sheet dims the bar"
+        );
         assert_eq!(
-            state.bar(3, false).meta,
+            state.bar(3, 0, false).meta,
             route_meta("/sessions"),
             "…without retitling it"
         );
 
-        state.reconcile(2);
+        state.reconcile(2, 0);
         assert!(
-            !state.bar(2, false).overlay_active,
+            !state.bar(2, 0, false).overlay_active,
             "dismissing it gives the bar back"
         );
     }
@@ -1230,12 +1340,12 @@ mod tests {
         // A sheet whose row opens a dialog: depth 4 over a depth-2 route. The
         // flag is a comparison, not a counter, so it simply stays set.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
-        state.reconcile(4);
-        assert!(state.bar(4, false).overlay_active);
-        state.reconcile(3);
-        assert!(state.bar(3, false).overlay_active, "one is still up");
-        state.reconcile(2);
-        assert!(!state.bar(2, false).overlay_active);
+        state.reconcile(4, 0);
+        assert!(state.bar(4, 0, false).overlay_active);
+        state.reconcile(3, 0);
+        assert!(state.bar(3, 0, false).overlay_active, "one is still up");
+        state.reconcile(2, 0);
+        assert!(!state.bar(2, 0, false).overlay_active);
     }
 
     #[test]
@@ -1255,17 +1365,17 @@ mod tests {
         state.stack.pop();
         state.pending_pop = true;
         assert!(
-            !state.bar(3, false).overlay_active,
+            !state.bar(3, 0, false).overlay_active,
             "the stale depth is a queued pop, not a sheet"
         );
 
         // …and the moment the navigator applies it, depth is authoritative
         // again — including for a sheet opened right afterwards.
-        state.reconcile(2);
-        assert!(!state.bar(2, false).overlay_active);
-        state.reconcile(3);
+        state.reconcile(2, 0);
+        assert!(!state.bar(2, 0, false).overlay_active);
+        state.reconcile(3, 0);
         assert!(
-            state.bar(3, false).overlay_active,
+            state.bar(3, 0, false).overlay_active,
             "a real overlay still registers once the pop has landed"
         );
     }
@@ -1282,13 +1392,13 @@ mod tests {
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         state.overlays = 1;
         assert!(
-            state.bar(2, false).overlay_active,
+            state.bar(2, 0, false).overlay_active,
             "dimmed at the stale depth"
         );
         // …and it stays dimmed once the navigator catches up, now by both
         // halves at once.
-        state.reconcile(3);
-        assert!(state.bar(3, false).overlay_active);
+        state.reconcile(3, 0);
+        assert!(state.bar(3, 0, false).overlay_active);
     }
 
     #[test]
@@ -1300,21 +1410,21 @@ mod tests {
         // and inert until unrelated input.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         state.overlays = 1;
-        state.reconcile(3);
-        assert!(state.bar(3, false).overlay_active);
+        state.reconcile(3, 0);
+        assert!(state.bar(3, 0, false).overlay_active);
 
         // `Nav::dismiss_overlay`: still depth 3, but the app knows better.
         state.overlays_closing = 1;
         assert!(
-            !state.bar(3, false).overlay_active,
+            !state.bar(3, 0, false).overlay_active,
             "the bar lights up on the frame the dismissal is enqueued"
         );
 
         // The pop lands; the completion callback clears both counts.
-        state.reconcile(2);
+        state.reconcile(2, 0);
         state.overlays = 0;
         state.overlays_closing = 0;
-        assert!(!state.bar(2, false).overlay_active);
+        assert!(!state.bar(2, 0, false).overlay_active);
     }
 
     #[test]
@@ -1323,27 +1433,27 @@ mod tests {
         // the bar off the sheet still underneath it.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         state.overlays = 2;
-        state.reconcile(4);
-        assert!(state.bar(4, false).overlay_active);
+        state.reconcile(4, 0);
+        assert!(state.bar(4, 0, false).overlay_active);
 
         state.overlays_closing = 1;
         assert!(
-            state.bar(4, false).overlay_active,
+            state.bar(4, 0, false).overlay_active,
             "one of the two is on its way out; the other is still up"
         );
 
         // The dialog's pop lands and its completion callback runs.
-        state.reconcile(3);
+        state.reconcile(3, 0);
         state.overlays = 1;
         state.overlays_closing = 0;
         assert!(
-            state.bar(3, false).overlay_active,
+            state.bar(3, 0, false).overlay_active,
             "the sheet still dims it"
         );
 
         // Now the sheet itself.
         state.overlays_closing = 1;
-        assert!(!state.bar(3, false).overlay_active);
+        assert!(!state.bar(3, 0, false).overlay_active);
     }
 
     #[test]
@@ -1352,8 +1462,8 @@ mod tests {
         // the controller (a test's `push_transparent`, a frust helper the app
         // has not wrapped) has no accounting at all.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
-        state.reconcile(3);
-        assert!(state.bar(3, false).overlay_active);
+        state.reconcile(3, 0);
+        assert!(state.bar(3, 0, false).overlay_active);
         assert_eq!(state.overlays, 0, "…with nothing counted");
     }
 
@@ -1365,12 +1475,15 @@ mod tests {
         // `dismiss_overlay` nor (yet) `end_overlay` has run.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 3);
         state.overlays = 1;
-        assert!(state.bar(3, false).overlay_active);
+        assert!(state.bar(3, 0, false).overlay_active);
 
-        state.reconcile(2);
+        state.reconcile(2, 0);
         assert_eq!(state.overlays, 0, "the depth fall clamps the counter flat");
         assert_eq!(state.overlays_closing, 0);
-        assert!(!state.bar(2, false).overlay_active, "…and the bar is live");
+        assert!(
+            !state.bar(2, 0, false).overlay_active,
+            "…and the bar is live"
+        );
     }
 
     #[test]
@@ -1381,9 +1494,84 @@ mod tests {
         // of state that knows a sheet is coming.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         state.overlays = 1;
-        state.reconcile(2);
+        state.reconcile(2, 0);
         assert_eq!(state.overlays, 1, "the stale depth clamps nothing");
-        assert!(state.bar(2, false).overlay_active);
+        assert!(state.bar(2, 0, false).overlay_active);
+    }
+
+    // -----------------------------------------------------------------------
+    // The overlay HOST's own count (the third term — see `overlay_active`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_overlay_on_the_host_dims_the_bar_without_moving_the_route_depth() {
+        // The shape every overlay in the app has since FINDINGS #44: the route
+        // stack is untouched, and the only depth that moved belongs to the
+        // host. The route-gap term alone would answer `false` here — which is
+        // exactly why the host's own count is read beside it.
+        let state = mirror(&[(2, route_meta("/sessions"))], 2);
+        assert!(!state.bar(2, 0, false).overlay_active, "no overlay at rest");
+        assert!(
+            state.bar(2, 1, false).overlay_active,
+            "a page on the host dims the bar, with nothing counted"
+        );
+        assert_eq!(
+            state.bar(2, 1, false).meta,
+            route_meta("/sessions"),
+            "…without retitling it"
+        );
+    }
+
+    #[test]
+    fn a_host_dismissal_the_app_never_saw_cannot_strand_a_dimmed_bar() {
+        // The Android back press, at the arithmetic: the host pops the sheet
+        // through `BackPolicy::Pop`, so neither `dismiss_overlay` nor (yet)
+        // `end_overlay` has run and the route depth — where the old backstop
+        // read its evidence — never moves at all. The host's own fall is what
+        // clamps the counter now.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 1;
+        state.reconcile(2, 1);
+        assert!(state.bar(2, 1, false).overlay_active, "the sheet is up");
+
+        state.reconcile(2, 0);
+        assert_eq!(state.overlays, 0, "the host's fall clamps the counter flat");
+        assert_eq!(state.overlays_closing, 0);
+        assert!(
+            !state.bar(2, 0, false).overlay_active,
+            "…and the bar is live on that very frame"
+        );
+    }
+
+    #[test]
+    fn a_queued_host_dismissal_still_lights_the_bar_a_rebuild_early() {
+        // The synchronous half survives the new term: `dismiss_overlay` runs a
+        // rebuild before the host applies the pop, so the host still counts the
+        // page — and both depth-derived terms discount `overlays_closing` for
+        // exactly that window.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.overlays = 1;
+        state.reconcile(2, 1);
+        assert!(state.bar(2, 1, false).overlay_active);
+
+        state.overlays_closing = 1; // `Nav::dismiss_overlay`
+        assert!(
+            !state.bar(2, 1, false).overlay_active,
+            "the bar lights up on the frame the dismissal is enqueued"
+        );
+    }
+
+    #[test]
+    fn the_host_backstop_never_fires_on_the_frame_an_overlay_is_pushed() {
+        // The push-side gate, on the host: `begin_overlay` counts before the
+        // host has applied anything, so an un-gated clamp would wipe the one
+        // piece of state that knows a sheet is coming.
+        let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
+        state.begin_overlay(2, 0);
+        assert_eq!(state.overlays, 1, "the sheet is counted");
+        state.reconcile(2, 0);
+        assert_eq!(state.overlays, 1, "…and nothing has fallen to clamp it");
+        assert!(state.bar(2, 0, false).overlay_active);
     }
 
     // -----------------------------------------------------------------------
@@ -1399,7 +1587,7 @@ mod tests {
         // and the next depth fall past it evicts the route's own entry.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         state.overlays = 1;
-        state.reconcile(3); // the sheet's page is live
+        state.reconcile(3, 0); // the sheet's page is live
 
         assert_eq!(
             state.record_push_depth(3),
@@ -1430,23 +1618,26 @@ mod tests {
         let mut state = mirror(&[(2, route_meta("/terminal"))], 3);
         assert_eq!(state.overlays, 0, "the menu's own count is already cleared");
 
-        state.begin_overlay(2);
+        state.begin_overlay(2, 0);
         assert_eq!(state.overlays, 1, "the sheet is counted");
         assert_eq!(
             state.last_seen_depth, 2,
             "…and the stale fall was spent on the way in, not on it"
         );
-        assert!(state.bar(2, false).overlay_active, "so the bar is dimmed");
+        assert!(
+            state.bar(2, 0, false).overlay_active,
+            "so the bar is dimmed"
+        );
 
         // The next reconcile has nothing left to clamp, which is the whole
         // point: the sheet's own count survives to the dismissal, where
         // `dismiss_overlay` needs it to light the bar synchronously.
-        state.reconcile(2);
+        state.reconcile(2, 0);
         assert_eq!(state.overlays, 1, "the count survives the next pass");
-        state.reconcile(3); // the sheet's page lands
+        state.reconcile(3, 0); // the sheet's page lands
         state.overlays_closing = 1; // `dismiss_overlay`
         assert!(
-            !state.bar(3, false).overlay_active,
+            !state.bar(3, 0, false).overlay_active,
             "the dismissal lights the bar rather than stranding it dimmed"
         );
     }
@@ -1465,11 +1656,11 @@ mod tests {
         );
         state.stack.pop();
         state.pending_pop = true;
-        assert!(!state.bar(3, false).overlay_active);
+        assert!(!state.bar(3, 0, false).overlay_active);
 
         state.overlays = 1;
         assert!(
-            state.bar(3, false).overlay_active,
+            state.bar(3, 0, false).overlay_active,
             "an overlay the app counted is not a queued route pop"
         );
     }
@@ -1489,15 +1680,15 @@ mod tests {
         // field, so the bar keeps titling whatever route is on top and comes
         // straight back when the screen clears it on unmount.
         let state = mirror(&[(2, route_meta("/terminal"))], 2);
-        assert!(!state.bar(2, false).fullscreen);
+        assert!(!state.bar(2, 0, false).fullscreen);
 
-        let bar = state.bar(2, true);
+        let bar = state.bar(2, 0, true);
         assert!(bar.fullscreen);
         assert_eq!(bar.meta, route_meta("/terminal"), "…without retitling");
         assert!(!bar.overlay_active);
 
         assert!(
-            !state.bar(2, false).fullscreen,
+            !state.bar(2, 0, false).fullscreen,
             "unmount gives the bar back"
         );
     }
