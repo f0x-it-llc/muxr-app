@@ -23,6 +23,7 @@
 //! | default bg | SGR 49 | `GlyphInk::terminal_bg` |
 //! | default fg | SGR 39 | `GlyphInk::terminal_fg` — the *untyped* body ink, which is exactly what "no SGR colour set" means |
 //! | cursor | — | `GlyphInk::terminal_prompt` (the amber caret the design mock blinks) |
+//! | selection | — | `Theme::dark.primary` at [`SELECTION_ALPHA`] — `docs/terminal.html`'s own `::selection{background:var(--amber-faint)}`, see below |
 //! | 0 | black | `GlyphInk::terminal_bg` — `ESC[30m` vanishes into the surface, as it does in a real terminal |
 //! | 1 | red | `Theme::dark.error` |
 //! | 2 | green | `StatusPalette` dark `success` |
@@ -35,6 +36,23 @@
 //! | 9-14 | bright r/g/y/b/m/c | their normal slot mixed [`BRIGHT_MIX`] toward white |
 //! | 15 | bright white | `GlyphInk::terminal_fg` — the body ink, the brightest thing the grid prints |
 //! | 16-231 / 232-255 | xterm cube / greyscale | computed, not tokened (see [`indexed_color`]) |
+//!
+//! **The selection wash.** `docs/terminal.html` styles `::selection` as
+//! `background: var(--amber-faint)` (the accent at 0.12) with the text recoloured
+//! to `var(--amber)`. Two adaptations, both deliberate:
+//!
+//! - The colour is `Theme::dark.primary` — the *same* swatch `--amber` is,
+//!   pinned to the dark side for the same brightness-invariance reason every
+//!   slot above is (this palette must not follow the platform, because the
+//!   surface under it does not).
+//! - The wash is painted **over** the runs, not behind them, so a selected cell
+//!   that already carries a non-default background (an inverse-video match in
+//!   `grep`, a TUI's own highlight) still reads as selected. A CSS `::selection`
+//!   background sits *behind* its text, which is why 0.12 is enough there and is
+//!   not here — hence [`SELECTION_ALPHA`], tuned up to stay visible over an
+//!   arbitrary run while leaving the glyphs under it legible. The text is
+//!   deliberately **not** recoloured: that would mean re-shaping every partly
+//!   selected run on every pointer move.
 //!
 //! **The two gaps.** Glyph is a single-accent system whose only hue-bearing
 //! tokens are amber (accent), red (error), green (success) and cyan (info); it
@@ -75,6 +93,15 @@ pub const DIM_ALPHA: f32 = 0.66;
 /// washing out to near-white.
 pub const BRIGHT_MIX: f64 = 0.35;
 
+/// Alpha of the selection wash over the runs it covers.
+///
+/// **Hand-tuned, and deliberately not the mock's 0.12** — see the
+/// [module docs](self)' selection note: a CSS `::selection` background paints
+/// *behind* its text and this one paints over it, so it needs more weight to
+/// read the same. High enough to be unmistakable over a coloured run, low
+/// enough that the glyphs under it stay readable.
+pub const SELECTION_ALPHA: f32 = 0.28;
+
 /// ANSI slot 4 (blue). **Hand-tuned** — Glyph carries no blue token at all (see
 /// the [module docs](self)); this sits in the same luminance band as the
 /// tokened hues so a colourized build log reads as one palette.
@@ -107,6 +134,9 @@ pub struct TerminalPalette {
     /// The cursor's ink (block fill, underline, bar, and the unfocused
     /// outline).
     pub cursor: Color,
+    /// The wash a selected cell is painted over with (see the
+    /// [module docs](self)' selection note).
+    pub selection: Color,
     /// `Color::Idx(0..=15)`: 0-7 normal, 8-15 bright.
     pub ansi: [Color; 16],
 }
@@ -157,6 +187,9 @@ pub fn terminal_palette(theme: &Theme) -> TerminalPalette {
         background: ink.terminal_bg,
         foreground: ink.terminal_fg,
         cursor: ink.terminal_prompt,
+        // Explicitly the DARK accent, for the same reason the status colours
+        // above are: this palette never follows the platform brightness.
+        selection: theme.dark.primary.with_alpha(SELECTION_ALPHA),
         ansi,
     }
 }
@@ -300,6 +333,11 @@ mod tests {
         assert_eq!(palette.background, ink.terminal_bg);
         assert_eq!(palette.foreground, ink.terminal_fg);
         assert_eq!(palette.cursor, ink.terminal_prompt);
+        assert_eq!(
+            palette.selection,
+            theme.dark.primary.with_alpha(SELECTION_ALPHA),
+            "the selection wash is the mock's own accent, pinned dark"
+        );
         assert_eq!(palette.ansi[0], ink.terminal_bg, "ANSI black = the surface");
         assert_eq!(palette.ansi[7], ink.terminal_out);
         assert_eq!(palette.ansi[8], ink.terminal_comment);

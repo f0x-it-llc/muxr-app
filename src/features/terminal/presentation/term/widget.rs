@@ -70,9 +70,41 @@
 //! `read_only` grid — the widget claims no focus, publishes nothing and emits
 //! nothing: it is inert, exactly as it was.
 //!
+//! # Selection, the loupe, and who owns which half of the gesture
+//!
+//! Given a [`SelectionSeam`] (`.selection(..)`), the grid is also the selection
+//! gesture's **hands**: it measures, it tracks the finger, and it paints. It is
+//! not the gesture's *recogniser* — the enclosing
+//! [`GestureDetector`](frust::GestureDetector) that
+//! [`terminal_surface`](super::terminal_surface) wraps it in owns the timing and
+//! fires [`SelectionSeam::begin`] at the threshold. The split matters because
+//! the detector's `on_long_press` callback carries no pointer position: the grid
+//! is what records where the finger is, so the callback only has to say *now*.
+//!
+//! - a `Down` **clears an existing selection before anything else** — a tap that
+//!   dismisses a selection must not also claim focus and summon the keyboard;
+//! - a `Move` during a live drag re-resolves both endpoints and repaints. No
+//!   throttle, and no signal write: this is pixels, and a frust paint pass walks
+//!   the whole tree, so a plain `request_redraw` also refreshes the Copy chip
+//!   sitting above this widget;
+//! - an `Up` ends the drag and anchors the chip.
+//!
+//! **Selection survives `read_only`.** The focus gate is the read-only gate for
+//! *input*; reading and copying a session you cannot type into is exactly what
+//! a read-only terminal is for, so the selection arms sit ahead of that gate.
+//!
+//! The **loupe** is a re-render, not a backdrop sample: a
+//! [`LOUPE_W`]x[`LOUPE_H`] rounded window floating [`LOUPE_LIFT`] above the
+//! finger, inside which the same runs are painted again under a
+//! [`LOUPE_SCALE`] transform. Its one subtlety is [`loupe_content_offset`] —
+//! when the window is clamped against an edge, the magnification is re-centred
+//! on the true finger position rather than on the window, so the loupe keeps
+//! showing what is under the finger even where the box cannot follow it.
+//!
 //! # Not here
 //!
-//! No selection, no scrollback view, no key repeat. Those are their own tasks.
+//! No scrollback view, no key repeat, no selection handles, no double-tap-select
+//! and no select-all — the incumbent has none of those, and neither does this.
 //! An `InputEvent::Housekeeping` broadcast is still `Ignored` — a leaf has no
 //! children to forward one to and must never consume one.
 
@@ -80,15 +112,17 @@ use std::rc::Rc;
 
 use frust::authoring::text::{TextContext, TextLayout};
 use frust::authoring::{
-    BoxConstraints, Brush, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, SemanticsCtx, Shape, Size, View, Widget,
+    Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, Vec2, View, Widget,
 };
 use frust::{FrameTime, Theme};
 
 use super::batch::{RunBatch, batch_screen};
 use super::geometry::{CellGeometry, measure_cell, solve_cell_geometry};
+use super::selection::{self, Segment};
 use super::style::{CellStyle, TerminalPalette};
-use super::{CursorStyle, InputSeam, SharedEmulator};
+use super::{CursorStyle, InputSeam, SelectionSeam, SharedEmulator};
 
 /// The caret's blink period, in ms — one full on/off cycle.
 ///
@@ -116,6 +150,75 @@ pub fn cursor_lit(elapsed_ms: f64) -> bool {
     (elapsed_ms % CURSOR_BLINK_PERIOD_MS) < CURSOR_BLINK_PERIOD_MS / 2.0
 }
 
+// ---------------------------------------------------------------------------
+// The loupe (transcribed from the incumbent, exactly)
+// ---------------------------------------------------------------------------
+
+/// The magnifier window's width, in logical px.
+pub const LOUPE_W: f64 = 116.0;
+/// …and its height.
+pub const LOUPE_H: f64 = 46.0;
+/// How much the cells inside it are magnified.
+pub const LOUPE_SCALE: f64 = 1.75;
+/// How far above the finger the window's **bottom edge** floats — enough that
+/// the hand holding the phone is not covering the thing it is magnifying.
+pub const LOUPE_LIFT: f64 = 28.0;
+/// The gutter the window is kept inside the terminal rect by.
+pub const LOUPE_MARGIN: f64 = 4.0;
+/// The window's corner radius.
+const LOUPE_RADIUS: f64 = 4.0;
+/// Its border width.
+const LOUPE_BORDER: f64 = 1.0;
+/// Its drop shadow's blur and ink alpha.
+const LOUPE_SHADOW_BLUR: f64 = 6.0;
+const LOUPE_SHADOW_ALPHA: f32 = 0.4;
+/// Flattening tolerance for the window's rounded border path.
+const LOUPE_TOLERANCE: f64 = 0.1;
+
+/// The loupe window's box inside a `bounds`-sized terminal rect, for a finger at
+/// `focal` (widget-local px).
+///
+/// Horizontally centred on the finger, floating [`LOUPE_LIFT`] above it, then
+/// clamped to keep a [`LOUPE_MARGIN`] gutter on every side. Written
+/// low-bound-last (`max` after `min`) so a rect too small to hold the window
+/// pins it to the top-left rather than panicking on an inverted range.
+pub fn loupe_box(focal: Point, bounds: Size) -> Rect {
+    let x = (focal.x - LOUPE_W / 2.0)
+        .min(bounds.width - LOUPE_MARGIN - LOUPE_W)
+        .max(LOUPE_MARGIN);
+    let y = (focal.y - LOUPE_LIFT - LOUPE_H)
+        .min(bounds.height - LOUPE_MARGIN - LOUPE_H)
+        .max(LOUPE_MARGIN);
+    Rect::new(x, y, x + LOUPE_W, y + LOUPE_H)
+}
+
+/// **The subtle part.** How far the magnified content is shifted off the
+/// window's own centre: `focal - centre_of(window)`.
+///
+/// While the window can follow the finger, this is `(0, LOUPE_LIFT + LOUPE_H/2)`
+/// — no horizontal shift, and a constant vertical one, since the window floats
+/// *above* the finger by design. Once a clamp pins the window against an edge —
+/// a finger in a corner, which is precisely when a magnifier matters most — the
+/// window stops moving but the finger keeps going, and re-deriving the offset
+/// from the **clamped** centre is what keeps the cell under the finger in the
+/// window instead of freezing on the last cell the window could centre on.
+pub fn loupe_content_offset(focal: Point, window: Rect) -> Vec2 {
+    focal.to_vec2() - window.center().to_vec2()
+}
+
+/// The transform that paints the grid magnified into `window`: the content point
+/// `focal` lands on the window's centre, scaled [`LOUPE_SCALE`] about it.
+///
+/// Both points are **absolute** (paint-space), like every other coordinate a
+/// `PaintScene` method takes. Equivalent to translating the content by
+/// [`loupe_content_offset`] and scaling about the window's centre — expressed as
+/// one composition here so there is a single place the arithmetic lives.
+fn loupe_transform(focal: Point, window: Rect) -> Affine {
+    Affine::translate(window.center().to_vec2())
+        * Affine::scale(LOUPE_SCALE)
+        * Affine::translate(-focal.to_vec2())
+}
+
 /// Where the cursor is and what sits under it, captured during `layout` (the
 /// only pass that can shape) so `paint` touches neither the emulator nor the
 /// text engine.
@@ -138,6 +241,7 @@ pub struct TerminalGridView {
     label: String,
     input: Option<InputSeam>,
     read_only: bool,
+    selection: Option<SelectionSeam>,
 }
 
 /// Build a grid view over `emulator` at `generation` (see
@@ -161,6 +265,7 @@ pub fn terminal_grid(
         label: String::new(),
         input: None,
         read_only: false,
+        selection: None,
     }
 }
 
@@ -212,6 +317,23 @@ impl TerminalGridView {
         self.read_only = read_only;
         self
     }
+
+    /// Make this grid **selectable**: long-press-and-drag over `seam`, with the
+    /// highlight and the loupe painted here (see the [module docs](self)).
+    ///
+    /// Ordinarily installed by [`terminal_surface`](super::terminal_surface),
+    /// which also wires the gesture detector that starts the gesture and mounts
+    /// the Copy chip that ends it — a grid given a seam but no detector tracks
+    /// and paints, but nothing ever begins.
+    ///
+    /// Unlike [`input`](Self::input), this is **not** gated on
+    /// [`read_only`](Self::read_only): copying out of a session you cannot type
+    /// into is the point of a read-only terminal.
+    #[must_use]
+    pub fn selection(mut self, seam: SelectionSeam) -> Self {
+        self.selection = Some(seam);
+        self
+    }
 }
 
 /// The retained grid: re-batches and re-shapes the emulator's screen on every
@@ -240,6 +362,9 @@ pub struct TerminalGridWidget {
     /// the [module docs](self)).
     input: Option<InputSeam>,
     read_only: bool,
+    /// The selection gesture this grid is the hands of, when it is selectable
+    /// (see the [module docs](self)).
+    selection: Option<SelectionSeam>,
     /// The caret cell in **absolute** coordinates, captured during `paint` (the
     /// only pass that knows the grid's absolute origin — `EventCtx::origin` is
     /// parent-relative) and published as the platform's candidate-placement
@@ -268,6 +393,7 @@ impl<State: 'static> View<State> for TerminalGridView {
             blink_from: None,
             input: self.input.clone(),
             read_only: self.read_only,
+            selection: self.selection.clone(),
             caret_rect: None,
             was_focused: self.focused,
         }
@@ -320,9 +446,11 @@ impl<State: 'static> View<State> for TerminalGridView {
         // comparable, so it is reinstalled every rebuild (the same rule
         // `ExpandButtonView` applies to its callback). Only the *presence* of a
         // seam and the read-only flag change what is painted or announced.
-        let clienthood =
-            prev.input.is_some() != self.input.is_some() || prev.read_only != self.read_only;
+        let clienthood = prev.input.is_some() != self.input.is_some()
+            || prev.read_only != self.read_only
+            || prev.selection.is_some() != self.selection.is_some();
         element.input = self.input.clone();
+        element.selection = self.selection.clone();
         if clienthood {
             element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
@@ -373,6 +501,12 @@ impl Widget for TerminalGridWidget {
             self.shaped = Some(self.generation);
         }
 
+        // Publish the px -> cell mapping every selection resolution goes
+        // through. This is the only pass that knows it.
+        if let Some(seam) = self.selection.as_ref() {
+            seam.set_metrics(geometry);
+        }
+
         bc.constrain(geometry.grid_size())
     }
 
@@ -420,53 +554,40 @@ impl Widget for TerminalGridWidget {
             ctx.publish_ime_state(state);
         }
 
+        // The caret's blink bookkeeping runs exactly once per frame — before
+        // the content is painted, so the loupe's own re-paint below reuses the
+        // same answer rather than requesting a second frame for it (or letting
+        // the caret blink out of phase with itself inside the magnifier).
+        let lit = self.cursor_lit_now(ctx, focused);
+
         // The derived geometry already fits the content box, so nothing should
         // reach this clip — it stays as the backstop that makes "nothing
         // outside the grid can paint" true by construction (a font floored at
-        // MIN_FONT_SIZE in a hopeless box is the one case that leans on it).
+        // MIN_FONT_SIZE in a hopeless box is the one case that leans on it),
+        // and it is now also what keeps the loupe inside the terminal rect.
         scene.push_clip(origin, size);
         scene.fill_rect(origin, size, self.palette.background);
-
-        for run in self.batch.active() {
-            let x = origin.x + f64::from(run.col()) * geometry.width;
-            let y = origin.y + f64::from(run.row()) * geometry.height;
-            let (fg, bg) = run.style().resolve(&self.palette);
-            if let Some(bg) = bg {
-                scene.fill_rect(
-                    Point::new(x, y),
-                    Size::new(f64::from(run.cells()) * geometry.width, geometry.height),
-                    bg,
-                );
-            }
-            if let Some(layout) = run.layout() {
-                for glyphs in layout.to_scene_runs(Point::new(x, y)) {
-                    scene.draw_glyph_run(glyphs);
-                }
-            }
-            if run.style().underline {
-                let uy = y + geometry.height * TEXT_UNDERLINE_Y_FRACTION;
-                scene.stroke_line(
-                    Point::new(x, uy),
-                    Point::new(x + f64::from(run.cells()) * geometry.width, uy),
-                    TEXT_UNDERLINE_WIDTH,
-                    fg,
-                );
-            }
-        }
-
-        self.paint_cursor(ctx, scene, geometry, focused);
-
+        self.paint_content(scene, origin, geometry, focused, lit, None);
+        self.paint_loupe(scene, origin, size, geometry, focused, lit);
         scene.pop_clip();
         // No `request_frame` for content: the feed pump's generation write is
         // the sole wake source (module docs, rule 2).
     }
 
-    /// The keystroke source's event half — see the [module docs](self).
+    /// The keystroke source's event half **and** the selection gesture's hands —
+    /// see the [module docs](self).
     ///
-    /// A grid with no [`InputSeam`], or a `read_only` one, falls straight
-    /// through to `Ignored`: it claims no focus, so the focus-routed `Key`/`Ime`
-    /// events can never reach it in the first place.
+    /// The two are deliberately ordered: every pointer phase goes through the
+    /// selection arms first (they work `read_only` and with no [`InputSeam`] at
+    /// all), and only a `Down` that did *not* dismiss a selection falls through
+    /// to claiming focus. A grid with neither seam is inert exactly as it was.
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        if let InputEvent::Pointer(pointer) = event
+            && let Some(selection) = self.selection.clone()
+            && let Some(result) = self.selection_event(ctx, pointer, &selection)
+        {
+            return result;
+        }
         let Some(seam) = self.input.as_ref() else {
             return EventResult::Ignored;
         };
@@ -475,8 +596,6 @@ impl Widget for TerminalGridWidget {
         }
         match event {
             InputEvent::Pointer(pointer) => {
-                // No capture: the grid has no drag semantic yet (selection is
-                // its own task), and a `Cancel` must never touch state.
                 if pointer.phase != PointerPhase::Down || !inside(pointer.position, ctx.size()) {
                     return EventResult::Ignored;
                 }
@@ -538,6 +657,13 @@ fn inside(position: Point, size: Size) -> bool {
     position.x >= 0.0 && position.y >= 0.0 && position.x < size.width && position.y < size.height
 }
 
+/// Whether two rects share any area — the loupe's cull test. `kurbo`'s own
+/// `Rect::intersect` returns a (possibly negative-extent) rect rather than an
+/// `Option`, so the comparison is spelled out here.
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
+}
+
 impl TerminalGridWidget {
     /// Batch the emulator's current screen, shape every run, and capture the
     /// cursor cell (see [`CursorCell`]).
@@ -586,14 +712,185 @@ impl TerminalGridWidget {
         });
     }
 
-    /// Paint the caret — the one thing here that may ask for another frame, and
-    /// only ever as a paced cosmetic loop (see the [module docs](self)).
-    fn paint_cursor(
+    /// The selection half of `event` — see [`Widget::event`]'s own doc for the
+    /// ordering. `Some(result)` when this phase was the selection's to answer,
+    /// `None` to fall through to the focus/IME path.
+    ///
+    /// Deliberately **no** `capture_pointer` here: the enclosing
+    /// [`GestureDetector`](frust::GestureDetector) that
+    /// [`terminal_surface`](super::terminal_surface) wraps this grid in captures
+    /// and forwards every `Move`/`Up` to its child unconditionally, so a second
+    /// capture would only muddy which pod owns the gesture.
+    fn selection_event(
         &mut self,
-        ctx: &mut PaintCtx,
+        ctx: &mut EventCtx,
+        pointer: &PointerEvent,
+        seam: &SelectionSeam,
+    ) -> Option<EventResult> {
+        match pointer.phase {
+            PointerPhase::Down => {
+                seam.track(pointer.position, true);
+                // BEFORE anything else (see the module docs): a tap that
+                // dismisses a selection must not also claim focus and summon
+                // the keyboard.
+                if seam.clear_if_active() {
+                    ctx.request_redraw();
+                    return Some(EventResult::Handled);
+                }
+                None
+            }
+            PointerPhase::Move => {
+                seam.track(pointer.position, true);
+                if !seam.dragging() {
+                    return Some(EventResult::Ignored);
+                }
+                // Unthrottled and signal-free: both endpoints re-resolve and the
+                // frame repaints, which is also what refreshes the loupe.
+                seam.extend();
+                ctx.request_redraw();
+                Some(EventResult::Handled)
+            }
+            PointerPhase::Up => {
+                seam.track(pointer.position, false);
+                if !seam.dragging() {
+                    return Some(EventResult::Ignored);
+                }
+                seam.finish();
+                ctx.request_redraw();
+                Some(EventResult::Handled)
+            }
+            // Flags only — a `Cancel` arm never touches app state
+            // (`docs/CODE_STANDARDS.md`'s Interaction Semantics). The loupe has
+            // to go (it is a *gesture* affordance, and the gesture is over); the
+            // selection it produced stays until the next tap clears it.
+            PointerPhase::Cancel => {
+                seam.track(pointer.position, false);
+                seam.cancel_drag();
+                ctx.request_redraw();
+                Some(EventResult::Ignored)
+            }
+        }
+    }
+
+    /// Whether the caret is lit this frame, doing the blink cycle's bookkeeping
+    /// exactly once per paint.
+    ///
+    /// Split out of the drawing below so the loupe's re-paint reuses the answer:
+    /// asking twice would request two paced frames and (worse) let the caret
+    /// blink out of phase with itself inside the magnifier.
+    fn cursor_lit_now(&mut self, ctx: &mut PaintCtx, focused: bool) -> bool {
+        if !focused {
+            return false;
+        }
+        if Theme::from_paint_ctx(ctx).is_some_and(|theme| theme.motion.reduce_motion) {
+            // Frozen lit: a caret is a position cue, so it must not vanish for
+            // a user who asked motion to stop.
+            return true;
+        }
+        let from = *self.blink_from.get_or_insert(ctx.frame_time());
+        let since = ctx.frame_time().saturating_sub(from).as_secs_f64() * 1000.0;
+        // Paced, not unpaced: a 1.1s two-state blink is exactly the "decorative
+        // loop whose exact cadence is imperceptible" class the mobile frame gate
+        // may throttle.
+        ctx.request_frame_paced();
+        cursor_lit(since)
+    }
+
+    /// Paint the grid's cells, the selection wash and the caret at `origin`.
+    ///
+    /// `cull` (grid-local, i.e. relative to `origin`) drops everything outside a
+    /// region — how the loupe re-paints a 116x46 window without submitting a
+    /// whole screen of glyph runs the clip would only throw away. `None` paints
+    /// everything.
+    ///
+    /// Takes `&self`: this is called **twice** per frame (once for the grid,
+    /// once magnified inside the loupe), so it must be free of per-frame
+    /// bookkeeping — see [`cursor_lit_now`](Self::cursor_lit_now).
+    fn paint_content(
+        &self,
         scene: &mut dyn PaintScene,
+        origin: Point,
         geo: CellGeometry,
         focused: bool,
+        lit: bool,
+        cull: Option<Rect>,
+    ) {
+        for run in self.batch.active() {
+            let x = f64::from(run.col()) * geo.width;
+            let y = f64::from(run.row()) * geo.height;
+            let width = f64::from(run.cells()) * geo.width;
+            if let Some(cull) = cull
+                && !overlaps(cull, Rect::new(x, y, x + width, y + geo.height))
+            {
+                continue;
+            }
+            let (x, y) = (origin.x + x, origin.y + y);
+            let (fg, bg) = run.style().resolve(&self.palette);
+            if let Some(bg) = bg {
+                scene.fill_rect(Point::new(x, y), Size::new(width, geo.height), bg);
+            }
+            if let Some(layout) = run.layout() {
+                for glyphs in layout.to_scene_runs(Point::new(x, y)) {
+                    scene.draw_glyph_run(glyphs);
+                }
+            }
+            if run.style().underline {
+                let uy = y + geo.height * TEXT_UNDERLINE_Y_FRACTION;
+                scene.stroke_line(
+                    Point::new(x, uy),
+                    Point::new(x + width, uy),
+                    TEXT_UNDERLINE_WIDTH,
+                    fg,
+                );
+            }
+        }
+
+        self.paint_selection(scene, origin, geo, cull);
+        self.paint_cursor(scene, origin, geo, focused, lit);
+    }
+
+    /// Paint the selection wash: one rect per line-wise
+    /// [`Segment`](super::selection::Segment), **over** the runs it covers (see
+    /// [`style`](super::style)'s selection note for why over and not behind).
+    fn paint_selection(
+        &self,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        geo: CellGeometry,
+        cull: Option<Rect>,
+    ) {
+        let Some(range) = self.selection.as_ref().and_then(SelectionSeam::range) else {
+            return;
+        };
+        for Segment { row, col, span } in selection::segments(range, geo.cols) {
+            if row >= geo.rows {
+                break;
+            }
+            let x = f64::from(col) * geo.width;
+            let y = f64::from(row) * geo.height;
+            let width = f64::from(span) * geo.width;
+            if let Some(cull) = cull
+                && !overlaps(cull, Rect::new(x, y, x + width, y + geo.height))
+            {
+                continue;
+            }
+            scene.fill_rect(
+                Point::new(origin.x + x, origin.y + y),
+                Size::new(width, geo.height),
+                self.palette.selection,
+            );
+        }
+    }
+
+    /// Paint the caret at `origin` — filled and `lit` when focused, a hollow
+    /// outline when not.
+    fn paint_cursor(
+        &self,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        geo: CellGeometry,
+        focused: bool,
+        lit: bool,
     ) {
         let Some(cell) = &self.cursor_cell else {
             return;
@@ -601,7 +898,6 @@ impl TerminalGridWidget {
         if cell.row >= geo.rows || cell.col >= geo.cols {
             return;
         }
-        let origin = ctx.origin();
         let x = origin.x + f64::from(cell.col) * geo.width;
         let y = origin.y + f64::from(cell.row) * geo.height;
 
@@ -619,22 +915,6 @@ impl TerminalGridWidget {
             );
             return;
         }
-
-        let reduce_motion =
-            Theme::from_paint_ctx(ctx).is_some_and(|theme| theme.motion.reduce_motion);
-        let lit = if reduce_motion {
-            // Frozen lit: a caret is a position cue, so it must not vanish for
-            // a user who asked motion to stop.
-            true
-        } else {
-            let from = *self.blink_from.get_or_insert(ctx.frame_time());
-            let since = ctx.frame_time().saturating_sub(from).as_secs_f64() * 1000.0;
-            // Paced, not unpaced: a 1.1s two-state blink is exactly the
-            // "decorative loop whose exact cadence is imperceptible" class the
-            // mobile frame gate may throttle.
-            ctx.request_frame_paced();
-            cursor_lit(since)
-        };
         if !lit {
             return;
         }
@@ -662,6 +942,79 @@ impl TerminalGridWidget {
                 scene.fill_rect(Point::new(x, y), Size::new(thickness, geo.height), ink);
             }
         }
+    }
+
+    /// Paint the magnifier, if a selection drag is live.
+    ///
+    /// A **re-render**, not a backdrop sample: the same runs are painted again
+    /// under a [`LOUPE_SCALE`] transform inside a rounded clip, so what the user
+    /// sees is real text re-rasterized at 1.75x rather than a blown-up bitmap.
+    /// Never intercepts input — this is paint only, and `event` knows nothing
+    /// about it.
+    fn paint_loupe(
+        &self,
+        scene: &mut dyn PaintScene,
+        origin: Point,
+        size: Size,
+        geo: CellGeometry,
+        focused: bool,
+        lit: bool,
+    ) {
+        let Some(seam) = self.selection.as_ref() else {
+            return;
+        };
+        if !seam.dragging() {
+            return;
+        }
+        let focal = seam.pointer();
+        let window = loupe_box(focal, size);
+        let at = Point::new(origin.x + window.x0, origin.y + window.y0);
+        let box_size = Size::new(window.width(), window.height());
+        // Absolute (paint-space) counterparts: `push_transform` composes with
+        // the scene's current transform, and every other coordinate here is
+        // absolute too.
+        let focal_abs = Point::new(origin.x + focal.x, origin.y + focal.y);
+        let window_abs = window + Vec2::new(origin.x, origin.y);
+
+        scene.draw_shadow(
+            at,
+            box_size,
+            LOUPE_RADIUS,
+            LOUPE_SHADOW_BLUR,
+            Color::BLACK.with_alpha(LOUPE_SHADOW_ALPHA),
+        );
+        scene.push_clip_rounded(at, box_size, LOUPE_RADIUS);
+        scene.fill_rect(at, box_size, self.palette.background);
+        scene.push_transform(loupe_transform(focal_abs, window_abs));
+        // The content window in grid-local coordinates: the box the magnified
+        // view actually shows, always centred on the finger (that is what the
+        // clamped-centre offset buys).
+        let half = Vec2::new(
+            window.width() / LOUPE_SCALE / 2.0,
+            window.height() / LOUPE_SCALE / 2.0,
+        );
+        let cull = Rect::new(
+            focal.x - half.x,
+            focal.y - half.y,
+            focal.x + half.x,
+            focal.y + half.y,
+        );
+        self.paint_content(scene, origin, geo, focused, lit, Some(cull));
+        scene.pop_transform();
+        scene.pop_clip();
+
+        // The border last, over the magnified content — inset by half the
+        // stroke so the whole hairline lands inside the window.
+        let half = LOUPE_BORDER / 2.0;
+        let path = RoundedRect::new(
+            half,
+            half,
+            window.width() - half,
+            window.height() - half,
+            LOUPE_RADIUS,
+        )
+        .to_path(LOUPE_TOLERANCE);
+        scene.stroke_path(at, &path, LOUPE_BORDER, &Brush::Solid(self.palette.cursor));
     }
 
     /// The solved geometry, once `layout` has run — a test/diagnostic accessor.

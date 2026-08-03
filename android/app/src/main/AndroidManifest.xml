@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      Required by the `frust-haptics` plugin (the terminal's selection-click
+      tick). A NORMAL permission: granted at install with no runtime prompt.
+      This is the one manifest addition any plugin in this app needs — the
+      `frust` TUI's Add Plugin dialog inserts exactly this line.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

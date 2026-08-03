@@ -15,8 +15,10 @@
 //! | [`batch`] | same-style run batching, and the four vt100 traps it has to get right |
 //! | [`geometry`] | the measured cell box, and the cols x rows an available box divides into |
 //! | [`input`] | the keystroke source's pure half: the snapshot diff, the Ctrl/Alt latch, the key-bar byte vocabulary |
-//! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret, and IME clienthood |
-//! | this module | the emulator wrapper, the 30 Hz feed pump, [`CursorStyle`], and the [`InputSeam`] the grid and the key bar share |
+//! | [`selection`] | the selection model's pure half: word boundaries, the row-major merge, line-wise segments, the copy text |
+//! | [`chip`] | the Copy chip a released selection raises, and the injectable clipboard sink |
+//! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret, IME clienthood, the selection highlight and the loupe |
+//! | this module | the emulator wrapper, the 30 Hz feed pump, [`CursorStyle`], the [`InputSeam`] the grid and the key bar share, the [`SelectionSeam`] the grid and the chip share, and [`terminal_surface`], which assembles all of it |
 //!
 //! # The 30 Hz coalescing mechanism, and why it is app-side
 //!
@@ -64,8 +66,10 @@
 //! scrollback is a plausible next step.
 
 pub mod batch;
+pub mod chip;
 pub mod geometry;
 pub mod input;
+pub mod selection;
 pub mod style;
 pub mod widget;
 
@@ -75,11 +79,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use frust::authoring::{EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Rect};
-use frust::{GetUntracked, RwSignal, Set, on_cleanup, spawn_blocking, spawn_local};
+use frust::authoring::{
+    EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect, any,
+};
+use frust::{GestureDetector, GetUntracked, RwSignal, Set, Stack, StackView};
+use frust::{on_cleanup, spawn_blocking, spawn_local};
+use frust_haptics::{HapticEffect, Haptics};
 
 use crate::features::terminal::domain::feed::TerminalFeed;
 
+use geometry::CellGeometry;
+use selection::{GridPoint, GridRange};
+
+pub use chip::{CopyChipView, CopyChipWidget, CopySink, copy_chip};
 pub use geometry::{FALLBACK_COLS, FALLBACK_ROWS};
 pub use input::{BarKey, Emission, KeystrokeSource, ModifierLatch};
 pub use style::{TerminalPalette, terminal_palette};
@@ -256,6 +268,264 @@ impl InputSeam {
         self.dispatch(&emission);
         Some(emission)
     }
+}
+
+/// The live selection gesture, shared between the grid widget (which measures,
+/// paints and tracks the finger), the gesture detector's `on_long_press`
+/// callback (which starts it) and the Copy chip (which ends it) — see
+/// [`SelectionSeam`].
+pub type SharedSelection = Rc<RefCell<SelectionState>>;
+
+/// Everything one selection gesture is: what the grid last measured, where the
+/// finger is, which cell the gesture anchored on, and what is selected.
+///
+/// Private fields with accessors on [`SelectionSeam`] rather than a bag of
+/// `pub`s: three widgets read this, and every one of them must go through the
+/// same clamping/resolution rules.
+#[derive(Default)]
+pub struct SelectionState {
+    /// The cell box the grid last laid out at — the px→cell mapping.
+    metrics: Option<CellGeometry>,
+    /// The finger, in the grid's own local logical px.
+    pointer: Point,
+    /// Whether a finger is currently down (see [`SelectionSeam::begin`]).
+    pressed: bool,
+    /// The cell the long-press anchored on. Fixed for the whole drag.
+    anchor: Option<GridPoint>,
+    /// Whether a selection drag is live — what makes the loupe visible.
+    dragging: bool,
+    /// The selected cells, if any.
+    range: Option<GridRange>,
+    /// Where the drag released, i.e. where the Copy chip is anchored. `Some`
+    /// **is** "the chip is up".
+    chip: Option<Point>,
+    /// Selection-click haptics fired — a test/diagnostic counter.
+    haptics: u32,
+}
+
+/// Everything the grid widget, the long-press callback and the Copy chip must
+/// agree on to be one selection: the shared [`SelectionState`] and the emulator
+/// whose screen resolves words and yields copy text.
+///
+/// # Why this is an `Rc<RefCell<_>>` and not a signal
+///
+/// The same reason [`InputSeam`]'s source is: it is mutated during the **event**
+/// pass, where there is no reactive owner, and a drag re-resolves both endpoints
+/// on every `Move`. A signal write per move would wake one whole-app tracked
+/// rebuild per move — 60+ a second while a finger is sliding — to change nothing
+/// but pixels. The grid instead asks for a plain `request_redraw`, and a frust
+/// paint pass walks the whole tree, so the chip (a sibling, not a child) sees
+/// the new state on that very frame with no rebuild involved.
+///
+/// # The one thing this type does that is not state
+///
+/// [`begin`](Self::begin) fires the selection-click haptic. It lives here and
+/// not in [`selection`] for the same reason the revision signal lives on
+/// [`InputSeam`] rather than in [`input`]: the model stays pure and testable,
+/// and the one side effect sits at the single choke point every caller reaches
+/// it through.
+#[derive(Clone)]
+pub struct SelectionSeam {
+    /// The shared gesture state.
+    state: SharedSelection,
+    /// The screen words resolve against and copy text comes from.
+    emulator: SharedEmulator,
+}
+
+impl SelectionSeam {
+    /// A seam over `emulator`, with nothing selected.
+    pub fn new(emulator: SharedEmulator) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(SelectionState::default())),
+            emulator,
+        }
+    }
+
+    /// Publish the cell box the grid just laid out at — the px→cell mapping
+    /// every resolution below goes through. Called from `layout`.
+    pub fn set_metrics(&self, metrics: CellGeometry) {
+        self.state.borrow_mut().metrics = Some(metrics);
+    }
+
+    /// Record the finger at `at` (grid-local logical px), and whether it is
+    /// down. Called from every pointer arm of the grid's `event`.
+    pub fn track(&self, at: Point, pressed: bool) {
+        let mut state = self.state.borrow_mut();
+        state.pointer = at;
+        state.pressed = pressed;
+    }
+
+    /// **The long-press consumer.** Tick, anchor on the cell under the finger,
+    /// and select the word there.
+    ///
+    /// The haptic fires **before** the word is resolved and therefore
+    /// unconditionally — including when the finger landed on a separator and
+    /// nothing gets selected. That ordering is the incumbent's (its
+    /// `_onSelectionStart` ticks, then calls `selectWord`), and it is the right
+    /// one: the tick acknowledges *the gesture*, and a hold that silently did
+    /// nothing would feel broken rather than empty. The `Result` is ignored —
+    /// haptics are cosmetic, and desktop reports `NotAvailable` by design.
+    ///
+    /// A fire that arrives with **no finger down** (the framework's
+    /// fire-on-release delivery path, when no rebuild ran between the threshold
+    /// and the lift) resolves the word and goes straight to the released state,
+    /// chip and all, rather than leaving a drag live with nothing to end it.
+    pub fn begin(&self) {
+        let _ = Haptics::perform(HapticEffect::SelectionClick);
+        let mut state = self.state.borrow_mut();
+        state.haptics += 1;
+        let Some(metrics) = state.metrics else {
+            return;
+        };
+        let anchor = selection::cell_at(state.pointer, metrics);
+        state.anchor = Some(anchor);
+        state.range = selection::word_at(self.emulator.borrow().screen(), anchor);
+        if state.pressed {
+            state.dragging = true;
+            state.chip = None;
+        } else {
+            state.dragging = false;
+            state.chip = state.range.map(|_| state.pointer);
+        }
+    }
+
+    /// Re-resolve the selection for the live finger position: the word at the
+    /// **fixed** anchor merged with the word under the finger, in reading order.
+    ///
+    /// Both ends every time (see [`selection::resolve`]) — nothing is cached,
+    /// so reversing direction mid-drag needs no special case.
+    pub fn extend(&self) {
+        let mut state = self.state.borrow_mut();
+        let (Some(metrics), Some(anchor)) = (state.metrics, state.anchor) else {
+            return;
+        };
+        let extent = selection::cell_at(state.pointer, metrics);
+        state.range = selection::resolve(self.emulator.borrow().screen(), anchor, extent);
+    }
+
+    /// End the drag: the loupe goes away and, if anything is selected, the Copy
+    /// chip appears where the finger lifted.
+    pub fn finish(&self) {
+        let mut state = self.state.borrow_mut();
+        state.dragging = false;
+        state.chip = state.range.map(|_| state.pointer);
+    }
+
+    /// Drop the drag **flag** only — the `Cancel` arm's whole vocabulary
+    /// (`docs/CODE_STANDARDS.md`'s interaction semantics: a `Cancel` never
+    /// touches app state). The selection itself survives a stolen gesture; the
+    /// next tap clears it.
+    pub fn cancel_drag(&self) {
+        self.state.borrow_mut().dragging = false;
+    }
+
+    /// Whether anything is selected or the chip is up — i.e. whether the next
+    /// tap is a **clearing** tap.
+    pub fn is_active(&self) -> bool {
+        let state = self.state.borrow();
+        state.range.is_some() || state.chip.is_some()
+    }
+
+    /// Drop the selection, the chip and the anchor.
+    pub fn clear(&self) {
+        let mut state = self.state.borrow_mut();
+        state.anchor = None;
+        state.dragging = false;
+        state.range = None;
+        state.chip = None;
+    }
+
+    /// Clear an existing selection, reporting whether there was one.
+    ///
+    /// **The clearing tap**, spelled as one call so the grid can check it
+    /// *before* claiming focus: a tap that dismisses a selection must not also
+    /// summon the keyboard.
+    pub fn clear_if_active(&self) -> bool {
+        let active = self.is_active();
+        if active {
+            self.clear();
+        }
+        active
+    }
+
+    /// The selected cells, if any.
+    pub fn range(&self) -> Option<GridRange> {
+        self.state.borrow().range
+    }
+
+    /// Whether a selection drag is live — what makes the loupe visible.
+    pub fn dragging(&self) -> bool {
+        self.state.borrow().dragging
+    }
+
+    /// The finger, in the grid's own local logical px — the loupe's focal point.
+    pub fn pointer(&self) -> Point {
+        self.state.borrow().pointer
+    }
+
+    /// Where the drag released, when the Copy chip is up.
+    pub fn chip_anchor(&self) -> Option<Point> {
+        self.state.borrow().chip
+    }
+
+    /// The selected text, as the clipboard should receive it (see
+    /// [`selection::selected_text`]); empty when nothing is selected.
+    pub fn text(&self) -> String {
+        let Some(range) = self.range() else {
+            return String::new();
+        };
+        selection::selected_text(self.emulator.borrow().screen(), range)
+    }
+
+    /// Selection-click haptics fired so far — a test/diagnostic accessor.
+    pub fn haptic_count(&self) -> u32 {
+        self.state.borrow().haptics
+    }
+
+    /// The cell box the grid last laid out at, once it has — a test/diagnostic
+    /// accessor (and the only way anything outside the grid can turn a cell
+    /// into a pixel).
+    pub fn metrics(&self) -> Option<CellGeometry> {
+        self.state.borrow().metrics
+    }
+}
+
+/// The whole interactive terminal: the grid, its long-press gesture, and the
+/// Copy chip over it.
+///
+/// ```text
+/// Stack
+///  ├─ GestureDetector(on_long_press = seam.begin)   ← bottom
+///  │    └─ TerminalGridView (selection wired)
+///  └─ CopyChipView                                  ← top, full-bleed
+/// ```
+///
+/// # Three things this assembly decides
+///
+/// 1. **The chip is above the gesture detector**, so a press on the pill never
+///    reaches the grid: tapping `Copy` cannot clear the very selection it is
+///    copying, and cannot start a fresh long-press.
+/// 2. **`on_long_press` is the only gesture wired.** Frust's detector fires it
+///    at the threshold in wall time (a paint latches a `Housekeeping` flush and
+///    the next rebuild delivers it), so a perfectly stationary hold selects with
+///    no movement at all. No `on_tap`: the grid's own `Down` arm already owns
+///    tap behaviour, and it must run the clearing check before claiming focus.
+/// 3. **The surface takes the whole offered box**, because the chip overlay is
+///    full-bleed. The grid still takes only its own whole-cell box inside it and
+///    still paints its own background, so the sub-cell remainder is the same
+///    tight-parent case [`TerminalGridWidget`]'s own `layout` documents — not a
+///    visible seam.
+pub fn terminal_surface<State: 'static>(
+    seam: SelectionSeam,
+    grid: TerminalGridView,
+    chip: CopyChipView,
+) -> StackView<State> {
+    let armed = seam.clone();
+    Stack(vec![
+        any(GestureDetector::<State, _>(grid.selection(seam))
+            .on_long_press(move |_state: &mut State| armed.begin())),
+        any(chip),
+    ])
 }
 
 /// A VT emulator sized to the grid on screen.
