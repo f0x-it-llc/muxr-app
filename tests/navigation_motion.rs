@@ -1131,33 +1131,15 @@ fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
     );
     h.tap_parked(first_row);
 
-    assert_eq!(h.overlay_depth(), REST_DEPTH, "the menu popped itself");
-    // The gap between the two overlays. This used to assert the bar stayed
-    // *dimmed* across it — a property of the old app-side accounting rather
-    // than a promise: the menu's self-pop dropped the route depth where nothing
-    // was looking, so the stale count survived to cover the gap. The host pops
-    // its page before the page under it (the bar included) rebuilds, so the gap
-    // is visible the frame it opens — and with nothing on screen to be modal
-    // about, a live bar is the honest answer. What must not happen is the bar
-    // going *inert* while an overlay is up, which every assertion either side
-    // of this one still pins.
-    assert!(
-        h.has_bar(),
-        "the menu is gone and nothing has replaced it yet: {:?}",
-        node_roles(&h.root)
-    );
-
-    // The hand-off pass: the navigator flushes the menu's pop-completion
-    // callback, which is the `open_sheet` that opens the next overlay.
-    // Production gets this pass from the user's next touch (see `IDLE_MOVE`);
-    // the frames after it are the ones the sheet's own push asks for.
-    h.dispatch(&pointer(PointerPhase::Move, IDLE_MOVE));
-    h.park();
-
+    // No hand-off pass, no gap: the rebuild that pops the menu also flushes
+    // its completion callback (the navigator's housekeeping broadcast), so the
+    // `open_sheet` it carries runs on the pop's own frame — the sheet is
+    // already standing where the menu was by the time the park returns,
+    // without a single further input.
     assert_eq!(
         h.overlay_depth(),
         REST_DEPTH + 1,
-        "the sheet took the menu's place"
+        "the sheet took the menu's place on the pop's own frame"
     );
     assert!(
         !h.has_bar(),
