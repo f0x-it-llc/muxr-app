@@ -23,6 +23,8 @@
 //!
 //! - a Return leaves no `\n` anywhere in the buffers, and the next keystroke
 //!   diffs against an empty baseline;
+//! - a **stale** snapshot arriving into that empty baseline — the platform
+//!   still holding the line it was handed a Return for — replays nothing;
 //! - a whole-buffer replacement snapshot sends **nothing** and re-publishes;
 //! - the buffers are scrubbed on a blur and on unmount — but *not* on a key
 //!   bar hand-off, which is the same session still being typed into;
@@ -489,6 +491,83 @@ fn a_return_leaves_no_newline_behind_and_the_next_key_starts_clean() {
         "78",
         "one byte, not the whole line again"
     );
+}
+
+#[test]
+fn a_stale_post_return_snapshot_never_replays_the_submitted_line() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+
+    // Positive precondition: the line really was typed and really was sent.
+    mounted.type_text("ls\n");
+    assert_eq!(mounted.drain_hex(), "6c730d", "`ls`, then CR");
+    assert_eq!(mounted.mirror(), "", "the baseline was dropped");
+
+    // CONTRACT (review FC2, guard 1's other half). Dropping OUR baseline does
+    // not drop the platform's: a round trip that errors, answers nil or is a
+    // frame late leaves it holding the pre-Return text. This snapshot is
+    // therefore built RAW — from the platform's stale buffer, not from
+    // `mirror()` — because a snapshot built from our own mirror is exactly
+    // what would hide this. Diffed against nothing it reads as one `added`
+    // run carrying the whole line and its `\n`, which `text_bytes` maps to CR:
+    // emitted, `ls` runs a second time on the remote host.
+    mounted.apply("ls\n");
+    assert!(
+        mounted.drain().is_empty(),
+        "a stale snapshot replays NOTHING to the session"
+    );
+    assert_eq!(
+        mounted.mirror(),
+        "",
+        "…and the empty baseline is re-published, pulling the platform back"
+    );
+
+    // The session is still live, and the one shot is spent: ordinary typing
+    // works, and the next real Return still submits.
+    mounted.type_text("x");
+    assert_eq!(mounted.drain_hex(), "78");
+    mounted.type_text("\n");
+    assert_eq!(mounted.drain_hex(), "0d", "the next line still submits");
+}
+
+#[test]
+fn a_blur_scrubs_a_live_composition_too() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.set_bar(true);
+
+    // A composing snapshot carries the WHOLE platform mirror, so it is
+    // retained typing exactly as the buffers are (review FC2) — and is
+    // counted, and scrubbed, as such.
+    mounted.root.event(
+        &mut mounted.state,
+        &InputEvent::Ime(ImeEvent::ApplyEditingState(EditingState {
+            text: "hunter2".to_string(),
+            selection_base: 7,
+            selection_extent: 7,
+            composing_base: 0,
+            composing_extent: 7,
+        })),
+    );
+    assert!(mounted.drain().is_empty(), "marked text is not committed");
+    assert_eq!(
+        mounted.published().text,
+        "hunter2",
+        "it is live and echoed verbatim"
+    );
+    assert!(mounted.buffered_units() > 0, "…and buffered while it is");
+
+    mounted.tap_outside_everything();
+    assert_eq!(
+        mounted.buffered_units(),
+        0,
+        "a blurred session keeps none of the composition either"
+    );
+    assert_eq!(mounted.published().text, "");
 }
 
 #[test]
