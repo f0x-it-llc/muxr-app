@@ -1,7 +1,8 @@
 //! Headless behavior coverage for the `/terminal` screen's **live demo pane**
 //! (task 11's cutover): the "Demo session" overflow-menu entry, the
 //! pane-content switch, settings-driven cursor/font, resize-on-delta-only,
-//! fullscreen with a live pane, and the IME-active-only key bar.
+//! fullscreen with a live pane, the IME-active-only key bar, and the
+//! tap-to-focus-only contract at the root (section 10).
 //!
 //! Shares `tests/terminal.rs`'s harness shape (the same two-navigator split,
 //! the same frame-stepping idiom) rather than importing it — that file's own
@@ -64,8 +65,8 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, center, char_key, ms, node_labels, pointer, pump_frames, rounded_in, serial,
-    setup, tap,
+    EPSILON, RecScene, added, center, char_key, largest, ms, node_labels, pointer, pump_frames,
+    rounded_in, serial, setup, tap,
 };
 
 /// Same oversized surface `tests/terminal.rs` lays out at — the sheet/menu
@@ -260,6 +261,13 @@ impl Harness {
         self.mounted.set(false);
         self.settle();
     }
+
+    /// The root's focus/IME session as `(focus_active, publishes_a_surface)` —
+    /// the exact pair a platform shell reads to decide whether a soft keyboard
+    /// should be on screen (`RenderRoot::is_focus_active`/`ime_state`).
+    fn session(&self) -> (bool, bool) {
+        (self.root.is_focus_active(), self.root.ime_state().is_some())
+    }
 }
 
 /// The live grid's own plain background fill — see the [module docs](self).
@@ -287,6 +295,34 @@ fn card(scene: &RecScene) -> (Point, Size, f64) {
     let mut cards = rounded_in(scene, ink.terminal_bg);
     cards.sort_by(|a, b| (b.1.width * b.1.height).total_cmp(&(a.1.width * a.1.height)));
     cards.first().copied().expect("the card paints itself")
+}
+
+/// The overflow menu's **panel**, diffed out of the screen painting underneath
+/// it: an open `frust::glyph` menu adds exactly one rounded fill to the frame
+/// (its drop shadow is a blurred path and its border a stroke, so neither lands
+/// in [`RecScene::rounded`]).
+fn menu_panel(before: &RecScene, after: &RecScene) -> (Point, Size) {
+    let new = added(&before.rounded, &after.rounded);
+    assert_eq!(new.len(), 1, "an open menu adds exactly its panel: {new:?}");
+    largest(&new).expect("the menu panel painted itself")
+}
+
+/// `frust::glyph::menu`'s own row metrics, transcribed rather than imported —
+/// they are private to that crate, and (like [`ROW_DEMO`]) a test that could
+/// import them could not catch one changing. Rows start [`MENU_PANEL_PAD`] below
+/// the panel's top edge, then run one [`MENU_ITEM_ROW_H`] per item and one
+/// [`MENU_SEP_TOTAL_H`] per separator.
+const MENU_PANEL_PAD: f64 = 6.0;
+const MENU_ITEM_ROW_H: f64 = 34.0;
+const MENU_SEP_TOTAL_H: f64 = 11.0;
+
+/// Where a tap must land to hit the menu's "Demo session" row — the *pointer*
+/// route into the live pane, as opposed to [`Harness::choose_menu_row`]'s
+/// result-pop shortcut. `menu_entries` is item/sep/item/item/sep/**item**, so
+/// the last row sits three items and two separators down the panel.
+fn demo_row_center((origin, size): (Point, Size)) -> Point {
+    let row_top = origin.y + MENU_PANEL_PAD + MENU_ITEM_ROW_H * 3.0 + MENU_SEP_TOTAL_H * 2.0;
+    Point::new(origin.x + size.width / 2.0, row_top + MENU_ITEM_ROW_H / 2.0)
 }
 
 /// The text a `vt100::Screen` cell holds, or an empty string for a blank one.
@@ -832,5 +868,119 @@ fn a_keystroke_after_drain_echoes_synchronously_in_the_same_dispatch_call() {
     assert!(
         generation.get_untracked() > 0,
         "the synchronous wake published a new generation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10 — focus/IME hygiene: nothing summons a keyboard the user did not ask for
+// ---------------------------------------------------------------------------
+//
+// The screen's v2 design is **tap-to-focus only**: the keyboard and the key bar
+// are IME-active-only, so mounting the live pane must claim nothing at all and
+// only a tap on the grid itself may open a focus/IME session. These three pin
+// both halves of that at the root — `RenderRoot::is_focus_active`/`ime_state`
+// are literally what a shell reads to decide whether to show a soft keyboard,
+// so they are the honest place to assert it (a widget-level `has_focus` would
+// not have caught the seeding these tests exist for).
+
+/// A freshly mounted live pane claims **nothing** — no root focus, no published
+/// IME surface, not even a focus/IME generation edge for a shell to wake on.
+#[test]
+fn mounting_the_live_pane_claims_no_focus_and_publishes_no_ime_surface() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    assert_eq!(
+        h.session(),
+        (false, false),
+        "the mock screen holds no focus/IME session to begin with"
+    );
+    let before = h.root.focus_ime_generation();
+
+    h.enter_demo();
+    h.frame();
+    // Past the first feed wakes and the appearance poll's first tick: a claim
+    // that arrived a few frames late would be just as wrong as one on mount.
+    h.pump_for(Duration::from_millis(50));
+
+    assert!(
+        debug_live_probe().is_some(),
+        "the live pane really did mount"
+    );
+    assert_eq!(
+        h.session(),
+        (false, false),
+        "mounting the grid must not claim focus or publish an IME surface"
+    );
+    assert_eq!(
+        h.root.focus_ime_generation(),
+        before,
+        "and must not move the focus/IME edge a shell wakes on"
+    );
+}
+
+/// The other half: tapping the grid *does* open the session — focus claimed and
+/// an **active** IME surface published, which is what brings the keyboard (and
+/// with it the key bar) up.
+#[test]
+fn tapping_the_grid_claims_focus_and_publishes_an_active_ime_surface() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    let scene = h.frame();
+
+    let (origin, size) = grid_rect(&scene);
+    h.tap(center((origin, size)));
+
+    assert_eq!(
+        h.session(),
+        (true, true),
+        "a tap on the grid is the one thing that opens the session"
+    );
+    assert!(
+        h.root.ime_state().expect("a surface is published").active,
+        "and the surface it publishes is an active one"
+    );
+}
+
+/// Entering the demo through a real **pointer** tap on the menu row — the
+/// device sequence, rather than [`Harness::choose_menu_row`]'s result-pop
+/// shortcut — still leaves no focus/IME session behind once the menu is gone.
+///
+/// This is the app-side end of a framework defect, filed as a FINDINGS
+/// candidate (the register lives outside this repo). `frust::glyph::menu`'s
+/// widget claims root focus on **any** pointer `Down` ("a press anywhere claims
+/// focus so a subsequent Escape has a chain to travel"), so the Down that picks
+/// this row seeds `focus_active = true` with no IME surface behind it, for as
+/// long as the menu's exit animation and pop take. Nothing in this app asks for
+/// that, there is no seam to opt out of it, and it is the menu's claim — not
+/// the live pane's mount — that the frame-gate capture caught. What this app
+/// *can* pin is the outcome: the transient claim is released by the pop, no IME
+/// surface is ever published, and the pane the row mounted is inert until the
+/// user taps it. Green either way, so it keeps holding once the menu stops
+/// claiming.
+#[test]
+fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    let before = h.settle();
+
+    let after = h.open_menu();
+    let panel = menu_panel(&before, &after);
+    h.tap(demo_row_center(panel));
+    // Past the menu's own exit staging and the overlay pop that follows it.
+    h.flush();
+    h.frame();
+
+    assert!(
+        debug_live_probe().is_some(),
+        "the tap landed on the Demo session row"
+    );
+    assert_eq!(
+        h.session(),
+        (false, false),
+        "the menu's transient focus claim went away with the menu"
     );
 }

@@ -666,6 +666,22 @@ impl Actions {
     /// The anchor rect is unaffected by the move: it is reported in **window**
     /// coordinates, and the host's root page spans the whole window exactly as
     /// the route navigator did.
+    ///
+    /// **The menu claims root focus on every press, and this app cannot stop
+    /// it** — a FINDINGS candidate, not a bug on this side. `frust::glyph`'s
+    /// menu widget requests focus on *any* pointer `Down` ("a press anywhere
+    /// claims focus so a subsequent Escape has a chain to travel"), and
+    /// [`show_glyph_menu`] exposes no seam to opt out. So the very `Down` that
+    /// picks a row — [`MENU_DEMO`]'s included — seeds a root focus session with
+    /// no IME surface behind it until the menu's exit and pop release it. It
+    /// summons no keyboard (nothing publishes a surface, and the grid is not on
+    /// the focus path), and on a shell whose frame gate reads the focus/IME
+    /// **edge** it costs two frames rather than a steady wake; the same press
+    /// pattern lives in `crate::ui::sheet`'s own `ModalStage`, whose claim
+    /// instead lasts as long as the sheet is up. `tests/terminal_live.rs`'s
+    /// section 10 pins what this side controls: mounting the live pane claims
+    /// nothing, the transient claim leaves with the menu, and only a tap on the
+    /// grid opens a real session.
     pub fn open_menu(&self) {
         let actions = self.clone();
         show_glyph_menu(
