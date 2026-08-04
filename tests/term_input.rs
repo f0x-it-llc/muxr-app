@@ -143,9 +143,10 @@ struct Mounted {
     shared_feed: SharedFeed,
     /// The emulator the mounted grid paints: where an echoed keystroke lands.
     emulator: SharedEmulator,
-    /// The pump's repaint generation, and how many it has published.
+    /// The pump's repaint generation — [`pump_wake`] derives its own "next"
+    /// from this signal, so no separate published-counter field is needed
+    /// here any more (review M-A1).
     generation: RwSignal<u64>,
-    published: u64,
     seam: InputSeam,
     bar_active: RwSignal<bool>,
     /// Whether the screen is still on the tree — cleared by
@@ -205,7 +206,6 @@ impl Mounted {
             feed,
             emulator,
             generation,
-            published: 0,
             seam,
             bar_active,
             mounted,
@@ -308,12 +308,7 @@ impl Mounted {
     /// One wake of task 08's real feed pump: drain everything due into the
     /// mounted grid's emulator and publish at most one generation.
     fn pump(&mut self) -> bool {
-        pump_wake(
-            &self.shared_feed,
-            &self.emulator,
-            self.generation,
-            &mut self.published,
-        )
+        pump_wake(&self.shared_feed, &self.emulator, self.generation)
     }
 
     /// Show (or hide) the key bar, as a screen would from the published

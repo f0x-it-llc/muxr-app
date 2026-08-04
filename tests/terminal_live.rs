@@ -835,8 +835,7 @@ fn a_keystroke_after_drain_echoes_synchronously_in_the_same_dispatch_call() {
     {
         let scratch: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
         let scratch_generation = RwSignal::new(0u64);
-        let mut published = 0u64;
-        pump_wake(&feed_dyn, &scratch, scratch_generation, &mut published);
+        pump_wake(&feed_dyn, &scratch, scratch_generation);
     }
     assert!(
         !feed.borrow().is_open(),

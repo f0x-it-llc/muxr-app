@@ -39,8 +39,8 @@ use muxr::features::terminal::presentation::term::widget::{
     CURSOR_BLINK_PERIOD_MS, TerminalGridWidget, cursor_lit, terminal_grid,
 };
 use muxr::features::terminal::presentation::term::{
-    CursorStyle, SharedEmulator, SharedFeed, TerminalEmulator, TerminalPalette, pump_wake,
-    spawn_feed_pump,
+    CursorStyle, Emission, InputSeam, SharedEmulator, SharedFeed, TerminalEmulator,
+    TerminalPalette, pump_wake, spawn_feed_pump,
 };
 
 mod support;
@@ -363,6 +363,74 @@ fn a_font_size_change_relayouts_and_a_cursor_change_only_repaints() {
     assert!(flags.needs_paint(), "the caret's shape is pixels");
 }
 
+/// Review M-A1: `run_feed`'s scheduled loop and `InputSeam::dispatch`'s
+/// synchronous echo drain share one `generation` signal via `pump_wake`.
+/// This pins the dropped-frame case the fix closes: a keystroke's own
+/// dispatch bump must not collide with `run_feed`'s very next wake — if it
+/// did, that wake's freshly fed replay content would never reshape (see
+/// `pump_wake`'s own doc for the mechanism).
+#[test]
+fn a_keystroke_during_replay_still_reshapes_on_the_wake_after_it() {
+    let _serial = serial();
+    let _owner = setup();
+
+    let feed: Rc<RefCell<DemoFeed>> = Rc::new(RefCell::new(DemoFeed::manual()));
+    let feed_dyn: SharedFeed = feed.clone();
+    let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+    let generation = RwSignal::new(0u64);
+    let mut input = InputSeam::new(feed_dyn.clone());
+    input.wire_pump(Rc::clone(&emulator), generation);
+
+    let palette = TerminalPalette::fallback();
+    let make = |generation: u64| {
+        terminal_grid(Rc::clone(&emulator), generation, palette, FONT_SIZE).label(LABEL)
+    };
+    let mut counter = 0u64;
+    let mut ctx = BuildCtx::new(&mut counter);
+
+    // Wake 1 (`run_feed`-style): the replay's own chunk 0 is due at t=0.
+    assert!(pump_wake(&feed_dyn, &emulator, generation));
+    let g_wake1 = generation.get_untracked();
+    let view_wake1 = make(g_wake1);
+    let mut widget = View::<()>::build(&view_wake1, &mut ctx);
+
+    // A keystroke lands mid-replay: `InputSeam::dispatch`'s own synchronous
+    // echo drain — the seam's own writer.
+    input.dispatch(&Emission {
+        bytes: b"q".to_vec(),
+        ..Default::default()
+    });
+    let g_dispatch = generation.get_untracked();
+    assert!(
+        g_dispatch > g_wake1,
+        "the keystroke's own echo must move the counter"
+    );
+    let view_dispatch = make(g_dispatch);
+    let flags = View::<()>::rebuild(&view_dispatch, &view_wake1, &mut widget, &mut ctx);
+    assert!(flags.needs_layout(), "the dispatch's own wake must reshape");
+
+    // Wake 2: `run_feed`'s next scheduled wake, with more real replay
+    // content due — the dropped-frame case. Under the pre-fix bug this
+    // duplicated `g_dispatch` instead of moving past it, and the rebuild
+    // below would see `prev.generation == self.generation` and skip layout,
+    // freezing the grid on stale content for that whole wake.
+    feed.borrow_mut().set_elapsed(Duration::from_millis(100));
+    assert!(pump_wake(&feed_dyn, &emulator, generation));
+    let g_wake2 = generation.get_untracked();
+    assert_ne!(
+        g_wake2, g_dispatch,
+        "run_feed's own wake must not repeat the dispatch's value"
+    );
+    let view_wake2 = make(g_wake2);
+    let flags = View::<()>::rebuild(&view_wake2, &view_dispatch, &mut widget, &mut ctx);
+    assert!(
+        flags.needs_layout(),
+        "the wake after a keystroke-during-replay must still reshape — a \
+         duplicate generation here is exactly the dropped-frame bug review \
+         M-A1 found"
+    );
+}
+
 #[test]
 fn reshaping_is_skipped_while_the_generation_is_unchanged() {
     let mut grid = Grid::fed(b"\x1b[32mINFO\x1b[0m one two three");
@@ -628,11 +696,10 @@ fn many_due_chunks_publish_exactly_one_generation() {
     let feed = RefCell::new(DemoFeed::manual());
     let emulator = RefCell::new(TerminalEmulator::with_defaults());
     let generation = RwSignal::new(0u64);
-    let mut published = 0u64;
 
     // 200ms into a 30 Hz replay: chunks 0..=6 are due.
     feed.borrow_mut().set_elapsed(Duration::from_millis(200));
-    assert!(pump_wake(&feed, &emulator, generation, &mut published));
+    assert!(pump_wake(&feed, &emulator, generation));
 
     assert_eq!(
         emulator.borrow().fed_writes(),
@@ -646,7 +713,7 @@ fn many_due_chunks_publish_exactly_one_generation() {
     );
 
     // A wake with nothing due writes nothing at all.
-    assert!(!pump_wake(&feed, &emulator, generation, &mut published));
+    assert!(!pump_wake(&feed, &emulator, generation));
     assert_eq!(generation.get_untracked(), 1);
 }
 
