@@ -24,7 +24,9 @@
 //! - a Return leaves no `\n` anywhere in the buffers, and the next keystroke
 //!   diffs against an empty baseline;
 //! - a **stale** snapshot arriving into that empty baseline — the platform
-//!   still holding the line it was handed a Return for — replays nothing;
+//!   still holding the line it was handed a Return for — replays nothing,
+//!   whether or not it carries the Return (Android's submit leaves as an
+//!   editor action, so the line it strands has no newline in it at all);
 //! - a whole-buffer replacement snapshot sends **nothing** and re-publishes;
 //! - the buffers are scrubbed on a blur and on unmount — but *not* on a key
 //!   bar hand-off, which is the same session still being typed into;
@@ -530,6 +532,42 @@ fn a_stale_post_return_snapshot_never_replays_the_submitted_line() {
     assert_eq!(mounted.drain_hex(), "78");
     mounted.type_text("\n");
     assert_eq!(mounted.drain_hex(), "0d", "the next line still submits");
+}
+
+#[test]
+fn a_stale_android_snapshot_carries_no_newline_and_still_replays_nothing() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+
+    // Android's REAL submit shape (review FC3): the Return leaves as an editor
+    // action (`IME_ACTION_DONE` → a focus-routed Key(Enter)), never as text, and
+    // `performEditorAction` does not re-poll — so the `Editable` keeps the
+    // pre-submit line, with NO newline in it, until a later frame's resync.
+    mounted.type_text("sudo -i");
+    assert_eq!(mounted.drain_hex(), "7375646f202d69", "the line was typed");
+    mounted.key(Key::Named(NamedKey::Enter));
+    assert_eq!(mounted.drain_hex(), "0d", "…and the Return went out");
+    assert_eq!(mounted.mirror(), "", "leaving an empty baseline");
+
+    // RAW — the platform's own stale buffer, not `mirror()`. Diffed against
+    // nothing it is one `added` run holding the whole line, and there is no
+    // Return in it for a Return-keyed guard to catch.
+    mounted.apply("sudo -i");
+    assert!(
+        mounted.drain().is_empty(),
+        "a stale line replays NOTHING, newline or no newline"
+    );
+    assert_eq!(
+        mounted.mirror(),
+        "",
+        "…and the empty baseline is re-published, pulling the platform back"
+    );
+
+    // The session is still live, and the shot is spent.
+    mounted.type_text("x");
+    assert_eq!(mounted.drain_hex(), "78");
 }
 
 #[test]
