@@ -36,7 +36,11 @@
 //! [`DemoFeed::send_input`] therefore appends its bytes to the output stream
 //! (on by default; [`DemoFeed::with_echo`] turns it off), which is what makes
 //! "the keys I pressed appeared on screen, in order, byte for byte" checkable
-//! on a device long before a real session exists.
+//! on a device long before a real session exists. Whether [`is_open`] reports
+//! closed once the replay drains depends on whether an echo is **queued**,
+//! not on whether echo is merely switched on — see that method's own doc.
+//!
+//! [`is_open`]: TerminalFeed::is_open
 
 use std::time::{Duration, Instant};
 
@@ -283,10 +287,30 @@ impl TerminalFeed for DemoFeed {
         self.last_resize = Some((cols, rows));
     }
 
-    /// Open while the replay has chunks left, or while echo is on: an echoing
-    /// feed stands in for a live PTY, which can answer a keystroke at any time.
+    /// Whether this feed can still produce output right now.
+    ///
+    /// Open while the replay has chunks left, **or** while an echo is queued
+    /// and not yet drained — not merely because echo is switched on. Echo
+    /// used to be an unconditional "stay open forever" clause, which kept
+    /// [`run_feed`]'s 30 Hz timer alive for the rest of the mount just so a
+    /// keystroke typed after the fixture drained still had somewhere to
+    /// surface. Now that [`InputSeam::dispatch`] drains an echo
+    /// **synchronously**, the instant `send_input` queues it, the timer no
+    /// longer owes anything to echo latency — a drained replay with nothing
+    /// queued really has nothing left to say, so the pump can stop entirely
+    /// instead of polling this feed 30 times a second forever.
+    ///
+    /// This is a property of being a **finite replay with no live process
+    /// behind it**, not a rule every [`TerminalFeed`] shares — the trait's
+    /// own default `is_open` stays `true` unconditionally, and a future live
+    /// PTY/gRPC session's implementation should too, for as long as the
+    /// session itself is connected: unlike this replay, a real process can
+    /// answer at any time with nothing "queued" to observe in advance.
+    ///
+    /// [`run_feed`]: crate::features::terminal::presentation::term::run_feed
+    /// [`InputSeam::dispatch`]: crate::features::terminal::presentation::term::InputSeam::dispatch
     fn is_open(&self) -> bool {
-        !self.is_drained() || self.echo
+        !self.is_drained() || !self.echoed.is_empty()
     }
 }
 
@@ -375,15 +399,41 @@ mod tests {
         );
     }
 
+    /// Task 06: echo no longer means "stay open forever" — a drained replay
+    /// with nothing queued has nothing left to say, so the pump can stop.
     #[test]
-    fn an_echoing_feed_stays_open_past_the_end_of_the_replay() {
+    fn a_drained_feed_with_echo_on_closes_once_nothing_is_queued() {
         let mut feed = DemoFeed::manual();
         feed.set_elapsed(Duration::from_secs(60));
         drain(&mut feed);
         assert!(feed.is_drained());
         assert!(
+            !feed.is_open(),
+            "nothing left to replay and no echo pending: the pump has nothing left to wait for"
+        );
+    }
+
+    /// The other half of the same contract: a keystroke after the replay has
+    /// drained reopens the feed just long enough to hand back its echo, then
+    /// closes again — this is the exact shape `InputSeam::dispatch`'s
+    /// synchronous echo drain (`presentation::term`) exists to short-circuit,
+    /// so the pump's own 30 Hz timer never has to notice it at all.
+    #[test]
+    fn a_drained_feed_reopens_for_a_queued_echo_and_closes_once_it_drains() {
+        let mut feed = DemoFeed::manual();
+        feed.set_elapsed(Duration::from_secs(60));
+        drain(&mut feed);
+        assert!(!feed.is_open());
+
+        feed.send_input(b"ls\r");
+        assert!(
             feed.is_open(),
-            "a PTY stand-in can still answer a keystroke"
+            "an echo is queued: still something to hand back"
+        );
+        drain(&mut feed);
+        assert!(
+            !feed.is_open(),
+            "the echo drained: closed again until the next keystroke"
         );
     }
 

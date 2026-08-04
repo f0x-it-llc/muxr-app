@@ -460,9 +460,15 @@ impl LiveSession {
             Rc::new(RefCell::new(term::TerminalEmulator::with_defaults()));
         let feed: Rc<RefCell<DemoFeed>> = Rc::new(RefCell::new(DemoFeed::new()));
         let feed_dyn: term::SharedFeed = feed.clone();
-        let input = term::InputSeam::new(feed_dyn.clone());
-        let selection = term::SelectionSeam::new(Rc::clone(&emulator));
         let generation = RwSignal::new(0u64);
+        let mut input = term::InputSeam::new(feed_dyn.clone());
+        // Task 06: wires the seam's synchronous echo drain to this session's
+        // own emulator/generation pair (see `InputSeam::wire_pump`'s own
+        // doc) — without this, `dispatch` sends but never drains, and a
+        // typed keystroke would wait on `run_feed`'s next scheduled wake
+        // (or, once the replay has drained, never surface at all).
+        input.wire_pump(Rc::clone(&emulator), generation);
+        let selection = term::SelectionSeam::new(Rc::clone(&emulator));
         term::spawn_feed_pump(feed_dyn, Rc::clone(&emulator), generation);
 
         // One read right away — so the very first live frame already carries

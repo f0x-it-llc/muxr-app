@@ -33,11 +33,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, PopResult, SizedBox, Stack, Theme, any,
-    navigator, provide_context,
+    AnyView, Component, GetUntracked, NavigatorController, PopResult, RwSignal, SizedBox, Stack,
+    Theme, any, navigator, provide_context,
 };
 use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
 use frust_text::TextContext;
@@ -48,11 +49,16 @@ use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle as SettingsCursorStyle,
 };
+use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
+use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_live_probe, open_terminal_menu, set_demo_copy_sink, terminal_page,
 };
 use muxr::features::terminal::presentation::term::CursorStyle as GridCursorStyle;
 use muxr::features::terminal::presentation::term::chip::{CHIP_H, CHIP_W};
+use muxr::features::terminal::presentation::term::{
+    Emission, InputSeam, SharedEmulator, SharedFeed, TerminalEmulator, pump_wake, run_feed,
+};
 use muxr::routes::{app_nav, install_app_router};
 use muxr::{AppState, MuxrApp};
 
@@ -727,5 +733,104 @@ fn unmounting_drops_the_published_chrome_and_the_live_probe() {
     assert!(
         debug_live_probe().is_none(),
         "the screen's own cleanup withdrew its chrome"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9 — pump hygiene: the timer stops once nothing is left to say (task 06)
+// ---------------------------------------------------------------------------
+//
+// These two drive the real `DemoFeed`/`InputSeam`/`run_feed` triple directly
+// rather than through the mounted screen: `LiveSession::enter` constructs a
+// `DemoFeed::new()`, whose real wall clock takes a genuine 30 seconds to
+// drain the fixture — far too slow to wait out in a test — so these use
+// `DemoFeed::manual()` instead (`tests/term_widget.rs`'s/`tests/term_input.rs`'s
+// own precedent), wiring the exact same seams `LiveSession::enter` wires
+// together in production (`InputSeam::wire_pump`), just with the replay's
+// clock in the test's own hands.
+
+#[test]
+fn run_feed_exits_once_a_drained_feed_has_nothing_left_to_say() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let feed: Rc<RefCell<DemoFeed>> = Rc::new(RefCell::new(DemoFeed::manual()));
+    // Push the manual clock straight past the whole 30s schedule: the
+    // fixture is fully drained and nothing has been typed, so the very first
+    // wake below should already see a closed feed.
+    feed.borrow_mut().set_elapsed(Duration::from_secs(60));
+    let feed_dyn: SharedFeed = feed.clone();
+    let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+    let generation = RwSignal::new(0u64);
+    let cancelled = Arc::new(AtomicBool::new(false));
+
+    // `run_feed` never reaches its own sleep on this path — the very first
+    // wake already sees a closed feed and returns — so a plain
+    // current-thread runtime drives it to completion with no real
+    // wall-clock wait at all. Under the old `!is_drained() || echo` rule
+    // (echo defaults on) this call would never return.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime");
+    rt.block_on(run_feed(feed_dyn, emulator, generation, cancelled));
+
+    assert!(
+        feed.borrow().is_drained(),
+        "the one wake drained the whole fixture before the loop exited"
+    );
+    assert!(
+        !feed.borrow().is_open(),
+        "and nothing was queued, so the loop had every reason to stop"
+    );
+}
+
+#[test]
+fn a_keystroke_after_drain_echoes_synchronously_in_the_same_dispatch_call() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let feed: Rc<RefCell<DemoFeed>> = Rc::new(RefCell::new(DemoFeed::manual()));
+    feed.borrow_mut().set_elapsed(Duration::from_secs(60));
+    let feed_dyn: SharedFeed = feed.clone();
+
+    // Drain the replay itself out of the way first, into a throwaway
+    // emulator — this test is about the keystroke's own echo, not the
+    // fixture's own content.
+    {
+        let scratch: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+        let scratch_generation = RwSignal::new(0u64);
+        let mut published = 0u64;
+        pump_wake(&feed_dyn, &scratch, scratch_generation, &mut published);
+    }
+    assert!(
+        !feed.borrow().is_open(),
+        "nothing left to replay or echo yet"
+    );
+
+    let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+    let generation = RwSignal::new(0u64);
+    let mut seam = InputSeam::new(feed_dyn.clone());
+    seam.wire_pump(Rc::clone(&emulator), generation);
+
+    // No `pump_wake` call from the test itself between here and the
+    // assertion below — the echo must reach the emulator inside `dispatch`
+    // alone, exactly the case the old timer-only design kept alive for.
+    seam.dispatch(&Emission {
+        bytes: b"q".to_vec(),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        emulator
+            .borrow()
+            .screen()
+            .cell(0, 0)
+            .map(|c| c.contents().to_string()),
+        Some("q".to_string()),
+        "the echo landed in the shared emulator in the same dispatch call"
+    );
+    assert!(
+        generation.get_untracked() > 0,
+        "the synchronous wake published a new generation"
     );
 }
