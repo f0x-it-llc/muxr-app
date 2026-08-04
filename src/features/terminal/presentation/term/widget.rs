@@ -809,6 +809,28 @@ impl TerminalGridWidget {
                 // the keyboard.
                 if seam.clear_if_active() {
                     ctx.request_redraw();
+                    // This `Down` is `Handled` right here, but frust-core's
+                    // root-level focus bookkeeping does not consult that: ANY
+                    // pointer `Down` that requested no focus is read as a
+                    // blur, regardless of `Handled` (`RenderRoot::event`).
+                    // Left alone, the very next paint would see this widget's
+                    // own focus edge flip true -> false and scrub the
+                    // in-progress input baseline out from under a session
+                    // that is plainly still being typed into.
+                    //
+                    // So this Down claims the seam's focus counter — the
+                    // SAME hand-off mechanism a key-bar cap's own `Down` uses
+                    // (`InputSeam::claim_focus`, `keybar.rs`) — without
+                    // calling `ctx.request_focus()`: the counter moves, but
+                    // `self.focus_claim` (this widget's own recorded
+                    // snapshot) is deliberately left stale, so
+                    // `note_focus_edge` reads the mismatch as a hand-off, not
+                    // a departure, and skips the scrub. The keyboard is still
+                    // not summoned — nothing here requests focus or
+                    // publishes an IME surface, exactly as before.
+                    if let Some(input) = self.input.as_ref() {
+                        input.claim_focus();
+                    }
                     return Some(EventResult::Handled);
                 }
                 None
@@ -850,13 +872,26 @@ impl TerminalGridWidget {
     /// (review M6), and the claim bookkeeping that keeps it honest.
     ///
     /// A blur is where buffered keystrokes stop being live, so it is a scrub
-    /// boundary — but a tap on a key bar cap *also* takes the focus path away
-    /// from this grid, and that one is a **hand-off**, not a blur: the same
-    /// session is still being typed into, and scrubbing there would silently
-    /// cost the user their next Backspace (a delete is only observable as a
-    /// shortening, and an emptied mirror has nothing to shorten). So the
-    /// seam's claim counter is what distinguishes them: unchanged across the
-    /// edge means nothing else took the surface.
+    /// boundary — but the seam's claim counter can move without the session
+    /// actually stopping, in two cases, and neither is a blur:
+    ///
+    /// - a tap on a key bar cap takes the focus path away from this grid,
+    ///   claiming the seam itself (`keybar.rs`'s own `Down` arm);
+    /// - a tap on the grid *that this widget itself consumed* — the
+    ///   selection Down arm's clearing tap (see `selection_event`). frust-core
+    ///   reads any pointer `Down` that requested no focus as a blur
+    ///   regardless of whether the widget reported it `Handled`
+    ///   (`RenderRoot::event`), so a tap that only dismisses a selection
+    ///   still forces this widget's own focus edge false on the very next
+    ///   paint. That arm claims the seam right there, for exactly this
+    ///   reason.
+    ///
+    /// Either way the same session is still being typed into, and scrubbing
+    /// would silently cost the user their next Backspace (a delete is only
+    /// observable as a shortening, and an emptied mirror has nothing to
+    /// shorten). So the seam's claim counter is what distinguishes all three
+    /// cases from a real blur: unchanged across the edge means nothing else
+    /// took the surface.
     ///
     /// **Residual, recorded rather than papered over:** a cap holding the
     /// focus path when the keyboard is dismissed tears down with the bar and
