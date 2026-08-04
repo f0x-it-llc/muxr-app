@@ -228,8 +228,10 @@ struct PumpHandle {
     /// The emulator the echoed bytes land in.
     emulator: SharedEmulator,
     /// The generation signal the drain publishes to — the same one
-    /// [`run_feed`]'s scheduled loop shares, so a rebuild sees one
-    /// monotonically increasing counter no matter which of the two woke it.
+    /// [`run_feed`]'s scheduled loop shares. [`pump_wake`] derives the next
+    /// value from this signal itself, so a rebuild sees one monotonically
+    /// increasing counter no matter which of the two woke it — neither
+    /// caller carries a competing notion of "next" (review M-A1).
     generation: RwSignal<u64>,
 }
 
@@ -290,18 +292,16 @@ impl InputSeam {
     /// statement above it), and [`pump_wake`] takes its own fresh borrows of
     /// `feed` and the pump's emulator — so no `RefCell` borrow is ever held
     /// across the call, the same discipline [`run_feed`]'s own docs require.
-    /// `published` is reseeded from `generation.get_untracked()` on every
-    /// call rather than carried as state on this seam: `pump_wake` always
-    /// leaves the two in lockstep (it increments `published` then writes
-    /// that same value into `generation`), so reading the signal fresh here
-    /// is exactly equivalent to sharing one persistent counter with
-    /// [`run_feed`]'s own loop — with no extra shared state to keep in sync.
+    /// This seam carries no counter of its own: [`pump_wake`] is the one
+    /// source of truth for "next" (its own doc), deriving it from
+    /// `generation` itself on every call — so this synchronous drain and
+    /// [`run_feed`]'s own scheduled wake always agree, whichever runs first
+    /// (review M-A1).
     pub fn dispatch(&self, emission: &Emission) {
         if !emission.bytes.is_empty() && !self.read_only() {
             self.feed.borrow_mut().send_input(&emission.bytes);
             if let Some(pump) = &self.pump {
-                let mut published = pump.generation.get_untracked();
-                pump_wake(&self.feed, &pump.emulator, pump.generation, &mut published);
+                pump_wake(&self.feed, &pump.emulator, pump.generation);
             }
         }
         let revision = self.source.borrow().revision();
@@ -854,14 +854,21 @@ impl TerminalEmulator {
 ///
 /// Two callers share this one wake — [`run_feed`]'s scheduled loop, and
 /// [`InputSeam::dispatch`]'s synchronous echo drain (see the [module
-/// docs](self)) — and both write the same `generation` signal, so a caller
-/// only ever needs `published` seeded from `generation.get_untracked()`
-/// right before the call, never carried as persistent state across wakes.
+/// docs](self)) — and both write the same `generation` signal. **This
+/// function, not either caller, is the one source of truth for "next":** it
+/// derives the value itself, `generation.get_untracked() + 1`, right here,
+/// so neither caller carries a counter of its own across wakes (review
+/// M-A1). An earlier version took a `&mut u64 published` from each caller
+/// instead — `run_feed`'s own copy could fall out of step with a generation
+/// [`InputSeam::dispatch`] had just published between two of `run_feed`'s
+/// wakes, so its next wake recomputed the *same* next value a second time
+/// (a duplicate the tracked rebuild never saw, dropping that wake's freshly
+/// fed content) or, across two dispatches, a value *lower* than what was
+/// already live.
 pub fn pump_wake(
     feed: &RefCell<dyn TerminalFeed>,
     emulator: &RefCell<TerminalEmulator>,
     generation: RwSignal<u64>,
-    published: &mut u64,
 ) -> bool {
     let writes = {
         let mut emulator = emulator.borrow_mut();
@@ -871,8 +878,7 @@ pub fn pump_wake(
     if writes == 0 {
         return false;
     }
-    *published += 1;
-    generation.set(*published);
+    generation.set(generation.get_untracked() + 1);
     true
 }
 
@@ -889,13 +895,12 @@ pub async fn run_feed(
     cancelled: Arc<AtomicBool>,
 ) {
     let start = Instant::now();
-    let mut published = 0u64;
     let mut tick = 0u32;
     loop {
         if cancelled.load(Ordering::Relaxed) {
             return;
         }
-        pump_wake(&feed, &emulator, generation, &mut published);
+        pump_wake(&feed, &emulator, generation);
         if !feed.borrow().is_open() {
             return;
         }
@@ -929,7 +934,48 @@ pub fn spawn_feed_pump(feed: SharedFeed, emulator: SharedEmulator, generation: R
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+
+    /// A queue-driven [`TerminalFeed`] fake for the pump-hygiene tests below:
+    /// a test [`push`](Self::push)es exactly the chunks it wants due on the
+    /// next [`pump_wake`] call, and [`TerminalFeed::send_input`] echoes
+    /// synchronously — the same PTY-style contract `data::feeds::DemoFeed`
+    /// implements, minus its own wall-clock/fixture-replay machinery, which
+    /// these tests (review M-A1's interleaving regressions) have no use for.
+    #[derive(Default)]
+    struct QueueFeed {
+        due: VecDeque<Vec<u8>>,
+    }
+
+    impl QueueFeed {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        /// Queue `bytes` as one more write, due on the next drain.
+        fn push(&mut self, bytes: &[u8]) {
+            self.due.push_back(bytes.to_vec());
+        }
+    }
+
+    impl TerminalFeed for QueueFeed {
+        fn drain_output(&mut self, sink: &mut dyn FnMut(&[u8])) -> usize {
+            let mut writes = 0;
+            while let Some(chunk) = self.due.pop_front() {
+                sink(&chunk);
+                writes += 1;
+            }
+            writes
+        }
+
+        fn send_input(&mut self, bytes: &[u8]) {
+            self.push(bytes);
+        }
+
+        fn resize(&mut self, _cols: u16, _rows: u16) {}
+    }
 
     #[test]
     fn the_repaint_interval_matches_the_documented_cap() {
@@ -984,5 +1030,132 @@ mod tests {
         let mut emulator = TerminalEmulator::new(20, 4, 0);
         emulator.resize(0, 0);
         assert_eq!(emulator.size(), (1, 1), "never a zero-cell screen");
+    }
+
+    // -----------------------------------------------------------------------
+    // Review M-A1: one source of truth for the generation counter
+    // -----------------------------------------------------------------------
+    //
+    // Both `run_feed`'s scheduled loop and `InputSeam::dispatch`'s
+    // synchronous echo drain call `pump_wake` against the same `generation`
+    // signal. These pin that the two can no longer disagree about "next" —
+    // see `pump_wake`'s own doc for the defect this replaces.
+
+    #[test]
+    fn a_dispatch_between_two_wakes_keeps_one_monotonic_generation() {
+        let feed: Rc<RefCell<QueueFeed>> = Rc::new(RefCell::new(QueueFeed::new()));
+        let feed_dyn: SharedFeed = feed.clone();
+        let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+        let generation = RwSignal::new(0u64);
+        let mut input = InputSeam::new(feed_dyn.clone());
+        input.wire_pump(Rc::clone(&emulator), generation);
+
+        // Wake 1 — a `run_feed`-style wake with real replay content due.
+        feed.borrow_mut().push(b"first chunk");
+        assert!(pump_wake(&feed_dyn, &emulator, generation));
+        let first = generation.get_untracked();
+        assert_eq!(first, 1);
+
+        // A keystroke lands mid-replay: `InputSeam::dispatch`'s own
+        // synchronous echo drain — the seam's writer.
+        input.dispatch(&Emission {
+            bytes: b"q".to_vec(),
+            ..Default::default()
+        });
+        let second = generation.get_untracked();
+        assert!(
+            second > first,
+            "the keystroke's own echo must move the counter: {first} -> {second}"
+        );
+
+        // Wake 2 — `run_feed`'s next scheduled wake, with more real replay
+        // content due. Under the pre-fix bug this recomputed `second` a
+        // second time (both callers derived "next" from their own stale
+        // local rather than from `generation` itself), publishing a
+        // duplicate.
+        feed.borrow_mut().push(b"second chunk");
+        assert!(pump_wake(&feed_dyn, &emulator, generation));
+        let third = generation.get_untracked();
+
+        assert!(
+            third > second,
+            "the wake after a dispatch bump must move past it too: \
+             {first} -> {second} -> {third}"
+        );
+        assert_ne!(
+            third, second,
+            "no duplicate generation across the two writers"
+        );
+    }
+
+    #[test]
+    fn a_selection_clears_on_the_next_generation_wake_regardless_of_writer() {
+        let feed: Rc<RefCell<QueueFeed>> = Rc::new(RefCell::new(QueueFeed::new()));
+        let feed_dyn: SharedFeed = feed.clone();
+        let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+        emulator.borrow_mut().feed(b"hello world");
+        let generation = RwSignal::new(0u64);
+        let mut input = InputSeam::new(feed_dyn.clone());
+        input.wire_pump(Rc::clone(&emulator), generation);
+        let selection = SelectionSeam::new(Rc::clone(&emulator));
+
+        let metrics = CellGeometry {
+            font_size: 13.0,
+            width: 8.0,
+            height: 16.0,
+            cols: 20,
+            rows: 4,
+        };
+        selection.set_metrics(metrics);
+        // Seed the seam's last-seen generation exactly as
+        // `TerminalGridView::build` does on the grid's first build — nothing
+        // to clear yet.
+        selection.observe_generation(generation.get_untracked());
+
+        // Select the word "hello" at (row 0, col 0) — the panel's probe
+        // scenario re-arms this same word after each clear below.
+        let arm = |selection: &SelectionSeam| {
+            selection.track(Point::new(4.0, 8.0), true);
+            selection.begin();
+            assert!(selection.range().is_some(), "sanity: the word armed");
+        };
+
+        // Wake 1 (`run_feed`-style): new content arrives before anything is
+        // selected — a no-op on the selection, but it moves the generation
+        // the seam will compare its next observation against.
+        feed.borrow_mut().push(b"more output");
+        assert!(pump_wake(&feed_dyn, &emulator, generation));
+        selection.observe_generation(generation.get_untracked());
+
+        arm(&selection);
+
+        // A keystroke lands: `InputSeam::dispatch`'s own synchronous echo
+        // drain is the SECOND writer to this same generation signal.
+        input.dispatch(&Emission {
+            bytes: b"x".to_vec(),
+            ..Default::default()
+        });
+        selection.observe_generation(generation.get_untracked());
+        assert!(
+            selection.range().is_none(),
+            "the dispatch's own wake must clear a held selection"
+        );
+
+        arm(&selection);
+
+        // Wake 2 (`run_feed`-style, again). Under the pre-fix bug this
+        // repeated the dispatch's own generation value, so
+        // `observe_generation`'s `!=` check saw no change and left the
+        // re-armed selection alone — exactly the hazard `selection`'s module
+        // docs forbid.
+        feed.borrow_mut().push(b"even more output");
+        assert!(pump_wake(&feed_dyn, &emulator, generation));
+        selection.observe_generation(generation.get_untracked());
+        assert!(
+            selection.range().is_none(),
+            "the wake after a dispatch bump must ALSO be seen as new, and \
+             clear the re-armed selection — regardless of which writer \
+             produced it"
+        );
     }
 }
