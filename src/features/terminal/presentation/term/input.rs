@@ -191,8 +191,18 @@
 //! and one accepted regression: a Backspace pressed **immediately** after a
 //! Return has no shortening to be observed as (the mirror is empty), so it
 //! emits nothing until one character has been typed. That is the same
-//! documented residual as an exhausted history, and at a shell prompt a
-//! Backspace on an empty line is a no-op anyway.
+//! documented residual as an exhausted history, and it is genuinely harmless
+//! **here**: a Return really did just submit the line, so the shell prompt
+//! really is empty at that instant — "a Backspace on an empty line is a
+//! no-op" is a fact about *this* scrub's trigger, not a general excuse for
+//! every scrub. A scrub firing while the line is still mid-command (any
+//! *other* boundary — see [`InputSeam`](super::InputSeam)'s scrub call sites)
+//! drops a real, non-empty residual: the very next Backspace, observable only
+//! as a snapshot shortening, emits nothing even though the remote line is not
+//! empty and the user is not done typing. `TerminalGridWidget::note_focus_edge`
+//! is what keeps a same-widget hand-off (a selection-dismissing tap the grid
+//! itself consumed) from reaching that scrub at all; a genuine departure
+//! still takes the hit, and it is real, not harmless-by-construction.
 //!
 //! ## The frame the platform may still be holding the old line
 //!

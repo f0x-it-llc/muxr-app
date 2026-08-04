@@ -24,7 +24,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use frust::authoring::{Affine, PaintScene, PointerPhase};
+use frust::authoring::{Affine, EditingState, ImeEvent, InputEvent, PaintScene, PointerPhase};
 use frust::{AnyView, GetUntracked, RwSignal, Set, any};
 use frust_core::RenderRoot;
 use frust_scene::GlyphRun;
@@ -33,6 +33,7 @@ use kurbo::{BezPath, Point, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
+use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::term::chip::{
     CHIP_H, CHIP_W, COPIED_TOAST, CopySink, chip_rect, copy_chip,
 };
@@ -178,6 +179,14 @@ struct Mounted {
     tcx: TextContext,
     emulator: SharedEmulator,
     selection: SelectionSeam,
+    /// The grid's keystroke source — kept around (a `Mounted` handle, not
+    /// just the `Logic` closure's own clone) so a test can type into the grid
+    /// and inspect what the source is still holding
+    /// (see [`Mounted::buffered_units`]).
+    input: InputSeam,
+    /// The demo feed the seam emits into — a test drains it to read back the
+    /// bytes typing actually sent (see [`Mounted::drain`]).
+    feed: Rc<RefCell<DemoFeed>>,
     /// The feed pump's own generation counter — a test bumps it directly to
     /// simulate new output arriving (see [`Mounted::advance_generation`]).
     generation: RwSignal<u64>,
@@ -208,6 +217,7 @@ impl Mounted {
 
         let view_emulator = Rc::clone(&emulator);
         let view_selection = selection.clone();
+        let stored_input = input.clone();
         let logic: Logic = Box::new(move |_state: &mut ()| {
             let grid = terminal_grid(
                 Rc::clone(&view_emulator),
@@ -227,16 +237,24 @@ impl Mounted {
 
         let mut root = RenderRoot::new();
         root.set_theme(Box::new(frust::Theme::glyph_baseline()));
-        Mounted {
+        let mut mounted = Mounted {
             root,
             logic,
             state: (),
             tcx: TextContext::new(),
             emulator,
             selection,
+            input: stored_input,
+            feed,
             generation,
             copied,
-        }
+        };
+        // The manual demo feed's chunk 0 is due at t=0 regardless of any frame
+        // — drain it once here (`tests/term_input.rs`'s own precedent) so a
+        // later `drain`/`drain_hex` reflects only what a test actually typed,
+        // never the scripted replay's own canned output.
+        mounted.drain();
+        mounted
     }
 
     /// Simulate the feed pump publishing a new generation — i.e. new output
@@ -298,6 +316,64 @@ impl Mounted {
     /// The selected text, as the clipboard would receive it.
     fn text(&self) -> String {
         self.selection.text()
+    }
+
+    /// Deliver one mobile snapshot down the focus path, exactly as
+    /// `nativeImeApply`/`imeRoundTrip` do (`tests/term_input.rs`'s own
+    /// `apply`, mirrored here so a selection test can also drive typing).
+    fn apply(&mut self, text: &str) {
+        let end = text.encode_utf16().count() as i32;
+        let state = EditingState {
+            text: text.to_string(),
+            selection_base: end,
+            selection_extent: end,
+            composing_base: -1,
+            composing_extent: -1,
+        };
+        self.root.event(
+            &mut self.state,
+            &InputEvent::Ime(ImeEvent::ApplyEditingState(state)),
+        );
+    }
+
+    /// Type `text` the way a soft keyboard does: one snapshot per character,
+    /// each built on the mirror the widget currently publishes.
+    fn type_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            let mut buffer = self.mirror();
+            buffer.push(ch);
+            self.apply(&buffer);
+        }
+    }
+
+    /// The editing state the widget currently publishes to the platform.
+    fn published(&self) -> EditingState {
+        self.input.published()
+    }
+
+    fn mirror(&self) -> String {
+        self.published().text
+    }
+
+    /// How many UTF-16 units of the user's own typing the shared source is
+    /// still holding — the content-free scrub assertion (see
+    /// `KeystrokeSource::buffered_units`).
+    fn buffered_units(&self) -> usize {
+        self.input.source.borrow().buffered_units()
+    }
+
+    /// Everything the session has been sent since the last drain.
+    fn drain(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.feed
+            .borrow_mut()
+            .drain_output(&mut |bytes| out.extend_from_slice(bytes));
+        out
+    }
+
+    /// [`drain`](Self::drain) as lowercase hex.
+    fn drain_hex(&mut self) -> String {
+        self.drain().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -667,6 +743,97 @@ fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
     assert!(
         mounted.root.ime_state().is_some(),
         "…and raises the keyboard"
+    );
+}
+
+#[test]
+fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.frame(0.0);
+
+    // Focus the grid and type an IN-PROGRESS command line — not a submitted
+    // one, and not empty.
+    let focus_at = mounted.cell(4, 0);
+    mounted.event(PointerPhase::Down, focus_at);
+    mounted.event(PointerPhase::Up, focus_at);
+    mounted.frame(10.0);
+    assert!(
+        mounted.root.is_focus_active(),
+        "sanity: the grid is focused"
+    );
+    mounted.type_text("ls -l");
+    assert_eq!(mounted.mirror(), "ls -l", "sanity: the line is mid-command");
+    assert!(
+        mounted.buffered_units() > 0,
+        "sanity: the line is buffered before the dismiss"
+    );
+    mounted.drain(); // discard the typing's own echo before the byte assertion below
+
+    // Long-press elsewhere to select a word, then release.
+    mounted.hold(mounted.cell(0, 8)); // "build"
+    mounted.event(PointerPhase::Up, mounted.cell(0, 8));
+    mounted.frame(HELD_MS + 40.0);
+    assert!(
+        mounted.selection.range().is_some(),
+        "sanity: something to clear"
+    );
+
+    // The clearing tap. Deliberately far from the floating Copy chip's own
+    // pill (which anchors near the release point, top-left here) — a tap
+    // landing on the chip's own Dismiss half clears the selection through
+    // `ChipTarget::Dismiss` instead, never reaching the grid's own selection
+    // Down arm at all. Consumed entirely by *this grid's* Down arm —
+    // `Handled`, and frust-core still forces a focus-path blur on it
+    // (`RenderRoot::event`: any pointer `Down` that claims no focus is a
+    // blur, `Handled` or not) — the exact edge case `note_focus_edge` now
+    // has to tell apart from a real departure.
+    let elsewhere = Point::new(PHONE.width - 20.0, PHONE.height - 20.0);
+    assert!(
+        !chip_rect(mounted.cell(0, 8), PHONE).contains(elsewhere),
+        "sanity: the clearing tap must miss the chip's own pill"
+    );
+    mounted.event(PointerPhase::Down, elsewhere);
+    mounted.event(PointerPhase::Up, elsewhere);
+    mounted.frame(HELD_MS + 100.0);
+
+    assert_eq!(
+        mounted.selection.range(),
+        None,
+        "sanity: the tap dismissed the selection"
+    );
+    assert!(
+        !mounted.root.is_focus_active(),
+        "the dismissing tap still does not (re)focus the grid — unchanged \
+         from the original behavior"
+    );
+    assert!(
+        mounted.root.ime_state().is_none(),
+        "…and still does not summon the keyboard"
+    );
+
+    // THE FIX: unlike a real departure, this Down was consumed by the grid
+    // itself — a hand-off, not a blur — so the diff baseline for the
+    // in-progress line must survive it.
+    assert!(
+        mounted.buffered_units() > 0,
+        "a dismissing tap the grid itself consumed must NOT scrub the \
+         in-progress input baseline — the session is plainly still being \
+         typed into"
+    );
+    assert_eq!(mounted.mirror(), "ls -l", "the whole line, untouched");
+
+    // And the diff engine still has a live baseline to shorten: the next
+    // snapshot (a real Backspace) still emits, rather than the silent no-op
+    // an actually-scrubbed baseline would produce.
+    let mut shorter = mounted.mirror();
+    shorter.pop();
+    mounted.apply(&shorter);
+    assert_eq!(
+        mounted.drain_hex(),
+        "7f",
+        "the next shortening snapshot still emits a real backspace"
     );
 }
 
