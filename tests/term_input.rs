@@ -26,7 +26,10 @@
 //! - a **stale** snapshot arriving into that empty baseline — the platform
 //!   still holding the line it was handed a Return for — replays nothing,
 //!   whether or not it carries the Return (Android's submit leaves as an
-//!   editor action, so the line it strands has no newline in it at all);
+//!   editor action, so the line it strands has no newline in it at all),
+//!   whether or not the line is word-shaped (`hunter2` is refused on its
+//!   content, not its shape), and on **every** frame of that window rather
+//!   than only its first;
 //! - a whole-buffer replacement snapshot sends **nothing** and re-publishes;
 //! - the buffers are scrubbed on a blur and on unmount — but *not* on a key
 //!   bar hand-off, which is the same session still being typed into;
@@ -566,6 +569,43 @@ fn a_stale_android_snapshot_carries_no_newline_and_still_replays_nothing() {
     );
 
     // The session is still live, and the shot is spent.
+    mounted.type_text("x");
+    assert_eq!(mounted.drain_hex(), "78");
+}
+
+#[test]
+fn a_word_shaped_stale_line_replays_nothing_on_any_frame_of_the_window() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+
+    // The password at a prompt with echo off (review R2-F2): typed, then
+    // submitted with Android's editor action, so the `Editable` is stranded
+    // holding `hunter2` with NO newline — seven alphanumeric units, exactly the
+    // shape a gesture commit has.
+    mounted.type_text("hunter2");
+    assert_eq!(mounted.drain_hex(), "68756e74657232", "the line was typed");
+    mounted.key(Key::Named(NamedKey::Enter));
+    assert_eq!(mounted.drain_hex(), "0d", "…and the Return went out");
+    assert_eq!(mounted.mirror(), "", "leaving an empty baseline");
+
+    // RAW, and TWICE: `performEditorAction` only counts down `imeResyncFrames`,
+    // so the same stale buffer can be polled on several frames (review R2-F1).
+    for round in 1..=2 {
+        mounted.apply("hunter2");
+        assert!(
+            mounted.drain().is_empty(),
+            "round {round} replayed the password to the session"
+        );
+        assert_eq!(
+            mounted.mirror(),
+            "",
+            "round {round}: the empty baseline is what is re-published"
+        );
+    }
+
+    // The session is still live once the platform catches up.
     mounted.type_text("x");
     assert_eq!(mounted.drain_hex(), "78");
 }
