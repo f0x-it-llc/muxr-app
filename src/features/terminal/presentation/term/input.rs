@@ -118,12 +118,20 @@
 //!   (`clamp_front`, `set_mirror`, the re-anchor, the composing echo) now
 //!   rewrite the buffers **in place**, and the one temporary that survives —
 //!   the diff's `added` middle — is wrapped so its own drop scrubs it;
-//! - nothing oversized is ever *stored*: `set_mirror` keeps only the
-//!   clamped suffix of a snapshot, so a pasted token or a dictation
-//!   burst cannot grow a buffer past the capacity
-//!   [`new`](KeystrokeSource::new) pre-reserved (a reallocation frees the old
-//!   plaintext where no scrub can reach it — `zeroize`'s own documented
-//!   caveat);
+//! - nothing oversized is ever *stored* in **either diff buffer**:
+//!   `set_mirror` keeps only the clamped suffix of a snapshot, so a pasted
+//!   token or a dictation burst cannot grow the mirror or the history past the
+//!   capacity [`new`](KeystrokeSource::new) pre-reserved (a reallocation frees
+//!   the old plaintext where no scrub can reach it — `zeroize`'s own
+//!   documented caveat). The **composing echo is deliberately unbounded**, and
+//!   is the one buffer that is: a composition's indices are indices into it,
+//!   so clamping it would hand the bridge a range into text that cannot hold
+//!   it. Growing it is safe because it — like the mirror — is only ever
+//!   written `zeroize()`-then-`push_str`, so the allocation a growth frees
+//!   holds zeros rather than the previous composition. The **history** is the
+//!   one buffer that appends onto live plaintext, which is why its reserve,
+//!   and only its reserve, has to cover the outward-rounded bound (review FC3;
+//!   see [`new`](KeystrokeSource::new));
 //! - [`KeystrokeSource::scrub`] drops both buffers, the composing echo, and
 //!   the diff baseline with them, at every boundary where the text stops being
 //!   live: a submitted line (below), a blur, `read_only`, and the pane's
@@ -147,7 +155,15 @@
 //! - a key cap holding the focus path when the keyboard is dismissed keeps the
 //!   buffers until the pane's teardown (already recorded on the grid widget's
 //!   `note_focus_edge`; closing it needs a key-cap teardown scrub, a separate
-//!   item and not this module's).
+//!   item and not this module's);
+//! - the post-scrub replay guard below is a **shape** test, not a proof
+//!   (review FC3): a stale line that is itself one bare word inside the
+//!   guard's bound — `ls`, `htop`, a word-shaped password — is
+//!   indistinguishable by shape from a genuine gesture commit, and still
+//!   replays to the host in the frames the platform is behind. What the guard
+//!   does close is every stale line carrying a Return, every line past the
+//!   bound, and every line with the whitespace or punctuation a shell line
+//!   almost always has.
 //!
 //! # A submitted line is dropped, not kept as a baseline
 //!
@@ -174,31 +190,66 @@
 //!
 //! ## The frame the platform may still be holding the old line
 //!
-//! Dropping *our* baseline does not drop the *platform's*. Both bridges apply
-//! a republished state synchronously (above), so the ordinary next snapshot is
-//! built on the empty buffer — but a round trip that errors, answers nil, or
-//! is simply a frame late leaves the platform holding the pre-Return text, and
-//! **that** snapshot, diffed against an empty baseline, reads as one
-//! `added` run holding the whole submitted line plus its Return. Emitted, it
-//! re-executes the command on the remote host. The oversized-*delete* guard
-//! below cannot see this one: nothing was removed (review FC2).
+//! Dropping *our* baseline does not drop the *platform's*. An ordinary edit
+//! round trip is applied synchronously (above), but a **submit** is not:
+//! Android's `FrustInputConnection.performEditorAction` forwards
+//! `IME_ACTION_DONE` through `nativeImeAction` and then only counts down
+//! `imeResyncFrames`, its own comment recording that "a submit clears the
+//! field on the next-frame rebuild". For those frames the `Editable` still
+//! holds the pre-submit text; on iOS a round trip that errors, answers nil or
+//! is simply a frame late leaves the same window open.
 //!
-//! So every scrub arms a **one shot**. While it is armed, the next snapshot
-//! whose `added` carries a Return **together with other text** is read as that
-//! desync: nothing is emitted, the (empty) mirror is re-published to pull the
-//! platform back into step, and the shot is spent. Two deliberate narrowings:
+//! Diffed against the empty baseline the scrub left, **that** snapshot reads
+//! as one `added` run holding the whole submitted line. Emitted, it re-executes
+//! the command on a remote host that is back at a prompt — or re-transmits the
+//! password typed at a prompt with echo *off* into a shell with echo *on*. The
+//! oversized-*delete* guard below cannot see this one: nothing was removed
+//! (review FC2).
+//!
+//! And the stale line does not necessarily carry a Return — which is the half
+//! review FC3 closed. **On Android a submitted line never has a newline in the
+//! platform buffer at all**, because Return left as an editor action rather
+//! than as text: the stale `added` is the bare command line (`"hunter2"`, not
+//! `"hunter2\n"`), so a guard keyed on the Return spends its shot without ever
+//! firing.
+//!
+//! So every scrub arms a **one shot**, and while it is armed a snapshot is let
+//! through only when its `added` is at most **one commit's worth** of input
+//! ([`is_one_commit`]). The reasoning is the empty mirror: while the shot is
+//! armed the baseline is provably empty, so `added` is everything typed
+//! *since* the Return — which on the first snapshot after a submit is at most
+//! one keystroke or one gesture-typed word, where a shell line is many
+//! commits. Anything else emits nothing, re-publishes the (empty) mirror to
+//! pull the platform back into step, and spends the shot.
+//!
+//! Three deliberate narrowings, each pinned by a test:
 //!
 //! - a Return **and nothing else** is let through, because it carries no
 //!   command text to replay and because a blank line at a shell prompt is
 //!   ordinary typing — suppressing it would swallow every other Return the
-//!   user pressed twice in a row;
-//! - the shot is spent by the first ordinary snapshot too (one typed
-//!   character consumes it), so nothing past that window is ever suppressed.
+//!   user pressed twice in a row. Being a submit of its own, it re-arms the
+//!   shot;
+//! - the shot is spent by the first snapshot that **actually adds something**,
+//!   and by nothing else (review FC3). A snapshot that adds nothing — Gboard's
+//!   `finishComposingText()` going straight to `sync()` pushes exactly such a
+//!   no-op — emits nothing and therefore closes no window, so spending the
+//!   shot on it would retire the guard while its precondition still held;
+//! - a composing snapshot returns before all of this, so a composition does not
+//!   spend the shot either.
 //!
-//! The trade, accepted: a genuine multi-line paste made as the *very first*
-//! action after a Return is dropped, and the user retries it. That is far
-//! rarer than the desync, and a dropped paste is an annoyance where a
-//! re-executed command is an incident.
+//! The trade, accepted: a paste, a dictated phrase, or any other multi-word
+//! commit made as the *very first* action after a Return is dropped, and the
+//! user retries it. That is far rarer than the desync, and a dropped paste is
+//! an annoyance where a re-executed command is an incident.
+//!
+//! **What this does not close**, recorded with the residuals above rather than
+//! claimed: a stale line that is itself one bare word inside the bound (`ls`)
+//! looks exactly like a gesture commit, and still replays. A frust-side bridge
+//! fix making the submit path re-poll synchronously narrows the window from the
+//! other end, and this guard is deliberately not conditional on it: an app
+//! cannot assume the bridge version it runs against, the resync stays
+//! multi-frame in the fallback path, and the emit choke point is where defense
+//! in depth belongs.
 //!
 //! # An oversized single edit is a desync, not intent
 //!
@@ -329,6 +380,38 @@ pub const MAX_PENDING_BACKSPACES: usize = 4;
 /// incident.
 pub const MAX_SNAPSHOT_DELETE: usize = 8;
 
+/// How many UTF-16 code units **one keystroke** can be, and therefore the
+/// shortest add the post-scrub guard admits without looking at its shape at all
+/// (see [`is_one_commit`]).
+///
+/// **2**, because a keyboard's own emoji panel commits a surrogate pair — two
+/// units for one tap — and nothing a single key press produces is longer. Every
+/// character a shell line is built out of (a space, a `-`, a `|`, a quote) is
+/// one unit, so this is what keeps the guard from swallowing the ordinary
+/// first-keystroke-after-a-Return whatever character it happens to be.
+const SINGLE_KEYSTROKE_UNITS: usize = 2;
+
+/// The longest single IME **commit** the post-scrub guard admits as genuine
+/// first input (see [`is_one_commit`] and the [module docs](self)).
+///
+/// **16**, derived from what one commit can be rather than picked round. The
+/// only multi-unit add a soft keyboard produces in one go is a gesture-typed
+/// word: frust's Android bridge deliberately keeps swipe typing working on an
+/// [`ImeContentType::Terminal`](frust::authoring::ImeContentType) field (it
+/// sets `TYPE_TEXT_FLAG_NO_SUGGESTIONS` but **not**
+/// `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`, which an S2-spike device check found
+/// some IMEs read as "no gestures"), so a whole word arriving in one snapshot
+/// is expected traffic here. Fifteen letters is the far tail of English word
+/// length, plus the one trailing space a gesture commit appends: 16. Anything
+/// longer is more than one commit, and on this seam that means a line.
+///
+/// The trade this makes deliberately, and the reason it is not smaller: a bound
+/// tight enough to reject every short stale line would also reject the gesture
+/// commits this field is set up to receive. A stale line inside the bound is
+/// caught by [`is_one_commit`]'s shape rule instead — unless it is itself one
+/// bare word, which is the residual the [module docs](self) record.
+pub const MAX_POST_SCRUB_ADD: usize = 16;
+
 // ---------------------------------------------------------------------------
 // UTF-16 arithmetic (the seam's index unit)
 // ---------------------------------------------------------------------------
@@ -418,6 +501,51 @@ fn carries_return(text: &str) -> bool {
 /// ordinary typing.
 fn is_bare_return(text: &str) -> bool {
     matches!(text, "\n" | "\r" | "\r\n")
+}
+
+/// Whether `added` is at most **one commit's worth** of input — the
+/// post-scrub replay guard's admission test (see the [module docs](self)).
+///
+/// While the shot is armed the mirror is provably empty, so `added` is
+/// everything the user has typed *since* the Return. On the first snapshot
+/// after a submit that is at most one commit; a stale line is many. The three
+/// rules, in order:
+///
+/// 1. **A Return is admitted only bare.** A Return *with* text is the shape
+///    review FC2 caught: the whole submitted line and its newline, which
+///    [`text_bytes`] would map to CR and re-execute. A Return *alone* carries
+///    nothing to replay (the module docs' first narrowing).
+/// 2. **Any single keystroke passes**, whatever character it is
+///    ([`SINGLE_KEYSTROKE_UNITS`]) — a space, a `-` or a `|` is as ordinary at
+///    a shell prompt as a letter, and an emoji is one tap for two units.
+/// 3. **Longer, and it has to look like one word**: at most
+///    [`MAX_POST_SCRUB_ADD`] units of alphanumerics, with the single trailing
+///    space a gesture commit appends allowed. `"status"` and `"status "` are
+///    one commit; `"sudo -i"`, `"ls -la"` and `"cd /tmp"` are not — a shell
+///    line's whitespace and punctuation is exactly what makes it more than one.
+///    (Alphanumeric is Unicode-wide, so a kana→kanji conversion commit is one
+///    word here too.)
+///
+/// A **shape** test, not a proof, and the module docs record the residual it
+/// leaves: a stale line that is itself one bare word inside the bound (`ls`,
+/// `htop`, a word-shaped password) is indistinguishable from a gesture commit
+/// and is admitted.
+fn is_one_commit(added: &str) -> bool {
+    if carries_return(added) {
+        return is_bare_return(added);
+    }
+    let units = len_utf16(added);
+    if units <= SINGLE_KEYSTROKE_UNITS {
+        return true;
+    }
+    if units > MAX_POST_SCRUB_ADD {
+        return false;
+    }
+    added
+        .strip_suffix(' ')
+        .unwrap_or(added)
+        .chars()
+        .all(char::is_alphanumeric)
 }
 
 /// The minimal `(removed, added)` edit turning `old` into `new`: the common
@@ -749,10 +877,11 @@ pub enum InputClass {
     /// A latch key was toggled.
     Latch,
     /// A snapshot read as a bridge/dictation **desync** rather than as typing:
-    /// one deleting more than [`MAX_SNAPSHOT_DELETE`] units, or one replaying a
-    /// just-submitted line into the empty baseline a scrub left. Nothing is
-    /// emitted and the mirror is re-published to pull the platform back into
-    /// step (see the [module docs](self)).
+    /// one deleting more than [`MAX_SNAPSHOT_DELETE`] units, or one adding more
+    /// than one commit's worth ([`is_one_commit`]) into the empty baseline a
+    /// scrub left — a just-submitted line replayed. Nothing is emitted and the
+    /// mirror is re-published to pull the platform back into step (see the
+    /// [module docs](self)).
     Desync,
 }
 
@@ -878,8 +1007,11 @@ pub struct KeystrokeSource {
     /// **One shot, armed by every [`scrub`](Self::scrub)**: the baseline was
     /// just dropped to empty, so the platform may still be holding the line
     /// that was submitted (see the [module docs](self)). Spent by the next
-    /// snapshot either way — as the stale-replay guard if that one adds a
-    /// Return with text, and harmlessly if it is ordinary typing.
+    /// snapshot that actually **adds** something — as the stale-replay guard
+    /// if that add is more than one commit's worth ([`is_one_commit`]), and
+    /// harmlessly if it is ordinary typing. A snapshot that adds nothing leaves
+    /// it armed, because the empty baseline it guards outlives such a snapshot
+    /// (review FC3).
     baseline_dropped: bool,
     /// Armed by a `Key::Named(Backspace)`, consumed by the matching snapshot
     /// shortening (the dedupe rule).
@@ -908,17 +1040,25 @@ impl KeystrokeSource {
     /// Both buffers are allocated at their steady-state capacity up front:
     /// a `String` that grows reallocates, and a reallocation frees the old
     /// plaintext where no scrub can reach it (`zeroize`'s own documented
-    /// caveat). Pre-reserving the bound each buffer is clamped to means
-    /// **no** typing path grows one — three bytes per UTF-16 unit covers every
-    /// character below the surrogate range, and a surrogate pair is 4 bytes for
-    /// 2 units, so `units * 3` is an upper bound for any text at all. The
-    /// mirror's bound is [`MIRROR_STORE_CAP`] rather than [`MIRROR_CAP`]
-    /// because that is what `set_mirror` clamps to (one unit past the cap, so
-    /// the re-anchor still fires).
+    /// caveat). Three bytes per UTF-16 unit is an upper bound for any text at
+    /// all: it covers every character below the surrogate range, and a
+    /// surrogate pair is 4 bytes for 2 units. The mirror's bound is
+    /// [`MIRROR_STORE_CAP`] rather than [`MIRROR_CAP`] because that is what
+    /// `set_mirror` clamps to (one unit past the cap, so the re-anchor still
+    /// fires).
+    ///
+    /// The history reserves **one unit more** than [`HISTORY_CAP`]
+    /// (review FC3). `clamp_front` rounds *outward* to a character boundary
+    /// ([`utf16_suffix`]), so a clamp landing mid-surrogate-pair legitimately
+    /// leaves `HISTORY_CAP + 1` units — one byte past a `HISTORY_CAP * 3`
+    /// reserve, and therefore one reallocation. That matters here and nowhere
+    /// else: `set_mirror` **appends** to the live history, so a growth would
+    /// free the user's own plaintext, where the mirror and the composing echo
+    /// are rewritten `zeroize()`-then-`push_str` and can only ever free zeros.
     pub fn new() -> Self {
         Self {
             mirror: Zeroizing::new(String::with_capacity(MIRROR_STORE_CAP * 3)),
-            history: Zeroizing::new(String::with_capacity(HISTORY_CAP * 3)),
+            history: Zeroizing::new(String::with_capacity((HISTORY_CAP + 1) * 3)),
             composing: None,
             baseline_dropped: false,
             pending_backspaces: 0,
@@ -1183,8 +1323,10 @@ impl KeystrokeSource {
     ///    emits nothing, so the stale window it guards is still open behind it.
     /// 2. Diff against the mirror, then the two desync guards, which both emit
     ///    nothing, move nothing and re-publish (see the [module docs](self)):
-    ///    an `added` replaying a submitted line into the one shot the last
-    ///    scrub armed, and an oversized `removed`.
+    ///    an `added` bigger than one commit's worth arriving into the one shot
+    ///    the last scrub armed — a submitted line being replayed, with or
+    ///    without the Return the platform's own submit path decides — and an
+    ///    oversized `removed`.
     /// 3. Otherwise a shortening consumes any armed `Key::Named(Backspace)`
     ///    echo first (the dedupe rule), and any snapshot that does not shorten
     ///    retires the arm.
@@ -1215,18 +1357,25 @@ impl KeystrokeSource {
         // scrubs it (review M6).
         let added = Zeroizing::new(added);
 
-        if std::mem::take(&mut self.baseline_dropped)
-            && carries_return(&added)
-            && !is_bare_return(&added)
-        {
+        if !added.is_empty() {
             // The last scrub dropped OUR baseline; the platform may still hold
             // the line that was submitted. Diffed against nothing, that stale
-            // snapshot reads as one `added` run carrying the whole line and its
-            // Return — and `text_bytes` maps `\n` to CR, so emitting it would
-            // re-execute the command on the remote host (review FC2). The
-            // oversized-delete guard below cannot catch this one: nothing was
-            // removed. A Return *alone* is let through (see the module docs).
-            return self.desync();
+            // snapshot reads as one `added` run carrying the whole line — with
+            // its Return on iOS, and WITHOUT one on Android, where Return left
+            // as an editor action rather than as text (review FC3). Emitting
+            // either re-runs the command on the remote host; the
+            // oversized-delete guard below cannot catch them, because nothing
+            // was removed (review FC2). So while the shot is armed, only one
+            // commit's worth of input is let through.
+            //
+            // The shot is spent here and only here: a snapshot that adds
+            // nothing (Gboard's `finishComposingText()` → `sync()`) emits
+            // nothing and closes no window, so it must not retire a guard whose
+            // precondition — the empty baseline — outlives it.
+            let armed = std::mem::take(&mut self.baseline_dropped);
+            if armed && !is_one_commit(&added) {
+                return self.desync();
+            }
         }
 
         if removed > MAX_SNAPSHOT_DELETE {
@@ -1780,22 +1929,159 @@ mod tests {
     }
 
     #[test]
-    fn the_stale_guard_is_armed_by_the_android_return_key_too() {
-        // `IME_ACTION_DONE` drops the baseline from the key path, and the
-        // Editable it leaves behind can be just as stale.
+    fn the_stale_android_shape_carries_no_newline_and_is_still_caught() {
+        // THE Android case (review FC3), and the reason the guard cannot be
+        // keyed on the Return: `IME_ACTION_DONE` leaves as an editor action,
+        // never as text, and `performEditorAction` does not re-poll — it counts
+        // down `imeResyncFrames`, its own comment recording that the field is
+        // cleared on the next-frame REBUILD. So the `Editable` keeps the
+        // pre-submit line, WITHOUT a newline, for those frames.
         let mut source = KeystrokeSource::new();
-        type_text(&mut source, "sudo -i");
+        // Positive preconditions: the line really was typed, and the Return
+        // really went out, before there is any stale window to speak of.
+        assert_eq!(hex(&type_text(&mut source, "sudo -i")), "7375646f202d69");
         assert_eq!(
             hex(&source
                 .on_key(&Key::Named(NamedKey::Enter), Modifiers::default())
                 .bytes),
             "0d"
         );
+        assert_eq!(source.mirror(), "", "…leaving an empty baseline, armed");
+        let sent = source.emitted();
+
+        // RAW: built from the PLATFORM's own stale buffer, deliberately not
+        // from `source.mirror()` — a snapshot built from our own mirror is
+        // what hid this shape in the first place.
+        let stale = source.on_snapshot(&snapshot("sudo -i"));
+        assert!(
+            stale.bytes.is_empty(),
+            "a missing newline is no excuse, got {}",
+            hex(&stale.bytes)
+        );
+        assert_eq!(stale.class, InputClass::Desync);
+        assert!(stale.reconciled, "…and the caller re-publishes");
+        assert_eq!(source.emitted(), sent, "not one byte reached the session");
+        assert_eq!(
+            source.published().text,
+            "",
+            "the empty baseline is what the platform is pulled back to"
+        );
+    }
+
+    #[test]
+    fn the_stale_ios_shape_carries_the_return_and_is_caught_separately() {
+        // The other platform's shape of the same window, kept as its own case:
+        // iOS accumulates the literal Return in its mirror, so the stale buffer
+        // arrives WITH it — which is what review FC2 closed first, and what the
+        // Android shape above proved was only half the finding.
+        let mut source = KeystrokeSource::new();
+        assert_eq!(hex(&type_text(&mut source, "sudo -i")), "7375646f202d69");
+        assert_eq!(
+            hex(&source.on_snapshot(&snapshot("sudo -i\r")).bytes),
+            "0d",
+            "the Return went out"
+        );
+        assert_eq!(source.mirror(), "", "…leaving an empty baseline, armed");
+        let sent = source.emitted();
 
         let stale = source.on_snapshot(&snapshot("sudo -i\r"));
-        assert!(stale.bytes.is_empty(), "no replay from the key path either");
+        assert!(
+            stale.bytes.is_empty(),
+            "no replay from the iOS shape either"
+        );
         assert_eq!(stale.class, InputClass::Desync);
         assert!(stale.reconciled);
+        assert_eq!(source.emitted(), sent);
+    }
+
+    #[test]
+    fn genuine_first_input_after_a_return_still_lands() {
+        // The guard admits one commit's worth, so every shape a real first
+        // keystroke has survives it: one character, one emoji tap (two units
+        // for one commit), and one gesture-typed word — which the Android
+        // bridge deliberately keeps working on a terminal field — with or
+        // without the trailing space a gesture commit appends.
+        let cases: [(&str, &str); 4] = [
+            ("x", "78"),
+            ("\u{1f600}", "f09f9880"),
+            ("status", "737461747573"),
+            ("status ", "73746174757320"),
+        ];
+        for (first, expected) in cases {
+            let mut source = KeystrokeSource::new();
+            assert_eq!(hex(&type_text(&mut source, "ls")), "6c73");
+            assert_eq!(hex(&source.on_snapshot(&snapshot("ls\n")).bytes), "0d");
+            assert_eq!(source.mirror(), "", "armed, on an empty baseline");
+
+            // RAW again: the platform reconciled to that empty state inside the
+            // same round trip, so this snapshot is the first commit on it.
+            let emission = source.on_snapshot(&snapshot(first));
+            assert_eq!(hex(&emission.bytes), expected, "{first:?} must land");
+            assert_eq!(emission.class, InputClass::Text);
+            assert_eq!(source.mirror(), first, "…and become the new baseline");
+        }
+    }
+
+    #[test]
+    fn a_no_op_snapshot_does_not_spend_the_stale_shot() {
+        // Gboard's `finishComposingText()` goes straight to `sync()`, which
+        // pushes the mirror unchanged: a snapshot that adds nothing, emits
+        // nothing and closes no window. Spending the one shot on it would
+        // retire the guard while its precondition — the empty baseline — still
+        // held, and the stale replay behind it would fall through both guards
+        // (review FC3).
+        let mut source = KeystrokeSource::new();
+        assert_eq!(hex(&type_text(&mut source, "ls")), "6c73");
+        assert_eq!(hex(&source.on_snapshot(&snapshot("ls\n")).bytes), "0d");
+        assert_eq!(source.mirror(), "", "the baseline was dropped");
+        let sent = source.emitted();
+
+        let no_op = source.on_snapshot(&snapshot(""));
+        assert!(no_op.bytes.is_empty());
+        assert_eq!(no_op.class, InputClass::None);
+        assert_eq!(source.emitted(), sent, "a positive precondition: no-op");
+
+        // The shot is still armed, so the stale line behind it is still caught.
+        let stale = source.on_snapshot(&snapshot("ls -la"));
+        assert!(
+            stale.bytes.is_empty(),
+            "the shot was spent on a no-op, got {}",
+            hex(&stale.bytes)
+        );
+        assert_eq!(stale.class, InputClass::Desync);
+        assert!(stale.reconciled);
+        assert_eq!(source.emitted(), sent, "not one byte reached the session");
+    }
+
+    #[test]
+    fn the_one_commit_test_admits_a_keystroke_and_rejects_a_line() {
+        // The admission rule itself, as a table — what the guard above is.
+        let cases: [(&str, bool, &str); 12] = [
+            ("x", true, "one character"),
+            (" ", true, "…whatever character it is"),
+            ("-", true, "…including shell punctuation"),
+            ("\u{1f600}", true, "an emoji tap is two units, one commit"),
+            ("\n", true, "a bare Return has no command text to replay"),
+            ("\r\n", true, "…in either spelling"),
+            ("status", true, "one gesture-typed word"),
+            ("status ", true, "…plus the space a gesture commit appends"),
+            ("ls -la", false, "a shell line's whitespace gives it away"),
+            ("cd /tmp", false, "…as does its punctuation"),
+            ("ls\n", false, "a Return WITH text is the FC2 shape"),
+            (
+                "abcdefghijklmnopq",
+                false,
+                "one unit past the bound is no longer one commit",
+            ),
+        ];
+        for (added, expected, why) in cases {
+            assert_eq!(is_one_commit(added), expected, "{added:?}: {why}");
+        }
+        assert_eq!(
+            len_utf16("abcdefghijklmnopq"),
+            MAX_POST_SCRUB_ADD + 1,
+            "the long case really is one past the bound"
+        );
     }
 
     #[test]
