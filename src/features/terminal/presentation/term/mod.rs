@@ -51,6 +51,25 @@
 //! **Changing the cap is one constant: [`REPAINT_HZ`].** Nothing else derives
 //! from it.
 //!
+//! # The one exception: a synchronous echo drain
+//!
+//! A real PTY echoes a keystroke before the program under it answers, and
+//! coalescing that onto this module's own 30 Hz schedule would mean every
+//! typed character waits up to one tick before it's visible. So
+//! [`InputSeam::dispatch`] instead drains it **synchronously** — a borrow, a
+//! drain, and (if anything came back) one signal write, the same shape as
+//! [`pump_wake`] itself — right after
+//! [`TerminalFeed::send_input`](crate::features::terminal::domain::feed::TerminalFeed::send_input),
+//! in the very event pass the keystroke arrived in, rather than waiting on
+//! [`run_feed`]'s own timer. [`InputSeam::wire_pump`] is what wires a seam to
+//! the emulator/generation pair this needs; every lower-level seam test that
+//! drives its own pump by hand instead (`tests/term_input.rs`,
+//! `tests/term_selection.rs`, `tests/term_widget.rs`) leaves it unwired and
+//! keeps working exactly as before. This is also what lets a drained replay
+//! stop meaning "keep the timer running forever because echo is on" — see
+//! `data::feeds::DemoFeed::is_open`'s own doc for the exit condition it
+//! unlocks.
+//!
 //! # Rebuild model
 //!
 //! A generation write wakes one whole-app tracked rebuild (`docs/ARCHITECTURE.md`'s
@@ -194,10 +213,30 @@ pub struct InputSeam {
     /// real blur (nothing holds it, so the buffers go). Monotonic; the value
     /// itself means nothing.
     focus_claim: Rc<Cell<u64>>,
+    /// The session's own pump — the emulator an echo lands in and the
+    /// generation signal that publishes it — wired in once by
+    /// [`wire_pump`](Self::wire_pump). `None` until then, which is exactly
+    /// what every lower-level seam test that drives its own pump by hand
+    /// leaves it at (see the [module docs](self)' synchronous-echo section).
+    pump: Option<PumpHandle>,
+}
+
+/// The session's own pump, as [`InputSeam::dispatch`] needs it to drain an
+/// echo synchronously — see [`InputSeam::wire_pump`].
+#[derive(Clone)]
+struct PumpHandle {
+    /// The emulator the echoed bytes land in.
+    emulator: SharedEmulator,
+    /// The generation signal the drain publishes to — the same one
+    /// [`run_feed`]'s scheduled loop shares, so a rebuild sees one
+    /// monotonically increasing counter no matter which of the two woke it.
+    generation: RwSignal<u64>,
 }
 
 impl InputSeam {
     /// A seam over `feed`, with a fresh source and a revision signal at zero.
+    ///
+    /// Not wired to a pump yet — see [`wire_pump`](Self::wire_pump).
     pub fn new(feed: SharedFeed) -> Self {
         Self {
             source: Rc::new(RefCell::new(KeystrokeSource::new())),
@@ -205,7 +244,32 @@ impl InputSeam {
             revision: RwSignal::new(0),
             read_only: Rc::new(Cell::new(false)),
             focus_claim: Rc::new(Cell::new(0)),
+            pump: None,
         }
+    }
+
+    /// Wire this seam to the session's own feed pump — the emulator an
+    /// echoed byte must land in, and the generation signal the pump
+    /// publishes to (see the [module docs](self)' synchronous-echo section).
+    ///
+    /// Once wired, [`dispatch`](Self::dispatch) drains the feed
+    /// synchronously right after sending, in the same event pass a keystroke
+    /// arrived in, instead of waiting out [`run_feed`]'s next scheduled
+    /// wake. Called exactly once, from `LiveSession::enter`
+    /// (`presentation::controller`), immediately after constructing the
+    /// seam, the emulator and the generation signal they end up sharing with
+    /// [`spawn_feed_pump`].
+    ///
+    /// Every lower-level seam test (`tests/term_input.rs`,
+    /// `tests/term_selection.rs`, `tests/term_widget.rs`) never calls this —
+    /// each drives [`pump_wake`] by hand instead, so `dispatch` there stays a
+    /// plain send with no synchronous drain, exactly as before this method
+    /// existed.
+    pub fn wire_pump(&mut self, emulator: SharedEmulator, generation: RwSignal<u64>) {
+        self.pump = Some(PumpHandle {
+            emulator,
+            generation,
+        });
     }
 
     /// Send `emission`'s bytes to the session and wake anything reading
@@ -216,9 +280,29 @@ impl InputSeam {
     /// route out (the latch having already been applied inside the source).
     /// That is what makes it the right place for the read-only gate to be
     /// final: no byte leaves a read-only session, whichever widget derived it.
+    ///
+    /// # The synchronous echo drain
+    ///
+    /// Once [`wire_pump`](Self::wire_pump) has run, sending non-empty bytes
+    /// also drains the feed **right here**, synchronously — see the
+    /// [module docs](self)' section on why. The `feed.borrow_mut()` above
+    /// has already dropped by the time this runs (it lives for only the one
+    /// statement above it), and [`pump_wake`] takes its own fresh borrows of
+    /// `feed` and the pump's emulator — so no `RefCell` borrow is ever held
+    /// across the call, the same discipline [`run_feed`]'s own docs require.
+    /// `published` is reseeded from `generation.get_untracked()` on every
+    /// call rather than carried as state on this seam: `pump_wake` always
+    /// leaves the two in lockstep (it increments `published` then writes
+    /// that same value into `generation`), so reading the signal fresh here
+    /// is exactly equivalent to sharing one persistent counter with
+    /// [`run_feed`]'s own loop — with no extra shared state to keep in sync.
     pub fn dispatch(&self, emission: &Emission) {
         if !emission.bytes.is_empty() && !self.read_only() {
             self.feed.borrow_mut().send_input(&emission.bytes);
+            if let Some(pump) = &self.pump {
+                let mut published = pump.generation.get_untracked();
+                pump_wake(&self.feed, &pump.emulator, pump.generation, &mut published);
+            }
         }
         let revision = self.source.borrow().revision();
         if revision != self.revision.get_untracked() {
@@ -767,6 +851,12 @@ impl TerminalEmulator {
 /// Returns whether the generation moved. Split out of [`run_feed`] so the
 /// one-write-per-wake rule is testable without a timer: the whole coalescing
 /// mechanism lives in this function, and the loop around it only sleeps.
+///
+/// Two callers share this one wake — [`run_feed`]'s scheduled loop, and
+/// [`InputSeam::dispatch`]'s synchronous echo drain (see the [module
+/// docs](self)) — and both write the same `generation` signal, so a caller
+/// only ever needs `published` seeded from `generation.get_untracked()`
+/// right before the call, never carried as persistent state across wakes.
 pub fn pump_wake(
     feed: &RefCell<dyn TerminalFeed>,
     emulator: &RefCell<TerminalEmulator>,
