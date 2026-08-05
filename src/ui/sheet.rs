@@ -581,6 +581,15 @@ pub struct SheetScaffoldWidget {
     /// Whether that press started outside the panel — only an outside press
     /// released outside dismisses.
     down_outside: bool,
+    /// Whether a `Down` has already claimed focus this open — the claim-once
+    /// guard (see `event`'s Down arm). Seeding `false` in [`View::build`] is
+    /// correct with no reset needed elsewhere: [`show_sheet`] pushes a fresh
+    /// page per open (a new [`SheetScaffoldWidget`] is built, and `teardown`
+    /// runs on close), so there is no retained instance to reset — unlike
+    /// frust's own FAB menu (`material::fab_menu`), which *persists* across
+    /// open/close and resets this same flag on its own close transition
+    /// instead.
+    focus_claimed: bool,
 }
 
 impl<State: 'static> View<State> for SheetScaffoldView<State> {
@@ -601,6 +610,7 @@ impl<State: 'static> View<State> for SheetScaffoldView<State> {
             dismissed: false,
             captured: false,
             down_outside: false,
+            focus_claimed: false,
         }
     }
 
@@ -804,12 +814,16 @@ impl Widget for SheetScaffoldWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A press anywhere claims focus so a later Escape has a chain to
-        // travel (`glyph::dialog`'s opt-in).
+        // The first press anywhere claims focus so a later Escape has a chain
+        // to travel (`glyph::dialog`'s opt-in); the claim is held until this
+        // page pops (see `focus_claimed`'s doc), so a later press re-claiming
+        // would be redundant.
         if let InputEvent::Pointer(p) = event
             && p.phase == PointerPhase::Down
+            && !self.focus_claimed
         {
             ctx.request_focus();
+            self.focus_claimed = true;
         }
         // The body (or a captured/focused descendant of it) sees the event
         // first; only what it ignores reaches the barrier below.
@@ -878,6 +892,9 @@ impl Widget for SheetScaffoldWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::SizedBox;
+    use frust::authoring::{PointerButton, PointerEvent};
+    use std::any::Any;
 
     #[test]
     fn the_handle_zone_is_the_sum_of_its_three_bands() {
@@ -927,6 +944,65 @@ mod tests {
         sheet.mark_closed();
         assert!(!sheet.close(), "the sheet is already gone");
         assert_eq!(pops.get(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Focus claim-once guard
+    // -----------------------------------------------------------------------
+
+    fn ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    #[test]
+    fn a_second_down_within_one_open_does_not_reclaim_focus() {
+        let body: AnyView<()> = any(SizedBox::<()>(Some(300.0), Some(200.0)));
+        let view = SheetScaffoldView {
+            body,
+            on_dismiss: None,
+        };
+        let mut next_id = 0u64;
+        let widget = view.build(&mut BuildCtx::new(&mut next_id));
+        let mut pod = ChildPod::new(Box::new(widget));
+
+        let area = Size::new(400.0, 800.0);
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
+
+        let mut dummy = ();
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            // The Down at (5, 5) lands well above the bottom-anchored panel,
+            // so the matching Up dismisses (mirrors frust's own
+            // `material::sheet` test) — that only clears `captured`, not the
+            // claim-once guard under test.
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Up, 5.0, 5.0));
+        }
+
+        // Isolate the second Down's own effect on the flag: if the guard
+        // holds, the widget never re-calls `request_focus`, so an externally
+        // cleared flag stays cleared.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(
+            !pod.is_focused(),
+            "a second Down within the same open must not re-request focus"
+        );
     }
 
     #[test]
