@@ -128,6 +128,7 @@
 //! children to forward one to and must never consume one.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use frust::authoring::text::{TextContext, TextLayout};
 use frust::authoring::{
@@ -927,10 +928,13 @@ impl TerminalGridWidget {
         }
         let from = *self.blink_from.get_or_insert(ctx.frame_time());
         let since = ctx.frame_time().saturating_sub(from).as_secs_f64() * 1000.0;
-        // Paced, not unpaced: a 1.1s two-state blink is exactly the "decorative
-        // loop whose exact cadence is imperceptible" class the mobile frame gate
-        // may throttle.
-        ctx.request_frame_paced();
+        // Paced at the blink's own half-period: a 1.1s two-state blink needs one
+        // paint per visibility flip, not the cosmetic cap — the gate repaints the
+        // full grid on every paced frame, so naming the interval is the
+        // difference between ~2 and ~30 grid paints a second at focused idle.
+        // (`cursor_lit` derives phase from the frame clock, so cadence never
+        // shifts the flip points.)
+        ctx.request_frame_paced_at(Duration::from_millis((CURSOR_BLINK_PERIOD_MS / 2.0) as u64));
         cursor_lit(since)
     }
 
