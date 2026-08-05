@@ -581,15 +581,6 @@ pub struct SheetScaffoldWidget {
     /// Whether that press started outside the panel — only an outside press
     /// released outside dismisses.
     down_outside: bool,
-    /// Whether a `Down` has already claimed focus this open — the claim-once
-    /// guard (see `event`'s Down arm). Seeding `false` in [`View::build`] is
-    /// correct with no reset needed elsewhere: [`show_sheet`] pushes a fresh
-    /// page per open (a new [`SheetScaffoldWidget`] is built, and `teardown`
-    /// runs on close), so there is no retained instance to reset — unlike
-    /// frust's own FAB menu (`material::fab_menu`), which *persists* across
-    /// open/close and resets this same flag on its own close transition
-    /// instead.
-    focus_claimed: bool,
 }
 
 impl<State: 'static> View<State> for SheetScaffoldView<State> {
@@ -610,7 +601,6 @@ impl<State: 'static> View<State> for SheetScaffoldView<State> {
             dismissed: false,
             captured: false,
             down_outside: false,
-            focus_claimed: false,
         }
     }
 
@@ -814,16 +804,15 @@ impl Widget for SheetScaffoldWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // The first press anywhere claims focus so a later Escape has a chain
-        // to travel (`glyph::dialog`'s opt-in); the claim is held until this
-        // page pops (see `focus_claimed`'s doc), so a later press re-claiming
-        // would be redundant.
+        // Claim focus on EVERY Down: the root treats a Down that bubbles no
+        // claim as a blur (`release_focus_session` drops focus + IME);
+        // re-claiming while already focused is a change-guarded no-op. Do not
+        // add a claim-once guard here — it kills the session on the second
+        // tap (see frust claim-once-hygiene review, 2026-08-06).
         if let InputEvent::Pointer(p) = event
             && p.phase == PointerPhase::Down
-            && !self.focus_claimed
         {
             ctx.request_focus();
-            self.focus_claimed = true;
         }
         // The body (or a captured/focused descendant of it) sees the event
         // first; only what it ignores reaches the barrier below.
@@ -947,7 +936,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Focus claim-once guard
+    // Every Down re-claims focus (no claim-once guard)
     // -----------------------------------------------------------------------
 
     fn ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
@@ -959,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_down_within_one_open_does_not_reclaim_focus() {
+    fn every_down_claims_focus_even_when_already_focused() {
         let body: AnyView<()> = any(SizedBox::<()>(Some(300.0), Some(200.0)));
         let view = SheetScaffoldView {
             body,
@@ -983,16 +972,19 @@ mod tests {
         {
             // The Down at (5, 5) lands well above the bottom-anchored panel,
             // so the matching Up dismisses (mirrors frust's own
-            // `material::sheet` test) — that only clears `captured`, not the
-            // claim-once guard under test.
+            // `material::sheet` test) — that only clears `captured`.
             let s: &mut dyn Any = &mut dummy;
             let mut ctx = EventCtx::new(s, Point::ZERO, area);
             pod.event_child(&mut ctx, &ev(PointerPhase::Up, 5.0, 5.0));
         }
 
-        // Isolate the second Down's own effect on the flag: if the guard
-        // holds, the widget never re-calls `request_focus`, so an externally
-        // cleared flag stays cleared.
+        // Force the pod out of focus the way an unrelated blur elsewhere in
+        // the tree could — then prove the widget's *next* Down heals it. A
+        // claim-once guard would leave this false forever after the first
+        // Down; that silent, permanent loss is exactly the regression the
+        // reverted guard reintroduced (frust claim-once-hygiene review,
+        // 2026-08-06): the root treats an unclaimed Down as a blur signal and
+        // tears down the whole focus/IME session on it.
         pod.set_focused(false);
         {
             let s: &mut dyn Any = &mut dummy;
@@ -1000,8 +992,8 @@ mod tests {
             pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
         }
         assert!(
-            !pod.is_focused(),
-            "a second Down within the same open must not re-request focus"
+            pod.is_focused(),
+            "a second Down must re-claim focus even though it was externally cleared"
         );
     }
 
