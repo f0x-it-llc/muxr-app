@@ -71,17 +71,26 @@
 //! [`Harness::pump_until_values`] is the deadline-bounded wait every test uses
 //! instead of a fixed frame count.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, NavigatorController, Set, SizedBox, Stack, WindowMetrics, any, navigator,
-    provide_context,
+    AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, WindowMetrics,
+    any, navigator, provide_context,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::failure::AppFailure;
+use muxr::features::sessions::di::SharedSessionsRepository;
+use muxr::features::sessions::domain::entities::{
+    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
+};
+use muxr::features::sessions::domain::repositories::SessionsRepository;
+use muxr::features::sessions::presentation::controllers::SessionsController;
 use muxr::features::sessions::presentation::pages::sessions_page;
 use muxr::routes::install_app_router;
 use muxr::ui::toasts::app_toasts;
@@ -1128,4 +1137,175 @@ fn read_only_leaves_the_empty_states_own_create_action_disabled_too() {
     let after = h.settle();
     assert_eq!(h.depth(), 1, "a read-only tap opens no create dialog");
     assert!(added(&before.rounded, &after.rounded).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// 10 — poll pile-up and stale-overwrite: at the controller level, no widget
+// tree needed, since both hazards live entirely in `SessionsController`'s own
+// claim/generation bookkeeping.
+// ---------------------------------------------------------------------------
+
+/// A minimal [`Session`], distinguishable only by `name` — the one field
+/// either test below reads.
+fn stub_session(name: &str) -> Session {
+    Session {
+        id: name.to_string(),
+        name: name.to_string(),
+        status: SessionStatus::Running,
+        backend: SessionBackend::Zellij,
+        layout: LayoutSummary {
+            tabs: 1,
+            panes: 1,
+            third: ThirdMetric::Clients(0),
+            preview: Vec::new(),
+        },
+    }
+}
+
+/// A [`SessionsRepository`] that only counts its own `list_sessions` calls —
+/// the observable [`a_tick_mid_flight_does_not_spawn_a_second_poll_refresh`]
+/// asserts on.
+struct CountingSessionsRepo {
+    calls: AtomicU32,
+}
+
+impl CountingSessionsRepo {
+    fn new() -> Self {
+        Self {
+            calls: AtomicU32::new(0),
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for CountingSessionsRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the poll/staleness tests")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the poll/staleness tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the poll/staleness tests")
+    }
+}
+
+/// A tick arriving while the previous one's poll-triggered refresh is still
+/// outstanding is skipped, not stacked on top — the confirmed pile-up defect:
+/// without the in-flight claim, an RPC round trip slower than the poll's own
+/// period lets every later tick add another full fan-out to the ones still
+/// running.
+#[tokio::test]
+async fn a_tick_mid_flight_does_not_spawn_a_second_poll_refresh() {
+    let repo = Arc::new(CountingSessionsRepo::new());
+    let controller = SessionsController::new(Arc::clone(&repo) as SharedSessionsRepository);
+    controller.refresh().await;
+    assert_eq!(repo.calls(), 1, "the first load ran exactly once");
+
+    assert!(
+        controller.take_poll_tick(),
+        "the first tick claims the in-flight guard"
+    );
+    assert!(
+        !controller.take_poll_tick(),
+        "a second tick before the claimed refresh finishes is skipped, not stacked"
+    );
+
+    controller.refresh_from_poll().await;
+    assert_eq!(
+        repo.calls(),
+        2,
+        "exactly one poll-triggered fan-out ran, not two"
+    );
+
+    assert!(
+        controller.take_poll_tick(),
+        "the claim released once the poll refresh finished, so the next tick is taken again"
+    );
+}
+
+/// A hand-rolled [`SessionsRepository`] whose two calls race deterministically
+/// — `MockSessionsRepository`'s own latency is one fixed constant with no seam
+/// to make one call outrun another, so the staleness-guard test below drives
+/// this instead. The first call ("older") sleeps long enough that the second
+/// ("newer") both starts and finishes first.
+struct RaceSessionsRepo {
+    calls: AtomicU32,
+}
+
+impl RaceSessionsRepo {
+    fn new() -> Self {
+        Self {
+            calls: AtomicU32::new(0),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for RaceSessionsRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            clean_signals::time::sleep(Duration::from_millis(80)).await;
+            Ok(vec![stub_session("stale")])
+        } else {
+            clean_signals::time::sleep(Duration::from_millis(5)).await;
+            Ok(vec![stub_session("fresh")])
+        }
+    }
+
+    async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the poll/staleness tests")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the poll/staleness tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the poll/staleness tests")
+    }
+}
+
+/// An older, slower refresh that completes *after* a newer, faster one must
+/// not clobber it — the confirmed overwrite defect: `sessions` is
+/// last-writer-wins, so without the generation guard whichever round trip
+/// happens to land last wins regardless of which one was actually requested
+/// last.
+#[tokio::test]
+async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it() {
+    let controller = SessionsController::new(Arc::new(RaceSessionsRepo::new()));
+
+    // `join!` polls its two arguments in the order written: the first
+    // `refresh` bumps the generation and immediately suspends on its own
+    // longer delay, then the second bumps past it and finishes first, on a
+    // shorter one — reproducing the race deterministically rather than
+    // depending on real network jitter (`src/net/client.rs`'s own
+    // `concurrent_reconnects_are_single_flight` test relies on the same
+    // left-to-right first-poll ordering).
+    tokio::join!(controller.refresh(), controller.refresh());
+
+    let names: Vec<String> = controller
+        .sessions
+        .get_untracked()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["fresh".to_string()],
+        "the newer, faster refresh's result wins, not the older, slower one: {names:?}"
+    );
 }

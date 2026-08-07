@@ -68,7 +68,7 @@
 //! couldn't have had synchronously.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use clean_signals::{ControllerCore, NoParams, RunOptions};
 use frust::{GetUntracked, RwSignal, Set};
@@ -118,6 +118,32 @@ pub struct SessionsController {
     /// Guards [`claim_poll_interval_start`](Self::claim_poll_interval_start)'s
     /// once-only contract.
     poll_interval_started: AtomicBool,
+    /// Whether a poll-triggered refresh is currently outstanding — the
+    /// in-flight claim that bounds the mock poll's own concurrency to one.
+    /// Without it, an RPC round trip slower than the poll's own period lets
+    /// every later tick stack another full fan-out on top of the ones still
+    /// running, growing network traffic without bound.
+    /// [`take_poll_tick`](Self::take_poll_tick) claims it (an `AtomicBool`
+    /// swap, the same single-flight shape
+    /// `ConnectController::begin_credential_save`'s own `saving_credential`
+    /// uses) before letting a tick through; [`refresh_from_poll`](Self::refresh_from_poll)
+    /// releases it once that tick's own refresh finishes. Deliberately scoped
+    /// to the poll alone — a mutation's own trailing refresh
+    /// (create/rename/kill) calls [`refresh`](Self::refresh) directly and is
+    /// never gated by it, so a user action is never silently dropped just
+    /// because a poll happens to be mid-flight; [`generation`](Self::generation)
+    /// is what keeps *that* case honest instead.
+    poll_in_flight: AtomicBool,
+    /// Bumped at the start of every [`refresh`](Self::refresh) call — the
+    /// staleness guard [`refresh`](Self::refresh) checks before writing
+    /// [`sessions`](Self::sessions): [`sessions`](Self::sessions) is
+    /// last-writer-wins, so without this an older, slower refresh that lands
+    /// *after* a newer one (typically the poll's, racing a mutation's own
+    /// trailing refresh) would clobber the fresher result. A refresh
+    /// snapshots the generation it bumped to before its network round trip,
+    /// and only writes if it is still the newest one by the time that round
+    /// trip lands.
+    generation: AtomicU64,
 }
 
 impl SessionsController {
@@ -136,6 +162,8 @@ impl SessionsController {
             polls: AtomicU32::new(0),
             poll_period: RwSignal::new(None),
             poll_interval_started: AtomicBool::new(false),
+            poll_in_flight: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -151,15 +179,42 @@ impl SessionsController {
     /// Load (or reload) the session list from the repository. Every mutation
     /// below ends with one of these, so the screen always renders what the
     /// server actually holds rather than a locally patched guess.
+    ///
+    /// Every call — the first load, a mutation's trailing refresh, or a poll
+    /// tick's [`refresh_from_poll`](Self::refresh_from_poll) — bumps
+    /// [`generation`](Self::generation) up front and only writes
+    /// [`sessions`](Self::sessions)/[`loaded`](Self::loaded) if that snapshot
+    /// is still the newest one once the round trip lands, so a call that
+    /// started earlier but resolves later can never clobber a fresher result
+    /// that already landed.
     pub async fn refresh(&self) {
+        let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Ok(sessions) = self
             .core
             .run(&self.list, NoParams, RunOptions::default())
             .await
+            && self.generation.load(Ordering::SeqCst) == my_generation
         {
             self.sessions.set(sessions);
             self.loaded.set(true);
         }
+    }
+
+    /// The refresh a claimed poll tick runs — identical to
+    /// [`refresh`](Self::refresh), wrapped with the release of the in-flight
+    /// claim [`take_poll_tick`](Self::take_poll_tick) took for it. The
+    /// release is an RAII guard rather than a trailing statement so a future
+    /// early return added to either function can't leak the claim and wedge
+    /// the poll shut.
+    pub async fn refresh_from_poll(&self) {
+        struct ReleasePollClaim<'a>(&'a AtomicBool);
+        impl Drop for ReleasePollClaim<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _release = ReleasePollClaim(&self.poll_in_flight);
+        self.refresh().await;
     }
 
     /// Create a session named `name` (already trimmed by the dialog), then
@@ -219,15 +274,23 @@ impl SessionsController {
     /// **Consume** one mock poll tick, answering whether the caller should
     /// refresh now. A paused controller skips, and so does one whose first
     /// load hasn't landed yet (the screen's own initial load is already in
-    /// flight; a second concurrent list would race it for no benefit). Only a
-    /// taken tick counts towards [`polls_taken`](Self::polls_taken).
+    /// flight; a second concurrent list would race it for no benefit) —
+    /// and so does one whose *previous* tick is still running, claimed via
+    /// [`poll_in_flight`](Self::poll_in_flight): the `&&` short-circuits
+    /// before the claim swap unless both other gates already pass, so a
+    /// paused or not-yet-loaded controller never touches the flag at all.
+    /// Only a taken tick counts towards [`polls_taken`](Self::polls_taken).
     ///
     /// The caller drives the timing (`clean_signals_frust::use_interval` in
     /// the screen's `build`, once [`poll_period`](Self::poll_period)
     /// resolves — see the [module docs](self)' "Poll cadence" section) and
-    /// the async spawn, so this stays synchronous and unit-testable.
+    /// the async spawn (through [`refresh_from_poll`](Self::refresh_from_poll),
+    /// which releases the claim this takes), so this stays synchronous and
+    /// unit-testable.
     pub fn take_poll_tick(&self) -> bool {
-        let poll = self.is_polling() && self.loaded.get_untracked();
+        let poll = self.is_polling()
+            && self.loaded.get_untracked()
+            && !self.poll_in_flight.swap(true, Ordering::SeqCst);
         if poll {
             self.polls.fetch_add(1, Ordering::Relaxed);
         }

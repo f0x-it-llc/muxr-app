@@ -278,7 +278,7 @@ impl Component for SessionsScreen {
             use_interval(Duration::from_secs(u64::from(secs)), move || {
                 if polling.take_poll_tick() {
                     let handle = Arc::clone(&polling);
-                    spawn_local(async move { handle.refresh().await });
+                    spawn_local(async move { handle.refresh_from_poll().await });
                 }
             });
         }
