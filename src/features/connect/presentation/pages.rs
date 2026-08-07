@@ -54,18 +54,62 @@
 //! navigator's: the QR sheet is a page above every piece of app chrome, which
 //! is what keeps the floating top bar from staying tappable under it, and what
 //! puts the sheet's own scrim over it (FINDINGS #44).
+//!
+//! # The QR sheet
+//!
+//! [`qr_sheet_body`] is a `Component` of its own ([`QrScanSheet`]), not a plain
+//! builder, because it owns a **camera session** — and therefore a lifecycle:
+//! open on mount, tear down on every way out (a scrim tap, `Escape`, an Android
+//! back press). That is what `Component::init`'s `on_cleanup` gives it, and why
+//! the session is never a `Drop` impl (`docs/CODE_STANDARDS.md`'s State &
+//! Reactivity rule). The wiring follows `examples/glyph-catalog`'s camera page,
+//! the sanctioned `frust-camera` integration precedent, point for point:
+//! `use_task` + `spawn_blocking` for the blocking permission call, an
+//! `Arc<Mutex<Option<Arc<CameraSession>>>>` cell (an `Arc` because `on_cleanup`
+//! takes a `Send + Sync` closure), the session opened once per grant from
+//! `build`, and **no signal write from inside the detection callback**, which
+//! runs on a plugin-owned thread.
+//!
+//! The hand-off is therefore explicit: `on_detect` copies the raw value into a
+//! plain mutex cell, and a UI-thread poll loop ([`spawn_detection_pump`], the
+//! `spawn_local` + cancel-flag shape `presentation::term`'s feed pump already
+//! uses) is what parses it, applies it to the form and closes the sheet. First
+//! parseable payload wins: the loop returns, so every later detection is
+//! ignored — and an *unparseable* one is ignored silently, exactly as the
+//! Flutter sheet does, since a QR that is simply not a pairing code is not a
+//! failure worth interrupting a scan for. No scanned text is ever formatted
+//! into a message, a label or a log line: the raw value is a bearer token in
+//! the clear, and it lives in a [`Zeroizing`] holder from the callback until
+//! the parse consumes it.
+//!
+//! **The camera is a phone/tablet affordance.** [`open_camera`] and
+//! [`request_camera_permission`] are gated to Android and iOS: every other
+//! target renders the sheet's unavailable state instead. That is not a
+//! stand-in for the plugin's own desktop fail-soft — it is the product line the
+//! Flutter client already draws (macOS is not a muxr target and deliberately
+//! carries no camera entitlement), and it is what keeps a desktop preview, and
+//! every headless test on a developer's Mac, from asking AVFoundation for a
+//! capture device it has no usage-description string to justify.
 
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use clean_signals_frust::use_controller;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, IconSource, Padding, SizedBox, Stack, WindowMetrics, any, component, icon,
-    inflexible, safe_area, scroll_view, text, use_context,
+    Align, Alignment, AnyView, AsyncValue, Axis, ButtonStyle, Component, CrossAxisAlignment,
+    EdgeInsets, FlexView, Get, GetUntracked, IconSource, Padding, SizedBox, Stack, Theme, UseTask,
+    WindowMetrics, any, button, component, icon, inflexible, on_cleanup, platform_view, safe_area,
+    scroll_view, spawn_local, text, use_context,
 };
+use frust_camera::barcode::{Barcode, BarcodeFormat};
+use frust_camera::{
+    BarcodeStreamOptions, CameraError, CameraSession, DetectionPolicy, PermissionStatus,
+};
+use zeroize::Zeroizing;
 
 use super::chrome::panel;
 use super::controller::ConnectController;
@@ -74,6 +118,7 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::SavedServers;
+use crate::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
@@ -293,6 +338,10 @@ impl Component for ConnectScreen {
         let connected = state.connection.connected.get();
         if state.was_connected && !connected {
             state.controller.clear_token();
+            // A stashed pairing goes out on the same edge: the pin it carries
+            // belongs to a session that has ended (`connect_controller.dart`
+            // clears its pending trust here too).
+            state.controller.clear_pending_pairing();
         }
         state.was_connected = connected;
 
@@ -302,6 +351,11 @@ impl Component for ConnectScreen {
                 let controller = Arc::clone(&state.controller);
                 let nav = state.app_nav.clone();
                 Rc::new(move || controller.connect(&nav))
+            },
+            on_connect_pinned: {
+                let controller = Arc::clone(&state.controller);
+                let nav = state.app_nav.clone();
+                Rc::new(move || controller.connect_from_pairing(&nav))
             },
         };
 
@@ -328,7 +382,7 @@ impl Component for ConnectScreen {
         any(Stack(vec![
             any(page_backdrop::<ConnectState>()),
             any(scroll_view(content)),
-            qr_affordance(&state.overlays),
+            qr_affordance(&state.overlays, &state.controller),
         ]))
     }
 }
@@ -342,8 +396,12 @@ impl Component for ConnectScreen {
 /// that costs against the stock button — its press *scale* (this dips tone
 /// instead) and its loading/disabled states — this affordance never used, the
 /// same trade `super::pieces::connect_button` already records.
-fn qr_affordance(overlays: &frust::NavigatorController<AppState>) -> AnyView<ConnectState> {
+fn qr_affordance(
+    overlays: &frust::NavigatorController<AppState>,
+    controller: &Arc<ConnectController>,
+) -> AnyView<ConnectState> {
     let overlays = overlays.clone();
+    let controller = Arc::clone(controller);
     let theme = active_theme();
     let scheme = theme.scheme();
     any(safe_area(Align(
@@ -351,10 +409,22 @@ fn qr_affordance(overlays: &frust::NavigatorController<AppState>) -> AnyView<Con
         Padding(
             EdgeInsets::all(FAB_MARGIN),
             icon_button(SCAN_MARK, FAB_LABEL, move |_state: &mut ConnectState| {
-                // The body ignores the sheet's own handle: this sheet carries
-                // no closer of its own (the scrim and back are its only
-                // dismissals), so nothing inside it ever asks to close.
-                show_sheet(&overlays, |_sheet| qr_sheet_body())
+                let controller = Arc::clone(&controller);
+                show_sheet(&overlays, move |sheet| {
+                    // The sheet closes itself the moment a payload lands, so
+                    // its handle is threaded in as the one-shot closer the
+                    // scan pump fires — the same `Rc<dyn Fn()>` shape
+                    // `ui::sheet`'s own `on_dismiss` takes, and gated by the
+                    // same at-most-one-pop handle every other closer goes
+                    // through.
+                    let sheet = sheet.clone();
+                    qr_sheet_body(
+                        Rc::new(move || {
+                            sheet.close();
+                        }),
+                        Arc::clone(&controller),
+                    )
+                })
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA
@@ -368,17 +438,432 @@ fn qr_affordance(overlays: &frust::NavigatorController<AppState>) -> AnyView<Con
     )))
 }
 
-/// The QR sheet's body: a placeholder viewfinder over the copy that says so.
+// ---------------------------------------------------------------------------
+// The QR sheet (see the module docs)
+// ---------------------------------------------------------------------------
+
+/// The sheet's own title — the same words the affordance that opened it is
+/// named by.
+const SHEET_TITLE: &str = FAB_LABEL;
+/// The live viewfinder's copy — the Flutter sheet's own subtitle.
+const SCAN_HINT: &str = "Point the camera at the QR code shown by muxrctl on your server.";
+/// …while the platform is still answering the permission request.
+const PERMISSION_PENDING: &str = "Requesting camera permission…";
+/// …once it has refused. No retry is offered: iOS shows its permission dialog
+/// once per install, so a second ask is a no-op and the only way forward is the
+/// system settings app (the Flutter sheet draws the same line).
+const PERMISSION_DENIED: &str = concat!(
+    "Camera permission denied — enable camera access for muxr in your device ",
+    "settings, then scan again.",
+);
+/// …when Android has no foreground activity cached to show the dialog on. A
+/// retry is worth offering here: the state is transient by construction.
+const PERMISSION_NEEDS_UI: &str =
+    "The permission dialog needs muxr in the foreground — try again from here.";
+/// …on a build with no camera backend at all: the desktop preview, and every
+/// headless test. Pairing by hand is the whole path, so this is a plain
+/// instruction rather than an error.
+pub const NO_CAMERA: &str =
+    "Camera pairing needs a phone or tablet — enter the server URL and token by hand instead.";
+/// …when the camera exists but refused to open or to stream. The plugin's own
+/// detail is deliberately not shown (`crate::failure`'s rule: internal detail
+/// never reaches the user).
+const CAMERA_UNAVAILABLE: &str = "Camera unavailable.";
+/// The retry action's label — the Flutter sheet's own copy.
+const RETRY_LABEL: &str = "try again";
+/// The torch toggle's two labels.
+const TORCH_ON_LABEL: &str = "torch on";
+const TORCH_OFF_LABEL: &str = "torch off";
+/// What a screen reader announces over the live preview slot: the platform
+/// view carries no frust-visible semantics of its own, so this label is the
+/// only signal that region gives (`platform_view`'s documented v1 gap).
+const VIEWFINDER_LABEL: &str = "Camera viewfinder";
+
+/// How often the UI thread checks the detection cell the camera's own thread
+/// writes into. 100ms is well under the reaction time of pointing a phone at a
+/// code and far above the cost of taking an uncontended lock; the scan itself
+/// runs at the camera's rate, not this one.
+const SCAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The QR sheet's body: a live scanning viewfinder, or the copy that explains
+/// why there isn't one.
 ///
-/// **A placeholder on purpose.** Camera capture needs a platform plugin muxr has
-/// not adopted yet, so this sheet exists to prove the affordance and the
-/// dismissal path, not to scan anything. Rebuilt on every navigator rebuild
-/// while the sheet is up (`show_sheet`'s builder contract), so it stays cheap.
-fn qr_sheet_body() -> AnyView<AppState> {
-    let theme = active_theme();
+/// `close` is the sheet's one-shot dismissal (see [`qr_affordance`]); it is
+/// fired exactly once, by the scan pump, when a payload has been applied to
+/// `controller`. Every *other* way out of this sheet is the scaffold's own
+/// (a scrim tap, `Escape`, an Android back press), and each of them tears this
+/// component down, which is what closes the camera.
+///
+/// `pub` so `tests/connect.rs` can mount the body directly: a navigator's pages
+/// contribute no semantics (FINDINGS #23), so the sheet is invisible to the
+/// accessibility tree while it is a pushed page.
+pub fn qr_sheet_body(close: Rc<dyn Fn()>, controller: Arc<ConnectController>) -> AnyView<AppState> {
+    any(component(QrScanSheet { close, controller }))
+}
+
+/// The QR sheet `Component`. Stateless configuration; everything retained
+/// lives in [`QrSheetState`].
+struct QrScanSheet {
+    /// See [`qr_sheet_body`].
+    close: Rc<dyn Fn()>,
+    /// The form a scanned payload is applied to.
+    controller: Arc<ConnectController>,
+}
+
+/// The QR sheet's retained state.
+pub struct QrSheetState {
+    /// The camera-permission probe, or `None` on a target with no camera
+    /// backend — where the sheet renders [`NO_CAMERA`] immediately rather than
+    /// awaiting an answer nothing will give (see the module docs' gating note).
+    permission: Option<UseTask<PermissionStatus>>,
+    /// The open session. `Arc<Mutex<..>>` rather than an `Rc`/`RefCell` only
+    /// because [`on_cleanup`] takes a `Send + Sync` closure — the
+    /// `examples/glyph-catalog` camera page's own reason for the same shape.
+    session: Arc<Mutex<Option<Arc<CameraSession>>>>,
+    /// Where the plugin thread leaves what it decoded.
+    detections: Arc<Detections>,
+    /// Whether the camera has been opened for the current grant — so a refusal
+    /// is not retried on every rebuild.
+    opened: bool,
+    /// Whether opening the camera, or starting its barcode stream, failed.
+    /// A plain flag: the plugin's message is diagnostic, and this sheet shows
+    /// the user [`CAMERA_UNAVAILABLE`] instead of it.
+    camera_failed: bool,
+    /// The torch's last *requested* state. Optimistic by necessity —
+    /// `set_torch` is "accepted, not confirmed" (`plugins/camera`'s §5), so
+    /// this mirrors the last call this sheet made, never the LED.
+    torch_on: bool,
+}
+
+/// The one-slot hand-off between the camera's decode thread and the UI thread.
+///
+/// A plain mutex, never a signal: `on_detect` runs on a plugin-owned thread
+/// with the platform's own buffer borrowed, and writing a signal from there is
+/// forbidden outright (`plugins/camera`'s stream contract). The held value is
+/// [`Zeroizing`] because a pairing QR's text *is* a bearer token — see the
+/// module docs.
+#[derive(Default)]
+struct Detections {
+    /// The most recent decoded value, or `None` once the pump has taken it.
+    last: Mutex<Option<Zeroizing<String>>>,
+}
+
+impl Detections {
+    /// Record `raw` as the newest detection, replacing (and scrubbing) any the
+    /// pump has not taken yet. Runs on the plugin's thread.
+    fn publish(&self, raw: &str) {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(Zeroizing::new(raw.to_string()));
+    }
+
+    /// Take the newest detection, if any. Runs on the UI thread.
+    fn take(&self) -> Option<Zeroizing<String>> {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+impl Component for QrScanSheet {
+    type State = QrSheetState;
+
+    fn init(&self) -> QrSheetState {
+        let session: Arc<Mutex<Option<Arc<CameraSession>>>> = Arc::new(Mutex::new(None));
+        {
+            // The mandatory teardown: this sheet holds the device's single
+            // image-stream claim, and every way out of it (payload applied,
+            // scrim, `Escape`, Android back) disposes this component's owner.
+            // `CameraSession::close` stops the running barcode stream and takes
+            // the torch out with it, so this one call is the whole teardown.
+            let cell = Arc::clone(&session);
+            on_cleanup(move || {
+                let session = cell.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some(session) = session {
+                    session.close();
+                }
+            });
+        }
+
+        let detections = Arc::new(Detections::default());
+        spawn_detection_pump(
+            Arc::clone(&detections),
+            Arc::clone(&self.controller),
+            Rc::clone(&self.close),
+        );
+
+        QrSheetState {
+            permission: request_camera_permission(),
+            session,
+            detections,
+            opened: false,
+            camera_failed: false,
+            torch_on: false,
+        }
+    }
+
+    fn build(&self, state: &mut QrSheetState) -> AnyView<QrSheetState> {
+        let theme = active_theme();
+        open_camera_once(state);
+        match sheet_stage(state) {
+            Stage::Live => live_body(state, &theme),
+            Stage::Waiting => message_body(&theme, PERMISSION_PENDING, MessageTone::Muted, false),
+            Stage::Unavailable(message, tone, retryable) => {
+                message_body(&theme, message, tone, retryable)
+            }
+        }
+    }
+}
+
+/// What the sheet is showing this frame.
+enum Stage {
+    /// The permission request is still out.
+    Waiting,
+    /// A session is open: the live viewfinder.
+    Live,
+    /// No viewfinder — the copy that says why, its ink, and whether a retry
+    /// could plausibly change the answer.
+    Unavailable(&'static str, MessageTone, bool),
+}
+
+/// Whether a message reads as an ordinary instruction or as a failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MessageTone {
+    /// `on_surface_variant` — nothing went wrong (the desktop path, the wait).
+    Muted,
+    /// `error` — the camera is there and refused.
+    Failed,
+}
+
+/// Which [`Stage`] `state` is in. Reads the permission task's signal, so the
+/// sheet rebuilds when the platform answers.
+fn sheet_stage(state: &QrSheetState) -> Stage {
+    let Some(permission) = &state.permission else {
+        return Stage::Unavailable(NO_CAMERA, MessageTone::Muted, false);
+    };
+    if state.camera_failed {
+        return Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true);
+    }
+    if has_session(state) {
+        return Stage::Live;
+    }
+    match permission.signal().get() {
+        AsyncValue::Idle | AsyncValue::Loading(_) => Stage::Waiting,
+        AsyncValue::Ready(PermissionStatus::Granted) => Stage::Waiting,
+        AsyncValue::Ready(PermissionStatus::Pending) => Stage::Waiting,
+        AsyncValue::Ready(PermissionStatus::Denied) => {
+            Stage::Unavailable(PERMISSION_DENIED, MessageTone::Failed, false)
+        }
+        AsyncValue::Ready(PermissionStatus::NeedsUi) => {
+            Stage::Unavailable(PERMISSION_NEEDS_UI, MessageTone::Failed, true)
+        }
+        // `PermissionStatus` is `#[non_exhaustive]`: a variant this build has
+        // never heard of reads as an unspecified refusal rather than a compile
+        // break, and a retry is the only honest offer to make about it.
+        AsyncValue::Ready(_) => Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true),
+        AsyncValue::Error(_) => Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true),
+    }
+}
+
+/// Whether a session is open right now.
+fn has_session(state: &QrSheetState) -> bool {
+    state
+        .session
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some()
+}
+
+/// Open the camera and start scanning — once per grant, from `build`, the
+/// `examples/glyph-catalog` camera page's own idempotent open branch.
+fn open_camera_once(state: &mut QrSheetState) {
+    let granted = state.permission.as_ref().is_some_and(|permission| {
+        matches!(
+            permission.signal().get(),
+            AsyncValue::Ready(PermissionStatus::Granted)
+        )
+    });
+    if state.opened || !granted {
+        return;
+    }
+    state.opened = true;
+    let Ok(session) = open_camera() else {
+        state.camera_failed = true;
+        return;
+    };
+    let session = Arc::new(session);
+    if start_scan(&session, &state.detections).is_err() {
+        // A session that cannot stream is a viewfinder with nothing behind it:
+        // let it go rather than hold the device open behind an error state.
+        session.close();
+        state.camera_failed = true;
+        return;
+    }
+    *state.session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session);
+}
+
+/// Start the barcode stream, wiring `on_detect` to `detections` and nothing
+/// else.
+///
+/// [`DetectionPolicy::NoDuplicates`] because a pairing code sits in frame for
+/// as long as it takes to focus, and this sheet wants the payload once rather
+/// than at the decode rate. QR only: `muxrctl` emits nothing else, and every
+/// other format the engine might grow would decode to something this sheet
+/// would only reject.
+fn start_scan(session: &CameraSession, detections: &Arc<Detections>) -> Result<(), CameraError> {
+    let detections = Arc::clone(detections);
+    session.start_barcode_stream(
+        BarcodeStreamOptions {
+            formats: vec![BarcodeFormat::QrCode],
+            detection: DetectionPolicy::NoDuplicates,
+        },
+        move |found: &[Barcode]| {
+            // Never empty (the plugin's own contract) — `first` is the
+            // one-code-per-frame convenience, not a defensive check. Nothing
+            // here parses, allocates a message, or writes a signal: the whole
+            // callback is one copy into the hand-off cell.
+            if let Some(barcode) = found.first() {
+                detections.publish(&barcode.raw_value);
+            }
+        },
+    )
+}
+
+/// Poll the detection cell on the **UI thread**, apply the first parseable
+/// pairing payload, and close the sheet.
+///
+/// The `spawn_local` + `on_cleanup` cancel-flag shape
+/// `presentation::term`'s feed pump already uses: the loop checks the flag
+/// before every read, so a sheet torn down between two wakes never touches the
+/// controller again. It returns after the first payload — single-shot, so the
+/// detections that keep arriving until the session closes are ignored — and an
+/// unparseable value is dropped without a word (see the module docs).
+fn spawn_detection_pump(
+    detections: Arc<Detections>,
+    controller: Arc<ConnectController>,
+    close: Rc<dyn Fn()>,
+) {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let cancelled = Arc::clone(&cancelled);
+        on_cleanup(move || cancelled.store(true, Ordering::Relaxed));
+    }
+    spawn_local(async move {
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Some(raw) = detections.take()
+                && let Some(payload) = parse_pairing_uri(&raw)
+            {
+                controller.apply_scanned_payload(payload);
+                close();
+                return;
+            }
+            clean_signals::time::sleep(SCAN_POLL_INTERVAL).await;
+        }
+    });
+}
+
+/// The live sheet: the platform preview inside the same framed viewfinder the
+/// placeholder draws, the scan hint, and — where the lens has one — the torch.
+fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
+    let scheme = theme.scheme();
+    let guard = state.session.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(session) = guard.as_ref() else {
+        // Unreachable: `Stage::Live` is what a held session means. Rendering
+        // the instruction beats an `expect` on a lock a rebuild could in
+        // principle race.
+        drop(guard);
+        return message_body(theme, CAMERA_UNAVAILABLE, MessageTone::Failed, true);
+    };
+    // Target-gated by the session itself — never a shared literal
+    // (`plugins/camera`'s README §2).
+    let view_type = session.preview_view_type().to_string();
+    let params = session.params_json();
+    // Read fresh every build rather than cached: Android answers `false` until
+    // CameraX finishes binding, so a control gated on the first answer would
+    // never appear (`plugins/camera`'s README §5's re-check note).
+    let torch_available = session.torch_available();
+    drop(guard);
+
+    let viewfinder = panel(
+        SizedBox::<QrSheetState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(
+            platform_view(view_type)
+                .size(VIEWFINDER, VIEWFINDER)
+                .params_json(params)
+                .semantics_label(VIEWFINDER_LABEL),
+        ),
+        scheme.surface_container_lowest,
+        theme.shape.medium,
+    )
+    .border(scheme.outline);
+
+    let mut children = vec![
+        inflexible(any(Align(Alignment::CENTER, viewfinder))),
+        inflexible(any(SizedBox::<QrSheetState>(None, Some(SHEET_GAP)))),
+        inflexible(any(
+            text(SHEET_TITLE).style(inked(&theme.type_scale.title_medium, scheme.on_surface))
+        )),
+        inflexible(any(SizedBox::<QrSheetState>(None, Some(SHEET_GAP / 2.0)))),
+        inflexible(any(text(SCAN_HINT).style(inked(
+            &theme.type_scale.body_small,
+            scheme.on_surface_variant,
+        )))),
+    ];
+    if torch_available {
+        children.push(inflexible(any(SizedBox::<QrSheetState>(
+            None,
+            Some(SHEET_GAP),
+        ))));
+        children.push(inflexible(any(Align(
+            Alignment::CENTER,
+            button(torch_label(state.torch_on), toggle_torch).style(ButtonStyle::Secondary),
+        ))));
+    }
+
+    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+}
+
+/// The torch toggle's label at `on`.
+fn torch_label(on: bool) -> &'static str {
+    if on { TORCH_ON_LABEL } else { TORCH_OFF_LABEL }
+}
+
+/// Flip the torch. Non-blocking and callable from any thread, the UI one
+/// included (`plugins/camera`'s README §5), so this runs straight from the
+/// press handler rather than through `spawn_blocking`.
+///
+/// The requested state is recorded only when the call was accepted; a refusal
+/// leaves the label reading what the LED is actually doing, which is all a
+/// caller can honestly claim about a control the platform confirms
+/// asynchronously (or, on Apple, not at all).
+fn toggle_torch(state: &mut QrSheetState) {
+    let session = state
+        .session
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let Some(session) = session else {
+        return;
+    };
+    let requested = !state.torch_on;
+    if session.set_torch(requested).is_ok() {
+        state.torch_on = requested;
+    }
+}
+
+/// The sheet with no live camera: the placeholder viewfinder over `message`,
+/// and a retry where one could help.
+fn message_body(
+    theme: &Theme,
+    message: &str,
+    tone: MessageTone,
+    retryable: bool,
+) -> AnyView<QrSheetState> {
     let scheme = theme.scheme();
     let viewfinder = panel(
-        SizedBox::<AppState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(Align(
+        SizedBox::<QrSheetState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(Align(
             Alignment::CENTER,
             // The same vector the FAB draws, at viewfinder size — a scan frame
             // is exactly what a camera placeholder wants, and it keeps this
@@ -389,26 +874,84 @@ fn qr_sheet_body() -> AnyView<AppState> {
         theme.shape.medium,
     )
     .border(scheme.outline);
+    let message_ink = match tone {
+        MessageTone::Muted => scheme.on_surface_variant,
+        MessageTone::Failed => scheme.error,
+    };
 
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(Align(Alignment::CENTER, viewfinder))),
-            inflexible(any(SizedBox::<AppState>(None, Some(SHEET_GAP)))),
-            inflexible(any(text("Pair by QR code")
-                .style(inked(&theme.type_scale.title_medium, scheme.on_surface)))),
-            inflexible(any(SizedBox::<AppState>(None, Some(SHEET_GAP / 2.0)))),
-            inflexible(any(text(
-                "Camera pairing lands in a later phase — enter the server URL \
-                     and token by hand for now.",
-            )
-            .style(inked(
-                &theme.type_scale.body_small,
-                scheme.on_surface_variant,
-            )))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    let mut children = vec![
+        inflexible(any(Align(Alignment::CENTER, viewfinder))),
+        inflexible(any(SizedBox::<QrSheetState>(None, Some(SHEET_GAP)))),
+        inflexible(any(
+            text(SHEET_TITLE).style(inked(&theme.type_scale.title_medium, scheme.on_surface))
+        )),
+        inflexible(any(SizedBox::<QrSheetState>(None, Some(SHEET_GAP / 2.0)))),
+        inflexible(any(
+            text(message).style(inked(&theme.type_scale.body_small, message_ink))
+        )),
+    ];
+    if retryable {
+        children.push(inflexible(any(SizedBox::<QrSheetState>(
+            None,
+            Some(SHEET_GAP),
+        ))));
+        children.push(inflexible(any(Align(
+            Alignment::CENTER,
+            button(RETRY_LABEL, retry_camera).style(ButtonStyle::Secondary),
+        ))));
+    }
+
+    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+}
+
+/// Ask again: re-run the permission probe and let `build`'s own open branch —
+/// not a second one — reopen the camera on the next rebuild.
+fn retry_camera(state: &mut QrSheetState) {
+    state.camera_failed = false;
+    state.opened = false;
+    if let Some(permission) = &state.permission {
+        permission.restart();
+    }
+}
+
+/// Request camera permission off the UI thread, or `None` where this build has
+/// no camera backend to ask (see the module docs' gating note).
+///
+/// `Camera::request_permission` **blocks** until the platform machinery
+/// resolves — a system dialog on Android, `requestAccessForMediaType:` on iOS —
+/// so it is paired with `spawn_blocking` and flattened into one `Result` for
+/// `use_task`'s single-error bound, exactly as the glyph-catalog camera page
+/// does.
+fn request_camera_permission() -> Option<UseTask<PermissionStatus>> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Some(frust::use_task(|| async {
+            match frust::spawn_blocking(frust_camera::Camera::request_permission).await {
+                Ok(result) => result,
+                Err(join_error) => Err(CameraError::Platform(join_error.to_string())),
+            }
+        }))
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        None
+    }
+}
+
+/// Open the back camera, or refuse on a build with no camera backend.
+///
+/// The refusal is this app's own product line, not the plugin's fail-soft: see
+/// the module docs' gating note for why a desktop build must not reach
+/// AVFoundation at all.
+fn open_camera() -> Result<CameraSession, CameraError> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        frust_camera::Camera::open(frust_camera::Lens::Back, frust_camera::Resolution::Auto)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Err(CameraError::PlatformNotInitialized)
+    }
 }
 
 /// `style` re-inked with `color` — the same explicit-ink discipline
