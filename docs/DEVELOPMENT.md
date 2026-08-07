@@ -11,7 +11,10 @@
   (`../../plugins/clipboard`, the Copy chip's clipboard write) and `frust-haptics`
   (`../../plugins/haptics`, the selection-click tick) — the latter needs Android's
   `android.permission.VIBRATE`, already checked into `AndroidManifest.xml` (a normal permission,
-  granted at install with no runtime prompt).
+  granted at install with no runtime prompt). The `muxrd` network layer path-depends on three more
+  (`../../plugins/shared-preferences`, `../../plugins/secure-storage`, `../../plugins/camera`) plus
+  `../../crates/frust-plugin` for its Android JNI accessor — all in the same checkout; each
+  plugin's own manifest/plist entries land with the code that consumes it.
 - No `clean-signals-rs` sibling checkout is required: `clean-signals` itself isn't published
   yet, so `Cargo.toml` git+rev-pins it directly (`rev = "910f626"` on `master`) to its public
   repo — the identical spec `clean-signals-frust`'s own `clean-signals` dependency uses, so
@@ -30,6 +33,47 @@
 cargo build            # debug
 cargo build --release  # release
 ```
+
+## Codegen (`muxr.v1` gRPC)
+
+`build.rs` compiles `proto/muxr.proto` into `$OUT_DIR/muxr.v1.rs`, which
+`src/net/proto.rs` includes; generated code is build output and is never
+committed. **No `protoc` install is required** — on any machine, in CI, or for a
+cross-compile: `protox` is a protobuf compiler written in Rust, and its
+`FileDescriptorSet` goes straight to `tonic-prost-build`'s `compile_fds`
+(`prost-build`'s own path would shell out to a system `protoc`). Nothing to
+install; `cargo build` is the whole story.
+
+`proto/muxr.proto` is a **vendored copy** of `muxrd/proto/muxr.proto` from the
+`muxr-core` repo at rev `ec6b032` (recorded in the file's own header). To
+refresh it against a newer server:
+
+```bash
+cp <muxr-core>/muxrd/proto/muxr.proto proto/muxr.proto   # then re-add the header block
+# update the rev recorded in that header, and rebuild
+```
+
+Re-copy the file wholesale and never hand-patch a message: wire drift then
+shows up as a codegen or type error at the call sites that consumed the old
+shape, instead of a silent decode mismatch against a live server.
+
+Because the gRPC stack brings TLS with a C-built crypto provider (**aws-lc-rs**,
+rustls' default and tonic's `tls-aws-lc` feature — the one provider in the tree,
+since a second one is a runtime install conflict), a change to the network layer
+is checked against both device targets, not just the host:
+
+```bash
+cargo ndk -t arm64-v8a check      # Android arm64 (reads ANDROID_NDK_HOME)
+cargo check --target aarch64-apple-ios
+```
+
+`cargo ndk` reads `ANDROID_NDK_HOME`; nothing in this repo or its Gradle rig
+pins an NDK version. aws-lc-rs' Android cross-compile needs **NDK r27.3 or
+newer** (older r27 carried a CMake bug that broke it) — r28.2
+(`28.2.13676358`) is what this rig is verified against. If a build machine is
+stuck on an older NDK, the recorded fallback is swapping tonic's `tls-aws-lc`
+feature for `tls-ring` (and rustls/rcgen to their `ring` backends) — a
+whole-tree provider swap, never a per-crate one.
 
 ## Run
 
