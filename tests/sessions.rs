@@ -74,7 +74,7 @@
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, NavigatorController, SizedBox, Stack, WindowMetrics, any, navigator,
+    AnyView, Component, NavigatorController, Set, SizedBox, Stack, WindowMetrics, any, navigator,
     provide_context,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
@@ -1042,4 +1042,89 @@ fn narrow_metrics_leave_the_list_column_unclamped_like_no_metrics_at_all() {
         SEEDED.len(),
         "narrow metrics take the same unclamped branch as no metrics at all"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 9 — read-only gating (create/rename/kill disable; attach doesn't)
+// ---------------------------------------------------------------------------
+
+/// Flipping [`muxr::connection::ConnectionController::is_read_only`] directly
+/// is enough to drive this — the mock backend's own `connect` always answers
+/// `is_read_only: false` (`connection`'s module docs), so a suite that needs
+/// the read-only branch writes the signal itself, exactly the seam a real
+/// read-only credential's `Login` response would flip.
+#[test]
+fn read_only_disables_create_and_the_sheets_rename_and_kill_rows() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+
+    // The dashed row is still on screen (same label, just dimmed) — a tap
+    // opens nothing.
+    let before = h.frame();
+    h.tap_value("new session");
+    let after = h.settle();
+    assert_eq!(h.depth(), 1, "a read-only tap opens no create dialog");
+    assert!(
+        added(&before.rounded, &after.rounded).is_empty(),
+        "…and paints no new chrome"
+    );
+
+    // The management sheet: Rename…/Kill… are still labelled rows — a
+    // `Ghost` button paints no fill at rest (`frust-widgets`' own
+    // `StylePaint`), so a disabled row vanishes from `content_rows`'s
+    // fill-based geometric scan; locate them by label instead, the same way
+    // `open_dialog_by_label` already does for the empty state's own action.
+    // Attach is untouched by read-only.
+    open_manage_sheet(&mut h, SEEDED[0]);
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == "Attach"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "Rename\u{2026}"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "Kill\u{2026}"), "{labels:?}");
+
+    let before = h.frame();
+    h.tap_label("Rename\u{2026}");
+    let after = h.settle();
+    assert!(
+        Chrome::diff(&before, &after).rounded.is_empty(),
+        "a read-only rename tap opens no dialog"
+    );
+    assert_eq!(h.depth(), 2, "…and the sheet is still the top page");
+
+    let before = h.frame();
+    h.tap_label("Kill\u{2026}");
+    let after = h.settle();
+    assert!(
+        Chrome::diff(&before, &after).rounded.is_empty(),
+        "a read-only kill tap opens no confirm dialog"
+    );
+    assert_eq!(h.depth(), 2);
+}
+
+#[test]
+fn read_only_leaves_the_empty_states_own_create_action_disabled_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    for name in SEEDED {
+        kill_through_the_sheet(&mut h, name, true);
+        h.pump_until_values("the killed card to disappear", move |values| {
+            !values.iter().any(|v| v == name)
+        });
+    }
+    assert!(
+        node_labels(&h.root).iter().any(|l| l == "No sessions"),
+        "an emptied list shows the empty state"
+    );
+
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+
+    let before = h.frame();
+    h.tap_label("+ new session");
+    let after = h.settle();
+    assert_eq!(h.depth(), 1, "a read-only tap opens no create dialog");
+    assert!(added(&before.rounded, &after.rounded).is_empty());
 }
