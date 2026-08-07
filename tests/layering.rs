@@ -14,9 +14,11 @@
 //! composition-root wiring module, `connection.rs` itself (which defines
 //! `expect_connection_controller`), or a `presentation`/`ui` file (every
 //! screen resolves its app-scoped handles once in `Component::init`, and
-//! reads context again only from `Component::build`, both of which run under
-//! a live owner by construction — `docs/ARCHITECTURE.md`'s "Building a
-//! Screen" section). A `data`/`domain` file reaching for any of the three —
+//! reads context again only from `Component::build` — both owner-carrying
+//! sites per `docs/ARCHITECTURE.md`'s "Building a Screen" section, though a
+//! presentation file can still smuggle a lookup into a spawned future body,
+//! which is why the second scan below exists and checks every directory).
+//! A `data`/`domain` file reaching for any of the three —
 //! the exact shape of the original bug — is not on that list and fails this
 //! scan.
 //!
@@ -68,10 +70,13 @@
 //!   block (e.g. `spawn_local(run_feed_watched(..))`) is not tracked at all,
 //!   since there is no literal `async` on its opening line to key off of;
 //!   and a count that never returns to zero would leave the rest of the file
-//!   flagged as "inside" the block. None of these shapes appear in this
-//!   codebase's current `spawn`/`spawn_local` call sites (this scan passing
-//!   is exactly that claim), but a future call site using one of them needs
-//!   a human eye, not just this test, to review.
+//!   flagged as "inside" the block. The named-future shape EXISTS today —
+//!   `term/mod.rs` spawns `run_feed_watched(..)` exactly that way — so its
+//!   target's body is pinned lookup-free by
+//!   [`the_named_future_spawned_by_the_terminal_pump_stays_lookup_free`]
+//!   below rather than left to this scan's blind spot; any OTHER future call
+//!   site using one of these shapes needs a human eye, not just this test,
+//!   to review.
 //!
 //! Plain `std::fs` source scan, no dependency beyond std (this repo has no
 //! lint-plugin tooling — see `docs/CODE_STANDARDS.md`; precedent:
@@ -396,4 +401,60 @@ fn spawn_block_scanner_flags_only_lookups_actually_inside_the_tracked_span() {
     let result_assertion =
         "spawn_local(async move {\n    let e = call().await.expect_err(\"boom\");\n});\n";
     assert!(banned_lookups_in_spawn_blocks(result_assertion).is_empty());
+}
+
+/// The one spawn call in the tree whose argument is a named future rather
+/// than an inline `async` block — `term/mod.rs`'s
+/// `spawn_local(run_feed_watched(..))` — sits in the spawn-block scan's
+/// documented blind spot (no literal `async` on the opening line to key
+/// off). This pin closes that specific gap: it locates `run_feed_watched`'s
+/// body by the same brace tracking the scan uses and asserts no
+/// owner-dependent lookup ever appears inside it. If this test starts
+/// failing, the fix is the same as everywhere else: resolve the handle
+/// before the future is built and move only the resolved `Arc` in.
+#[test]
+fn the_named_future_spawned_by_the_terminal_pump_stays_lookup_free() {
+    let path = src_dir().join("features/terminal/presentation/term/mod.rs");
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+    let mut depth: i32 = 0;
+    let mut in_body = false;
+    let mut entered = false;
+    let mut offenders = Vec::new();
+    for (idx, raw) in contents.lines().enumerate() {
+        let line = raw.trim_start();
+        if line.starts_with("//") {
+            continue;
+        }
+        if !in_body && !entered && line.contains("pub async fn run_feed_watched") {
+            in_body = true;
+            entered = true;
+        }
+        if in_body {
+            depth += brace_delta(raw);
+            if is_owner_dependent_lookup(raw) {
+                offenders.push(idx + 1);
+            }
+            // The signature spans lines before its `{`; only stop once the
+            // body has opened and closed back to zero.
+            if depth == 0 && raw.contains('}') {
+                in_body = false;
+            }
+        }
+    }
+    assert!(
+        entered,
+        "run_feed_watched not found in {} — if it moved or was renamed, \
+         re-point this pin (its spawn site is the named-future shape the \
+         spawn-block scan cannot track)",
+        path.display()
+    );
+    assert!(
+        offenders.is_empty(),
+        "run_feed_watched's body performs an owner-dependent context lookup \
+         at line(s) {offenders:?} of {} — it is polled by pump_local with no \
+         ambient owner; resolve the handle before building the future",
+        path.display()
+    );
 }
