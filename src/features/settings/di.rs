@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
+use crate::connection::expect_connection_controller;
 use crate::features::settings::data::repositories::{
     GrpcAuthTokensRepository, MockAuthTokensRepository, MockPreferencesRepository, PrefsRepository,
 };
@@ -114,16 +115,23 @@ pub fn provide() {
 
 /// The [`AuthTokensRepository`] [`provide`] publishes: the real, `muxrd`-backed
 /// store, unless [`use_mock_auth_tokens_for_tests`] opted this process out
-/// (every headless suite). Unlike [`platform_preferences_repository`] this has
-/// no fallible-construction fallback branch — [`GrpcAuthTokensRepository`] is
-/// stateless (it resolves the live connection fresh on every call, see that
-/// type's own module docs), so there is nothing here that can fail to
-/// construct.
+/// (every headless suite). [`GrpcAuthTokensRepository`] resolves the app's one
+/// [`ConnectionController`](crate::connection::ConnectionController) exactly
+/// once, right here — `MuxrApp::init` has already published it under the root
+/// owner by the time this runs, so `expect_connection_controller` is always
+/// safe here (the same DI-time resolution `sessions::di`'s and
+/// `terminal::di`'s own `platform_*_repository` use for their own real
+/// repositories, and — unlike a per-call lookup from inside an owner-less
+/// `frust::spawn_local` poller — the one context guaranteed a live reactive
+/// owner; see [`GrpcAuthTokensRepository`]'s own module docs for why that
+/// distinction is load-bearing here). Unlike [`platform_preferences_repository`]
+/// this has no fallible-construction fallback branch — there is nothing here
+/// that can fail to construct.
 fn platform_auth_tokens_repository() -> SharedAuthTokensRepository {
     if USE_MOCK_AUTH_TOKENS_FOR_TESTS.load(Ordering::Relaxed) {
         return Arc::new(MockAuthTokensRepository::seeded());
     }
-    Arc::new(GrpcAuthTokensRepository::new())
+    Arc::new(GrpcAuthTokensRepository::new(expect_connection_controller()))
 }
 
 /// The [`PreferencesRepository`] [`provide`] publishes: the real
