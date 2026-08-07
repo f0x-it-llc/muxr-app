@@ -344,9 +344,11 @@ pub(crate) fn host_of(endpoint: &str) -> &str {
 ///
 /// `label` is the server's own label, carried through from the connect form.
 /// Both buttons clear the offer through
-/// [`crate::connection::ConnectionController`]; accepting also raises the
-/// "saved (mock)" toast, because nothing is actually persisted yet — no
-/// secure-storage plugin is wired.
+/// [`crate::connection::ConnectionController`]; accepting hands off to the
+/// REAL gated save (mint → biometric gate → store, via the connection's
+/// `CredentialSaver` seam), which reports its own outcome on every
+/// non-success branch — so the toast here only announces the hand-off, never
+/// a result the gate hasn't produced yet.
 pub(super) fn credential_banner(label: &str) -> AnyView<SessionsState> {
     let banner = alert(
         AlertVariant::Info,
@@ -367,7 +369,7 @@ pub(super) fn credential_banner(label: &str) -> AnyView<SessionsState> {
         inflexible(
             button("Save", move |state: &mut SessionsState| {
                 state.connection.accept_credential_offer();
-                crate::ui::toasts::app_toasts().show(format!("Saved {saved_label} (mock)"));
+                crate::ui::toasts::app_toasts().show(format!("Saving {saved_label}…"));
             })
             .style(ButtonStyle::Primary)
             .small(),
