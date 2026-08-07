@@ -117,8 +117,9 @@ use super::pieces::{Live, active_theme, connect_pieces_with};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
-use crate::features::connect::di::SavedServers;
+use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
 use crate::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
+use crate::features::settings::di::expect_auth_tokens_repository;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
@@ -301,15 +302,24 @@ impl Component for ConnectScreen {
         // (`Component::init` runs inside the shell's rebuild, under the owner
         // `ComponentView::build` created). A press handler cannot do this —
         // see `super::controller`'s injection note.
-        let repository = use_context::<SavedServers>().expect(
-            "features::connect::di::provide must run in MuxrApp::init before the / route mounts",
-        );
+        let repository = expect_saved_servers();
+        let credentials = expect_credential_service();
+        // The one cross-feature resolve: a saved credential *is* a server-side
+        // token, and `settings` owns that store — the same shape the terminal
+        // screen resolves `sessions`'/`settings`' own repositories with
+        // (`docs/ARCHITECTURE.md`'s cross-feature note).
+        let tokens = expect_auth_tokens_repository();
         let connection = expect_connection_controller();
         let was_connected = connection.connected.get_untracked();
         let controller = use_controller::<ConnectController, AppFailure>({
             let connection = Arc::clone(&connection);
-            move || ConnectController::new(repository, connection)
+            move || ConnectController::new(repository, credentials, tokens, connection)
         });
+        // The credential-save seam `crate::connection` calls when the user
+        // accepts the offer Sessions raises: installed here, where the flow's
+        // dependencies are already resolved, and held weakly by the connection
+        // handle (see `ConnectController::credential_saver`).
+        connection.set_credential_saver(controller.credential_saver());
 
         ConnectState {
             controller,
@@ -356,6 +366,15 @@ impl Component for ConnectScreen {
                 let controller = Arc::clone(&state.controller);
                 let nav = state.app_nav.clone();
                 Rc::new(move || controller.connect_from_pairing(&nav))
+            },
+            // A saved row's tap needs the navigator too — reconnecting through
+            // a stored credential lands on `/sessions` exactly as a manual
+            // connect does — so it is a screen-owned callback like the two
+            // above rather than a bare controller method.
+            on_saved_tap: {
+                let controller = Arc::clone(&state.controller);
+                let nav = state.app_nav.clone();
+                Rc::new(move |index| controller.saved_row_tapped(index, &nav))
             },
         };
 

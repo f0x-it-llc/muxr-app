@@ -114,7 +114,7 @@ use frust::{
 use super::chrome::{centered_paragraph, panel, radio_semantics, swatch, switch_semantics};
 use super::controller::ConnectController;
 use crate::connection::TrustMode;
-use crate::features::connect::domain::entities::{PairingTrust, SavedServer};
+use crate::features::connect::domain::entities::{PairingTrust, SavedServer, epoch_millis};
 
 // ---------------------------------------------------------------------------
 // The screen's live wiring
@@ -144,6 +144,11 @@ pub struct Live {
     /// cannot live on the `Send + Sync` controller. Only ever reached from the
     /// pinned CTA, which renders only while a pairing is stashed.
     pub on_connect_pinned: Rc<dyn Fn()>,
+    /// A saved row was tapped, by index —
+    /// [`ConnectController::saved_row_tapped`], which either refills the form
+    /// or unlocks the row's stored credential and connects. A third state-free
+    /// callback for the same navigator reason as the two above.
+    pub on_saved_tap: Rc<dyn Fn(usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +256,10 @@ pub const PAIRING_CAPTION: &str = "scanned pairing — the code's own token and 
 /// spelling for both, since it is the same fact about the same kind of
 /// credential.
 pub const READ_ONLY_CHIP: &str = "read-only";
+/// The chip a saved row carries when a biometric-gated credential is stored for
+/// it — which is also what says a tap on that row will raise a prompt rather
+/// than refill the form.
+pub const CREDENTIAL_CHIP: &str = "credential";
 
 /// `.field input[placeholder]` — the server-URL field's ghost text. `pub`
 /// because it is the exact string `tests/connect.rs`'s shaping suite measures
@@ -1072,7 +1081,7 @@ pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView
     // `live` is `Some(..)` whenever `pairing_chrome` answered, so the CTA below
     // always has a real action behind it.
     let on_connect_pinned = live.map(|live| Rc::clone(&live.on_connect_pinned));
-    let busy = live.is_some_and(|live| live.controller.connecting().get());
+    let busy = live.is_some_and(|live| live.controller.busy());
     any(column::<S>(vec![
         pairing_banner(theme, pairing),
         v_gap::<S>(PAIRING_GAP),
@@ -1163,26 +1172,37 @@ pub fn saved_address<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<
         None => vec![splash_placeholder_row()],
         Some(live) => live.controller.saved.get(),
     };
+    // One clock read for the whole list rather than one per row: every row's
+    // recency is measured against the same instant, and this piece rebuilds at
+    // signal rate.
+    let now = epoch_millis();
     let mut children = vec![saved_header(theme, &colors), v_gap(SAVED_HDR_BOTTOM_GAP)];
     for (index, server) in servers.iter().enumerate() {
-        children.push(saved_row(theme, &colors, server, index, live));
+        children.push(saved_row(theme, &colors, server, index, now, live));
     }
     backed(column::<S>(children), &colors)
 }
 
 /// The row the splash paints in place of the repository's list: the mock's own
 /// `.saved-row`, which is also where the seeded store's first entry came from
-/// (`data::repositories::mock_saved_servers`).
+/// (`data::repositories::mock_saved_servers`). Its stamp is two hours back from
+/// whenever the splash plays, so the row reads the mock's `2 hours ago`.
 fn splash_placeholder_row() -> SavedServer {
     SavedServer {
         host: "100.71.31.57".to_string(),
         port: 50051,
         trust_mode: TrustMode::TrustOnFirstUse,
         label: "Home rig".to_string(),
-        last_used: "2 hours ago".to_string(),
+        last_used_ms: epoch_millis() - PLACEHOLDER_AGE_MS,
         read_only: false,
+        has_credential: false,
+        token_name: None,
+        fingerprint: None,
     }
 }
+
+/// How old [`splash_placeholder_row`]'s stamp is — two hours, in milliseconds.
+const PLACEHOLDER_AGE_MS: i64 = 2 * 60 * 60 * 1000;
 
 /// `.saved-hdr`: an uppercase micro label followed by a hairline rule filling
 /// the rest of the row (`::after{flex:1;height:1px}`).
@@ -1201,19 +1221,25 @@ fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
     ]))
 }
 
-/// One `.saved-row`: status dot, `host:port` over its meta line, and a
-/// read-only badge where the stored credential is limited.
+/// One `.saved-row`: status dot, `host:port` over its meta line, a badge for a
+/// stored credential, and a read-only badge where that credential is limited.
+///
+/// Tapping a row with a stored credential unlocks and reconnects rather than
+/// refilling the form — the split [`Live::on_saved_tap`] dispatches (see
+/// [`ConnectController::saved_row_tapped`]), which is why the badge matters: it
+/// is what tells the user a tap here will raise a biometric prompt.
 fn saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     server: &SavedServer,
     index: usize,
+    now_ms: i64,
     live: Option<&Live>,
 ) -> AnyView<S> {
     let meta = format!(
         "{} · {} · port {}",
         trust_meta_label(server.trust_mode),
-        server.last_used,
+        server.last_used_label(now_ms),
         server.port
     );
     let mut items = vec![
@@ -1233,6 +1259,13 @@ fn saved_row<S: 'static>(
             ])),
         ),
     ];
+    if server.has_credential {
+        items.push(inflexible(h_gap::<S>(SAVED_GAP)));
+        items.push(inflexible(any(badge(
+            CREDENTIAL_CHIP,
+            BadgeVariant::Neutral,
+        ))));
+    }
     if server.read_only {
         items.push(inflexible(h_gap::<S>(SAVED_GAP)));
         items.push(inflexible(any(badge(
@@ -1244,8 +1277,8 @@ fn saved_row<S: 'static>(
     match live {
         None => any(body),
         Some(live) => {
-            let controller = Arc::clone(&live.controller);
-            any(GestureDetector(body).on_tap(move |_state: &mut S| controller.select_saved(index)))
+            let on_tap = Rc::clone(&live.on_saved_tap);
+            any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
         }
     }
 }

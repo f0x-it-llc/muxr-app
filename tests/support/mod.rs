@@ -520,12 +520,19 @@ pub fn serial() -> MutexGuard<'static, ()> {
 ///   client for a `muxrd`-backed one to call through, so every read would fail
 ///   "not connected" instead of answering the seeded facts the suites assert
 ///   on.
+/// - `connect::di`'s two stores — the saved-server list (same
+///   leftover-state-between-runs problem the preferences store has) and the
+///   biometric-gated credential store, whose real gate answers "unavailable"
+///   permanently off-device and waits for a human on one. The mock is also the
+///   only way to drive the gate's outcome table at all.
 pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
     muxr::connection::use_mock_connection_for_tests();
     muxr::features::sessions::di::use_mock_sessions_for_tests();
     muxr::features::settings::di::use_mock_auth_tokens_for_tests();
     muxr::features::terminal::di::use_mock_terminal_for_tests();
+    muxr::features::connect::di::use_mock_saved_servers_for_tests();
+    muxr::features::connect::di::use_mock_credentials_for_tests();
     let _runtime = ReactiveRuntime::init(recording_waker());
     let ambient = Owner::new();
     ambient.set();

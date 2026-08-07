@@ -8,17 +8,18 @@
 //!
 //! | Layer | What it holds |
 //! |---|---|
-//! | [`domain`] | `SavedServer`, the `SavedServersRepository` contract, the `host:port` validation |
-//! | [`data`] | `MockSavedServersRepository` — in-memory, seeded (no persistence yet) |
+//! | [`domain`] | `SavedServer`, the two store contracts (metadata + gated secret), the `host:port` validation, the two credential use cases |
+//! | [`data`] | The real preferences-backed saved-server store and the real biometric-gated credential store, each beside its in-memory double |
 //! | [`presentation`] | The `ConnectScreen` `Component`, its `ConnectController`, and the eight pieces |
-//! | [`di`] | Constructs the repository once and publishes it into context |
+//! | [`di`] | Constructs both stores once and publishes them into context |
 //!
-//! **Partly mock-era still.** Credential persistence and biometrics are
-//! absent (the saved-server store is in memory), so nothing a scan or a form
-//! collects outlives the process. The QR sheet itself is real: it scans a
-//! `muxr://pair` code through `frust-camera`, prefills the form and offers the
-//! explicit pinned connect (see [`presentation::pages`]' QR-sheet section).
-//! See `docs/ARCHITECTURE.md`'s Planned section.
+//! **Two stores, one key.** A remembered server's *metadata* and its *secret*
+//! never share a store: the list is plain device storage, the auth token is
+//! behind the device's biometric gate, and only a `host:port` key joins them
+//! (see [`domain::entities`]' module docs). The QR sheet scans a `muxr://pair`
+//! code through `frust-camera`, prefills the form and offers the explicit
+//! pinned connect (see [`presentation::pages`]' QR-sheet section); a successful
+//! pairing then stores its scanned token behind one biometric prompt.
 
 pub mod data;
 pub mod di;

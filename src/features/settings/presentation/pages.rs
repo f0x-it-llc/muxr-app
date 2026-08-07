@@ -47,9 +47,11 @@
 //!   see [`connection_rows`]). **No latency**: the sessions strip owns that
 //!   number, next to the list a round trip actually gates; repeating it here
 //!   would be a second, differently-stale copy of the same fact.
-//! - **auth tokens**, **terminal appearance**, **session poll** — this
-//!   feature's own [`SettingsController`], over the two repositories `di`
-//!   published.
+//! - **auth tokens**, **saved servers**, **terminal appearance**, **session
+//!   poll** — this feature's own [`SettingsController`], over the two
+//!   repositories `di` published plus the two `connect`'s own `di` publishes
+//!   (the saved-server list and its credential store — see that controller's
+//!   module docs for why the credential rows live on this screen).
 //!
 //! # Minting a token
 //!
@@ -99,6 +101,7 @@ use crate::connection::{
     ConnectionController, ServerBackend, ServerInfo, TrustMode, expect_connection_controller,
 };
 use crate::failure::AppFailure;
+use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
@@ -201,6 +204,11 @@ impl Component for SettingsScreen {
             SettingsController::new(
                 expect_auth_tokens_repository(),
                 expect_preferences_repository(),
+                // `connect`'s two stores, resolved through its own `di` — the
+                // cross-feature reach the terminal screen already makes, and
+                // which `SettingsController`'s module docs justify for these.
+                expect_saved_servers(),
+                expect_credential_service(),
             )
         });
 
@@ -235,6 +243,7 @@ impl Component for SettingsScreen {
         let info = state.actions.connection.server_info.get();
         let read_only = state.actions.connection.is_read_only.get();
         let tokens = state.actions.controller.tokens.get();
+        let saved = state.actions.controller.saved.get();
         let appearance = state.actions.controller.appearance.get();
         let poll = state.actions.controller.poll.get();
 
@@ -261,6 +270,17 @@ impl Component for SettingsScreen {
                 .map(|token| pieces::token_item(token, &colors, !read_only)),
         );
         body.push(pieces::create_token_row(&colors, !read_only));
+
+        body.push(pieces::group_label("saved servers", &colors));
+        if saved.is_empty() {
+            body.push(pieces::no_saved_servers_row(&colors));
+        } else {
+            body.extend(
+                saved
+                    .iter()
+                    .map(|server| pieces::saved_server_item(server, &colors)),
+            );
+        }
 
         body.push(pieces::group_label("terminal appearance", &colors));
         body.extend(appearance_rows(&appearance, &colors));
@@ -699,6 +719,76 @@ impl Actions {
         );
     }
 
+    /// Open the delete-credential confirmation for the saved server at
+    /// `endpoint`.
+    ///
+    /// **No read-only guard**, unlike the two token controls: deleting a
+    /// device-local credential is not a server mutation, and the token revoke
+    /// that rides along is best-effort by design (see
+    /// [`SettingsController::delete_credential`]). A read-only session must
+    /// still be able to forget its own stored secret.
+    pub fn open_delete_credential_dialog(&self, endpoint: &str) {
+        let controller = Arc::clone(&self.controller);
+        let endpoint = endpoint.to_string();
+        confirm_dialog(
+            &self.overlays,
+            "Delete credential?",
+            format!(
+                "The credential saved for {endpoint} is removed from this device and its \
+                 token revoked on the server. The saved server itself is kept."
+            ),
+            "Delete",
+            move |_app: &mut AppState| {
+                let handle = Arc::clone(&controller);
+                let endpoint = endpoint.clone();
+                let confirmation = format!("Deleted the credential for {endpoint}");
+                spawn_local(async move {
+                    // Confirm only on success — the same rule the token
+                    // controls follow.
+                    if handle.delete_credential(endpoint).await {
+                        app_toasts().show(confirmation);
+                    }
+                });
+            },
+        );
+    }
+
+    /// Open the forget-server confirmation for the saved server at `endpoint`.
+    /// The message names the stored credential only when there is one to lose.
+    pub fn open_forget_server_dialog(&self, endpoint: &str) {
+        let controller = Arc::clone(&self.controller);
+        let endpoint = endpoint.to_string();
+        let has_credential = controller
+            .saved
+            .get_untracked()
+            .iter()
+            .any(|server| server.endpoint() == endpoint && server.has_credential);
+        let credential_clause = if has_credential {
+            ", along with its saved credential"
+        } else {
+            ""
+        };
+        confirm_dialog(
+            &self.overlays,
+            "Forget server?",
+            format!(
+                "The saved profile for {endpoint} is deleted{credential_clause}. You will \
+                 need its address and a token to connect again."
+            ),
+            "Forget",
+            move |_app: &mut AppState| {
+                let handle = Arc::clone(&controller);
+                let endpoint = endpoint.clone();
+                let confirmation = format!("Forgot {endpoint}");
+                spawn_local(async move {
+                    if handle.forget_server(endpoint).await {
+                        app_toasts().show(confirmation);
+                    }
+                });
+            },
+        );
+    }
+
     /// Open the Disconnect confirmation. See the [module docs](self) for why
     /// confirming both clears the connection *and* navigates.
     pub fn open_disconnect_dialog(&self) {
@@ -769,6 +859,16 @@ pub(super) fn open_create_token_dialog(state: &mut SettingsState) {
 /// A token's `revoke` button.
 pub(super) fn open_revoke_dialog(state: &mut SettingsState, name: &str) {
     state.actions.open_revoke_dialog(name);
+}
+
+/// A saved server's `delete credential` button.
+pub(super) fn open_delete_credential_dialog(state: &mut SettingsState, endpoint: &str) {
+    state.actions.open_delete_credential_dialog(endpoint);
+}
+
+/// A saved server's `forget` button.
+pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &str) {
+    state.actions.open_forget_server_dialog(endpoint);
 }
 
 /// The `Disconnect` button.

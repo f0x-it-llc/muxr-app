@@ -5,9 +5,7 @@
 //! module doc), differing only in that it may depend on an external
 //! transport/storage crate.
 //!
-//! One implementation today: [`repositories::mock_saved_servers`], an in-memory
-//! saved-server store. Nothing persists yet — secure credential storage is a
-//! later phase (`docs/ARCHITECTURE.md`'s Planned section), and the mock is what
-//! lets the Connect screen be real before it exists.
+//! Two contracts, two implementations each — a real one and the in-memory
+//! double every headless suite runs on. See [`repositories`]' own table.
 
 pub mod repositories;
