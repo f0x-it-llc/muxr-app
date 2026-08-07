@@ -51,8 +51,11 @@ until then this app inherits the parent Frust checkout's `docs/CODE_STANDARDS.md
   feature slices in one pass rather than splitting, per that task's explicit "update in place, don't
   restructure" instruction; compaction alone (trimming the Planned section's shipped items, deduping
   the Net/Tests cross-reference, tightening Feature Slices prose) recovered content but landed at
-  312/320. **Re-check trigger:** the next `docs/ARCHITECTURE.md` edit of any size — split into
-  hub-and-spoke instead of raising this further.
+  312/320; the phase-5 review fix rounds (layer-table true-ups, the deferred shared-channel
+  limitation note, the layering-suite Tests entry) then consumed the remaining slack — the file
+  now sits at **320/320, the hard cap exactly, zero headroom**. **The re-check trigger has
+  FIRED:** the next `docs/ARCHITECTURE.md` edit of any size cannot land in place — split into
+  hub-and-spoke first; do not raise this cap again.
 - `docs/DEVELOPMENT.md` → cap raised **130 → 180**. Already over its recorded cap (152) going into
   p5-12 from an earlier untracked addition (the Codegen/crypto-provider section for `src/net`, added
   without a matching policy update); p5-12 added a "Test Rig (Live `muxrd`)" section on top, landing
