@@ -3,18 +3,20 @@
 ## Overview
 
 Muxr is a Frust app: a stack-navigated client attaching to and controlling remote zellij sessions
-through `muxrd`. All four features — `connect`, `sessions`, `terminal`, `settings` — are full
-`{domain, data, presentation}` slices (mock repositories behind domain traits, clean-signals
-controllers, per-screen `Component`s) over mock data; the real `muxrd` gRPC layer is not wired yet.
-A persistent floating top bar and a full cold-start splash frame every screen. Every feature follows
-the same inward-dependency slice, described below.
+through `muxrd`, a TLS + bearer-auth gRPC daemon. All four features — `connect`, `sessions`,
+`terminal`, `settings` — are full `{domain, data, presentation}` slices running over `src/net`'s real
+gRPC client, each also keeping a mock repository behind its `di.rs`'s test-only seam for headless
+suites; the desktop preview degrades gracefully where a plugin has no desktop backend (camera,
+biometrics). A persistent floating top bar and a full cold-start splash frame every screen. Every
+feature follows the same inward-dependency slice, described below.
 
 ## Composition Root — `src/lib.rs`
 
 `frust::app!(MuxrApp, setup = { frust::glyph_theme::install(); })` is the sole entry point, binding
 `MuxrApp` to Android/iOS/desktop and installing Glyph as the one design system first. `init`
 publishes the app-scoped `ConnectionController` (below), calls each feature's own `di::provide()`
-(every feature constructs its own mock repositories the same way), and builds the app's route
+(every feature wires its own repositories the same way — real by default, mock behind a
+process-static test-only seam), and builds the app's route
 `Router` alongside a second navigator, the root overlay host (`AppState::overlays`, see Navigation).
 `build` mounts `shell::root_view` unchanged — its body and stable four-slot `Stack` invariant (see
 Shell, below) untouched — then wraps that whole output, as its caller, in
@@ -55,6 +57,39 @@ variant carries its own `is_retryable` (only `Network` is) and its own user-faci
 detail is never shown to the user. `ui::toasts::FailureToasts` is the one bridge from an `AppFailure`
 to a visible toast, surfacing only `user_message()`.
 
+## Net — `src/net/`
+
+App-level infrastructure beside `connection.rs`/`failure.rs`, not a feature's `data` layer — more
+than one feature's repository shares the same channel. `proto` is the generated `muxr.v1` service
+`build.rs` compiles from a vendored `muxrd` proto (`docs/DEVELOPMENT.md`'s Codegen section covers the
+toolchain). `tls` holds `TrustConfig` and the three `rustls` verifiers it installs —
+deliberately separate from `connection::TrustMode` (a posture label a screen renders), since the
+mapping between them is the connect seam's job. `channel` builds the endpoint/`Channel` for a
+`(host, port, TrustConfig)` triple; `auth` is the swappable session token and its bearer interceptor;
+`client` is `MuxrClient`, the connected handle every repository holds; `error` is the one place a
+`tonic::Status` becomes an `AppFailure`. `testing` (`#[cfg(test)]`) stands an in-process `muxrd`
+fixture on a loopback port, so the client stack is exercised without the docker rig — and is where the
+client's handshake/credential coverage lives, by necessity: `dev-dependencies` (`rcgen`, tonic's
+`server`/`router`) can't link into a `tests/*.rs` integration binary.
+
+## Connection — `src/connection.rs`
+
+`ConnectionController` is the app's one app-scoped connection handle — published once from
+`MuxrApp::init`, resolved via `connection::expect_connection_controller()`; it lives beside
+`failure.rs`/`responsive.rs` since more than one feature reads it (Sessions renders `server_info`'s
+latency, Settings the rest). It owns the state machine; a `ConnectionBackend` seam owns the work:
+`NetConnectionBackend` (dial, `Login`, a timed `GetVersion` over `src/net`) and `MockConnectionBackend`
+(the facts every headless suite runs on), unified by `ConnectRun`'s `Ready`/`Pending` sum type since a
+mock settles synchronously and a real dial cannot be polled outside its own runtime.
+`use_mock_connection_for_tests` opts a test process onto the mock before `MuxrApp::init` runs, the same
+seam shape `settings::di`'s preferences opt-out uses. Beyond `connected` the controller publishes
+`connecting` (single-flight guard) and `is_read_only` (mirrored off `ServerInfo`, the primary defence
+against a read-only credential's refused mutations); `ServerInfo` carries
+`backend_versions`/`available_backends`/`capabilities` and the measured `latency_ms`. `CredentialSaver`
+is a one-method seam `connect` installs so an accepted save offer can mint a token and write the
+secure store without this module naming a feature type. `MuxrApp::init` subscribes the controller's
+failure sink to the app's toast bridge once.
+
 ## Navigation — `src/routes.rs`
 
 Four flat routes, one per feature: `/`, `/sessions`, `/terminal`, `/settings`. Exactly one `Router`
@@ -64,12 +99,9 @@ a screen's `Component` never sees that outer state, the router is also published
 `Rc`-backed and so fails `provide_context`'s `Send + Sync` bound) — a screen resolves it via
 `routes::app_nav()` in its own `Component::init`. `session_guard_with(Arc<ConnectionController>)` is
 the router's one redirect: bounces an unauthenticated push to `/sessions`/`/terminal` back to `/`
-(`/`/`/settings` never guarded), closing over the controller **by capture, not context**, so it stays
-safe from any call stack; it fires only at navigation time, so a connection dropping mid-screen does
-not reactively bounce it back. `ConnectionController` (`src/connection.rs`) is the app's one
-mock-only connection handle, resolved via `connection::expect_connection_controller()`; it lives
-beside `failure.rs`/`responsive.rs` rather than inside `connect`, since more than one feature reads
-it.
+(`/`/`/settings` never guarded), closing over `ConnectionController` (see Connection, above) **by
+capture, not context**, so it stays safe from any call stack; it fires only at navigation time, so a
+connection dropping mid-screen does not reactively bounce it back.
 
 `Nav` also keeps a small route-meta mirror behind the shell's one persistent top bar: `RouteMeta`/
 `BarState` carry the bar's title/leading/action and the crossfade `direction`. A pop that bypasses
@@ -97,46 +129,64 @@ Four slices — `connect`, `sessions`, `terminal`, `settings` — each split int
 | Layer | May depend on | Rule |
 |-------|---------------|------|
 | `domain` | own `domain` + `crate::failure` + a named sibling `domain` contract + `crate::connection`'s plain-data re-exports | Framework-free: never `frust::`, never a sibling `data`/`presentation` |
-| `data` | own `domain` (implements its repository traits) + external I/O crates | Framework-free like `domain`; owns its own failure-mapping into `AppFailure` |
+| `data` | own `domain` (implements its repository traits) + external I/O crates + (`sessions`, `terminal` only) the one sanctioned `Arc<ConnectionController>` edge | Framework-free like `domain`; owns its own failure-mapping into `AppFailure` |
 | `presentation` | own `domain`/`data` + `frust::` | The only layer touching `frust`'s reactive/widget vocabulary |
 
-All four are now full slices — mock repositories behind domain traits, a clean-signals controller,
-and a per-screen `Component` (see Building a Screen, below) — over mock data; the real `muxrd` gRPC
-layer is not wired yet (see Planned). A `domain` → sibling-`domain` edge is a deliberate, narrow
-widening of the table above, used three times: `connect`'s domain re-exports
-`crate::connection::TrustMode`; `terminal`'s domain re-exports `sessions`' own
-`SessionsRepository`/`RenameRequest` (one owner for a session's name); and `terminal`'s domain also
-re-exports `settings`' own `CursorStyle`/`PreferencesRepository` (the live pane maps a cursor shape
-and reads appearance prefs through the one store `settings` writes) — no edge crosses a sibling's
-`data` or `presentation`. A separate widening sits outside the layer table entirely: each feature's
-`di.rs` is composition-root wiring, and `terminal`'s page resolves both
-`sessions::di::expect_sessions_repository()` and `settings::di::expect_preferences_repository()`
-directly rather than re-routing copies through its own.
+All four are full slices: a real repository over `src/net`'s gRPC client (or `crate::connection`
+directly), a clean-signals controller, and a per-screen `Component` (see Building a Screen, below),
+each also keeping a mock repository behind its `di.rs`'s test-only seam. A `domain` →
+sibling-`domain` edge is a deliberate, narrow widening of the table above, used three times:
+`connect`'s domain re-exports `crate::connection::TrustMode`; `terminal`'s domain re-exports
+`sessions`' own `SessionsRepository`/`RenameRequest` (one owner for a session's name); and
+`terminal`'s domain also re-exports `settings`' own `CursorStyle`/`PreferencesRepository` (the live
+pane maps a cursor shape and reads appearance prefs through the one store `settings` writes) — no
+edge crosses a sibling's `data` or `presentation`. Two more widenings sit outside the layer table
+entirely: each feature's `di.rs` is composition-root wiring, so a page may resolve a sibling's
+`di::expect_*` directly rather than re-routing a copy through its own — `terminal`'s page resolves
+`sessions::di::expect_sessions_repository()`/`settings::di::expect_preferences_repository()`,
+`settings`' page resolves `connect::di::expect_saved_servers()`/`expect_credential_service()`, and
+`connect`'s page resolves `settings::di::expect_auth_tokens_repository()`.
 
-- **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, a mock-mirror
-  repository, the fullscreen seam, the "panes & tabs" sheet, and the app bar's overflow menu
-  (`frust::glyph::show_glyph_menu`, forwarded from `crate::shell` since the bar it opens from is app
-  chrome). A second domain port, `domain::feed::TerminalFeed` — a byte-level stream, deliberately
-  separate from `TerminalRepository`'s one-shot model calls — has its first implementation,
-  `data::feeds::DemoFeed`, replaying an embedded fixture. `presentation::term` is the real grid: a
-  `vt100` emulator held off the signal graph, a ~30 Hz pump coalescing every wake into one signal
-  write, same-style run batching, cell geometry, and a `LAYOUT | PAINT` generation contract (the
-  cursor blink is its one paced, paint-only exception). `term::input` turns platform IME snapshots
-  into keystrokes via a last-known-state diff, gated by a one-shot Ctrl/Alt latch at the single emit
-  choke point; `term::selection`/`chip` add word-wise long-press selection, a re-render loupe and a
-  sensitive-clipboard Copy chip; `presentation::keybar` is the IME-active-only key bar, whose caps
-  claim focus and re-publish the IME surface on every tap — a pointer `Down` that claims no focus is a
-  blur that drops it, so docked chrome must do the same. The screen defaults to the mock transcript;
-  a "Demo session" overflow-menu row mounts this grid instead, built lazily inside `build` under the
-  screen's own `Owner` so its `on_cleanup` teardown fires on unmount.
-- **`settings`** — the connected server's settings screen: four groups (connection, auth tokens,
-  terminal appearance, session poll) over an in-memory token repository and an in-memory preferences
-  repository (persistence is Planned), a shared picker-sheet builder the last two groups' rows open,
-  and the Disconnect flow — the production caller of `ConnectionController::disconnect`. Its
-  `herdr version` row is a screen-local constant (see Planned).
-- **`sessions`** — its `presentation::pieces` still exports an unused `picker_rows`/`picker_heading`
-  pair from a picker sheet the redesign superseded (switch/create moved onto the dashed new-session
-  row and the empty state); kept for a future picker sheet to inherit rather than re-derive.
+- **`connect`** — the `/` route: the manual connect form, the saved-server list, and the QR-pairing
+  sheet (camera scan → prefilled form → a pinned CTA the user still presses; a scan never dials by
+  itself). Credentials split into two stores sharing only a `host:port` key: saved-server *metadata*
+  (`shared-preferences`, key `zelli_saved_servers`) and the auth token itself, behind the device's
+  biometric gate (`secure-storage`, key `zelli_cred_<host>_<port>`). Five credential flows, each its
+  own controller method: manual save (mint + rotate, revoking the old token only once the new one is
+  stored), one-prompt QR save (the scanned token *is* the credential, nothing minted), gated login
+  with a saved credential, ungated delete (owned by Settings), and an upsert on every successful login
+  (keeps the saved row's credential fields current).
+- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every
+  mutation by `Session::id` (the backend-qualified routing key) rather than display name. A read-only
+  credential (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never
+  Attach. Its `presentation::pieces` still exports an unused `picker_rows`/`picker_heading` pair from
+  a picker sheet the redesign superseded; kept for a future picker sheet to inherit rather than
+  re-derive.
+- **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
+  seam, the "panes & tabs" sheet, and the app bar's overflow menu (`frust::glyph::show_glyph_menu`,
+  forwarded from `crate::shell`). A second domain port, `domain::feed::TerminalFeed` — a byte-level
+  stream, deliberately separate from `TerminalRepository`'s one-shot model calls — has two
+  implementations: `data::feeds::DemoFeed` (an embedded fixture replay) and
+  `data::feeds::GrpcTerminalFeed` (the real `AttachTerminal` stream, a fixed 1/2/4/8/16s reconnect
+  backoff, and a link-status signal the card's own link strip renders when reconnecting, disconnected
+  or closed). `presentation::term` is the real grid: a `vt100` emulator held off the signal graph, a
+  ~30 Hz pump coalescing every wake into one signal write, same-style run batching, cell geometry, and
+  a `LAYOUT | PAINT` generation contract (the cursor blink is its one paced, paint-only exception).
+  `term::input` turns platform IME snapshots into keystrokes; `term::selection`/`chip` add word-wise
+  long-press selection, a re-render loupe and a sensitive-clipboard Copy chip; `presentation::keybar`
+  is the IME-active-only key bar, whose caps claim (and must re-claim, on every tap) focus. Three
+  things can occupy the card: a real attached session (route carries `?session=<id>` and the app holds
+  a live client), the overflow menu's "Demo session" row (the fixture replay), or — a bare `/terminal`,
+  and every headless suite — the seeded mock transcript `pieces::card_body` renders. A read-only
+  credential mounts the grid in its own read-only mode and withdraws the panes sheet's mutating rows.
+- **`settings`** — the connected server's settings screen: five groups (connection, auth tokens,
+  saved servers, terminal appearance, session poll). `GrpcAuthTokensRepository` and `PrefsRepository`
+  (the `frust-shared-preferences`-backed store) back the real run; token rows support create (with a
+  read-only toggle, gated behind `is_read_only`) and revoke, and a freshly minted token's secret is
+  shown once, through a dedicated reveal sheet, then gone for good. The connection group's version
+  row(s) are one per `ServerInfo::backend_versions` entry; the saved servers group renders `connect`'s
+  own list (`saved_server_item`, with its two delete actions). Settings owns the Disconnect flow — the
+  production caller of `ConnectionController::disconnect`.
 
 ## Building a Screen (canonical pattern)
 
@@ -218,19 +268,25 @@ width-clamp-and-padding pass only, never a *structural* (side-by-side-pane, two-
 
 ## Tests — `tests/`
 
-Headless integration tests drive a `RenderRoot` directly (no GPU, no window): `tests/support/` is
-the shared harness (a recording paint scene, sized-frame/pump helpers, event builders, value and
-rect-diff readers). `routes.rs` smoke-tests each route; `sequence.rs`/`splash.rs` exercise the splash
-timeline; `navigation_motion.rs` mounts the *whole* app to exercise the shell's persistent bar, the
-route-meta mirror and the page transition (a navigator's own pages are otherwise invisible to the
-accessibility tree); `shell_handoff.rs` is the widget-identity regression test for the root `Stack`'s
-fixed indices. `connect.rs`/`sessions.rs`/`terminal.rs`/`settings.rs`/`ui_substrate.rs` exercise the
-four screens and the shared `ui/` modules, each mounting its screen beside its own navigator (so it
-stays visible to accessibility) and installing the app's real router over that navigator so the
-suite runs the real table and guard. `term_widget.rs`/`term_input.rs`/`term_selection.rs` drive the
-real terminal grid, its keystroke source and its selection/copy model directly, headless against the
-real `vt100` emulator; `terminal_live.rs` mounts the whole `/terminal` screen and exercises the same
-grid through the "Demo session" cutover.
+Headless integration tests drive a `RenderRoot` directly (no GPU, no window). `tests/support::setup`
+is the one call site that opts a whole test binary onto every mock repository before `MuxrApp::init`
+runs — seven seams (connection, sessions, terminal, settings' preferences and auth tokens, connect's
+saved-servers and credential-service), each flipped by its own module's `use_mock_*_for_tests()`. The
+same module is also the shared paint/frame/pump harness (a recording paint scene, sized-frame/pump
+helpers, event builders, value and rect-diff readers). `routes.rs` smoke-tests each route;
+`sequence.rs`/`splash.rs` exercise the splash timeline; `navigation_motion.rs` mounts the *whole* app
+to exercise the shell's persistent bar, the route-meta mirror and the page transition (a navigator's
+own pages are otherwise invisible to the accessibility tree); `shell_handoff.rs` is the
+widget-identity regression test for the root `Stack`'s fixed indices.
+`connect.rs`/`sessions.rs`/`terminal.rs`/`settings.rs`/`ui_substrate.rs` exercise the four screens and
+the shared `ui/` modules, each mounting its screen beside its own navigator (so it stays visible to
+accessibility) and installing the app's real router over that navigator; `connect.rs` also scripts
+the credential mock's recorded prompt count to assert "exactly one biometric prompt" per flow.
+`term_widget.rs`/`term_input.rs`/`term_selection.rs` drive the real terminal grid, its keystroke
+source and its selection/copy model directly, headless against the real `vt100` emulator;
+`terminal_live.rs` mounts the whole `/terminal` screen and drives the same grid's link-status signal
+through the "Demo session" cutover. `src/net`'s own `#[cfg(test)]` suite (see Net, above) carries the
+client's handshake/credential coverage.
 
 ## Design References
 
@@ -240,20 +296,16 @@ grid through the "Demo session" cutover.
 
 ## Planned
 
-- The `muxrd` connection/gRPC layer (TLS + bearer auth) — `connection.rs`'s controller is mock-only,
-  and every feature's repositories are in-memory mocks standing in for it.
-- Cutting the terminal grid over to a real `muxrd` session (replacing `DemoFeed`) and a real
-  session's read-only/threaded handling — the grid, its keystroke source and its selection are built
-  and demo-mounted (see Feature Slices' `terminal` entry); only the live transport remains. Also
-  scrollback-anchored selection: `term::selection` addresses only the rendered screen today and
+- Scrollback-anchored selection: `term::selection` addresses only the rendered screen today and
   clears a held selection on new output rather than retarget it stale (its module docs record why).
-- QR-code pairing for host + token entry.
-- Secure, persisted credential/preference storage — `settings`'s preferences repository is in-memory only.
+- Pane-management RPCs (new pane, close, resize) are unwired — v2's terminal UI has no affordance for
+  them yet; the dashed "new pane" row is a stand-in that reports "unavailable" rather than calling one.
+- The scroll RPC is unwired too — there is no scroll gesture on the terminal grid to drive it from.
+- Background pause/reattach: a backgrounded app keeps its `AttachTerminal` stream open rather than
+  detaching and reattaching on resume, pending a frust app-lifecycle seam this app can hook into.
 - The login-token field's controller-held buffer is cleared and zeroized on both connect and
   disconnect today; transient copies on the render pass and the platform IME surface (suggestions,
   recents capture) still hold plaintext until platform-level masking plumbing lands.
-- A `herdr` wire-version field on `ServerInfo` — the settings screen's `herdr version` row is a
-  screen-local constant until then.
 - Structural (side-by-side, two-column) responsive layouts, once frust's responsive primitive and a
   design mock exist.
 - Promoting `icon_button` out of `ui::topbar` into its own `crate::ui` module, once it has grown a

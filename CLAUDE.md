@@ -2,10 +2,11 @@
 
 Muxr is a [Frust](https://github.com/f0x-it-llc/frust)-native rewrite of the muxr client: an
 app that attaches to and controls remote [zellij](https://zellij.dev) terminal-multiplexer
-sessions through `muxrd`, a TLS + bearer-auth gRPC backend. Development is UI-first: all four
-features (`connect`, `sessions`, `terminal`, `settings`) are full, interactive screens over mock
-data (a session guard bounces an unauthenticated push back to Connect); the real `muxrd` gRPC
-layer is not wired yet.
+sessions through `muxrd`, a TLS + bearer-auth gRPC backend. All four features (`connect`,
+`sessions`, `terminal`, `settings`) run over the real `muxrd` gRPC layer in production (a session
+guard bounces an unauthenticated push back to Connect); each also keeps a mock repository behind
+its `di.rs` seam for headless tests, and the desktop preview degrades gracefully where a plugin
+has no desktop backend (camera, biometrics).
 
 ## Documentation
 
