@@ -499,7 +499,17 @@ pub fn serial() -> MutexGuard<'static, ()> {
 /// duration so component owners stay valid children of it). Required before any
 /// test that mounts a `Component` (`on_cleanup`/`spawn_local`/context all need an
 /// ambient owner + the installed executor).
+///
+/// Also opts this process out of `settings::di::provide`'s real,
+/// `frust-shared-preferences`-backed preferences store (see that module's
+/// own "headless-test seam" docs): every suite calls this before
+/// `MuxrApp::init` ever runs, which is what makes it the one seam that
+/// reaches every `tests/*.rs` file without editing each one individually.
+/// Without it, a suite would read and write this dev machine's own
+/// NSUserDefaults (or, off Apple/Android, a JSON file) — leftover state from
+/// a *previous* run would make the suite order-dependent.
 pub fn setup() -> Owner {
+    muxr::features::settings::di::use_mock_preferences_for_tests();
     let _runtime = ReactiveRuntime::init(recording_waker());
     let ambient = Owner::new();
     ambient.set();

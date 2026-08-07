@@ -90,14 +90,15 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener, use_interval};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, NavigatorController, Padding, SizedBox, WindowMetrics, any, component, flexible,
-    inflexible, safe_area, scroll_view, spawn_local, use_context,
+    FlexView, Get, NavigatorController, Padding, Set, SizedBox, WindowMetrics, any, component,
+    flexible, inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
+use crate::features::settings::di::expect_preferences_repository;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
@@ -221,16 +222,23 @@ impl Component for SessionsScreen {
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
-        // The mock poll: a component-scoped interval, so it stops the moment
-        // this route unmounts. While it is merely *covered* (`/terminal` on
-        // top) the component is still very much alive, which is what
-        // `SessionsController`'s pause exists for.
-        let polling = Arc::clone(&controller);
-        use_interval(Duration::from_secs(POLL_PERIOD_SECS), move || {
-            if polling.take_poll_tick() {
-                let handle = Arc::clone(&polling);
-                spawn_local(async move { handle.refresh().await });
-            }
+        // The mock poll's cadence: resolved once from `settings`' own stored
+        // `layout_refresh_secs` preference (this mount only — see
+        // `SessionsController`'s "Poll cadence" module docs for why a pref
+        // changed while this screen is already mounted applies only from the
+        // *next* mount). `settings::di::expect_preferences_repository()` is
+        // resolved directly here, the same di.rs-is-composition-root-wiring
+        // widening `terminal`'s page already uses for this exact repository
+        // (`docs/ARCHITECTURE.md`'s Feature Slices section). `Component::build`
+        // starts `use_interval` itself, the moment `poll_period` resolves.
+        let poll_loader = Arc::clone(&controller);
+        spawn_local(async move {
+            let secs = expect_preferences_repository()
+                .load_preferences()
+                .await
+                .map(|prefs| prefs.poll.layout_refresh_secs)
+                .unwrap_or(POLL_PERIOD_SECS);
+            poll_loader.poll_period.set(Some(secs));
         });
 
         SessionsState {
@@ -254,6 +262,26 @@ impl Component for SessionsScreen {
             .actions
             .controller
             .observe_depth(state.actions.stack_depth());
+
+        // Start the mock poll's interval the moment its cadence resolves
+        // (tracked read: `init`'s async load writing `poll_period` is what
+        // wakes this rebuild). `claim_poll_interval_start` makes the actual
+        // `use_interval` call run exactly once even though `build` re-runs
+        // on every later tracked write — see `SessionsController`'s "Poll
+        // cadence" module docs for why this lives in `build` rather than
+        // `init` (both run under the same component `Owner`, so
+        // `use_interval` is exactly as safe to start from here).
+        if let Some(secs) = state.actions.controller.poll_period.get()
+            && state.actions.controller.claim_poll_interval_start()
+        {
+            let polling = Arc::clone(&state.actions.controller);
+            use_interval(Duration::from_secs(u64::from(secs)), move || {
+                if polling.take_poll_tick() {
+                    let handle = Arc::clone(&polling);
+                    spawn_local(async move { handle.refresh().await });
+                }
+            });
+        }
 
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.

@@ -11,10 +11,27 @@
 //! every mount of the `/settings` screen resolves the *same* stores through
 //! [`expect_auth_tokens_repository`]/[`expect_preferences_repository`]: a token
 //! revoked on one visit is still gone on the next, and a font size picked on
-//! one is still picked. Choosing the implementations is this file's whole job
-//! — swapping the mocks for the real `muxrd` client and a storage plugin is a
-//! two-line edit here, invisible to the screen, the controller and the use
-//! cases (which only ever name the traits).
+//! one is still picked. `AuthTokensRepository` stays the in-memory mock (no
+//! real `muxrd` client yet); `PreferencesRepository` is real —
+//! [`PrefsRepository`](crate::features::settings::data::repositories::PrefsRepository),
+//! the `frust-shared-preferences`-backed store — swapping the mock for it is
+//! what let preferences survive a restart, invisible to the screen, the
+//! controller and the use cases (which only ever name the traits).
+//!
+//! # The headless-test seam
+//!
+//! [`provide`] runs from the *exact same* `MuxrApp::init` call whether it's a
+//! real app launch or a `tests/*.rs` integration suite mounting the app root
+//! (`Harness::mount`, every suite's own helper) — there is no `cfg(test)` to
+//! branch on here, since an integration test binary links the *normal* build
+//! of this crate, never the one compiled with `--cfg test`. So a suite opts
+//! out **before** `provide` runs, via [`use_mock_preferences_for_tests`]: the
+//! one call site is `tests/support::setup()`, which every suite already calls
+//! ahead of mounting anything, so no individual `tests/*.rs` file needs to
+//! know this seam exists. Without it, every headless suite would read and
+//! write this dev machine's own NSUserDefaults (or, off Apple/Android, a JSON
+//! file) — leftover state from a *previous* run would make the suite
+//! order-dependent, which this app's Tests doc rules out.
 //!
 //! # Why `Arc<dyn …>` and not a generic
 //!
@@ -26,15 +43,33 @@
 //! free of two repository type parameters.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
 use crate::features::settings::data::repositories::{
-    MockAuthTokensRepository, MockPreferencesRepository,
+    MockAuthTokensRepository, MockPreferencesRepository, PrefsRepository,
 };
 use crate::features::settings::domain::repositories::{
     AuthTokensRepository, PreferencesRepository,
 };
+
+/// Set by [`use_mock_preferences_for_tests`], read by
+/// [`platform_preferences_repository`]: `false` (the real store) for every
+/// real app run, flipped to `true` once per test process before `provide`
+/// ever runs — see the [module docs](self)' headless-test seam section.
+static USE_MOCK_PREFERENCES_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+
+/// Opt the current process out of the real, platform-backed preferences
+/// store for the rest of its life: every later [`provide`] call constructs
+/// [`MockPreferencesRepository`] instead of
+/// [`PrefsRepository`](crate::features::settings::data::repositories::PrefsRepository).
+/// Idempotent, and a no-op once already set. Must run **before** `provide`
+/// (i.e. before `MuxrApp::init`) to have any effect — `tests/support::setup`
+/// is the one call site outside this module; see the [module docs](self).
+pub fn use_mock_preferences_for_tests() {
+    USE_MOCK_PREFERENCES_FOR_TESTS.store(true, Ordering::Relaxed);
+}
 
 /// The shared token-repository handle this feature publishes and resolves — a
 /// type alias so the provide/expect pair can never drift apart (context lookup
@@ -50,8 +85,27 @@ pub type SharedPreferencesRepository = Arc<dyn PreferencesRepository + Send + Sy
 pub fn provide() {
     let tokens: SharedAuthTokensRepository = Arc::new(MockAuthTokensRepository::seeded());
     provide_context(tokens);
-    let preferences: SharedPreferencesRepository = Arc::new(MockPreferencesRepository::seeded());
-    provide_context(preferences);
+    provide_context(platform_preferences_repository());
+}
+
+/// The [`PreferencesRepository`] [`provide`] publishes: the real
+/// `frust-shared-preferences`-backed store, unless
+/// [`use_mock_preferences_for_tests`] opted this process out (every headless
+/// suite), or the platform store itself couldn't be opened (`PrefsError` —
+/// e.g. an Android host that never ran `nativeInitPlatform`) — either way
+/// this falls back to the same in-memory mock the pre-persistence era ran
+/// on, rather than taking the whole app down over a preferences store.
+fn platform_preferences_repository() -> SharedPreferencesRepository {
+    if USE_MOCK_PREFERENCES_FOR_TESTS.load(Ordering::Relaxed) {
+        return Arc::new(MockPreferencesRepository::seeded());
+    }
+    match PrefsRepository::standard() {
+        Ok(repository) => Arc::new(repository),
+        Err(err) => {
+            log::warn!("preferences: falling back to the in-memory store: {err}");
+            Arc::new(MockPreferencesRepository::seeded())
+        }
+    }
 }
 
 /// Resolve the token repository [`provide`] published.
