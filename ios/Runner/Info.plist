@@ -87,5 +87,8 @@
 	     higher. -->
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- Face ID / Touch ID usage description, added only when the frust-secure-storage biometric gate is used. -->
+	<key>NSFaceIDUsageDescription</key>
+	<string>Unlock your stored credentials.</string>
 </dict>
 </plist>

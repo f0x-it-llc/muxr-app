@@ -11,6 +11,7 @@
 		ABCDABCDABCDABCDABCD0021 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */; };
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
 		ABCDABCDABCDABCDABCD0033 /* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */; };
+		ABCDABCDABCDABCDABCD0034 /* FrustCamera in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0035 /* FrustCamera */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDABCDABCDABCDABCD0033 /* FrustEmbedding in Frameworks */,
+				ABCDABCDABCDABCDABCD0034 /* FrustCamera in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -90,6 +92,7 @@
 			name = Runner;
 			packageProductDependencies = (
 				ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */,
+				ABCDABCDABCDABCDABCD0035 /* FrustCamera */,
 			);
 			productName = Runner;
 			productReference = ABCDABCDABCDABCDABCD0003 /* Runner.app */;
@@ -120,6 +123,7 @@
 			mainGroup = ABCDABCDABCDABCDABCD0007;
 			packageReferences = (
 				ABCDABCDABCDABCDABCD0031 /* XCLocalSwiftPackageReference "FrustEmbedding" */,
+				ABCDABCDABCDABCDABCD0036 /* XCLocalSwiftPackageReference "FrustCamera" */,
 			);
 			productRefGroup = ABCDABCDABCDABCDABCD0008 /* Products */;
 			projectDirPath = "";
@@ -758,12 +762,20 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../platform/ios/FrustEmbedding";
 		};
+		ABCDABCDABCDABCDABCD0036 /* XCLocalSwiftPackageReference "FrustCamera" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../crates/frust/../../plugins/camera/platform/ios";
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FrustEmbedding;
+		};
+		ABCDABCDABCDABCDABCD0035 /* FrustCamera */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FrustCamera;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

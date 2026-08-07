@@ -345,3 +345,7 @@ frust::app!(
         frust::glyph_theme::install();
     }
 );
+
+// Keeps frust-camera's Swift-called C export alive through release LTO (see frust_camera::ios_exports).
+#[cfg(target_vendor = "apple")]
+frust_camera::ios_exports!();
