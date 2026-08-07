@@ -269,7 +269,7 @@ pub enum TrustMode {
     /// presents is accepted. Named for what actually happens rather than for
     /// the trust-on-first-use scheme this variant used to promise — nothing
     /// ever records a first-seen fingerprint, so this posture authenticates
-    /// the server on no connection, first or otherwise (review F7).
+    /// the server on no connection, first or otherwise.
     NoVerification,
     /// A certificate pinned ahead of time (the QR-pairing flow), whose
     /// fingerprint rides on [`ConnectTarget::fingerprint`].

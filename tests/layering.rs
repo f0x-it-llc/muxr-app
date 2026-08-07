@@ -1,6 +1,6 @@
-//! Layering conformance scan — the tripwire review finding F4 asked for.
+//! Layering conformance scan for context/owner lookups.
 //!
-//! F4's story in one sentence: `GrpcAuthTokensRepository` used to resolve the
+//! The bug in one sentence: `GrpcAuthTokensRepository` used to resolve the
 //! app's `ConnectionController` via a fresh `use_context` lookup on every RPC,
 //! which panicked the instant a real call ran inside a `frust::spawn_local`
 //! future — the only poller for that future installs no ambient reactive
@@ -20,14 +20,67 @@
 //! the exact shape of the original bug — is not on that list and fails this
 //! scan.
 //!
+//! # The directory heuristic's blind spot
+//!
+//! That first scan trusts a file's *directory* to prove its lookups run
+//! under a live owner — true for `Component::init`/`build` themselves, but
+//! not for the *body* of a future a `presentation/` file spawns:
+//! `spawn_local`'s poller installs no ambient owner no matter which directory
+//! the spawning file lives in. The sessions screen's poll-cadence loader hit
+//! exactly this: `expect_preferences_repository()` was called from inside a
+//! `spawn_local(async move { .. })` body in `presentation/pages.rs`, which
+//! the directory allowlist above waves straight through, and the lookup
+//! panicked on the future's first real poll for the identical reason the
+//! repository lookup above did (a headless suite's own ambient owner masked
+//! it, so no test caught it). The fix moved the lookup to before the
+//! `spawn_local` call, resolving it under `Component::init`'s real owner and
+//! carrying only the resolved value into the future. The second scan below
+//! closes the directory heuristic's blind spot directly, independent of
+//! which directory the spawning file lives in.
+//!
+//! # Spawned-async-block scan: design and known limits
+//!
+//! [`banned_lookups_in_spawn_blocks`] is a line-based textual scan, not a
+//! parser, so its notion of "inside a spawned async block" is an
+//! approximation:
+//!
+//! - A line opens a tracked block when it contains `spawn_local(async` or
+//!   `spawn(async` ([`opens_spawn_block`]) — this covers both `async {}` and
+//!   `async move {}`, and both a bare `spawn`/`spawn_local` call and a
+//!   `frust::`-qualified one.
+//! - From that line on, the scan sums a plain `{`/`}` character count per
+//!   line ([`brace_delta`]) until the running total returns to zero, and
+//!   flags an [`is_owner_dependent_lookup`] token found on any non-comment
+//!   line in that span — the opening and closing lines included. That
+//!   matcher is deliberately *wider* than [`BANNED_NEEDLES`] above: rather
+//!   than the three names the directory-based scan already knows to
+//!   enumerate, it flags `use_context` plus **any** `expect_`-prefixed call
+//!   (`expect_preferences_repository`, `expect_saved_servers`, …), since a
+//!   lookup deferred into a spawned future body is the same bug no matter
+//!   which feature's `di.rs` minted the accessor — with one exclusion,
+//!   `expect_err(` (a `Result`/`Option` assertion, unrelated and common in
+//!   test code).
+//! - **Known limits**, accepted for a tripwire rather than a compiler pass:
+//!   an *unbalanced* `{`/`}` inside a string or byte literal on one line
+//!   would throw the running count off (a *balanced* pair —
+//!   `format!("{}", x)`, `"{name}"` — nets zero and is harmless); a spawn
+//!   call whose argument is a named future rather than an inline `async`
+//!   block (e.g. `spawn_local(run_feed_watched(..))`) is not tracked at all,
+//!   since there is no literal `async` on its opening line to key off of;
+//!   and a count that never returns to zero would leave the rest of the file
+//!   flagged as "inside" the block. None of these shapes appear in this
+//!   codebase's current `spawn`/`spawn_local` call sites (this scan passing
+//!   is exactly that claim), but a future call site using one of them needs
+//!   a human eye, not just this test, to review.
+//!
 //! Plain `std::fs` source scan, no dependency beyond std (this repo has no
 //! lint-plugin tooling — see `docs/CODE_STANDARDS.md`; precedent:
 //! `frust-drive/tests/print_free_cores.rs`'s own scan). Comment-only lines
 //! (anything whose trimmed text starts with `//`, which covers `///`/`//!`
 //! doc comments too) are stripped before matching, so a module doc that
 //! *names* one of the three functions in prose — this file's own header
-//! above included — never trips the scan; only an actual reference in code
-//! does.
+//! above included — never trips either scan; only an actual reference in
+//! code does.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -67,7 +120,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// The three ways a reactive owner is looked up at call time — see this
 /// file's own module docs for why a per-call lookup from the wrong place is
-/// the exact bug F4 closed.
+/// the owner-less spawn_local context-read panic this scan guards against.
 const BANNED_NEEDLES: &[&str] = &[
     "expect_connection_controller",
     "expect_controller",
@@ -125,7 +178,8 @@ fn a_context_owner_lookup_only_appears_at_a_sanctioned_di_time_or_presentation_s
                 failures.push(format!(
                     "{relp}:{}: a context/owner lookup outside di.rs/connection.rs/presentation-or-ui \
                      — resolve the dependency once at DI time and hold it as a field instead \
-                     (this is the exact shape review finding F4 closed). Line: {}",
+                     (this is the owner-less spawn_local context-read panic this scan guards \
+                     against). Line: {}",
                     i + 1,
                     raw.trim()
                 ));
@@ -164,4 +218,182 @@ fn scanner_allowlist_recognizes_this_codebases_sanctioned_shapes() {
         "features/settings/domain/repositories.rs"
     ));
     assert!(!is_sanctioned_lookup_site("failure.rs"));
+}
+
+// ---------------------------------------------------------------------------
+// Spawned-async-block scan — independent of the directory allowlist above
+// (see this file's own module docs, "The directory heuristic's blind spot"
+// and "Spawned-async-block scan: design and known limits").
+// ---------------------------------------------------------------------------
+
+/// Lines that open a spawned-async-block span this scan tracks through to its
+/// close. Covers both a bare and a `frust::`-qualified call, and both
+/// `async {}`/`async move {}`, since all four just need the substring
+/// `spawn_local(async`/`spawn(async` to appear somewhere on the line.
+const SPAWN_OPENERS: &[&str] = &["spawn_local(async", "spawn(async"];
+
+/// True if `line` opens a tracked span — see [`SPAWN_OPENERS`].
+fn opens_spawn_block(line: &str) -> bool {
+    SPAWN_OPENERS.iter().any(|needle| line.contains(needle))
+}
+
+/// Net `{`/`}` on `line`, a plain character count — see this file's module
+/// docs ("Spawned-async-block scan: design and known limits") for what this
+/// does and doesn't get right.
+fn brace_delta(line: &str) -> i32 {
+    line.chars().filter(|&c| c == '{').count() as i32
+        - line.chars().filter(|&c| c == '}').count() as i32
+}
+
+/// The spawn-block scan's own, wider matcher: `use_context` directly, plus
+/// **any** `expect_*` DI-accessor call. Unlike [`BANNED_NEEDLES`] above (the
+/// three names the directory-based scan enumerates because it already knows
+/// every one of its sanctioned call sites), a lookup deferred into a spawned
+/// future body is the same bug regardless of *which* feature's `di.rs` minted
+/// the accessor — `expect_preferences_repository`, `expect_saved_servers`,
+/// `expect_credential_service`, and every other feature's own `expect_*`
+/// share that prefix by convention, so matching the prefix itself catches the
+/// whole family without enumerating it. The one exclusion is `expect_err(` —
+/// a `Result`/`Option` assertion, unrelated to context/owner lookups and
+/// common in test code.
+fn is_owner_dependent_lookup(line: &str) -> bool {
+    if line.contains("use_context") {
+        return true;
+    }
+    let mut rest = line;
+    while let Some(idx) = rest.find("expect_") {
+        let after = &rest[idx + "expect_".len()..];
+        if !after.starts_with("err(") {
+            return true;
+        }
+        rest = &after[1..];
+    }
+    false
+}
+
+/// Scans `contents` line-by-line and returns the 1-based line numbers where
+/// an [`is_owner_dependent_lookup`] token appears inside a tracked
+/// spawned-async-block span — see [`opens_spawn_block`]/[`brace_delta`].
+/// Independent of [`is_sanctioned_lookup_site`]: a spawn body is flagged
+/// wherever it lives, allowlisted directory or not, since the poller that
+/// drives it installs no ambient owner regardless of which file spawned it.
+fn banned_lookups_in_spawn_blocks(contents: &str) -> Vec<usize> {
+    let mut hits = Vec::new();
+    let mut depth = 0i32;
+    let mut in_spawn = false;
+
+    for (i, raw) in contents.lines().enumerate() {
+        let is_comment = raw.trim_start().starts_with("//");
+
+        if !in_spawn && !is_comment && opens_spawn_block(raw) {
+            in_spawn = true;
+            depth = 0;
+        }
+
+        if in_spawn {
+            if !is_comment && is_owner_dependent_lookup(raw) {
+                hits.push(i + 1);
+            }
+            if !is_comment {
+                depth += brace_delta(raw);
+                if depth <= 0 {
+                    in_spawn = false;
+                }
+            }
+        }
+    }
+
+    hits
+}
+
+#[test]
+fn a_context_owner_lookup_never_appears_inside_a_spawned_async_block() {
+    let mut failures = Vec::new();
+
+    for path in rust_files(&src_dir()) {
+        let relp = rel(&path);
+        let contents =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+        for line in banned_lookups_in_spawn_blocks(&contents) {
+            failures.push(format!(
+                "{relp}:{line}: a context/owner lookup inside a spawned async block — the \
+                 poller that later drives this future installs no ambient reactive owner, so a \
+                 lookup taken from inside the block panics on the future's first real poll (the \
+                 same owner-less spawn_local context-read panic the sessions poll loader had, \
+                 even though this file may live in an otherwise-sanctioned directory); resolve \
+                 the dependency synchronously before the `spawn`/`spawn_local` call and move \
+                 only the resolved value into the future body instead."
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "layering tripwire violated ({} hit(s)) — a context/owner lookup must never be deferred \
+         into a spawned async block's body, regardless of which directory the spawning file \
+         lives in; resolve it synchronously at the spawn call site instead:\n{}",
+        failures.len(),
+        failures.join("\n"),
+    );
+}
+
+/// Guards the spawned-async-block scan's own detection logic against
+/// synthetic input, independent of whatever this codebase's real source
+/// currently contains — see this file's module docs for the design this
+/// pins down.
+#[test]
+fn spawn_block_scanner_flags_only_lookups_actually_inside_the_tracked_span() {
+    // A lookup inside a single-line-opened block is flagged.
+    let inside =
+        "fn f() {\n    spawn_local(async move {\n        expect_controller();\n    });\n}\n";
+    assert_eq!(banned_lookups_in_spawn_blocks(inside), vec![3]);
+
+    // The same token before or after the block is not flagged — only a
+    // per-call lookup deferred into the future body is the bug shape.
+    let outside = "fn f() {\n    let c = expect_controller();\n    spawn_local(async move {\n        c.refresh();\n    });\n}\n";
+    assert!(banned_lookups_in_spawn_blocks(outside).is_empty());
+
+    // A token on the block's own closing line is still in span.
+    let on_close_line = "spawn_local(async move {\n    do_work();\n}).and(use_context::<X>());\n";
+    assert_eq!(banned_lookups_in_spawn_blocks(on_close_line), vec![3]);
+
+    // A comment-only line inside the block never trips it, same exemption
+    // as the directory-based scan above.
+    let commented = "spawn_local(async move {\n    // use_context here is just prose\n});\n";
+    assert!(banned_lookups_in_spawn_blocks(commented).is_empty());
+
+    // A nested spawn's body is still "inside" the outer span.
+    let nested = "spawn_local(async move {\n    spawn_local(async move {\n        expect_controller();\n    });\n});\n";
+    assert_eq!(banned_lookups_in_spawn_blocks(nested), vec![3]);
+
+    // A `frust::`-qualified call and a bare `spawn` (not `spawn_local`) are
+    // both tracked.
+    let qualified = "frust::spawn_local(async move {\n    use_context::<X>();\n});\n";
+    assert_eq!(banned_lookups_in_spawn_blocks(qualified), vec![2]);
+    let bare_spawn = "spawn(async move {\n    use_context::<X>();\n});\n";
+    assert_eq!(banned_lookups_in_spawn_blocks(bare_spawn), vec![2]);
+
+    // A call taking a named future (no literal `async` on the opening line)
+    // is a known, documented limitation — not tracked.
+    let named_future = "spawn_local(run_feed_watched(handle))\n    .then(|| use_context::<X>());\n";
+    assert!(banned_lookups_in_spawn_blocks(named_future).is_empty());
+
+    // Any `expect_*` DI accessor is flagged, not just the three names the
+    // directory-based scan enumerates — this is the widening the class of
+    // bug needs, since every feature mints its own `expect_<name>` under
+    // `di.rs`.
+    let other_feature_accessor =
+        "spawn_local(async move {\n    expect_saved_servers().refresh().await;\n});\n";
+    assert_eq!(
+        banned_lookups_in_spawn_blocks(other_feature_accessor),
+        vec![2]
+    );
+
+    // `expect_err(` is a `Result`/`Option` assertion, not a context/owner
+    // lookup, and must not be flagged even though it shares the `expect_`
+    // prefix.
+    let result_assertion =
+        "spawn_local(async move {\n    let e = call().await.expect_err(\"boom\");\n});\n";
+    assert!(banned_lookups_in_spawn_blocks(result_assertion).is_empty());
 }

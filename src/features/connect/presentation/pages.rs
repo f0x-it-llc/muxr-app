@@ -55,7 +55,7 @@
 //! is what keeps the floating top bar from staying tappable under it, and what
 //! puts the sheet's own scrim over it (FINDINGS #44).
 //!
-//! # The no-verification confirm gate (review F7)
+//! # The no-verification confirm gate
 //!
 //! A saved row stored under [`crate::connection::TrustMode::NoVerification`]
 //! carries a real stored credential that
@@ -399,8 +399,8 @@ impl Component for ConnectScreen {
             // a stored credential lands on `/sessions` exactly as a manual
             // connect does — so it is a screen-owned callback like the two
             // above rather than a bare controller method. It also needs the
-            // overlay host, for the review-F7 confirm gate `handle_saved_row_tap`
-            // may raise (see the module docs).
+            // overlay host, for the no-verification confirm gate
+            // `handle_saved_row_tap` may raise (see the module docs).
             on_saved_tap: {
                 let controller = Arc::clone(&state.controller);
                 let overlays = state.overlays.clone();
@@ -437,7 +437,7 @@ impl Component for ConnectScreen {
     }
 }
 
-/// A saved row at `index` was tapped. The review-F7 confirm gate: for a row
+/// A saved row at `index` was tapped. The no-verification confirm gate: for a row
 /// [`ConnectController::saved_row_needs_confirmation`] flags (a stored
 /// credential under [`crate::connection::TrustMode::NoVerification`]), raise
 /// [`confirm_dialog`] on `overlays` and defer
