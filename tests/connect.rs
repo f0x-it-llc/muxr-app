@@ -80,9 +80,16 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
 
-use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::connection::{
+    ConnectTarget, ConnectionController, TrustMode, expect_connection_controller,
+};
+use muxr::features::connect::data::repositories::MockCredentialService;
 use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
-use muxr::features::connect::domain::entities::PairingPayload;
+use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
+use muxr::features::connect::domain::entities::{
+    CredentialStatus, PairingPayload, SavedServer, epoch_millis,
+};
+use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::ConnectController;
 use muxr::features::connect::presentation::pages::{
@@ -93,6 +100,7 @@ use muxr::features::connect::presentation::pieces::{
     READ_ONLY_CHIP, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER, connect_pieces,
     connect_pieces_with, field_text_style, heading,
 };
+use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
@@ -206,7 +214,20 @@ impl Harness {
     /// controller), re-point the app's nav handle at this fixture's own
     /// navigator, then mount the screen and render its first settled frame.
     fn mount() -> Self {
+        Self::mount_seeded(|| {})
+    }
+
+    /// [`Harness::mount`] with `seed` run in between: after `MuxrApp::init` has
+    /// published this feature's stores, and **before** the screen's own
+    /// controller reads them.
+    ///
+    /// The window matters — `init` constructs fresh repositories every time it
+    /// runs, so a row written before it is discarded, and the screen's
+    /// controller loads its list once at construction, so a row written after
+    /// the mount is invisible until something reloads.
+    fn mount_seeded(seed: impl FnOnce()) -> Self {
         let state = MuxrApp.init();
+        seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // The screen resolves `routes::app_nav()` in its own `init`; this makes
         // that handle the app's real router over *this* navigator, guard and
@@ -883,8 +904,11 @@ fn set_token_then_clear_token_round_trips_to_an_empty_buffer() {
     let _g = serial();
     let _ambient = setup();
     let connection = muxr::connection::provide_connection_controller();
-    let controller =
-        ConnectController::new(Arc::new(MockSavedServersRepository::seeded()), connection);
+    let controller = controller_over(
+        Arc::new(MockSavedServersRepository::seeded()),
+        Arc::new(MockCredentialService::new()),
+        connection,
+    );
 
     controller.set_token("s3cr3t".to_string());
     assert_eq!(controller.token.get_untracked().as_str(), "s3cr3t");
@@ -1068,6 +1092,10 @@ impl Form {
             controller: Arc::clone(controller),
             on_connect: Rc::new(|| {}),
             on_connect_pinned,
+            // This fixture's store is empty, so no saved row is ever painted
+            // and nothing can reach this callback (the screen's own wiring is
+            // exercised through `Harness` instead).
+            on_saved_tap: Rc::new(|_index| {}),
         };
         let logic: FormLogic = Box::new(move |_state: &mut ()| {
             connect_layout(connect_pieces_with::<()>(&theme, Some(&live)))
@@ -1164,8 +1192,42 @@ impl Form {
 /// (mock-backed) connection — see [`Form`]'s note on why the store is empty.
 fn pairing_controller() -> Arc<ConnectController> {
     let connection = muxr::connection::provide_connection_controller();
-    Arc::new(ConnectController::new(
+    controller_over(
         Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        Arc::new(MockCredentialService::new()),
+        connection,
+    )
+}
+
+/// A [`ConnectController`] over explicit stores — the same four dependencies
+/// the screen's own `init` resolves, with the token store always the seeded
+/// mock (a save mints through it, and every assertion about a revoke reads it
+/// back through `MockAuthTokensRepository::snapshot`).
+fn controller_over(
+    servers: Arc<MockSavedServersRepository>,
+    credentials: Arc<MockCredentialService>,
+    connection: Arc<ConnectionController>,
+) -> Arc<ConnectController> {
+    controller_with_tokens(
+        servers,
+        credentials,
+        Arc::new(MockAuthTokensRepository::seeded()),
+        connection,
+    )
+}
+
+/// [`controller_over`] with the token store handed in, for the flows that
+/// assert on what was minted or revoked.
+fn controller_with_tokens(
+    servers: Arc<MockSavedServersRepository>,
+    credentials: Arc<MockCredentialService>,
+    tokens: Arc<MockAuthTokensRepository>,
+    connection: Arc<ConnectionController>,
+) -> Arc<ConnectController> {
+    Arc::new(ConnectController::new(
+        servers,
+        credentials,
+        tokens,
         connection,
     ))
 }
@@ -1302,10 +1364,11 @@ fn the_pinned_cta_connects_with_the_codes_own_trust_and_token() {
     let nav_controller: NavigatorController<AppState> = NavigatorController::new();
     let _router = install_app_router(&nav_controller, &nav_controller, Arc::clone(&connection));
 
-    let controller = Arc::new(ConnectController::new(
+    let controller = controller_over(
         Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        Arc::new(MockCredentialService::new()),
         Arc::clone(&connection),
-    ));
+    );
     let pinned = {
         let controller = Arc::clone(&controller);
         Rc::new(move || controller.connect_from_pairing(&app_nav()))
@@ -1370,10 +1433,11 @@ fn a_failed_pinned_connect_keeps_the_form_filled_and_the_cta_up() {
     let nav_controller: NavigatorController<AppState> = NavigatorController::new();
     let _router = install_app_router(&nav_controller, &nav_controller, Arc::clone(&connection));
     connection.connecting.set(true);
-    let controller = Arc::new(ConnectController::new(
+    let controller = controller_over(
         Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        Arc::new(MockCredentialService::new()),
         Arc::clone(&connection),
-    ));
+    );
     let pinned = {
         let controller = Arc::clone(&controller);
         Rc::new(move || controller.connect_from_pairing(&app_nav()))
@@ -1474,8 +1538,9 @@ fn the_ordinary_cta_still_connects_while_a_matching_pairing_is_stashed() {
     let _g = serial();
     let _ambient = setup();
     let connection = muxr::connection::provide_connection_controller();
-    let controller = ConnectController::new(
+    let controller = controller_over(
         Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        Arc::new(MockCredentialService::new()),
         connection,
     );
 
@@ -1491,6 +1556,607 @@ fn the_ordinary_cta_still_connects_while_a_matching_pairing_is_stashed() {
         "a scanned credential's save is the pairing flow's own step, never the \
          manual offer"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Credentials: the gate's outcome table, and the four flows around it
+// ---------------------------------------------------------------------------
+
+/// The endpoint every credential case operates on — deliberately not one of the
+/// seeded rows, so the fixture's own row is the only thing under test.
+const CRED_ENDPOINT: &str = "cred.example:50051";
+/// …and the secret stored for it.
+const CRED_TOKEN: &str = "stored-s3cr3t";
+
+/// A saved row for [`CRED_ENDPOINT`], with or without a stored credential.
+fn credential_row(has_credential: bool, token_name: Option<&str>) -> SavedServer {
+    SavedServer {
+        host: "cred.example".to_string(),
+        port: 50051,
+        trust_mode: TrustMode::System,
+        label: "Cred rig".to_string(),
+        last_used_ms: 1_700_000_000_000,
+        read_only: false,
+        has_credential,
+        token_name: token_name.map(str::to_string),
+        fingerprint: None,
+    }
+}
+
+/// The four handles a credential flow is driven and read through.
+struct Creds {
+    controller: Arc<ConnectController>,
+    credentials: Arc<MockCredentialService>,
+    servers: Arc<MockSavedServersRepository>,
+    tokens: Arc<MockAuthTokensRepository>,
+    connection: Arc<ConnectionController>,
+    /// The app's real route table over this fixture's own navigator — held
+    /// because `routes::app_nav()` resolves through it and a dropped router
+    /// would take the handle's table with it. Type-erased because
+    /// `frust::Router` is not part of this app's own public surface (only the
+    /// composition root ever names one).
+    _router: Rc<dyn Any>,
+}
+
+/// A controller over a saved-server store holding `rows`, with the app's real
+/// router installed so a recovered connect can push `/sessions`.
+fn credential_fixture(rows: Vec<SavedServer>) -> Creds {
+    let connection = muxr::connection::provide_connection_controller();
+    let nav: NavigatorController<AppState> = NavigatorController::new();
+    let router = install_app_router(&nav, &nav, Arc::clone(&connection));
+    let servers = Arc::new(MockSavedServersRepository::with_servers(rows));
+    let credentials = Arc::new(MockCredentialService::new());
+    let tokens = Arc::new(MockAuthTokensRepository::seeded());
+    let controller = controller_with_tokens(
+        Arc::clone(&servers),
+        Arc::clone(&credentials),
+        Arc::clone(&tokens),
+        Arc::clone(&connection),
+    );
+    Creds {
+        controller,
+        credentials,
+        servers,
+        tokens,
+        connection,
+        _router: router,
+    }
+}
+
+/// Drive the UI-thread task queue until `done` answers `true`, or fail.
+///
+/// The credential flows are `spawn_local` chains over repositories that
+/// deliberately sleep (`MockAuthTokensRepository`'s own simulated latency), so a
+/// single pump is not enough — this is `support::pump_until`'s loop without a
+/// `RenderRoot`, since these cases drive a controller rather than a screen.
+fn pump_until_done(what: &str, mut done: impl FnMut() -> bool) {
+    let runtime = frust_reactive::ReactiveRuntime::get().expect("setup() installed the runtime");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        runtime.pump_local();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// The saved row for [`CRED_ENDPOINT`] as the store currently holds it.
+fn stored_row(servers: &MockSavedServersRepository) -> SavedServer {
+    servers
+        .list()
+        .expect("the mock store never fails")
+        .into_iter()
+        .find(|server| server.endpoint() == CRED_ENDPOINT)
+        .expect("the fixture's row")
+}
+
+// --- Flow 3: unlock, and the whole outcome table -----------------------------
+
+#[test]
+fn unlocking_a_saved_row_connects_with_the_recovered_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+
+    creds
+        .controller
+        .recover_and_connect(stored_row(&creds.servers), &app_nav());
+    pump_until_done("the recovered connect", || {
+        creds.connection.connected.get_untracked()
+    });
+
+    assert_eq!(
+        creds.credentials.prompts(),
+        vec!["Unlock Cred rig".to_string()],
+        "exactly one prompt, naming the rig rather than anything secret"
+    );
+    let info = creds
+        .connection
+        .server_info
+        .get_untracked()
+        .expect("a connected controller carries its facts");
+    assert_eq!(info.endpoint, CRED_ENDPOINT, "the row's own endpoint");
+    assert_eq!(
+        info.trust_mode,
+        TrustMode::System,
+        "…under the posture the row stored"
+    );
+    assert_eq!(
+        creds.connection.credential_offer.get_untracked(),
+        None,
+        "a credential this connect just read is never offered for saving"
+    );
+    assert!(
+        stored_row(&creds.servers).has_credential,
+        "the login upsert carries the credential fields forward rather than \
+         wiping the very credential it just used"
+    );
+}
+
+#[test]
+fn a_canceled_unlock_is_silent_and_leaves_the_form_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, None)]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+    creds.credentials.set_gate(CredentialStatus::Canceled);
+
+    creds
+        .controller
+        .recover_and_connect(stored_row(&creds.servers), &app_nav());
+    pump_until_done("the canceled unlock", || {
+        !creds.controller.unlocking.get_untracked()
+    });
+
+    assert!(
+        !creds.connection.connected.get_untracked(),
+        "nothing opened"
+    );
+    assert_eq!(
+        creds.controller.url.get_untracked(),
+        String::new(),
+        "a cancel prefills nothing — the user dismissed their own prompt"
+    );
+}
+
+#[test]
+fn every_refused_unlock_reports_its_own_reason_and_prefills_the_form() {
+    // The whole outcome table, in one process: each branch says its own thing
+    // and leaves the manual form filled in, since the manual login is the only
+    // path left once the gate refuses (there is no plain-storage fallback).
+    let _g = serial();
+    let _ambient = setup();
+    for status in [
+        CredentialStatus::NotEnrolled,
+        CredentialStatus::NoDeviceCredential,
+        CredentialStatus::LockedOut,
+        CredentialStatus::Unavailable,
+        CredentialStatus::Failed,
+    ] {
+        let creds = credential_fixture(vec![credential_row(true, None)]);
+        creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+        creds.credentials.set_gate(status);
+
+        creds
+            .controller
+            .recover_and_connect(stored_row(&creds.servers), &app_nav());
+        pump_until_done("the refused unlock", || {
+            !creds.controller.unlocking.get_untracked()
+        });
+
+        assert!(
+            !creds.connection.connected.get_untracked(),
+            "{status:?} must not connect"
+        );
+        assert_eq!(
+            creds.controller.url.get_untracked(),
+            CRED_ENDPOINT,
+            "{status:?} falls back to the manual form for that same server"
+        );
+        assert!(
+            status.message().is_some(),
+            "{status:?} has something to say to the user"
+        );
+        assert!(
+            stored_row(&creds.servers).has_credential,
+            "{status:?} is a refusal, not a loss — the credential is still there"
+        );
+    }
+}
+
+#[test]
+fn a_gate_that_passes_over_an_empty_store_reports_no_saved_credential() {
+    let _g = serial();
+    let _ambient = setup();
+    // The row claims a credential the secure store does not hold — a torn
+    // pair, which is exactly the not-found branch.
+    let creds = credential_fixture(vec![credential_row(true, None)]);
+
+    creds
+        .controller
+        .recover_and_connect(stored_row(&creds.servers), &app_nav());
+    pump_until_done("the empty-store unlock", || {
+        !creds.controller.unlocking.get_untracked()
+    });
+
+    assert!(!creds.connection.connected.get_untracked());
+    assert_eq!(
+        creds.controller.url.get_untracked(),
+        CRED_ENDPOINT,
+        "the manual form is prefilled for that server"
+    );
+    assert_eq!(
+        CredentialStatus::NotFound.message(),
+        Some("No saved credential found. Please log in manually.")
+    );
+}
+
+#[test]
+fn an_invalidated_key_forgets_the_credential_it_can_no_longer_read() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+    creds.credentials.set_gate(CredentialStatus::KeyInvalidated);
+
+    creds
+        .controller
+        .recover_and_connect(stored_row(&creds.servers), &app_nav());
+    pump_until_done("the invalidated unlock", || {
+        !stored_row(&creds.servers).has_credential
+    });
+
+    assert!(!creds.connection.connected.get_untracked());
+    let row = stored_row(&creds.servers);
+    assert!(
+        !row.has_credential && row.token_name.is_none(),
+        "an enrollment change makes the secret unreadable forever, so the row \
+         must stop claiming one: {row:?}"
+    );
+    assert_eq!(
+        creds.credentials.stored(CRED_ENDPOINT),
+        None,
+        "…and the dead entry is dropped, the plugin's own recovery for it"
+    );
+    assert_eq!(
+        creds.controller.url.get_untracked(),
+        CRED_ENDPOINT,
+        "the manual form is still prefilled"
+    );
+}
+
+#[test]
+fn a_saved_row_with_no_credential_refills_the_form_without_raising_a_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(false, None)]);
+
+    creds.controller.saved_row_tapped(0, &app_nav());
+
+    assert!(
+        creds.credentials.prompts().is_empty(),
+        "there is nothing to unlock, so nothing may prompt"
+    );
+    assert_eq!(creds.controller.url.get_untracked(), CRED_ENDPOINT);
+    assert!(!creds.connection.connected.get_untracked());
+}
+
+// --- Flow 1: the manual save (the offer's accept) ----------------------------
+
+/// Connect the fixture's connection to [`CRED_ENDPOINT`], as a login would,
+/// so an accepted offer has a live session to save for.
+fn connect_fixture(creds: &Creds) {
+    creds.controller.set_url(CRED_ENDPOINT.to_string());
+    creds.controller.connect(&app_nav());
+    assert!(
+        creds.connection.connected.get_untracked(),
+        "the mock backend settles a connect before `connect` returns"
+    );
+}
+
+#[test]
+fn accepting_the_offer_mints_a_token_stores_it_and_records_it_on_the_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    connect_fixture(&creds);
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+
+    creds.connection.accept_credential_offer();
+    pump_until_done("the credential save", || {
+        stored_row(&creds.servers).has_credential
+    });
+
+    let row = stored_row(&creds.servers);
+    let token_name = row.token_name.clone().expect("the minted token's name");
+    assert!(
+        token_name.starts_with("muxr-mobile-"),
+        "a token minted for this device says so: {token_name}"
+    );
+    assert!(
+        creds
+            .tokens
+            .snapshot()
+            .iter()
+            .any(|token| token.name == token_name),
+        "…and it exists on the server"
+    );
+    let stored = creds
+        .credentials
+        .stored(CRED_ENDPOINT)
+        .expect("the minted secret is what was stored");
+    assert!(
+        stored.starts_with("mock-secret-"),
+        "the *freshly minted* secret is stored, never the form's own token: {stored}"
+    );
+    assert_eq!(
+        creds.connection.credential_offer.get_untracked(),
+        None,
+        "the offer is consumed"
+    );
+}
+
+#[test]
+fn a_denied_gate_revokes_the_token_it_just_minted() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    connect_fixture(&creds);
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+    creds.credentials.set_gate(CredentialStatus::Canceled);
+    let before = creds.tokens.snapshot().len();
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+
+    creds.connection.accept_credential_offer();
+    pump_until_done("the denied save", || {
+        creds.tokens.snapshot().len() == before && !creds.credentials.prompts().is_empty()
+    });
+
+    assert_eq!(
+        creds.tokens.snapshot().len(),
+        before,
+        "a token nobody can hold must not be left orphaned on the server"
+    );
+    assert_eq!(
+        creds.credentials.stored(CRED_ENDPOINT),
+        None,
+        "and nothing was stored"
+    );
+    assert!(
+        !stored_row(&creds.servers).has_credential,
+        "…so the row still claims no credential"
+    );
+}
+
+#[test]
+fn re_saving_rotates_the_previous_token_only_after_the_new_one_is_stored() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    connect_fixture(&creds);
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+    creds.connection.accept_credential_offer();
+    pump_until_done("the first save", || {
+        stored_row(&creds.servers).has_credential
+    });
+    let first = stored_row(&creds.servers)
+        .token_name
+        .expect("the first minted token");
+
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+    creds.connection.accept_credential_offer();
+    // Waiting on the *revoke* rather than on the row: the rotation's whole
+    // contract is that the old token outlives the new credential's write, so
+    // the row changing first is exactly what this must not mistake for done.
+    let revoked = |creds: &Creds| {
+        !creds
+            .tokens
+            .snapshot()
+            .iter()
+            .any(|token| token.name == first)
+    };
+    pump_until_done("the second save", || revoked(&creds));
+
+    let names: Vec<String> = creds
+        .tokens
+        .snapshot()
+        .into_iter()
+        .map(|token| token.name)
+        .collect();
+    assert!(
+        !names.contains(&first),
+        "the previous token is revoked once the new credential is persisted: {names:?}"
+    );
+    let second = stored_row(&creds.servers)
+        .token_name
+        .expect("the second minted token");
+    assert!(names.contains(&second), "…and the new one survives");
+}
+
+#[test]
+fn a_read_only_session_never_mints_a_credential() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    connect_fixture(&creds);
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+    creds.connection.is_read_only.set(true);
+    let before = creds.tokens.snapshot().len();
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+
+    creds.connection.accept_credential_offer();
+
+    assert_eq!(
+        creds.connection.credential_offer.get_untracked(),
+        None,
+        "the offer is still consumed"
+    );
+    assert_eq!(creds.tokens.snapshot().len(), before, "…but nothing minted");
+    assert!(creds.credentials.prompts().is_empty(), "…and nothing gated");
+}
+
+// --- Flow 2: the QR save -----------------------------------------------------
+
+#[test]
+fn a_successful_pairing_stores_the_scanned_token_behind_one_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+
+    creds
+        .controller
+        .apply_scanned_payload(scanned_payload(false));
+    creds.controller.connect_from_pairing(&app_nav());
+    pump_until_done("the paired credential save", || {
+        creds.credentials.stored(PAIRED_ENDPOINT).is_some()
+    });
+
+    assert_eq!(
+        creds.credentials.stored(PAIRED_ENDPOINT).as_deref(),
+        Some(PAIRED_TOKEN),
+        "the QR's own token is the credential — nothing is minted for it"
+    );
+    assert_eq!(
+        creds.credentials.prompts().len(),
+        1,
+        "exactly one prompt per successful pairing tap"
+    );
+    let row = creds
+        .servers
+        .list()
+        .expect("the mock store never fails")
+        .into_iter()
+        .find(|server| server.endpoint() == PAIRED_ENDPOINT)
+        .expect("the login upsert wrote the paired rig's row");
+    assert!(row.has_credential);
+    assert_eq!(
+        row.token_name, None,
+        "muxrctl minted that token, so this device has no name to revoke it by"
+    );
+    assert_eq!(row.trust_mode, TrustMode::Pinned);
+    assert_eq!(row.fingerprint.as_deref(), Some(PAIRED_FINGERPRINT));
+}
+
+#[test]
+fn a_denied_pairing_gate_leaves_the_session_live_and_the_row_unsaved() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    creds.credentials.set_gate(CredentialStatus::Canceled);
+
+    creds
+        .controller
+        .apply_scanned_payload(scanned_payload(false));
+    creds.controller.connect_from_pairing(&app_nav());
+    pump_until_done("the denied pairing gate", || {
+        !creds.credentials.prompts().is_empty()
+    });
+
+    assert!(
+        creds.connection.connected.get_untracked(),
+        "the session opened before the prompt and is unaffected by it"
+    );
+    assert_eq!(creds.credentials.stored(PAIRED_ENDPOINT), None);
+    let row = creds
+        .servers
+        .list()
+        .expect("the mock store never fails")
+        .into_iter()
+        .find(|server| server.endpoint() == PAIRED_ENDPOINT)
+        .expect("the login upsert still wrote the row");
+    assert!(!row.has_credential);
+}
+
+// --- Flow 5: the login upsert ------------------------------------------------
+
+#[test]
+fn a_successful_connect_writes_the_servers_metadata_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+
+    connect_fixture(&creds);
+
+    let row = stored_row(&creds.servers);
+    assert_eq!(
+        row.label, "cred.example",
+        "a new rig is labelled by its host"
+    );
+    assert_eq!(row.trust_mode, TrustMode::System);
+    assert!(!row.read_only);
+    assert!(row.last_used_ms > 0, "the login stamped its recency");
+    assert!(!row.has_credential, "…and claims no credential yet");
+    assert_eq!(
+        creds.controller.saved.get_untracked().len(),
+        1,
+        "the screen's own list is refreshed with it"
+    );
+}
+
+// --- The screen, end to end --------------------------------------------------
+
+#[test]
+fn tapping_a_credential_row_on_the_real_screen_unlocks_and_lands_on_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    // The app's own DI stores, seeded in `mount_seeded`'s window: this is the
+    // production wiring (the screen resolves both through `connect::di`), so
+    // the row, the prompt and the redirect are all the real ones.
+    let mut harness = Harness::mount_seeded(|| {
+        // Stamped now, so it sorts ahead of the seeded rows and lays out inside
+        // the fixture's surface — the list is most-recently-used first.
+        let mut row = credential_row(true, None);
+        row.last_used_ms = epoch_millis();
+        expect_saved_servers()
+            .save(row)
+            .expect("the mock store never fails");
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed(CRED_ENDPOINT, CRED_TOKEN);
+    });
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+    harness.tap_node("the saved row", |node| node.value() == Some(CRED_ENDPOINT));
+    pump_until_done("the recovered connect", || {
+        expect_connection_controller().connected.get_untracked()
+    });
+    harness.settle();
+
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "the tap raised exactly one prompt"
+    );
+    assert!(harness.nav.depth() > before, "…and landed on /sessions");
 }
 
 // ---------------------------------------------------------------------------

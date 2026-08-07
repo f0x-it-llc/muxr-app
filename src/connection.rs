@@ -104,10 +104,17 @@
 //! stored credential already covers), because only the caller has the saved
 //! server list, and this module must not depend on a feature's repository. The
 //! controller ANDs that with the one fact only a completed login knows: a
-//! read-only credential is never offered for saving. Accepting or dismissing
-//! only clears the signal; the secure-storage write behind "Save" is what the
-//! `connect` feature's persistence work attaches to
-//! [`accept_credential_offer`](ConnectionController::accept_credential_offer).
+//! read-only credential is never offered for saving.
+//!
+//! Accepting the offer has to *do* something, and what it does — mint a token,
+//! raise a biometric prompt, write a secure store, update a saved-server row —
+//! belongs to the `connect` feature, not here. [`CredentialSaver`] is the seam
+//! that keeps it there: this module names a one-method trait and calls it,
+//! `connect` installs an implementation through
+//! [`set_credential_saver`](ConnectionController::set_credential_saver), and no
+//! feature type crosses into this file. With none installed (a headless suite
+//! that never mounts Connect), accepting still clears the offer and simply
+//! saves nothing.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -378,6 +385,28 @@ pub trait ConnectionBackend: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
+// The credential-save seam
+// ---------------------------------------------------------------------------
+
+/// The work behind an accepted credential offer — installed by the `connect`
+/// feature, called by [`ConnectionController::accept_credential_offer`].
+///
+/// One method, and only plain data crosses it, so this module stays free of any
+/// feature's repositories (see the module docs' credential-offer section). The
+/// implementor owns everything the save actually involves: minting the token,
+/// raising the biometric prompt, writing the secure store, and updating the
+/// saved-server row.
+pub trait CredentialSaver: Send + Sync {
+    /// Save a credential for the connected server at `endpoint` (`host:port`),
+    /// which the offer showed the user as `label`.
+    ///
+    /// Called on the UI thread, from the press that accepted the offer, and
+    /// expected to return immediately — the prompt and the stores behind it are
+    /// the implementor's own asynchronous work.
+    fn save_credential(&self, endpoint: String, label: String);
+}
+
+// ---------------------------------------------------------------------------
 // The mock backend
 // ---------------------------------------------------------------------------
 
@@ -617,6 +646,9 @@ pub struct ConnectionController {
     /// The server label whose credential Sessions should offer to save, or
     /// `None` when there is nothing to offer.
     pub credential_offer: RwSignal<Option<String>>,
+    /// What an accepted offer actually saves through, or `None` while nothing
+    /// has installed one — see [`CredentialSaver`].
+    credential_saver: Mutex<Option<Arc<dyn CredentialSaver>>>,
 }
 
 impl ConnectionController {
@@ -632,6 +664,7 @@ impl ConnectionController {
             server_info: RwSignal::new(None),
             is_read_only: RwSignal::new(false),
             credential_offer: RwSignal::new(None),
+            credential_saver: Mutex::new(None),
         }
     }
 
@@ -784,11 +817,51 @@ impl ConnectionController {
             .emit(&AppFailure::Auth(SESSION_EXPIRED.to_string()));
     }
 
-    /// Accept the pending credential offer, clearing it. The secure-storage
-    /// write behind it is what the `connect` feature's persistence work
-    /// attaches here (see the module docs).
+    /// Install what an accepted offer saves through, replacing any previous one
+    /// — the `connect` feature's own [`CredentialSaver`] (see the module docs).
+    ///
+    /// Called from the Connect screen's `Component::init`, which is where every
+    /// dependency the save needs is already resolved.
+    pub fn set_credential_saver(&self, saver: Arc<dyn CredentialSaver>) {
+        *self
+            .credential_saver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(saver);
+    }
+
+    /// Accept the pending credential offer: clear it, and hand the save to the
+    /// installed [`CredentialSaver`].
+    ///
+    /// The offer is cleared **first** and unconditionally, so a second press
+    /// (or a saver that answers slowly) cannot start the save twice. Three
+    /// things make this a no-op beyond that clear: no offer pending, no live
+    /// connection to name an endpoint, and a read-only session — which cannot
+    /// mint the token a saved credential is made of, the same fact
+    /// [`Self::settle`] refuses to raise the offer on in the first place.
     pub fn accept_credential_offer(&self) {
+        let offer = self.credential_offer.get_untracked();
         self.credential_offer.set(None);
+        let Some(label) = offer else {
+            return;
+        };
+        if self.is_read_only.get_untracked() {
+            return;
+        }
+        let Some(endpoint) = self
+            .server_info
+            .get_untracked()
+            .map(|info| info.endpoint.clone())
+        else {
+            return;
+        };
+        let saver = self
+            .credential_saver
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(saver) = saver {
+            saver.save_credential(endpoint, label);
+        }
     }
 
     /// Dismiss the pending credential offer without saving it.

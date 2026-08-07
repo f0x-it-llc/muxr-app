@@ -60,6 +60,8 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
+use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::routes::{app_nav, install_app_router};
@@ -74,9 +76,9 @@ use support::{
 };
 
 /// The surface every frame here lays out at — tall enough that the whole screen
-/// (four groups, the dashed create row and Disconnect) is on it at once. See
-/// the [module docs](self).
-const SURFACE: Size = Size::new(800.0, 1400.0);
+/// (five groups, the dashed create row, the saved-server rows and Disconnect)
+/// is on it at once. See the [module docs](self).
+const SURFACE: Size = Size::new(800.0, 1700.0);
 
 /// A point in the top-left corner — scrim on every overlay this screen pushes
 /// (the dialog centers its panel, the sheet anchors its own to the bottom).
@@ -99,14 +101,26 @@ const ROW_PAD_X: f64 = 16.0;
 /// The seeded token names `data`'s mock repository ships — the redesign's two
 /// `.token-item`s, in order.
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-/// The four group labels, as the screen prints them (the source's
+/// The five group labels, as the screen prints them (the source's
 /// `text-transform:uppercase`, applied in Rust — `text` carries no transform).
-const GROUPS: [&str; 4] = [
+const GROUPS: [&str; 5] = [
     "CONNECTION",
     "AUTH TOKENS",
+    "SAVED SERVERS",
     "TERMINAL APPEARANCE",
     "SESSION POLL",
 ];
+
+/// The saved server the credential cases operate on — seeded before the screen
+/// mounts, stamped fresh so it sorts to the top of the group.
+const CRED_ENDPOINT: &str = "cred.example:50051";
+/// …its label, which is what the row prints on its top line.
+const CRED_LABEL: &str = "Cred rig";
+/// …and the secret its stored credential holds.
+const CRED_TOKEN: &str = "stored-s3cr3t";
+/// The token name that credential's server-side token carries — one of the
+/// seeded pair, so a delete has something real to revoke.
+const CRED_TOKEN_NAME: &str = "token_2";
 
 // ---------------------------------------------------------------------------
 // Local harness
@@ -171,10 +185,23 @@ impl Harness {
     /// Mount the screen (see the [module docs](self) for the shape), leaving
     /// the connection **disconnected** and the first load un-awaited.
     fn mount() -> Self {
+        Self::mount_seeded(|| {})
+    }
+
+    /// [`Harness::mount`] with `seed` run in between: after `MuxrApp::init` has
+    /// published every feature's stores, and **before** the screen's own
+    /// controller reads them.
+    ///
+    /// The window matters — `init` constructs fresh repositories every time it
+    /// runs, so anything written before it is discarded, and the screen loads
+    /// its lists once at construction.
+    fn mount_seeded(seed: impl FnOnce()) -> Self {
         // The real composition root: it publishes the app-scoped connection
         // controller and calls every feature's `di::provide` — including this
-        // feature's two repositories.
+        // feature's two repositories and (for the saved-server group)
+        // `connect`'s own two.
         let state = MuxrApp.init();
+        seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-point the app's one path-pushing handle (`routes::app_nav`, which
         // the screen resolves in its own `init`) at this fixture's navigator,
@@ -497,7 +524,7 @@ fn confirm(h: &mut Harness, dialog: &Chrome) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_four_groups_and_the_disconnect_action_render() {
+fn all_five_groups_and_the_disconnect_action_render() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
@@ -917,6 +944,150 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
     for name in SEEDED_TOKENS {
         assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// 3b — saved servers and their credentials
+// ---------------------------------------------------------------------------
+
+/// A saved row for [`CRED_ENDPOINT`], stamped now so it sorts to the top of the
+/// group (the list is most-recently-used first).
+fn credential_row(has_credential: bool) -> SavedServer {
+    SavedServer {
+        host: "cred.example".to_string(),
+        port: 50051,
+        trust_mode: TrustMode::System,
+        label: CRED_LABEL.to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: false,
+        has_credential,
+        token_name: has_credential.then(|| CRED_TOKEN_NAME.to_string()),
+        fingerprint: None,
+    }
+}
+
+/// Mount connected, with [`credential_row`] in the saved-server store and its
+/// secret in the credential store.
+fn with_saved_credential(has_credential: bool) -> Harness {
+    let mut harness = Harness::mount_seeded(|| {
+        expect_saved_servers()
+            .save(credential_row(has_credential))
+            .expect("the mock store never fails");
+        if has_credential {
+            mock_credentials()
+                .expect("tests/support opted this process into the mock")
+                .seed(CRED_ENDPOINT, CRED_TOKEN);
+        }
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::TrustOnFirstUse));
+    harness.await_tokens();
+    // The saved-server read is the *last* step of the screen's first load (the
+    // token list and both preference groups land ahead of it), so awaiting the
+    // tokens is not enough to see it.
+    harness.pump_until_values("the saved-server rows", |values| {
+        values.iter().any(|v| v == CRED_LABEL)
+    });
+    harness
+}
+
+#[test]
+fn the_saved_server_group_lists_each_rig_and_flags_the_one_with_a_credential() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = with_saved_credential(true);
+
+    let values = node_values(&h.root);
+    assert!(
+        values.iter().any(|v| v == CRED_LABEL),
+        "the seeded rig's own label heads its row: {values:?}"
+    );
+    assert!(
+        values.iter().any(|v| v.starts_with(CRED_ENDPOINT)),
+        "…over its endpoint and recency: {values:?}"
+    );
+    assert!(
+        values.iter().any(|v| v == "credential saved"),
+        "the stored credential is visible as such: {values:?}"
+    );
+    // One `forget` per saved rig (the seeded three plus this one), and a
+    // `delete credential` only where there is one to delete.
+    assert_eq!(node_centers_by_label(&h.root, "forget").len(), 4);
+    assert_eq!(
+        node_centers_by_label(&h.root, "delete credential").len(),
+        1,
+        "a row with no credential offers no way to delete one"
+    );
+}
+
+#[test]
+fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_saved_credential(true);
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    // A dismissed confirmation deletes nothing.
+    open_dialog_by_label(&mut h, "delete credential");
+    assert_eq!(h.depth(), 2, "the confirmation is its own page");
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 1);
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT).as_deref(),
+        Some(CRED_TOKEN),
+        "the secret survives a dismissed confirmation"
+    );
+
+    // Confirming does.
+    let dialog = open_dialog_by_label(&mut h, "delete credential");
+    confirm(&mut h, &dialog);
+    h.pump_until_values("the credential chip to disappear", |values| {
+        !values.iter().any(|v| v == "credential saved")
+    });
+
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT),
+        None,
+        "the secret is gone from the store"
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "…and no biometric prompt was ever raised: a delete runs no gate"
+    );
+    let values = node_values(&h.root);
+    assert!(
+        values.iter().any(|v| v == CRED_LABEL),
+        "the saved server itself is kept: {values:?}"
+    );
+    assert!(
+        !values.iter().any(|v| v == CRED_TOKEN_NAME),
+        "…and the server-side token behind it was revoked: {values:?}"
+    );
+}
+
+#[test]
+fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_saved_credential(true);
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    let dialog = open_dialog_by_label(&mut h, "forget");
+    confirm(&mut h, &dialog);
+    h.pump_until_values("the row to disappear", |values| {
+        !values.iter().any(|v| v == CRED_LABEL)
+    });
+
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT),
+        None,
+        "a secret filed under a forgotten endpoint would be unreachable forever"
+    );
+    assert_eq!(
+        node_centers_by_label(&h.root, "forget").len(),
+        3,
+        "…and only that row went"
+    );
 }
 
 // ---------------------------------------------------------------------------

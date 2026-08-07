@@ -11,6 +11,7 @@
 //! | [`group_label`] | `.set-group-lbl` — the 10px dim uppercase band above each group |
 //! | [`settings_row`] | `.set-row` — mark tile, label over value, trailing chevron/toggle |
 //! | [`token_item`] | `.token-item` — name + scope chip, `created <date>` + `revoke` |
+//! | [`saved_server_item`] | the same shape for a remembered server — label + credential chip, endpoint + its two delete actions |
 //! | [`create_token_row`] | `.add-token-btn` — the dashed `+ create new token` row |
 //! | [`disconnect_button`] | `.disconnect-btn` — the outlined error-hued full-width action |
 //! | [`picker_sheet`] | screen 6 — the title row and its `.pick-row`s, one of them amber-filled |
@@ -84,6 +85,7 @@ use frust::{
 };
 
 use crate::AppState;
+use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
 use crate::ui::toasts::app_toasts;
 
@@ -170,6 +172,14 @@ pub(super) const CREATE_TOKEN_PLUS: &str = "+";
 pub(super) const CREATE_TOKEN_LABEL: &str = "create new token";
 /// `.revoke-btn`'s label — also how a test finds the button.
 pub(super) const REVOKE_LABEL: &str = "revoke";
+/// The saved-server row's two actions — also how a test finds each button.
+pub(super) const DELETE_CREDENTIAL_LABEL: &str = "delete credential";
+pub(super) const FORGET_SERVER_LABEL: &str = "forget";
+/// The chip a saved row carries while a biometric-gated credential is stored
+/// for it. The Flutter settings row's own words.
+pub(super) const CREDENTIAL_CHIP: &str = "credential saved";
+/// What the `saved servers` group renders with nothing in it.
+pub(super) const NO_SAVED_SERVERS: &str = "no saved servers";
 /// `.disconnect-btn`'s label.
 pub(super) const DISCONNECT_LABEL: &str = "Disconnect";
 /// The bell row's `.set-value` — copy, not a preference: the switch beside it
@@ -646,6 +656,93 @@ pub(super) fn token_item(
         0.0,
     )
     .bottom_rule(colors.rule))
+}
+
+/// One saved server, in the same two-line shape as a [`token_item`]: the rig's
+/// label and its credential chip on the top line, its endpoint and the row's
+/// delete actions on the meta line.
+///
+/// Two actions, because they are two different deletions and a user asking for
+/// one rarely means the other: `delete credential` (only where one is stored)
+/// drops the stored secret and revokes the token behind it, leaving the row
+/// dialable by hand; `forget` removes the whole profile — and its credential
+/// with it, since the endpoint is the key that secret is filed under.
+pub(super) fn saved_server_item(server: &SavedServer, colors: &Palette) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    let endpoint = server.endpoint();
+    let mut top = vec![flexible(
+        1,
+        text(server.label.clone()).style(inked(&theme.type_scale.body_small, colors.fg)),
+    )];
+    if server.has_credential {
+        top.push(h_gap(ROW_GAP));
+        top.push(inflexible(credential_chip(colors)));
+    }
+
+    let meta_text = format!("{} · {}", endpoint, server.last_used_label(epoch_millis()));
+    let mut meta = vec![
+        inflexible(text(meta_text).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+        spacer(),
+    ];
+    if server.has_credential {
+        let key = endpoint.clone();
+        meta.push(inflexible(
+            button(DELETE_CREDENTIAL_LABEL, move |state: &mut SettingsState| {
+                super::pages::open_delete_credential_dialog(state, &key);
+            })
+            .style(ButtonStyle::Danger)
+            .small(),
+        ));
+        meta.push(h_gap(ROW_GAP));
+    }
+    let key = endpoint.clone();
+    meta.push(inflexible(
+        button(FORGET_SERVER_LABEL, move |state: &mut SettingsState| {
+            super::pages::open_forget_server_dialog(state, &key);
+        })
+        .style(ButtonStyle::Ghost)
+        .small(),
+    ));
+
+    any(panel(
+        Padding(
+            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+            column(vec![
+                any(row(top)),
+                any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
+                any(row(meta)),
+            ]),
+        ),
+        Color::TRANSPARENT,
+        0.0,
+    )
+    .bottom_rule(colors.rule))
+}
+
+/// The `saved servers` group with nothing in it — a plain muted line, in the
+/// same box a row would occupy, rather than an empty group label with nothing
+/// under it.
+pub(super) fn no_saved_servers_row(colors: &Palette) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    any(Padding(
+        EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+        text(NO_SAVED_SERVERS).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+    ))
+}
+
+/// The `credential saved` pill — the same hand-composed shape as a
+/// [`scope_chip`], in the cyan/info hue that chip already reserves for a fact
+/// about a credential rather than about a token's power.
+fn credential_chip(colors: &Palette) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    any(panel(
+        Padding(
+            EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
+            text(CREDENTIAL_CHIP).style(inked(&theme.type_scale.label_small, colors.cyan)),
+        ),
+        colors.cyan_faint,
+        RADIUS_FULL,
+    ))
 }
 
 /// `.token-scope` — the 9px pill naming what a token may do.

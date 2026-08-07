@@ -1,6 +1,7 @@
 //! [`MockSavedServersRepository`] — the in-memory
-//! [`SavedServersRepository`] the Connect screen runs on until secure storage
-//! lands.
+//! [`SavedServersRepository`] every headless suite runs on, in place of the
+//! real, preferences-backed [`super::prefs_saved_servers`] store (whose own
+//! module docs explain the split, and `di`'s the seam that chooses).
 //!
 //! No `frust::` signals/widgets here (the same framework-free rule as `domain`);
 //! the store is a plain [`Mutex`]-guarded [`Vec`], not an `RwSignal` — the
@@ -22,15 +23,26 @@
 //! `docs/redesign.html`'s `.saved-row` (`100.71.31.57:50051`, "insecure-dev TLS ·
 //! port 50051") plus two the same mock's copy implies — a CA-verified public
 //! host and a read-only rig, so the row's badge/trust rendering has something to
-//! show. A poisoned lock is recovered (`unwrap_or_else(PoisonError::into_inner)`)
-//! rather than propagated: a panic on the UI thread has already failed the
-//! frame, and handing back a usable guard keeps a later frame renderable.
+//! show. Their recency stamps are relative to the seeding call, so the rows
+//! read "2 hours ago"/"yesterday"/"last week" whenever a suite runs rather than
+//! drifting to a fixed date. A poisoned lock is recovered
+//! (`unwrap_or_else(PoisonError::into_inner)`) rather than propagated: a panic
+//! on the UI thread has already failed the frame, and handing back a usable
+//! guard keeps a later frame renderable.
+//!
+//! Ordering is not this store's own rule: [`super::prefs_saved_servers::upsert`]
+//! is what both implementations sort through, so a `list()` answers in the same
+//! order whichever one is wired.
 
 use std::sync::{Mutex, PoisonError};
 
+use super::prefs_saved_servers::upsert;
 use crate::failure::AppFailure;
-use crate::features::connect::domain::entities::{SavedServer, TrustMode};
+use crate::features::connect::domain::entities::{SavedServer, TrustMode, epoch_millis};
 use crate::features::connect::domain::repositories::SavedServersRepository;
+
+/// Milliseconds in an hour — the seed's own recency arithmetic.
+const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// The in-memory saved-server store. See the [module docs](self).
 pub struct MockSavedServersRepository {
@@ -53,32 +65,42 @@ impl MockSavedServersRepository {
     }
 }
 
-/// The seeded rows, most-recently-used first.
+/// The seeded rows, most-recently-used first (see the [module docs](self)).
 fn seed() -> Vec<SavedServer> {
+    let now = epoch_millis();
     vec![
         SavedServer {
             host: "100.71.31.57".to_string(),
             port: 50051,
             trust_mode: TrustMode::TrustOnFirstUse,
             label: "Home rig".to_string(),
-            last_used: "2 hours ago".to_string(),
+            last_used_ms: now - 2 * HOUR_MS,
             read_only: false,
+            has_credential: false,
+            token_name: None,
+            fingerprint: None,
         },
         SavedServer {
             host: "zelli.example.com".to_string(),
             port: 50051,
             trust_mode: TrustMode::System,
             label: "zelli".to_string(),
-            last_used: "yesterday".to_string(),
+            last_used_ms: now - 30 * HOUR_MS,
             read_only: false,
+            has_credential: false,
+            token_name: None,
+            fingerprint: None,
         },
         SavedServer {
             host: "herdr.internal".to_string(),
             port: 7443,
             trust_mode: TrustMode::Pinned,
             label: "herdr staging".to_string(),
-            last_used: "last week".to_string(),
+            last_used_ms: now - 9 * 24 * HOUR_MS,
             read_only: true,
+            has_credential: false,
+            token_name: None,
+            fingerprint: Some("ab".repeat(32)),
         },
     ]
 }
@@ -91,11 +113,7 @@ impl SavedServersRepository for MockSavedServersRepository {
 
     fn save(&self, server: SavedServer) -> Result<(), AppFailure> {
         let mut servers = self.servers.lock().unwrap_or_else(PoisonError::into_inner);
-        let endpoint = server.endpoint();
-        // Most-recently-used first: a re-saved endpoint moves to the top rather
-        // than staying wherever it was.
-        servers.retain(|existing| existing.endpoint() != endpoint);
-        servers.insert(0, server);
+        upsert(&mut servers, server);
         Ok(())
     }
 
@@ -110,14 +128,17 @@ impl SavedServersRepository for MockSavedServersRepository {
 mod tests {
     use super::*;
 
-    fn server(host: &str, port: u16) -> SavedServer {
+    fn server(host: &str, port: u16, last_used_ms: i64) -> SavedServer {
         SavedServer {
             host: host.to_string(),
             port,
             trust_mode: TrustMode::System,
             label: host.to_string(),
-            last_used: "just now".to_string(),
+            last_used_ms,
             read_only: false,
+            has_credential: false,
+            token_name: None,
+            fingerprint: None,
         }
     }
 
@@ -150,9 +171,10 @@ mod tests {
     }
 
     #[test]
-    fn saving_a_new_endpoint_puts_it_first() {
-        let repo = MockSavedServersRepository::with_servers(vec![server("a.example", 1)]);
-        repo.save(server("b.example", 2)).expect("save succeeds");
+    fn saving_a_more_recent_endpoint_puts_it_first() {
+        let repo = MockSavedServersRepository::with_servers(vec![server("a.example", 1, 10)]);
+        repo.save(server("b.example", 2, 20))
+            .expect("save succeeds");
 
         let listed = repo.list().expect("list succeeds");
         assert_eq!(listed[0].endpoint(), "b.example:2");
@@ -162,10 +184,10 @@ mod tests {
     #[test]
     fn re_saving_an_endpoint_replaces_it_rather_than_duplicating() {
         let repo = MockSavedServersRepository::with_servers(vec![
-            server("a.example", 1),
-            server("b.example", 2),
+            server("a.example", 1, 10),
+            server("b.example", 2, 20),
         ]);
-        let mut updated = server("b.example", 2);
+        let mut updated = server("b.example", 2, 30);
         updated.label = "renamed".to_string();
         repo.save(updated).expect("save succeeds");
 
@@ -176,7 +198,7 @@ mod tests {
 
     #[test]
     fn removing_is_idempotent() {
-        let repo = MockSavedServersRepository::with_servers(vec![server("a.example", 1)]);
+        let repo = MockSavedServersRepository::with_servers(vec![server("a.example", 1, 10)]);
         repo.remove("a.example:1").expect("remove succeeds");
         repo.remove("a.example:1")
             .expect("removing an absent endpoint still succeeds");
