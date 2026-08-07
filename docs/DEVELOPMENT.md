@@ -83,9 +83,9 @@ frust run --flavor develop             # device/simulator: Develop flavor/scheme
 frust run --flavor production          # device/simulator: Production flavor/scheme
 ```
 
-The cold-start splash (`docs/ARCHITECTURE.md`'s Cold-Start Splash section) plays on `cargo run`
-too — it is gated per **process launch**, so it replays every time the desktop binary restarts,
-but never on a warm in-process navigation back to `/`.
+The cold-start splash (`docs/ARCHITECTURE.md`'s UI Substrate section, `splash` bullet) plays on
+`cargo run` too — it is gated per **process launch**, so it replays every time the desktop binary
+restarts, but never on a warm in-process navigation back to `/`.
 
 ## Test Rig (Live `muxrd`)
 

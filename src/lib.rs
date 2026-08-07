@@ -5,12 +5,11 @@
 //! `/settings` (see `routes.rs`). Each feature under [`features`] follows
 //! the `{domain, data, presentation}` clean-architecture slice
 //! `examples/huddle` establishes (see its `src/README-phase-c.md`):
-//! dependencies point inward only, `presentation` → `domain` ← `data`. Only
-//! `connect`'s presentation layer is real today (a static Connect screen, no
-//! domain/data logic behind it); the other three are placeholder pages —
-//! Phase 2 wires each feature's real logic and adds route guards/redirects,
-//! the seam [`shell::root_view`] and [`routes::build_routes`] are left thin
-//! to grow into.
+//! dependencies point inward only, `presentation` → `domain` ← `data`. All
+//! four features run their real `data`/`domain` logic over `muxrd`'s gRPC
+//! layer (`crate::net`, `crate::connection`), each also keeping a mock
+//! repository behind its own `di.rs` seam for headless suites — see
+//! `docs/ARCHITECTURE.md`'s Feature Slices section for the full picture.
 //!
 //! This file is the **composition root**: `Component::init` publishes the
 //! app-scoped [`connection::ConnectionController`] via
@@ -27,12 +26,11 @@
 //! navigator, the top bar floating over it, and the toast layer — plus, on the
 //! first build of a cold start, the splash overlay
 //! ([`AppState::splash_plan`], [`ui::splash::sequence`]) — and wraps the lot in
-//! the **root overlay host** ([`AppState::overlays`]). No feature
-//! repository exists yet to construct here — a real one joins this function
-//! the same way `examples/huddle`'s `HuddleApp::init` constructs and
-//! `provide_context`s each feature's repository, once a feature's `data`
-//! layer has one to build; each feature's own `di.rs` is the seam that will
-//! grow it, called from here.
+//! the **root overlay host** ([`AppState::overlays`]). Each feature's own
+//! `di.rs` — called from `init`, above — is the seam that constructs and
+//! `provide_context`s its repository, real by default with a mock behind a
+//! test-only seam, the same shape `examples/huddle`'s `HuddleApp::init` uses
+//! for its own repository.
 //!
 //! **Dev-machine-only scaffold**: this variant's `Cargo.toml` path-deps into
 //! the Frust checkout that generated it, plus a sibling `clean-signals-rs`
