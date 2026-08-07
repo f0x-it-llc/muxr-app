@@ -18,8 +18,7 @@
 //! │ CONNECTION                  │
 //! │ ▤ server url    100.71…   › │  green value, chevron
 //! │ ▤ tls certificate insecure › │  amber value, chevron
-//! │ z zellij version  0.44.3    │  static
-//! │ h herdr version   …-v14     │  static
+//! │ z zellij version  0.44.3    │  static, one row per reported backend
 //! │ AUTH TOKENS                 │
 //! │ zelli-mobile-…  [read-write]│
 //! │ created 2026-07-02  (revoke)│
@@ -42,13 +41,28 @@
 //! # Where each group's data comes from
 //!
 //! - **connection** — [`crate::connection::ConnectionController`]'s
-//!   `server_info`, app-scoped because routing itself reads it. **No latency**:
-//!   the sessions strip owns that number, next to the list a round trip
-//!   actually gates; repeating it here would be a second, differently-stale
-//!   copy of the same fact.
+//!   `server_info`, app-scoped because routing itself reads it. Its version
+//!   row(s) are one per [`ServerInfo::backend_versions`] entry (falling back
+//!   to the legacy single version string for a server that reported none —
+//!   see [`connection_rows`]). **No latency**: the sessions strip owns that
+//!   number, next to the list a round trip actually gates; repeating it here
+//!   would be a second, differently-stale copy of the same fact.
 //! - **auth tokens**, **terminal appearance**, **session poll** — this
 //!   feature's own [`SettingsController`], over the two repositories `di`
 //!   published.
+//!
+//! # Minting a token
+//!
+//! [`Actions::open_create_token_dialog`] opens
+//! [`pieces::open_create_token_dialog`] (name + read-only toggle); on a
+//! landed mint it opens [`open_secret_reveal`], the one-time secret sheet
+//! reading [`SettingsController::pending_token_secret`] — see that field's own
+//! doc for the whole flow. Both mutating token actions
+//! ([`Actions::open_create_token_dialog`]/[`Actions::open_revoke_dialog`])
+//! open with the same [`Actions::tokens_blocked`] guard: a read-only
+//! connected session (`ConnectionController::is_read_only`) cannot mint or
+//! revoke, and the guard raises [`READ_ONLY_TOKEN_TOAST`] rather than
+//! silently doing nothing.
 //!
 //! # The component state boundary, and what it means for callbacks
 //!
@@ -76,13 +90,13 @@ use std::sync::Arc;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    NavigatorController, Padding, SizedBox, WindowMetrics, any, component, inflexible, safe_area,
-    scroll_view, spawn_local, use_context,
+    GetUntracked, NavigatorController, Padding, SizedBox, WindowMetrics, any, component,
+    inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
 use crate::connection::{
-    ConnectionController, ServerInfo, TrustMode, expect_connection_controller,
+    ConnectionController, ServerBackend, ServerInfo, TrustMode, expect_connection_controller,
 };
 use crate::failure::AppFailure;
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
@@ -91,7 +105,7 @@ use crate::features::settings::domain::entities::{
 };
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
-use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
+use crate::ui::dialogs::confirm_dialog;
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
@@ -115,15 +129,13 @@ const UNAVAILABLE_TOAST: &str = "Not yet available \u{2014} reconnect to change 
 /// worse failure.
 const DISCONNECTED_VALUE: &str = "not connected";
 
-/// The `herdr version` row's value.
-///
-/// **A screen-local constant, and the one value on this screen not read from
-/// live state.** [`ServerInfo`] carries a single `version` (the multiplexer's,
-/// which the `zellij version` row prints); nothing on it names the herdr wire
-/// protocol yet, and `src/connection.rs` is outside this task's write scope.
-/// The real `muxrd` handshake reports it — see the completion summary's
-/// findings.
-const HERDR_WIRE_VERSION: &str = "herdr-wire-v14";
+/// What tapping a mutating token control says while the connected session is
+/// itself read-only — `ConnectionController::is_read_only`'s own "primary
+/// defence" note (`crate::connection`'s module docs): a read-only credential
+/// cannot mint or revoke, so both controls stay reachable but honest, the same
+/// [`UNAVAILABLE_TOAST`] idiom the `connection` rows use for a different gap.
+const READ_ONLY_TOKEN_TOAST: &str =
+    "Read-only session \u{2014} reconnect with a read-write token to change this";
 
 /// The groups column's max width past [`WIDE_BREAKPOINT_PX`] (FINDINGS #21's
 /// conservative width-clamp pass) — a tablet/landscape/desktop window centers
@@ -221,6 +233,7 @@ impl Component for SettingsScreen {
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.
         let info = state.actions.connection.server_info.get();
+        let read_only = state.actions.connection.is_read_only.get();
         let tokens = state.actions.controller.tokens.get();
         let appearance = state.actions.controller.appearance.get();
         let poll = state.actions.controller.poll.get();
@@ -245,9 +258,9 @@ impl Component for SettingsScreen {
         body.extend(
             tokens
                 .iter()
-                .map(|token| pieces::token_item(token, &colors)),
+                .map(|token| pieces::token_item(token, &colors, !read_only)),
         );
-        body.push(pieces::create_token_row(&colors));
+        body.push(pieces::create_token_row(&colors, !read_only));
 
         body.push(pieces::group_label("terminal appearance", &colors));
         body.extend(appearance_rows(&appearance, &colors));
@@ -293,9 +306,9 @@ impl Component for SettingsScreen {
 // The four groups' rows
 // ---------------------------------------------------------------------------
 
-/// The `connection` group: the endpoint, the TLS posture, and the two version
-/// facts. Every value is read off `info`; `None` prints
-/// [`DISCONNECTED_VALUE`] rather than nothing.
+/// The `connection` group: the endpoint, the TLS posture, and one version row
+/// per backend the server reports. Every value is read off `info`; `None`
+/// prints [`DISCONNECTED_VALUE`] rather than nothing.
 fn connection_rows(info: Option<&ServerInfo>, colors: &Palette) -> Vec<AnyView<SettingsState>> {
     let (endpoint, endpoint_tone) = match info {
         Some(info) => (info.endpoint.clone(), ValueTone::Ok),
@@ -305,10 +318,7 @@ fn connection_rows(info: Option<&ServerInfo>, colors: &Palette) -> Vec<AnyView<S
         Some(info) => tls_posture(info.trust_mode),
         None => (DISCONNECTED_VALUE, ValueTone::Plain),
     };
-    let zellij = info.map_or(DISCONNECTED_VALUE.to_string(), |info| {
-        version_number(&info.version).to_string()
-    });
-    vec![
+    let mut rows = vec![
         pieces::settings_row(
             pieces::MARK_SERVER_URL,
             "server url",
@@ -325,23 +335,69 @@ fn connection_rows(info: Option<&ServerInfo>, colors: &Palette) -> Vec<AnyView<S
             RowAction::Unavailable,
             colors,
         ),
-        pieces::settings_row(
+    ];
+    rows.extend(backend_version_rows(info, colors));
+    rows
+}
+
+/// One row per backend `info` actually reported
+/// ([`ServerInfo::backend_versions`]), or the legacy single-version fallback
+/// for an older server that reported none — always at least one row, so this
+/// group never goes silent about the multiplexer it's attached to (or, while
+/// disconnected, the one it *was*).
+fn backend_version_rows(
+    info: Option<&ServerInfo>,
+    colors: &Palette,
+) -> Vec<AnyView<SettingsState>> {
+    match info {
+        Some(info) if !info.backend_versions.is_empty() => info
+            .backend_versions
+            .iter()
+            .map(|backend_version| {
+                pieces::settings_row(
+                    backend_mark(backend_version.backend),
+                    backend_version_label(backend_version.backend),
+                    backend_version.version.clone(),
+                    ValueTone::Plain,
+                    RowAction::Static,
+                    colors,
+                )
+            })
+            .collect(),
+        Some(info) => vec![pieces::settings_row(
             pieces::MARK_ZELLIJ,
             "zellij version",
-            zellij,
+            version_number(&info.version).to_string(),
             ValueTone::Plain,
             RowAction::Static,
             colors,
-        ),
-        pieces::settings_row(
-            pieces::MARK_HERDR,
-            "herdr version",
-            HERDR_WIRE_VERSION,
+        )],
+        None => vec![pieces::settings_row(
+            pieces::MARK_ZELLIJ,
+            "zellij version",
+            DISCONNECTED_VALUE,
             ValueTone::Plain,
             RowAction::Static,
             colors,
-        ),
-    ]
+        )],
+    }
+}
+
+/// The `.set-ic` mark for `backend`'s version row — the backend's own initial
+/// (see [`pieces::MARK_ZELLIJ`]/[`pieces::MARK_HERDR`]'s own doc for why).
+fn backend_mark(backend: ServerBackend) -> pieces::RowMark {
+    match backend {
+        ServerBackend::Zellij => pieces::MARK_ZELLIJ,
+        ServerBackend::Herdr => pieces::MARK_HERDR,
+    }
+}
+
+/// …and its row label.
+fn backend_version_label(backend: ServerBackend) -> &'static str {
+    match backend {
+        ServerBackend::Zellij => "zellij version",
+        ServerBackend::Herdr => "herdr version",
+    }
 }
 
 /// What the `tls certificate` row prints for a posture, and in which hue.
@@ -574,23 +630,43 @@ impl Actions {
         spawn_local(async move { controller.set_poll_prefs(next).await });
     }
 
-    /// Open the mint-a-token dialog (the dashed row).
+    /// Whether a mutating token control is blocked because the connected
+    /// session is itself read-only — see [`READ_ONLY_TOKEN_TOAST`]'s own doc.
+    /// Raises that toast when it is; the one guard both
+    /// [`open_create_token_dialog`](Self::open_create_token_dialog) and
+    /// [`open_revoke_dialog`](Self::open_revoke_dialog) open with.
+    fn tokens_blocked(&self) -> bool {
+        if self.connection.is_read_only.get_untracked() {
+            app_toasts().show(READ_ONLY_TOKEN_TOAST);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Open the mint-a-token dialog (the dashed row): a name and its
+    /// read-only toggle, then — on a landed mint — the one-time secret
+    /// reveal (see [`open_secret_reveal`]).
     ///
     /// The confirmation toast is raised **only if the mint landed**: a failure
     /// already surfaces through the screen's own failure→toast bridge, and a
     /// "Created …" beside it would contradict it.
     pub fn open_create_token_dialog(&self) {
+        if self.tokens_blocked() {
+            return;
+        }
         let controller = Arc::clone(&self.controller);
-        name_input_dialog(
+        let overlays = self.overlays.clone();
+        pieces::open_create_token_dialog(
             &self.overlays,
-            "New token",
-            "",
-            move |_app: &mut AppState, name: String| {
+            move |_app: &mut AppState, name: String, read_only: bool| {
                 let handle = Arc::clone(&controller);
+                let overlays = overlays.clone();
                 let confirmation = format!("Created {name}");
                 spawn_local(async move {
-                    if handle.create_token(name).await {
+                    if handle.create_token(name, read_only).await {
                         app_toasts().show(confirmation);
+                        open_secret_reveal(&overlays, &handle);
                     }
                 });
             },
@@ -599,6 +675,9 @@ impl Actions {
 
     /// Open the revoke confirmation for the token called `name`.
     pub fn open_revoke_dialog(&self, name: &str) {
+        if self.tokens_blocked() {
+            return;
+        }
         let controller = Arc::clone(&self.controller);
         let name = name.to_string();
         confirm_dialog(
@@ -636,6 +715,33 @@ impl Actions {
             },
         );
     }
+}
+
+/// Open the one-time secret reveal for `controller`'s currently pending
+/// secret — [`Actions::open_create_token_dialog`]'s own follow-up once a mint
+/// lands. Mirrors [`Actions::open_picker`]'s split: the `show_sheet` call and
+/// the controller read live here, [`pieces::secret_reveal_sheet`] is the pure
+/// render.
+fn open_secret_reveal(
+    overlays: &NavigatorController<AppState>,
+    controller: &Arc<SettingsController>,
+) {
+    let controller = Arc::clone(controller);
+    show_sheet(overlays, move |sheet| {
+        let theme = pieces::active_theme();
+        let colors = pieces::palette(&theme);
+        // Tracked: re-resolved on every navigator rebuild, exactly like the
+        // picker sheet's own body (`Actions::open_picker`'s own doc).
+        let minted = controller.pending_token_secret.get();
+        let sheet = sheet.clone();
+        let controller = Arc::clone(&controller);
+        pieces::secret_reveal_sheet(minted.as_ref(), &colors, move |_app: &mut AppState| {
+            // Close first, then clear — the picker sheet's own ordering (the
+            // exit staging and a state write should not overlap).
+            sheet.close();
+            controller.clear_pending_secret();
+        })
+    });
 }
 
 // ---------------------------------------------------------------------------

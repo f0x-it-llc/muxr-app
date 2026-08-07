@@ -34,6 +34,21 @@
 //! preference save is the exception: the repository *returns* the stored
 //! record, so the signal takes that value directly and no second round trip is
 //! needed.
+//!
+//! # The one-time secret
+//!
+//! [`pending_token_secret`](Self::pending_token_secret) is the seam the
+//! presentation layer's secret-reveal sheet reads from: a landed
+//! [`create_token`](Self::create_token) parks the daemon's one-time
+//! [`MintedToken`] there (nothing else in this controller writes it), and
+//! [`clear_pending_secret`](Self::clear_pending_secret) is the reveal's own
+//! "dismissed, gone forever" — the cleared `Option`'s dropped `Zeroizing`
+//! secret scrubs its buffer right there. There is deliberately no
+//! auto-clearing tied to a *scrim* dismissal of that sheet (`ui::sheet` gives
+//! its caller no dismiss hook to hang one off — see that module's own docs):
+//! the value simply sits until the next mint overwrites it or an explicit
+//! dismissal clears it, never logged and never read anywhere but that one
+//! sheet.
 
 use std::sync::Arc;
 
@@ -42,7 +57,7 @@ use frust::{GetUntracked, RwSignal, Set};
 
 use crate::failure::AppFailure;
 use crate::features::settings::domain::entities::{
-    AppearancePrefs, AuthToken, PollPrefs, Preferences,
+    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences,
 };
 use crate::features::settings::domain::repositories::{
     AuthTokensRepository, PreferencesRepository,
@@ -69,6 +84,9 @@ pub struct SettingsController {
     pub poll: RwSignal<PollPrefs>,
     /// Whether the first load has completed (see the [module docs](self)).
     pub loaded: RwSignal<bool>,
+    /// The most recently minted token's one-time secret — see the
+    /// [module docs](self)' "one-time secret" section.
+    pub pending_token_secret: RwSignal<Option<MintedToken>>,
 }
 
 impl SettingsController {
@@ -91,6 +109,7 @@ impl SettingsController {
             appearance: RwSignal::new(defaults.appearance),
             poll: RwSignal::new(defaults.poll),
             loaded: RwSignal::new(false),
+            pending_token_secret: RwSignal::new(None),
         }
     }
 
@@ -130,24 +149,35 @@ impl SettingsController {
         }
     }
 
-    /// Mint a token named `name` (already trimmed by the dialog), then
-    /// refresh. A failed mint leaves the list untouched and surfaces through
-    /// [`failures`](ControllerCore::failures) — the screen's toast bridge.
+    /// Mint a token named `name` (already trimmed by the dialog) with the
+    /// requested `read_only` scope, then refresh. A failed mint leaves the
+    /// list untouched and surfaces through
+    /// [`failures`](ControllerCore::failures) — the screen's toast bridge. A
+    /// landed one parks the daemon's one-time secret on
+    /// [`Self::pending_token_secret`] — see the [module docs](self).
     ///
     /// **Answers whether it landed**, which the two mutating call sites need:
     /// the screen raises its own confirmation toast afterwards, and a
     /// "Created …" beside the failure toast for the same call would be a
     /// straight lie.
-    pub async fn create_token(&self, name: String) -> bool {
-        let created = self
+    pub async fn create_token(&self, name: String, read_only: bool) -> bool {
+        let request = CreateTokenRequest { name, read_only };
+        let Ok(minted) = self
             .core
-            .run(&self.create_token, name, RunOptions::default())
+            .run(&self.create_token, request, RunOptions::default())
             .await
-            .is_ok();
-        if created {
-            self.refresh_tokens().await;
-        }
-        created
+        else {
+            return false;
+        };
+        self.pending_token_secret.set(Some(minted));
+        self.refresh_tokens().await;
+        true
+    }
+
+    /// Dismiss the pending secret reveal — "gone forever" from here on. See
+    /// the [module docs](self)' "one-time secret" section.
+    pub fn clear_pending_secret(&self) {
+        self.pending_token_secret.set(None);
     }
 
     /// Revoke the token called `name`, then refresh. Answers whether it
@@ -264,7 +294,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        block_on(c.create_token("laptop".to_string()));
+        block_on(c.create_token("laptop".to_string(), false));
 
         let tokens = c.tokens.get_untracked();
         assert_eq!(tokens.len(), SEEDED_COUNT + 1);
@@ -272,6 +302,46 @@ mod tests {
         assert_eq!(minted.name, "laptop");
         assert_eq!(minted.scope, TokenScope::ReadWrite);
         assert_eq!(minted.created, MOCK_TODAY);
+    }
+
+    #[test]
+    fn create_with_the_read_only_toggle_mints_a_read_only_token() {
+        let c = controller();
+        block_on(c.refresh());
+
+        block_on(c.create_token("phone".to_string(), true));
+
+        let tokens = c.tokens.get_untracked();
+        let minted = tokens.last().expect("the minted token");
+        assert_eq!(minted.name, "phone");
+        assert_eq!(minted.scope, TokenScope::ReadOnly);
+    }
+
+    #[test]
+    fn create_parks_the_one_time_secret_until_dismissed() {
+        let c = controller();
+        block_on(c.refresh());
+        assert_eq!(c.pending_token_secret.get_untracked(), None);
+
+        assert!(block_on(c.create_token("laptop".to_string(), false)));
+        let pending = c
+            .pending_token_secret
+            .get_untracked()
+            .expect("a landed mint parks its secret");
+        assert_eq!(pending.name, "laptop");
+
+        c.clear_pending_secret();
+        assert_eq!(c.pending_token_secret.get_untracked(), None);
+    }
+
+    #[test]
+    fn a_rejected_mint_parks_no_secret() {
+        let c = controller();
+        block_on(c.refresh());
+
+        // The mock rejects a duplicate name — the one reachable failure here.
+        assert!(!block_on(c.create_token("token_2".to_string(), false)));
+        assert_eq!(c.pending_token_secret.get_untracked(), None);
     }
 
     #[test]
@@ -311,9 +381,9 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        assert!(block_on(c.create_token("laptop".to_string())));
+        assert!(block_on(c.create_token("laptop".to_string(), false)));
         assert!(
-            !block_on(c.create_token("laptop".to_string())),
+            !block_on(c.create_token("laptop".to_string(), false)),
             "a duplicate mint is rejected by the repository"
         );
         assert!(block_on(c.revoke_token("laptop".to_string())));
