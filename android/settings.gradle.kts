@@ -34,3 +34,27 @@ gradle.lifecycle.beforeProject {
 }
 
 // frust:plugin-includes — plugin-contributed `include(...)` lines go below.
+
+// Added by `frust` Add Plugin: a plugin's Android library module,
+// included by path out of the frust checkout (the same derivation
+// `frust.embedding.dir` and the plugin's Cargo path dep use).
+include(":frust-camera")
+project(":frust-camera").projectDir = file("../../../plugins/camera/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-camera") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-camera"))
+    }
+}
+
+// Added by `frust` Add Plugin: a plugin's Android library module,
+// included by path out of the frust checkout (the same derivation
+// `frust.embedding.dir` and the plugin's Cargo path dep use).
+include(":frust-secure-storage")
+project(":frust-secure-storage").projectDir = file("../../../plugins/secure-storage/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-secure-storage") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-secure-storage"))
+    }
+}
