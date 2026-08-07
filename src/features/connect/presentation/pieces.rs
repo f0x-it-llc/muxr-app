@@ -910,8 +910,8 @@ fn trust_option_label(mode: TrustMode) -> &'static str {
 fn trust_meta_label(mode: TrustMode) -> &'static str {
     match mode {
         TrustMode::System => "system TLS",
-        // Not "first-use TLS" (review F7): that name claimed a
-        // trust-on-first-use mechanism this posture never implemented.
+        // Not "first-use TLS": that name claimed a trust-on-first-use
+        // mechanism this posture never implemented.
         TrustMode::NoVerification => "no-verification TLS",
         TrustMode::Pinned => "pinned TLS",
     }

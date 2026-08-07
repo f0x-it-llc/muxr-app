@@ -46,7 +46,7 @@
 //! unrecognised `trustMode` string falls back to that same derivation rather
 //! than to a guess.
 //!
-//! # Storage safety of the [`TrustMode::NoVerification`] rename (review F7)
+//! # Storage safety of the [`TrustMode::NoVerification`] rename
 //!
 //! The Rust variant used to be spelled `TrustOnFirstUse`; the stored string is
 //! and remains `"insecure"` (the Flutter client's own `TrustMode` spelling,
@@ -424,8 +424,8 @@ mod tests {
     #[test]
     fn the_legacy_insecure_bool_is_still_written_beside_the_trust_mode() {
         // Storage-safety proof for the `TrustOnFirstUse` → `NoVerification`
-        // rename (review F7): the encoded string is `"insecure"` either way —
-        // the rename touches only the Rust identifier, never a stored byte.
+        // rename: the encoded string is `"insecure"` either way — the rename
+        // touches only the Rust identifier, never a stored byte.
         let mut unverified = server("rig.example", 50051, 0);
         unverified.trust_mode = TrustMode::NoVerification;
         let payload = encode_list(&[unverified]);

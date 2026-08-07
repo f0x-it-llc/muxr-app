@@ -229,11 +229,21 @@ impl Component for SessionsScreen {
         // *next* mount). `settings::di::expect_preferences_repository()` is
         // resolved directly here, the same di.rs-is-composition-root-wiring
         // widening `terminal`'s page already uses for this exact repository
-        // (`docs/ARCHITECTURE.md`'s Feature Slices section). `Component::build`
-        // starts `use_interval` itself, the moment `poll_period` resolves.
+        // (`docs/ARCHITECTURE.md`'s Feature Slices section) — and resolved
+        // *synchronously, right here in `init`*, never inside the spawned
+        // future body below: `Component::init` runs under this component's
+        // real `Owner`, but the `frust::spawn_local` poller that later polls
+        // this future installs no ambient owner, so a `use_context`-backed
+        // lookup taken from inside the future's first poll would panic on
+        // the first real `/sessions` mount (a headless suite masks this
+        // because its harness keeps an ambient owner live throughout).
+        // Only the resolved `Arc` crosses into the spawned block.
+        // `Component::build` starts `use_interval` itself, the moment
+        // `poll_period` resolves.
         let poll_loader = Arc::clone(&controller);
+        let preferences = expect_preferences_repository();
         spawn_local(async move {
-            let secs = expect_preferences_repository()
+            let secs = preferences
                 .load_preferences()
                 .await
                 .map(|prefs| prefs.poll.layout_refresh_secs)

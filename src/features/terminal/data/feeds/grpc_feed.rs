@@ -92,11 +92,16 @@
 //! That shared buffer is filled by the *server*, at whatever rate it likes, and
 //! drained by a UI pump that can stop entirely (a backgrounded app, a torn-down
 //! screen whose pump task outlives it). Left uncapped it is a
-//! network-controlled allocation, so the queue is accounted in **bytes** and
-//! bounded by [`INBOUND_HIGH_WATER`]/[`INBOUND_LOW_WATER`]: at the high-water
-//! mark the pump stops reading the stream, and it resumes only once a drain has
-//! brought the queue back under the low-water mark. Pauses are counted
-//! ([`GrpcTerminalFeed::read_pauses`]), never silent.
+//! network-controlled allocation, so the queue is accounted two ways —
+//! **bytes**, bounded by [`INBOUND_HIGH_WATER`]/[`INBOUND_LOW_WATER`], and
+//! **frame count**, bounded by
+//! [`INBOUND_HIGH_WATER_FRAMES`]/[`INBOUND_LOW_WATER_FRAMES`], since a flood
+//! of many tiny (or empty) render frames stays under the byte cap while each
+//! queued entry still costs its own `VecDeque` slot and `Vec` allocation. The
+//! pump pauses the moment **either** cap trips (bytes or frame count) and
+//! resumes only once a drain has brought the queue back under **both**
+//! low-water marks. Pauses are counted ([`GrpcTerminalFeed::read_pauses`]),
+//! never silent.
 //!
 //! **Backpressure, not a drop policy.** Nothing may be discarded here: the wire
 //! has no resync or refresh request (`ClientFrame` is `attach`/`input`/
@@ -201,6 +206,26 @@ pub const INBOUND_HIGH_WATER: usize = 2 * 1024 * 1024;
 /// turn into a stop/start read for every single frame. In practice a drain
 /// empties the queue outright, which is well under this.
 pub const INBOUND_LOW_WATER: usize = INBOUND_HIGH_WATER / 4;
+
+/// Queued inbound **frames** at which the pump stops reading the stream — the
+/// frame-count half of the inbound flow control the [module docs](self)
+/// describe, alongside [`INBOUND_HIGH_WATER`]'s byte accounting.
+///
+/// A flood of many tiny (or empty) render frames stays under the byte cap
+/// while every queued entry still costs its own `VecDeque` slot and `Vec`
+/// allocation, so the byte cap alone cannot bound that shape. 4096 is
+/// generous for interactive use (the UI drains every ~33 ms, so reaching this
+/// mark this way means tens of thousands of frames per second) and still
+/// bounded, the same contract [`INBOUND_HIGH_WATER`] states for bytes.
+pub const INBOUND_HIGH_WATER_FRAMES: usize = 4096;
+
+/// Queued inbound frames the drain side must bring the queue back under
+/// before the pump resumes reading — the frame-count counterpart of
+/// [`INBOUND_LOW_WATER`].
+///
+/// A quarter of [`INBOUND_HIGH_WATER_FRAMES`], for the same reason
+/// [`INBOUND_LOW_WATER`] is a quarter of [`INBOUND_HIGH_WATER`].
+pub const INBOUND_LOW_WATER_FRAMES: usize = INBOUND_HIGH_WATER_FRAMES / 4;
 
 /// Where a feed's session currently stands. Plain shared state, polled by the
 /// screen that owns the feed — deliberately not a signal (see the [module
@@ -322,9 +347,9 @@ impl GrpcTerminalFeed {
         self.shared.state().dropped_frames
     }
 
-    /// Render frames received but not yet drained — a diagnostic/test
-    /// accessor. Never read by production code, which drains instead of
-    /// asking.
+    /// Render frames received but not yet drained — what
+    /// [`INBOUND_HIGH_WATER_FRAMES`] bounds. A diagnostic/test accessor.
+    /// Never read by production code, which drains instead of asking.
     pub fn pending_writes(&self) -> usize {
         self.shared.state().inbound.len()
     }
@@ -336,8 +361,9 @@ impl GrpcTerminalFeed {
     }
 
     /// Times the pump stopped reading the stream because the queue had reached
-    /// [`INBOUND_HIGH_WATER`] — a diagnostic counter in the same style as
-    /// [`dropped_frames`](Self::dropped_frames), never read by production code.
+    /// [`INBOUND_HIGH_WATER`] or [`INBOUND_HIGH_WATER_FRAMES`] — a diagnostic
+    /// counter in the same style as [`dropped_frames`](Self::dropped_frames),
+    /// never read by production code.
     ///
     /// A non-zero count is the signal that a producer outran this session's
     /// drain; nothing was lost, the server was simply held off.
@@ -650,16 +676,21 @@ impl Shared {
         state.inbound.push_back(bytes);
     }
 
-    /// Whether the queue has reached [`INBOUND_HIGH_WATER`] — the pump asks
-    /// before every read.
+    /// Whether the queue has reached [`INBOUND_HIGH_WATER`] or
+    /// [`INBOUND_HIGH_WATER_FRAMES`] — the pump asks before every read. Either
+    /// cap alone is enough to pause (see the [module docs](self)).
     fn inbound_saturated(&self) -> bool {
-        self.state().inbound_bytes >= INBOUND_HIGH_WATER
+        let state = self.state();
+        state.inbound_bytes >= INBOUND_HIGH_WATER
+            || state.inbound.len() >= INBOUND_HIGH_WATER_FRAMES
     }
 
-    /// Whether a drain has brought the queue back under [`INBOUND_LOW_WATER`],
-    /// which is what lets a paused pump start reading again.
+    /// Whether a drain has brought the queue back under **both**
+    /// [`INBOUND_LOW_WATER`] and [`INBOUND_LOW_WATER_FRAMES`], which is what
+    /// lets a paused pump start reading again.
     fn inbound_has_room(&self) -> bool {
-        self.state().inbound_bytes <= INBOUND_LOW_WATER
+        let state = self.state();
+        state.inbound_bytes <= INBOUND_LOW_WATER && state.inbound.len() <= INBOUND_LOW_WATER_FRAMES
     }
 
     fn count_read_pause(&self) {
@@ -860,9 +891,10 @@ fn classify(status: &tonic::Status) -> Attempt {
 }
 
 /// Hold the reader off the stream while the queue sits at
-/// [`INBOUND_HIGH_WATER`], returning once a drain has brought it back under
-/// [`INBOUND_LOW_WATER`] — the pause half of the inbound flow control (see the
-/// [module docs](self)).
+/// [`INBOUND_HIGH_WATER`] or [`INBOUND_HIGH_WATER_FRAMES`], returning once a
+/// drain has brought it back under both [`INBOUND_LOW_WATER`] and
+/// [`INBOUND_LOW_WATER_FRAMES`] — the pause half of the inbound flow control
+/// (see the [module docs](self)).
 ///
 /// `Some` when the wait ended the attempt instead of resuming it: a shutdown is
 /// the one thing besides a drain that reaches a paused reader, which is what
@@ -1044,6 +1076,29 @@ mod tests {
             script.push_render(vec![b'x'; FLOOD_FRAME]);
         }
         wait_until("the pump parks on the high-water mark", || {
+            feed.read_pauses() >= 1
+        })
+        .await;
+    }
+
+    /// Push empty render frames at a feed nothing is draining, until its pump
+    /// parks on [`INBOUND_HIGH_WATER_FRAMES`] — the frame-count counterpart of
+    /// [`flood_until_paused`].
+    ///
+    /// Crossing 4096 frames takes far more pushes than the fixture's own
+    /// 64-deep local command channel ([`ATTACH_CAPACITY`] in `net::testing`)
+    /// can hold at once, unlike [`flood_until_paused`]'s single burst of
+    /// [`FLOOD_FRAMES`] (well under that capacity). So this pushes a small
+    /// batch — comfortably under that capacity — from inside [`wait_until`]'s
+    /// own probe, repeating (and pushing more) on every failed check; each
+    /// batch drains through the real stream during the probe's own poll delay
+    /// before the next one is pushed.
+    async fn flood_tiny_frames_until_paused(script: &TerminalScript, feed: &GrpcTerminalFeed) {
+        const BATCH: usize = 16;
+        wait_until("the pump parks on the frame-count high-water mark", || {
+            for _ in 0..BATCH {
+                script.push_render(Vec::new());
+            }
             feed.read_pauses() >= 1
         })
         .await;
@@ -1286,6 +1341,50 @@ mod tests {
         );
     }
 
+    /// A flood of many *tiny* (here, empty) render frames stays nowhere near
+    /// [`INBOUND_HIGH_WATER`]'s byte accounting, yet each one still costs its
+    /// own `VecDeque` slot and `Vec` allocation — [`INBOUND_HIGH_WATER_FRAMES`]
+    /// is what catches that shape and pauses the reader on frame count alone.
+    #[tokio::test]
+    async fn a_flood_of_tiny_frames_pauses_the_reader_via_the_frame_count_cap() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (mut feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+
+        flood_tiny_frames_until_paused(&script, &feed).await;
+        assert!(
+            feed.pending_bytes() < INBOUND_HIGH_WATER,
+            "a flood of empty frames must never cross the byte cap on its own: {} bytes",
+            feed.pending_bytes()
+        );
+        assert!(
+            (INBOUND_HIGH_WATER_FRAMES..INBOUND_HIGH_WATER_FRAMES * 2)
+                .contains(&feed.pending_writes()),
+            "the queue is bounded by the frame-count mark, not left to grow \
+             unboundedly while bytes stay low: {} frames",
+            feed.pending_writes()
+        );
+
+        // Draining resumes the reader, and the session keeps delivering
+        // rather than staying parked forever — nothing was dropped to make
+        // room.
+        drain(&mut feed);
+        script.push_render(b"after\r\n".to_vec());
+        wait_until("the session keeps delivering once reading resumes", || {
+            feed.pending_writes() >= 1
+        })
+        .await;
+        assert_eq!(
+            feed.status(),
+            FeedStatus::Connected,
+            "the session is intact"
+        );
+    }
+
     /// The mark is a pause threshold, not an admission filter: a single frame
     /// bigger than the whole cap is queued whole, and the session carries on.
     #[tokio::test]
@@ -1486,5 +1585,15 @@ mod tests {
     fn the_shipped_inbound_bound_is_two_mib_resuming_at_a_quarter_of_it() {
         assert_eq!(INBOUND_HIGH_WATER, 2 * 1024 * 1024);
         assert_eq!(INBOUND_LOW_WATER, 512 * 1024);
+    }
+
+    /// The shipped frame-count bound is the documented one: 4096 queued
+    /// render frames pauses the reader, and a quarter of that resumes it —
+    /// same shape as the byte bound above, alongside rather than instead of
+    /// it.
+    #[test]
+    fn the_shipped_inbound_frame_bound_is_4096_resuming_at_a_quarter_of_it() {
+        assert_eq!(INBOUND_HIGH_WATER_FRAMES, 4096);
+        assert_eq!(INBOUND_LOW_WATER_FRAMES, 1024);
     }
 }

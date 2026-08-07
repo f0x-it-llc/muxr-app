@@ -2160,7 +2160,7 @@ fn tapping_a_credential_row_on_the_real_screen_unlocks_and_lands_on_sessions() {
 }
 
 // ---------------------------------------------------------------------------
-// The no-verification confirm gate (review F7)
+// The no-verification confirm gate
 // ---------------------------------------------------------------------------
 
 /// [`credential_row`] with its posture overridden and stamped now, so it sorts

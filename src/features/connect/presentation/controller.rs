@@ -63,11 +63,12 @@
 //!    [`ConnectController::recover_and_connect`]: unlock, then connect with the
 //!    recovered token under the row's own stored posture. Every other outcome
 //!    reports [`CredentialStatus::message`] and prefills the manual form. A row
-//!    stored under [`TrustMode::NoVerification`] is gated a step earlier still
-//!    (review F7, see [`Self::saved_row_needs_confirmation`]'s doc): the screen
-//!    raises a confirm dialog *before* calling this method at all, since the
-//!    unlock this method starts recovers a real secret that a connection with
-//!    no verification then sends over a channel that authenticates nothing.
+//!    stored under [`TrustMode::NoVerification`] is gated a step earlier still —
+//!    the no-verification confirm gate (see
+//!    [`Self::saved_row_needs_confirmation`]'s doc): the screen raises a
+//!    confirm dialog *before* calling this method at all, since the unlock
+//!    this method starts recovers a real secret that a connection with no
+//!    verification then sends over a channel that authenticates nothing.
 //! 4. **Delete** — ungated, and owned by the Settings screen (this feature's
 //!    only delete is `forget_unreadable`'s cleanup after an invalidated key).
 //! 5. **Upsert on login** — every successful connect through this controller
@@ -381,8 +382,8 @@ impl ConnectController {
     /// The saved row at `index`, if tapping it must raise a confirmation
     /// **before** [`Self::saved_row_tapped`]/[`Self::recover_and_connect`] fire
     /// their biometric unlock — a stored credential trusted under
-    /// [`TrustMode::NoVerification`] (review F7): that unlock recovers a real
-    /// secret, and `recover_and_connect` then replays it over a channel that
+    /// [`TrustMode::NoVerification`]: that unlock recovers a real secret, and
+    /// `recover_and_connect` then replays it over a channel that
     /// authenticates nothing. `None` for an out-of-range index, a row with no
     /// stored credential (nothing to unlock — [`Self::saved_row_tapped`]'s
     /// prefill branch, which raises no prompt either), or any other posture.
@@ -829,7 +830,7 @@ impl ConnectController {
     /// Ignored while a dial or another unlock is in flight — the same
     /// single-flight rule the CTAs share.
     ///
-    /// **Callers**, not this method, own the review-F7 confirmation: a
+    /// **Callers**, not this method, own the no-verification confirmation: a
     /// `NoVerification` row's tap is gated by
     /// `super::pages::ConnectScreen`'s own wiring *before* it ever reaches
     /// here (see [`Self::saved_row_needs_confirmation`]) — by the time this
