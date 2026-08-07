@@ -41,10 +41,21 @@
 //!
 //! **Legacy records migrate** exactly as the Flutter client's do: an entry with
 //! no `trustMode` derives one — `insecure: true` becomes
-//! [`TrustMode::TrustOnFirstUse`], a bare `fingerprint` becomes
+//! [`TrustMode::NoVerification`], a bare `fingerprint` becomes
 //! [`TrustMode::Pinned`], anything else [`TrustMode::System`] — and an
 //! unrecognised `trustMode` string falls back to that same derivation rather
 //! than to a guess.
+//!
+//! # Storage safety of the [`TrustMode::NoVerification`] rename (review F7)
+//!
+//! The Rust variant used to be spelled `TrustOnFirstUse`; the stored string is
+//! and remains `"insecure"` (the Flutter client's own `TrustMode` spelling,
+//! kept for parity — see [`trust_mode_name`]/[`trust_mode_from_name`]). The
+//! rename touches only the in-memory identifier, never a byte on disk: a row
+//! written by an older build still decodes to this variant, and a row this
+//! build writes is byte-identical to what the older build would have written
+//! for the same posture — this module's own encode/decode round-trip tests
+//! (below, under "Legacy migration") are the proof.
 //!
 //! A fingerprint is kept **only** for [`TrustMode::Pinned`], and only when it is
 //! 64 lowercase hex characters: a weaker posture must never carry a stale pin,
@@ -209,7 +220,7 @@ fn encode_entry(server: &SavedServer) -> Json {
         // an insecure rig as a CA-verified one.
         (
             "insecure".to_string(),
-            Json::Bool(server.trust_mode == TrustMode::TrustOnFirstUse),
+            Json::Bool(server.trust_mode == TrustMode::NoVerification),
         ),
         ("label".to_string(), Json::String(server.label.clone())),
         (
@@ -271,7 +282,7 @@ fn decode_entry(entry: &Json) -> Option<SavedServer> {
         .and_then(Json::as_bool)
         .unwrap_or(false);
     let derived = if legacy_insecure {
-        TrustMode::TrustOnFirstUse
+        TrustMode::NoVerification
     } else if fingerprint.is_some() {
         TrustMode::Pinned
     } else {
@@ -332,7 +343,7 @@ fn is_fingerprint(value: &str) -> bool {
 fn trust_mode_name(mode: TrustMode) -> &'static str {
     match mode {
         TrustMode::System => "systemCa",
-        TrustMode::TrustOnFirstUse => "insecure",
+        TrustMode::NoVerification => "insecure",
         TrustMode::Pinned => "selfSignedPinned",
     }
 }
@@ -342,7 +353,7 @@ fn trust_mode_name(mode: TrustMode) -> &'static str {
 fn trust_mode_from_name(name: &str) -> Option<TrustMode> {
     match name {
         "systemCa" => Some(TrustMode::System),
-        "insecure" => Some(TrustMode::TrustOnFirstUse),
+        "insecure" => Some(TrustMode::NoVerification),
         "selfSignedPinned" => Some(TrustMode::Pinned),
         _ => None,
     }
@@ -412,9 +423,12 @@ mod tests {
 
     #[test]
     fn the_legacy_insecure_bool_is_still_written_beside_the_trust_mode() {
-        let mut tofu = server("rig.example", 50051, 0);
-        tofu.trust_mode = TrustMode::TrustOnFirstUse;
-        let payload = encode_list(&[tofu]);
+        // Storage-safety proof for the `TrustOnFirstUse` → `NoVerification`
+        // rename (review F7): the encoded string is `"insecure"` either way —
+        // the rename touches only the Rust identifier, never a stored byte.
+        let mut unverified = server("rig.example", 50051, 0);
+        unverified.trust_mode = TrustMode::NoVerification;
+        let payload = encode_list(&[unverified]);
         assert!(payload.contains(r#""trustMode":"insecure""#), "{payload}");
         assert!(payload.contains(r#""insecure":true"#), "{payload}");
 
@@ -458,9 +472,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn a_legacy_insecure_record_migrates_to_the_trust_on_first_use_posture() {
+    fn a_legacy_insecure_record_migrates_to_the_no_verification_posture() {
+        // Storage-safety proof, the decode half: a row an older build wrote
+        // (or a stored `"insecure":true` written before `NoVerification` was
+        // named that) still maps onto the renamed variant.
         let decoded = decode_list(r#"[{"host":"rig","port":50051,"insecure":true}]"#);
-        assert_eq!(decoded[0].trust_mode, TrustMode::TrustOnFirstUse);
+        assert_eq!(decoded[0].trust_mode, TrustMode::NoVerification);
     }
 
     #[test]
@@ -490,7 +507,7 @@ mod tests {
             decode_list(r#"[{"host":"rig","port":50051,"trustMode":"quantum","insecure":true}]"#);
         assert_eq!(
             decoded[0].trust_mode,
-            TrustMode::TrustOnFirstUse,
+            TrustMode::NoVerification,
             "a mode this build never heard of must not read as the safest one by accident"
         );
     }

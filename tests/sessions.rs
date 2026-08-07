@@ -144,7 +144,7 @@ fn mock_target(offer_credential: bool) -> ConnectTarget {
     ConnectTarget {
         host: "mock.example".to_string(),
         port: 7777,
-        trust_mode: TrustMode::TrustOnFirstUse,
+        trust_mode: TrustMode::NoVerification,
         label: "Mock rig".to_string(),
         offer_credential,
         token: zeroize::Zeroizing::new(String::new()),
@@ -552,7 +552,7 @@ fn the_conn_row_prints_the_connections_facts() {
     );
 
     // The TLS posture is a *badge* (a `Role::Status` node, hence a label). The
-    // mock connects trust-on-first-use — the one posture that skips
+    // mock connects with no verification — the one posture that skips
     // certificate validation — and the redesign's `.warn-badge` is what it
     // earns; a validated posture would print no chip at all.
     let labels = node_labels(&h.root);

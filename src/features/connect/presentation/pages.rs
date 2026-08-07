@@ -55,6 +55,33 @@
 //! is what keeps the floating top bar from staying tappable under it, and what
 //! puts the sheet's own scrim over it (FINDINGS #44).
 //!
+//! # The no-verification confirm gate (review F7)
+//!
+//! A saved row stored under [`crate::connection::TrustMode::NoVerification`]
+//! carries a real stored credential that
+//! [`ConnectController::recover_and_connect`] would otherwise replay, silently,
+//! over a connection that authenticates nothing. [`handle_saved_row_tap`] is
+//! the gate: it consults
+//! [`ConnectController::saved_row_needs_confirmation`] and, only for that one
+//! combination (a stored credential **and** [`TrustMode::NoVerification`]),
+//! raises [`crate::ui::dialogs::confirm_dialog`] on the **overlay host's**
+//! navigator (never the route one — this is a dialog, not a push) before
+//! [`ConnectController::saved_row_tapped`] runs at all. Every other row (no
+//! stored credential, or `System`/`Pinned`) is untouched.
+//!
+//! **Ordering: before the unlock, not after.** The gate fires ahead of the
+//! biometric prompt rather than after a recovered-but-unconfirmed token, which
+//! is the cheaper honest ordering — a "no" answer here costs the user nothing
+//! more than the tap they just made, where gating after the unlock would have
+//! already spent a system prompt (and, on some platforms, a lockout counter)
+//! on a connect they were about to decline anyway.
+//!
+//! **Why the manual form carries no such gate.** Selecting "Trust anyway" in
+//! [`super::pieces::trust_selector`] *is* the explicit consent for a manual
+//! connect — the user is looking at the radio row's own warning chip and
+//! choosing it. A saved-row tap has no equivalent moment: the row was chosen
+//! for its endpoint, not its posture, so the posture needs its own prompt.
+//!
 //! # The QR sheet
 //!
 //! [`qr_sheet_body`] is a `Component` of its own ([`QrScanSheet`]), not a plain
@@ -123,6 +150,7 @@ use crate::features::settings::di::expect_auth_tokens_repository;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
+use crate::ui::dialogs::confirm_dialog;
 use crate::ui::sheet::show_sheet;
 use crate::ui::topbar::icon_button;
 
@@ -370,11 +398,14 @@ impl Component for ConnectScreen {
             // A saved row's tap needs the navigator too — reconnecting through
             // a stored credential lands on `/sessions` exactly as a manual
             // connect does — so it is a screen-owned callback like the two
-            // above rather than a bare controller method.
+            // above rather than a bare controller method. It also needs the
+            // overlay host, for the review-F7 confirm gate `handle_saved_row_tap`
+            // may raise (see the module docs).
             on_saved_tap: {
                 let controller = Arc::clone(&state.controller);
+                let overlays = state.overlays.clone();
                 let nav = state.app_nav.clone();
-                Rc::new(move |index| controller.saved_row_tapped(index, &nav))
+                Rc::new(move |index| handle_saved_row_tap(&controller, &overlays, &nav, index))
             },
         };
 
@@ -404,6 +435,38 @@ impl Component for ConnectScreen {
             qr_affordance(&state.overlays, &state.controller),
         ]))
     }
+}
+
+/// A saved row at `index` was tapped. The review-F7 confirm gate: for a row
+/// [`ConnectController::saved_row_needs_confirmation`] flags (a stored
+/// credential under [`crate::connection::TrustMode::NoVerification`]), raise
+/// [`confirm_dialog`] on `overlays` and defer
+/// [`ConnectController::recover_and_connect`] to its confirm action; every
+/// other row runs [`ConnectController::saved_row_tapped`] immediately, exactly
+/// as before this gate existed. See the [module docs](self)'s "no-verification
+/// confirm gate" section for the ordering and manual-path rationale.
+fn handle_saved_row_tap(
+    controller: &Arc<ConnectController>,
+    overlays: &frust::NavigatorController<AppState>,
+    nav: &Nav,
+    index: usize,
+) {
+    let Some(server) = controller.saved_row_needs_confirmation(index) else {
+        controller.saved_row_tapped(index, nav);
+        return;
+    };
+    let controller = Arc::clone(controller);
+    let nav = nav.clone();
+    confirm_dialog(
+        overlays,
+        "Connect without verification?",
+        "This connection can't verify the server, and the saved token will be \
+         sent over an unauthenticated channel.",
+        "Connect anyway",
+        move |_app: &mut AppState| {
+            controller.recover_and_connect(server.clone(), &nav);
+        },
+    );
 }
 
 /// `.fab`: the amber QR/pair affordance, pinned to the screen's bottom-trailing

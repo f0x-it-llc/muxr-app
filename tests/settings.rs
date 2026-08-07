@@ -246,10 +246,10 @@ impl Harness {
         harness
     }
 
-    /// The common case: connected trust-on-first-use, like the redesign's own
-    /// mock (its `insecure (plaintext)` row).
+    /// The common case: connected with no verification, like the redesign's
+    /// own mock (its `insecure (plaintext)` row).
     fn connected() -> Self {
-        Harness::connected_with(TrustMode::TrustOnFirstUse)
+        Harness::connected_with(TrustMode::NoVerification)
     }
 
     /// One frame at [`SURFACE`], on the zero clock.
@@ -620,11 +620,11 @@ fn the_tls_row_warns_only_for_the_posture_that_skips_validation() {
 
     // Sequential, not interleaved: each harness re-provides the app-scoped
     // connection controller, so only the most recently mounted one is live.
-    let insecure = Harness::connected_with(TrustMode::TrustOnFirstUse);
+    let insecure = Harness::connected_with(TrustMode::NoVerification);
     let values = node_values(&insecure.root);
     assert!(
         values.iter().any(|v| v == "insecure (plaintext)"),
-        "trust-on-first-use is named by its consequence: {values:?}"
+        "the unverified posture is named by its consequence: {values:?}"
     );
     drop(insecure);
 
@@ -979,7 +979,7 @@ fn with_saved_credential(has_credential: bool) -> Harness {
                 .seed(CRED_ENDPOINT, CRED_TOKEN);
         }
     });
-    expect_connection_controller().connect(mock_target(TrustMode::TrustOnFirstUse));
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
     harness.await_tokens();
     // The saved-server read is the *last* step of the screen's first load (the
     // token list and both preference groups land ahead of it), so awaiting the
