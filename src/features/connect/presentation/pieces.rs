@@ -12,7 +12,7 @@
 //! | 3 | [`server_url_field`] | 390ms |
 //! | 4 | [`token_field`] | 480ms |
 //! | 5 | [`remember_row`] — the remember toggle **and** the trust-mode selector | 580ms |
-//! | 6 | [`connect_button`] | 720ms |
+//! | 6 | [`connect_button`] — the CTA, plus the pinned pairing CTA above it | 720ms |
 //! | 7 | [`saved_address`] — the "saved servers" header + its rows | 860ms |
 //!
 //! - [`super::pages::connect_page`] mounts them live, inside the screen
@@ -107,14 +107,14 @@ use frust::glyph::{BadgeVariant, badge};
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, Padding, SizedBox, StatusPalette, Theme, any, button, flexible, inflexible, text,
+    Get, Padding, SizedBox, StatusPalette, Theme, With, any, button, flexible, inflexible, text,
     text_input,
 };
 
 use super::chrome::{centered_paragraph, panel, radio_semantics, swatch, switch_semantics};
 use super::controller::ConnectController;
 use crate::connection::TrustMode;
-use crate::features::connect::domain::entities::SavedServer;
+use crate::features::connect::domain::entities::{PairingTrust, SavedServer};
 
 // ---------------------------------------------------------------------------
 // The screen's live wiring
@@ -137,6 +137,13 @@ pub struct Live {
     pub controller: Arc<ConnectController>,
     /// Validate, connect, and navigate — see the type docs.
     pub on_connect: Rc<dyn Fn()>,
+    /// Connect with the **scanned pairing's** own credentials, and navigate —
+    /// [`ConnectController::connect_from_pairing`]. A second state-free
+    /// callback rather than a flag on [`Self::on_connect`], for the same
+    /// reason that one exists at all: both navigate, and the navigator handle
+    /// cannot live on the `Send + Sync` controller. Only ever reached from the
+    /// pinned CTA, which renders only while a pairing is stashed.
+    pub on_connect_pinned: Rc<dyn Fn()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +210,11 @@ const RADIO_RING_BORDER: f64 = 1.5;
 /// `.radio-dot.sel::after{inset:3px}` — the selected dot's inset inside the
 /// ring, which makes the dot itself `RADIO_RING - 2 * RADIO_DOT_INSET` wide.
 const RADIO_DOT_INSET: f64 = 3.0;
+/// Between the pairing banner, the pinned CTA and the manual CTA under them.
+/// An original constant — the mock has no pairing block at all — set at the
+/// `.saved-row{gap:10px}` step so the pairing pair reads as one group inside
+/// the layer's own 22px rhythm rather than as two more pieces.
+const PAIRING_GAP: f64 = 10.0;
 /// The CTA's forced height, in logical px — Ed's round-2 device-gate
 /// directive: the platform minimum tap target, and the source's own `~44` at
 /// a browser-default line box under `.btn-primary{padding:13px}`.
@@ -224,6 +236,21 @@ pub const SUBTITLE: &str = "Enter credentials to attach to a remote zellij or he
 /// `.btn-primary`'s label. `pub` for the same reason [`SUBTITLE`] is — the CTA
 /// is located by its accessibility label in `tests/connect.rs`.
 pub const CONNECT_LABEL: &str = "→ connect";
+
+/// The pinned CTA's label — the **explicit action** a scanned pairing waits
+/// for (a scan prefills; only this connects). `pub` for the same reason
+/// [`CONNECT_LABEL`] is.
+pub const PINNED_CONNECT_LABEL: &str = "Connect now (pinned)";
+/// …and the same CTA for a `tm=ca` pairing, which carries no pin to name. The
+/// action is the same one; only the word that would be a lie changes.
+pub const PAIRED_CONNECT_LABEL: &str = "Connect now (paired)";
+/// The caption over the pinned CTA, naming where the credentials about to be
+/// dialed came from. `pub` — `tests/connect.rs` reads this exact run.
+pub const PAIRING_CAPTION: &str = "scanned pairing — the code's own token and trust";
+/// The chip a `ro=1` pairing (or a stored read-only credential) carries. One
+/// spelling for both, since it is the same fact about the same kind of
+/// credential.
+pub const READ_ONLY_CHIP: &str = "read-only";
 
 /// `.field input[placeholder]` — the server-URL field's ghost text. `pub`
 /// because it is the exact string `tests/connect.rs`'s shaping suite measures
@@ -821,8 +848,16 @@ fn trust_selector<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> 
         .map(|&mode| trust_row(theme, &colors, mode, selected == mode, live))
         .collect();
     if !TRUST_OPTIONS.contains(&selected) {
+        // Two sources put a pin on this form — a saved row and a scanned QR —
+        // and the caption names whichever one is live, since "where it came
+        // from" is the only thing it has to say.
+        let caption = if pairing_chrome(live).is_some() {
+            PAIRED_CAPTION
+        } else {
+            PINNED_CAPTION
+        };
         rows.push(any(
-            text(PINNED_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))
+            text(caption).style(inked(&theme.type_scale.label_small, colors.fg_dim))
         ));
     }
     any(column::<S>(rows))
@@ -840,6 +875,12 @@ const TRUST_OPTIONS: [TrustMode; 2] = [TrustMode::System, TrustMode::TrustOnFirs
 /// asserts on this exact run when it taps the seeded pinned server, and a copy
 /// there could drift.
 pub const PINNED_CAPTION: &str = "pinned certificate — from the saved server";
+
+/// [`PINNED_CAPTION`]'s sibling for the *other* source of a pin: a scanned
+/// pairing code. Same non-interactive treatment, same slot — the caption names
+/// where the posture came from, and after a scan that is the QR, not the saved
+/// list.
+pub const PAIRED_CAPTION: &str = "pinned certificate — from the scanned QR code";
 
 /// This mode's `.radio-opt` label.
 ///
@@ -1005,16 +1046,109 @@ fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
 ///   real, currently-unreachable difference this app has no manual
 ///   brightness toggle to trigger, but a
 ///   system dark-mode switch could.
-pub fn connect_button<S: 'static>(_theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+/// # The pairing pair above it
+///
+/// While a scanned pairing is stashed
+/// ([`ConnectController::pending_pairing`]) this piece grows two more rows
+/// above the CTA: a caption naming where the credentials came from (plus the
+/// read-only chip for a `ro=1` code), and the **explicit** pinned CTA that
+/// actually dials them. They live here rather than as a ninth piece because
+/// the splash's stagger table has exactly eight slots and this is the piece
+/// they belong to — the splash itself never sees them (it composes with no
+/// [`Live`], and so never has a pairing).
+pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
-    any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
+    let cta = any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
         button(CONNECT_LABEL, move |_state: &mut S| {
             if let Some(on_connect) = &on_connect {
                 on_connect();
             }
         })
         .label_alignment(Alignment::CENTER),
-    ))
+    ));
+    let Some(pairing) = pairing_chrome(live) else {
+        return cta;
+    };
+    // `live` is `Some(..)` whenever `pairing_chrome` answered, so the CTA below
+    // always has a real action behind it.
+    let on_connect_pinned = live.map(|live| Rc::clone(&live.on_connect_pinned));
+    let busy = live.is_some_and(|live| live.controller.connecting().get());
+    any(column::<S>(vec![
+        pairing_banner(theme, pairing),
+        v_gap::<S>(PAIRING_GAP),
+        any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
+            button(pairing.connect_label(), move |_state: &mut S| {
+                if let Some(on_connect_pinned) = &on_connect_pinned {
+                    on_connect_pinned();
+                }
+            })
+            .label_alignment(Alignment::CENTER)
+            // The busy state is the connection controller's own signal,
+            // shared with the manual CTA's dial (see
+            // `ConnectController::connecting`) — one in-flight connect, one
+            // spinner, and `connect_with`'s single-flight guard underneath
+            // either way.
+            .loading(busy),
+        )),
+        v_gap::<S>(PAIRING_GAP),
+        cta,
+    ]))
+}
+
+/// What a stashed pairing contributes to the form's chrome.
+///
+/// Deliberately **not** the payload itself: a piece rebuilds at signal rate,
+/// and the payload carries the scanned token — copying that secret out once
+/// per frame to read two booleans is a copy nobody needs (see
+/// `ConnectController::pending_pairing`'s hygiene note).
+#[derive(Clone, Copy)]
+struct PairingChrome {
+    /// Whether the code's credential is read-only (`ro=1`).
+    read_only: bool,
+    /// Whether the code pinned a certificate (`tm=pin`/v1) rather than asking
+    /// for ordinary CA validation.
+    pinned: bool,
+}
+
+impl PairingChrome {
+    /// This pairing's CTA label — see [`PINNED_CONNECT_LABEL`].
+    fn connect_label(self) -> &'static str {
+        if self.pinned {
+            PINNED_CONNECT_LABEL
+        } else {
+            PAIRED_CONNECT_LABEL
+        }
+    }
+}
+
+/// Read the live pairing's chrome, tracked, or `None` when nothing is stashed
+/// (and always `None` for the splash, which has no controller to read).
+fn pairing_chrome(live: Option<&Live>) -> Option<PairingChrome> {
+    live?.controller.pending_pairing.with(|pending| {
+        pending.as_ref().map(|payload| PairingChrome {
+            read_only: payload.read_only,
+            pinned: matches!(payload.trust, PairingTrust::Pin { .. }),
+        })
+    })
+}
+
+/// The caption over the pinned CTA: what is about to be dialed, and — for a
+/// `ro=1` code — the same read-only chip a stored read-only credential's saved
+/// row already carries.
+fn pairing_banner<S: 'static>(theme: &Theme, pairing: PairingChrome) -> AnyView<S> {
+    let colors = palette(theme);
+    let mut items = vec![flexible(
+        1,
+        any(text(PAIRING_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+    )];
+    if pairing.read_only {
+        items.push(inflexible(h_gap::<S>(SAVED_GAP)));
+        items.push(inflexible(any(badge(
+            READ_ONLY_CHIP,
+            BadgeVariant::Neutral,
+        ))));
+    }
+    any(row::<S>(items))
 }
 
 /// Piece 7 — `.saved-hdr` + `.saved-row`: the saved-server list, each row
@@ -1101,7 +1235,10 @@ fn saved_row<S: 'static>(
     ];
     if server.read_only {
         items.push(inflexible(h_gap::<S>(SAVED_GAP)));
-        items.push(inflexible(any(badge("read-only", BadgeVariant::Neutral))));
+        items.push(inflexible(any(badge(
+            READ_ONLY_CHIP,
+            BadgeVariant::Neutral,
+        ))));
     }
     let body = Padding(EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y), row::<S>(items));
     match live {

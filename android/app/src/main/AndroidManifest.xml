@@ -9,6 +9,21 @@
     -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!--
+      Required by the `frust-camera` plugin (the Connect screen's QR pairing
+      sheet). A DANGEROUS permission: declaring it here is what makes the
+      runtime request the plugin fires (`Camera::request_permission`) legal to
+      show at all.
+
+      The plugin's own Gradle module declares this too, and the manifest merger
+      would fold it in — but that module is not included in this app's
+      `settings.gradle.kts` yet (the plugin README's §2a step), so today this
+      declaration is the only one in the merged manifest. It stays either way:
+      the merger de-duplicates identical `uses-permission` entries, and an app
+      that asks for the camera should say so in its own manifest.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

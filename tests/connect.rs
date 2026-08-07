@@ -64,12 +64,13 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::Theme;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
-    Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, SizedBox, Stack,
+    Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
@@ -81,13 +82,18 @@ use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
+use muxr::features::connect::domain::entities::PairingPayload;
+use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::ConnectController;
-use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
-use muxr::features::connect::presentation::pieces::{
-    CONNECT_LABEL, PINNED_CAPTION, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER,
-    connect_pieces, field_text_style, heading,
+use muxr::features::connect::presentation::pages::{
+    NO_CAMERA, connect_layout, connect_page, qr_sheet_body,
 };
-use muxr::routes::install_app_router;
+use muxr::features::connect::presentation::pieces::{
+    CONNECT_LABEL, Live, PAIRED_CAPTION, PAIRING_CAPTION, PINNED_CAPTION, PINNED_CONNECT_LABEL,
+    READ_ONLY_CHIP, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER, connect_pieces,
+    connect_pieces_with, field_text_style, heading,
+};
+use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
@@ -999,6 +1005,492 @@ fn the_qr_sheet_also_dismisses_on_escape() {
     harness.settle();
 
     assert_eq!(harness.nav.depth(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// QR pairing: the scan sheet, the prefill, and the pinned CTA
+// ---------------------------------------------------------------------------
+
+/// A `muxr://pair` v2 `tm=pin` code for [`PAIRED_ENDPOINT`], `ro` as given.
+///
+/// Built by running the *real* parser over a real URI rather than by hand:
+/// this is the shape the camera actually hands the form, so a change to either
+/// half shows up here rather than in production.
+fn scanned_payload(read_only: bool) -> PairingPayload {
+    let ro = u8::from(read_only);
+    let uri = format!(
+        "muxr://pair?v=2&h=192.168.1.100&p=50051&t={PAIRED_TOKEN_B64}&ro={ro}&n=Home%20Rig\
+         &tm=pin&fp={PAIRED_FINGERPRINT}"
+    );
+    parse_pairing_uri(&uri).expect("the fixture URI is a well-formed pairing code")
+}
+
+/// The endpoint [`scanned_payload`] pairs with — deliberately **not** one of
+/// the seeded saved servers, so nothing about the prefill can come from the
+/// saved list.
+const PAIRED_ENDPOINT: &str = "192.168.1.100:50051";
+/// The fixture's token, base64url-encoded with no padding (`s3cr3t-token`).
+const PAIRED_TOKEN_B64: &str = "czNjcjN0LXRva2Vu";
+/// …and in the clear, which is what the form must end up holding.
+const PAIRED_TOKEN: &str = "s3cr3t-token";
+/// The fixture's pinned SHA-256, 64 lowercase hex characters.
+const PAIRED_FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The boxed piece-logic closure the form fixture below drives.
+type FormLogic = Box<dyn FnMut(&mut ()) -> AnyView<()>>;
+
+/// The eight Connect pieces mounted **live over a controller the test owns** —
+/// the same `Some(&Live)` composition the screen builds, minus the navigator.
+///
+/// Why not [`Harness`]: the screen hosts its controller through
+/// `use_controller`, so a test that mounts the screen cannot reach the very
+/// controller a scan would apply to. The pieces take their `Live` wiring as a
+/// parameter (that is what the splash/route split exists for), so composing
+/// them here is the *supported* way to drive a form whose controller the test
+/// also holds — and it is the same code path the route mounts.
+///
+/// The repository is deliberately **empty**: the seeded store carries a
+/// read-only row of its own, and this fixture asserts on how many `read-only`
+/// chips are on screen.
+struct Form {
+    root: RenderRoot<(), AnyView<()>>,
+    logic: FormLogic,
+    state: (),
+    tcx: TextContext,
+}
+
+impl Form {
+    /// Mount the pieces over `controller`, wiring the pinned CTA to
+    /// `on_connect_pinned`.
+    fn mount(controller: &Arc<ConnectController>, on_connect_pinned: Rc<dyn Fn()>) -> Self {
+        let theme = Theme::glyph_baseline();
+        let live = Live {
+            controller: Arc::clone(controller),
+            on_connect: Rc::new(|| {}),
+            on_connect_pinned,
+        };
+        let logic: FormLogic = Box::new(move |_state: &mut ()| {
+            connect_layout(connect_pieces_with::<()>(&theme, Some(&live)))
+        });
+        let mut form = Form {
+            root: RenderRoot::new(),
+            logic,
+            state: (),
+            tcx: TextContext::new(),
+        };
+        form.frame();
+        form
+    }
+
+    /// One frame at [`SURFACE`].
+    fn frame(&mut self) {
+        frame_sized(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            SURFACE,
+        );
+    }
+
+    /// Both fields' values, in tree order (0 = server URL, 1 = the masked
+    /// login token) — [`Harness::field_values`]' twin over this fixture.
+    fn field_values(&self) -> Vec<String> {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
+            .filter_map(|(_, node)| node.value().map(str::to_string))
+            .collect()
+    }
+
+    /// Whether any node carries `value` — how a plain `text` run is read back.
+    fn shows_value(&self, value: &str) -> bool {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.value() == Some(value))
+    }
+
+    /// How many `Role::Status` chips (`glyph::badge`) carry `label`.
+    fn chips(&self, label: &str) -> usize {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == Role::Status && node.label() == Some(label))
+            .count()
+    }
+
+    /// The center of the button labelled `label`, or `None` when it is not on
+    /// screen.
+    fn button(&self, label: &str) -> Option<Point> {
+        self.root.semantics().nodes.iter().find_map(|(_, node)| {
+            if node.role() != Role::Button || node.label() != Some(label) {
+                return None;
+            }
+            let bounds = node.bounds()?;
+            Some(Point::new(
+                (bounds.x0 + bounds.x1) / 2.0,
+                (bounds.y0 + bounds.y1) / 2.0,
+            ))
+        })
+    }
+
+    /// Tap the button labelled `label` and render the frame after it.
+    fn tap_button(&mut self, label: &str) {
+        let point = self
+            .button(label)
+            .unwrap_or_else(|| panic!("no button labelled {label:?}"));
+        tap(&mut self.root, &mut self.state, point);
+        self.frame();
+    }
+
+    /// Whether the trust row labelled `label` reads as selected.
+    fn trust_selected(&self, label: &str) -> bool {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::RadioButton && node.label() == Some(label))
+            .map(|(_, node)| node.is_selected() == Some(true))
+            .unwrap_or_else(|| panic!("no trust row labelled {label:?}"))
+    }
+}
+
+/// A controller over an **empty** saved-server store and the app-scoped
+/// (mock-backed) connection — see [`Form`]'s note on why the store is empty.
+fn pairing_controller() -> Arc<ConnectController> {
+    let connection = muxr::connection::provide_connection_controller();
+    Arc::new(ConnectController::new(
+        Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        connection,
+    ))
+}
+
+#[test]
+fn the_qr_sheet_shows_the_no_camera_state_off_device() {
+    // The sheet's own body, mounted directly rather than as a pushed page: a
+    // navigator contributes no semantics for its pages (FINDINGS #23), so the
+    // sheet is unreadable while it is one. This is the desktop/headless path —
+    // no camera backend, so the sheet says so instead of framing a dead
+    // viewfinder.
+    let _g = serial();
+    let _ambient = setup();
+    let mut state = MuxrApp.init();
+    let controller = pairing_controller();
+    let mut logic: Logic =
+        Box::new(move |_state| qr_sheet_body(Rc::new(|| {}), Arc::clone(&controller)));
+    let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
+    let mut tcx = TextContext::new();
+    let scene = frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+
+    let values: Vec<String> = root
+        .semantics()
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| node.value().map(str::to_string))
+        .collect();
+    assert!(
+        values.iter().any(|value| value == NO_CAMERA),
+        "the sheet explains why there is no viewfinder: {values:?}"
+    );
+    assert!(
+        !root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.role() == Role::Button),
+        "no retry is offered where retrying cannot change the answer"
+    );
+    // …and it still draws the scan-frame placeholder, as a vector.
+    assert_eq!(
+        scene.paths.len(),
+        1,
+        "the placeholder viewfinder's mark is the sheet's one vector: {:?}",
+        scene.paths
+    );
+}
+
+#[test]
+fn a_scanned_payload_prefills_the_form_and_raises_the_pinned_cta() {
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    assert_eq!(
+        form.button(PINNED_CONNECT_LABEL),
+        None,
+        "nothing scanned yet, so there is nothing to connect from"
+    );
+
+    controller.apply_scanned_payload(scanned_payload(true));
+    form.frame();
+
+    assert_eq!(
+        form.field_values(),
+        vec![
+            PAIRED_ENDPOINT.to_string(),
+            "\u{2022}".repeat(PAIRED_TOKEN.chars().count()),
+        ],
+        "the scan prefilled both fields — the token masked, like any other"
+    );
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        PAIRED_TOKEN,
+        "…and the real token is what landed behind the mask"
+    );
+    // The posture came with the code, so the selector renders it the one
+    // honest way it can: neither manual row selected, and the caption naming
+    // the QR (not the saved list) as its source.
+    assert!(!form.trust_selected(SYSTEM_TRUST) && !form.trust_selected(INSECURE_TRUST));
+    assert!(
+        form.shows_value(PAIRED_CAPTION),
+        "{PAIRED_CAPTION:?} missing"
+    );
+    assert!(
+        !form.shows_value(PINNED_CAPTION),
+        "the saved-server caption must not stand in for a scanned pin"
+    );
+    // The explicit action — a scan prefills, only this connects.
+    assert!(
+        form.button(PINNED_CONNECT_LABEL).is_some(),
+        "the pinned CTA appears with the pairing"
+    );
+    assert!(form.shows_value(PAIRING_CAPTION));
+    assert!(
+        form.button(CONNECT_LABEL).is_some(),
+        "…beside the ordinary CTA, which never goes away"
+    );
+    assert_eq!(
+        form.chips(READ_ONLY_CHIP),
+        1,
+        "a ro=1 code surfaces its read-only chip on the form"
+    );
+}
+
+#[test]
+fn a_read_write_pairing_shows_no_read_only_chip() {
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload(false));
+    form.frame();
+
+    assert!(form.button(PINNED_CONNECT_LABEL).is_some());
+    assert_eq!(
+        form.chips(READ_ONLY_CHIP),
+        0,
+        "the chip is a fact about the credential, not decoration on the banner"
+    );
+}
+
+#[test]
+fn the_pinned_cta_connects_with_the_codes_own_trust_and_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let _app = MuxrApp.init();
+    let connection = expect_connection_controller();
+    // The screen pushes `/sessions` through the app's real table and guard;
+    // this fixture installs the same router over a navigator of its own so the
+    // push resolves rather than panicking on a missing handle.
+    let nav_controller: NavigatorController<AppState> = NavigatorController::new();
+    let _router = install_app_router(&nav_controller, &nav_controller, Arc::clone(&connection));
+
+    let controller = Arc::new(ConnectController::new(
+        Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        Arc::clone(&connection),
+    ));
+    let pinned = {
+        let controller = Arc::clone(&controller);
+        Rc::new(move || controller.connect_from_pairing(&app_nav()))
+    };
+    let mut form = Form::mount(&controller, pinned);
+
+    controller.apply_scanned_payload(scanned_payload(false));
+    form.frame();
+    form.tap_button(PINNED_CONNECT_LABEL);
+
+    assert!(
+        connection.connected.get_untracked(),
+        "the mock connection opened"
+    );
+    let info = connection
+        .server_info
+        .get_untracked()
+        .expect("a connected controller carries its server facts");
+    assert_eq!(
+        info.endpoint, PAIRED_ENDPOINT,
+        "the scanned endpoint was dialed"
+    );
+    assert_eq!(
+        info.trust_mode,
+        TrustMode::Pinned,
+        "…under the posture the code pinned, not the selector's default"
+    );
+    assert_eq!(
+        connection.credential_offer.get_untracked(),
+        None,
+        "the manual save offer must not fire for a scanned credential"
+    );
+    assert_eq!(
+        controller.pending_pairing.get_untracked(),
+        None,
+        "a live session consumes the pairing"
+    );
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        "",
+        "…and the token's job ended with the connection it opened"
+    );
+    assert_eq!(
+        form.button(PINNED_CONNECT_LABEL),
+        None,
+        "so the pinned CTA goes with it"
+    );
+}
+
+#[test]
+fn a_failed_pinned_connect_keeps_the_form_filled_and_the_cta_up() {
+    // The mock backend never refuses, so a connect that settles nothing is
+    // staged with the busy flag instead: the CTA renders `.loading` (its press
+    // suppressed) over a controller whose `connect_with` would ignore a second
+    // dial anyway. Either way nothing settles — which is exactly the shape a
+    // refused dial leaves behind, and what this asserts survives it: the token
+    // still typed, the payload still stashed, the CTA still there for the
+    // one-tap retry.
+    let _g = serial();
+    let _ambient = setup();
+    let connection = muxr::connection::provide_connection_controller();
+    let nav_controller: NavigatorController<AppState> = NavigatorController::new();
+    let _router = install_app_router(&nav_controller, &nav_controller, Arc::clone(&connection));
+    connection.connecting.set(true);
+    let controller = Arc::new(ConnectController::new(
+        Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        Arc::clone(&connection),
+    ));
+    let pinned = {
+        let controller = Arc::clone(&controller);
+        Rc::new(move || controller.connect_from_pairing(&app_nav()))
+    };
+    let mut form = Form::mount(&controller, pinned);
+
+    controller.apply_scanned_payload(scanned_payload(false));
+    form.frame();
+    form.tap_button(PINNED_CONNECT_LABEL);
+
+    assert!(!connection.connected.get_untracked(), "nothing opened");
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        PAIRED_TOKEN,
+        "the token survives a connect that did not happen"
+    );
+    assert!(
+        controller.pending_pairing.get_untracked().is_some(),
+        "…and so does the pairing"
+    );
+    assert!(
+        form.button(PINNED_CONNECT_LABEL).is_some(),
+        "so a retry is one tap"
+    );
+}
+
+#[test]
+fn editing_the_endpoint_away_from_the_scan_drops_the_pairing() {
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload(false));
+    form.frame();
+    assert!(form.button(PINNED_CONNECT_LABEL).is_some());
+
+    // Retyping the very same address is not an edit away from it.
+    controller.set_url(PAIRED_ENDPOINT.to_string());
+    form.frame();
+    assert!(
+        form.button(PINNED_CONNECT_LABEL).is_some(),
+        "the pairing still names what the field says"
+    );
+
+    controller.set_url("other.example:50051".to_string());
+    form.frame();
+
+    assert_eq!(
+        controller.pending_pairing.get_untracked(),
+        None,
+        "the pin belongs to the scanned address, not to whatever is typed next"
+    );
+    assert_eq!(
+        form.button(PINNED_CONNECT_LABEL),
+        None,
+        "…so the CTA that would have used it is gone"
+    );
+    assert!(
+        form.trust_selected(SYSTEM_TRUST),
+        "and the posture falls back to the manual default rather than staying \
+         pinned with no pin behind it"
+    );
+    assert!(!form.shows_value(PAIRED_CAPTION));
+}
+
+#[test]
+fn editing_the_token_drops_the_pairing_too() {
+    // The pinned CTA sends the *payload's* token; a hand-typed one would make
+    // the form say one thing and the button do another.
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload(false));
+    form.frame();
+    assert!(form.button(PINNED_CONNECT_LABEL).is_some());
+
+    controller.set_token("typed-by-hand".to_string());
+    form.frame();
+
+    assert_eq!(controller.pending_pairing.get_untracked(), None);
+    assert_eq!(form.button(PINNED_CONNECT_LABEL), None);
+    assert_eq!(
+        form.field_values()[0],
+        PAIRED_ENDPOINT,
+        "only the pairing is dropped — the prefilled endpoint stays typed"
+    );
+}
+
+#[test]
+fn the_ordinary_cta_still_connects_while_a_matching_pairing_is_stashed() {
+    // The fail-closed trap this avoids: a prefill leaves the form on
+    // `TrustMode::Pinned`, which the manual path carries no fingerprint for —
+    // so without the pairing's own pin riding through `validated_target`, the
+    // ordinary CTA would refuse every scan's endpoint before dialing.
+    let _g = serial();
+    let _ambient = setup();
+    let connection = muxr::connection::provide_connection_controller();
+    let controller = ConnectController::new(
+        Arc::new(MockSavedServersRepository::with_servers(Vec::new())),
+        connection,
+    );
+
+    controller.apply_scanned_payload(scanned_payload(false));
+    let target = controller
+        .validated_target()
+        .expect("the prefilled endpoint is dialable");
+
+    assert_eq!(target.trust_mode, TrustMode::Pinned);
+    assert_eq!(target.fingerprint.as_deref(), Some(PAIRED_FINGERPRINT));
+    assert!(
+        !target.offer_credential,
+        "a scanned credential's save is the pairing flow's own step, never the \
+         manual offer"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -13,10 +13,12 @@
 //! | [`presentation`] | The `ConnectScreen` `Component`, its `ConnectController`, and the eight pieces |
 //! | [`di`] | Constructs the repository once and publishes it into context |
 //!
-//! **Mock-era.** There is no `muxrd` gRPC round trip, no credential
-//! persistence, no biometrics and no camera: connecting drives
-//! [`crate::connection::ConnectionController`]'s mock handle, and the QR sheet is
-//! a placeholder. See `docs/ARCHITECTURE.md`'s Planned section.
+//! **Partly mock-era still.** Credential persistence and biometrics are
+//! absent (the saved-server store is in memory), so nothing a scan or a form
+//! collects outlives the process. The QR sheet itself is real: it scans a
+//! `muxr://pair` code through `frust-camera`, prefills the form and offers the
+//! explicit pinned connect (see [`presentation::pages`]' QR-sheet section).
+//! See `docs/ARCHITECTURE.md`'s Planned section.
 
 pub mod data;
 pub mod di;

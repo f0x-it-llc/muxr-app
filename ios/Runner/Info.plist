@@ -61,6 +61,12 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- Required by the `frust-camera` plugin (the Connect screen's QR pairing
+	     sheet). Apple requires this string in the app's OWN Info.plist — no
+	     plugin module can supply it — and an app that reaches AVFoundation
+	     without it is terminated by the system rather than merely refused. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Muxr uses the camera to scan pairing QR codes.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
