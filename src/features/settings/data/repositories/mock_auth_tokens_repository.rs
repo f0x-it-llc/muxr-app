@@ -26,18 +26,25 @@
 //! [`AppFailure::Network`] and a rejected credential to [`AppFailure::Auth`] in
 //! exactly this spot.
 //!
-//! # The minted creation date
+//! # The minted creation date and secret
 //!
 //! A token created at runtime is stamped [`MOCK_TODAY`] rather than a real
-//! clock reading: there is no daemon to mint a timestamp yet, and a fixed date
-//! keeps the headless suites asserting on one exact string. The real client
-//! reads the date off the mint response.
+//! clock reading: this store is headless-test-only (`di`'s own seam), and a
+//! fixed date keeps every suite asserting on one exact string. Its one-time
+//! secret is deterministic too — [`MOCK_MINTED_SECRET_PREFIX`] plus the
+//! (already-trimmed) name — for the same reason: a suite exercising the
+//! reveal sheet needs an exact string to assert on, not a random one. The
+//! real client reads both off the daemon's own `CreateToken` response.
 
 use std::sync::Mutex;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use crate::failure::AppFailure;
-use crate::features::settings::domain::entities::{AuthToken, TokenScope};
+use crate::features::settings::domain::entities::{
+    AuthToken, CreateTokenRequest, MintedToken, TokenScope,
+};
 use crate::features::settings::domain::repositories::AuthTokensRepository;
 
 /// Simulated round-trip latency on every call — the same short, deliberate
@@ -51,11 +58,9 @@ const MOCK_LATENCY: Duration = Duration::from_millis(20);
 /// a copy of the literal.
 pub const MOCK_TODAY: &str = "2026-07-31";
 
-/// The scope a token minted from this screen gets. The redesign's dashed row
-/// collects a name and nothing else, so there is no scope picker to read: a
-/// freshly minted token is full-access, and narrowing it is a server-side
-/// concern the real API will expose.
-const MINTED_SCOPE: TokenScope = TokenScope::ReadWrite;
+/// The one-time secret stamped on a token minted at runtime — see the
+/// [module docs](self). `pub` for the same reason as [`MOCK_TODAY`].
+pub const MOCK_MINTED_SECRET_PREFIX: &str = "mock-secret-";
 
 /// An in-memory [`AuthTokensRepository`]. See the [module docs](self).
 pub struct MockAuthTokensRepository {
@@ -119,9 +124,9 @@ impl AuthTokensRepository for MockAuthTokensRepository {
         Ok(self.snapshot())
     }
 
-    async fn create_token(&self, name: String) -> Result<AuthToken, AppFailure> {
+    async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
-        let name = name.trim().to_string();
+        let name = request.name.trim().to_string();
         if name.is_empty() {
             return Err(AppFailure::Internal(
                 "create_token called with a blank name".to_string(),
@@ -133,13 +138,23 @@ impl AuthTokensRepository for MockAuthTokensRepository {
                 "create_token: {name} already exists"
             )));
         }
+        let scope = if request.read_only {
+            TokenScope::ReadOnly
+        } else {
+            TokenScope::ReadWrite
+        };
         let token = AuthToken {
-            name,
-            scope: MINTED_SCOPE,
+            name: name.clone(),
+            scope,
             created: MOCK_TODAY.to_string(),
         };
-        tokens.push(token.clone());
-        Ok(token)
+        tokens.push(token);
+        Ok(MintedToken {
+            name: name.clone(),
+            scope,
+            created: MOCK_TODAY.to_string(),
+            token: Zeroizing::new(format!("{MOCK_MINTED_SECRET_PREFIX}{name}")),
+        })
     }
 
     async fn revoke_token(&self, name: String) -> Result<(), AppFailure> {
@@ -173,6 +188,14 @@ mod tests {
             .block_on(fut)
     }
 
+    /// A read-write mint request for `name`.
+    fn mint(name: &str) -> CreateTokenRequest {
+        CreateTokenRequest {
+            name: name.to_string(),
+            read_only: false,
+        }
+    }
+
     #[test]
     fn the_seed_is_the_redesigns_two_tokens_verbatim() {
         let repo = MockAuthTokensRepository::seeded();
@@ -188,26 +211,44 @@ mod tests {
     }
 
     #[test]
-    fn create_appends_a_read_write_token_dated_today() {
+    fn create_appends_a_read_write_token_dated_today_with_its_one_time_secret() {
         let repo = MockAuthTokensRepository::seeded();
-        let created = block_on(repo.create_token("  laptop  ".to_string())).expect("create");
+        let minted = block_on(repo.create_token(mint("  laptop  "))).expect("create");
 
-        assert_eq!(created.name, "laptop", "the stored name is trimmed");
-        assert_eq!(created.scope, TokenScope::ReadWrite);
-        assert_eq!(created.created, MOCK_TODAY);
+        assert_eq!(minted.name, "laptop", "the stored name is trimmed");
+        assert_eq!(minted.scope, TokenScope::ReadWrite);
+        assert_eq!(minted.created, MOCK_TODAY);
+        assert_eq!(minted.token.as_str(), "mock-secret-laptop");
         let tokens = repo.snapshot();
         assert_eq!(tokens.len(), SEEDED_COUNT + 1);
         assert_eq!(tokens.last().map(|t| t.name.as_str()), Some("laptop"));
     }
 
     #[test]
+    fn the_read_only_toggle_mints_a_read_only_scope() {
+        let repo = MockAuthTokensRepository::seeded();
+        let minted = block_on(repo.create_token(CreateTokenRequest {
+            name: "phone".to_string(),
+            read_only: true,
+        }))
+        .expect("create");
+
+        assert_eq!(minted.scope, TokenScope::ReadOnly);
+        assert_eq!(
+            repo.snapshot().last().map(|t| t.scope),
+            Some(TokenScope::ReadOnly),
+            "the stored record carries the same scope as the minted response"
+        );
+    }
+
+    #[test]
     fn create_rejects_a_blank_or_duplicate_name() {
         let repo = MockAuthTokensRepository::seeded();
 
-        let blank = block_on(repo.create_token("   ".to_string())).expect_err("blank rejected");
+        let blank = block_on(repo.create_token(mint("   "))).expect_err("blank rejected");
         assert!(matches!(blank, AppFailure::Internal(_)));
 
-        let dup = block_on(repo.create_token("token_2".to_string())).expect_err("dup rejected");
+        let dup = block_on(repo.create_token(mint("token_2"))).expect_err("dup rejected");
         assert!(matches!(dup, AppFailure::Internal(_)));
 
         assert_eq!(repo.snapshot().len(), SEEDED_COUNT, "nothing was appended");

@@ -520,6 +520,7 @@ pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
     muxr::connection::use_mock_connection_for_tests();
     muxr::features::sessions::di::use_mock_sessions_for_tests();
+    muxr::features::settings::di::use_mock_auth_tokens_for_tests();
     let _runtime = ReactiveRuntime::init(recording_waker());
     let ambient = Owner::new();
     ambient.set();

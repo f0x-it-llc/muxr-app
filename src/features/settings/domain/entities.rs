@@ -27,13 +27,26 @@
 //! from screens 5 and 6 respectively, not a rendering choice a screen should
 //! re-derive.
 //!
-//! # Mock era
+//! # Real and mock alike
 //!
-//! There is no `muxrd` gRPC round trip yet (see `crate::connection`'s module
-//! docs), so these are the shapes the **mock** repositories
-//! (`crate::features::settings::data`) produce. They are deliberately plain
-//! owned data, so the real client can map a token/preferences proto onto them
-//! field by field without the presentation layer changing at all.
+//! These are deliberately plain owned data, so both
+//! [`data::GrpcAuthTokensRepository`](crate::features::settings::data::repositories::GrpcAuthTokensRepository)
+//! (production) and the **mock** repositories
+//! (`crate::features::settings::data`, every headless suite) map their own
+//! source — a `muxrd` proto message, an in-memory seed — onto the same shapes
+//! field by field, with the presentation layer none the wiser which one is
+//! behind it.
+//!
+//! # The two-part token shape
+//!
+//! [`AuthToken`] is what `ListTokens` (and a mint's own stored record) carry —
+//! metadata only, **never** a secret. [`MintedToken`] is `CreateToken`'s own
+//! response shape: everything [`AuthToken`] has, plus the one-time
+//! [`MintedToken::token`] the daemon hands back **only** there (`ListTokens`
+//! reports every token's secret as empty, permanently — the wire's own
+//! contract). Splitting them is what keeps a stray secret out of
+//! [`AuthToken`]'s `Debug`/equality, which every screen row and every test
+//! assertion formats freely.
 
 /// One auth token the connected server holds, as the `auth tokens` group
 /// renders it (`.token-item`).
@@ -49,10 +62,11 @@ pub struct AuthToken {
     pub name: String,
     /// What the token is allowed to do — the `.token-scope` chip.
     pub scope: TokenScope,
-    /// The ISO date the token was minted (`2026-07-02`), printed by
-    /// [`created_label`](Self::created_label). A plain `String` rather than a
-    /// date type: nothing in this app does date *arithmetic*, and the daemon
-    /// hands the label over already formatted.
+    /// The token's creation stamp, printed by [`created_label`](Self::created_label).
+    /// A plain `String` rather than a date type: nothing in this app does date
+    /// *arithmetic*, and the daemon hands the label over already formatted — a
+    /// SQLite `DATETIME` string over the wire (empty if the daemon itself
+    /// doesn't know it), the mock's own `2026-07-02` ISO date locally.
     pub created: String,
 }
 
@@ -80,6 +94,63 @@ impl TokenScope {
             TokenScope::ReadWrite => "read-write",
             TokenScope::ReadOnly => "read-only",
         }
+    }
+}
+
+/// A request to mint a new auth token — the create dialog's name plus its
+/// read-only toggle
+/// ([`AuthTokensRepository::create_token`](super::repositories::AuthTokensRepository::create_token)'s
+/// params). Mirrors the Flutter app's own `CreateTokenRequest` shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateTokenRequest {
+    /// The token's name, already trimmed by the dialog that collected it.
+    pub name: String,
+    /// Whether the minted token should be read-only (mints read-write when
+    /// unset — the mock era's own only behaviour before this toggle existed).
+    pub read_only: bool,
+}
+
+/// A freshly minted token: everything [`AuthToken`] carries, plus the
+/// one-time secret the daemon returns **only** on create. Mirrors the Flutter
+/// app's own `MintedToken` shape — see the [module docs](self)'s "two-part
+/// token shape" section for why this is a separate type from [`AuthToken`]
+/// rather than an optional field on it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MintedToken {
+    /// The minted token's name.
+    pub name: String,
+    /// Its scope, as stored (mirrors [`CreateTokenRequest::read_only`]).
+    pub scope: TokenScope,
+    /// Its creation stamp — see [`AuthToken::created`].
+    pub created: String,
+    /// The secret itself. Shown exactly once, in the presentation layer's
+    /// one-time reveal sheet, and never logged: `Zeroizing` so the buffer is
+    /// scrubbed the moment this value is dropped (the reveal's dismissal, or
+    /// the next mint overwriting the pending one).
+    pub token: zeroize::Zeroizing<String>,
+}
+
+impl MintedToken {
+    /// The reveal sheet's `created <date>` line — the same spelling
+    /// [`AuthToken::created_label`] uses.
+    pub fn created_label(&self) -> String {
+        format!("created {}", self.created)
+    }
+}
+
+impl std::fmt::Debug for MintedToken {
+    /// Hand-written so [`Self::token`] never prints: `Zeroizing`'s own `Debug`
+    /// forwards straight to the wrapped `String` (`crate::connection`'s
+    /// `ConnectTarget` documents the same hazard for its own secret field), so
+    /// a derived impl here would put a live token secret in the clear in any
+    /// log line — or failed test assertion — that formats one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MintedToken")
+            .field("name", &self.name)
+            .field("scope", &self.scope)
+            .field("created", &self.created)
+            .field("token", &"<redacted>")
+            .finish()
     }
 }
 
@@ -242,6 +313,36 @@ mod tests {
         assert_eq!(token.created_label(), "created 2026-07-10");
         assert_eq!(token.scope.label(), "read-only");
         assert_eq!(TokenScope::ReadWrite.label(), "read-write");
+    }
+
+    #[test]
+    fn a_minted_tokens_meta_line_matches_auth_tokens_own_spelling() {
+        let minted = MintedToken {
+            name: "laptop".to_string(),
+            scope: TokenScope::ReadWrite,
+            created: "2026-08-05".to_string(),
+            token: zeroize::Zeroizing::new("s3cr3t".to_string()),
+        };
+        assert_eq!(minted.created_label(), "created 2026-08-05");
+    }
+
+    #[test]
+    fn a_minted_tokens_debug_never_prints_its_secret() {
+        let minted = MintedToken {
+            name: "laptop".to_string(),
+            scope: TokenScope::ReadOnly,
+            created: "2026-08-05".to_string(),
+            token: zeroize::Zeroizing::new("s3cr3t-once".to_string()),
+        };
+        let formatted = format!("{minted:?}");
+        assert!(
+            !formatted.contains("s3cr3t-once"),
+            "the secret leaked into Debug: {formatted}"
+        );
+        assert!(formatted.contains("<redacted>"), "{formatted}");
+        // …and the rest of the shape is still there for a log line to be
+        // useful at all.
+        assert!(formatted.contains("laptop"));
     }
 
     #[test]

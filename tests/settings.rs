@@ -50,7 +50,7 @@
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, Resolution, SizedBox, Stack,
+    AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Toggled};
@@ -60,6 +60,7 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
@@ -508,12 +509,15 @@ fn all_four_groups_and_the_disconnect_action_render() {
             "the {group:?} group label renders: {values:?}"
         );
     }
-    // One row label per `.set-row` the redesign draws.
+    // One row label per `.set-row` the redesign draws. Only `zellij version`
+    // renders here: the mock connection backend reports exactly one backend
+    // (`connection.rs`'s own `MockConnectionBackend`), and the connection
+    // group prints one version row per backend the server actually reports —
+    // never a fixed pair.
     for label in [
         "server url",
         "tls certificate",
         "zellij version",
-        "herdr version",
         "font family",
         "font size",
         "cursor style",
@@ -569,9 +573,16 @@ fn the_connection_group_prints_the_live_servers_facts() {
         values.iter().any(|v| v == "0.44.3"),
         "the zellij row prints the version without the product name: {values:?}"
     );
-    assert!(
-        values.iter().any(|v| v == "herdr-wire-v14"),
-        "…and the herdr wire version: {values:?}"
+    // Exactly one version row: the mock backend reports exactly one entry in
+    // `ServerInfo::backend_versions`, and the connection group renders one row
+    // per reported backend rather than a fixed pair.
+    assert_eq!(
+        values
+            .iter()
+            .filter(|v| v.as_str() == "zellij version")
+            .count(),
+        1,
+        "one version row per reported backend: {values:?}"
     );
 }
 
@@ -703,30 +714,87 @@ fn revoking_a_token_confirms_first_then_removes_it() {
     );
 }
 
-/// Open the dashed create row's dialog, type `name` into its field and submit.
-fn mint_token(h: &mut Harness, name: &str) {
+/// Open the dashed create row's dialog, type `name` into its field, flip the
+/// read-only toggle when `read_only`, and submit.
+///
+/// The two submit paths differ on purpose: with no toggle tap the field still
+/// holds focus, so Enter submits it exactly like
+/// `ui::dialogs::name_input_dialog`'s own field, reading the just-typed value
+/// the framework hands its `on_submit` directly. Tapping the toggle row first
+/// blurs that focus (`docs/CODE_STANDARDS.md`'s "a `Down` that doesn't
+/// (re)claim focus … blurs the chain"), so Enter would route nowhere; the Save
+/// button submits instead. Save's own "disabled" gate
+/// (`open_create_token_dialog`'s own doc) is a `can_submit` bool captured at
+/// the dialog body's *last rebuild*, so an explicit [`Harness::frame`] after
+/// typing is what lets it see the typed name before either submit path fires
+/// — Save's read of the toggle itself needs no such rebuild, since
+/// `get_untracked()` always reads the signal's live value.
+fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
     let dialog = open_dialog_by_value(h, "create new token");
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
     h.tap(center(dialog.content_child()));
     h.type_text(name);
-    h.press(NamedKey::Enter);
+    h.frame();
+    if read_only {
+        h.tap_label("read-only");
+        h.tap_label("Save");
+    } else {
+        h.press(NamedKey::Enter);
+    }
     h.flush();
 }
 
+/// A landed mint's dialog pop and its follow-up secret-reveal sheet push both
+/// land inside the same async continuation (`SettingsController::create_token`
+/// refreshes the list and parks the secret before its caller opens the
+/// sheet), so [`Harness::pump_until_values`] often returns with the sheet
+/// already mid-transition. One extra [`Harness::settle`] finishes it before a
+/// test taps into the sheet.
+fn await_secret_reveal(h: &mut Harness, minted_name: &str) {
+    h.pump_until_values("the minted token", |values| {
+        values.iter().any(|v| v == minted_name)
+    });
+    h.settle();
+    assert_eq!(
+        h.depth(),
+        2,
+        "a landed mint opens the one-time secret reveal over the (already-popped) dialog"
+    );
+}
+
+/// Dismiss the currently open secret-reveal sheet via its `Done` action.
+fn dismiss_secret_reveal(h: &mut Harness) {
+    h.tap_label("Done");
+    h.flush();
+    assert_eq!(h.depth(), 1, "dismissing the reveal closes it, and only it");
+}
+
 #[test]
-fn the_dashed_row_mints_a_token() {
+fn the_dashed_row_mints_a_token_then_reveals_and_reloads() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
     app_toasts().clear();
 
-    mint_token(&mut h, "laptop");
+    mint_token(&mut h, "laptop", false);
+    await_secret_reveal(&mut h, "laptop");
 
-    h.pump_until_values("the minted token", |values| {
-        values.iter().any(|v| v == "laptop")
-    });
-    assert_eq!(h.depth(), 1, "the dialog closed behind it");
+    // The reveal prints the mock's own deterministic one-time secret — never
+    // shown anywhere before this sheet, and never again after it closes.
+    let secret = format!("{MOCK_MINTED_SECRET_PREFIX}laptop");
     let values = node_values(&h.root);
+    assert!(
+        values.contains(&secret),
+        "the reveal prints the one-time secret: {values:?}"
+    );
+
+    dismiss_secret_reveal(&mut h);
+
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|v| v.contains(MOCK_MINTED_SECRET_PREFIX)),
+        "the secret is gone for good once dismissed: {values:?}"
+    );
     // Appended, not replacing: both seeded tokens are still there…
     for name in SEEDED_TOKENS {
         assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
@@ -739,12 +807,33 @@ fn the_dashed_row_mints_a_token() {
     assert_eq!(
         values.iter().filter(|v| *v == "read-write").count(),
         2,
-        "a minted token is read-write: {values:?}"
+        "a minted token is read-write by default: {values:?}"
     );
     let pending = app_toasts().pending_untracked();
     assert!(
         pending.iter().any(|m| m == "Created laptop"),
         "…and the mint is confirmed: {pending:?}"
+    );
+}
+
+#[test]
+fn the_read_only_toggle_mints_a_read_only_token_that_reloads_into_the_list() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    app_toasts().clear();
+
+    mint_token(&mut h, "phone", true);
+    await_secret_reveal(&mut h, "phone");
+    dismiss_secret_reveal(&mut h);
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == "phone"), "{values:?}");
+    // The seeded read-only token plus the freshly minted one.
+    assert_eq!(
+        values.iter().filter(|v| *v == "read-only").count(),
+        2,
+        "the toggle's scope survives the reload: {values:?}"
     );
 }
 
@@ -758,7 +847,7 @@ fn a_rejected_mint_never_claims_to_have_created_anything() {
     let mut h = Harness::connected();
     app_toasts().clear();
 
-    mint_token(&mut h, SEEDED_TOKENS[1]);
+    mint_token(&mut h, SEEDED_TOKENS[1], false);
     // The mock's own 20ms latency outlasts a handful of pumps, so wait for the
     // call to land rather than counting frames — what lands is the *failure*
     // toast the screen's `use_failure_listener` bridge raises.
@@ -776,6 +865,8 @@ fn a_rejected_mint_never_claims_to_have_created_anything() {
         !pending.iter().any(|m| m.starts_with("Created")),
         "a rejected mint raises no confirmation: {pending:?}"
     );
+    // A rejection never parks a secret or opens the reveal.
+    assert_eq!(h.depth(), 1, "a rejected mint opens no secret reveal");
     // And the list is untouched: still exactly the two seeded tokens.
     let values = node_values(&h.root);
     assert_eq!(
@@ -783,6 +874,49 @@ fn a_rejected_mint_never_claims_to_have_created_anything() {
         0,
         "nothing was minted: {values:?}"
     );
+}
+
+#[test]
+fn a_read_only_connected_session_disables_minting_and_revoking() {
+    // `ConnectionController::is_read_only` gates both mutating token
+    // controls; the mock connect flow always logs in read-write
+    // (`connection.rs`'s own `MockConnectionBackend`), so this test flips the
+    // signal directly rather than through a login round trip.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+    app_toasts().clear();
+
+    h.tap_value("create new token");
+    h.settle();
+    assert_eq!(h.depth(), 1, "a read-only session opens no create dialog");
+    let toasted = app_toasts().pending_untracked();
+    assert!(
+        toasted.iter().any(|m| m.contains("Read-only session")),
+        "…and says why: {toasted:?}"
+    );
+
+    app_toasts().clear();
+    h.tap_label("revoke");
+    h.settle();
+    assert_eq!(
+        h.depth(),
+        1,
+        "a read-only session opens no revoke confirmation"
+    );
+    let toasted = app_toasts().pending_untracked();
+    assert!(
+        toasted.iter().any(|m| m.contains("Read-only session")),
+        "…and says why: {toasted:?}"
+    );
+
+    // Neither guarded control actually touched the store.
+    let values = node_values(&h.root);
+    for name in SEEDED_TOKENS {
+        assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

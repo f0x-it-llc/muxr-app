@@ -11,12 +11,13 @@
 //! every mount of the `/settings` screen resolves the *same* stores through
 //! [`expect_auth_tokens_repository`]/[`expect_preferences_repository`]: a token
 //! revoked on one visit is still gone on the next, and a font size picked on
-//! one is still picked. `AuthTokensRepository` stays the in-memory mock (no
-//! real `muxrd` client yet); `PreferencesRepository` is real —
-//! [`PrefsRepository`](crate::features::settings::data::repositories::PrefsRepository),
-//! the `frust-shared-preferences`-backed store — swapping the mock for it is
-//! what let preferences survive a restart, invisible to the screen, the
-//! controller and the use cases (which only ever name the traits).
+//! one is still picked. Both are real for a production run:
+//! [`GrpcAuthTokensRepository`](crate::features::settings::data::repositories::GrpcAuthTokensRepository)
+//! reaches the connected server over `muxrd`, and
+//! [`PrefsRepository`](crate::features::settings::data::repositories::PrefsRepository)
+//! is the `frust-shared-preferences`-backed store — both invisible to the
+//! screen, the controller and the use cases (which only ever name the
+//! traits).
 //!
 //! # The headless-test seam
 //!
@@ -25,13 +26,19 @@
 //! (`Harness::mount`, every suite's own helper) — there is no `cfg(test)` to
 //! branch on here, since an integration test binary links the *normal* build
 //! of this crate, never the one compiled with `--cfg test`. So a suite opts
-//! out **before** `provide` runs, via [`use_mock_preferences_for_tests`]: the
-//! one call site is `tests/support::setup()`, which every suite already calls
-//! ahead of mounting anything, so no individual `tests/*.rs` file needs to
-//! know this seam exists. Without it, every headless suite would read and
-//! write this dev machine's own NSUserDefaults (or, off Apple/Android, a JSON
-//! file) — leftover state from a *previous* run would make the suite
-//! order-dependent, which this app's Tests doc rules out.
+//! out **before** `provide` runs, via [`use_mock_auth_tokens_for_tests`]/
+//! [`use_mock_preferences_for_tests`]: the one call site for both is
+//! `tests/support::setup()`, which every suite already calls ahead of
+//! mounting anything, so no individual `tests/*.rs` file needs to know either
+//! seam exists.
+//!
+//! - Without the tokens opt-out, every headless suite's token-group
+//!   assertions would need a live `muxrd` connection the fixture doesn't
+//!   answer these RPCs on yet (`src/net/testing.rs`'s own module docs).
+//! - Without the preferences opt-out, every suite would read and write this
+//!   dev machine's own NSUserDefaults (or, off Apple/Android, a JSON file) —
+//!   leftover state from a *previous* run would make the suite
+//!   order-dependent, which this app's Tests doc rules out.
 //!
 //! # Why `Arc<dyn …>` and not a generic
 //!
@@ -48,11 +55,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use frust::{provide_context, use_context};
 
 use crate::features::settings::data::repositories::{
-    MockAuthTokensRepository, MockPreferencesRepository, PrefsRepository,
+    GrpcAuthTokensRepository, MockAuthTokensRepository, MockPreferencesRepository, PrefsRepository,
 };
 use crate::features::settings::domain::repositories::{
     AuthTokensRepository, PreferencesRepository,
 };
+
+/// Set by [`use_mock_auth_tokens_for_tests`], read by
+/// [`platform_auth_tokens_repository`]: `false` (the real `muxrd`-backed
+/// store) for every real app run, flipped to `true` once per test process
+/// before `provide` ever runs — see the [module docs](self)' headless-test
+/// seam section.
+static USE_MOCK_AUTH_TOKENS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+
+/// Opt the current process out of the real `muxrd`-backed token store for the
+/// rest of its life: every later [`provide`] call constructs
+/// [`MockAuthTokensRepository`] instead of
+/// [`GrpcAuthTokensRepository`](crate::features::settings::data::repositories::GrpcAuthTokensRepository).
+/// Idempotent, and a no-op once already set. Must run **before** `provide`
+/// (i.e. before `MuxrApp::init`) to have any effect — `tests/support::setup`
+/// is the one call site outside this module; see the [module docs](self).
+pub fn use_mock_auth_tokens_for_tests() {
+    USE_MOCK_AUTH_TOKENS_FOR_TESTS.store(true, Ordering::Relaxed);
+}
 
 /// Set by [`use_mock_preferences_for_tests`], read by
 /// [`platform_preferences_repository`]: `false` (the real store) for every
@@ -83,9 +108,22 @@ pub type SharedPreferencesRepository = Arc<dyn PreferencesRepository + Send + Sy
 /// implementations, each constructed once and published under the root owner.
 /// See the [module docs](self).
 pub fn provide() {
-    let tokens: SharedAuthTokensRepository = Arc::new(MockAuthTokensRepository::seeded());
-    provide_context(tokens);
+    provide_context(platform_auth_tokens_repository());
     provide_context(platform_preferences_repository());
+}
+
+/// The [`AuthTokensRepository`] [`provide`] publishes: the real, `muxrd`-backed
+/// store, unless [`use_mock_auth_tokens_for_tests`] opted this process out
+/// (every headless suite). Unlike [`platform_preferences_repository`] this has
+/// no fallible-construction fallback branch — [`GrpcAuthTokensRepository`] is
+/// stateless (it resolves the live connection fresh on every call, see that
+/// type's own module docs), so there is nothing here that can fail to
+/// construct.
+fn platform_auth_tokens_repository() -> SharedAuthTokensRepository {
+    if USE_MOCK_AUTH_TOKENS_FOR_TESTS.load(Ordering::Relaxed) {
+        return Arc::new(MockAuthTokensRepository::seeded());
+    }
+    Arc::new(GrpcAuthTokensRepository::new())
 }
 
 /// The [`PreferencesRepository`] [`provide`] publishes: the real

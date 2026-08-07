@@ -73,16 +73,19 @@ use std::rc::Rc;
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
+use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::icons::{CHECK, CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH};
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, IconSource, Padding, SizedBox, Stack, StatusPalette, Theme, any,
-    button, flexible, icon, inflexible, text,
+    FlexView, GestureDetector, Get, GetUntracked, IconSource, NavigatorController, Padding,
+    PopResult, RwSignal, Set, SizedBox, Stack, StatusPalette, Theme, any, button, flexible, icon,
+    inflexible, text, text_input,
 };
 
 use crate::AppState;
-use crate::features::settings::domain::entities::{AuthToken, TokenScope};
+use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
+use crate::ui::toasts::app_toasts;
 
 use super::chrome::{RADIUS_FULL, panel, switch_semantics};
 use super::pages::SettingsState;
@@ -148,6 +151,14 @@ const PICK_BLEED: f64 = 20.0;
 const PICK_TITLE_GAP: f64 = 18.0;
 /// The `✓` on the selected picker row.
 const CHECK_SIZE: f64 = 13.0;
+/// Vertical gap between a dialog's field/toggle/action rows — the same value
+/// `ui::dialogs::name_input_dialog`'s own `FIELD_ACTIONS_GAP` uses, duplicated
+/// here since this feature composes its own create-token dialog directly (see
+/// [`open_create_token_dialog`]'s own doc for why).
+const DIALOG_FIELD_GAP: f64 = 16.0;
+/// Horizontal gap between the create dialog's Cancel/Save buttons — mirrors
+/// `ui::dialogs`'s own `ACTION_GAP`.
+const DIALOG_ACTION_GAP: f64 = 10.0;
 
 // ---------------------------------------------------------------------------
 // Copy
@@ -164,6 +175,32 @@ pub(super) const DISCONNECT_LABEL: &str = "Disconnect";
 /// The bell row's `.set-value` — copy, not a preference: the switch beside it
 /// is the state, and this says what being on *means*.
 pub(super) const BELL_VALUE: &str = "haptic + badge";
+/// The create dialog's own title.
+const CREATE_TOKEN_TITLE: &str = "New token";
+/// …its Cancel/Save labels and the read-only toggle's row label — mirrors
+/// `ui::dialogs::name_input_dialog`'s own spelling.
+const DIALOG_CANCEL_LABEL: &str = "Cancel";
+const DIALOG_SUBMIT_LABEL: &str = "Save";
+pub(super) const READ_ONLY_TOGGLE_LABEL: &str = "read-only";
+/// The one-time secret reveal sheet's own title.
+pub(super) const SECRET_REVEAL_TITLE: &str = "token secret";
+/// …its Copy action.
+const COPY_SECRET_LABEL: &str = "Copy secret";
+/// …its dismiss action.
+const SECRET_DONE_LABEL: &str = "Done";
+/// The caption under the secret — Flutter parity's "you won't see this again"
+/// warning, spelled out rather than assumed.
+const SECRET_CAPTION: &str =
+    "This is the only time this secret is shown. Copy it now — it can't be viewed again.";
+/// What the reveal sheet renders in the vanishingly unlikely race where its
+/// pending secret was already cleared by the time this body re-ran (the sheet
+/// is on its way down anyway — see [`secret_reveal_sheet`]'s own doc).
+const SECRET_ALREADY_DISMISSED: &str = "This secret has already been dismissed.";
+/// What a successful/failed secret copy says — the terminal Copy chip's own
+/// wording (`features::terminal::presentation::term::chip`), duplicated here
+/// since a feature never imports a sibling's `presentation`.
+const COPIED_SECRET_TOAST: &str = "Copied to clipboard";
+const COPY_SECRET_FAILED_TOAST: &str = "Couldn't copy to clipboard";
 
 // ---------------------------------------------------------------------------
 // Token derivations
@@ -556,7 +593,19 @@ fn toggle_art(on: bool, colors: &Palette) -> AnyView<SettingsState> {
 
 /// One `.token-item`: the token's name and scope chip on the top line, its
 /// creation date and the `revoke` action on the meta line.
-pub(super) fn token_item(token: &AuthToken, colors: &Palette) -> AnyView<SettingsState> {
+///
+/// `revoke_enabled` is `false` while the connected session is itself
+/// read-only (`ConnectionController::is_read_only`'s "primary defence" note —
+/// see `crate::connection`'s module docs): the button still fires
+/// `open_revoke_dialog` either way (that call's own guard is what actually
+/// blocks it, and raises the honest toast), but its style drops to
+/// [`ButtonStyle::Ghost`] — the same "no disabled `Button` state" workaround
+/// `ui::dialogs`'s own submit button uses.
+pub(super) fn token_item(
+    token: &AuthToken,
+    colors: &Palette,
+    revoke_enabled: bool,
+) -> AnyView<SettingsState> {
     let theme = active_theme();
     let name = token.name.clone();
     let top = row(vec![
@@ -576,7 +625,11 @@ pub(super) fn token_item(token: &AuthToken, colors: &Palette) -> AnyView<Setting
             button(REVOKE_LABEL, move |state: &mut SettingsState| {
                 super::pages::open_revoke_dialog(state, &name)
             })
-            .style(ButtonStyle::Danger)
+            .style(if revoke_enabled {
+                ButtonStyle::Danger
+            } else {
+                ButtonStyle::Ghost
+            })
             .small(),
         ),
     ]);
@@ -623,17 +676,22 @@ fn scope_chip(scope: TokenScope, colors: &Palette) -> AnyView<SettingsState> {
 /// group, and the screen's only way to mint one.
 ///
 /// The `+` is amber because it is the call to action; the label beside it is
-/// dim (`.add-token-btn{color:var(--fg-dim)}` with an amber `<b>`).
-pub(super) fn create_token_row(colors: &Palette) -> AnyView<SettingsState> {
+/// dim (`.add-token-btn{color:var(--fg-dim)}` with an amber `<b>`). While
+/// `enabled` is `false` (a read-only connected session — see
+/// [`token_item`]'s own doc) both dim to [`Palette::fg_faintest`] instead: the
+/// row still opens `open_create_token_dialog` on tap, whose own guard is what
+/// actually blocks the mint and raises the honest toast.
+pub(super) fn create_token_row(colors: &Palette, enabled: bool) -> AnyView<SettingsState> {
     let theme = active_theme();
+    let (plus_ink, label_ink) = if enabled {
+        (colors.amber, colors.fg_dim)
+    } else {
+        (colors.fg_faintest, colors.fg_faintest)
+    };
     let label = row(vec![
-        inflexible(
-            text(CREATE_TOKEN_PLUS).style(inked(&theme.type_scale.body_small, colors.amber)),
-        ),
+        inflexible(text(CREATE_TOKEN_PLUS).style(inked(&theme.type_scale.body_small, plus_ink))),
         h_gap(ADD_GAP),
-        inflexible(
-            text(CREATE_TOKEN_LABEL).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
-        ),
+        inflexible(text(CREATE_TOKEN_LABEL).style(inked(&theme.type_scale.body_small, label_ink))),
     ]);
     any(Padding(
         EdgeInsets {
@@ -652,6 +710,252 @@ pub(super) fn create_token_row(colors: &Palette) -> AnyView<SettingsState> {
         )
         .on_tap(|state: &mut SettingsState| super::pages::open_create_token_dialog(state)),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// The create-token dialog — over `AppState`, like the picker sheet
+// ---------------------------------------------------------------------------
+
+/// Open the mint-a-token dialog: a name field and the read-only toggle
+/// Flutter's own create flow offers. `ui::dialogs::name_input_dialog` has no
+/// toggle slot, and this feature cannot widen a file outside its own tree
+/// (`docs/ARCHITECTURE.md`'s layer table), so this composes the same
+/// `glyph_dialog`/`show_glyph_dialog` primitives that helper wraps, directly
+/// — the same shape (a controlled [`RwSignal`] field, a "disabled" submit per
+/// the framework's own no-disabled-`Button` gap `ui::dialogs`'s own doc
+/// names) with one more control.
+///
+/// `on_submit` receives the **trimmed**, non-empty name and the toggle's
+/// value; every dismissal route (cancel, scrim, `Escape`, back) closes the
+/// dialog without calling back, exactly like `name_input_dialog`.
+pub(super) fn open_create_token_dialog(
+    overlays: &NavigatorController<AppState>,
+    on_submit: impl Fn(&mut AppState, String, bool) + 'static,
+) {
+    let name = RwSignal::new(String::new());
+    let read_only = RwSignal::new(false);
+    let page_nav = overlays.clone();
+    show_glyph_dialog(
+        overlays,
+        move || {
+            let theme = active_theme();
+            let colors = palette(&theme);
+            let current = name.get();
+            let ro = read_only.get();
+            let can_submit = create_token_submittable(&current);
+            let enter_nav = page_nav.clone();
+            let submit_nav = page_nav.clone();
+            let cancel_nav = page_nav.clone();
+            let submit_current = current.clone();
+            let field = text_input(current, move |_state: &mut AppState, next: String| {
+                name.set(next)
+            })
+            .on_submit(move |_state: &mut AppState, typed: String| {
+                submit_create_token(&enter_nav, &typed, read_only.get_untracked())
+            });
+            let toggle = dialog_read_only_row(ro, &colors, move |_state: &mut AppState| {
+                read_only.set(!read_only.get_untracked())
+            });
+            let buttons = FlexView::new(
+                Axis::Horizontal,
+                vec![
+                    flexible(1, SizedBox::<AppState>(None, None)),
+                    inflexible(
+                        button(DIALOG_CANCEL_LABEL, move |_state: &mut AppState| {
+                            cancel_nav.pop()
+                        })
+                        .style(ButtonStyle::Ghost)
+                        .small(),
+                    ),
+                    inflexible(SizedBox::<AppState>(Some(DIALOG_ACTION_GAP), None)),
+                    inflexible(
+                        button(DIALOG_SUBMIT_LABEL, move |_state: &mut AppState| {
+                            // "Disabled": the style below is the visual half,
+                            // this guard the behavioral one (see the module
+                            // docs' framework-gap note).
+                            if can_submit {
+                                submit_create_token(
+                                    &submit_nav,
+                                    &submit_current,
+                                    read_only.get_untracked(),
+                                );
+                            }
+                        })
+                        .style(if can_submit {
+                            ButtonStyle::Primary
+                        } else {
+                            ButtonStyle::Ghost
+                        })
+                        .small(),
+                    ),
+                ],
+            );
+            glyph_dialog()
+                .title(CREATE_TOKEN_TITLE)
+                .action(any(FlexView::new(
+                    Axis::Vertical,
+                    vec![
+                        inflexible(field),
+                        inflexible(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
+                        inflexible(toggle),
+                        inflexible(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
+                        inflexible(buttons),
+                    ],
+                )
+                .cross_axis(CrossAxisAlignment::Stretch)))
+        },
+        move |state: &mut AppState, result: PopResult| {
+            if let Some((typed, read_only)) = result.take::<(String, bool)>() {
+                on_submit(state, typed, read_only);
+            }
+        },
+    );
+}
+
+/// Whether `text` is a usable name (non-blank once trimmed) — mirrors
+/// `ui::dialogs::name_input_dialog`'s own `submittable`.
+fn create_token_submittable(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
+/// Pop the create dialog carrying the trimmed name and the toggle's value, or
+/// do nothing when there is no usable name — the one gate both the Enter key
+/// and the Save button route through (mirrors
+/// `ui::dialogs::name_input_dialog`'s own `submit` helper).
+fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_only: bool) {
+    let name = typed.trim();
+    if name.is_empty() {
+        return;
+    }
+    nav.pop_with_result(PopResult::of((name.to_string(), read_only)));
+}
+
+/// The create dialog's read-only toggle: a label plus the same 36×21 pill
+/// [`toggle_art`] draws for the bell row, tappable across its whole row (the
+/// bell row's own "the switch is the state, not the button" idiom). Built
+/// over `AppState` — a dialog is a page on the *app's* navigator, not
+/// [`SettingsState`] — and rendered statically rather than cross-faded: the
+/// dialog's body closure already re-runs on every tap, so there is no
+/// mid-frame transition to animate between (unlike the bell row, which stays
+/// mounted and must animate its own state changes in place).
+fn dialog_read_only_row(
+    on: bool,
+    colors: &Palette,
+    on_tap: impl Fn(&mut AppState) + 'static,
+) -> AnyView<AppState> {
+    let theme = active_theme();
+    let content = row(vec![
+        flexible(
+            1,
+            text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg)),
+        ),
+        inflexible(switch_semantics(
+            dialog_toggle_art(on, colors),
+            READ_ONLY_TOGGLE_LABEL,
+            on,
+        )),
+    ]);
+    any(GestureDetector(content).on_tap(on_tap))
+}
+
+/// The read-only toggle's art — [`toggle_art`]'s static, `AppState`-typed
+/// sibling. See [`dialog_read_only_row`] for why this one never animates.
+fn dialog_toggle_art(on: bool, colors: &Palette) -> AnyView<AppState> {
+    let radius = TOGGLE_H / 2.0;
+    let track = Size::new(TOGGLE_W, TOGGLE_H);
+    let (track_fill, track_border) = if on {
+        (colors.amber_faint, colors.amber_border)
+    } else {
+        (colors.overlay, colors.outline)
+    };
+    let (knob_left, knob_fill) = if on {
+        (KNOB_LEFT_ON, colors.amber_fill)
+    } else {
+        (KNOB_LEFT_OFF, colors.fg_dim)
+    };
+    let track_view = panel(SizedBox::<AppState>(None, None), track_fill, radius)
+        .border(track_border)
+        .fixed(track);
+    let knob = Padding(
+        EdgeInsets {
+            left: knob_left,
+            top: KNOB_TOP,
+            right: TOGGLE_W - knob_left - KNOB,
+            bottom: TOGGLE_H - KNOB_TOP - KNOB,
+        },
+        panel(SizedBox::<AppState>(None, None), knob_fill, KNOB / 2.0).fixed(Size::new(KNOB, KNOB)),
+    );
+    any(Stack(vec![any(track_view), any(knob)]))
+}
+
+// ---------------------------------------------------------------------------
+// The one-time secret reveal sheet — over `AppState`, like the picker sheet
+// ---------------------------------------------------------------------------
+
+/// The reveal sheet's own content: title, the minted token's name, its secret
+/// (in the type scale's own monospace face — every Glyph role is, so there is
+/// no separate "mono" token to reach for), a Copy action and the "gone
+/// forever" caption. `minted` is `None` only in the vanishingly unlikely race
+/// where the pending secret was already cleared by the time this body re-ran
+/// (the sheet is on its way down anyway); it renders a bare caption rather
+/// than panicking.
+///
+/// Built by [`super::pages`] from
+/// [`SettingsController::pending_token_secret`](super::controller::SettingsController::pending_token_secret),
+/// exactly the split [`picker_sheet`] uses for the same reason: this file
+/// never reaches into the controller itself.
+pub(super) fn secret_reveal_sheet(
+    minted: Option<&MintedToken>,
+    colors: &Palette,
+    on_done: impl Fn(&mut AppState) + 'static,
+) -> AnyView<AppState> {
+    let theme = active_theme();
+    let Some(minted) = minted else {
+        return any(text(SECRET_ALREADY_DISMISSED)
+            .style(inked(&theme.type_scale.body_small, colors.fg_dim)));
+    };
+    // One residue `Zeroizing` cannot cover, same as `crate::connection`'s own
+    // documented note on its encoded request frame: rendering the secret at
+    // all needs a plain `String` this render pass owns (the shaped glyph run
+    // and the clipboard write both need one), so it lives outside the
+    // wrapper's scrub-on-drop for the rest of this build call.
+    let secret = minted.token.to_string();
+    let copy_secret = secret.clone();
+    let children: Vec<AnyView<AppState>> = vec![
+        any(text(SECRET_REVEAL_TITLE)
+            .style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
+        any(SizedBox::<AppState>(None, Some(PICK_TITLE_GAP))),
+        any(text(minted.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
+        any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
+        any(panel(
+            Padding(
+                EdgeInsets::all(ROW_PAD_X),
+                text(secret).style(inked(&theme.type_scale.title_small, colors.fg)),
+            ),
+            colors.raised,
+            theme.shape.small,
+        )),
+        any(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
+        any(button(COPY_SECRET_LABEL, move |_state: &mut AppState| {
+            let copied = frust_clipboard::Clipboard::set_text_sensitive(&copy_secret).is_ok();
+            app_toasts().show(if copied {
+                COPIED_SECRET_TOAST
+            } else {
+                COPY_SECRET_FAILED_TOAST
+            });
+        })
+        .style(ButtonStyle::Primary)
+        .small()),
+        any(SizedBox::<AppState>(None, Some(TOKEN_LINE_GAP))),
+        any(text(SECRET_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+        any(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
+        any(button(SECRET_DONE_LABEL, move |state: &mut AppState| {
+            on_done(state)
+        })
+        .style(ButtonStyle::Ghost)
+        .small()),
+    ];
+    any(column(children))
 }
 
 // ---------------------------------------------------------------------------
