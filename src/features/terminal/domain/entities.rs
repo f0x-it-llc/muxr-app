@@ -61,6 +61,14 @@ pub use crate::features::settings::domain::entities::CursorStyle as SettingsCurs
 /// One zellij *space* — the sheet's `spaces` pill row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Space {
+    /// The opaque backend id a switch addresses this space by — the wire's own
+    /// `Space.id`, never shown to the user.
+    ///
+    /// Separate from [`name`](Self::name) because the two are separate on the
+    /// wire: a space can be renamed without its id moving, and a display name
+    /// is not unique enough to route on. The in-memory mock has no backend
+    /// behind it, so its ids are its names.
+    pub id: String,
     /// The pill's label (`forgekit`).
     pub name: String,
     /// Whether this is the selected pill (`.pill.sel`). Exactly one space is
@@ -82,6 +90,15 @@ pub struct TabEntry {
     /// the sheet's `panes — <key>` section label prints, and what
     /// [`SwitchTab`](super::use_cases::SwitchTab) addresses a tab by.
     pub key: String,
+    /// The tab's stable backend id — what a *switch* addresses it by.
+    ///
+    /// Three separate identifiers ride on one tab, and none derives from
+    /// another: [`index`](Self::index) is a display position that shifts the
+    /// moment a tab before it closes, [`key`](Self::key) is this screen's own
+    /// display/lookup handle, and this is the routing key the backend knows
+    /// (the wire's `TabMsg.tab_id`). The in-memory mock has no backend behind
+    /// it, so its ids are its positions.
+    pub tab_id: u64,
     /// The pill's human label (`minefit-api`).
     pub label: String,
     /// The card status row's pane title (`ed@devbox: ~`).
@@ -208,6 +225,7 @@ mod tests {
     fn a_tab_pill_prints_its_index_and_label() {
         let tab = TabEntry {
             index: 4,
+            tab_id: 4,
             key: "devbox".to_string(),
             label: "devbox".to_string(),
             pane_title: "ed@devbox: ~".to_string(),
@@ -237,6 +255,7 @@ mod tests {
     fn the_active_key_falls_back_to_the_first_tab() {
         let tab = |key: &str, active: bool| TabEntry {
             index: 1,
+            tab_id: 1,
             key: key.to_string(),
             label: key.to_string(),
             pane_title: String::new(),

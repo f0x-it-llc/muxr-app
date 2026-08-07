@@ -55,8 +55,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, NavigatorController, PopResult, SizedBox, Stack, Theme, WindowMetrics, any,
-    navigator, provide_context,
+    AnyView, Component, NavigatorController, PopResult, Set, SizedBox, Stack, Theme, WindowMetrics,
+    any, navigator, provide_context,
 };
 use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_text::TextContext;
@@ -138,6 +138,10 @@ const CLOSE_DELAY: Duration = Duration::from_millis(260);
 
 /// What a landed detach says, transcribed from `presentation::pages`.
 const DETACHED_TOAST: &str = "detached";
+
+/// …and what a control a read-only credential may not use says instead, same
+/// provenance.
+const READ_ONLY_TOAST: &str = "read-only session";
 
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
 /// card prints once the *second* of two rapid pill taps has landed.
@@ -1331,6 +1335,73 @@ fn a_second_detach_while_the_first_is_in_flight_pops_once() {
         .filter(|message| message == DETACHED_TOAST)
         .count();
     assert_eq!(detached, 1, "one detach, one pop, one toast");
+}
+
+// ---------------------------------------------------------------------------
+// 7b — a read-only credential
+// ---------------------------------------------------------------------------
+
+/// Flipping `muxr::connection::ConnectionController::is_read_only` directly is
+/// how a suite reaches this state: the mock backend always answers
+/// `is_read_only: false` (`connection`'s module docs), so there is no target a
+/// mock connect could carry that would produce one — the same seam
+/// `tests/sessions.rs` and `tests/settings.rs` already use.
+fn make_read_only(h: &mut Harness) {
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+}
+
+#[test]
+fn a_read_only_credential_withdraws_the_sheets_three_create_affordances() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    make_read_only(&mut h);
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+
+    // Three spaces and four tabs, and neither `+ space` nor `+` beside them.
+    assert_eq!(
+        pills(&sheet).len(),
+        3 + 4,
+        "a read-only session is offered no create: {sheet:?}"
+    );
+    // The pills stay tappable — switching space or tab is a per-connection
+    // *view* change, not a mutation, so a read-only credential keeps both.
+    let btop = pills(&sheet)[3];
+    h.tap(center(btop));
+    h.pump_until_values("the btop tab", |values| {
+        values.iter().any(|v| v == BTOP_TITLE)
+    });
+    assert!(h.shows(BTOP_TITLE), "the card followed the pill");
+}
+
+#[test]
+fn a_read_only_credential_refuses_the_rename_dialog_and_says_why() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+    make_read_only(&mut h);
+
+    h.open_menu();
+    h.choose_menu_row(ROW_RENAME);
+    h.flush();
+
+    assert_eq!(
+        h.depth(),
+        REST_DEPTH,
+        "the rename dialog never opened over a session that cannot be renamed"
+    );
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == READ_ONLY_TOAST),
+        "the row stays on screen and says why: {:?}",
+        app_toasts().pending_untracked()
+    );
 }
 
 // ---------------------------------------------------------------------------

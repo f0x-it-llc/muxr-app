@@ -15,6 +15,7 @@
 //! |---|---|
 //! | [`term_box`] | `.pill`, `.pane-item`, `.new-pane-btn`, `.term-statusrow`, `.sheet-close` — one filled/bordered box, optionally dashed |
 //! | [`clipped_label`] | `.term-pane-title` — a single-line run, ellipsized to fit |
+//! | [`status_strip`] | the card's one-line link notice and its affordance — no mock element; a live session's own |
 //! | [`expand_button`] | `.expand-btn` — the 28px circle that toggles fullscreen |
 //! | [`terminal_stage`] | `.term-wrap` + `.term-card` — the animated clearance/padding/radius, the card fill/border/shadow, and the bar's anchor rect |
 //! | [`term_body`] | `.term-body` — typed lines, the staggered reveal, the blinking caret |
@@ -62,7 +63,10 @@ use frust::authoring::{
     any, build_child, erase_callback, rebuild_child, route_event, route_event_single,
     teardown_child,
 };
-use frust::{AnimationController, Curve, FrameTime, IconData, IconSource, Theme, icon};
+use frust::{
+    AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
+    IconData, IconSource, Padding, Theme, flexible, icon, inflexible, text,
+};
 
 use crate::features::terminal::domain::entities::{TermLine, TermLineKind};
 use crate::ui::topbar::BAR_HEIGHT;
@@ -333,6 +337,61 @@ impl Widget for TermBoxWidget {
 // ---------------------------------------------------------------------------
 // `wrap_row` — `.pill-row{display:flex; gap:8px; flex-wrap:wrap}`
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The card's status strip
+// ---------------------------------------------------------------------------
+
+/// The strip's own gutters — the status row's (`.term-statusrow`'s 18px lead,
+/// 14px trail), transcribed a second time because that row's constants are
+/// private to [`super::pieces`]; the two are the card's one left edge, so they
+/// have to agree.
+const STRIP_PAD_LEFT: f64 = 18.0;
+const STRIP_PAD_RIGHT: f64 = 14.0;
+/// Tighter than the status row's 14px: this band is a transient notice above a
+/// grid, and every row it steals is a row of terminal.
+const STRIP_PAD_Y: f64 = 10.0;
+/// Gap between the message and the affordance beside it — the sheet's own pill
+/// gap, so the card and its sheet breathe alike.
+const STRIP_GAP: f64 = 8.0;
+
+/// A one-line notice band across the card, optionally ending in one
+/// affordance: what the screen surfaces a live session's link state through.
+///
+/// A band rather than an overlay because it must not cover terminal output the
+/// user is still reading — a reconnecting session is *stale*, not gone, and
+/// what it last printed is often exactly what explains why. Square-cornered
+/// and full-bleed for the same reason the status row above it is: the card
+/// clips to its own radius, so a band inside it never needs one of its own.
+///
+/// `action` is an already-built view rather than a label plus a callback, so
+/// this stays free of a closure type parameter and the caller keeps whatever
+/// button vocabulary the rest of its screen uses.
+pub(super) fn status_strip<State: 'static>(
+    message: impl Into<String>,
+    style: TextStyle,
+    fill: Color,
+    action: Option<AnyView<State>>,
+) -> AnyView<State> {
+    let mut children = vec![flexible(1, text(message.into()).style(style))];
+    if let Some(action) = action {
+        children.push(inflexible(frust::SizedBox::<State>(Some(STRIP_GAP), None)));
+        children.push(inflexible(action));
+    }
+    any(term_box(
+        Padding(
+            EdgeInsets {
+                left: STRIP_PAD_LEFT,
+                top: STRIP_PAD_Y,
+                right: STRIP_PAD_RIGHT,
+                bottom: STRIP_PAD_Y,
+            },
+            FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
+        ),
+        fill,
+        0.0,
+    ))
+}
 
 /// A row of children that wraps onto further lines when it runs out of width,
 /// with `gap` between neighbours on both axes.
