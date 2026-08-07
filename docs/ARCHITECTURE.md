@@ -161,9 +161,8 @@ entirely: each feature's `di.rs` is composition-root wiring, so a page may resol
 - **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every
   mutation by `Session::id` (the backend-qualified routing key) rather than display name. A read-only
   credential (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never
-  Attach. Its `presentation::pieces` still exports an unused `picker_rows`/`picker_heading` pair from
-  a picker sheet the redesign superseded; kept for a future picker sheet to inherit rather than
-  re-derive.
+  Attach. Its `presentation::pieces` still exports an unused row/heading pair from a picker sheet the
+  redesign superseded, kept for a future picker sheet to inherit.
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
   seam, the "panes & tabs" sheet, and the app bar's overflow menu (`frust::glyph::show_glyph_menu`,
   forwarded from `crate::shell`). A second domain port, `domain::feed::TerminalFeed` — a byte-level
@@ -254,8 +253,8 @@ it belongs to the feature that owns its entries, forwarded from `crate::shell`; 
 
 **Chrome icons are vectors; font glyphs are content text only.** A bar affordance, a FAB, or a row's
 trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` — never a font
-glyph, whose fallback chain differs per platform and once left a settings gear invisible on iPhone. A
-font glyph is only ever content *text* (a chip's `▣ 9 panes`, the splash's brand rain).
+glyph, whose fallback chain differs per platform. A font glyph is only ever content *text* (a chip's
+`▣ 9 panes`, the splash's brand rain).
 
 ## Responsive — `src/responsive.rs`
 
@@ -288,7 +287,9 @@ the credential mock's recorded prompt count to assert "exactly one biometric pro
 source and its selection/copy model directly, headless against the real `vt100` emulator;
 `terminal_live.rs` mounts the whole `/terminal` screen and drives the same grid's link-status signal
 through the "Demo session" cutover. `src/net`'s own `#[cfg(test)]` suite (see Net, above) carries the
-client's handshake/credential coverage.
+client's handshake/credential coverage. `layering.rs` is a source-scan conformance test enforcing that
+owner-dependent context lookups appear only at DI/presentation-sanctioned sites, and never inside a
+spawned async block's body regardless of directory.
 
 ## Design References
 
@@ -305,6 +306,11 @@ client's handshake/credential coverage.
 - The scroll RPC is unwired too — there is no scroll gesture on the terminal grid to drive it from.
 - Background pause/reattach: a backgrounded app keeps its `AttachTerminal` stream open rather than
   detaching and reattaching on resume, pending a frust app-lifecycle seam this app can hook into.
+- The live terminal feed's inbound flow control (`grpc_feed.rs`) pauses reading the `AttachTerminal`
+  stream once its byte or frame high-water mark trips; since every RPC shares the app's one HTTP/2
+  connection (see Net, above), a long pause can in principle backpressure that connection's
+  flow-control window and stall the other in-flight streams (sessions polls, token RPCs). A dedicated
+  channel for the attach stream is the designed remedy, deliberately deferred past the device gate.
 - The login-token field's controller-held buffer is cleared and zeroized on both connect and
   disconnect today; transient copies on the render pass and the platform IME surface (suggestions,
   recents capture) still hold plaintext until platform-level masking plumbing lands.
