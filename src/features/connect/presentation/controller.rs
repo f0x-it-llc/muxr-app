@@ -13,10 +13,11 @@
 //! Embeds a [`ControllerCore`] by composition and exposes it via
 //! `AsRef<ControllerCore<AppFailure>>` — the `examples/huddle` controller shape,
 //! matched here for the same reason `crate::connection::ConnectionController`
-//! matches it: one idiom for every controller in this app, mock or real. The
-//! core carries no in-flight work yet (nothing this controller does is async —
-//! see `domain::repositories`' note on the synchronous repository), but it is
-//! what `use_controller` disposes and what a later real dial will run through.
+//! matches it: one idiom for every controller in this app. This core carries no
+//! in-flight work of its own: the saved-server repository is synchronous (see
+//! `domain::repositories`' note), and the one asynchronous thing the screen
+//! starts — the dial — runs under the *connection* controller's core, which is
+//! where its failures surface.
 //!
 //! # Injected, never resolved here
 //!
@@ -36,6 +37,11 @@
 //! [`crate::ui::toasts::app_toasts`] — never a string built here. Validation maps
 //! through `domain::use_cases::parse_endpoint`, whose own docs record the one
 //! vocabulary gap (`AppFailure` has no `Validation` arm).
+//!
+//! A *refused dial* is the exception, and deliberately so: it is raised on
+//! [`ConnectionController`]'s own failure sink, which the composition root
+//! already bridges to the same toasts. Re-raising it here would show the user
+//! two toasts for one failure.
 
 use std::sync::Arc;
 
@@ -78,14 +84,16 @@ pub struct ConnectController {
     /// [`Zeroizing`]-wrapped `String` rather than a plain one: replacing or
     /// dropping the wrapper scrubs the buffer instead of leaving stale
     /// plaintext parked in a freed allocation. That covers the *at-rest*
-    /// half; [`Self::clear_token`] covers the *when* — called on both the
-    /// connect edge ([`Self::connect`]'s `Ok` branch) and the disconnect edge
-    /// (`super::pages::ConnectScreen::build`'s `connection.connected`
-    /// true→false watch), so a mounted-but-covered Connect screen (Sessions
-    /// stacks over it rather than replacing it) never keeps a stale token
-    /// alive across either transition. What this does **not** cover — the
-    /// platform IME's own suggestion/recents surface — is recorded in
-    /// `docs/ARCHITECTURE.md`'s Planned section (FINDINGS #31).
+    /// half; two edges cover the *when* — the disconnect edge, through
+    /// [`Self::clear_token`] (`super::pages::ConnectScreen::build`'s
+    /// `connection.connected` true→false watch), and the connect edge, where
+    /// [`Self::connect`]'s completion closure scrubs this same signal the same
+    /// way. So a mounted-but-covered Connect screen (Sessions stacks over it
+    /// rather than replacing it) never keeps a stale token alive across either
+    /// transition. A connect that *fails* deliberately keeps it: the user needs
+    /// it to retry. What this does **not** cover — the platform IME's own
+    /// suggestion/recents surface — is recorded in `docs/ARCHITECTURE.md`'s
+    /// Planned section.
     pub token: RwSignal<Zeroizing<String>>,
     /// The selected TLS posture.
     pub trust_mode: RwSignal<TrustMode>,
@@ -144,12 +152,11 @@ impl ConnectController {
         self.token.set(Zeroizing::new(token));
     }
 
-    /// Scrub the login-token field back to empty. See [`Self::token`]'s doc
-    /// for the two edges that call this (`Self::connect`'s success branch,
-    /// and the screen's own disconnect-edge watch) and what scrubbing does
-    /// and does not cover. A fresh `Zeroizing::new(String::new())` rather
-    /// than mutating the held buffer in place: the signal's replace still
-    /// drops (and so zeroizes) the stale one.
+    /// Scrub the login-token field back to empty — the screen's own
+    /// disconnect-edge watch. See [`Self::token`]'s doc for the other edge and
+    /// for what scrubbing does and does not cover. A fresh
+    /// `Zeroizing::new(String::new())` rather than mutating the held buffer in
+    /// place: the signal's replace still drops (and so zeroizes) the stale one.
     pub fn clear_token(&self) {
         self.token.set(Zeroizing::new(String::new()));
     }
@@ -175,52 +182,83 @@ impl ConnectController {
         self.trust_mode.set(server.trust_mode);
     }
 
+    /// Whether a dial is in flight — the connect button's busy state.
+    ///
+    /// The connection controller's own signal rather than a second copy here:
+    /// the dial is *its* work, and two flags for one fact drift.
+    pub fn connecting(&self) -> RwSignal<bool> {
+        self.connection.connecting
+    }
+
     /// The [`ConnectTarget`] this form describes, or why it doesn't.
     ///
     /// Split out from [`Self::connect`] so the validation + target mapping is
     /// unit-testable without a live navigator. `offer_credential` is set only
     /// when the user asked to be remembered **and** this endpoint isn't already
-    /// saved — re-offering a server the user already stored is noise.
+    /// saved — re-offering a server the user already stored is noise. That is
+    /// the caller's half of the credential-offer decision `crate::connection`
+    /// documents; the read-only half is the connection controller's.
+    ///
+    /// `fingerprint` is `None`: a certificate pin arrives with a scanned
+    /// pairing payload (`domain::entities::PairingTrust::Pin`), and nothing
+    /// the manual form collects carries one — so a hand-picked
+    /// [`TrustMode::Pinned`] fails closed before dialing rather than silently
+    /// dropping to a weaker posture.
     pub fn validated_target(&self) -> Result<ConnectTarget, AppFailure> {
         let endpoint = parse_endpoint(&self.url.get_untracked())?;
         let saved = self.saved.get_untracked();
         let known = saved
             .iter()
             .find(|server| server.host == endpoint.host && server.port == endpoint.port);
+        let remember = self.remember.get_untracked();
         Ok(ConnectTarget {
             // A known endpoint keeps its stored label; a new one is labelled by
             // its own host, which is what the credential offer will show.
             label: known.map_or_else(|| endpoint.host.clone(), |server| server.label.clone()),
-            offer_credential: self.remember.get_untracked() && known.is_none(),
+            offer_credential: remember && known.is_none(),
             host: endpoint.host,
             port: endpoint.port,
             trust_mode: self.trust_mode.get_untracked(),
+            token: self.token.get_untracked(),
+            remember,
+            fingerprint: None,
         })
     }
 
-    /// Validate the form and, if it holds up, open the (mock) connection and
-    /// navigate to [`SESSIONS_LOCATION`] — through the app's one guarded
-    /// router (see `crate::routes`), so this push resolves exactly as a deep
-    /// link to the same path would.
+    /// Validate the form and, if it holds up, open the connection and — once it
+    /// is actually up — navigate to [`SESSIONS_LOCATION`] through the app's one
+    /// guarded router (see `crate::routes`), so this push resolves exactly as a
+    /// deep link to the same path would.
     ///
     /// `nav` is passed in rather than held: [`Nav`] wraps an `Rc`-backed
     /// `Router` and so is neither `Send` nor `Sync`, while this controller must
     /// be both (`use_controller`'s bound). The screen resolves the handle in
     /// its own `Component::init`, keeps it in its `Component::State`, and lends
-    /// it here.
+    /// it here. The completion closure below is what carries that `Rc` across
+    /// the dial — it runs on the UI thread, and only there.
     ///
     /// A rejection raises the failure as a toast and lights [`Self::invalid`];
-    /// nothing navigates and no connection opens.
+    /// nothing navigates and no connection opens. A *refused dial* raises its
+    /// own toast through the connection controller's sink (see the module
+    /// docs), leaves the form as the user typed it — token included, so a retry
+    /// is one tap — and never navigates.
     pub fn connect(&self, nav: &Nav) {
         match self.validated_target() {
             Ok(target) => {
                 self.invalid.set(false);
-                // Login-token hygiene (review F5): the token's job ends the
-                // instant a connection opens with it — see `Self::token`'s
-                // doc for the other edge this pairs with.
-                self.clear_token();
-                self.connection.connect(target);
-                nav.push(SESSIONS_LOCATION);
+                let nav = nav.clone();
+                // Login-token hygiene: the token's job ends the instant a
+                // connection opens with it — see `Self::token`'s doc for the
+                // other edge this pairs with. The signal is captured by value
+                // (`RwSignal` is `Copy`) because the closure outlives this
+                // borrow of `self` whenever the dial is a real one.
+                let token = self.token;
+                self.connection.connect_with(target, move |outcome| {
+                    if outcome.is_ok() {
+                        token.set(Zeroizing::new(String::new()));
+                        nav.push(SESSIONS_LOCATION);
+                    }
+                });
             }
             Err(failure) => {
                 self.invalid.set(true);

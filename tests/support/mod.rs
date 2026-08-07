@@ -500,16 +500,25 @@ pub fn serial() -> MutexGuard<'static, ()> {
 /// test that mounts a `Component` (`on_cleanup`/`spawn_local`/context all need an
 /// ambient owner + the installed executor).
 ///
-/// Also opts this process out of `settings::di::provide`'s real,
-/// `frust-shared-preferences`-backed preferences store (see that module's
-/// own "headless-test seam" docs): every suite calls this before
-/// `MuxrApp::init` ever runs, which is what makes it the one seam that
-/// reaches every `tests/*.rs` file without editing each one individually.
-/// Without it, a suite would read and write this dev machine's own
-/// NSUserDefaults (or, off Apple/Android, a JSON file) — leftover state from
-/// a *previous* run would make the suite order-dependent.
+/// Also opts this process out of the two real, platform-backed dependencies
+/// `MuxrApp::init` would otherwise construct — each through its own module's
+/// documented headless-test seam, and each for the same structural reason: an
+/// integration test binary links the *normal* build of the library, so neither
+/// module has a `cfg(test)` to branch on. Every suite calls this before
+/// `MuxrApp::init` ever runs, which is what makes it the one seam that reaches
+/// every `tests/*.rs` file without editing each one individually.
+///
+/// - `settings::di`'s `frust-shared-preferences` store — without the opt-out a
+///   suite reads and writes this dev machine's own NSUserDefaults (or, off
+///   Apple/Android, a JSON file), and leftover state from a *previous* run
+///   would make the suite order-dependent.
+/// - `connection`'s `muxrd` client — without the opt-out every `connect` in
+///   these suites would try to open a real socket, and the mock facts each
+///   suite asserts on (the sessions strip's `zellij 0.44.3 · 36ms`) have no
+///   server to come from.
 pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
+    muxr::connection::use_mock_connection_for_tests();
     let _runtime = ReactiveRuntime::init(recording_waker());
     let ambient = Owner::new();
     ambient.set();

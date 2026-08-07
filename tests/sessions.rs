@@ -138,6 +138,9 @@ fn mock_target(offer_credential: bool) -> ConnectTarget {
         trust_mode: TrustMode::TrustOnFirstUse,
         label: "Mock rig".to_string(),
         offer_credential,
+        token: zeroize::Zeroizing::new(String::new()),
+        remember: false,
+        fingerprint: None,
     }
 }
 

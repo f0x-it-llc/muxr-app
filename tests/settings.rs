@@ -119,6 +119,9 @@ fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
         trust_mode,
         label: "Mock rig".to_string(),
         offer_credential: false,
+        token: zeroize::Zeroizing::new(String::new()),
+        remember: false,
+        fingerprint: None,
     }
 }
 
