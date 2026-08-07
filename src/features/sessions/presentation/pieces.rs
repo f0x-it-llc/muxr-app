@@ -521,7 +521,14 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
 ///
 /// The `+` is amber because it is the call to action; the label beside it is
 /// muted. See [`super::chrome::dashed_box`] for why the outline is hand-drawn.
-pub(super) fn new_session_row(colors: &Palette) -> AnyView<SessionsState> {
+///
+/// `read_only` "disables" it the same way `ui::dialogs`' submit button does
+/// (that module's framework-gap note: frust's `Button` has no disabled
+/// variant) — a no-op `on_tap` is the behavioral half; the same whole-element
+/// dim [`session_card`] uses for an idle card ([`IDLE_OPACITY`]) is the
+/// visual half, one "this is inert right now" language for the screen rather
+/// than a second one invented just for read-only affordances.
+pub(super) fn new_session_row(colors: &Palette, read_only: bool) -> AnyView<SessionsState> {
     let theme = active_theme();
     let label = row(vec![
         inflexible(text(NEW_SESSION_PLUS).style(inked(&theme.type_scale.body_small, colors.amber))),
@@ -530,7 +537,7 @@ pub(super) fn new_session_row(colors: &Palette) -> AnyView<SessionsState> {
             text(NEW_SESSION_LABEL).style(inked(&theme.type_scale.body_small, colors.fg_muted)),
         ),
     ]);
-    any(GestureDetector(dashed_box(
+    let dashed = GestureDetector(dashed_box(
         Padding(
             EdgeInsets::all(NEW_ROW_PAD),
             Align(Alignment::CENTER, label),
@@ -538,7 +545,16 @@ pub(super) fn new_session_row(colors: &Palette) -> AnyView<SessionsState> {
         colors.outline,
         theme.shape.medium,
     ))
-    .on_tap(|state: &mut SessionsState| super::pages::open_create_dialog(state)))
+    .on_tap(move |state: &mut SessionsState| {
+        if !read_only {
+            super::pages::open_create_dialog(state);
+        }
+    });
+    if read_only {
+        any(AnimatedOpacity(IDLE_OPACITY, dashed))
+    } else {
+        any(dashed)
+    }
 }
 
 /// The amber call-to-action mark on the new-session row (`.new-sess-btn b`).
@@ -550,16 +566,28 @@ pub(super) const NEW_SESSION_LABEL: &str = "new session";
 /// What the list shows once every session has been killed. The redesign has no
 /// block for it (its mock is never empty), so this is Glyph's own
 /// [`empty_state`] panel with the same create action the dashed row carries.
-pub(super) fn empty_view() -> AnyView<SessionsState> {
+///
+/// `read_only` "disables" the action the same way [`new_session_row`] does —
+/// see that fn's doc.
+pub(super) fn empty_view(read_only: bool) -> AnyView<SessionsState> {
+    let style = if read_only {
+        ButtonStyle::Ghost
+    } else {
+        ButtonStyle::Primary
+    };
     any(
         empty_state("No sessions", "Create one to start working on this server.")
             .glyph("\u{25a3}")
             .action(
                 button(
                     format!("{NEW_SESSION_PLUS} {NEW_SESSION_LABEL}"),
-                    |state: &mut SessionsState| super::pages::open_create_dialog(state),
+                    move |state: &mut SessionsState| {
+                        if !read_only {
+                            super::pages::open_create_dialog(state);
+                        }
+                    },
                 )
-                .style(ButtonStyle::Primary),
+                .style(style),
             ),
     )
 }
@@ -586,17 +614,29 @@ pub(super) fn sheet_heading(title: impl Into<String>) -> AnyView<AppState> {
 /// treatment the sheet CSS gives its own `.pill`/`.pane-item` rows — and
 /// `destructive` swaps in the danger one (error ink + error hairline), which is
 /// the sheet's only colour cue that Kill is not like its two neighbours.
+/// `disabled` overrides either with `Ghost` (the same "disabled" language
+/// [`new_session_row`] and [`empty_view`] use) — the row stays on screen, a
+/// tap on it just does nothing; the caller's `on_press` is never invoked while
+/// `disabled`.
 pub(super) fn sheet_row(
     label: impl Into<String>,
     destructive: bool,
+    disabled: bool,
     on_press: impl Fn(&mut AppState) + 'static,
 ) -> AnyView<AppState> {
-    let style = if destructive {
+    let style = if disabled {
+        ButtonStyle::Ghost
+    } else if destructive {
         ButtonStyle::Danger
     } else {
         ButtonStyle::Secondary
     };
-    any(button(label.into(), move |state: &mut AppState| on_press(state)).style(style))
+    any(button(label.into(), move |state: &mut AppState| {
+        if !disabled {
+            on_press(state);
+        }
+    })
+    .style(style))
 }
 
 // ---------------------------------------------------------------------------

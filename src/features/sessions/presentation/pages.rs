@@ -90,8 +90,8 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener, use_interval};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, NavigatorController, Padding, Set, SizedBox, WindowMetrics, any, component,
-    flexible, inflexible, safe_area, scroll_view, spawn_local, use_context,
+    FlexView, Get, GetUntracked, NavigatorController, Padding, Set, SizedBox, WindowMetrics, any,
+    component, flexible, inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -289,6 +289,9 @@ impl Component for SessionsScreen {
         let loaded = state.actions.controller.loaded.get();
         let offer = state.connection.credential_offer.get();
         let info = state.connection.server_info.get();
+        // Gates create/rename/kill (never attach) — see `pieces::new_session_row`'s
+        // doc for the disabled-state pattern this and `open_manage_sheet` share.
+        let read_only = state.connection.is_read_only.get();
 
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
@@ -310,14 +313,14 @@ impl Component for SessionsScreen {
             list.push(pieces::credential_banner(label));
         }
         if loaded && sessions.is_empty() {
-            list.push(pieces::empty_view());
+            list.push(pieces::empty_view(read_only));
         } else {
             list.extend(
                 sessions
                     .iter()
                     .map(|session| pieces::session_card(session, &colors)),
             );
-            list.push(pieces::new_session_row(&colors));
+            list.push(pieces::new_session_row(&colors, read_only));
         }
 
         // The *shell's* bar consumes the top window inset on this screen's
@@ -470,7 +473,10 @@ impl Actions {
     /// sheet → dialog (or sheet → `/terminal`) in one rebuild: both ops land in
     /// the same drain, and the poll stays paused throughout, since the mark
     /// taken when the sheet opened is shallower than either depth.
-    pub fn open_manage_sheet(&self, id: &str) {
+    ///
+    /// `read_only` disables the Rename/Kill rows (never Attach) — see
+    /// `pieces::sheet_row`'s doc for the disabled-state pattern.
+    pub fn open_manage_sheet(&self, id: &str, read_only: bool) {
         let Some(session) = self.controller.session(id) else {
             return;
         };
@@ -481,9 +487,9 @@ impl Actions {
         show_sheet(&self.overlays, move |sheet| {
             let heading = pieces::sheet_heading(name.clone());
             let rows = [
-                sheet_action(&actions, sheet, &id, ManageAction::Attach),
-                sheet_action(&actions, sheet, &id, ManageAction::Rename),
-                sheet_action(&actions, sheet, &id, ManageAction::Kill),
+                sheet_action(&actions, sheet, &id, ManageAction::Attach, false),
+                sheet_action(&actions, sheet, &id, ManageAction::Rename, read_only),
+                sheet_action(&actions, sheet, &id, ManageAction::Kill, read_only),
             ];
             let mut children = vec![
                 inflexible(heading),
@@ -525,12 +531,15 @@ impl ManageAction {
     }
 }
 
-/// One management-sheet row, wired to `action` for session `id`.
+/// One management-sheet row, wired to `action` for session `id`. `disabled`
+/// is always `false` for [`ManageAction::Attach`] — only
+/// create/rename/kill are read-only-gated (see [`Actions::open_manage_sheet`]).
 fn sheet_action(
     actions: &Actions,
     sheet: &SheetHandle,
     id: &str,
     action: ManageAction,
+    disabled: bool,
 ) -> AnyView<AppState> {
     let actions = actions.clone();
     let sheet = sheet.clone();
@@ -538,6 +547,7 @@ fn sheet_action(
     pieces::sheet_row(
         action.label(),
         action.destructive(),
+        disabled,
         move |_app: &mut AppState| {
             // Close the sheet first: the dialog (or the terminal route) takes its
             // place in the same rebuild — see `open_manage_sheet`'s docs.
@@ -569,9 +579,13 @@ pub(super) fn open_create_dialog(state: &mut SessionsState) {
     state.actions.open_create_dialog();
 }
 
-/// Open the management sheet for `id` — a card long-press.
+/// Open the management sheet for `id` — a card long-press. Reads the
+/// connection's current read-only state (untracked: a one-shot decision at
+/// the moment the sheet opens, like `open_rename_dialog`'s own re-read of the
+/// current name).
 pub(super) fn open_manage_sheet(state: &mut SessionsState, id: &str) {
-    state.actions.open_manage_sheet(id);
+    let read_only = state.connection.is_read_only.get_untracked();
+    state.actions.open_manage_sheet(id, read_only);
 }
 
 /// Push the `/terminal` route for session `id` onto the app's page stack,
