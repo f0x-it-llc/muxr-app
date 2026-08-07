@@ -795,6 +795,8 @@ mod tests {
     use super::*;
     use crate::connection::{ConnectTarget, TrustMode};
 
+    /// A connect target the mock backend accepts — it authenticates nothing, so
+    /// the credential fields are empty.
     fn target() -> ConnectTarget {
         ConnectTarget {
             host: "mock.example".to_string(),
@@ -802,6 +804,9 @@ mod tests {
             trust_mode: TrustMode::System,
             label: "Mock rig".to_string(),
             offer_credential: false,
+            token: zeroize::Zeroizing::new(String::new()),
+            remember: false,
+            fingerprint: None,
         }
     }
 

@@ -13,8 +13,9 @@
 //! to grow into.
 //!
 //! This file is the **composition root**: `Component::init` publishes the
-//! app-scoped mock [`connection::ConnectionController`] via
-//! [`connection::provide_connection_controller`], calls each feature's own
+//! app-scoped [`connection::ConnectionController`] via
+//! [`connection::provide_connection_controller`] (and bridges its failures to
+//! the app's toasts, since it outlives every screen), calls each feature's own
 //! [`features::connect::di::provide`]-shaped wiring stub, then builds the
 //! [`Router`]/[`NavigatorController`] pair through
 //! [`routes::install_app_router`] (which wires the session guard — closed over
@@ -114,7 +115,7 @@ pub struct AppState {
     /// The same handle every screen resolves through [`routes::app_nav`], so
     /// the bar and the screens share one route-meta mirror.
     nav_handle: routes::Nav,
-    /// The app-scoped mock connection handle, for the bar's `/sessions` host
+    /// The app-scoped connection handle, for the bar's `/sessions` host
     /// title. Resolved in `init` (never from a build-time context read), the
     /// same discipline every screen follows.
     connection: Arc<connection::ConnectionController>,
@@ -232,12 +233,25 @@ impl Component for MuxrApp {
     type State = AppState;
 
     fn init(&self) -> AppState {
-        // App-scoped mock connection state, published once under the root
-        // owner (see `connection`'s module docs) — reachable from any screen
-        // via `use_context`, and handed *by value* to the session guard below,
+        // App-scoped connection state, published once under the root owner
+        // (see `connection`'s module docs) — reachable from any screen via
+        // `use_context`, and handed *by value* to the session guard below,
         // which must stay safe to consult from a press handler's owner-less
         // call stack and so never reads context itself.
         let connection = connection::provide_connection_controller();
+
+        // The connection's failure→toast bridge. A screen's own controller
+        // binds one per mount (`use_failure_listener`); this handle outlives
+        // every screen, so its subscription is made once here and deliberately
+        // leaked for the process's life. Every emission happens on the UI
+        // thread (the connection controller's coordinator is the only thing
+        // that settles a connect), which is what makes the thread-local
+        // `app_toasts` handle the right one — see `ui::toasts`' module docs.
+        connection
+            .core()
+            .failures()
+            .subscribe(|failure: &failure::AppFailure| ui::toasts::app_toasts().raise(failure))
+            .forget();
 
         // Each feature's own composition-root wiring seam — empty today (see
         // each `di.rs`'s doc), grows real repo construction once a feature's

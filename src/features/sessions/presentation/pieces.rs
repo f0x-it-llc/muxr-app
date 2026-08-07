@@ -646,6 +646,8 @@ pub fn picker_heading(count: usize) -> AnyView<crate::AppState> {
 mod tests {
     use super::*;
 
+    /// The strip renders five of [`ServerInfo`]'s facts; the rest belong to
+    /// screens that are not this one, so this fixture leaves them empty.
     fn info(mode: TrustMode) -> ServerInfo {
         ServerInfo {
             endpoint: "100.71.31.57:50051".to_string(),
@@ -653,6 +655,10 @@ mod tests {
             tls_label: "Trust on first use".to_string(),
             version: "zellij 0.44.3".to_string(),
             latency_ms: 36,
+            backend_versions: Vec::new(),
+            available_backends: Vec::new(),
+            capabilities: std::collections::BTreeSet::new(),
+            is_read_only: false,
         }
     }
 
