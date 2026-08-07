@@ -3,9 +3,11 @@
 //! [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed)
 //! port, with a bounded reconnect schedule.
 //!
-//! Not mounted by the `/terminal` screen yet — `presentation::controller`'s
-//! `LiveSession` still constructs [`DemoFeed`](super::demo_feed::DemoFeed),
-//! and the cutover is its own step. This module is the transport and its
+//! Constructed by `presentation::controller`'s `LiveSession::enter` for a
+//! real attached session — the route carries `?session=<id>` and the app
+//! holds a live client; [`DemoFeed`](super::demo_feed::DemoFeed) is what the
+//! overflow menu's "Demo session" row (and any session `LiveSession` can't
+//! attach to) replays instead. This module is the transport and its
 //! fixture-backed tests.
 //!
 //! # The wire contract

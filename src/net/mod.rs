@@ -14,10 +14,15 @@
 //! - [`error`] — the one place a `tonic::Status` becomes an
 //!   [`AppFailure`](crate::failure::AppFailure).
 //!
-//! No feature's `data` layer consumes it yet — every repository in the app is
-//! still the in-memory mock `docs/ARCHITECTURE.md`'s Planned section describes,
-//! and the repository implementations that replace them are what joins this
-//! module next.
+//! Consumed directly by three feature `data` layers — `sessions`'
+//! `GrpcSessionsRepository`, `settings`'s `GrpcAuthTokensRepository`, and
+//! `terminal`'s `GrpcTerminalFeed`/`GrpcTerminalRepository` — plus
+//! `connection.rs`'s own `NetConnectionBackend`, the dial/`Login`/timed
+//! `GetVersion` flow built on this module's `client`/`auth`/`tls`/`channel`
+//! layers. `connect`'s data layer never imports this module: it stores a pin
+//! fingerprint in the same hex shape `tls` accepts, but mapping a saved
+//! posture onto a `TrustConfig` happens at the connect seam, in
+//! `connection.rs`.
 //!
 //! **Layer position.** This is app-level infrastructure, beside
 //! `connection.rs`/`failure.rs`, not a feature's `data` layer: more than one
