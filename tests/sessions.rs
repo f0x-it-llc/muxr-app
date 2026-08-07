@@ -955,8 +955,9 @@ fn accepting_the_credential_offer_clears_it_and_confirms_by_toast() {
     assert!(
         pending
             .iter()
-            .any(|m| m.contains("Mock rig") && m.contains("mock")),
-        "…and says so, honestly labelled as a mock save: {pending:?}"
+            .any(|m| m.contains("Saving") && m.contains("Mock rig")),
+        "…and announces the hand-off (the gated save reports its own outcome; \
+         the tap-time toast must not claim a result): {pending:?}"
     );
 }
 
