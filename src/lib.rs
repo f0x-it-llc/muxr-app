@@ -42,6 +42,10 @@
 pub mod connection;
 pub mod failure;
 pub mod features;
+// `net` is `pub` for the same reason every module here is: the headless suites
+// in `tests/` are separate crates, and a fixture that stands a fake `muxrd` up
+// needs the generated service types by name.
+pub mod net;
 pub mod responsive;
 pub mod routes;
 pub mod ui;

@@ -1,0 +1,583 @@
+// VENDORED COPY — the body below this block is byte-for-byte upstream.
+//
+// Source: `muxrd/proto/muxr.proto` in the `f0x-it-llc/muxr-core` repo, rev
+// `ec6b032`. `build.rs` compiles this file (protox -> tonic-prost-build) into
+// the `muxr.v1` module `src/net/proto.rs` includes; it is the single
+// definition of the wire this app speaks, so nothing else in the tree may
+// restate a field number, an enum value or an RPC name.
+//
+// Refresh recipe: re-copy the whole file from the newer muxr-core rev, keep
+// this block, and update the rev recorded above — never hand-patch a message
+// in place. A hand-patch makes this copy silently disagree with the server;
+// a wholesale re-copy makes any wire drift surface at build time instead, as a
+// codegen error or a type error at the call sites that consumed the old shape.
+
+syntax = "proto3";
+
+package muxr.v1;
+
+// Muxr — the muxrd gRPC service.
+//
+// Phase B coverage:
+//   GetVersion     — plaintext; no auth required
+//   Login          — stub (B3)
+//   AttachTerminal — stub (B2)
+//
+// Phase C coverage:
+//   ListSessions   — enumerate live + resurrectable sessions (C1)
+//   GetLayout      — typed tab/pane tree for a session (C1)
+service Muxr {
+  // Returns server + linked zellij version info. No auth.
+  rpc GetVersion(Empty) returns (VersionInfo);
+
+  // Exchange an auth_token for a session_token. No auth. (B3)
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  // Bidirectional stream: mobile → server (ClientFrame), server → mobile
+  // (ServerFrame). Requires bearer auth. (B2)
+  rpc AttachTerminal(stream ClientFrame) returns (stream ServerFrame);
+
+  // List all live and resurrectable zellij sessions. Requires bearer auth. (C1)
+  rpc ListSessions(Empty) returns (SessionList);
+
+  // Return the typed tab/pane layout for a specific session. Requires bearer auth. (C1)
+  rpc GetLayout(SessionRef) returns (Layout);
+
+  // ─── Phase D1: pane ops (id-targeted) ──────────────────────────────────────
+  // All require bearer auth.  MUTATING ops (everything except FocusPane) reject
+  // read-only session tokens with permission_denied.
+
+  // Write raw bytes to a specific pane. MUTATING.
+  rpc WriteToPane(WriteToPaneReq) returns (ActionAck);
+  // Focus a specific pane. Allowed for read-only tokens.
+  rpc FocusPane(PaneTarget) returns (ActionAck);
+  // Close a specific pane. MUTATING.
+  rpc ClosePane(PaneTarget) returns (ActionAck);
+  // Open a new pane; the new pane id is returned in ActionAck.info. MUTATING.
+  rpc NewPane(NewPaneReq) returns (ActionAck);
+  // Rename a specific pane. MUTATING.
+  rpc RenamePane(RenamePaneReq) returns (ActionAck);
+  // Resize a specific pane. MUTATING.
+  rpc ResizePane(ResizePaneReq) returns (ActionAck);
+  // Toggle a pane between floating and embedded. MUTATING.
+  rpc TogglePaneFloating(PaneTarget) returns (ActionAck);
+  // Toggle fullscreen for a pane. MUTATING.
+  // Carries an optional floating-pane hint so the relay can skip a live IPC
+  // query on the hot path (Bug 2c — interaction latency).
+  rpc TogglePaneFullscreen(ToggleFullscreenReq) returns (ActionAck);
+
+  // ─── Phase D2: tab ops ─────────────────────────────────────────────────────
+  // All require bearer auth.  MUTATING (gated on read-only).
+
+  // Open a new tab; the new tab id/name surface in ActionAck.info. MUTATING.
+  rpc NewTab(NewTabReq) returns (ActionAck);
+  // Close a tab by id. MUTATING.
+  rpc CloseTab(TabTarget) returns (ActionAck);
+  // Switch focus to a tab by id. MUTATING.
+  rpc GoToTab(TabTarget) returns (ActionAck);
+  // Rename a tab by id. MUTATING.
+  rpc RenameTab(RenameTabReq) returns (ActionAck);
+
+  // ─── Phase D2: scroll ──────────────────────────────────────────────────────
+  // Allowed for read-only tokens.
+
+  // Scroll a pane. Allowed for read-only tokens.
+  rpc ScrollPane(ScrollReq) returns (ActionAck);
+
+  // ─── Phase D2: session lifecycle ───────────────────────────────────────────
+  // All require bearer auth.  MUTATING (gated on read-only).
+
+  // Rename the current session. MUTATING.
+  rpc RenameSession(RenameSessionReq) returns (ActionAck);
+  // Kill a named session (removes it). MUTATING.
+  rpc KillSession(SessionRef) returns (ActionAck);
+  // Create a new detached session by name. MUTATING.
+  rpc CreateSession(CreateSessionReq) returns (ActionAck);
+
+  // ─── Spaces (herdr workspaces) ────────────────────────────────────────────
+  // Herdr maps workspaces to spaces; zellij returns an empty SpaceList.
+  // All require bearer auth.  MUTATING ops reject read-only tokens.
+
+  // List all spaces (herdr workspaces) for a session. Zellij returns empty.
+  rpc GetSpaces(SessionRef)       returns (SpaceList);
+  // Switch the active space. MUTATING.
+  rpc SwitchSpace(SwitchSpaceReq) returns (ActionAck);
+  // Create a new space with an optional label. MUTATING.
+  rpc CreateSpace(CreateSpaceReq) returns (ActionAck);
+  // Rename an existing space. MUTATING.
+  rpc RenameSpace(RenameSpaceReq) returns (ActionAck);
+  // Close (delete) a space. MUTATING.
+  rpc CloseSpace(CloseSpaceReq)   returns (ActionAck);
+
+  // ─── Phase F: token management ─────────────────────────────────────────────
+  // Wraps the same zellij `web_authentication_tokens` ops the CLI uses. All
+  // require bearer auth and are ADMIN-gated: read-only session tokens are
+  // rejected with permission_denied.
+
+  // Create a new auth token; the secret is returned ONCE in TokenInfo.token.
+  rpc CreateToken(CreateTokenReq) returns (TokenInfo);
+  // List existing auth tokens (metadata only — never the secret).
+  rpc ListTokens(Empty) returns (TokenList);
+  // Revoke an auth token by name.
+  rpc RevokeToken(RevokeTokenReq) returns (ActionAck);
+}
+
+message Empty {}
+
+// Multiplexer backend that owns a session.
+enum Backend {
+  BACKEND_UNSPECIFIED = 0;
+  BACKEND_ZELLIJ      = 1;
+  BACKEND_HERDR       = 2;
+}
+
+// Version string for one available backend.
+message BackendVersion {
+  Backend backend = 1;
+  string  version = 2;
+}
+
+message VersionInfo {
+  // Semantic version of muxrd itself.
+  string server_version = 1;
+  // Zellij version this server was compiled against (back-compat; = the zellij BackendVersion's value).
+  string zellij_version = 2;
+  // Per-backend versions for all detected backends.
+  repeated BackendVersion backends           = 3;
+  // Detected/usable backends.
+  repeated Backend        available_backends = 4;
+  // Additive server capability flags. Known values:
+  //   "mouse-input" — ClientFrame.mouse is understood on AttachTerminal.
+  // Clients must ignore unknown values.
+  repeated string capabilities = 5;
+}
+
+message LoginRequest {
+  // The persistent auth token created via `zellij-utils web_authentication_tokens`.
+  string auth_token = 1;
+  // If true, session token lives 28 days; otherwise ~5 minutes.
+  bool remember_me = 2;
+}
+
+message LoginResponse {
+  string session_token = 1;
+  // True if the authenticating token is read-only (mutating RPCs are gated
+  // server-side; surfaced so the client can disable mutating controls). (F)
+  bool   is_read_only  = 2;
+}
+
+// ─── Phase F: token-management messages ──────────────────────────────────────
+
+// Metadata for one auth token. `token` is populated ONLY in a CreateToken
+// response (the secret is never returned by ListTokens).
+message TokenInfo {
+  // Human-readable token name.
+  string name           = 1;
+  // The secret token value — populated only on create, empty on list.
+  string token          = 2;
+  // True if this is a read-only token.
+  bool   read_only      = 3;
+  // Creation timestamp as stored by zellij (SQLite DATETIME string), "" if unknown.
+  string created_at     = 4;
+}
+
+// List of tokens returned by ListTokens (metadata only).
+message TokenList {
+  repeated TokenInfo tokens = 1;
+}
+
+// CreateToken request.
+message CreateTokenReq {
+  // Name for the new token.
+  string name      = 1;
+  // If true, create a read-only token.
+  bool   read_only = 2;
+}
+
+// RevokeToken request.
+message RevokeTokenReq {
+  // Name of the token to revoke.
+  string name = 1;
+}
+
+// Client → Server frame on the AttachTerminal stream.
+message ClientFrame {
+  oneof kind {
+    // First frame on any new stream: identify the session + initial dimensions.
+    AttachReq attach = 1;
+    // Raw input bytes (key presses etc.) forwarded to the focused pane.
+    bytes input = 2;
+    // Terminal resize event.
+    Resize resize = 3;
+    // Structured mouse event, routed by the multiplexer to the pane/region
+    // under the coordinates (server capability "mouse-input").
+    MouseInput mouse = 4;
+  }
+}
+
+// Mouse event kind. Only wheel events are sent today; the remaining values
+// are reserved so press/drag support can be added without a wire break.
+enum MouseKind {
+  MOUSE_KIND_WHEEL_UP   = 0;
+  MOUSE_KIND_WHEEL_DOWN = 1;
+}
+
+// Structured mouse event on the AttachTerminal stream. Coordinates are
+// ZERO-BASED cells in this relay client's grid — the same grid that
+// AttachReq/Resize rows+cols established and GetLayout reports. The
+// multiplexer resolves the pane under the position and either forwards the
+// event to the pane's application (if it captured the mouse) or scrolls the
+// pane itself.
+message MouseInput {
+  MouseKind kind = 1;
+  uint32 col     = 2;
+  uint32 row     = 3;
+}
+
+// Identifies the target session and initial terminal dimensions.
+message AttachReq {
+  string session = 1;
+  uint32 rows    = 2;
+  uint32 cols    = 3;
+}
+
+// Terminal resize.
+message Resize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+// Server → Client frame on the AttachTerminal stream.
+message ServerFrame {
+  oneof kind {
+    // Raw ANSI render bytes from the zellij session.
+    bytes render = 1;
+    // Out-of-band control event (Phase C+).
+    ControlEvent control = 2;
+  }
+}
+
+// Out-of-band control event sent from server to client (Phase C+).
+message ControlEvent {
+  string kind    = 1;
+  string payload = 2;
+}
+
+// ─── Phase C1: session + layout types ────────────────────────────────────────
+
+// Reference to a named zellij session (used in GetLayout).
+message SessionRef {
+  string session = 1;
+  // optional; echoed from AttachTerminal's minted id to route per-connection (empty = legacy/fallback routing)
+  string connection_id = 2;
+}
+
+// List of sessions returned by ListSessions.
+message SessionList {
+  repeated SessionInfo sessions = 1;
+}
+
+// Metadata for a single zellij session.
+message SessionInfo {
+  // Session name.
+  string name         = 1;
+  // Approximate age of the session in seconds (from socket mtime).
+  uint64 age_secs     = 2;
+  // True if this is a resurrectable (dead but recoverable) session.
+  bool resurrectable  = 3;
+  // ─── Phase F enrichment (live sessions only; 0/false for resurrectable) ────
+  // Number of tabs in the session (from a layout query).
+  uint32 tab_count          = 4;
+  // Total number of panes across all tabs.
+  uint32 pane_count         = 5;
+  // True if any tab has an active bell notification.
+  bool   has_bell           = 6;
+  // True if this is the session the requesting token is attached to.
+  bool   is_current         = 7;
+  // Count of mobile clients currently attached to this session THROUGH
+  // muxrd (active AttachTerminal relays), not zellij-level clients.
+  uint32 connected_clients  = 8;
+  // Multiplexer backend that owns this session (for client tint).
+  Backend backend           = 9;
+  // Opaque backend-qualified routing key (e.g. "zellij:dev").
+  string  id                = 10;
+  // Number of spaces (herdr workspaces) for this session; 0 for backends
+  // without a space layer (e.g. zellij). Populated by ListSessions so the
+  // client can show a space count on herdr session cards without a separate
+  // GetSpaces call.
+  uint32 space_count        = 11;
+}
+
+// Full tab/pane layout for a session (returned by GetLayout).
+message Layout {
+  repeated TabMsg tabs = 1;
+}
+
+// One tab in the layout.
+message TabMsg {
+  // 0-indexed tab position.
+  uint32 position     = 1;
+  // Display name of the tab.
+  string name         = 2;
+  // Whether this tab is currently active/focused.
+  bool   active       = 3;
+  // Whether this tab has an active (persistent) bell notification.
+  bool   has_bell     = 4;
+  // Number of suppressed (hidden) panes.
+  uint32 panes_to_hide = 5;
+  // Stable identifier for this tab (from TabInfo.tab_id).
+  uint32 tab_id       = 6;
+  // Panes in this tab.
+  repeated PaneMsg panes = 7;
+  // Whether a pane in this tab is currently fullscreened (TabInfo.is_fullscreen_active).
+  bool   fullscreen_active       = 8;
+  // Whether floating panes are visible in this tab (TabInfo.are_floating_panes_visible).
+  bool   floating_panes_visible  = 9;
+}
+
+// One pane inside a tab.
+message PaneMsg {
+  // Pane id (unique within pane kind — terminal or plugin).
+  uint32 id           = 1;
+  // Display title of the pane.
+  string title        = 2;
+  // Whether this pane is focused within its layer (tiled/floating).
+  bool   is_focused   = 3;
+  // Whether the pane is floating (vs tiled).
+  bool   is_floating  = 4;
+  // Whether the pane has exited (command panes only).
+  bool   exited       = 5;
+  // Command running in the pane (if it's a command/terminal pane), else empty.
+  string command      = 6;
+  // Current working directory of the pane, if available.
+  string cwd          = 7;
+  // Geometry: x position (pane_x from PaneInfo).
+  uint32 x            = 8;
+  // Geometry: y position (pane_y from PaneInfo).
+  uint32 y            = 9;
+  // Geometry: rows.
+  uint32 rows         = 10;
+  // Geometry: columns.
+  uint32 cols         = 11;
+  // Whether this is a plugin pane (vs terminal).
+  bool   is_plugin    = 12;
+  // Whether this pane is currently fullscreened (PaneInfo.is_fullscreen).
+  bool   is_fullscreen = 13;
+}
+
+// ─── Phase D1: action targets + ack ──────────────────────────────────────────
+
+// Identifies a specific pane to target with an action.
+message PaneTarget {
+  // Session the pane lives in.
+  string session   = 1;
+  // Pane id (unique within its kind — terminal or plugin).
+  uint32 pane_id   = 2;
+  // True if this is a plugin pane → PaneId::Plugin; else PaneId::Terminal.
+  bool   is_plugin = 3;
+  // optional; echoed from AttachTerminal's minted id to route per-connection (empty = legacy/fallback routing)
+  string connection_id = 4;
+}
+
+// Toggle-fullscreen request with an optional floating-pane hint (Bug 2c).
+//
+// The relay's fullscreen decision needs to know, for the target pane: whether
+// it is floating, whether floating panes are visible in its tab, and whether it
+// is the focused floating pane. The mobile client already polls all three
+// (Pane.is_floating, Tab.floating_panes_visible, Pane.is_focused), so it sends
+// them here to spare the relay a synchronous IPC query on the hot path.
+//
+// has_floating_hint is the explicit presence flag: because proto3 bools default
+// to false, an all-false hint is indistinguishable from "not provided". A caller
+// that knows the floating state MUST set has_floating_hint=true; the relay then
+// trusts the three bools. When has_floating_hint=false (e.g. a target-only
+// request) the relay ignores them and runs a live IPC query — so a hint-less
+// caller can never silently mis-route a floating pane onto the tiled path.
+message ToggleFullscreenReq {
+  PaneTarget target = 1;
+  // Pane.is_floating for the target pane.
+  bool target_is_floating = 2;
+  // Tab.floating_panes_visible for the target pane's tab.
+  bool floating_visible = 3;
+  // True iff the target is the currently-focused, visible floating pane
+  // (target_is_floating && floating_visible && pane.is_focused).
+  bool target_is_focused_floating = 4;
+  // True iff the three fields above are populated and should be trusted. When
+  // false the relay falls back to a live floating-state query.
+  bool has_floating_hint = 5;
+}
+
+// Identifies a specific tab to target with an action (Phase D2).
+message TabTarget {
+  string session = 1;
+  uint64 tab_id  = 2;
+  // optional; echoed from AttachTerminal's minted id to route per-connection (empty = legacy/fallback routing)
+  string connection_id = 3;
+}
+
+// Generic acknowledgement returned by action RPCs.
+message ActionAck {
+  // True if the action completed without a surfaced error.
+  bool   ok    = 1;
+  // Surfaced error message (LogError), empty if none.
+  string error = 2;
+  // Info payload (Log) — e.g. a newly-created pane id "terminal_<n>", empty if none.
+  string info  = 3;
+}
+
+// WriteToPane request.
+message WriteToPaneReq {
+  PaneTarget target = 1;
+  // Raw bytes to write to the pane (e.g. keystrokes, including newlines).
+  bytes      data   = 2;
+}
+
+// NewPane request.
+message NewPaneReq {
+  string session   = 1;
+  // If true, open a floating pane; else a focused tiled pane.
+  bool   floating  = 2;
+  // Optional name for the new pane.
+  string pane_name = 3;
+}
+
+// RenamePane request.
+message RenamePaneReq {
+  PaneTarget target = 1;
+  string     name   = 2;
+}
+
+// Resize direction (which border / direction to grow or shrink).
+enum ResizeDirection {
+  RESIZE_DIRECTION_UNSPECIFIED = 0;
+  RESIZE_DIRECTION_LEFT        = 1;
+  RESIZE_DIRECTION_RIGHT       = 2;
+  RESIZE_DIRECTION_UP          = 3;
+  RESIZE_DIRECTION_DOWN        = 4;
+}
+
+// Whether to increase or decrease the pane size.
+enum ResizeKind {
+  RESIZE_KIND_INCREASE = 0;
+  RESIZE_KIND_DECREASE = 1;
+}
+
+// ResizePane request.
+message ResizePaneReq {
+  PaneTarget      target    = 1;
+  ResizeKind      resize    = 2;
+  // Direction is optional; UNSPECIFIED resizes uniformly.
+  ResizeDirection direction = 3;
+}
+
+// ─── Phase D2: tab + scroll + session-lifecycle types ────────────────────────
+
+// NewTab request.
+message NewTabReq {
+  string session  = 1;
+  // Optional name for the new tab.
+  string tab_name = 2;
+}
+
+// RenameTab request.
+message RenameTabReq {
+  string session = 1;
+  uint64 tab_id  = 2;
+  string name    = 3;
+}
+
+// Scroll direction enum.
+enum ScrollDirection {
+  SCROLL_DIRECTION_UP            = 0;
+  SCROLL_DIRECTION_DOWN          = 1;
+  SCROLL_DIRECTION_TO_TOP        = 2;
+  SCROLL_DIRECTION_TO_BOTTOM     = 3;
+  SCROLL_DIRECTION_PAGE_UP       = 4;
+  SCROLL_DIRECTION_PAGE_DOWN     = 5;
+  SCROLL_DIRECTION_HALF_PAGE_UP  = 6;
+  SCROLL_DIRECTION_HALF_PAGE_DOWN = 7;
+}
+
+// ScrollPane request.
+message ScrollReq {
+  PaneTarget      target    = 1;
+  ScrollDirection direction = 2;
+}
+
+// RenameSession request.
+message RenameSessionReq {
+  // Session to rename (must match the bearer token's session).
+  string session = 1;
+  // New name for the session.
+  string name    = 2;
+}
+
+// CreateSession request.
+message CreateSessionReq {
+  // Name for the new session.
+  string name   = 1;
+  // Optional layout file path (passed as --layout to zellij; unused if empty).
+  string layout = 2;
+  // Which backend to create the session on (required when >1 backend available).
+  Backend backend = 3;
+}
+
+// ─── Spaces (herdr workspaces) ────────────────────────────────────────────────
+// A Space is a herdr workspace.  Zellij sessions always return an empty list.
+
+// One herdr workspace / space.
+message Space {
+  // Opaque herdr workspace id.
+  string id     = 1;
+  // Display name of the workspace.
+  string name   = 2;
+  // Whether this is the currently-active workspace.
+  bool   active = 3;
+}
+
+// List of spaces returned by GetSpaces.
+message SpaceList {
+  repeated Space spaces = 1;
+}
+
+// SwitchSpace request — activate a different space.
+message SwitchSpaceReq {
+  // Backend-qualified session id (echoed verbatim from SessionInfo.id).
+  string session       = 1;
+  // Opaque space id to switch to.
+  string space_id      = 2;
+  // optional; per-connection routing (echoed from AttachTerminal connection_id).
+  string connection_id = 3;
+}
+
+// CreateSpace request — create a new herdr workspace.
+message CreateSpaceReq {
+  // Backend-qualified session id.
+  string session       = 1;
+  // Human-readable label for the new space (may be empty).
+  string label         = 2;
+  // optional; per-connection routing.
+  string connection_id = 3;
+}
+
+// RenameSpace request — rename an existing space.
+message RenameSpaceReq {
+  // Backend-qualified session id.
+  string session       = 1;
+  // Opaque space id to rename.
+  string space_id      = 2;
+  // New display label.
+  string label         = 3;
+  // optional; per-connection routing.
+  string connection_id = 4;
+}
+
+// CloseSpace request — close (delete) a space.
+message CloseSpaceReq {
+  // Backend-qualified session id.
+  string session       = 1;
+  // Opaque space id to close.
+  string space_id      = 2;
+  // optional; per-connection routing.
+  string connection_id = 3;
+}
