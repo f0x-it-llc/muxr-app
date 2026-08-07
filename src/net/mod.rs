@@ -13,6 +13,9 @@
 //! - [`client`] — [`MuxrClient`], the handle everything above this layer holds.
 //! - [`error`] — the one place a `tonic::Status` becomes an
 //!   [`AppFailure`](crate::failure::AppFailure).
+//! - [`control`] — the two `ControlEvent.kind` strings an `AttachTerminal`
+//!   stream carries, which the proto types as a free-form `string` and so
+//!   cannot generate.
 //!
 //! Consumed directly by three feature `data` layers — `sessions`'
 //! `GrpcSessionsRepository`, `settings`'s `GrpcAuthTokensRepository`, and
@@ -34,6 +37,12 @@
 //! (`frust_plugin::android`, for the system-CA verifier's JNI initialization)
 //! is not that, and is the one framework crate this module may name.
 //!
+//! **The dependency runs one way.** A feature's `data` layer imports this
+//! module; nothing under `src/net` — the `#[cfg(test)]` fixture included —
+//! imports `crate::features::*`. A wire fact both sides need is hoisted here
+//! (see [`control`]) rather than reached back for, which keeps the rule
+//! greppable: zero `features::` imports in this directory.
+//!
 //! `connection.rs`'s own `TrustMode` is deliberately **not** referenced here:
 //! it is a mock connection's user-facing posture label, and mapping it onto
 //! [`TrustConfig`] belongs to whoever builds a real connect request.
@@ -41,6 +50,7 @@
 pub mod auth;
 pub mod channel;
 pub mod client;
+pub mod control;
 pub mod error;
 pub mod proto;
 pub mod tls;

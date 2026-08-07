@@ -34,12 +34,14 @@
 //! user is actually looking at.
 //!
 //! **Two control kinds are understood** ([`CONTROL_CONNECTION_ID`],
-//! [`CONTROL_EXIT`]); every other kind is *ignored*, never an error, so a
-//! newer `muxrd` can add one without breaking this client. The connection id
-//! is captured for the caller ([`GrpcTerminalFeed::connection_id`]) — the
-//! per-connection routing token `PaneTarget`-style requests echo back — and is
-//! never surfaced as terminal output. `exit` is a clean server-side close:
-//! status [`FeedStatus::Closed`], and **no** reconnect.
+//! [`CONTROL_EXIT`], both owned by [`crate::net::control`] since the fixture
+//! that sends them must agree with the feed that parses them); every other kind
+//! is *ignored*, never an error, so a newer `muxrd` can add one without
+//! breaking this client. The connection id is captured for the caller
+//! ([`GrpcTerminalFeed::connection_id`]) — the per-connection routing token
+//! `PaneTarget`-style requests echo back — and is never surfaced as terminal
+//! output. `exit` is a clean server-side close: status [`FeedStatus::Closed`],
+//! and **no** reconnect.
 //!
 //! # Reconnect: a fixed, jitter-free schedule
 //!
@@ -52,6 +54,12 @@
 //! "retry" affordance. Running off the end of the schedule is
 //! [`FeedStatus::Disconnected`]: the loop stops attempting and parks until
 //! `reset_backoff` re-arms it.
+//!
+//! **A drop reports [`FeedStatus::Reconnecting`] for the whole step, nap
+//! included** — not just for the attach attempt at either end of it. The status
+//! is what the screen's link strip renders, and a strip that renders nothing
+//! for [`FeedStatus::Connected`] would otherwise leave a frozen grid with no
+//! banner and no retry for up to 16 seconds at the tail of the schedule.
 //!
 //! `UNAUTHENTICATED` short-circuits all of that. A credential that the server
 //! refuses will refuse the next four attempts too, so the loop stops at once,
@@ -78,6 +86,42 @@
 //! reports `0`. That synchronous drain is an *optimization* for a feed that
 //! can answer instantly, never a contract this port carries — see
 //! `presentation::term`'s "The one exception: a synchronous echo drain".
+//!
+//! # Inbound flow control: the reader pauses, nothing is dropped
+//!
+//! That shared buffer is filled by the *server*, at whatever rate it likes, and
+//! drained by a UI pump that can stop entirely (a backgrounded app, a torn-down
+//! screen whose pump task outlives it). Left uncapped it is a
+//! network-controlled allocation, so the queue is accounted in **bytes** and
+//! bounded by [`INBOUND_HIGH_WATER`]/[`INBOUND_LOW_WATER`]: at the high-water
+//! mark the pump stops reading the stream, and it resumes only once a drain has
+//! brought the queue back under the low-water mark. Pauses are counted
+//! ([`GrpcTerminalFeed::read_pauses`]), never silent.
+//!
+//! **Backpressure, not a drop policy.** Nothing may be discarded here: the wire
+//! has no resync or refresh request (`ClientFrame` is `attach`/`input`/
+//! `resize`/`mouse`), so the only way to re-obtain the grid is a fresh attach,
+//! and this feed's own drain contract is to coalesce nothing — dropping
+//! arbitrary raw ANSI would silently corrupt the emulator with no way back.
+//! Not reading, on the other hand, is a thing HTTP/2 already knows how to
+//! express: the receive window closes and the server stops sending, which is
+//! precisely the pressure that belongs on whoever is producing too fast.
+//!
+//! **The pause gates the whole stream read, control frames included.** A
+//! `ServerFrame` stream is one sequence — there is no way to keep reading
+//! `control` while holding back `render` — so a [`CONTROL_EXIT`] behind a
+//! flood is seen when the reader resumes, not during the pause. That is
+//! acceptable: the pause only exists while the UI is not draining, and the
+//! first drain both resumes the reader and delivers the close. A
+//! [`shutdown`](GrpcTerminalFeed::shutdown) (which [`Drop`] calls) wakes a
+//! paused reader immediately, so teardown never waits on a drain that will
+//! never come.
+//!
+//! **A frame bigger than the cap is still accepted.** The high-water mark is a
+//! pause threshold, never an admission filter: the check happens *before* a
+//! read, so a single oversized frame lands whole and the queue simply sits over
+//! its mark until the next drain. Rejecting it would be the deadlock the
+//! bound is meant to prevent.
 //!
 //! # Why the loop is spelled by hand
 //!
@@ -116,17 +160,8 @@ use tonic::Code;
 
 use crate::features::terminal::domain::feed::TerminalFeed;
 use crate::net::MuxrClient;
+use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::{AttachReq, ClientFrame, Resize, ServerFrame, client_frame, server_frame};
-
-/// The control event carrying this stream's server-minted connection id — the
-/// per-connection routing token `muxrd` expects echoed back on a later
-/// pane/tab/space request (`proto/muxr.proto`'s own "echoed from
-/// AttachTerminal connection_id" fields).
-pub const CONTROL_CONNECTION_ID: &str = "connection_id";
-
-/// The control event announcing a clean server-side close. Terminal: the feed
-/// goes [`FeedStatus::Closed`] and never reconnects.
-pub const CONTROL_EXIT: &str = "exit";
 
 /// The reconnect schedule: 1, 2, 4, 8, 16 seconds, **no jitter**, matching the
 /// Flutter client's own `terminal_session` timings. See the [module
@@ -148,6 +183,24 @@ pub const RECONNECT_BACKOFF: [Duration; 5] = [
 /// on a dead socket. Dropping is counted
 /// ([`GrpcTerminalFeed::dropped_frames`]), never silent.
 const OUTBOUND_CAPACITY: usize = 256;
+
+/// Queued inbound bytes at which the pump stops reading the stream — the
+/// contract half of the inbound flow control the [module docs](self) describe.
+///
+/// 2 MiB is generous for interactive use and still bounded: the UI drains every
+/// ~33 ms, so reaching this mark means a burst arriving faster than ~60 MB/s or
+/// a UI that has stopped draining altogether — the two cases worth pausing for.
+/// It is a **pause** threshold, not an admission filter: a single frame larger
+/// than this is still accepted whole.
+pub const INBOUND_HIGH_WATER: usize = 2 * 1024 * 1024;
+
+/// Queued inbound bytes the drain side must bring the queue back under before
+/// the pump resumes reading.
+///
+/// A quarter of [`INBOUND_HIGH_WATER`], so a queue hovering at the mark cannot
+/// turn into a stop/start read for every single frame. In practice a drain
+/// empties the queue outright, which is well under this.
+pub const INBOUND_LOW_WATER: usize = INBOUND_HIGH_WATER / 4;
 
 /// Where a feed's session currently stands. Plain shared state, polled by the
 /// screen that owns the feed — deliberately not a signal (see the [module
@@ -276,6 +329,22 @@ impl GrpcTerminalFeed {
         self.shared.state().inbound.len()
     }
 
+    /// Bytes those frames hold — what [`INBOUND_HIGH_WATER`] bounds. A
+    /// diagnostic/test accessor, never read by production code.
+    pub fn pending_bytes(&self) -> usize {
+        self.shared.state().inbound_bytes
+    }
+
+    /// Times the pump stopped reading the stream because the queue had reached
+    /// [`INBOUND_HIGH_WATER`] — a diagnostic counter in the same style as
+    /// [`dropped_frames`](Self::dropped_frames), never read by production code.
+    ///
+    /// A non-zero count is the signal that a producer outran this session's
+    /// drain; nothing was lost, the server was simply held off.
+    pub fn read_pauses(&self) -> u64 {
+        self.shared.state().read_pauses
+    }
+
     /// The feed and its pump future, unspawned. The one construction path;
     /// [`attach`](Self::attach) is this plus [`frust::spawn`].
     fn build(pump: Pump) -> (Self, impl Future<Output = ()> + Send + use<>) {
@@ -317,6 +386,12 @@ impl TerminalFeed for GrpcTerminalFeed {
     /// pump above it already does (`presentation::term`'s one-generation-per-wake
     /// rule), and splitting or merging ANSI here would only hide what the
     /// server actually sent.
+    ///
+    /// This is also the resume half of the inbound flow control (see the
+    /// [module docs](self)): the swap empties the queue, so a pump parked on
+    /// [`INBOUND_HIGH_WATER`] is woken here. Waking a `Notify` is not a
+    /// reactive write — this still runs on the UI thread having touched no
+    /// signal.
     fn drain_output(&mut self, sink: &mut dyn FnMut(&[u8])) -> usize {
         {
             let mut state = self.shared.state();
@@ -324,7 +399,12 @@ impl TerminalFeed for GrpcTerminalFeed {
                 return 0;
             }
             std::mem::swap(&mut state.inbound, &mut self.scratch);
+            state.inbound_bytes = 0;
         }
+        // Unconditional rather than only on a high-to-low crossing: a stored
+        // permit costs one extra re-check on the pump's next pause, whereas a
+        // missed wake would hold the reader off until the drain after this one.
+        self.shared.drained.notify_one();
         let writes = self.scratch.len();
         for chunk in &self.scratch {
             sink(chunk);
@@ -415,6 +495,13 @@ struct Shared {
     /// `notify_waiters`) stores a permit when the pump is between waits, so a
     /// retry or a shutdown raised at the wrong instant is never lost.
     wake: Notify,
+    /// The drain side's own wake, raised by
+    /// [`drain_output`](TerminalFeed::drain_output) and awaited only by a pump
+    /// paused on [`INBOUND_HIGH_WATER`]. Separate from [`Shared::wake`] because
+    /// the two mean different things: a `wake` is read through
+    /// [`Shared::take_wake`] and can consume a retry, while a drain is pure
+    /// capacity news.
+    drained: Notify,
     shutdown: AtomicBool,
     retry: AtomicBool,
 }
@@ -422,6 +509,10 @@ struct Shared {
 struct State {
     /// Render payloads awaiting the next drain, in arrival order.
     inbound: VecDeque<Vec<u8>>,
+    /// Bytes held across every entry of [`State::inbound`] — the quantity the
+    /// flow control bounds, kept alongside rather than recomputed, since the
+    /// pump consults it before every read.
+    inbound_bytes: usize,
     status: FeedStatus,
     connection_id: Option<String>,
     cols: u16,
@@ -434,6 +525,7 @@ struct State {
     finished: bool,
     backoff_step: usize,
     dropped_frames: u64,
+    read_pauses: u64,
 }
 
 /// What a `wake` notification turned out to mean.
@@ -495,6 +587,7 @@ impl Shared {
         Self {
             state: Mutex::new(State {
                 inbound: VecDeque::new(),
+                inbound_bytes: 0,
                 status: FeedStatus::Idle,
                 connection_id: None,
                 cols,
@@ -503,8 +596,10 @@ impl Shared {
                 finished: false,
                 backoff_step: 0,
                 dropped_frames: 0,
+                read_pauses: 0,
             }),
             wake: Notify::new(),
+            drained: Notify::new(),
             shutdown: AtomicBool::new(false),
             retry: AtomicBool::new(false),
         }
@@ -544,8 +639,31 @@ impl Shared {
         }
     }
 
+    /// Queue one render payload for the next drain, accounting its bytes.
+    ///
+    /// Always accepts: a frame the pump has already read has nowhere else to
+    /// go, and the bound it may push past is enforced by *not reading the next
+    /// one* (see [`Shared::inbound_saturated`]).
     fn push_render(&self, bytes: Vec<u8>) {
-        self.state().inbound.push_back(bytes);
+        let mut state = self.state();
+        state.inbound_bytes += bytes.len();
+        state.inbound.push_back(bytes);
+    }
+
+    /// Whether the queue has reached [`INBOUND_HIGH_WATER`] — the pump asks
+    /// before every read.
+    fn inbound_saturated(&self) -> bool {
+        self.state().inbound_bytes >= INBOUND_HIGH_WATER
+    }
+
+    /// Whether a drain has brought the queue back under [`INBOUND_LOW_WATER`],
+    /// which is what lets a paused pump start reading again.
+    fn inbound_has_room(&self) -> bool {
+        self.state().inbound_bytes <= INBOUND_LOW_WATER
+    }
+
+    fn count_read_pause(&self) {
+        self.state().read_pauses += 1;
     }
 
     fn set_connection_id(&self, id: String) {
@@ -598,7 +716,13 @@ async fn run_pump(pump: Pump) {
     while !shared.shutdown.load(Ordering::Acquire) {
         shared.set_status(FeedStatus::Reconnecting);
         match attach(&client, &session, &shared).await {
-            Attempt::Dropped => {}
+            // Back to `Reconnecting` before the nap below, not after it: a
+            // stream that dropped once `attach` had published `Connected` would
+            // otherwise keep claiming to be connected for the whole backoff
+            // step, and the link strip renders nothing at all for a connected
+            // feed. Covers a drop during the attach itself too — that path
+            // returns `Dropped` as well.
+            Attempt::Dropped => shared.set_status(FeedStatus::Reconnecting),
             Attempt::Closed | Attempt::Shutdown => break,
             Attempt::AuthExpired => {
                 // One credential the server refuses will be refused four more
@@ -674,9 +798,16 @@ async fn attach(client: &MuxrClient, session: &str, shared: &Shared) -> Attempt 
 
 /// Read server frames until the stream ends, the server says
 /// [`CONTROL_EXIT`], or a shutdown races in.
+///
+/// Reads only while the drain side keeps up: see [`await_capacity`], the pause
+/// that turns a UI that has stopped draining into HTTP/2 backpressure on the
+/// server rather than unbounded growth here.
 async fn pump_stream(mut stream: tonic::Streaming<ServerFrame>, shared: &Shared) -> Attempt {
     let mut saw_render = false;
     loop {
+        if let Some(attempt) = await_capacity(shared).await {
+            return attempt;
+        }
         let message = match race(shared.wake.notified(), stream.message()).await {
             Winner::First(()) => match shared.take_wake() {
                 Wake::Shutdown => return Attempt::Shutdown,
@@ -725,6 +856,38 @@ fn classify(status: &tonic::Status) -> Attempt {
         Attempt::AuthExpired
     } else {
         Attempt::Dropped
+    }
+}
+
+/// Hold the reader off the stream while the queue sits at
+/// [`INBOUND_HIGH_WATER`], returning once a drain has brought it back under
+/// [`INBOUND_LOW_WATER`] — the pause half of the inbound flow control (see the
+/// [module docs](self)).
+///
+/// `Some` when the wait ended the attempt instead of resuming it: a shutdown is
+/// the one thing besides a drain that reaches a paused reader, which is what
+/// keeps teardown from waiting on a drain that will never come.
+///
+/// A no-op — one lock, no await — on every frame below the mark, which is every
+/// frame of an ordinary session.
+async fn await_capacity(shared: &Shared) -> Option<Attempt> {
+    if !shared.inbound_saturated() {
+        return None;
+    }
+    shared.count_read_pause();
+    loop {
+        // The drain's permit is stored rather than lost if it lands between the
+        // check above and this wait, so the pause cannot miss its own wake.
+        if let Winner::First(()) = race(shared.wake.notified(), shared.drained.notified()).await
+            && shared.take_wake() == Wake::Shutdown
+        {
+            return Some(Attempt::Shutdown);
+        }
+        // Re-read the level rather than trust the wake: a retry, a stale permit
+        // or a drain that left the queue still full all land here.
+        if shared.inbound_has_room() {
+            return None;
+        }
     }
 }
 
@@ -788,8 +951,25 @@ mod tests {
     /// (the shipped [`RECONNECT_BACKOFF`] would cost 31 seconds).
     const TEST_BACKOFF: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
 
+    /// One step long enough that "still waiting out the nap" is a state a test
+    /// can *observe* rather than a millisecond it has to win a race against.
+    /// Never actually waited out: the feed is dropped mid-nap, which wakes it.
+    const LONG_BACKOFF: [Duration; 1] = [Duration::from_secs(2)];
+
     /// The session name every test attaches to.
     const SESSION: &str = "alpha";
+
+    /// One flooded render frame. Large enough that a handful of them crosses
+    /// [`INBOUND_HIGH_WATER`], small enough to stay well under tonic's own
+    /// 4 MiB decode ceiling.
+    const FLOOD_FRAME: usize = 256 * 1024;
+
+    /// Frames a flood pushes: twice what the high-water mark holds, so the pump
+    /// parks with roughly half the flood still behind it on the wire.
+    const FLOOD_FRAMES: usize = 2 * INBOUND_HIGH_WATER / FLOOD_FRAME;
+
+    /// Bytes one flood pushes in total.
+    const FLOOD_TOTAL: usize = FLOOD_FRAME * FLOOD_FRAMES;
 
     /// A fixture, a token-bearing client, and the script that drives the
     /// server side of the attach stream.
@@ -850,6 +1030,23 @@ mod tests {
             "the reported write count must match what the sink saw"
         );
         writes
+    }
+
+    /// Bytes one drain handed over.
+    fn drained_bytes(feed: &mut GrpcTerminalFeed) -> usize {
+        drain(feed).iter().map(Vec::len).sum()
+    }
+
+    /// Push [`FLOOD_TOTAL`] at a feed nothing is draining, and wait for its pump
+    /// to park on the high-water mark.
+    async fn flood_until_paused(script: &TerminalScript, feed: &GrpcTerminalFeed) {
+        for _ in 0..FLOOD_FRAMES {
+            script.push_render(vec![b'x'; FLOOD_FRAME]);
+        }
+        wait_until("the pump parks on the high-water mark", || {
+            feed.read_pauses() >= 1
+        })
+        .await;
     }
 
     /// The mandatory first frame carries the session and the grid the feed was
@@ -1023,6 +1220,161 @@ mod tests {
         assert_eq!(feed.backoff_step(), 0);
     }
 
+    /// A drop reports `Reconnecting` for the *whole* step — the backoff nap
+    /// included, not just the attach attempts at either end of it. The status
+    /// is what the link strip renders, and it renders nothing for a connected
+    /// feed.
+    #[tokio::test]
+    async fn a_drop_reports_reconnecting_while_the_backoff_nap_runs() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (feed, _) = rig.feed_with(80, 24, &LONG_BACKOFF);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+
+        script.kill();
+        wait_until("the drop lands", || feed.status() != FeedStatus::Connected).await;
+        assert_eq!(
+            feed.status(),
+            FeedStatus::Reconnecting,
+            "a feed waiting out a backoff step is reconnecting, not connected"
+        );
+        assert_eq!(
+            script.attach_count(),
+            1,
+            "the nap is still running: nothing has re-attached to make that true trivially"
+        );
+    }
+
+    /// A producer outrunning the drain parks the pump on the high-water mark
+    /// rather than growing the queue, and a drain starts it reading again.
+    #[tokio::test]
+    async fn a_flood_pauses_the_reader_until_a_drain_makes_room() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (mut feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+
+        flood_until_paused(&script, &feed).await;
+        assert!(
+            feed.pending_bytes() < INBOUND_HIGH_WATER + FLOOD_FRAME,
+            "the queue is bounded by the mark plus the one frame that crossed it, not by what the server sent: {} bytes",
+            feed.pending_bytes()
+        );
+        assert!(
+            feed.pending_bytes() < FLOOD_TOTAL,
+            "the rest of the flood is still on the server, held off by a reader that stopped reading"
+        );
+
+        // Draining empties the queue and wakes the pump, and the whole flood
+        // arrives — nothing was dropped to make room.
+        let mut received = drained_bytes(&mut feed);
+        wait_until("the rest of the flood arrives once reading resumes", || {
+            received += drained_bytes(&mut feed);
+            received == FLOOD_TOTAL
+        })
+        .await;
+        assert_eq!(
+            feed.status(),
+            FeedStatus::Connected,
+            "the session is intact"
+        );
+    }
+
+    /// The mark is a pause threshold, not an admission filter: a single frame
+    /// bigger than the whole cap is queued whole, and the session carries on.
+    #[tokio::test]
+    async fn a_frame_larger_than_the_cap_is_accepted_whole() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (mut feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+
+        let oversized = INBOUND_HIGH_WATER + FLOOD_FRAME;
+        script.push_render(vec![b'z'; oversized]);
+        wait_until("the oversized frame lands", || {
+            feed.pending_bytes() >= oversized
+        })
+        .await;
+        let writes = drain(&mut feed);
+        assert_eq!(
+            writes.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![oversized],
+            "an over-cap frame is handed over whole, never split and never refused"
+        );
+
+        script.push_render(b"after\r\n".to_vec());
+        wait_until("the session keeps delivering", || {
+            feed.pending_writes() == 1
+        })
+        .await;
+        assert_eq!(drain(&mut feed), vec![b"after\r\n".to_vec()]);
+    }
+
+    /// A shutdown reaches a paused reader — `Drop` takes this same path, so
+    /// teardown never waits on a drain that will never come.
+    #[tokio::test]
+    async fn a_shutdown_wakes_a_reader_paused_on_the_high_water_mark() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+        flood_until_paused(&script, &feed).await;
+
+        feed.shutdown();
+        wait_until("the pump returns without a drain", || {
+            feed.status() == FeedStatus::Disconnected
+        })
+        .await;
+        assert_eq!(script.attach_count(), 1, "a shutdown never reconnects");
+    }
+
+    /// A `ServerFrame` stream is one sequence, so a pause holds back a server
+    /// `exit` too — and the first drain both resumes the reader and delivers
+    /// the close.
+    #[tokio::test]
+    async fn an_exit_behind_a_flood_closes_once_the_drain_resumes_the_reader() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (mut feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+        flood_until_paused(&script, &feed).await;
+
+        script.send_exit();
+        assert_eq!(
+            feed.status(),
+            FeedStatus::Connected,
+            "a paused reader reads nothing at all, control frames included"
+        );
+
+        let mut received = 0;
+        wait_until("the close lands once draining resumes the reader", || {
+            received += drained_bytes(&mut feed);
+            feed.status() == FeedStatus::Closed
+        })
+        .await;
+        received += drained_bytes(&mut feed);
+        assert_eq!(
+            received, FLOOD_TOTAL,
+            "the whole flood arrived ahead of the close: a pause defers bytes, never drops them"
+        );
+        wait_until("the pump returns", || !feed.is_open()).await;
+    }
+
     /// Running off the end of the schedule stops the loop and offers the
     /// screen a retry; `reset_backoff` takes it.
     #[tokio::test]
@@ -1125,5 +1477,14 @@ mod tests {
             RECONNECT_BACKOFF.map(|step| step.as_secs()),
             [1, 2, 4, 8, 16]
         );
+    }
+
+    /// The shipped inbound bound is the documented one: 2 MiB of queued render
+    /// bytes pauses the reader, and a quarter of that resumes it — a low-water
+    /// mark at the high-water one would resume the instant it paused.
+    #[test]
+    fn the_shipped_inbound_bound_is_two_mib_resuming_at_a_quarter_of_it() {
+        assert_eq!(INBOUND_HIGH_WATER, 2 * 1024 * 1024);
+        assert_eq!(INBOUND_LOW_WATER, 512 * 1024);
     }
 }

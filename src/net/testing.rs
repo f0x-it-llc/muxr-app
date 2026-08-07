@@ -26,12 +26,16 @@
 //! **`AttachTerminal` is scripted, not canned.** The one streaming RPC needs a
 //! server side a test can *drive* — [`TerminalScript`] records what the client
 //! sent (attach handshakes, input, resizes) and pushes what the server should
-//! say back (a render frame, a clean [`exit`](CONTROL_EXIT), or a mid-flight
-//! drop for a reconnect test). Every other behavior is fixed: a stream must
-//! open with an `attach` frame, it answers with a [`connection_id`](CONTROL_CONNECTION_ID)
-//! control event, and it echoes received input back as render frames, which is
-//! the smallest stand-in for a PTY that makes "what I typed came back, in
-//! order" assertable.
+//! say back (a render frame, a clean
+//! [`exit`](crate::net::control::CONTROL_EXIT), or a mid-flight drop for a
+//! reconnect test). Every other behavior is fixed: a stream must open with an
+//! `attach` frame, it answers with a
+//! [`connection_id`](crate::net::control::CONTROL_CONNECTION_ID) control event,
+//! and it echoes received input back as render frames, which is the smallest
+//! stand-in for a PTY that makes "what I typed came back, in order" assertable.
+//! Both kinds are `net`'s own ([`control`](crate::net::control)), never the
+//! consuming feature's: this fixture and that feed have to agree, and nothing
+//! under `src/net` imports a feature.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -45,12 +49,12 @@ use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
-// The two control-event kinds the client parses. Imported rather than
-// re-spelled as literals here: the fixture has to say exactly what the feed
+// The two control-event kinds, from this layer's own `control` module rather
+// than re-spelled as literals: the fixture has to say exactly what the feed
 // listens for, and two independent string constants is precisely the drift a
-// green test would then hide.
-use crate::features::terminal::data::feeds::grpc_feed::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
+// green fixture test would then hide.
 use crate::net::client::MuxrClient;
+use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::muxr_server::{Muxr, MuxrServer};
 use crate::net::proto::{
     ActionAck, ClientFrame, CloseSpaceReq, ControlEvent, CreateSessionReq, CreateSpaceReq,
