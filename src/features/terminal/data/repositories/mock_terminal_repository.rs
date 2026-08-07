@@ -21,11 +21,14 @@
 //! # What mutates, and what does not
 //!
 //! Space selection is real state (the sheet's space pills toggle it), so it
-//! lives behind the mutex. Tabs and lines are **fixed**: v2's mock replays the
-//! same four tabs regardless of which session was attached (see
+//! lives behind the mutex — [`TerminalRepository::switch_space`] is its one
+//! write path, and it addresses a space by [`Space::id`], which in this
+//! backend-less store *is* the name. Tabs and lines are **fixed**: v2's mock
+//! replays the same four tabs regardless of which session was attached (see
 //! `domain::entities`' module docs), and a tab switch is a *read*, not a
-//! write. `detach_session` is a no-op that merely validates its id — there is
-//! no attachment to drop until the real `muxrd` client lands.
+//! write, so [`TerminalRepository::go_to_tab`] has nothing to tell and
+//! succeeds without doing anything. `detach_session` is likewise a no-op that
+//! merely validates its id — this store fronts no attachment to drop.
 //!
 //! # Failure mapping
 //!
@@ -69,13 +72,12 @@ impl MockTerminalRepository {
         }
     }
 
-    /// Select the space named `name`, deselecting every other — the sheet's
-    /// space pills. A **synchronous** mutation, deliberately outside the
-    /// [`TerminalRepository`] contract: v2's spaces are selection state the
-    /// sheet owns, not something the daemon is told about yet.
-    pub fn select_space(&self, name: &str) {
+    /// Select the space with id `id`, deselecting every other — the body
+    /// [`TerminalRepository::switch_space`] runs, exposed synchronously so a
+    /// test can move the selection without a runtime.
+    pub fn select_space(&self, id: &str) {
         for space in self.lock().iter_mut() {
-            space.selected = space.name == name;
+            space.selected = space.id == id;
         }
     }
 
@@ -111,6 +113,9 @@ fn seed_spaces() -> Vec<Space> {
     ]
     .into_iter()
     .map(|(name, selected)| Space {
+        // No backend, so a space's routing id is simply its name (see the
+        // module docs).
+        id: name.to_string(),
         name: name.to_string(),
         selected,
     })
@@ -123,6 +128,7 @@ fn seed_tabs() -> Vec<TabEntry> {
     vec![
         TabEntry {
             index: 1,
+            tab_id: 1,
             key: "btop".to_string(),
             label: "btop".to_string(),
             pane_title: "ed@precision: ~".to_string(),
@@ -132,6 +138,7 @@ fn seed_tabs() -> Vec<TabEntry> {
         },
         TabEntry {
             index: 2,
+            tab_id: 2,
             key: "minefit".to_string(),
             label: "minefit-api".to_string(),
             pane_title: "ed@minefit: ~/api".to_string(),
@@ -141,6 +148,7 @@ fn seed_tabs() -> Vec<TabEntry> {
         },
         TabEntry {
             index: 3,
+            tab_id: 3,
             key: "gohora".to_string(),
             label: "gohora".to_string(),
             pane_title: "ed@gohora: ~/src".to_string(),
@@ -150,6 +158,7 @@ fn seed_tabs() -> Vec<TabEntry> {
         },
         TabEntry {
             index: 4,
+            tab_id: 4,
             key: "devbox".to_string(),
             label: "devbox".to_string(),
             pane_title: "ed@devbox: ~".to_string(),
@@ -210,6 +219,29 @@ impl TerminalRepository for MockTerminalRepository {
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
         seed_lines(&key).ok_or_else(|| AppFailure::Internal(format!("tab_lines: no tab {key}")))
+    }
+
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        if !self.lock().iter().any(|space| space.id == space_id) {
+            return Err(AppFailure::Internal(format!(
+                "switch_space: no space {space_id}"
+            )));
+        }
+        self.select_space(&space_id);
+        Ok(())
+    }
+
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        // Nothing to tell: this store fronts no session, and the card's own
+        // switch is `tab_lines` (see the module docs). An id no seeded tab
+        // carries is still a bug worth surfacing — the sheet only ever
+        // addresses a tab it just drew.
+        if !self.tabs.iter().any(|tab| tab.tab_id == tab_id) {
+            return Err(AppFailure::Internal(format!("go_to_tab: no tab {tab_id}")));
+        }
+        Ok(())
     }
 
     async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
@@ -333,6 +365,30 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(selected, ["cupline"]);
+    }
+
+    #[test]
+    fn a_space_switch_writes_the_store_and_an_unknown_id_fails() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(block_on(repo.switch_space("cupline".to_string())).is_ok());
+
+        let selected: Vec<String> = repo
+            .spaces_snapshot()
+            .into_iter()
+            .filter(|s| s.selected)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(selected, ["cupline"], "the switch is the one write path");
+        assert!(block_on(repo.switch_space("nope".to_string())).is_err());
+    }
+
+    #[test]
+    fn a_tab_switch_succeeds_for_every_seeded_id_and_fails_for_no_other() {
+        let repo = MockTerminalRepository::seeded();
+        for tab_id in 1..=4 {
+            assert!(block_on(repo.go_to_tab(tab_id)).is_ok(), "{tab_id}");
+        }
+        assert!(block_on(repo.go_to_tab(99)).is_err());
     }
 
     #[test]

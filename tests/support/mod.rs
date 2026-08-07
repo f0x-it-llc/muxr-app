@@ -516,11 +516,16 @@ pub fn serial() -> MutexGuard<'static, ()> {
 ///   these suites would try to open a real socket, and the mock facts each
 ///   suite asserts on (the sessions strip's `zellij 0.44.3 · 36ms`) have no
 ///   server to come from.
+/// - each feature's own repository — with a mock-only connection there is no
+///   client for a `muxrd`-backed one to call through, so every read would fail
+///   "not connected" instead of answering the seeded facts the suites assert
+///   on.
 pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
     muxr::connection::use_mock_connection_for_tests();
     muxr::features::sessions::di::use_mock_sessions_for_tests();
     muxr::features::settings::di::use_mock_auth_tokens_for_tests();
+    muxr::features::terminal::di::use_mock_terminal_for_tests();
     let _runtime = ReactiveRuntime::init(recording_waker());
     let ambient = Owner::new();
     ambient.set();

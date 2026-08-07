@@ -894,6 +894,34 @@ pub async fn run_feed(
     generation: RwSignal<u64>,
     cancelled: Arc<AtomicBool>,
 ) {
+    run_feed_watched(feed, emulator, generation, cancelled, || {}).await;
+}
+
+/// [`run_feed`] with an `on_tick` observer called once per wake, on the **UI
+/// thread**, after the drain.
+///
+/// The one seam a caller has for *surfacing* whatever the feed knows beyond
+/// its bytes — a live `muxrd` session's connection status and its minted
+/// connection id, neither of which is on the
+/// [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed)
+/// port (deliberately: a feed writes no signal and touches no reactive state,
+/// so a status a screen renders has to be *polled* from the side that may
+/// write signals). Mirroring it here rather than on a timer of its own costs
+/// nothing: this loop is already awake, on the right thread, at the rate the
+/// screen repaints.
+///
+/// `on_tick` runs with **no borrow held** on either the feed or the emulator,
+/// so an observer may borrow them itself — including replacing the feed
+/// outright, which is what a session re-attach does. It also runs on the wake
+/// that ends the loop, *after* the open/closed decision is taken: a feed that
+/// has just finished publishes its final status before nothing polls it again.
+pub async fn run_feed_watched(
+    feed: SharedFeed,
+    emulator: SharedEmulator,
+    generation: RwSignal<u64>,
+    cancelled: Arc<AtomicBool>,
+    on_tick: impl Fn(),
+) {
     let start = Instant::now();
     let mut tick = 0u32;
     loop {
@@ -901,7 +929,9 @@ pub async fn run_feed(
             return;
         }
         pump_wake(&feed, &emulator, generation);
-        if !feed.borrow().is_open() {
+        let open = feed.borrow().is_open();
+        on_tick();
+        if !open {
             return;
         }
         // Sleep to the next absolute grid point rather than "now + interval",
@@ -924,12 +954,29 @@ pub async fn run_feed(
 /// `Arc<AtomicBool>` rather than `Rc<Cell<_>>` because `on_cleanup` takes a
 /// `Send + Sync` closure, even though both ends live on the UI thread.
 pub fn spawn_feed_pump(feed: SharedFeed, emulator: SharedEmulator, generation: RwSignal<u64>) {
+    spawn_feed_pump_watched(feed, emulator, generation, || {});
+}
+
+/// [`spawn_feed_pump`] over [`run_feed_watched`] — the same ownership and
+/// cancellation contract, plus the per-wake observer that function documents.
+///
+/// `on_tick` is not `Send`: the loop it rides in is spawned on the UI thread's
+/// own queue, which is exactly what lets an observer hold the `Rc`-backed feed
+/// handle it is polling.
+pub fn spawn_feed_pump_watched(
+    feed: SharedFeed,
+    emulator: SharedEmulator,
+    generation: RwSignal<u64>,
+    on_tick: impl Fn() + 'static,
+) {
     let cancelled = Arc::new(AtomicBool::new(false));
     {
         let cancelled = Arc::clone(&cancelled);
         on_cleanup(move || cancelled.store(true, Ordering::Relaxed));
     }
-    spawn_local(run_feed(feed, emulator, generation, cancelled));
+    spawn_local(run_feed_watched(
+        feed, emulator, generation, cancelled, on_tick,
+    ));
 }
 
 #[cfg(test)]

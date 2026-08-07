@@ -38,8 +38,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, PopResult, RwSignal, SizedBox, Stack,
-    Theme, any, navigator, provide_context,
+    AnyView, Component, GetUntracked, NavigatorController, PopResult, RwSignal, Set, SizedBox,
+    Stack, Theme, any, navigator, provide_context,
 };
 use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
 use frust_text::TextContext;
@@ -51,6 +51,7 @@ use muxr::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle as SettingsCursorStyle,
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
+use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_live_probe, open_terminal_menu, set_demo_copy_sink, terminal_page,
@@ -271,6 +272,18 @@ impl Harness {
     fn session(&self) -> (bool, bool) {
         (self.root.is_focus_active(), self.root.ime_state().is_some())
     }
+}
+
+/// The mounted session's demo feed.
+///
+/// `LiveProbe::feed` is an `Option` because the same probe also fronts a live
+/// **`muxrd`** session, whose feed is a real stream with no replay cursor to
+/// read; every test in this suite drives the demo entry, which always has one.
+fn demo_feed() -> Rc<RefCell<DemoFeed>> {
+    debug_live_probe()
+        .expect("a live pane is mounted")
+        .feed
+        .expect("the demo entry mounts the fixture replay")
 }
 
 /// The live grid's own plain background fill — see the [module docs](self).
@@ -641,9 +654,8 @@ fn resize_reaches_the_feed_only_on_an_actual_cell_grid_delta() {
     h.enter_demo();
     h.settle();
 
-    let probe = debug_live_probe().expect("live");
-    let windowed = probe
-        .feed
+    let feed = demo_feed();
+    let windowed = feed
         .borrow()
         .last_resize()
         .expect("the very first layout already resized off the fallback grid");
@@ -653,7 +665,7 @@ fn resize_reaches_the_feed_only_on_an_actual_cell_grid_delta() {
     h.frame();
     h.frame();
     assert_eq!(
-        probe.feed.borrow().last_resize(),
+        feed.borrow().last_resize(),
         Some(windowed),
         "an unchanged box records nothing new"
     );
@@ -661,8 +673,7 @@ fn resize_reaches_the_feed_only_on_an_actual_cell_grid_delta() {
     // Fullscreen changes the box substantially — a real delta.
     h.tap_label(EXPAND);
     h.settle_motion(1_000.0);
-    let fullscreen = probe
-        .feed
+    let fullscreen = feed
         .borrow()
         .last_resize()
         .expect("fullscreen is a real resize");
@@ -752,6 +763,162 @@ fn the_key_bar_mounts_only_while_live_and_the_keyboard_is_up() {
     assert!(
         !node_labels(&h.root).iter().any(|l| l == A_KEY_CAP_LABEL),
         "the keyboard went away: the bar collapses again"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7b — the link strip
+// ---------------------------------------------------------------------------
+//
+// The strip renders off one mirrored signal
+// (`TerminalController::link`), which is exactly the seam a live
+// `GrpcTerminalFeed` writes through on every wake of the repaint pump. Driving
+// that signal directly is therefore the whole surface under test on this side:
+// what the *feed* publishes into it (the backoff schedule, the exit control,
+// the auth short-circuit) is pinned by that type's own fixture-backed tests,
+// and standing a TLS server up inside a headless UI suite would test the
+// transport twice and the screen not at all.
+
+/// The strip's three messages and two affordances, transcribed from
+/// `presentation::pages` (private there; a test that imported them could not
+/// catch one changing).
+const LINK_RECONNECTING: &str = "reconnecting\u{2026}";
+const LINK_DISCONNECTED: &str = "disconnected";
+const LINK_CLOSED: &str = "session ended";
+const LINK_RETRY: &str = "Retry";
+const LINK_LEAVE: &str = "Back to sessions";
+
+/// Publish `status` as the mounted screen's link state and rebuild.
+fn publish_link(h: &mut Harness, status: Option<FeedStatus>) {
+    debug_controller()
+        .expect("a terminal screen is mounted")
+        .link
+        .set(status);
+    h.frame();
+}
+
+#[test]
+fn a_healthy_or_absent_link_says_nothing_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+
+    for status in [None, Some(FeedStatus::Idle), Some(FeedStatus::Connected)] {
+        publish_link(&mut h, status);
+        let values = support::node_values(&h.root);
+        assert!(
+            !values.iter().any(|value| value == LINK_RECONNECTING
+                || value == LINK_DISCONNECTED
+                || value == LINK_CLOSED),
+            "{status:?} is not worth a band across the card: {values:?}"
+        );
+        assert!(
+            !node_labels(&h.root)
+                .iter()
+                .any(|label| label == LINK_RETRY || label == LINK_LEAVE),
+            "{status:?} offers nothing to press"
+        );
+    }
+}
+
+#[test]
+fn a_reconnecting_link_says_so_and_offers_nothing_to_interrupt_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    publish_link(&mut h, Some(FeedStatus::Reconnecting));
+
+    let values = support::node_values(&h.root);
+    assert!(
+        values.iter().any(|value| value == LINK_RECONNECTING),
+        "{values:?}"
+    );
+    assert!(
+        !node_labels(&h.root)
+            .iter()
+            .any(|label| label == LINK_RETRY || label == LINK_LEAVE),
+        "a session coming back on its own has nothing to press"
+    );
+}
+
+#[test]
+fn a_disconnected_link_offers_the_retry_that_re_arms_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    publish_link(&mut h, Some(FeedStatus::Disconnected));
+
+    assert!(
+        support::node_values(&h.root)
+            .iter()
+            .any(|value| value == LINK_DISCONNECTED)
+    );
+    assert!(node_labels(&h.root).iter().any(|label| label == LINK_RETRY));
+
+    // The demo replay has no stream to re-arm, so this is the press path
+    // itself: it must reach the session and do nothing, rather than panic on a
+    // feed with no backoff.
+    h.tap_label(LINK_RETRY);
+    h.frame();
+    assert!(
+        debug_live_probe().is_some(),
+        "the live pane survived the press"
+    );
+}
+
+#[test]
+fn a_closed_link_offers_the_only_thing_left_the_way_back_to_the_list() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    publish_link(&mut h, Some(FeedStatus::Closed));
+
+    assert!(
+        support::node_values(&h.root)
+            .iter()
+            .any(|value| value == LINK_CLOSED)
+    );
+    assert!(node_labels(&h.root).iter().any(|label| label == LINK_LEAVE));
+    assert!(
+        !node_labels(&h.root).iter().any(|label| label == LINK_RETRY),
+        "a session the server ended has nothing to retry"
+    );
+
+    h.tap_label(LINK_LEAVE);
+    h.flush();
+    assert_eq!(
+        app_nav().bar().meta,
+        None,
+        "the terminal route came off the app's stack"
+    );
+}
+
+#[test]
+fn the_demo_entry_stays_on_the_fixture_replay_and_reports_no_link() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    h.frame();
+
+    assert!(
+        debug_live_probe()
+            .expect("a live pane is mounted")
+            .feed
+            .is_some(),
+        "the demo row mounts the checked-in replay whatever is connected"
+    );
+    assert_eq!(
+        debug_controller()
+            .expect("a terminal screen is mounted")
+            .link
+            .get_untracked(),
+        None,
+        "a replay has no link to report"
     );
 }
 

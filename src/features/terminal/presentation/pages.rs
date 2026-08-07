@@ -75,31 +75,30 @@
 //! reason: `provide_context` requires `Send + Sync`, which the `Rc`-backed
 //! `NavigatorController` in the bundle can never be.
 //!
-//! # Pane-content switch: the mock stays default, "Demo session" opts in
+//! # Pane-content switch: three ways in, and only one of them is real
 //!
-//! The card's body renders [`pieces::card_body`] (the seeded mock transcript)
-//! for every existing route and navigation — untouched, and pinned by every
-//! one of `tests/terminal.rs`'s ~34 tests, which assert that exact content
-//! through this real composition root. The live [`term::terminal_surface`] is
-//! reached only by tapping the overflow menu's **`Demo session`** row
-//! ([`MENU_DEMO_INDEX`]), which flips [`TerminalController::live`] — the one
-//! flag [`TerminalScreen::build`] branches the card's body (and the key bar's
-//! mount) on.
+//! [`TerminalScreen::build`] branches the card's body (and the key bar's
+//! mount) on one flag, [`TerminalController::live`], and **three** things set
+//! it:
 //!
-//! **Decision (deviates from the plan's literal suggestion):** the plan's
-//! default was a seeded "demo" row in the mock *session* list
-//! (`data::repositories::mock_terminal_repository`). Reading that
-//! repository's actual model, its `spaces`/`tabs` pill rows are exactly what
-//! `tests/terminal.rs`'s `the_menus_first_row_opens_the_sheet_with_every_pill_row_and_the_pane_item`
-//! pins by **count** (`3 + 1 + 4 + 1` pills) — any seeded row in either list
-//! changes that count and breaks an unmodifiable test. The overflow menu
-//! already carries exactly this shape of one-off screen action
-//! (`Panes & tabs`/`Rename session`/`Detach session`), asserted only by
-//! *label*, never by a total row count in `tests/terminal.rs` — so a fourth
-//! row is the cleaner, v2-consistent entry the module docs on this file's own
-//! task invited: additive, unobtrusive (one more overflow-menu row, the same
-//! shape as the other three), and public-safe (`Demo session` names nothing
-//! internal).
+//! 1. **A real attached session.** `init` flips it — through
+//!    [`TerminalController::attach_live`], which also claims the pane for the
+//!    session — when this screen carries a `?session=<id>` *and* the app holds
+//!    a live client. That is the production path: a real `muxrd` session has no
+//!    transcript to describe, it has a stream, so it mounts
+//!    [`term::terminal_surface`] over a `GrpcTerminalFeed` from the first
+//!    frame.
+//! 2. **The overflow menu's `Demo session` row** ([`MENU_DEMO_INDEX`]), which
+//!    mounts the same grid over the checked-in fixture replay instead —
+//!    whatever is connected. It is a demonstration, and it stays one.
+//! 3. **Nothing.** A bare `/terminal`, and every headless suite (whose
+//!    connection is mock-backed and hands out no client), keep
+//!    [`pieces::card_body`]'s seeded mock transcript — the content
+//!    `tests/terminal.rs` pins end to end through this real composition root.
+//!
+//! The demo row sits behind its own separator, after the first three: it is
+//! not a session-management action like the rest of the menu, so it is kept
+//! visually apart from them.
 //!
 //! [`LiveSession`] — the seams, the feed and the pump — is constructed
 //! **once**, lazily, inside `build` itself (guarded by `state.live.is_none()`
@@ -122,26 +121,27 @@ use frust::authoring::{Rect, WindowInsets};
 use frust::glyph::{MenuEntry, menu_item, menu_separator, show_glyph_menu};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, WindowMetrics, any, component, flexible, inflexible,
-    on_cleanup, spawn_local, use_context,
+    NavigatorController, Padding, PopResult, WindowMetrics, any, button, component, flexible,
+    inflexible, on_cleanup, spawn_local, use_context,
 };
 
 use crate::AppState;
+use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
+use crate::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::TabEntry;
-use crate::features::terminal::domain::feed::TerminalFeed;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
 use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
-use super::chrome::{WRAP_PAD, term_box};
-use super::controller::{LiveSession, TerminalController};
+use super::chrome::{WRAP_PAD, status_strip, term_box};
+use super::controller::{LiveSession, Reattach, TerminalController};
 use super::keybar;
 use super::pieces::{
     self, PANE_ROW_GAP, PILL_GAP, Palette, PillState, SECTION_BOTTOM_GAP, SECTION_TOP_GAP,
@@ -158,8 +158,8 @@ const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(
 const MENU_PANES: &str = "Panes & tabs";
 const MENU_RENAME: &str = "Rename session";
 const MENU_DETACH: &str = "Detach session";
-/// The demo-session entry — see the [module docs](self)'s "Demo entry"
-/// note. Appended after its own separator rather than woven into the first
+/// The demo-session entry — see the [module docs](self)'s "Pane-content
+/// switch". Appended after its own separator rather than woven into the first
 /// three rows, so `MENU_RENAME_INDEX`/`MENU_DETACH_INDEX` (and every existing
 /// index-based test in `tests/terminal.rs`) stay exactly where they were.
 const MENU_DEMO: &str = "Demo session";
@@ -174,6 +174,18 @@ const RENAME_TITLE: &str = "Rename session";
 const UNAVAILABLE_TOAST: &str = "not yet available";
 /// …and what a landed detach says on the way back to the list.
 const DETACHED_TOAST: &str = "detached";
+/// What a control a read-only credential may not use says when it is reached
+/// anyway (the overflow menu has no disabled row state, so *Rename session*
+/// stays on screen and refuses — see [`Actions::open_rename_dialog`]).
+const READ_ONLY_TOAST: &str = "read-only session";
+
+/// The link strip's three messages, and the two affordances beside them — see
+/// [`link_strip`].
+const LINK_RECONNECTING: &str = "reconnecting\u{2026}";
+const LINK_DISCONNECTED: &str = "disconnected";
+const LINK_CLOSED: &str = "session ended";
+const LINK_RETRY: &str = "Retry";
+const LINK_LEAVE: &str = "Back to sessions";
 
 /// The sheet's three section labels. The third names the tab whose panes it is
 /// listing (`panes — devbox`).
@@ -266,6 +278,18 @@ pub struct Actions {
     pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<TerminalController>,
+    /// The app's one connection handle — read for the live client the feed
+    /// attaches with, and for the read-only posture that decides which of this
+    /// screen's controls are offered at all.
+    pub connection: Arc<ConnectionController>,
+    /// The mounted live session's re-attach hook, once one exists — see
+    /// [`LiveSession::reattach`]. Filled in by `build` (which is where the
+    /// session is constructed) and read from the **sheet**, whose pages see
+    /// `&mut AppState` and can never reach `TerminalState`; shared
+    /// (`Rc<RefCell<_>>`, like [`live_probe`](Self::live_probe)) so every
+    /// clone of this bundle — the thread-local's included — sees the same
+    /// fill.
+    reattach: Rc<RefCell<Option<Reattach>>>,
     /// Where the app bar's trailing `⋮` slot is painting, in window
     /// coordinates — written by `super::chrome::terminal_stage` on every
     /// layout, read when the menu opens. See [`Actions::open_menu`].
@@ -297,7 +321,11 @@ pub struct LiveProbe {
     pub emulator: term::SharedEmulator,
     /// The demo feed the grid's pump is draining — concrete, so
     /// [`DemoFeed::last_resize`] and [`DemoFeed::fed_bytes`] are reachable.
-    pub feed: Rc<RefCell<DemoFeed>>,
+    ///
+    /// `None` on a live **`muxrd`** session, whose feed is a real stream with
+    /// no fixture behind it: what a test asserts about *that* is the link
+    /// status the screen mirrors, not a replay cursor.
+    pub feed: Option<Rc<RefCell<DemoFeed>>>,
 }
 
 /// The mounted screen's live demo pane, if one has been entered — see
@@ -408,6 +436,18 @@ impl Component for TerminalScreen {
             app_toasts().raise(&failure);
         });
 
+        // The one place the mock-vs-live decision is taken (see the module
+        // docs' "Pane-content switch"): a screen that carries a session id
+        // *and* has a live client behind it is showing a real terminal, so it
+        // mounts the grid from the start rather than a transcript that
+        // describes nothing. Everything else — a bare `/terminal`, and every
+        // headless suite, whose connection is mock-backed and hands out no
+        // client — keeps the mock transcript and its "Demo session" row.
+        let connection = expect_connection_controller();
+        if controller.session_id().is_some() && connection.client().is_some() {
+            controller.attach_live();
+        }
+
         // First load: spaces, tabs, the active tab's lines, the session name.
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.load().await });
@@ -417,6 +457,8 @@ impl Component for TerminalScreen {
             overlays: self.overlays.clone(),
             app_nav,
             controller,
+            connection,
+            reattach: Rc::new(RefCell::new(None)),
             anchor: Rc::new(Cell::new(Rect::ZERO)),
             detaching: Rc::new(Cell::new(false)),
             live_probe: Rc::new(RefCell::new(None)),
@@ -455,18 +497,20 @@ impl Component for TerminalScreen {
         // fight.
         let controller = Arc::clone(&state.actions.controller);
 
-        // Pane-content switch (see the module docs' "Demo entry" note): a
-        // tracked read of `live`, so flipping it (the overflow menu's "Demo
-        // session" row) wakes this rebuild. `LiveSession` is constructed
-        // exactly once per mount, guarded by `state.live.is_none()` — see
-        // `LiveSession::enter`'s own doc on why this must happen here and not
-        // from the menu's press handler.
+        // Pane-content switch (see the module docs): a tracked read of
+        // `live`, so whichever of its three entries flipped it wakes this
+        // rebuild. `LiveSession` is constructed exactly once per mount,
+        // guarded by `state.live.is_none()` — see `LiveSession::enter`'s own
+        // doc on why this must happen here and not from a press handler.
         if controller.live.get() && state.live.is_none() {
-            let session = LiveSession::enter(&controller);
+            let session = LiveSession::enter(&controller, &state.actions.connection);
             *state.actions.live_probe.borrow_mut() = Some(LiveProbe {
                 emulator: Rc::clone(&session.emulator),
-                feed: Rc::clone(&session.feed),
+                feed: session.feed.demo().map(Rc::clone),
             });
+            // Published for the sheet, which switches tabs from the other side
+            // of the component boundary — see `Actions::reattach`.
+            *state.actions.reattach.borrow_mut() = session.reattach.clone();
             state.live = Some(session);
         }
         // Resize propagation: drain whatever the *previous* layout recorded
@@ -479,17 +523,23 @@ impl Component for TerminalScreen {
         if let Some(session) = state.live.as_ref()
             && let Some((cols, rows)) = session.emulator.borrow_mut().take_pending_resize()
         {
-            session.feed.borrow_mut().resize(cols, rows);
+            session.resize(cols, rows);
         }
 
-        // Tracked reads: a load, a tab switch or a fullscreen toggle is what
-        // wakes this rebuild.
+        // Tracked reads: a load, a tab switch, a fullscreen toggle, a link
+        // change or a credential turning read-only is what wakes this rebuild.
         let lines = controller.lines.get();
         let epoch = controller.reveal_epoch.get();
         let fullscreen = controller.fullscreen.get();
         let tabs = controller.tabs.get();
         let active = controller.active_tab.get();
         let title = active_title(&tabs, &active);
+        let link = controller.link.get();
+        // Gates every control a read-only credential would be refused for (see
+        // `Actions::open_rename_dialog` and `Actions::sheet_body`), and puts
+        // the grid itself in its own read-only mode, where no byte leaves the
+        // session however it was derived.
+        let read_only = state.actions.connection.is_read_only.get();
 
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
@@ -529,6 +579,7 @@ impl Component for TerminalScreen {
                 .cursor(controller.cursor_style.get())
                 .label(MENU_DEMO)
                 .input(session.input.clone())
+                .read_only(read_only)
                 .selection(session.selection.clone());
                 let mut chip = term::copy_chip(session.selection.clone());
                 if let Some(sink) = demo_copy_sink() {
@@ -543,19 +594,23 @@ impl Component for TerminalScreen {
             None => pieces::card_body(lines, epoch, &colors),
         };
 
-        let card = FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(pieces::status_row(
-                    &title,
-                    fullscreen,
-                    &colors,
-                    toggle_fullscreen,
-                )),
-                flexible(1, card_body),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch);
+        // The link strip sits between the status row and the body, and only
+        // when there is something to say: a healthy (or absent) link adds no
+        // child at all, so the card every mock-era test pins is byte for byte
+        // the tree it always was.
+        let mut card_children = vec![inflexible(pieces::status_row(
+            &title,
+            fullscreen,
+            &colors,
+            toggle_fullscreen,
+        ))];
+        if let Some(strip) = link_strip(link, &colors) {
+            card_children.push(inflexible(strip));
+        }
+        card_children.push(flexible(1, card_body));
+
+        let card =
+            FlexView::new(Axis::Vertical, card_children).cross_axis(CrossAxisAlignment::Stretch);
 
         let stage = super::chrome::terminal_stage(
             card,
@@ -620,6 +675,46 @@ fn active_title(tabs: &[TabEntry], active: &str) -> String {
 /// The expand button's press, as the screen-state shim its callback needs.
 fn toggle_fullscreen(state: &mut TerminalState) {
     state.actions.toggle_fullscreen();
+}
+
+/// The card's link strip for `link`, or `None` when there is nothing to say.
+///
+/// Four of the feed's five states are silent: `Idle` and `Connected` are a
+/// session behaving, and a screen with no live `muxrd` session behind it
+/// (`None` — the mock transcript, the demo replay) has no link at all. The
+/// three that show speak in the same order of severity the affordance beside
+/// them does: reconnecting says only that (the session is coming back on its
+/// own, and a button would invite interrupting it), a disconnected one offers
+/// the retry that re-arms it, and a session the server *ended* offers the only
+/// thing left — the way back to the list.
+///
+/// Every callback here takes `&mut TerminalState`, which is exactly why the
+/// strip lives in the card rather than in the sheet: `retry` needs the live
+/// session, and the live session is screen state.
+fn link_strip(link: Option<FeedStatus>, colors: &Palette) -> Option<AnyView<TerminalState>> {
+    let (message, action): (&str, Option<AnyView<TerminalState>>) = match link? {
+        FeedStatus::Idle | FeedStatus::Connected => return None,
+        FeedStatus::Reconnecting => (LINK_RECONNECTING, None),
+        FeedStatus::Disconnected => (
+            LINK_DISCONNECTED,
+            Some(any(button(LINK_RETRY, |state: &mut TerminalState| {
+                if let Some(session) = state.live.as_ref() {
+                    session.retry();
+                }
+            }))),
+        ),
+        FeedStatus::Closed => (
+            LINK_CLOSED,
+            Some(any(button(LINK_LEAVE, |state: &mut TerminalState| {
+                state.actions.app_nav.pop();
+            }))),
+        ),
+    };
+    // Resolved only once there is a strip to build — a `build` that has
+    // nothing to say must stay as cheap as it was before this existed.
+    let mut style = pieces::active_theme().type_scale.label_medium.clone();
+    style.color = colors.fg_muted;
+    Some(status_strip(message, style, colors.head, action))
 }
 
 // ---------------------------------------------------------------------------
@@ -722,19 +817,40 @@ impl Actions {
     /// selection is the one the user is looking at) rather than stacking a
     /// second close behind the first, and the gate underneath means the
     /// superseded wait cannot pop the `/terminal` route on its way out.
+    ///
+    /// On a backend whose stream carries only the focused pane, the switch is
+    /// not done when the RPC lands: the open stream keeps replaying the pane
+    /// it attached to, so the session has to be attached again to start
+    /// receiving the new one. [`TerminalController::switch_tab`] answers
+    /// whether that applies, and [`reattach`](Self::reattach) is how this side
+    /// of the component boundary reaches a session it cannot see.
     pub fn switch_tab(&self, sheet: &SheetHandle, key: &str) {
         let controller = Arc::clone(&self.controller);
+        let reattach = Rc::clone(&self.reattach);
         let sheet = sheet.clone();
         let key = key.to_string();
         spawn_local(async move {
-            controller.switch_tab(key).await;
+            if controller.switch_tab(key).await {
+                // Cloned out of the cell first: the hook re-enters this screen's
+                // own state, and a borrow held across it would be a second one.
+                let hook = reattach.borrow().clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
             sheet.close_after(SHEET_CLOSE_DELAY).await;
         });
     }
 
-    /// Select a space — selection state only, in the mock era.
-    pub fn select_space(&self, name: &str) {
-        self.controller.select_space(name);
+    /// Switch this connection's view to the space with id `id`.
+    ///
+    /// Stays available to a read-only credential: which space a client is
+    /// looking at is per-connection state, not a change to the session (see
+    /// [`TerminalRepository::switch_space`](crate::features::terminal::domain::repositories::TerminalRepository::switch_space)).
+    pub fn select_space(&self, id: &str) {
+        let controller = Arc::clone(&self.controller);
+        let id = id.to_string();
+        spawn_local(async move { controller.select_space(id).await });
     }
 
     /// Open the rename dialog, seeded with the attached session's *current*
@@ -744,9 +860,21 @@ impl Actions {
     /// With no attached session there is nothing to rename, and the dialog
     /// does not open (the `features::sessions` precedent for a row whose
     /// target has gone).
+    ///
+    /// A rename is **mutating**, so a read-only credential is refused here
+    /// rather than at the server: `frust::glyph::MenuEntry` carries no
+    /// disabled state (it is a label plus a normal/danger variant), so the row
+    /// stays on screen and says why — the same "the row stays, the tap does
+    /// nothing" language `features::sessions`' own management sheet uses for a
+    /// read-only session, minus the greying it can express and this menu
+    /// cannot.
     pub fn open_rename_dialog(&self) {
-        // Untracked: a press handler has no reactive owner on desktop, and
-        // this read must never make one.
+        // Untracked throughout: a press handler has no reactive owner on
+        // desktop, and these reads must never make one.
+        if self.connection.is_read_only.get_untracked() {
+            app_toasts().show(READ_ONLY_TOAST);
+            return;
+        }
         let Some(current) = self.controller.session_name.get_untracked() else {
             return;
         };
@@ -792,8 +920,13 @@ impl Actions {
         });
     }
 
-    /// What the UI-only affordances say when tapped (the two add pills and the
-    /// new-pane row): this phase draws them, the functional phase wires them.
+    /// What the sheet's three **create** affordances say when tapped: `+
+    /// space`, `+` and `+ new pane` are drawn and unwired, and this is how
+    /// they say so rather than appearing to work.
+    ///
+    /// A read-only credential withdraws them from the sheet outright (see
+    /// [`sheet_body`](Self::sheet_body)) — offering a create nobody may
+    /// perform is worse than not offering one.
     pub fn unavailable(&self) {
         app_toasts().show(UNAVAILABLE_TOAST);
     }
@@ -807,10 +940,12 @@ impl Actions {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
         // Tracked reads: switching a tab from inside the sheet re-runs this
-        // builder and moves the selection.
+        // builder and moves the selection, and a credential turning read-only
+        // withdraws the three create affordances below.
         let spaces = self.controller.spaces.get();
         let tabs = self.controller.tabs.get();
         let active = self.controller.active_tab.get();
+        let read_only = self.connection.is_read_only.get();
 
         let mut children = vec![self.top_row(sheet, &colors), pieces::v_gap(SECTION_TOP_GAP)];
 
@@ -820,7 +955,7 @@ impl Actions {
             .iter()
             .map(|space| {
                 let actions = self.clone();
-                let name = space.name.clone();
+                let id = space.id.clone();
                 pieces::pill(
                     space.name.clone(),
                     if space.selected {
@@ -829,11 +964,13 @@ impl Actions {
                         PillState::Idle
                     },
                     &colors,
-                    move |_app: &mut AppState| actions.select_space(&name),
+                    move |_app: &mut AppState| actions.select_space(&id),
                 )
             })
             .collect();
-        space_pills.push(self.add_pill(ADD_SPACE, &colors));
+        if !read_only {
+            space_pills.push(self.add_pill(ADD_SPACE, &colors));
+        }
         children.push(super::chrome::wrap_row(space_pills, PILL_GAP));
 
         children.push(pieces::v_gap(SECTION_TOP_GAP));
@@ -857,7 +994,9 @@ impl Actions {
                 )
             })
             .collect();
-        tab_pills.push(self.add_pill(ADD_TAB, &colors));
+        if !read_only {
+            tab_pills.push(self.add_pill(ADD_TAB, &colors));
+        }
         children.push(super::chrome::wrap_row(tab_pills, PILL_GAP));
 
         children.push(pieces::v_gap(SECTION_TOP_GAP));
@@ -870,10 +1009,12 @@ impl Actions {
             children.push(pieces::pane_item(tab, &colors));
             children.push(pieces::v_gap(PANE_ROW_GAP));
         }
-        let actions = self.clone();
-        children.push(pieces::new_pane_row(&colors, move |_app: &mut AppState| {
-            actions.unavailable()
-        }));
+        if !read_only {
+            let actions = self.clone();
+            children.push(pieces::new_pane_row(&colors, move |_app: &mut AppState| {
+                actions.unavailable()
+            }));
+        }
 
         any(pieces::column(children))
     }
@@ -913,8 +1054,8 @@ impl Actions {
 ///
 /// *Demo session* sits behind its own separator, after the first three: it is
 /// not a session-management action like the rest of the menu, so it is kept
-/// visually apart from them (see the module docs' "Demo entry" note on why it
-/// lives here at all rather than as a seeded pill row).
+/// visually apart from them (see the module docs' "Pane-content switch" for
+/// what each of the three entries into the live pane mounts).
 fn menu_entries() -> Vec<MenuEntry> {
     vec![
         menu_item(MENU_PANES),
@@ -969,6 +1110,7 @@ mod tests {
     fn the_active_title_is_the_active_tabs_pane_title() {
         let tab = |key: &str, title: &str| TabEntry {
             index: 1,
+            tab_id: 1,
             key: key.to_string(),
             label: key.to_string(),
             pane_title: title.to_string(),

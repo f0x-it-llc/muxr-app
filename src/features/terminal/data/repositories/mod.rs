@@ -4,10 +4,12 @@
 //! signals/widgets here — same framework-free rule as `domain` (see
 //! `crate::features::terminal::domain`'s module doc).
 //!
-//! One today: [`MockTerminalRepository`], the in-memory store seeded from
-//! `docs/terminal.html`. The real `muxrd` client joins it here and
-//! `crate::features::terminal::di` picks which one is published.
+//! Two: [`MockTerminalRepository`], the in-memory store seeded from
+//! `docs/terminal.html`, and [`GrpcTerminalRepository`], the real `muxrd`
+//! client. `crate::features::terminal::di` picks which one is published.
 
+pub mod grpc_terminal_repository;
 pub mod mock_terminal_repository;
 
+pub use grpc_terminal_repository::GrpcTerminalRepository;
 pub use mock_terminal_repository::MockTerminalRepository;
