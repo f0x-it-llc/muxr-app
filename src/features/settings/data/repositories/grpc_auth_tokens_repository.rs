@@ -1,25 +1,47 @@
 //! [`GrpcAuthTokensRepository`] — the real [`AuthTokensRepository`] over the
 //! connected `muxrd` client.
 //!
-//! # Where the client comes from
+//! # Where the client comes from — resolved once, at DI time
 //!
-//! Unlike [`super::PrefsRepository`] (which owns its own platform handle),
-//! this repository holds nothing of its own: every call resolves the app's
-//! one [`ConnectionController`](crate::connection::ConnectionController) via
-//! [`expect_connection_controller`](crate::connection::expect_connection_controller)
-//! and asks it for the live [`MuxrClient`](crate::net::MuxrClient) fresh —
-//! `ConnectionController::client()`'s own contract (`crate::connection`'s
-//! module docs' "backend seam" section, which names this exact repository
-//! shape: "the live client, for the repositories built over the same
-//! connection"). `None` (nothing connected, or a teardown raced this call)
-//! maps to a retryable [`AppFailure::Network`] rather than panicking:
+//! Unlike a per-call lookup, this repository holds the app's one
+//! [`ConnectionController`](crate::connection::ConnectionController) as a
+//! plain `Arc` field, resolved **exactly once**, in `settings::di::provide`
+//! (composition-root wiring, run from `MuxrApp::init` under its ambient
+//! reactive owner) — the same shape
+//! [`GrpcSessionsRepository`](crate::features::sessions::data::repositories::GrpcSessionsRepository)
+//! and
+//! [`GrpcTerminalRepository`](crate::features::terminal::data::repositories::GrpcTerminalRepository)
+//! already use.
+//!
+//! That is a deliberate correction, not a style choice: every real call site
+//! on this repository runs inside a raw `frust::spawn_local` future body (a
+//! settings-page load/create/revoke handler), and the only thing polling
+//! that future — `ReactiveRuntime::pump_local` — installs **no** ambient
+//! reactive `Owner`. A per-call
+//! [`expect_connection_controller`](crate::connection::expect_connection_controller)/
+//! `use_context` lookup from inside that poller sees `Owner::current() ==
+//! None` and `.expect()`-panics
+//! (`clean_signals_frust::expect_controller`'s own contract) on the very
+//! first RPC this repository makes against a real connection — masked in
+//! every test because `tests/support::setup` installs a permanent ambient
+//! `Owner` no real app process ever has. Resolving the controller once, at
+//! DI time, under the one context that *is* guaranteed a live owner, closes
+//! that gap for good.
+//!
+//! [`client`](GrpcAuthTokensRepository::client) still asks the held
+//! controller for the live [`MuxrClient`](crate::net::MuxrClient) fresh on
+//! every call — that part alone stays per-call, and correctly so: the
+//! connection can drop and reconnect between two calls on the same
+//! repository instance. `None` (nothing connected, or a teardown raced this
+//! call) maps to a retryable [`AppFailure::Network`] rather than panicking:
 //! `/settings` is one of the two routes this app never guards, so every
 //! token-repository call site can run while disconnected.
 //!
 //! This is the one place in `data` that reaches past its own feature into
 //! `crate::connection` — a deliberate, narrow widening of the layer table's
-//! `data` row (own domain + external I/O crates): `crate::connection` is
-//! composition-root state beside `crate::failure`, not a sibling feature's
+//! `data` row (own domain + external I/O crates), the identical widening
+//! `sessions`/`terminal`'s own real repositories document: `crate::connection`
+//! is composition-root state beside `crate::failure`, not a sibling feature's
 //! layer, and every call here stays at its plain, non-reactive surface
 //! (`client()`, `on_session_expired()`) — nothing here reads or writes an
 //! `RwSignal`, so this stays as framework-free in spirit as the rest of
@@ -61,7 +83,7 @@ use std::sync::Arc;
 
 use zeroize::Zeroizing;
 
-use crate::connection::{ConnectionController, expect_connection_controller};
+use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::settings::domain::entities::{
     AuthToken, CreateTokenRequest, MintedToken, TokenScope,
@@ -70,38 +92,33 @@ use crate::features::settings::domain::repositories::AuthTokensRepository;
 use crate::net::error;
 use crate::net::proto::{CreateTokenReq, Empty, RevokeTokenReq, TokenInfo};
 
-/// What a repository call fails with when nothing is connected — the
-/// retryable half of the two-part contract [`expect_connection_controller`]
-/// and `ConnectionController::client` document: `/settings` is never
+/// [`GrpcAuthTokensRepository::client`]'s failure detail when nothing is
+/// connected — the retryable half of the contract
+/// `ConnectionController::client` documents: `/settings` is never
 /// route-guarded, so this is reachable, not a bug.
 const NOT_CONNECTED: &str = "no connection is open";
 
 /// The real [`AuthTokensRepository`], over the app's live `muxrd` connection.
 /// See the [module docs](self).
-pub struct GrpcAuthTokensRepository;
+pub struct GrpcAuthTokensRepository {
+    connection: Arc<ConnectionController>,
+}
 
 impl GrpcAuthTokensRepository {
-    /// Stateless — every call resolves the live connection fresh. See the
+    /// A repository over the app's one [`ConnectionController`] — resolved
+    /// once by the caller (`di::provide`) and held from then on. See the
     /// [module docs](self).
-    pub fn new() -> Self {
-        Self
+    pub fn new(connection: Arc<ConnectionController>) -> Self {
+        Self { connection }
     }
-}
 
-impl Default for GrpcAuthTokensRepository {
-    fn default() -> Self {
-        Self::new()
+    /// The live client, or [`NOT_CONNECTED`] when nothing is connected. See
+    /// the [module docs](self)' "Where the client comes from" section.
+    fn client(&self) -> Result<crate::net::MuxrClient, AppFailure> {
+        self.connection
+            .client()
+            .ok_or_else(|| AppFailure::Network(NOT_CONNECTED.to_string()))
     }
-}
-
-/// The app-scoped connection controller and its live client, or a
-/// [`NOT_CONNECTED`] network failure when there is nothing open.
-fn live_client() -> Result<(Arc<ConnectionController>, crate::net::MuxrClient), AppFailure> {
-    let controller = expect_connection_controller();
-    let client = controller
-        .client()
-        .ok_or_else(|| AppFailure::Network(NOT_CONNECTED.to_string()))?;
-    Ok((controller, client))
 }
 
 /// Map a gRPC status through [`error::from_status`], firing
@@ -149,18 +166,18 @@ fn minted_token_from_wire(info: &TokenInfo, secret: Zeroizing<String>) -> Minted
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 impl AuthTokensRepository for GrpcAuthTokensRepository {
     async fn list_tokens(&self) -> Result<Vec<AuthToken>, AppFailure> {
-        let (controller, client) = live_client()?;
+        let client = self.client()?;
         let list = client
             .authed()
             .list_tokens(Empty {})
             .await
-            .map_err(|status| map_status(&controller, &status))?
+            .map_err(|status| map_status(&self.connection, &status))?
             .into_inner();
         Ok(list.tokens.iter().map(auth_token_from_wire).collect())
     }
 
     async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
-        let (controller, client) = live_client()?;
+        let client = self.client()?;
         let mut info = client
             .authed()
             .create_token(CreateTokenReq {
@@ -168,7 +185,7 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
                 read_only: request.read_only,
             })
             .await
-            .map_err(|status| map_status(&controller, &status))?
+            .map_err(|status| map_status(&self.connection, &status))?
             .into_inner();
         // The secret crosses exactly once: lift it into the caller's
         // `Zeroizing` wrapper and leave the decoded response holding an empty
@@ -179,12 +196,12 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
     }
 
     async fn revoke_token(&self, name: String) -> Result<(), AppFailure> {
-        let (controller, client) = live_client()?;
+        let client = self.client()?;
         let ack = client
             .authed()
             .revoke_token(RevokeTokenReq { name })
             .await
-            .map_err(|status| map_status(&controller, &status))?
+            .map_err(|status| map_status(&self.connection, &status))?
             .into_inner();
         error::ack_result(&ack)
     }
