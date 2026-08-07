@@ -129,7 +129,7 @@ Four slices — `connect`, `sessions`, `terminal`, `settings` — each split int
 | Layer | May depend on | Rule |
 |-------|---------------|------|
 | `domain` | own `domain` + `crate::failure` + a named sibling `domain` contract + `crate::connection`'s plain-data re-exports | Framework-free: never `frust::`, never a sibling `data`/`presentation` |
-| `data` | own `domain` (implements its repository traits) + external I/O crates + (`sessions`, `terminal` only) the one sanctioned `Arc<ConnectionController>` edge | Framework-free like `domain`; owns its own failure-mapping into `AppFailure` |
+| `data` | own `domain` (implements its repository traits) + external I/O crates + (`sessions`, `terminal`, `settings` only) the one sanctioned `Arc<ConnectionController>` edge | Framework-free except `frust::spawn`/`frust::spawn_blocking`, sanctioned for background/blocking I/O off the UI thread; every other `frust::` vocabulary (signals, widgets, context, theme) stays banned, same as `domain`. Owns its own failure-mapping into `AppFailure` |
 | `presentation` | own `domain`/`data` + `frust::` | The only layer touching `frust`'s reactive/widget vocabulary |
 
 All four are full slices: a real repository over `src/net`'s gRPC client (or `crate::connection`
@@ -154,8 +154,10 @@ entirely: each feature's `di.rs` is composition-root wiring, so a page may resol
   biometric gate (`secure-storage`, key `zelli_cred_<host>_<port>`). Five credential flows, each its
   own controller method: manual save (mint + rotate, revoking the old token only once the new one is
   stored), one-prompt QR save (the scanned token *is* the credential, nothing minted), gated login
-  with a saved credential, ungated delete (owned by Settings), and an upsert on every successful login
-  (keeps the saved row's credential fields current).
+  with a saved credential (a row stored under `TrustMode::NoVerification` needs one more confirm gate
+  before that unlock even starts — the manual form's own "Trust anyway" radio stays ungated, since
+  picking it is its own consent), ungated delete (owned by Settings), and an upsert on every
+  successful login (keeps the saved row's credential fields current).
 - **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every
   mutation by `Session::id` (the backend-qualified routing key) rather than display name. A read-only
   credential (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never
