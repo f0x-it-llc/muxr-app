@@ -87,6 +87,29 @@ The cold-start splash (`docs/ARCHITECTURE.md`'s Cold-Start Splash section) plays
 too — it is gated per **process launch**, so it replays every time the desktop binary restarts,
 but never on a warm in-process navigation back to `/`.
 
+## Test Rig (Live `muxrd`)
+
+Exercising the app against a real server (rather than the mock/headless suites) needs a `muxr-core`
+checkout running `muxrd` in Docker, reachable from the device:
+
+```bash
+cd <muxr-core>
+BIND_ADDR=<host-ip> ./docker/run.sh --host <host-ip>            # e.g. a tailscale IP: 100.99.99.127
+BIND_ADDR=<host-ip> ./docker/run.sh --host <host-ip> --herdr    # the herdr backend — same ports,
+                                                                 # run one variant at a time
+```
+
+`<host-ip>` must be reachable from the device (a LAN/tailscale IP, never `localhost`) and must match
+the IP entered in `muxrctl`'s pairing setup below — that is what lands in the server cert's SAN.
+
+Pair from the rig's own `muxrctl` TUI (`ssh -t root@<host-ip> -p 2222`): **Configure** (enter the
+identical `<host-ip>`) → **Cert** → **Tokens** → **Server** → **Pair QR**, then scan it from the
+app's Connect screen. No SSH access: mint a token directly —
+`docker exec muxr-grpc-rig muxrd create-token --name <token-name>`.
+
+Attaching a second `zellij` client to the same session resizes the phone's view to the smaller of
+the two clients' dimensions — expected `zellij` behaviour, not an app bug.
+
 ## Test
 
 ```bash

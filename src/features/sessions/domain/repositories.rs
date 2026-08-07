@@ -6,16 +6,17 @@
 //! exactly the four operations `docs/redesign.html`'s sessions block affords,
 //! and nothing speculative.
 //!
-//! # Why it is already async
+//! # Why it is async
 //!
-//! Today's only implementation is in-memory (`data`'s
-//! `MockSessionsRepository`), which needs no `await` at all. The trait is
-//! `async` regardless so the real `muxrd` gRPC client can be dropped in behind
-//! it **additively** — the controller, its use cases and the screen already
-//! drive every call through `ControllerCore::run`'s async path, so the swap
-//! changes one `impl` block and nothing above it. The dual `cfg_attr` is the
-//! same pair every async trait in this codebase and `examples/huddle` uses
-//! (`wasm32`'s single-threaded event loop can't require `Send` futures).
+//! `data::GrpcSessionsRepository`, the production implementation, genuinely
+//! awaits a `muxrd` gRPC round trip; `data::MockSessionsRepository`, the
+//! in-memory sibling headless suites opt onto, needs no `await` at all but
+//! implements the identical `async` contract, so the controller, its use
+//! cases and the screen drive every call through `ControllerCore::run`'s
+//! async path either way — no code above this trait branches on which
+//! implementation is behind it. The dual `cfg_attr` is the same pair every
+//! async trait in this codebase and `examples/huddle` uses (`wasm32`'s
+//! single-threaded event loop can't require `Send` futures).
 //!
 //! Consumed as `Arc<dyn SessionsRepository + Send + Sync>` (huddle's DI
 //! convention), so neither the use cases nor the controller carry a repository

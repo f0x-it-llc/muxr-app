@@ -11,11 +11,14 @@
 //! its module docs) — not part of the inward-dependency slice itself, and the
 //! only place the three meet.
 //!
-//! **Mock-backed**: there is no `muxrd` gRPC round trip yet (see
-//! `crate::connection`'s module docs), so `data`'s repository is in-memory.
-//! Everything above it — the async repository contract, the use cases, the
-//! controller's `ControllerCore::run` calls, the screen's spawn/await/refresh
-//! path — is already the code the real client will run.
+//! **`GrpcSessionsRepository`** (`data::repositories`) is the production
+//! `data` implementation, over `muxrd`'s real gRPC round trip (see
+//! `crate::connection`'s module docs); `di::provide` publishes it unless a
+//! test process opted out via `di::use_mock_sessions_for_tests`, in which case
+//! `MockSessionsRepository` stands in instead. The async repository contract,
+//! the use cases, the controller's `ControllerCore::run` calls and the
+//! screen's spawn/await/refresh path are identical either way — the mock
+//! exists for headless suites, not as a placeholder for the real client.
 
 pub mod data;
 pub mod di;
