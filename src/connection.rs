@@ -265,8 +265,12 @@ pub struct BackendVersion {
 pub enum TrustMode {
     /// The platform's system trust store validates the certificate normally.
     System,
-    /// Trust-on-first-use: pin whatever certificate the first connect sees.
-    TrustOnFirstUse,
+    /// No certificate verification at all: any certificate the server
+    /// presents is accepted. Named for what actually happens rather than for
+    /// the trust-on-first-use scheme this variant used to promise — nothing
+    /// ever records a first-seen fingerprint, so this posture authenticates
+    /// the server on no connection, first or otherwise (review F7).
+    NoVerification,
     /// A certificate pinned ahead of time (the QR-pairing flow), whose
     /// fingerprint rides on [`ConnectTarget::fingerprint`].
     Pinned,
@@ -277,7 +281,7 @@ impl TrustMode {
     fn label(self) -> &'static str {
         match self {
             TrustMode::System => "System trust",
-            TrustMode::TrustOnFirstUse => "Trust on first use",
+            TrustMode::NoVerification => "No verification",
             TrustMode::Pinned => "Pinned certificate",
         }
     }
@@ -505,13 +509,13 @@ impl ConnectionBackend for NetConnectionBackend {
 
 /// The TLS posture `target` dials under.
 ///
-/// Trust-on-first-use maps onto the accept-any verifier: the first-use pin is
-/// not persisted anywhere yet, so this posture authenticates nothing — which is
-/// exactly why it is the one the sessions strip flags with a warning chip.
+/// [`TrustMode::NoVerification`] maps onto the accept-any verifier: it
+/// authenticates nothing — which is exactly why it is the one the sessions
+/// strip flags with a warning chip.
 fn trust_config_for(target: &ConnectTarget) -> Result<TrustConfig, AppFailure> {
     match target.trust_mode {
         TrustMode::System => Ok(TrustConfig::SystemCa),
-        TrustMode::TrustOnFirstUse => Ok(TrustConfig::InsecureAcceptAny),
+        TrustMode::NoVerification => Ok(TrustConfig::InsecureAcceptAny),
         TrustMode::Pinned => {
             let fingerprint = target
                 .fingerprint
@@ -941,7 +945,7 @@ mod tests {
         ConnectTarget {
             host: "mock.example".to_string(),
             port: 7777,
-            trust_mode: TrustMode::TrustOnFirstUse,
+            trust_mode: TrustMode::NoVerification,
             label: "Mock rig".to_string(),
             offer_credential,
             token: Zeroizing::new("s3cr3t".to_string()),
@@ -976,10 +980,10 @@ mod tests {
         assert_eq!(info.endpoint, "mock.example:7777");
         assert_eq!(
             info.trust_mode,
-            TrustMode::TrustOnFirstUse,
+            TrustMode::NoVerification,
             "the target's posture rides through as a variant, not just a label"
         );
-        assert_eq!(info.tls_label, "Trust on first use");
+        assert_eq!(info.tls_label, "No verification");
         assert_eq!(info.latency_ms, MOCK_LATENCY_MS);
         assert_eq!(
             info.version, MOCK_SERVER_VERSION,
@@ -1134,11 +1138,11 @@ mod tests {
         system.trust_mode = TrustMode::System;
         assert_eq!(trust_config_for(&system), Ok(TrustConfig::SystemCa));
 
-        let tofu = target(false);
+        let unverified = target(false);
         assert_eq!(
-            trust_config_for(&tofu),
+            trust_config_for(&unverified),
             Ok(TrustConfig::InsecureAcceptAny),
-            "trust-on-first-use has no persisted pin to check yet"
+            "no verification means no pin is ever checked"
         );
 
         let mut pinned = target(false);
@@ -1260,8 +1264,8 @@ mod tests {
     fn read_only_info() -> ServerInfo {
         ServerInfo {
             endpoint: "mock.example:7777".to_string(),
-            trust_mode: TrustMode::TrustOnFirstUse,
-            tls_label: TrustMode::TrustOnFirstUse.label().to_string(),
+            trust_mode: TrustMode::NoVerification,
+            tls_label: TrustMode::NoVerification.label().to_string(),
             version: MOCK_SERVER_VERSION.to_string(),
             latency_ms: MOCK_LATENCY_MS,
             backend_versions: Vec::new(),

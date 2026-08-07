@@ -825,7 +825,7 @@ fn toggle_art<S: 'static>(colors: &Palette, on: bool) -> AnyView<S> {
 /// # Two rows over a three-way enum, on purpose
 ///
 /// [`TrustMode`] has three postures but only two are a *manual* choice:
-/// `System` ("Public domain (CA)") and `TrustOnFirstUse` ("Trust anyway", the
+/// `System` ("Public domain (CA)") and `NoVerification` ("Trust anyway", the
 /// one that genuinely skips certificate validation, hence the chip).
 /// [`TrustMode::Pinned`] is deliberately **not** selectable here — in the muxr
 /// product a pinned certificate arrives with the thing that pinned it (a QR
@@ -874,7 +874,7 @@ fn trust_selector<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> 
 
 /// The manually selectable [`TrustMode`]s, in the order the selector stacks
 /// them: safest first. See [`trust_selector`] for why `Pinned` is absent.
-const TRUST_OPTIONS: [TrustMode; 2] = [TrustMode::System, TrustMode::TrustOnFirstUse];
+const TRUST_OPTIONS: [TrustMode; 2] = [TrustMode::System, TrustMode::NoVerification];
 
 /// What the selector says instead of a selection while the form carries
 /// [`TrustMode::Pinned`] — the posture a QR pairing or a saved server brings
@@ -900,7 +900,7 @@ fn trust_option_label(mode: TrustMode) -> &'static str {
     match mode {
         // The mock's own strings for the two rows it draws.
         TrustMode::System => "Public domain (CA)",
-        TrustMode::TrustOnFirstUse => "Trust anyway",
+        TrustMode::NoVerification => "Trust anyway",
         TrustMode::Pinned => "Pinned certificate",
     }
 }
@@ -910,7 +910,9 @@ fn trust_option_label(mode: TrustMode) -> &'static str {
 fn trust_meta_label(mode: TrustMode) -> &'static str {
     match mode {
         TrustMode::System => "system TLS",
-        TrustMode::TrustOnFirstUse => "first-use TLS",
+        // Not "first-use TLS" (review F7): that name claimed a
+        // trust-on-first-use mechanism this posture never implemented.
+        TrustMode::NoVerification => "no-verification TLS",
         TrustMode::Pinned => "pinned TLS",
     }
 }
@@ -963,7 +965,7 @@ fn trust_row<S: 'static>(
     // `BadgeVariant::Warning` paints no border, where `.warn-chip` asks for a
     // 1px `--warning-border` — `resolve_badge_colors` returns `None` for every
     // variant but `Neutral`, and the app cannot supply one.
-    if mode == TrustMode::TrustOnFirstUse {
+    if mode == TrustMode::NoVerification {
         items.push(inflexible(h_gap::<S>(SAVED_GAP)));
         items.push(inflexible(any(badge("insecure", BadgeVariant::Warning))));
     }
@@ -1191,7 +1193,7 @@ fn splash_placeholder_row() -> SavedServer {
     SavedServer {
         host: "100.71.31.57".to_string(),
         port: 50051,
-        trust_mode: TrustMode::TrustOnFirstUse,
+        trust_mode: TrustMode::NoVerification,
         label: "Home rig".to_string(),
         last_used_ms: epoch_millis() - PLACEHOLDER_AGE_MS,
         read_only: false,
@@ -1425,7 +1427,7 @@ mod tests {
     /// offers only [`TRUST_OPTIONS`].
     const ALL_TRUST_MODES: [TrustMode; 3] = [
         TrustMode::System,
-        TrustMode::TrustOnFirstUse,
+        TrustMode::NoVerification,
         TrustMode::Pinned,
     ];
 

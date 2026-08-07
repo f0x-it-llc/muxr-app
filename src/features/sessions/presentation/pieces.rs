@@ -317,7 +317,7 @@ fn meta_line(info: &ServerInfo) -> String {
 /// `BadgeVariant::Warning` chip, from the same enum.
 fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
     match mode {
-        TrustMode::TrustOnFirstUse => Some(INSECURE_CHIP),
+        TrustMode::NoVerification => Some(INSECURE_CHIP),
         TrustMode::System | TrustMode::Pinned => None,
     }
 }
@@ -694,7 +694,7 @@ mod tests {
         ServerInfo {
             endpoint: "100.71.31.57:50051".to_string(),
             trust_mode: mode,
-            tls_label: "Trust on first use".to_string(),
+            tls_label: "No verification".to_string(),
             version: "zellij 0.44.3".to_string(),
             latency_ms: 36,
             backend_versions: Vec::new(),
@@ -707,14 +707,14 @@ mod tests {
     #[test]
     fn the_strips_meta_line_is_the_redesigns() {
         assert_eq!(
-            meta_line(&info(TrustMode::TrustOnFirstUse)),
+            meta_line(&info(TrustMode::NoVerification)),
             "zellij 0.44.3 \u{b7} 36ms"
         );
     }
 
     #[test]
     fn only_the_validation_skipping_posture_earns_the_insecure_chip() {
-        assert_eq!(insecure_chip(TrustMode::TrustOnFirstUse), Some("insecure"));
+        assert_eq!(insecure_chip(TrustMode::NoVerification), Some("insecure"));
         assert_eq!(insecure_chip(TrustMode::System), None);
         assert_eq!(insecure_chip(TrustMode::Pinned), None);
     }

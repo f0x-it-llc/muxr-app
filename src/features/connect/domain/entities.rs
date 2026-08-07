@@ -407,7 +407,7 @@ mod tests {
         SavedServer {
             host: "100.71.31.57".to_string(),
             port: 50051,
-            trust_mode: TrustMode::TrustOnFirstUse,
+            trust_mode: TrustMode::NoVerification,
             label: "Home rig".to_string(),
             last_used_ms: NOW_MS - age_ms,
             read_only: false,

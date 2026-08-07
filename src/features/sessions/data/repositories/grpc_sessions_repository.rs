@@ -452,7 +452,7 @@ mod tests {
         connection.connect(ConnectTarget {
             host: "mock.example".to_string(),
             port: 1,
-            trust_mode: TrustMode::TrustOnFirstUse,
+            trust_mode: TrustMode::NoVerification,
             label: "Mock".to_string(),
             offer_credential: false,
             token: Zeroizing::new(String::new()),

@@ -62,7 +62,12 @@
 //! 3. **Login with a saved credential** —
 //!    [`ConnectController::recover_and_connect`]: unlock, then connect with the
 //!    recovered token under the row's own stored posture. Every other outcome
-//!    reports [`CredentialStatus::message`] and prefills the manual form.
+//!    reports [`CredentialStatus::message`] and prefills the manual form. A row
+//!    stored under [`TrustMode::NoVerification`] is gated a step earlier still
+//!    (review F7, see [`Self::saved_row_needs_confirmation`]'s doc): the screen
+//!    raises a confirm dialog *before* calling this method at all, since the
+//!    unlock this method starts recovers a real secret that a connection with
+//!    no verification then sends over a channel that authenticates nothing.
 //! 4. **Delete** — ungated, and owned by the Settings screen (this feature's
 //!    only delete is `forget_unreadable`'s cleanup after an invalidated key).
 //! 5. **Upsert on login** — every successful connect through this controller
@@ -371,6 +376,25 @@ impl ConnectController {
         } else {
             self.prefill(&server);
         }
+    }
+
+    /// The saved row at `index`, if tapping it must raise a confirmation
+    /// **before** [`Self::saved_row_tapped`]/[`Self::recover_and_connect`] fire
+    /// their biometric unlock — a stored credential trusted under
+    /// [`TrustMode::NoVerification`] (review F7): that unlock recovers a real
+    /// secret, and `recover_and_connect` then replays it over a channel that
+    /// authenticates nothing. `None` for an out-of-range index, a row with no
+    /// stored credential (nothing to unlock — [`Self::saved_row_tapped`]'s
+    /// prefill branch, which raises no prompt either), or any other posture.
+    ///
+    /// A predicate only, deliberately: this controller stays free of the
+    /// overlay-host handle a confirm dialog needs (`docs/ARCHITECTURE.md`'s
+    /// "Building a Screen" charter — a dialog is the screen's own concern, not
+    /// a controller's), so `super::pages::ConnectScreen` is what calls this
+    /// before deciding whether to raise one.
+    pub fn saved_row_needs_confirmation(&self, index: usize) -> Option<SavedServer> {
+        let server = self.saved.get_untracked().get(index).cloned()?;
+        (server.has_credential && server.trust_mode == TrustMode::NoVerification).then_some(server)
     }
 
     /// Whether a dial is in flight — the connect button's busy state, shared
@@ -804,6 +828,13 @@ impl ConnectController {
     ///
     /// Ignored while a dial or another unlock is in flight — the same
     /// single-flight rule the CTAs share.
+    ///
+    /// **Callers**, not this method, own the review-F7 confirmation: a
+    /// `NoVerification` row's tap is gated by
+    /// `super::pages::ConnectScreen`'s own wiring *before* it ever reaches
+    /// here (see [`Self::saved_row_needs_confirmation`]) — by the time this
+    /// method runs, either the row's posture needed no confirmation or the
+    /// user has already given it.
     pub fn recover_and_connect(self: &Arc<Self>, server: SavedServer, nav: &Nav) {
         if self.busy_untracked() {
             return;

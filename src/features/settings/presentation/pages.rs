@@ -424,12 +424,12 @@ fn backend_version_label(backend: ServerBackend) -> &'static str {
 ///
 /// Branches on the [`TrustMode`] **variant**, never on `ServerInfo::tls_label`
 /// (`crate::connection`'s own rule: that field is display text). The words are
-/// the redesign's rather than that label's — its "Trust on first use" describes
-/// the *mechanism*, where screen 5 names the *consequence*, which is the whole
-/// point of the note under that mock.
+/// the redesign's rather than that label's — its "No verification" names the
+/// *posture*, where screen 5 names the *consequence*, which is the whole point
+/// of the note under that mock.
 fn tls_posture(mode: TrustMode) -> (&'static str, ValueTone) {
     match mode {
-        TrustMode::TrustOnFirstUse => ("insecure (plaintext)", ValueTone::Warn),
+        TrustMode::NoVerification => ("insecure (plaintext)", ValueTone::Warn),
         TrustMode::System => ("public CA", ValueTone::Ok),
         TrustMode::Pinned => ("pinned certificate", ValueTone::Ok),
     }
@@ -886,7 +886,7 @@ mod tests {
         // must never read as a success state, and a validated posture must
         // never read as a warning.
         assert!(matches!(
-            tls_posture(TrustMode::TrustOnFirstUse),
+            tls_posture(TrustMode::NoVerification),
             ("insecure (plaintext)", ValueTone::Warn)
         ));
         assert!(matches!(

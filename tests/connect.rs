@@ -808,7 +808,7 @@ fn mock_target() -> ConnectTarget {
     ConnectTarget {
         host: "mock.example".to_string(),
         port: 7777,
-        trust_mode: TrustMode::TrustOnFirstUse,
+        trust_mode: TrustMode::NoVerification,
         label: "Mock rig".to_string(),
         offer_credential: false,
         token: zeroize::Zeroizing::new(String::new()),
@@ -2157,6 +2157,160 @@ fn tapping_a_credential_row_on_the_real_screen_unlocks_and_lands_on_sessions() {
         "the tap raised exactly one prompt"
     );
     assert!(harness.nav.depth() > before, "…and landed on /sessions");
+}
+
+// ---------------------------------------------------------------------------
+// The no-verification confirm gate (review F7)
+// ---------------------------------------------------------------------------
+
+/// [`credential_row`] with its posture overridden and stamped now, so it sorts
+/// ahead of the seeded rows and lays out inside the fixture's surface — the
+/// gate tests' one fixture, parametrized over the posture under test.
+fn gated_row(trust_mode: TrustMode) -> SavedServer {
+    let mut row = credential_row(true, None);
+    row.trust_mode = trust_mode;
+    row.last_used_ms = epoch_millis();
+    if trust_mode == TrustMode::Pinned {
+        row.fingerprint = Some(PAIRED_FINGERPRINT.to_string());
+    }
+    row
+}
+
+/// Mount the real screen with one [`gated_row`] saved and its secret seeded —
+/// every gate test's fixture.
+fn mount_with_gated_row(trust_mode: TrustMode) -> Harness {
+    Harness::mount_seeded(|| {
+        expect_saved_servers()
+            .save(gated_row(trust_mode))
+            .expect("the mock store never fails");
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed(CRED_ENDPOINT, CRED_TOKEN);
+    })
+}
+
+#[test]
+fn a_no_verification_saved_row_gates_behind_a_confirmation_before_any_unlock() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the no-verification saved row", |node| {
+        node.value() == Some(CRED_ENDPOINT)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the confirm dialog is pushed as its own page, ahead of any unlock"
+    );
+    assert_eq!(
+        credentials.prompts().len(),
+        0,
+        "the biometric prompt must not fire until the dialog is confirmed"
+    );
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "nothing has connected yet"
+    );
+}
+
+#[test]
+fn canceling_the_no_verification_gate_fires_no_prompt_and_leaves_the_form_untouched() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the no-verification saved row", |node| {
+        node.value() == Some(CRED_ENDPOINT)
+    });
+    // A scrim tap is `confirm_dialog`'s cancel route: it pops with an empty
+    // result, which reads as "cancelled" (see `ui::dialogs`' module docs), so
+    // `ConnectController::recover_and_connect` is never called at all.
+    harness.tap(SCRIM_POINT);
+    harness.settle();
+
+    assert_eq!(harness.nav.depth(), before, "the dialog closed");
+    assert_eq!(
+        credentials.prompts().len(),
+        0,
+        "a canceled gate must never raise the biometric prompt — the whole \
+         point of gating before the unlock rather than after it"
+    );
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "nothing connected"
+    );
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(""),
+        "cancel backs out silently: the manual form is untouched, not prefilled"
+    );
+}
+
+#[test]
+fn confirming_the_no_verification_gate_unlocks_and_connects() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the no-verification saved row", |node| {
+        node.value() == Some(CRED_ENDPOINT)
+    });
+    assert_eq!(harness.nav.depth(), before + 1, "the confirm dialog opened");
+
+    harness.tap_node("the dialog's confirm action", |node| {
+        node.role() == Role::Button && node.label() == Some("Connect anyway")
+    });
+    pump_until_done("the recovered connect", || {
+        expect_connection_controller().connected.get_untracked()
+    });
+    harness.settle();
+
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "confirming raised exactly one biometric prompt — the same mock \
+         semantics as an ungated row"
+    );
+    assert!(harness.nav.depth() > before, "…and landed on /sessions");
+}
+
+#[test]
+fn a_verified_saved_rows_credential_flow_is_never_gated() {
+    let _g = serial();
+    let _ambient = setup();
+    // Sequential, not interleaved (`tests/settings.rs`'s own pattern): each
+    // harness re-provides the app-scoped connection controller, so only the
+    // most recently mounted one is live.
+    for trust_mode in [TrustMode::System, TrustMode::Pinned] {
+        let mut harness = mount_with_gated_row(trust_mode);
+        let credentials = mock_credentials().expect("the mock service is published");
+        let before = harness.nav.depth();
+
+        harness.tap_node("the saved row", |node| node.value() == Some(CRED_ENDPOINT));
+        pump_until_done("the recovered connect", || {
+            expect_connection_controller().connected.get_untracked()
+        });
+        harness.settle();
+
+        assert_eq!(
+            credentials.prompts().len(),
+            1,
+            "{trust_mode:?}: exactly one prompt — no confirm dialog interposed"
+        );
+        assert_eq!(
+            harness.nav.depth(),
+            before + 1,
+            "{trust_mode:?}: the tap went straight to /sessions, no dialog page"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
