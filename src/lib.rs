@@ -56,8 +56,9 @@ use std::sync::Arc;
 
 use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
 
+use features::connect::domain::entities::SavedServer;
 use features::connect::presentation::pages::connect_layout;
-use features::connect::presentation::pieces::{active_theme, connect_pieces};
+use features::connect::presentation::pieces::{active_theme, connect_pieces, splash_saved_servers};
 use ui::splash::icon_phase::{IconArt, splash_icon_art};
 use ui::splash::sequence::{SplashPlan, claim_cold_start, reduced_splash, splash_sequence};
 
@@ -125,6 +126,13 @@ pub struct AppState {
     /// per rebuild (the contract [`splash_icon_art`] documents). Stays `None`
     /// when this launch has no splash to paint it with.
     icon: Option<IconArt>,
+    /// The saved-server rows the splash's copy of the Connect screen renders —
+    /// read from the repository once, beside the icon, for the same reason
+    /// ([`splash_saved_servers`]: the shell rebuilds every frame, and the real
+    /// store is a preferences read plus a JSON parse). An [`Rc`] slice so
+    /// re-deriving the cue per rebuild is a refcount bump rather than a copy of
+    /// every row. Stays `None` when this launch has no splash.
+    saved: Option<Rc<[SavedServer]>>,
     /// Flipped `true` by the sequence's own completion cue. Read (tracked) in
     /// [`Component::build`], so that one write is what unmounts the overlay.
     splash_done: RwSignal<bool>,
@@ -152,6 +160,13 @@ impl AppState {
         self.splash = Some(plan);
         if plan != SplashPlan::Skip {
             self.icon = Some(splash_icon_art());
+            // Resolved here, with the icon, for the same reason: this runs once
+            // per launch, and it runs *before* the splash's first frame — so
+            // the assembled screen is already the real one, with no placeholder
+            // row to flash and then correct. The repository it reads is
+            // published by `init`, which runs before any `build`
+            // (`features::connect::di::provide`, called there).
+            self.saved = Some(splash_saved_servers().into());
         }
         plan
     }
@@ -173,6 +188,7 @@ impl AppState {
         Some(SplashCue {
             plan,
             art: self.icon.clone()?,
+            saved: Rc::clone(self.saved.as_ref()?),
             done: self.splash_done,
         })
     }
@@ -189,6 +205,9 @@ struct SplashCue {
     /// The decoded app icon, decoded once with the decision rather than per
     /// rebuild (the contract [`splash_icon_art`] documents).
     art: IconArt,
+    /// The saved-server rows the assembled screen renders — read once with the
+    /// decision, for the same reason (see [`AppState::saved`]).
+    saved: Rc<[SavedServer]>,
     /// The sequence's own completion cue — read **tracked** by
     /// [`splash_overlay`], so the single `set(true)` that ends the splash is
     /// what unmounts it.
@@ -198,9 +217,11 @@ struct SplashCue {
 /// The splash overlay to stack over the navigator this frame, or `None` once
 /// there is nothing left to show.
 ///
-/// The full sequence assembles the *same* pieces through the *same* layout
-/// function the `/` route renders, which is what makes the unmount invisible —
-/// see [`crate::ui::splash::sequence`].
+/// The full sequence assembles the *same* pieces, from the *same* saved-server
+/// list, through the *same* layout function the `/` route renders — clamp and
+/// all — which is what makes the unmount invisible; see
+/// [`crate::ui::splash::sequence`] and
+/// [`features::connect::presentation::pieces`]' parity contract.
 fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
     // Tracked read: the cue's single `set(true)` wakes this rebuild. It happens
     // inside the overlay host's page builder now, which `RenderRoot::rebuild`
@@ -213,7 +234,7 @@ fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
         SplashPlan::Full => Some(splash_sequence(
             cue.art.clone(),
             SPLASH_SEED,
-            connect_pieces(&active_theme()),
+            connect_pieces(&active_theme(), &cue.saved),
             connect_layout,
             cue.done,
         )),
@@ -288,6 +309,7 @@ impl Component for MuxrApp {
             connection,
             splash: None,
             icon: None,
+            saved: None,
             splash_done: RwSignal::new(false),
         }
     }

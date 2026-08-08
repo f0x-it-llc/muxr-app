@@ -14,7 +14,9 @@
 //! [`pages::connect_layout`], the same function the screen uses, so the handoff
 //! between the two is a no-op frame. That is also why a piece takes an
 //! `Option<&`[`pieces::Live`]`>` rather than reading a controller itself: the
-//! splash has none to read.
+//! splash has none to read. It is a *wiring* difference only — the saved-server
+//! rows and every arrangement decision are inputs both callers share, so the
+//! two renderings cannot drift (see [`pieces`]' parity contract).
 //!
 //! Per `docs/ARCHITECTURE.md`'s "Building a Screen" charter, the screen is a
 //! per-screen `Component` hosting [`controller::ConnectController`] through

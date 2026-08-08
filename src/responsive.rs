@@ -14,6 +14,15 @@
 //! headless test in `tests/` that does not explicitly provide one) takes the
 //! same branch as a genuinely narrow window.
 //!
+//! Connect reads it one level down, inside
+//! `features::connect::presentation::pages::connect_layout` rather than the
+//! screen's own `build` — same build pass, same single read, but in the one
+//! function *both* renderings of that screen assemble through. Its cold-start
+//! splash lays the same pieces out through that layout with no `Component` of
+//! its own, so a clamp applied in the screen's `build` was a width the splash
+//! did not have and jumped to at the handoff (device gate G2). A screen with
+//! only one rendering keeps the plain idiom above.
+//!
 //! **Conservative only.** This pass is width-clamps and padding scaling —
 //! never a *structural* layout switch (no side-by-side panes, no two-column
 //! settings). Those need frust's still-WIP responsive primitive and a design

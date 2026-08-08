@@ -40,8 +40,9 @@ use frust_scene::GlyphRun;
 use kurbo::{Rect, Size};
 use peniko::Color;
 
+use muxr::features::connect::domain::entities::SavedServer;
 use muxr::features::connect::presentation::pages::connect_layout;
-use muxr::features::connect::presentation::pieces::connect_pieces;
+use muxr::features::connect::presentation::pieces::{connect_pieces, splash_saved_servers};
 use muxr::ui::backdrop::page_backdrop;
 use muxr::ui::splash::icon_phase::{IconArt, splash_icon_art};
 use muxr::ui::splash::sequence::{
@@ -66,15 +67,16 @@ const REDUCED_HOLD_MS: f64 = 200.0;
 /// The heading piece's stagger (`spec::PIECE_DELAYS_MS[2]`, likewise).
 const HEADING_DELAY_MS: f64 = 260.0;
 /// How many blurred halos a **settled** Connect screen paints, land flashes
-/// excluded: one, the saved-server row's `.dot-ok`
+/// excluded: one per saved-server row, each row's `.dot-ok`
 /// (`box-shadow:0 0 5px var(--success)`).
 ///
-/// The splash's copy of piece 7 renders the mock's single stand-in row
-/// (`pieces::splash_placeholder_row`), so this is one dot and not the live
-/// repository's three. Asserting the exact residue rather than zero keeps the
-/// original claim — that every *land flash* has faded — intact: a flash left
-/// running would push this above one.
-const RESTING_SHADOWS: usize = 1;
+/// Three, because the splash's copy of piece 7 renders the **real**
+/// repository's list now (device gate G2 — it used to invent a single
+/// stand-in row that vanished at the handoff), and every headless suite runs on
+/// `MockSavedServersRepository::seeded`'s three rigs. Asserting the exact
+/// residue rather than zero keeps the original claim — that every *land flash*
+/// has faded — intact: a flash left running would push this above three.
+const RESTING_SHADOWS: usize = 3;
 
 /// A recording paint target: the flattened glyph-id stream (for text
 /// assertions), plus a count of every other draw kind the splash emits.
@@ -241,19 +243,27 @@ fn decoded_icon() -> IconArt {
 
 /// Mount the orchestrator alone (no navigator underneath) at `cadence_ns`, so
 /// every draw recorded belongs to the splash.
+///
+/// `saved` is piece 7's rows: `None` reads them exactly as the app does
+/// (`pieces::splash_saved_servers`, resolved *after* `MuxrApp::init` has
+/// published the repository — the same ordering `AppState::splash_plan`
+/// relies on), and `Some(..)` pins a list so a test can mount the store state
+/// it wants.
 fn mount_sequence_at(
     cadence_ns: u64,
     reduce_motion: bool,
     frames: usize,
+    saved: Option<Vec<SavedServer>>,
 ) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
     let mut state = MuxrApp.init();
+    let saved = saved.unwrap_or_else(splash_saved_servers);
     let art = decoded_icon();
     let done = RwSignal::new(false);
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
         splash_sequence(
             art.clone(),
             7,
-            connect_pieces(&Theme::glyph_baseline()),
+            connect_pieces(&Theme::glyph_baseline(), &saved),
             connect_layout,
             done,
         )
@@ -268,9 +278,11 @@ fn mount_sequence_at(
     (frames, done)
 }
 
-/// [`mount_sequence_at`] at 60Hz.
+/// [`mount_sequence_at`] at 60Hz, over the repository's real list — what the
+/// app itself assembles, which under every headless suite is the seeded mock's
+/// three rigs.
 fn mount_sequence(reduce_motion: bool, frames: usize) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
-    mount_sequence_at(FRAME_NS, reduce_motion, frames)
+    mount_sequence_at(FRAME_NS, reduce_motion, frames, None)
 }
 
 #[test]
@@ -341,6 +353,38 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
 }
 
 #[test]
+fn a_store_with_no_saved_servers_assembles_no_saved_card_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+
+    // Device gate G2's phantom card: the splash used to paint one hardcoded
+    // "Home rig" row whatever the store held, so a user with nothing saved
+    // watched a card assemble and then vanish as the route took over. Piece 7's
+    // rows are an input now — an empty list is an empty list on both sides.
+    //
+    // Each row's status dot is a glowing swatch (`draw_shadow`), and the
+    // settled overlay paints no other blurred rect (`RESTING_SHADOWS`), so the
+    // shadow count *is* the row count.
+    let end = frame_at(sequence_end_ms() + 200.0);
+    let (empty, _) = mount_sequence_at(FRAME_NS, false, end, Some(Vec::new()));
+    let (last, _) = empty.last().expect("frames were painted");
+    assert_eq!(
+        last.shadows, 0,
+        "no saved servers must assemble no saved rows"
+    );
+
+    // …and the control: the same mount over the app's own read of the seeded
+    // store paints one dot per stored rig, so the assertion above is about the
+    // data and not about the dot having stopped painting.
+    let (seeded, _) = mount_sequence_at(FRAME_NS, false, end, None);
+    let (last_seeded, _) = seeded.last().expect("frames were painted");
+    assert_eq!(
+        last_seeded.shadows, RESTING_SHADOWS,
+        "the seeded store's rows still assemble"
+    );
+}
+
+#[test]
 fn the_completion_cue_fires_once_the_whole_timeline_has_run() {
     let _g = serial();
     let _ambient = setup();
@@ -380,6 +424,7 @@ fn observed_beats(cadence_ns: u64) -> Beats {
         cadence_ns,
         false,
         frame_at_cadence(sequence_end_ms() + 200.0, cadence_ns),
+        None,
     );
 
     let rain_cue = first_frame(&frames, "the rain cue", |(scene, _)| scene.glyph_runs > 0);

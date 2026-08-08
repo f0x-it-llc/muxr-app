@@ -11,7 +11,10 @@
 //! the frame the splash finishes on and the frame the route paints are the same
 //! picture. Both callers hand the layout a `Vec` of already-built pieces (see
 //! [`super::pieces`]); the layout itself is pure arrangement and never builds
-//! one, which is what keeps the two trees honest.
+//! one, which is what keeps the two trees honest. **Every** arrangement
+//! decision belongs to it, the responsive width clamp included — a clamp the
+//! screen applied on its own was the width jump device gate G2 caught, since
+//! the splash assembled through the layout and never saw it.
 //!
 //! Transcribed from `docs/redesign.html`'s `.connect` rule (and
 //! `docs/splash.html`'s `.ui-layer`, which is the same box): a top-anchored
@@ -198,6 +201,18 @@ const FAB_MARGIN: f64 = 20.0;
 /// design mock exists for a structural two-pane Connect, so this is a plain
 /// clamp, not a layout switch — see `crate::responsive`'s module docs.
 const CONNECT_CLAMP_WIDTH: f64 = 520.0;
+/// Where the clamped column sits in a wide window: centered horizontally,
+/// **top**-anchored vertically.
+///
+/// Not [`Alignment::CENTER`], which is what the screen's own copy of this clamp
+/// used before it moved into `connect_layout`. Inside the screen's
+/// [`scroll_view`] the vertical fraction is dead either way — a scroll child is
+/// laid out under an unbounded height, so an `Align` shrink-wraps that axis and
+/// has no free space to center within. The splash assembles into a `Stack`
+/// layer instead, whose height *is* bounded: `CENTER` there would drop the
+/// whole form to the middle of the screen and hand the handoff a vertical jump
+/// in place of the horizontal one this clamp exists to remove.
+const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
 /// The QR affordance's accessible name — what a screen reader announces, and
 /// what `tests/connect.rs` addresses the button by.
 pub const FAB_LABEL: &str = "Pair by QR code";
@@ -277,12 +292,30 @@ const SHEET_GAP: f64 = 16.0;
 
 /// Arrange `pieces` exactly as `.ui-layer` does: a safe-area-inset,
 /// `LAYER_PAD_*`-padded, top-anchored column with `LAYER_GAP` between
-/// consecutive pieces, each stretched to the full layer width.
+/// consecutive pieces, each stretched to the full layer width — **and**, past
+/// [`WIDE_BREAKPOINT_PX`], clamped to [`CONNECT_CLAMP_WIDTH`] and centered.
 ///
 /// Takes the pieces already built so the splash can pass its wrapped copies
 /// (identical layout, animated paint) and the screen can pass its live ones.
 /// Generic over the state type for the same reason the pieces are — the splash
 /// composes under [`AppState`], the screen under its own [`ConnectState`].
+///
+/// # Why the clamp lives here (device gate G2)
+///
+/// It used to be the screen's own, applied in [`ConnectScreen`]'s `build`
+/// around this function's output — so on a tablet, a landscape phone or a
+/// desktop window the splash assembled its pieces edge to edge and the whole
+/// form *jumped inward* the instant the route took over. This is the one
+/// function both renderings assemble through, so putting the clamp in it is
+/// what makes the two widths equal by construction rather than by two call
+/// sites agreeing (see [`super::pieces`]' parity contract).
+///
+/// The read is the reference idiom `crate::responsive` documents, one level
+/// down from a `Component::build`: `use_context::<WindowMetrics>()` once,
+/// branch on the one shared constant, never touch layout again. Both callers
+/// invoke this from a build pass under a live owner, and a rotation or resize
+/// re-provides the metrics and drives the rebuild that re-reads them — so the
+/// splash tracks a mid-sequence rotation exactly like the live screen does.
 pub fn connect_layout<S: 'static>(pieces: Vec<AnyView<S>>) -> AnyView<S> {
     let mut children = Vec::with_capacity(pieces.len() * 2);
     for (index, piece) in pieces.into_iter().enumerate() {
@@ -292,10 +325,23 @@ pub fn connect_layout<S: 'static>(pieces: Vec<AnyView<S>>) -> AnyView<S> {
         children.push(inflexible(piece));
     }
 
-    any(safe_area(Padding(
+    let layer = any(safe_area(Padding(
         EdgeInsets::symmetric(LAYER_PAD_X, LAYER_PAD_Y),
         FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch),
-    )))
+    )));
+
+    // `None` — no shell has published metrics yet, or a bare test harness —
+    // takes the same branch as a genuinely narrow window.
+    let is_wide = use_context::<WindowMetrics>()
+        .map(|metrics| metrics.size.width >= WIDE_BREAKPOINT_PX)
+        .unwrap_or(false);
+    if !is_wide {
+        return layer;
+    }
+    any(Align(
+        CLAMP_ALIGNMENT,
+        SizedBox::<S>(Some(CONNECT_CLAMP_WIDTH), None).child(layer),
+    ))
 }
 
 /// The Connect screen: the `/` route's page. See the [module docs](self).
@@ -429,25 +475,15 @@ impl Component for ConnectScreen {
             },
         };
 
-        // Responsive width-clamp pass (FINDINGS #21): read metrics once,
-        // branch on one page constant, never touch layout again — the
-        // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
-        // documents. `None` (no shell has published yet, or a bare test
-        // harness) takes the same branch as a genuinely narrow window.
-        let metrics = use_context::<WindowMetrics>();
-        let is_wide = metrics
-            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
-            .unwrap_or(false);
-
-        let content = connect_layout(connect_pieces_with(&theme, Some(&live)));
-        let content = if is_wide {
-            any(Align(
-                Alignment::CENTER,
-                SizedBox::<ConnectState>(Some(CONNECT_CLAMP_WIDTH), None).child(content),
-            ))
-        } else {
-            content
-        };
+        // Piece 7's rows, read here rather than inside the piece: this is the
+        // one **tracked** read of the list (so a save/delete wakes this
+        // screen's next rebuild), and handing it down is what lets the splash
+        // hand the same builder its own snapshot of the same repository — see
+        // `super::pieces`' parity contract. The responsive width-clamp pass
+        // (FINDINGS #21) is likewise no longer applied here: it moved into
+        // `connect_layout`, so the splash clamps identically (device gate G2).
+        let saved = state.controller.saved.get();
+        let content = connect_layout(connect_pieces_with(&theme, Some(&live), &saved));
 
         any(Stack(vec![
             any(page_backdrop::<ConnectState>()),
