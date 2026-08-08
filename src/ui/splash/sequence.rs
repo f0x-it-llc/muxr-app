@@ -33,12 +33,21 @@
 //! already rendering `/`. Its backdrop is opaque (and input-blocking) so
 //! nothing leaks through or gets tapped mid-sequence; its assembly lays out
 //! the very same [`connect_pieces`](crate::features::connect::presentation::pieces::connect_pieces)
-//! through the very same
+//! — same saved-server rows, same undimmed fields — through the very same
 //! [`connect_layout`](crate::features::connect::presentation::pages::connect_layout)
-//! the route uses — the only difference is that each piece is wrapped in
-//! [`piece_entry`], which is a **paint-time** transform and changes no
-//! geometry. So when [`Cue`] flips the caller's `done` signal and the shell
-//! drops the overlay, the pixels beneath are the ones that were already there.
+//! the route uses, width clamp included. The only difference is that each piece
+//! is wrapped in [`piece_entry`], which is a **paint-time** transform and
+//! changes no geometry. So when [`Cue`] flips the caller's `done` signal and the
+//! shell drops the overlay, the pixels beneath are the ones that were already
+//! there. That the two pictures actually coincide is the *pieces* module's
+//! contract, not this one's — see its "parity contract" section for the three
+//! divergences device gate G2 closed.
+//!
+//! Nothing here forwards input to the assembly either: [`DelayedWidget`] has no
+//! `Widget::event` of its own, so no pointer ever reaches a piece, and the
+//! backdrop under it swallows what is left. The assembled fields are
+//! *additionally* read-only in their own right (`pieces`' item 2), so blocking
+//! focus does not depend on this file's structure staying as it is.
 //!
 //! # Clocking, without a per-frame rebuild
 //!
@@ -201,9 +210,14 @@ pub fn sequence_end_ms() -> f64 {
 ///   composition root's `init`) and clone the handle in; this function runs
 ///   on every rebuild.
 /// - `seed` — fixes the burst's particles and the rain's whole field.
-/// - `pieces` — the screen to assemble, in stagger order.
+/// - `pieces` — the screen to assemble, in stagger order. Build them with the
+///   *same* builder the route uses, from the same saved-server list
+///   (`connect_pieces` + `splash_saved_servers`), or the handoff below has two
+///   different pictures to cross.
 /// - `assemble` — lays those pieces out; hand it the *same* function the
-///   route's page uses (see the module docs' handoff note).
+///   route's page uses (see the module docs' handoff note). It owns the
+///   responsive width clamp, so this sequence needs no window arithmetic of
+///   its own.
 /// - `done` — set `true` once, when the sequence is over.
 pub fn splash_sequence<State: 'static>(
     art: IconArt,

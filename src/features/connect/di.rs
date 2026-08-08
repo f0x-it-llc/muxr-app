@@ -152,6 +152,20 @@ pub fn expect_saved_servers() -> SavedServers {
     )
 }
 
+/// Resolve the saved-server repository if [`provide`] has already published one,
+/// or `None` if it has not.
+///
+/// The soft twin of [`expect_saved_servers`], for the **one** caller that runs
+/// outside a screen: the cold-start splash's snapshot
+/// (`presentation::pieces::splash_saved_servers`), which assembles the Connect
+/// screen before any route mounts. `MuxrApp::init` calls [`provide`] before the
+/// first `build` that resolves the splash, so in the app this always answers
+/// `Some` — but a splash is decorative, and rendering it with no saved rows is a
+/// better failure than taking a launch down over a list.
+pub fn saved_servers() -> Option<SavedServers> {
+    use_context::<SavedServers>()
+}
+
 /// Resolve the credential service [`provide`] published. Same panic contract as
 /// [`expect_saved_servers`].
 pub fn expect_credential_service() -> Credentials {

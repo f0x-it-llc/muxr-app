@@ -70,8 +70,8 @@ use std::sync::Arc;
 use frust::Theme;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
-    Align, Alignment, AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack,
-    WindowMetrics, any, navigator, provide_context,
+    Align, Alignment, AnyView, Component, Get, GetUntracked, NavigatorController, Set, SizedBox,
+    Stack, WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
 use frust_core::{FrameTime, NamedKey, PaintScene, RenderRoot, WindowInsets};
@@ -106,7 +106,9 @@ use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
-use support::{RecScene, char_key, frame_sized, named_key, serial, settle_sized, setup, tap};
+use support::{
+    EPSILON, RecScene, char_key, frame_sized, named_key, serial, settle_sized, setup, tap,
+};
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
 /// tall enough for the whole screen (~830px of pieces) to lay out unclipped —
@@ -663,6 +665,92 @@ fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
     assert!((cta.x0 - LAYER_PAD_X).abs() < 0.5, "{:?}", cta);
 }
 
+/// The CTA's box in a standalone mount of the **splash's** assembly path:
+/// `connect_layout(connect_pieces(..))` inside a `Stack`, which is exactly what
+/// `crate::splash_overlay` hands the sequence and how the sequence hosts it
+/// (its own wrapper is a paint-time entrance and changes no geometry). The
+/// `Stack` matters: it hands its children a *bounded* height, where the live
+/// screen's `scroll_view` hands an unbounded one — the difference
+/// `pages::CLAMP_ALIGNMENT` exists for. Laid out at [`SURFACE`], under whatever
+/// `WindowMetrics` the caller has already provided.
+fn splash_cta_bounds(saved: &[SavedServer]) -> Rect {
+    let theme = Theme::glyph_baseline();
+    let saved = saved.to_vec();
+    let mut logic = move |_state: &mut ()| {
+        any(Stack(vec![connect_layout(connect_pieces::<()>(
+            &theme, &saved,
+        ))]))
+    };
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut state = ();
+    let mut tcx = TextContext::new();
+    frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+    root.semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Button && node.label() == Some(CONNECT_LABEL))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the splash's assembly paints the CTA")
+}
+
+#[test]
+fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
+    let _g = serial();
+    let _ambient = setup();
+    // Device gate G2's width jump: the clamp used to live in the screen's own
+    // `build`, so the splash assembled edge to edge on any window at or past
+    // the breakpoint and the whole form snapped inward at the handoff. It is
+    // `connect_layout`'s now — the one function both renderings assemble
+    // through — so this asserts the two land on the same horizontal box rather
+    // than that each happens to satisfy the same arithmetic.
+    let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
+    let live = harness.bounds("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    let splash = splash_cta_bounds(&expect_saved_servers().list().expect("the mock lists"));
+
+    assert!(
+        (splash.x0 - live.x0).abs() < EPSILON && (splash.x1 - live.x1).abs() < EPSILON,
+        "the splash's assembly and the live screen must occupy the same \
+         horizontal box on a wide window: splash {splash:?} vs live {live:?}"
+    );
+    // …and it really is the clamped one, not both being unclamped.
+    let margin = (SURFACE.width - CONNECT_CLAMP_WIDTH) / 2.0;
+    assert!(
+        (splash.x0 - (margin + LAYER_PAD_X)).abs() < EPSILON,
+        "the splash's own copy is centered inside the clamp: {splash:?}"
+    );
+
+    // The clamp centers **horizontally only**: the assembly is hosted by a
+    // height-bounded `Stack`, so a vertically-centered alignment would drop the
+    // whole column down the screen and trade the width jump for a taller one.
+    // Wide and narrow must therefore agree on where the column starts.
+    provide_context(metrics_at(Size::new(400.0, SURFACE.height)));
+    let narrow = splash_cta_bounds(&[]);
+    assert!(
+        (splash.y0 - narrow.y0).abs() < EPSILON,
+        "clamping must not move the column vertically: wide {splash:?} vs \
+         narrow {narrow:?}"
+    );
+}
+
+#[test]
+fn narrow_metrics_leave_the_splash_assembly_full_bleed_too() {
+    let _g = serial();
+    let _ambient = setup();
+    provide_context(metrics_at(Size::new(400.0, SURFACE.height)));
+
+    // The other half of the branch: below the breakpoint the splash spans the
+    // layer exactly as the live screen does (the shared function takes one
+    // branch for both), so the handoff has nothing to move on a phone either.
+    let splash = splash_cta_bounds(&[]);
+    let layer = SURFACE.width - 2.0 * LAYER_PAD_X;
+    assert!(
+        (splash.width() - layer).abs() < EPSILON && (splash.x0 - LAYER_PAD_X).abs() < EPSILON,
+        "narrow metrics leave the splash unclamped: {splash:?}"
+    );
+}
+
 /// The mark the QR affordance used to set as a *text run*, and which each
 /// mobile platform's font-fallback chain resolved differently (or, on iPhone,
 /// not at all). Nothing on this screen may paint it again.
@@ -1100,7 +1188,11 @@ impl Form {
             on_saved_tap: Rc::new(|_index| {}),
         };
         let logic: FormLogic = Box::new(move |_state: &mut ()| {
-            connect_layout(connect_pieces_with::<()>(&theme, Some(&live)))
+            // Piece 7's rows are an input to the builder now (the splash passes
+            // its own snapshot of the same repository); the screen's own source
+            // is this tracked read, so the fixture takes it too.
+            let saved = live.controller.saved.get();
+            connect_layout(connect_pieces_with::<()>(&theme, Some(&live), &saved))
         });
         let mut form = Form {
             root: RenderRoot::new(),
@@ -2342,40 +2434,47 @@ fn the_live_screens_fields_stay_enabled() {
 
 #[test]
 fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
-    // `connect_pieces` (== `connect_pieces_with(theme, None)`) is exactly what
-    // the cold-start splash assembles — no navigator, no controller, and
-    // (per the module docs) no callback here reads the state it's handed, so
-    // a bare `()` state and a standalone `RenderRoot` reproduce it directly
-    // (mirroring `subtitle_lines`'s own standalone-piece pattern below).
+    // `connect_pieces` (== `connect_pieces_with(theme, None, saved)`) is
+    // exactly what the cold-start splash assembles — no navigator, no
+    // controller, and (per the module docs) no callback here reads the state
+    // it's handed, so a bare `()` state and a standalone `RenderRoot` reproduce
+    // it directly (mirroring `subtitle_lines`'s own standalone-piece pattern
+    // below).
     let _g = serial();
     let _ambient = setup();
 
     let theme = Theme::glyph_baseline();
-    let mut logic = move |_state: &mut ()| connect_layout(connect_pieces::<()>(&theme));
+    let mut logic = move |_state: &mut ()| connect_layout(connect_pieces::<()>(&theme, &[]));
     let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
     let mut state = ();
     let mut tcx = TextContext::new();
     frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
 
-    let fields: Vec<(Role, bool)> = root
+    let fields: Vec<(Role, bool, bool)> = root
         .semantics()
         .nodes
         .iter()
         .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
-        .map(|(_, node)| (node.role(), node.is_disabled()))
+        .map(|(_, node)| (node.role(), node.is_disabled(), node.is_read_only()))
         .collect();
     assert_eq!(fields.len(), 2, "the splash mock still renders both fields");
     assert!(
-        fields.iter().all(|(_, disabled)| *disabled),
-        "the splash's static fields (#16 adopted) must present as disabled — \
-         a stray tap during the staggering entrance must not focus or caret a \
-         field with nothing behind it: {fields:?}"
+        fields.iter().all(|(_, _, read_only)| *read_only),
+        "the splash's static fields must present as read-only — a stray tap \
+         during the staggering entrance must not focus or caret a field with \
+         nothing behind it (FINDINGS #16's concern, unchanged): {fields:?}"
+    );
+    assert!(
+        fields.iter().all(|(_, disabled, _)| !*disabled),
+        "…and NOT as disabled: `enabled(false)` is what dimmed the border and \
+         placeholder, so the fields popped to full alpha the instant the live \
+         screen took over (device gate G2): {fields:?}"
     );
 
     // A direct tap on either field's center must not move focus onto it —
-    // the disabled gate *is* the focus gate (`TextInputView::enabled`'s
-    // module docs: a `Down` inside a disabled field neither requests focus
-    // nor captures the pointer).
+    // read-only hangs off the *same* focus gate `enabled(false)` did
+    // (`TextInputWidget::interactive` is `enabled && !read_only`): a `Down`
+    // inside one neither requests focus nor captures the pointer.
     let centers: Vec<Point> = root
         .semantics()
         .nodes
@@ -2391,7 +2490,7 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
     frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
     assert!(
         root.semantics().focus.is_none(),
-        "a disabled field must not become the tree's focus node after a \
+        "a read-only field must not become the tree's focus node after a \
          direct tap"
     );
 }

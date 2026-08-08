@@ -27,28 +27,39 @@
 //! wiring — its hosted [`ConnectController`] plus the "connect now" action — and
 //! `Some(..)` is what turns a piece into a control: bound `text_input`s, a
 //! pressable toggle, selectable trust rows, a firing CTA, tappable saved rows.
-//! `None` renders the *same picture* with no callbacks and no repository data:
-//! that is what the splash composes, since it assembles the screen before any
-//! controller exists (`crate::AppState::splash_overlay` builds these outside any
-//! screen). Every default is chosen so the two coincide — the toggle starts on,
-//! the trust selector starts on "Public domain (CA)", the fields start empty —
-//! so the overlay still unmounts onto the picture underneath it.
+//! `None` renders the *same picture* with no callbacks: that is what the splash
+//! composes, since it assembles the screen before any controller exists
+//! (`crate::splash_overlay` builds these outside any screen). Every default is
+//! chosen so the two coincide — the toggle starts on (a real
+//! [`switch`], simply with a callback that drives nothing), the trust selector
+//! starts on "Public domain (CA)", the fields start empty — so the overlay still
+//! unmounts onto the picture underneath it.
 //!
-//! Two divergences are deliberate. Piece 7 (`saved_address`): the splash's
-//! copy renders the mock's single stand-in row, the live screen renders the
-//! repository's list — the last piece in a top-anchored column, so every
-//! piece above it is positionally identical across the handoff. Pieces 3/4
-//! (`server_url_field`/`token_field`, #16 adopted): the splash's copies render
-//! `.enabled(false)` so a stray tap during the staggering entrance cannot
-//! focus or caret a field with nothing behind it, where the live screen's stay
-//! enabled. Unlike every other `None`/`Live` split in this module (the art is
-//! byte-identical; only the wrapping recognizer/semantics differ), a disabled
-//! field also **dims** its own chrome — `TextInputView::enabled` has no
-//! undimmed "read-only" mode to reach for instead (see [`token_field`]'s doc)
-//! — so this one pops at the handoff (the border/placeholder alpha steps up
-//! the instant the live screen's enabled copy takes over). Flagged rather than
-//! silently accepted; closing it needs either a framework addition or
-//! accepting the pop.
+//! # The parity contract (device gate G2)
+//!
+//! `None` is a **wiring** difference and nothing else: the splash's copy and the
+//! route's copy paint the same pixels at every window size. Ed's gate caught the
+//! three places that used to be untrue, each a visible step at the handoff, and
+//! each is now closed *structurally* rather than by two call sites agreeing:
+//!
+//! 1. **Piece 7's rows are data, not a default.** The saved-server list is an
+//!    input to [`connect_pieces_with`] — the screen passes its controller's
+//!    signal, the splash passes [`splash_saved_servers`]' snapshot of the very
+//!    same repository — so neither caller can invent rows the other does not
+//!    have. The splash used to paint a hardcoded "Home rig" that *vanished* at
+//!    the handoff for the (very common) user with nothing saved; an empty store
+//!    now renders the same header-and-no-rows on both sides.
+//! 2. **Pieces 3/4 are read-only, not disabled.** The splash's fields must not
+//!    take focus mid-stagger (FINDINGS #16) — but `enabled(false)` also *dims*
+//!    the border and placeholder, so the fields popped to full alpha the instant
+//!    the live copies took over. [`TextInputView::read_only`] is the same
+//!    focus gate without the dimming (see [`token_field`]), which is exactly
+//!    what a static-but-live-styled copy needs.
+//! 3. **The responsive clamp is shared.** It lives in
+//!    [`connect_layout`](super::pages::connect_layout), the one function both
+//!    callers assemble through, rather than in the screen's own `build` — where
+//!    it made the splash's pieces span a wide window edge to edge and then jump
+//!    inward as the route took over.
 //!
 //! # Generic over the state type
 //!
@@ -116,6 +127,7 @@ use frust::{
 use super::chrome::{centered_paragraph, panel, radio_semantics, swatch, switch_semantics};
 use super::controller::ConnectController;
 use crate::connection::TrustMode;
+use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{PairingTrust, SavedServer, epoch_millis};
 
 // ---------------------------------------------------------------------------
@@ -502,8 +514,8 @@ pub fn heading<S: 'static>(theme: &Theme) -> AnyView<S> {
 /// screen's whole validation surface, since `frust`'s `TextInput` exposes no
 /// error state of its own (FINDINGS #16 covers the neighbouring disabled gap).
 ///
-/// Disabled for the splash's static copy (`live` is `None`) — see
-/// [`token_field`]'s doc and the [module docs](self)'s divergence note.
+/// Read-only for the splash's static copy (`live` is `None`) — see
+/// [`token_field`]'s doc and the [module docs](self)'s parity contract.
 pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let invalid = live.is_some_and(|live| live.controller.invalid.get());
     let value = live
@@ -518,7 +530,7 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
         FieldOptions {
             invalid,
             obscured: false,
-            enabled: live.is_some(),
+            read_only: live.is_none(),
         },
         move |next| {
             if let Some(controller) = &controller {
@@ -542,11 +554,19 @@ pub fn server_url_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyVi
 /// consequence yet; it blocks adopting this field for a real credential, not
 /// this adoption itself.
 ///
-/// **Disabled for the splash's static copy** (`live` is `None`) — see the
-/// [module docs](self)'s divergence note: `.enabled(false)` (#16 adopted)
-/// keeps a stray tap during the staggering entrance from focusing or
-/// caret-ing a field with nothing behind it. The live screen's copy stays
-/// enabled.
+/// **Read-only for the splash's static copy** (`live` is `None`) — the
+/// [module docs](self)'s parity contract, item 2. FINDINGS #16's concern is
+/// unchanged: a stray tap during the staggering entrance must not focus or
+/// caret a field with nothing behind it, and
+/// [`TextInputView::read_only`] hangs off the *same* focus gate
+/// `.enabled(false)` did (`interactive == enabled && !read_only`), so it
+/// refuses focus, caret, keyboard and IME exactly as before. What it drops is
+/// the dimming — `enabled` alone still keys the alpha multiply at both
+/// resolution points — which is what used to make the border and placeholder
+/// step up the instant the live screen's copy took over. (The splash blocks
+/// input twice over anyway: `DelayedWidget` forwards no events to the assembly
+/// at all, and the overlay's backdrop swallows what reaches it. This is the
+/// third layer, and the one that survives a change to either of those.)
 pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     // `.get()` returns the tracked `Zeroizing<String>` clone; `TextInputView`
     // takes a plain `String` by value, so this copies it out into one. That
@@ -566,7 +586,7 @@ pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S>
         FieldOptions {
             invalid: false,
             obscured: true,
-            enabled: live.is_some(),
+            read_only: live.is_none(),
         },
         move |next| {
             if let Some(controller) = &controller {
@@ -579,7 +599,7 @@ pub fn token_field<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S>
 /// Per-field presentation flags [`field`] needs beyond its label/placeholder/
 /// value — bundled into one struct so `field`'s own parameter count stays
 /// under clippy's `too_many_arguments` threshold now that obscuring (#20) and
-/// the splash's disabled presentation (#16) are both per-field knobs
+/// the splash's non-interactive presentation (#16) are both per-field knobs
 /// alongside the server-URL field's pre-existing validation flag.
 struct FieldOptions {
     /// Inks the label `error` while the form is invalid — only
@@ -588,10 +608,14 @@ struct FieldOptions {
     /// Mask the rendered glyphs (password mode) — see
     /// [`TextInputView::obscured`]; only [`token_field`] sets this.
     obscured: bool,
-    /// Accept input at all. `false` for the splash's static copy (`live` is
-    /// `None`): see [`token_field`]'s doc. The live screen always passes
-    /// `true`.
-    enabled: bool,
+    /// Refuse focus/caret/editing while painting at **full alpha**. `true` for
+    /// the splash's static copy (`live` is `None`): see [`token_field`]'s doc.
+    /// The live screen always passes `false`.
+    ///
+    /// Never `enabled(false)`: that gate is the same one, but it also dims,
+    /// which is the handoff pop the [module docs](self)'s parity contract
+    /// closed.
+    read_only: bool,
 }
 
 /// A `.field`: an uppercase micro label over a placeholder-bearing input.
@@ -601,7 +625,7 @@ struct FieldOptions {
 ///
 /// `on_change` is invoked with the requested text; a splash-composed field
 /// passes one that drops it. The splash's own copy no longer needs to lean on
-/// that alone to stay static, either — `options.enabled` (`false` there)
+/// that alone to stay static, either — `options.read_only` (`true` there)
 /// refuses focus/caret outright (#16 adopted), rather than merely getting
 /// overwritten by the next controlled-value rebuild.
 ///
@@ -640,7 +664,7 @@ fn field<S: 'static>(
                     .placeholder(placeholder)
                     .text_style(field_text_style(theme, colors.fg))
                     .obscured(options.obscured)
-                    .enabled(options.enabled),
+                    .read_only(options.read_only),
             ),
         ]),
         &colors,
@@ -1118,15 +1142,19 @@ fn pairing_banner<S: 'static>(theme: &Theme, pairing: PairingChrome) -> AnyView<
 /// Piece 7 — `.saved-hdr` + `.saved-row`: the saved-server list, each row
 /// tappable to refill the form.
 ///
-/// With no [`Live`] (the splash) this renders the mock's single stand-in row —
-/// see the [module docs](self)'s note on the one deliberate splash/route
-/// divergence.
-pub fn saved_address<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+/// `servers` is the list to render, handed down by [`connect_pieces_with`]
+/// rather than read here: the screen's rows come from its controller's signal
+/// and the splash's from [`splash_saved_servers`]' snapshot of the same
+/// repository, which is what makes the two pictures identical (the
+/// [module docs](self)'s parity contract, item 1). An empty list renders the
+/// header alone — on **both** sides, so a user with nothing saved sees no card
+/// appear and then vanish across the handoff.
+pub fn saved_address<S: 'static>(
+    theme: &Theme,
+    servers: &[SavedServer],
+    live: Option<&Live>,
+) -> AnyView<S> {
     let colors = palette(theme);
-    let servers = match live {
-        None => vec![splash_placeholder_row()],
-        Some(live) => live.controller.saved.get(),
-    };
     // One clock read for the whole list rather than one per row: every row's
     // recency is measured against the same instant, and this piece rebuilds at
     // signal rate.
@@ -1137,27 +1165,6 @@ pub fn saved_address<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<
     }
     backed(column::<S>(children), &colors)
 }
-
-/// The row the splash paints in place of the repository's list: the mock's own
-/// `.saved-row`, which is also where the seeded store's first entry came from
-/// (`data::repositories::mock_saved_servers`). Its stamp is two hours back from
-/// whenever the splash plays, so the row reads the mock's `2 hours ago`.
-fn splash_placeholder_row() -> SavedServer {
-    SavedServer {
-        host: "100.71.31.57".to_string(),
-        port: 50051,
-        trust_mode: TrustMode::NoVerification,
-        label: "Home rig".to_string(),
-        last_used_ms: epoch_millis() - PLACEHOLDER_AGE_MS,
-        read_only: false,
-        has_credential: false,
-        token_name: None,
-        fingerprint: None,
-    }
-}
-
-/// How old [`splash_placeholder_row`]'s stamp is — two hours, in milliseconds.
-const PLACEHOLDER_AGE_MS: i64 = 2 * 60 * 60 * 1000;
 
 /// `.saved-hdr`: an uppercase micro label followed by a hairline rule filling
 /// the rest of the row (`::after{flex:1;height:1px}`).
@@ -1247,8 +1254,16 @@ fn saved_row<S: 'static>(
 /// (`splash::spec::PIECE_DELAYS_MS`).
 ///
 /// `live` is `Some(..)` for the screen and `None` for the splash — see the
-/// [module docs](self).
-pub fn connect_pieces_with<S: 'static>(theme: &Theme, live: Option<&Live>) -> Vec<AnyView<S>> {
+/// [module docs](self). `saved` is piece 7's rows: the screen passes its
+/// controller's list (a tracked read taken in its own `build`), the splash
+/// passes [`splash_saved_servers`]' snapshot. Both callers pass the *same*
+/// repository's contents, which is the parity contract's first item — neither
+/// can invent a row the other does not have.
+pub fn connect_pieces_with<S: 'static>(
+    theme: &Theme,
+    live: Option<&Live>,
+    saved: &[SavedServer],
+) -> Vec<AnyView<S>> {
     vec![
         connect_mark(theme),
         server_badge(theme),
@@ -1257,15 +1272,52 @@ pub fn connect_pieces_with<S: 'static>(theme: &Theme, live: Option<&Live>) -> Ve
         token_field(theme, live),
         remember_row(theme, live),
         connect_button(theme, live),
-        saved_address(theme, live),
+        saved_address(theme, saved, live),
     ]
 }
 
 /// The eight pieces with **no** live wiring — the shared splash/route seam
-/// (`crate::AppState::splash_overlay` and `tests/sequence.rs` both call exactly
-/// this). See [`connect_pieces_with`].
-pub fn connect_pieces<S: 'static>(theme: &Theme) -> Vec<AnyView<S>> {
-    connect_pieces_with(theme, None)
+/// (`crate::splash_overlay` and `tests/sequence.rs` both call exactly this).
+/// See [`connect_pieces_with`].
+pub fn connect_pieces<S: 'static>(theme: &Theme, saved: &[SavedServer]) -> Vec<AnyView<S>> {
+    connect_pieces_with(theme, None, saved)
+}
+
+/// The saved-server rows the splash's copy of piece 7 renders: the repository's
+/// real list, exactly as `SavedServersRepository::list` answers it.
+///
+/// # Read once per launch, never per rebuild
+///
+/// The composition root resolves this **once**, with the rest of the splash's
+/// decision (`crate::AppState::splash_plan`), and carries the snapshot through
+/// every rebuild — for the same reason the app icon is decoded there rather
+/// than in `build`: the shell rebuilds the whole view tree every frame, and the
+/// real store is a preferences read plus a JSON parse. A per-rebuild read would
+/// put ~240 of those on the cold-start path this animation exists to cover.
+///
+/// A snapshot is also all the splash *can* honestly show: it paints a frozen
+/// picture of a screen whose controller does not exist yet, and nothing can
+/// write the store during the four seconds it plays.
+///
+/// # Ordering, and the two soft failures
+///
+/// `MuxrApp::init` runs `features::connect::di::provide()` before the first
+/// `build` resolves the splash, so the repository is always published by the
+/// time this runs. Both ways that could stop being true answer with **no rows**
+/// rather than a panic or a toast: an unpublished repository (see
+/// [`di::saved_servers`](crate::features::connect::di::saved_servers)) and a
+/// failing `list()`. The live screen's own controller re-reads the same store a
+/// moment later and raises the failure properly if it persists — a toast over
+/// the splash would be noise on top of a launch animation.
+pub fn splash_saved_servers() -> Vec<SavedServer> {
+    let Some(repository) = saved_servers() else {
+        log::warn!("splash: no saved-server repository published yet — assembling with no rows");
+        return Vec::new();
+    };
+    repository.list().unwrap_or_else(|failure| {
+        log::warn!("splash: listing saved servers failed ({failure:?}) — assembling with no rows");
+        Vec::new()
+    })
 }
 
 #[cfg(test)]
@@ -1278,7 +1330,7 @@ mod tests {
     fn there_is_one_piece_per_source_stagger() {
         let theme = Theme::glyph_baseline();
         assert_eq!(
-            connect_pieces::<AppState>(&theme).len(),
+            connect_pieces::<AppState>(&theme, &[]).len(),
             spec::PIECE_DELAYS_MS.len(),
             "the piece list and the `data-delay` table are the same eight \
              elements, in the same order"
@@ -1416,10 +1468,5 @@ mod tests {
         // drop below the floor is the regression this catches, mirroring the
         // FAB's own `const` assertion.
         const { assert!(CTA_HEIGHT >= 44.0) };
-    }
-
-    #[test]
-    fn the_splash_placeholder_is_the_mocks_own_saved_row() {
-        assert_eq!(splash_placeholder_row().endpoint(), "100.71.31.57:50051");
     }
 }
