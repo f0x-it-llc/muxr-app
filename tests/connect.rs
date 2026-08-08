@@ -721,9 +721,9 @@ fn splash_cta_bounds(saved: &[SavedServer]) -> Rect {
 fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     let _g = serial();
     let _ambient = setup();
-    // Device gate G2's width jump: the clamp used to live in the screen's own
-    // `build`, so the splash assembled edge to edge on any window at or past
-    // the breakpoint and the whole form snapped inward at the handoff. It is
+    // The width jump: the clamp used to live in the screen's own `build`, so
+    // the splash assembled edge to edge on any window at or past the
+    // breakpoint and the whole form snapped inward at the handoff. It is
     // `connect_layout`'s now — the one function both renderings assemble
     // through — so this asserts the two land on the same horizontal box rather
     // than that each happens to satisfy the same arithmetic.
@@ -1061,8 +1061,8 @@ fn remembering_a_new_server_offers_its_credential() {
     );
     assert!(
         offer_dialog_up(&harness),
-        "…and the offer is asked here rather than carried to Sessions (device \
-         gate G9 — see the offer section below)"
+        "…and the offer is asked here rather than carried to Sessions (see \
+         the offer section below)"
     );
 }
 
@@ -2008,7 +2008,7 @@ fn accepting_the_offer_mints_a_token_stores_it_and_records_it_on_the_row() {
         offered.borrow().as_slice(),
         ["cred.example".to_string()],
         "the connect handed its offer to the screen's prompt rather than \
-         redirecting past it (the held redirect, device gate G9)"
+         redirecting past it (the held redirect)"
     );
     creds
         .connection
@@ -2461,7 +2461,7 @@ fn a_verified_saved_rows_credential_flow_is_never_gated() {
 }
 
 // ---------------------------------------------------------------------------
-// The save-credential offer, answered on Connect (device gate G9)
+// The save-credential offer, answered on Connect
 //
 // The whole point of the move is an *ordering*: the dialog and its biometric
 // prompt happen on this screen, before the redirect to `/sessions` — so every
@@ -2573,6 +2573,47 @@ fn a_first_connect_asks_on_connect_and_lands_only_once_the_save_has_settled() {
         None,
         "the offer is consumed"
     );
+}
+
+#[test]
+fn the_manual_cta_reports_busy_between_accepting_the_offer_and_the_save_settling() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    connect_through_the_cta(&mut harness, UNKNOWN_URL);
+    assert!(offer_dialog_up(&harness));
+
+    harness.tap_node("the offer's Save action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_SAVE)
+    });
+    assert_eq!(
+        harness.nav.depth(),
+        1,
+        "the dialog closed and the redirect is still held on the save"
+    );
+
+    // The mint → biometric → store → revoke chain is running right now, with
+    // nothing else on screen to say so — the manual CTA is the only thing
+    // between the user and a re-tap, so it must report busy *here*, not just
+    // once the save has already settled (`frust::button`'s own contract:
+    // `.loading(true)` reports disabled).
+    let cta_disabled = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Button && node.label() == Some(CONNECT_LABEL))
+        .map(|(_, node)| node.is_disabled());
+    assert_eq!(
+        cta_disabled,
+        Some(true),
+        "the manual CTA must render busy while the offer's save is still \
+         running: {:?}",
+        node_labels(&harness.root)
+    );
+
+    harness.pump_until("the credential save", |harness| harness.nav.depth() > 1);
 }
 
 #[test]
@@ -2784,7 +2825,7 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
         fields.iter().all(|(_, disabled, _)| !*disabled),
         "…and NOT as disabled: `enabled(false)` is what dimmed the border and \
          placeholder, so the fields popped to full alpha the instant the live \
-         screen took over (device gate G2): {fields:?}"
+         screen took over: {fields:?}"
     );
 
     // A direct tap on either field's center must not move focus onto it —

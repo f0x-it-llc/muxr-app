@@ -98,7 +98,7 @@
 //! a teardown clears it, and it has to survive a navigation. What *answers* it
 //! is the **Connect screen**, before the redirect to Sessions — the user who
 //! just typed a server is asked about that server while still looking at the
-//! form they typed it into (device gate G9).
+//! form they typed it into.
 //!
 //! Sessions used to render it as a banner instead, because the Connect screen
 //! unmounts on the success redirect before its own offer UI could show. The way

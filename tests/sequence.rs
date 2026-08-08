@@ -71,8 +71,8 @@ const HEADING_DELAY_MS: f64 = 260.0;
 /// (`box-shadow:0 0 5px var(--success)`).
 ///
 /// Three, because the splash's copy of piece 7 renders the **real**
-/// repository's list now (device gate G2 — it used to invent a single
-/// stand-in row that vanished at the handoff), and every headless suite runs on
+/// repository's list now (it used to invent a single stand-in row that
+/// vanished at the handoff), and every headless suite runs on
 /// `MockSavedServersRepository::seeded`'s three rigs. Asserting the exact
 /// residue rather than zero keeps the original claim — that every *land flash*
 /// has faded — intact: a flash left running would push this above three.
@@ -357,10 +357,10 @@ fn a_store_with_no_saved_servers_assembles_no_saved_card_at_all() {
     let _g = serial();
     let _ambient = setup();
 
-    // Device gate G2's phantom card: the splash used to paint one hardcoded
-    // "Home rig" row whatever the store held, so a user with nothing saved
-    // watched a card assemble and then vanish as the route took over. Piece 7's
-    // rows are an input now — an empty list is an empty list on both sides.
+    // The phantom card the splash used to paint: one hardcoded "Home rig" row
+    // whatever the store held, so a user with nothing saved watched a card
+    // assemble and then vanish as the route took over. Piece 7's rows are an
+    // input now — an empty list is an empty list on both sides.
     //
     // Each row's status dot is a glowing swatch (`draw_shadow`), and the
     // settled overlay paints no other blurred rect (`RESTING_SHADOWS`), so the

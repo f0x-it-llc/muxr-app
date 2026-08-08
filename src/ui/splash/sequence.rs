@@ -41,7 +41,7 @@
 //! shell drops the overlay, the pixels beneath are the ones that were already
 //! there. That the two pictures actually coincide is the *pieces* module's
 //! contract, not this one's — see its "parity contract" section for the three
-//! divergences device gate G2 closed.
+//! divergences it closes.
 //!
 //! Nothing here forwards input to the assembly either: [`DelayedWidget`] has no
 //! `Widget::event` of its own, so no pointer ever reaches a piece, and the
