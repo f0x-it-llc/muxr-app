@@ -1,8 +1,11 @@
 //! The `sessions` feature slice — muxr's `/sessions` route: the list of a
 //! connected server's terminal sessions, with create/rename/kill (a card tap
 //! attaches, a long-press opens the management sheet those two live in), the
-//! fixed server-info + latency strip, the save-credential offer, and the attach
-//! path into `/terminal`.
+//! fixed server-info + latency strip, and the attach path into `/terminal`.
+//!
+//! The save-credential offer used to be this screen's too (a banner over the
+//! list). It is answered on Connect now, before the redirect that lands here —
+//! see [`crate::connection`]'s "Credential offer placement".
 //!
 //! `{domain, data, presentation}`, per the clean-architecture convention
 //! `examples/huddle` establishes (see its `src/README-phase-c.md`):

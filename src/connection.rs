@@ -94,9 +94,25 @@
 //! # Credential offer placement
 //!
 //! [`ConnectionController::credential_offer`] is hosted here (not on `connect`)
-//! because the Flutter app it mirrors found the Connect screen unmounts on a
-//! successful redirect before its own offer UI could show — Sessions, which
-//! is where the redirect lands, is what actually renders the offer.
+//! for the reason everything else in this file is: a settled connect writes it,
+//! a teardown clears it, and it has to survive a navigation. What *answers* it
+//! is the **Connect screen**, before the redirect to Sessions — the user who
+//! just typed a server is asked about that server while still looking at the
+//! form they typed it into (device gate G9).
+//!
+//! Sessions used to render it as a banner instead, because the Connect screen
+//! unmounts on the success redirect before its own offer UI could show. The way
+//! out of that lifecycle trap is not a second screen: it is **not redirecting
+//! yet**. `connect`'s completion closure reads this signal and, when it holds an
+//! offer, raises the save dialog on Connect and holds the push to `/sessions`
+//! until the answer resolves — a save that finished either way, a decline, or a
+//! dismissal. Connect therefore stays mounted for exactly as long as the
+//! question is on screen, and the redirect that used to race it is the thing
+//! waiting on it. [`ConnectionController::accept_credential_offer_with`] is that
+//! handshake's completion seam, and it is total by contract: every refusal path
+//! below still runs the callback, so a save that fails — or one no
+//! [`CredentialSaver`] is installed to run at all — can never strand the user on
+//! Connect.
 //!
 //! Eligibility is split deliberately: the **caller** decides whether a target
 //! is offerable at all ([`ConnectTarget::offer_credential`] — a manual,
@@ -113,8 +129,8 @@
 //! `connect` installs an implementation through
 //! [`set_credential_saver`](ConnectionController::set_credential_saver), and no
 //! feature type crosses into this file. With none installed (a headless suite
-//! that never mounts Connect), accepting still clears the offer and simply
-//! saves nothing.
+//! that never mounts Connect), accepting still clears the offer, saves nothing,
+//! and runs the completion callback described above.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -402,12 +418,19 @@ pub trait ConnectionBackend: Send + Sync + 'static {
 /// saved-server row.
 pub trait CredentialSaver: Send + Sync {
     /// Save a credential for the connected server at `endpoint` (`host:port`),
-    /// which the offer showed the user as `label`.
+    /// which the offer showed the user as `label`, and run `on_done` once that
+    /// save has settled — **however** it settled.
     ///
     /// Called on the UI thread, from the press that accepted the offer, and
     /// expected to return immediately — the prompt and the stores behind it are
-    /// the implementor's own asynchronous work.
-    fn save_credential(&self, endpoint: String, label: String);
+    /// the implementor's own asynchronous work. `on_done` is what the caller
+    /// resumes on (the Connect screen's held navigation, see the module docs'
+    /// credential-offer section), so an implementation that drops it strands
+    /// that caller: it must run on the success path, on every failure path, and
+    /// on any early return of its own. It is boxed rather than generic to keep
+    /// this trait object-safe, and carries no `Send` bound because it is
+    /// consumed on the same UI thread the call arrived on.
+    fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>);
 }
 
 // ---------------------------------------------------------------------------
@@ -647,8 +670,11 @@ pub struct ConnectionController {
     /// [`ServerInfo::is_read_only`], hoisted into its own signal because it
     /// gates controls on screens that never render the rest of the facts.
     pub is_read_only: RwSignal<bool>,
-    /// The server label whose credential Sessions should offer to save, or
-    /// `None` when there is nothing to offer.
+    /// The server label whose credential the just-settled connect should offer
+    /// to save, or `None` when there is nothing to offer. Written by
+    /// [`Self::settle`] **before** its `on_done`, which is what lets the Connect
+    /// flow read it back and hold its own redirect on the answer (see the module
+    /// docs' credential-offer section).
     pub credential_offer: RwSignal<Option<String>>,
     /// What an accepted offer actually saves through, or `None` while nothing
     /// has installed one — see [`CredentialSaver`].
@@ -834,21 +860,35 @@ impl ConnectionController {
     }
 
     /// Accept the pending credential offer: clear it, and hand the save to the
-    /// installed [`CredentialSaver`].
+    /// installed [`CredentialSaver`] — the fire-and-forget form, for a caller
+    /// with nothing to resume. See [`Self::accept_credential_offer_with`].
+    pub fn accept_credential_offer(&self) {
+        self.accept_credential_offer_with(|| {});
+    }
+
+    /// Accept the pending credential offer and run `on_done` once the save has
+    /// settled, whatever it settled as.
     ///
     /// The offer is cleared **first** and unconditionally, so a second press
     /// (or a saver that answers slowly) cannot start the save twice. Three
-    /// things make this a no-op beyond that clear: no offer pending, no live
-    /// connection to name an endpoint, and a read-only session — which cannot
-    /// mint the token a saved credential is made of, the same fact
+    /// things make the save itself a no-op beyond that clear: no offer pending,
+    /// no live connection to name an endpoint, and a read-only session — which
+    /// cannot mint the token a saved credential is made of, the same fact
     /// [`Self::settle`] refuses to raise the offer on in the first place.
-    pub fn accept_credential_offer(&self) {
+    ///
+    /// `on_done` runs on **every** one of those paths — and on the fourth, no
+    /// [`CredentialSaver`] installed at all. It is the Connect screen's held
+    /// navigation (see the module docs' credential-offer section): nothing about
+    /// a save that could not run may leave the user parked on the form.
+    pub fn accept_credential_offer_with(&self, on_done: impl FnOnce() + 'static) {
         let offer = self.credential_offer.get_untracked();
         self.credential_offer.set(None);
         let Some(label) = offer else {
+            on_done();
             return;
         };
         if self.is_read_only.get_untracked() {
+            on_done();
             return;
         }
         let Some(endpoint) = self
@@ -856,6 +896,7 @@ impl ConnectionController {
             .get_untracked()
             .map(|info| info.endpoint.clone())
         else {
+            on_done();
             return;
         };
         let saver = self
@@ -863,8 +904,9 @@ impl ConnectionController {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        if let Some(saver) = saver {
-            saver.save_credential(endpoint, label);
+        match saver {
+            Some(saver) => saver.save_credential(endpoint, label, Box::new(on_done)),
+            None => on_done(),
         }
     }
 
@@ -1063,6 +1105,106 @@ mod tests {
         dismissed.connect(target(true));
         dismissed.dismiss_credential_offer();
         assert_eq!(dismissed.credential_offer.get_untracked(), None);
+    }
+
+    thread_local! {
+        /// The completion [`RecordingSaver`] was last handed, parked until the
+        /// test settles it. A `thread_local!` rather than a field because
+        /// [`CredentialSaver`] is `Send + Sync` and a boxed `FnOnce()` is
+        /// neither — which is honest here: this saver, like the real one, is
+        /// only ever called on the thread that accepted the offer.
+        static PENDING_SAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run the completion the last `save_credential` parked, as a finished save
+    /// would.
+    fn finish_pending_save() {
+        let done = PENDING_SAVE.with_borrow_mut(Option::take);
+        if let Some(done) = done {
+            done();
+        }
+    }
+
+    /// A [`CredentialSaver`] that records what it was asked to save and parks
+    /// the completion, so a test can settle it on its own schedule — the
+    /// held-navigation handshake's stand-in for `connect`'s real saver.
+    #[derive(Default)]
+    struct RecordingSaver {
+        saved: Mutex<Vec<(String, String)>>,
+    }
+
+    impl CredentialSaver for RecordingSaver {
+        fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>) {
+            self.saved
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((endpoint, label));
+            PENDING_SAVE.with_borrow_mut(|pending| *pending = Some(on_done));
+        }
+    }
+
+    /// Flip a shared flag — the completion every test below hands in.
+    fn flag() -> (Arc<AtomicBool>, impl FnOnce() + 'static) {
+        let flag = Arc::new(AtomicBool::new(false));
+        let write = Arc::clone(&flag);
+        (flag, move || write.store(true, Ordering::SeqCst))
+    }
+
+    #[test]
+    fn accepting_runs_its_completion_only_once_the_save_settles() {
+        let controller = controller();
+        let saver = Arc::new(RecordingSaver::default());
+        controller.set_credential_saver(Arc::clone(&saver) as Arc<dyn CredentialSaver>);
+        controller.connect(target(true));
+
+        let (done, on_done) = flag();
+        controller.accept_credential_offer_with(on_done);
+
+        assert_eq!(
+            saver
+                .saved
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_slice(),
+            [("mock.example:7777".to_string(), "Mock rig".to_string())],
+            "the live endpoint and the offer's own label reach the saver"
+        );
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "the completion is the *settled* save's, not the accept's — a \
+             caller that navigates from it must still be on Connect here"
+        );
+
+        finish_pending_save();
+        assert!(done.load(Ordering::SeqCst), "…and fires when it settles");
+    }
+
+    #[test]
+    fn every_refused_accept_still_runs_its_completion() {
+        // Nothing pending: an accept with no offer up.
+        let no_offer = controller();
+        let (done, on_done) = flag();
+        no_offer.accept_credential_offer_with(on_done);
+        assert!(done.load(Ordering::SeqCst), "no offer");
+
+        // A read-only session, which cannot mint at all.
+        let read_only = Arc::new(ConnectionController::new(Arc::new(CannedBackend {
+            outcome: Mutex::new(Some(Ok(read_only_info()))),
+        })));
+        read_only.connect(target(true));
+        read_only.credential_offer.set(Some("Mock rig".to_string()));
+        let (done, on_done) = flag();
+        read_only.accept_credential_offer_with(on_done);
+        assert!(done.load(Ordering::SeqCst), "read-only session");
+
+        // A connected session with no saver installed — every headless suite
+        // that never mounts Connect.
+        let no_saver = controller();
+        no_saver.connect(target(true));
+        let (done, on_done) = flag();
+        no_saver.accept_credential_offer_with(on_done);
+        assert!(done.load(Ordering::SeqCst), "no saver installed");
     }
 
     // -----------------------------------------------------------------------

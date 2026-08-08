@@ -10,7 +10,6 @@
 //! | Piece | Redesign element |
 //! |---|---|
 //! | [`server_strip`] | `.conn-row` — success dot, `host:port`, `zellij 0.44.3 · 36ms`, the `insecure` chip |
-//! | [`credential_banner`] | the save-credential offer (no HTML block; see below) |
 //! | [`session_card`] | `.sess-card` — accent, avatar, name, chips, the three meta spans, pane pills |
 //! | [`new_session_row`] | `.new-sess-btn` — the dashed, centered "+ new session" row |
 //! | [`empty_view`] | the emptied-list state (no HTML block; Glyph's own `empty_state`) |
@@ -31,8 +30,8 @@
 //!
 //! Every element with a Glyph catalog counterpart uses it — [`badge`] for the
 //! three chips, [`avatar`] for `.sess-avatar` (recoloured per the rule above),
-//! [`alert`] for the offer banner, [`empty_state`] for the empty list,
-//! [`glyph_list`] for the picker rows, and [`button`] for the sheet's rows. The
+//! [`empty_state`] for the empty list, [`glyph_list`] for the picker rows, and
+//! [`button`] for the sheet's rows. The
 //! boxes the catalog has no counterpart for are [`super::chrome`]'s: the card
 //! (`glyph_card`'s title/desc/footer slots and its own inset can express
 //! neither the 2px left accent nor `.sess-card`'s 14px padding), the
@@ -59,8 +58,7 @@
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
 use frust::glyph::{
-    AlertVariant, BadgeVariant, GlyphListItem, alert, avatar, badge, empty_state, glyph_list,
-    glyph_list_item,
+    BadgeVariant, GlyphListItem, avatar, badge, empty_state, glyph_list, glyph_list_item,
 };
 use frust::motion::AnimatedOpacity;
 use frust::{
@@ -212,15 +210,6 @@ fn row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-/// A column whose children each fill the available width.
-pub(super) fn column(children: Vec<AnyView<SessionsState>>) -> FlexView<SessionsState> {
-    FlexView::new(
-        Axis::Vertical,
-        children.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Stretch)
-}
-
 /// `[a, b, c]` with a `gap`-tall spacer between consecutive items, as flex
 /// children.
 fn interleave(views: Vec<AnyView<SessionsState>>, gap: f64) -> Vec<FlexChild<SessionsState>> {
@@ -332,50 +321,6 @@ fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
 /// split beside the shell.
 pub(crate) fn host_of(endpoint: &str) -> &str {
     endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host)
-}
-
-// ---------------------------------------------------------------------------
-// The save-credential offer banner
-// ---------------------------------------------------------------------------
-
-/// The offer to save the just-connected server's credential, hosted on this
-/// screen rather than on Connect because Connect unmounts on the redirect that
-/// lands here (see [`crate::connection`]'s "Credential offer placement").
-///
-/// `label` is the server's own label, carried through from the connect form.
-/// Both buttons clear the offer through
-/// [`crate::connection::ConnectionController`]; accepting hands off to the
-/// REAL gated save (mint → biometric gate → store, via the connection's
-/// `CredentialSaver` seam), which reports its own outcome on every
-/// non-success branch — so the toast here only announces the hand-off, never
-/// a result the gate hasn't produced yet.
-pub(super) fn credential_banner(label: &str) -> AnyView<SessionsState> {
-    let banner = alert(
-        AlertVariant::Info,
-        "Save this server?",
-        format!("Keep {label}'s credential so the next connect is one tap."),
-    );
-    let saved_label = label.to_string();
-    let actions = row(vec![
-        spacer(),
-        inflexible(
-            button("Not now", |state: &mut SessionsState| {
-                state.connection.dismiss_credential_offer();
-            })
-            .style(ButtonStyle::Ghost)
-            .small(),
-        ),
-        h_gap(PILL_GAP),
-        inflexible(
-            button("Save", move |state: &mut SessionsState| {
-                state.connection.accept_credential_offer();
-                crate::ui::toasts::app_toasts().show(format!("Saving {saved_label}…"));
-            })
-            .style(ButtonStyle::Primary)
-            .small(),
-        ),
-    ]);
-    any(column(vec![any(banner), any(actions)]))
 }
 
 // ---------------------------------------------------------------------------

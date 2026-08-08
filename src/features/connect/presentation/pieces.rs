@@ -149,7 +149,11 @@ use crate::features::connect::domain::entities::{PairingTrust, SavedServer, epoc
 pub struct Live {
     /// The screen's form/view model.
     pub controller: Arc<ConnectController>,
-    /// Validate, connect, and navigate — see the type docs.
+    /// Validate, connect, and navigate — see the type docs. It also carries the
+    /// save-credential offer's dialog, for the same reason it carries the
+    /// navigation: raising one needs the overlay host the screen owns
+    /// (`super::pages`' offer section, device gate G9), so a connect that
+    /// raises an offer navigates from *that* answer rather than on the spot.
     pub on_connect: Rc<dyn Fn()>,
     /// Connect with the **scanned pairing's** own credentials, and navigate —
     /// [`ConnectController::connect_from_pairing`]. A second state-free

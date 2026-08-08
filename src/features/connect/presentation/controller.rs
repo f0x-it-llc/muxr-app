@@ -51,10 +51,11 @@
 //!
 //! 1. **Manual save** — [`ConnectController::begin_credential_save`], reached
 //!    through [`crate::connection::CredentialSaver`] when the user accepts the
-//!    offer Sessions raises. Mints a fresh read-write token, gates and stores
-//!    *that* secret, then rotates: the previous token is revoked only once the
-//!    new credential is safely persisted, and a gate denial revokes the token it
-//!    just minted rather than orphaning it on the server.
+//!    offer this screen raises on the connect that produced it (see the
+//!    held-redirect section below). Mints a fresh read-write token, gates and
+//!    stores *that* secret, then rotates: the previous token is revoked only
+//!    once the new credential is safely persisted, and a gate denial revokes the
+//!    token it just minted rather than orphaning it on the server.
 //! 2. **QR save** — [`ConnectController::connect_from_pairing`]'s success
 //!    branch. Connect first, then **one** prompt to store the scanned token
 //!    (nothing is minted — the QR's token *is* the credential). A denial leaves
@@ -119,7 +120,31 @@
 //! the secure-storage write for a paired token is its own one-prompt flow —
 //! [`ConnectController::connect_from_pairing`]'s success branch, beside the
 //! token scrub.
+//!
+//! # The held redirect (device gate G9)
+//!
+//! A manual connect that raised a credential offer does **not** push
+//! [`SESSIONS_LOCATION`] when it settles. [`ConnectController::connect`]'s
+//! completion closure reads [`ConnectionController::credential_offer`] — which
+//! `settle` writes before it — and, when it holds one, hands the label to the
+//! screen's `offer_prompt` instead: the save dialog goes up on Connect, and
+//! [`ConnectController::accept_offer_then_navigate`] /
+//! [`ConnectController::decline_offer_then_navigate`] are what finally push.
+//! The accept path pushes from the *save's* completion, so the biometric prompt
+//! is answered while the user is still on the form that raised it, and the
+//! failure paths push too — a refused gate reports itself
+//! ([`CredentialStatus::message`]) and still lands on Sessions, because a
+//! credential the user declined to store is not a reason to withhold the session
+//! they just opened.
+//!
+//! [`Self::resolving_offer`](ConnectController::resolving_offer) is the flag
+//! that spans that hold: it joins [`ConnectController::busy`], so the CTAs and
+//! the saved rows refuse a second connect while the question is on screen, the
+//! same single-flight rule an in-flight dial already has. (Under the root
+//! overlay host the form is inert behind the dialog anyway — this is the
+//! controller-side half, which does not depend on where the dialog was pushed.)
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -144,6 +169,17 @@ use crate::ui::toasts::app_toasts;
 /// Where a successful connect lands. The Sessions route's own spelling lives in
 /// `crate::routes`; this is the one place the Connect flow names it.
 pub const SESSIONS_LOCATION: &str = "/sessions";
+
+/// What [`ConnectController::connect`] calls, with the offered server's label,
+/// when a settled connect raised a credential offer instead of navigating —
+/// the module docs' held redirect.
+///
+/// The screen supplies it (`super::pages`'s `credential_offer_prompt`), because
+/// raising the dialog needs the overlay host this controller deliberately does
+/// not hold. An [`Rc`] for the same reason [`Nav`] is one: it is built per
+/// build pass, captured by a completion closure that only ever runs on the UI
+/// thread, and never crosses to another.
+pub type OfferPrompt = Rc<dyn Fn(String)>;
 
 /// The trust posture a fresh form starts on — the safe one, and the mock's own
 /// pre-selected row (`docs/redesign.html`'s `.radio-dot.sel` sits on "Public
@@ -229,6 +265,13 @@ pub struct ConnectController {
     /// no socket is open yet: the user is answering a system prompt, and the
     /// CTA must still read as working.
     pub unlocking: RwSignal<bool>,
+    /// Whether a settled connect's credential offer is still being answered —
+    /// the module docs' held redirect. Set when the offer dialog goes up,
+    /// cleared by whichever of [`Self::accept_offer_then_navigate`] /
+    /// [`Self::decline_offer_then_navigate`] answers it, and read through
+    /// [`Self::busy`] so nothing starts a second connect underneath the
+    /// question.
+    pub resolving_offer: RwSignal<bool>,
 }
 
 impl ConnectController {
@@ -258,6 +301,7 @@ impl ConnectController {
             invalid: RwSignal::new(false),
             pending_pairing: RwSignal::new(None),
             unlocking: RwSignal::new(false),
+            resolving_offer: RwSignal::new(false),
         };
         controller.reload_saved();
         controller
@@ -410,17 +454,21 @@ impl ConnectController {
         self.connection.connecting
     }
 
-    /// Whether *anything* the CTAs share is in flight: a dial, or the biometric
-    /// unlock that precedes one ([`Self::unlocking`]). A **tracked** read — this
-    /// is what a piece renders its busy state from.
+    /// Whether *anything* the CTAs share is in flight: a dial, the biometric
+    /// unlock that precedes one ([`Self::unlocking`]), or a credential offer
+    /// still being answered ([`Self::resolving_offer`] — the module docs' held
+    /// redirect). A **tracked** read — this is what a piece renders its busy
+    /// state from.
     pub fn busy(&self) -> bool {
-        self.connection.connecting.get() || self.unlocking.get()
+        self.connection.connecting.get() || self.unlocking.get() || self.resolving_offer.get()
     }
 
     /// [`Self::busy`] without subscribing — the guard a press handler reads,
     /// where there is no owner to subscribe.
     fn busy_untracked(&self) -> bool {
-        self.connection.connecting.get_untracked() || self.unlocking.get_untracked()
+        self.connection.connecting.get_untracked()
+            || self.unlocking.get_untracked()
+            || self.resolving_offer.get_untracked()
     }
 
     // -----------------------------------------------------------------------
@@ -481,8 +529,9 @@ impl ConnectController {
     /// Connect with the stashed pairing's own credentials — the pinned CTA.
     ///
     /// A no-op with nothing stashed (the CTA only renders while there is), and
-    /// ignored outright while a dial is already in flight (the connection
-    /// controller's own single-flight guard — see [`Self::connecting`]).
+    /// ignored outright while anything else the CTAs share is in flight — a
+    /// dial, an unlock, or an unanswered credential offer ([`Self::busy`], the
+    /// same single-flight rule [`Self::recover_and_connect`] reads).
     ///
     /// On success: the token field is scrubbed and the payload consumed (the
     /// session is live; nothing is left holding the QR's secret), then the same
@@ -503,6 +552,9 @@ impl ConnectController {
     /// `nav` is lent rather than held, for the reason [`Self::connect`]'s doc
     /// spells out.
     pub fn connect_from_pairing(self: &Arc<Self>, nav: &Nav) {
+        if self.busy_untracked() {
+            return;
+        }
         let Some(payload) = self.pending_pairing.get_untracked() else {
             return;
         };
@@ -603,7 +655,23 @@ impl ConnectController {
     /// own toast through the connection controller's sink (see the module
     /// docs), leaves the form as the user typed it — token included, so a retry
     /// is one tap — and never navigates.
-    pub fn connect(&self, nav: &Nav) {
+    ///
+    /// **The push is conditional** (device gate G9, the module docs' held
+    /// redirect): a settle that raised a credential offer hands `offer_prompt`
+    /// the server's label instead of pushing, and the push then belongs to
+    /// whichever of [`Self::accept_offer_then_navigate`] /
+    /// [`Self::decline_offer_then_navigate`] answers the dialog that prompt
+    /// raises. A connect with no offer (a known endpoint, a remember toggled
+    /// off, a read-only login) pushes exactly as it always did, and never calls
+    /// the prompt at all.
+    ///
+    /// `offer_prompt` is the screen's, for the same reason `nav` is lent: a
+    /// dialog belongs to the screen that has the overlay host, not to a
+    /// controller (`docs/ARCHITECTURE.md`'s "Building a Screen" charter).
+    pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt) {
+        if self.busy_untracked() {
+            return;
+        }
         match self.validated_target() {
             Ok(target) => {
                 self.invalid.set(false);
@@ -614,12 +682,25 @@ impl ConnectController {
                 // (`RwSignal` is `Copy`) because the closure outlives this
                 // borrow of `self` whenever the dial is a real one.
                 let token = self.token;
+                // Likewise `Copy`: the settled connect reads the offer back off
+                // the connection's own signal (which is where the read-only
+                // half of the eligibility decision has already been applied),
+                // and flags the hold on this controller's.
+                let offer = self.connection.credential_offer;
+                let resolving = self.resolving_offer;
                 let upsert = self.login_upsert(&target);
                 self.connection.connect_with(target, move |outcome| {
-                    if outcome.is_ok() {
-                        upsert.run();
-                        token.set(Zeroizing::new(String::new()));
-                        nav.push(SESSIONS_LOCATION);
+                    if outcome.is_err() {
+                        return;
+                    }
+                    upsert.run();
+                    token.set(Zeroizing::new(String::new()));
+                    match offer.get_untracked() {
+                        Some(label) => {
+                            resolving.set(true);
+                            offer_prompt(label);
+                        }
+                        None => nav.push(SESSIONS_LOCATION),
                     }
                 });
             }
@@ -628,6 +709,37 @@ impl ConnectController {
                 app_toasts().raise(&failure);
             }
         }
+    }
+
+    /// The user accepted the offer [`Self::connect`] held its redirect on: run
+    /// the save through the one gated flow every accept uses
+    /// ([`ConnectionController::accept_credential_offer_with`] →
+    /// [`Self::begin_credential_save`]), and push [`SESSIONS_LOCATION`] once it
+    /// has settled — **however** it settled.
+    ///
+    /// Navigating from the save's own completion is the ordering this whole
+    /// flow exists for: the biometric prompt is answered on Connect, not over a
+    /// Sessions screen the user was redirected to first. A denial or a failed
+    /// mint reports itself (see [`Self::report`] / the module docs' failure
+    /// vocabulary) and still lands — the session is open either way, and only
+    /// the credential was declined.
+    pub fn accept_offer_then_navigate(&self, nav: &Nav) {
+        let nav = nav.clone();
+        let resolving = self.resolving_offer;
+        self.connection.accept_credential_offer_with(move || {
+            resolving.set(false);
+            nav.push(SESSIONS_LOCATION);
+        });
+    }
+
+    /// The user declined the offer, or dismissed the dialog without answering
+    /// it (the scrim, `Escape`, an Android back press — all the same answer):
+    /// drop the offer and push [`SESSIONS_LOCATION`] straight away, which is
+    /// what the connect would have done on its own.
+    pub fn decline_offer_then_navigate(&self, nav: &Nav) {
+        self.connection.dismiss_credential_offer();
+        self.resolving_offer.set(false);
+        nav.push(SESSIONS_LOCATION);
     }
 
     // -----------------------------------------------------------------------
@@ -693,24 +805,35 @@ impl ConnectController {
 
     /// Mint a token for this device, store it behind the gate, and record it on
     /// the saved row — [`crate::connection::CredentialSaver`]'s work, reached
-    /// when the user accepts the offer Sessions raises.
+    /// when the user accepts the offer this screen raises on the connect that
+    /// produced it.
     ///
     /// Returns immediately: the mint, the prompt and the two stores all run on
-    /// the UI thread's task queue behind this call. Ignored outright while a
-    /// save is already running (a double-tapped "Save" must not mint two
-    /// server-side tokens) and for a read-only session, which cannot mint at
-    /// all.
-    pub fn begin_credential_save(self: &Arc<Self>, endpoint: String, label: String) {
+    /// the UI thread's task queue behind this call. `on_done` runs once that
+    /// whole chain has settled — the seam the held redirect resumes on (see the
+    /// module docs), so it fires on **every** path out of here, the two early
+    /// refusals included: a read-only session (which cannot mint at all) and a
+    /// save already running (a double-tapped "Save" must not mint two
+    /// server-side tokens).
+    pub fn begin_credential_save(
+        self: &Arc<Self>,
+        endpoint: String,
+        label: String,
+        on_done: impl FnOnce() + 'static,
+    ) {
         if self.connection.is_read_only.get_untracked() {
+            on_done();
             return;
         }
         if self.saving_credential.swap(true, Ordering::SeqCst) {
+            on_done();
             return;
         }
         let controller = Arc::clone(self);
         spawn_local(async move {
             controller.save_session_credential(endpoint, label).await;
             controller.saving_credential.store(false, Ordering::SeqCst);
+            on_done();
         });
     }
 
@@ -987,9 +1110,13 @@ struct ControllerCredentialSaver {
 }
 
 impl CredentialSaver for ControllerCredentialSaver {
-    fn save_credential(&self, endpoint: String, label: String) {
-        if let Some(controller) = self.controller.upgrade() {
-            controller.begin_credential_save(endpoint, label);
+    fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>) {
+        match self.controller.upgrade() {
+            Some(controller) => controller.begin_credential_save(endpoint, label, on_done),
+            // A Connect screen that has gone away saves nothing — but the
+            // caller's completion still runs, since a dropped one would strand
+            // whatever was waiting on it (the seam's own contract).
+            None => on_done(),
         }
     }
 }

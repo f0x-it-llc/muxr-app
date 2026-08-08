@@ -85,6 +85,24 @@
 //! choosing it. A saved-row tap has no equivalent moment: the row was chosen
 //! for its endpoint, not its posture, so the posture needs its own prompt.
 //!
+//! # The save-credential offer (device gate G9)
+//!
+//! A connect that raised a credential offer is answered **here**, before the
+//! redirect: [`credential_offer_prompt`] is the `offer_prompt` this screen lends
+//! [`ConnectController::connect`], and [`offer_credential_save`] is the dialog it
+//! raises — on the overlay host, like the confirm gate above, over a Connect
+//! screen the redirect is deliberately still waiting on (see
+//! [`crate::connection`]'s "Credential offer placement" for why holding the
+//! navigation is what makes an offer on this screen possible at all).
+//!
+//! Composed from `glyph_dialog`/`show_glyph_dialog` directly rather than through
+//! [`crate::ui::dialogs::confirm_dialog`]: that helper calls back **only** on
+//! confirm, and this dialog has to act on every way out of it — its decline
+//! button, the scrim, `Escape`, an Android back press — because each of those is
+//! an answer the held redirect is waiting for. `settings`'
+//! `open_create_token_dialog` composes the same primitives for the same kind of
+//! reason (a shape the shared helpers do not carry).
+//!
 //! # The FAB permission gate (device gate G5)
 //!
 //! The camera permission prompt is gated on the **tap**, not the sheet's own
@@ -148,11 +166,12 @@ use std::time::Duration;
 use clean_signals_frust::use_controller;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
+use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets,
-    FlexView, Get, GetUntracked, IconSource, Padding, SizedBox, Stack, Theme, WindowMetrics, any,
-    button, component, icon, inflexible, on_cleanup, platform_view, safe_area, scroll_view,
-    spawn_local, text, use_context,
+    FlexView, Get, GetUntracked, IconSource, Padding, PopResult, SizedBox, Stack, Theme,
+    WindowMetrics, any, button, component, icon, inflexible, on_cleanup, platform_view, safe_area,
+    scroll_view, spawn_local, text, use_context,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat};
 use frust_camera::{
@@ -161,7 +180,7 @@ use frust_camera::{
 use zeroize::Zeroizing;
 
 use super::chrome::panel;
-use super::controller::ConnectController;
+use super::controller::{ConnectController, OfferPrompt};
 use super::pieces::{Live, active_theme, connect_pieces_with};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
@@ -216,6 +235,19 @@ const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
 /// The QR affordance's accessible name — what a screen reader announces, and
 /// what `tests/connect.rs` addresses the button by.
 pub const FAB_LABEL: &str = "Pair by QR code";
+/// The save-credential offer's title (device gate G9). The words the Sessions
+/// banner this replaced used, since the question is the same one — only the
+/// moment it is asked at moved. It is also how `tests/connect.rs` tells *which*
+/// pushed page is up, which is why it stays a whole sentence.
+const OFFER_TITLE: &str = "Save this server?";
+/// …and its body, with the server's own label. Likewise the banner's.
+fn offer_body(label: &str) -> String {
+    format!("Keep {label}'s credential so the next connect is one tap.")
+}
+/// The offer's accept action — what raises the biometric prompt.
+const OFFER_ACCEPT_LABEL: &str = "Save";
+/// …and its decline, which is also what every dismissal route resolves as.
+const OFFER_DECLINE_LABEL: &str = "Not now";
 /// The FAB's box, in logical px. The mock's `.fab` is a 46px disc; this is the
 /// same box, which also clears the 44px platform minimum tap target.
 const FAB_BOX: f64 = 46.0;
@@ -451,10 +483,18 @@ impl Component for ConnectScreen {
 
         let live = Live {
             controller: Arc::clone(&state.controller),
+            // The manual CTA also carries the save-credential offer's dialog
+            // (device gate G9): the controller holds its own redirect while
+            // that question is up, and the prompt below is what asks it — see
+            // the module docs' offer section.
             on_connect: {
                 let controller = Arc::clone(&state.controller);
+                let overlays = state.overlays.clone();
                 let nav = state.app_nav.clone();
-                Rc::new(move || controller.connect(&nav))
+                Rc::new(move || {
+                    let prompt = credential_offer_prompt(&controller, &overlays, &nav);
+                    controller.connect(&nav, prompt);
+                })
             },
             on_connect_pinned: {
                 let controller = Arc::clone(&state.controller);
@@ -521,6 +561,88 @@ fn handle_saved_row_tap(
         "Connect anyway",
         move |_app: &mut AppState| {
             controller.recover_and_connect(server.clone(), &nav);
+        },
+    );
+}
+
+/// The `offer_prompt` this screen lends [`ConnectController::connect`]: raise
+/// [`offer_credential_save`] for the offered server's label. See the
+/// [module docs](self)'s offer section.
+///
+/// Built per press rather than held in [`ConnectState`] because it captures the
+/// three handles a dialog needs and nothing retains it past the connect it was
+/// made for.
+fn credential_offer_prompt(
+    controller: &Arc<ConnectController>,
+    overlays: &frust::NavigatorController<AppState>,
+    nav: &Nav,
+) -> OfferPrompt {
+    let controller = Arc::clone(controller);
+    let overlays = overlays.clone();
+    let nav = nav.clone();
+    Rc::new(move |label: String| {
+        offer_credential_save(&controller, &overlays, &nav, &label);
+    })
+}
+
+/// Ask whether to save the just-connected server's credential, and resolve the
+/// held redirect with the answer: [`ConnectController::accept_offer_then_navigate`]
+/// for the accept, [`ConnectController::decline_offer_then_navigate`] for
+/// everything else.
+///
+/// "Everything else" is the load-bearing half — a dialog that fell off the
+/// screen without an answer (a scrim tap, `Escape`, an Android back press) pops
+/// with an empty result, and treating that as anything other than "not now"
+/// would leave the user parked on a Connect screen whose connection is already
+/// open. See the [module docs](self)'s offer section for why this composes the
+/// glyph primitives directly.
+fn offer_credential_save(
+    controller: &Arc<ConnectController>,
+    overlays: &frust::NavigatorController<AppState>,
+    nav: &Nav,
+    label: &str,
+) {
+    let body = offer_body(label);
+    let page_nav = overlays.clone();
+    let controller = Arc::clone(controller);
+    let nav = nav.clone();
+    show_glyph_dialog(
+        overlays,
+        // Re-invoked on every navigator rebuild to diff the page's content, so
+        // every captured value is cloned per call rather than moved.
+        move || {
+            let decline_nav = page_nav.clone();
+            let accept_nav = page_nav.clone();
+            glyph_dialog()
+                .title(OFFER_TITLE)
+                .body(body.clone())
+                .action(any(button(
+                    OFFER_DECLINE_LABEL,
+                    move |_state: &mut AppState| {
+                        decline_nav.pop_with_result(PopResult::of(false));
+                    },
+                )
+                .style(ButtonStyle::Ghost)
+                .small()))
+                .action(any(button(
+                    OFFER_ACCEPT_LABEL,
+                    move |_state: &mut AppState| {
+                        accept_nav.pop_with_result(PopResult::of(true));
+                    },
+                )
+                .style(ButtonStyle::Primary)
+                .small()))
+        },
+        // Only the accept action pops with `true`; the decline pops `false` and
+        // every dismissal route pops *empty*, which reads as the same answer.
+        // Both branches navigate — this callback is the one place the held
+        // redirect can be resolved from, so it has no third outcome.
+        move |_state: &mut AppState, result: PopResult| {
+            if result.take::<bool>().unwrap_or(false) {
+                controller.accept_offer_then_navigate(&nav);
+            } else {
+                controller.decline_offer_then_navigate(&nav);
+            }
         },
     );
 }
