@@ -376,7 +376,9 @@ impl Harness {
     }
 
     /// Whether the remember toggle reads as on — the `Role::Switch` node
-    /// `chrome::switch_semantics` contributes over the composed art.
+    /// `chrome::switch_semantics` contributes over the real `frust::switch`
+    /// (the widget's own semantics carry no label, so the wrapper still
+    /// supplies the one this node reads).
     fn remember_on(&self) -> bool {
         self.root
             .semantics()
