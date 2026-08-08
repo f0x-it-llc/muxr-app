@@ -63,6 +63,7 @@
 //! the field's own shaping environment and not an approximation of it.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -107,7 +108,8 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, char_key, frame_sized, named_key, serial, settle_sized, setup, tap,
+    EPSILON, RecScene, char_key, frame_sized, named_key, node_labels, serial, settle_sized, setup,
+    tap,
 };
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
@@ -272,6 +274,28 @@ impl Harness {
     /// A full tap at `point`.
     fn tap(&mut self, point: Point) {
         tap(&mut self.root, &mut self.state, point);
+    }
+
+    /// Drive the UI-thread task queue — and this fixture's own settled frame —
+    /// until `done`, or fail.
+    ///
+    /// [`pump_until_done`]'s twin for the cases that also have to keep
+    /// *rendering*: `support::pump_until` frames at its own default surface,
+    /// where every read in this suite depends on [`SURFACE`] (see the module
+    /// docs' surface note).
+    fn pump_until(&mut self, what: &str, mut done: impl FnMut(&Self) -> bool) {
+        let runtime =
+            frust_reactive::ReactiveRuntime::get().expect("setup() installed the runtime");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(self) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            runtime.pump_local();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.settle();
+        }
     }
 
     /// Tap the first node matching `pred`, panicking with `what` if the tree
@@ -1032,7 +1056,13 @@ fn remembering_a_new_server_offers_its_credential() {
             .credential_offer
             .get_untracked(),
         Some(UNKNOWN_HOST.to_string()),
-        "a remembered, not-yet-saved rig offers its credential to Sessions"
+        "a remembered, not-yet-saved rig offers its credential, labelled by its \
+         own host"
+    );
+    assert!(
+        offer_dialog_up(&harness),
+        "…and the offer is asked here rather than carried to Sessions (device \
+         gate G9 — see the offer section below)"
     );
 }
 
@@ -1064,6 +1094,11 @@ fn toggling_remember_off_suppresses_the_credential_offer() {
             .get_untracked(),
         None,
         "…but nothing was offered for saving"
+    );
+    assert!(
+        !offer_dialog_up(&harness),
+        "…so no dialog held the redirect: {:?}",
+        node_labels(&harness.root)
     );
 }
 
@@ -1942,13 +1977,25 @@ fn a_saved_row_with_no_credential_refills_the_form_without_raising_a_prompt() {
 
 /// Connect the fixture's connection to [`CRED_ENDPOINT`], as a login would,
 /// so an accepted offer has a live session to save for.
-fn connect_fixture(creds: &Creds) {
+///
+/// The offer prompt is a **recorder**, not a dialog: these cases drive the save
+/// itself (mint, gate, rotate) through the connection's own accept, so what
+/// matters here is only that the held redirect stayed held — the screen-level
+/// suite below is where the dialog and the navigation it resolves are driven
+/// end to end.
+fn connect_fixture(creds: &Creds) -> Rc<RefCell<Vec<String>>> {
+    let offered: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let record = Rc::clone(&offered);
     creds.controller.set_url(CRED_ENDPOINT.to_string());
-    creds.controller.connect(&app_nav());
+    creds.controller.connect(
+        &app_nav(),
+        Rc::new(move |label: String| record.borrow_mut().push(label)),
+    );
     assert!(
         creds.connection.connected.get_untracked(),
         "the mock backend settles a connect before `connect` returns"
     );
+    offered
 }
 
 #[test]
@@ -1956,7 +2003,13 @@ fn accepting_the_offer_mints_a_token_stores_it_and_records_it_on_the_row() {
     let _g = serial();
     let _ambient = setup();
     let creds = credential_fixture(Vec::new());
-    connect_fixture(&creds);
+    let offered = connect_fixture(&creds);
+    assert_eq!(
+        offered.borrow().as_slice(),
+        ["cred.example".to_string()],
+        "the connect handed its offer to the screen's prompt rather than \
+         redirecting past it (the held redirect, device gate G9)"
+    );
     creds
         .connection
         .set_credential_saver(creds.controller.credential_saver());
@@ -2405,6 +2458,269 @@ fn a_verified_saved_rows_credential_flow_is_never_gated() {
             "{trust_mode:?}: the tap went straight to /sessions, no dialog page"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The save-credential offer, answered on Connect (device gate G9)
+//
+// The whole point of the move is an *ordering*: the dialog and its biometric
+// prompt happen on this screen, before the redirect to `/sessions` — so every
+// case below reads the navigator's depth at two moments (right after the
+// answer, and once the save has settled) rather than only at the end.
+// ---------------------------------------------------------------------------
+
+/// The offer dialog's title, its accept and its decline — transcribed, not
+/// imported, for the reason [`QR_LABEL`] is: these are the words a user reads,
+/// and a test that imported them could not catch them changing.
+const OFFER_TITLE: &str = "Save this server?";
+const OFFER_SAVE: &str = "Save";
+const OFFER_NOT_NOW: &str = "Not now";
+
+/// [`CredentialStatus::Failed`]'s own sentence — what a refused gate is
+/// reported with (`CredentialStatus::message`).
+const GATE_FAILED_TOAST: &str = "Biometric authentication failed. Please log in manually.";
+
+/// Type `url` into the real screen and press the CTA, with the toast queue
+/// cleared first so only what the connect itself raises is left.
+fn connect_through_the_cta(harness: &mut Harness, url: &str) {
+    type_url(harness, url);
+    app_toasts().clear();
+    harness.tap_node("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+}
+
+/// Whether the offer dialog is the page on screen. A pushed dialog's *title* is
+/// the only thing that names which page is up — the depth alone cannot tell a
+/// dialog from the `/sessions` push it is holding back.
+fn offer_dialog_up(harness: &Harness) -> bool {
+    harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .any(|(_, node)| node.label() == Some(OFFER_TITLE) || node.value() == Some(OFFER_TITLE))
+}
+
+/// The saved row for `endpoint` as the app's own store holds it.
+fn saved_row(endpoint: &str) -> SavedServer {
+    expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .into_iter()
+        .find(|server| server.endpoint() == endpoint)
+        .unwrap_or_else(|| panic!("no saved row for {endpoint}"))
+}
+
+#[test]
+fn a_first_connect_asks_on_connect_and_lands_only_once_the_save_has_settled() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+
+    connect_through_the_cta(&mut harness, UNKNOWN_URL);
+
+    let connection = expect_connection_controller();
+    assert!(
+        connection.connected.get_untracked(),
+        "the connection itself opened"
+    );
+    assert!(
+        offer_dialog_up(&harness),
+        "the offer is asked here, on Connect — not on the screen the redirect \
+         would have landed on: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "…and nothing is gated until it is answered"
+    );
+
+    harness.tap_node("the offer's Save action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_SAVE)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        1,
+        "the dialog closed and *nothing* was pushed: the redirect is waiting on \
+         the save the tap just started"
+    );
+    harness.pump_until("the credential save", |harness| harness.nav.depth() > 1);
+
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "exactly one biometric prompt, raised on Connect: {:?}",
+        credentials.prompts()
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "…and only a settled save pushed /sessions"
+    );
+    assert!(
+        saved_row(UNKNOWN_URL).has_credential,
+        "the row records the credential the save stored"
+    );
+    assert!(
+        credentials.stored(UNKNOWN_URL).is_some(),
+        "…and the secure store holds it"
+    );
+    assert_eq!(
+        connection.credential_offer.get_untracked(),
+        None,
+        "the offer is consumed"
+    );
+}
+
+#[test]
+fn declining_the_offer_lands_at_once_and_saves_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+
+    connect_through_the_cta(&mut harness, UNKNOWN_URL);
+    assert!(offer_dialog_up(&harness));
+
+    harness.tap_node("the offer's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_NOT_NOW)
+    });
+
+    assert!(!offer_dialog_up(&harness), "the dialog closed");
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "a decline has nothing to wait for: the held redirect goes through on \
+         the spot"
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "declining never reaches the gate: {:?}",
+        credentials.prompts()
+    );
+    assert_eq!(credentials.stored(UNKNOWN_URL), None, "…and stores nothing");
+    assert!(
+        !saved_row(UNKNOWN_URL).has_credential,
+        "…so the row the login upsert wrote still claims no credential"
+    );
+    assert_eq!(
+        expect_connection_controller()
+            .credential_offer
+            .get_untracked(),
+        None,
+        "the offer is consumed either way"
+    );
+}
+
+#[test]
+fn dismissing_the_offer_unanswered_lands_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+
+    connect_through_the_cta(&mut harness, UNKNOWN_URL);
+    assert!(offer_dialog_up(&harness));
+
+    // A scrim tap pops the dialog with an empty result — the same route
+    // `Escape` and an Android back press take. The held redirect must read it
+    // as "not now" rather than as no answer at all: the connection is already
+    // open, and a dialog that fell off the screen cannot be what leaves the
+    // user parked on the form.
+    harness.tap(SCRIM_POINT);
+    harness.settle();
+
+    assert!(!offer_dialog_up(&harness), "the dialog closed");
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "…and the redirect it was holding went through"
+    );
+    assert!(credentials.prompts().is_empty(), "nothing was gated");
+    assert!(
+        !saved_row(UNKNOWN_URL).has_credential,
+        "…and nothing was saved"
+    );
+    assert_eq!(
+        expect_connection_controller()
+            .credential_offer
+            .get_untracked(),
+        None,
+        "the offer is consumed"
+    );
+}
+
+#[test]
+fn a_denied_gate_says_why_and_still_lands_on_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+    credentials.set_gate(CredentialStatus::Failed);
+
+    connect_through_the_cta(&mut harness, UNKNOWN_URL);
+    harness.tap_node("the offer's Save action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_SAVE)
+    });
+    harness.pump_until("the denied save", |harness| harness.nav.depth() > 1);
+
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "the gate was asked exactly once"
+    );
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == GATE_FAILED_TOAST),
+        "a refused gate says so: {:?}",
+        app_toasts().pending_untracked()
+    );
+    assert!(
+        !saved_row(UNKNOWN_URL).has_credential,
+        "nothing was stored, so the row claims no credential"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "…and the user is still taken to the session they just opened — a \
+         declined credential is not a reason to strand them on Connect"
+    );
+}
+
+#[test]
+fn a_repeat_connect_to_a_known_server_never_asks_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+
+    // `VALID_URL` is one of the seeded rows, so this is the second connect to a
+    // server the app already knows — the no-offer path, unchanged by G9.
+    connect_through_the_cta(&mut harness, VALID_URL);
+
+    assert!(
+        !offer_dialog_up(&harness),
+        "a server the app already saved is not re-offered: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        expect_connection_controller()
+            .credential_offer
+            .get_untracked(),
+        None,
+        "…and no offer was ever raised"
+    );
+    assert!(credentials.prompts().is_empty(), "nothing gated");
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "the connect pushed /sessions directly, exactly as it always did"
+    );
 }
 
 // ---------------------------------------------------------------------------

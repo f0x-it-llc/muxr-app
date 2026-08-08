@@ -17,8 +17,8 @@
 //! ├─────────────────────────────┤  screen's; it floats over this page
 //! │ ● 100.71.31.57:50051  …     │  .conn-row — FIXED, outside the scroll
 //! ├─────────────────────────────┤
-//! │ ┃ D  dev      running zellij│  the scrolling list: cards, the offer
-//! │ ┃ ▣ 9 panes ◧ 4 tabs ◎ 0 …  │  banner, and the dashed new-session row
+//! │ ┃ D  dev      running zellij│  the scrolling list: the cards and the
+//! │ ┃ ▣ 9 panes ◧ 4 tabs ◎ 0 …  │  dashed new-session row
 //! │ + new session (dashed)      │
 //! └─────────────────────────────┘
 //! ```
@@ -53,10 +53,13 @@
 //! # What lives where
 //!
 //! - **Observed state** (the session list, its loaded flag) is the hosted
-//!   controller's signals; **app-scoped** state (the connection's server info
-//!   and credential offer) is [`crate::connection`]'s controller, resolved
+//!   controller's signals; **app-scoped** state (the connection's server info,
+//!   its read-only posture) is [`crate::connection`]'s controller, resolved
 //!   from context. [`SessionsState`] itself holds neither — only [`Actions`]'
-//!   four handles plus the connection.
+//!   four handles plus the connection. The credential offer that same
+//!   controller carries is **not** read here: it is answered on Connect, before
+//!   the redirect that lands on this screen (see [`crate::connection`]'s
+//!   "Credential offer placement").
 //! - **Every push this screen makes** — the terminal route, the two dialogs,
 //!   the management sheet — goes through [`Actions`], and pauses the
 //!   controller's mock poll first (see [`SessionsController`]'s module docs
@@ -172,7 +175,8 @@ pub struct SessionsState {
     /// see [`Actions`].
     pub actions: Actions,
     /// The app-scoped connection handle, for the strip, the top bar's title
-    /// and the credential offer (see [`crate::connection`]).
+    /// and the read-only posture that gates this screen's mutations (see
+    /// [`crate::connection`]).
     pub connection: Arc<ConnectionController>,
 }
 
@@ -297,7 +301,6 @@ impl Component for SessionsScreen {
         // wakes this rebuild.
         let sessions = state.actions.controller.sessions.get();
         let loaded = state.actions.controller.loaded.get();
-        let offer = state.connection.credential_offer.get();
         let info = state.connection.server_info.get();
         // Gates create/rename/kill (never attach) — see `pieces::new_session_row`'s
         // doc for the disabled-state pattern this and `open_manage_sheet` share.
@@ -316,12 +319,9 @@ impl Component for SessionsScreen {
             .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
             .unwrap_or(false);
 
-        // The scrolling half: the offer banner (when there is one), then either
-        // the empty state or every card plus the dashed create row.
+        // The scrolling half: either the empty state, or every card plus the
+        // dashed create row.
         let mut list = Vec::new();
-        if let Some(label) = &offer {
-            list.push(pieces::credential_banner(label));
-        }
         if loaded && sessions.is_empty() {
             list.push(pieces::empty_view(read_only));
         } else {

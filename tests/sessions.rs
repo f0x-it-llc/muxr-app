@@ -93,7 +93,6 @@ use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::SessionsController;
 use muxr::features::sessions::presentation::pages::sessions_page;
 use muxr::routes::install_app_router;
-use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -914,59 +913,70 @@ fn the_screen_carries_no_settings_affordance_of_its_own() {
 }
 
 // ---------------------------------------------------------------------------
-// 7 — the save-credential offer (unchanged behavior)
+// 7 — the save-credential offer is NOT this screen's (device gate G9)
 // ---------------------------------------------------------------------------
 
-/// The banner's own title, as `glyph::alert` exposes it (label = title).
+/// The offer's title, as this screen's banner used to expose it (`glyph::alert`
+/// label = title). Kept as the thing this screen must *not* paint: the same
+/// words are the Connect dialog's title now (`tests/connect.rs`' own offer
+/// section), and this is the regression tripwire against a second copy of the
+/// question growing back here.
 const OFFER_TITLE: &str = "Save this server?";
 
 #[test]
-fn the_credential_offer_banner_shows_and_dismisses() {
+fn a_pending_credential_offer_paints_nothing_on_this_screen() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
+    // A connection that raised an offer, exactly as a first connect does — the
+    // signal is app-scoped and outlives the redirect, so it is still pending
+    // while this screen renders.
     expect_connection_controller().connect(mock_target(true));
     h.await_sessions();
 
-    assert!(
-        node_labels(&h.root).iter().any(|l| l == OFFER_TITLE),
-        "a connection that offered its credential raises the banner here, \
-         not on Connect: {:?}",
-        node_labels(&h.root)
+    assert_eq!(
+        expect_connection_controller()
+            .credential_offer
+            .get_untracked(),
+        Some("Mock rig".to_string()),
+        "the offer is genuinely pending — this test would pass for the wrong \
+         reason otherwise"
     );
-
-    h.tap_label("Not now");
-    h.frame();
-
+    let labels = node_labels(&h.root);
     assert!(
-        !node_labels(&h.root).iter().any(|l| l == OFFER_TITLE),
-        "dismissing clears the offer"
+        !labels.iter().any(|l| l == OFFER_TITLE),
+        "the offer is answered on Connect, before the redirect that lands here \
+         (see `crate::connection`'s credential-offer placement): {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "Not now"),
+        "…and so is neither of its actions: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "Save"),
+        "…including the one that raised the biometric prompt over this screen: \
+         {labels:?}"
     );
 }
 
 #[test]
-fn accepting_the_credential_offer_clears_it_and_confirms_by_toast() {
+fn this_screen_never_touches_the_pending_offer() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
     expect_connection_controller().connect(mock_target(true));
     h.await_sessions();
-    app_toasts().clear();
-
-    h.tap_label("Save");
+    // Whatever this screen does — load, poll, rebuild — the offer is not its
+    // state to consume: only Connect's own dialog (or a teardown) clears it.
+    h.frame();
     h.frame();
 
-    assert!(
-        !node_labels(&h.root).iter().any(|l| l == OFFER_TITLE),
-        "accepting clears the offer"
-    );
-    let pending = app_toasts().pending_untracked();
-    assert!(
-        pending
-            .iter()
-            .any(|m| m.contains("Saving") && m.contains("Mock rig")),
-        "…and announces the hand-off (the gated save reports its own outcome; \
-         the tap-time toast must not claim a result): {pending:?}"
+    assert_eq!(
+        expect_connection_controller()
+            .credential_offer
+            .get_untracked(),
+        Some("Mock rig".to_string()),
+        "Sessions neither renders nor clears the offer any more"
     );
 }
 
