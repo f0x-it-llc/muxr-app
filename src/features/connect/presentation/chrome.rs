@@ -12,14 +12,20 @@
 //! [`View`]/[`Widget`] pairs — authored through [`frust::authoring`], the same
 //! seam `examples/huddle`'s `ui::fill_box` uses — fill the gap.
 //!
-//! [`switch_semantics`]/[`radio_semantics`] close the accessibility hole that
-//! composition opens: a toggle (or a trust row) assembled from swatches and a
-//! `GestureDetector` paints and presses correctly but contributes **no**
-//! accessibility node at all (a `GestureDetector` only forwards its child's,
-//! and a swatch has none), so a screen reader would find no control there.
-//! Each contributes the one `Role::Switch`/`Role::RadioButton` node the
-//! composed pile is worth, over one shared [`ControlSemanticsView`] body.
-//! Delete them the day `frust::glyph` grows a real switch/radio.
+//! [`switch_semantics`]/[`radio_semantics`] close an accessibility gap over
+//! whatever art or widget they wrap. [`radio_semantics`] closes a total hole:
+//! a trust row assembled from swatches and a `GestureDetector` paints and
+//! presses correctly but contributes **no** accessibility node at all (a
+//! `GestureDetector` only forwards its child's, and a swatch has none), so a
+//! screen reader would find no control there — delete it the day
+//! `frust::glyph` grows a real radio with a themeable label.
+//! [`switch_semantics`] closes a narrower one now that the remember toggle
+//! wraps the real `frust::switch` (`super::pieces::remember_row`): the widget
+//! contributes its own `Toggled`/`Action::Click` node, just no label
+//! (`SwitchWidget` takes no label parameter, unlike `Checkbox`/`RadioWidget`)
+//! — delete it the day `switch` grows one. Either way, one shared
+//! [`ControlSemanticsView`] body contributes the one `Role::Switch`/
+//! `Role::RadioButton` node the wrapped content is worth.
 //!
 //! [`centered_paragraph`] is the multi-line-centering one: `TextView` exposes
 //! no paragraph alignment and `TextContext::layout` hardcodes
@@ -361,12 +367,15 @@ enum ControlKind {
     Radio(bool),
 }
 
-/// Give `child` — a hand-composed toggle's art plus its press recognizer — the
-/// one accessibility node it cannot grow itself: a labelled, toggled
-/// [`Role::Switch`] advertising the [`Action::Click`] it fires.
+/// Give `child` — today, the real `frust::switch` the remember toggle wraps
+/// (`super::pieces::remember_row`) — the one accessibility detail it cannot
+/// grow itself: a **labelled**, toggled [`Role::Switch`] advertising the
+/// [`Action::Click`] it fires.
 ///
 /// Layout, paint and event routing are pure pass-through; only
-/// [`Widget::semantics`] does anything. See the [module docs](self).
+/// [`Widget::semantics`] does anything, and it fully replaces whatever node
+/// `child` would have contributed on its own (never both) — see the
+/// [module docs](self).
 pub fn switch_semantics<State: 'static, V: View<State>>(
     child: V,
     label: impl Into<String>,

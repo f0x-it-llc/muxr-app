@@ -62,14 +62,14 @@
 //!
 //! Facade/Glyph components carry the pieces wherever one fits — [`text`] for
 //! every run, [`text_input`] for both fields, [`button`] for the CTA (#15
-//! adopted — see [`connect_button`]), [`glyph::badge`] for the
+//! adopted — see [`connect_button`]), [`switch`] for the remember toggle (see
+//! [`remember_row`] — the baseline `material` catalog's `Switch`, now
+//! compiled in via `Cargo.toml`'s explicit `"material"` feature; Glyph itself
+//! ships no toggle of its own), [`glyph::badge`] for the
 //! "insecure"/"read-only" chips, and [`GestureDetector`] for the tappable
 //! saved rows and trust rows. The rest of the mock is borders and washes with
-//! no catalog counterpart (there is no Glyph toggle, and the `material`
-//! catalog's `Switch` is not compiled into this app — see `Cargo.toml`'s
-//! `default-features = false, features = ["glyph", …]`), so those compose from
-//! [`super::chrome`]'s panel/swatch primitives, with
-//! [`frust::motion::AnimatedOpacity`] carrying the toggle's on/off crossfade.
+//! no catalog counterpart, so those compose from [`super::chrome`]'s
+//! panel/swatch primitives.
 //!
 //! Two pieces of chrome are still hand-composed *against* a shipping widget,
 //! each for a recorded framework gap rather than a preference: the trust rows
@@ -79,7 +79,10 @@
 //! *wrapped* paragraph). Each carries its own `Role` node through
 //! `super::chrome` so the accessibility tree is no poorer for it. The CTA used
 //! to be the third (`ButtonWidget` pinned a stretched label at its leading
-//! edge, FINDINGS #15) — adopted now; see [`connect_button`].
+//! edge, FINDINGS #15) — adopted now; see [`connect_button`]. The remember
+//! toggle followed the same arc: a hand-composed `.toggle` pill stood in
+//! until a device pass found it small and weak-animated against the real
+//! widget's spring-driven thumb — adopted now; see [`remember_row`].
 //!
 //! # Tokens
 //!
@@ -104,11 +107,10 @@ use std::sync::Arc;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::authoring::{Color, Size};
 use frust::glyph::{BadgeVariant, badge};
-use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, Padding, SizedBox, StatusPalette, Theme, With, any, button, flexible, inflexible, text,
-    text_input,
+    Get, Padding, SizedBox, StatusPalette, Theme, With, any, button, flexible, inflexible, switch,
+    text, text_input,
 };
 
 use super::chrome::{centered_paragraph, panel, radio_semantics, swatch, switch_semantics};
@@ -174,15 +176,6 @@ const BADGE_LINE_GAP: f64 = 2.0;
 const HEADING_GAP: f64 = 6.0;
 /// `.field{gap:6px}` — between a field's label and its input.
 const FIELD_GAP: f64 = 6.0;
-/// `.toggle{width:36px;height:21px}`.
-const TOGGLE_W: f64 = 36.0;
-const TOGGLE_H: f64 = 21.0;
-/// `.toggle::after{width:15px;height:15px;top:2px;left:2px}` — the knob, and
-/// its **off** inset; `.toggle.on::after{left:17px}` is the on one.
-const KNOB: f64 = 15.0;
-const KNOB_LEFT_OFF: f64 = 2.0;
-const KNOB_LEFT_ON: f64 = 17.0;
-const KNOB_TOP: f64 = 2.0;
 /// `.dot-ok{width:7px;height:7px}`.
 const DOT: f64 = 7.0;
 /// `.saved-row{gap:10px}` — dot to text, and text to badge.
@@ -311,8 +304,6 @@ struct Palette {
     /// (`ColorScheme::outline_variant` is Glyph's own `border` token — the
     /// 0.09-alpha sibling of `outline`'s 0.18, already flattened).
     rule: Color,
-    /// `--bg-overlay`: the toggle track in its **off** state.
-    overlay: Color,
     /// The bright accent fill (`primary_container`, Glyph's accent-role split
     /// — the *fill* half, never `primary`, which is accent ink). Used
     /// directly by every piece but the CTA now (`connect_button` adopted the
@@ -341,7 +332,6 @@ fn palette(theme: &Theme) -> Palette {
         page: scheme.surface_container_low,
         outline: scheme.outline,
         rule: scheme.outline_variant,
-        overlay: scheme.surface_container_highest,
         amber: scheme.primary_container,
         amber_faint: scheme.primary.with_alpha(AMBER_FAINT_ALPHA),
         amber_border: scheme.primary.with_alpha(AMBER_BORDER_ALPHA),
@@ -729,28 +719,44 @@ fn field_font_family(family: &FontFamily) -> FontFamily {
 pub fn remember_row<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
     let colors = palette(theme);
     let remembered = live.is_none_or(|live| live.controller.remember.get());
-    let toggle: AnyView<S> = match live {
-        // Splash: the static on-state art, exactly as the mock draws it — no
-        // recognizer, and no `Role::Switch` node either, since there is nothing
-        // there to operate.
-        None => toggle_art(&colors, true),
-        Some(live) => {
-            let controller = Arc::clone(&live.controller);
-            any(switch_semantics(
-                GestureDetector(toggle_art::<S>(&colors, remembered))
-                    .on_tap(move |_state: &mut S| controller.toggle_remember()),
-                REMEMBER_LABEL,
-                remembered,
-            ))
-        }
-    };
+    let controller = live.map(|live| Arc::clone(&live.controller));
+    // The real `frust::switch` (52×32, spring-driven thumb) rather than the
+    // hand-composed `.toggle` pill this row used to draw — see the [module
+    // docs](self)'s Real components section. The switch reports the
+    // *requested* value it never self-applies (a controlled component, like
+    // every other interactive widget in this file); the callback ignores it
+    // and drives [`ConnectController::toggle_remember`] instead, so the
+    // controller's own flip (and the persistence it triggers) stays the
+    // single source of truth exactly as it was through the old
+    // `GestureDetector`.
+    //
+    // `switch`'s own `Widget::semantics` reports `Toggled` + `Action::Click`
+    // but no label (`frust-widgets`' `SwitchWidget` — unlike `Checkbox`/
+    // `RadioWidget`, it takes no label parameter at all, and the
+    // glyph-catalog demo this app follows doesn't wrap it either), so
+    // [`switch_semantics`] still wraps it here to keep [`REMEMBER_LABEL`] on
+    // the announced node — the one piece of the old accessibility wrapper the
+    // real widget doesn't cover on its own.
+    let toggle = any(switch_semantics(
+        switch::<S, _>(remembered, move |_state: &mut S, _requested: bool| {
+            if let Some(controller) = &controller {
+                controller.toggle_remember();
+            }
+        }),
+        REMEMBER_LABEL,
+        remembered,
+    ));
     backed(
         column::<S>(vec![
             any(row::<S>(vec![
                 // The flexible label takes every pixel the toggle doesn't, which
                 // is what pins the toggle to the trailing edge (`Flex`'s v1
                 // `MainAxisAlignment` has only `Start`, so there is no
-                // space-between to reach for).
+                // space-between to reach for). `row`'s own
+                // `CrossAxisAlignment::Center` centers the label against the
+                // switch's 32px height the same way it centered it against the
+                // old 21px pill — no explicit alignment change needed for the
+                // size step.
                 flexible(
                     1,
                     any(text(REMEMBER_LABEL)
@@ -763,59 +769,6 @@ pub fn remember_row<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S
         ]),
         &colors,
     )
-}
-
-/// The `.toggle` pill at `on`: a 36×21 track that crossfades from
-/// `--bg-overlay` to the faint amber wash, and a 15px knob that crossfades
-/// between its two parked positions.
-///
-/// Position is animated by **opacity**, not by offset: `frust::motion` ships
-/// `AnimatedOpacity`/`AnimatedScale` and no animated-offset wrapper, so two
-/// knobs are drawn (one per end) and faded against each other. Both timings
-/// default from `Theme.motion`, which is what makes the whole control collapse
-/// under `reduce_motion` for free (`docs/CODE_STANDARDS.md`'s transition rule).
-///
-/// # Both tracks fade; neither is a floor
-///
-/// `.toggle.on{background:var(--amber-faint)}` *replaces* the off track's
-/// `--bg-overlay`, and `--amber-faint` is `rgba(255,182,39,0.12)` — 12% alpha.
-/// Painting it over an opaque `--bg-overlay` composites 88% of the dark track
-/// straight back through, which is exactly the "on toggle with a dark track"
-/// the device showed; the same goes for the amber border over the neutral
-/// `outline` one. So the **off** track is faded out by its own
-/// `AnimatedOpacity` rather than left underneath as an opaque base, and at rest
-/// the on state is the amber wash over the page tone, as authored.
-fn toggle_art<S: 'static>(colors: &Palette, on: bool) -> AnyView<S> {
-    // `border-radius:999px` — a pill. The Glyph shape scale spells `full` as
-    // `f64::INFINITY`, so the drawable radius is half the track.
-    let radius = TOGGLE_H / 2.0;
-    let size = Size::new(TOGGLE_W, TOGGLE_H);
-    let off_track = swatch(size, colors.overlay, radius).border(colors.outline);
-    let on_track = swatch(size, colors.amber_faint, radius).border(colors.amber_border);
-    let knob = |left: f64, fill: Color| {
-        Padding(
-            EdgeInsets {
-                left,
-                top: KNOB_TOP,
-                right: TOGGLE_W - left - KNOB,
-                bottom: TOGGLE_H - KNOB_TOP - KNOB,
-            },
-            swatch(Size::new(KNOB, KNOB), fill, KNOB / 2.0),
-        )
-    };
-    let (on_opacity, off_opacity) = if on { (1.0, 0.0) } else { (0.0, 1.0) };
-    any(frust::Stack(vec![
-        any(AnimatedOpacity::<S, _>(off_opacity, off_track)),
-        any(AnimatedOpacity::<S, _>(on_opacity, on_track)),
-        any(AnimatedOpacity::<S, _>(
-            off_opacity,
-            knob(KNOB_LEFT_OFF, colors.fg_dim),
-        )),
-        any(AnimatedOpacity::<S, _>(
-            on_opacity,
-            knob(KNOB_LEFT_ON, colors.amber),
-        )),
-    ]))
 }
 
 /// The `.radio-opt` block: the mock's **two** rows, the riskier one carrying
@@ -1344,18 +1297,6 @@ mod tests {
     }
 
     #[test]
-    fn the_toggle_knob_sits_inside_its_track_at_both_ends() {
-        // Each parked knob's padding is `track - inset - knob` on the trailing
-        // edges; a negative one would be a layout panic in waiting.
-        const { assert!(KNOB_LEFT_OFF + KNOB <= TOGGLE_W) };
-        const { assert!(KNOB_LEFT_ON + KNOB <= TOGGLE_W) };
-        const { assert!(KNOB_TOP + KNOB <= TOGGLE_H) };
-        // …and the two positions are genuinely distinct, or the toggle would
-        // have no on/off tell at all.
-        const { assert!(KNOB_LEFT_OFF < KNOB_LEFT_ON) };
-    }
-
-    #[test]
     fn every_derived_ink_stays_a_legal_alpha() {
         for alpha in [AMBER_FAINT_ALPHA, AMBER_BORDER_ALPHA, FG_DIM_ALPHA] {
             assert!((0.0..=1.0).contains(&alpha));
@@ -1412,15 +1353,6 @@ mod tests {
             names.contains(&FamilyName::Generic(GenericSlot::Monospace)),
             "…and so is a platform monospace, before the rescue: {names:?}"
         );
-    }
-
-    #[test]
-    fn the_toggle_track_is_the_sources_own_pill() {
-        // `.toggle{width:36px;height:21px}` with a 15px knob — the numbers the
-        // device gate reads as "visibly larger" if one of them drifts.
-        const { assert!(TOGGLE_W == 36.0) };
-        const { assert!(TOGGLE_H == 21.0) };
-        const { assert!(KNOB == 15.0) };
     }
 
     /// Every posture, for the label-uniqueness sweep below — the *selector*

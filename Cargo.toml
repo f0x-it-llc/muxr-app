@@ -33,7 +33,20 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # neutral-themed), or swap them for `"material"`/`"cupertino"` plus the
 # matching `frust::set_default_theme(...)` call to use one of the other two
 # built-in design systems instead.
-frust = { path = "../../crates/frust", default-features = false, features = ["glyph", "glyph-fonts"] }
+#
+# `"material"` is named explicitly too, even though this app's own design
+# system is Glyph, not Material: the Connect screen's remember toggle is the
+# standard baseline `frust::switch` — the `material` feature gates the whole
+# Material catalog `switch` ships from (`crates/frust/src/lib.rs`), not just
+# the Glyph-styled catalog widgets. It compiled before this was added only by
+# accident, through feature unification with `clean-signals-frust`'s own
+# `frust` dependency (which enables the `frust` crate's defaults) — this makes
+# the app's own reliance on it an intentional line here instead.
+frust = { path = "../../crates/frust", default-features = false, features = [
+    "glyph",
+    "glyph-fonts",
+    "material",
+] }
 
 # `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,
