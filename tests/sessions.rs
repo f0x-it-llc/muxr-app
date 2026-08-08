@@ -913,7 +913,7 @@ fn the_screen_carries_no_settings_affordance_of_its_own() {
 }
 
 // ---------------------------------------------------------------------------
-// 7 — the save-credential offer is NOT this screen's (device gate G9)
+// 7 — the save-credential offer is NOT this screen's
 // ---------------------------------------------------------------------------
 
 /// The offer's title, as this screen's banner used to expose it (`glyph::alert`

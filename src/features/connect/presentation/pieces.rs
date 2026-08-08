@@ -35,7 +35,7 @@
 //! starts on "Public domain (CA)", the fields start empty — so the overlay still
 //! unmounts onto the picture underneath it.
 //!
-//! # The parity contract (device gate G2)
+//! # The parity contract
 //!
 //! `None` is a **wiring** difference and nothing else: the splash's copy and the
 //! route's copy paint the same pixels at every window size. Ed's gate caught the
@@ -152,7 +152,7 @@ pub struct Live {
     /// Validate, connect, and navigate — see the type docs. It also carries the
     /// save-credential offer's dialog, for the same reason it carries the
     /// navigation: raising one needs the overlay host the screen owns
-    /// (`super::pages`' offer section, device gate G9), so a connect that
+    /// (`super::pages`' offer section), so a connect that
     /// raises an offer navigates from *that* answer rather than on the spot.
     pub on_connect: Rc<dyn Fn()>,
     /// Connect with the **scanned pairing's** own credentials, and navigate —
@@ -1049,6 +1049,11 @@ fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
 /// they belong to — the splash itself never sees them (it composes with no
 /// [`Live`], and so never has a pairing).
 pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView<S> {
+    // Read once and shared by every CTA this piece renders (the manual one
+    // below, and the pinned one the pairing branch adds): `None` (the
+    // splash's static copy) reads `false` here, same as every other signal
+    // this piece is generic over, so the splash's picture is untouched.
+    let busy = live.is_some_and(|live| live.controller.busy());
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
     let cta = any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
         button(CONNECT_LABEL, move |_state: &mut S| {
@@ -1056,7 +1061,14 @@ pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView
                 on_connect();
             }
         })
-        .label_alignment(Alignment::CENTER),
+        .label_alignment(Alignment::CENTER)
+        // The manual CTA held the same `resolving_offer`-spanned held-redirect
+        // silently: after the offer dialog closes on accept, the mint →
+        // biometric → store → revoke chain runs with the form still looking
+        // live and this CTA the only thing between the user and a re-tap. The
+        // pinned CTA below already renders `busy` this way; this brings the
+        // manual one to parity rather than inventing a second idiom.
+        .loading(busy),
     ));
     let Some(pairing) = pairing_chrome(live) else {
         return cta;
@@ -1064,7 +1076,6 @@ pub fn connect_button<S: 'static>(theme: &Theme, live: Option<&Live>) -> AnyView
     // `live` is `Some(..)` whenever `pairing_chrome` answered, so the CTA below
     // always has a real action behind it.
     let on_connect_pinned = live.map(|live| Rc::clone(&live.on_connect_pinned));
-    let busy = live.is_some_and(|live| live.controller.busy());
     any(column::<S>(vec![
         pairing_banner(theme, pairing),
         v_gap::<S>(PAIRING_GAP),

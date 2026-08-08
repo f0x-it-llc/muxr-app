@@ -13,8 +13,8 @@
 //! [`super::pieces`]); the layout itself is pure arrangement and never builds
 //! one, which is what keeps the two trees honest. **Every** arrangement
 //! decision belongs to it, the responsive width clamp included — a clamp the
-//! screen applied on its own was the width jump device gate G2 caught, since
-//! the splash assembled through the layout and never saw it.
+//! screen applied on its own produced a width jump at the handoff, since the
+//! splash assembled through the layout and never saw it.
 //!
 //! Transcribed from `docs/redesign.html`'s `.connect` rule (and
 //! `docs/splash.html`'s `.ui-layer`, which is the same box): a top-anchored
@@ -85,7 +85,7 @@
 //! choosing it. A saved-row tap has no equivalent moment: the row was chosen
 //! for its endpoint, not its posture, so the posture needs its own prompt.
 //!
-//! # The save-credential offer (device gate G9)
+//! # The save-credential offer
 //!
 //! A connect that raised a credential offer is answered **here**, before the
 //! redirect: [`credential_offer_prompt`] is the `offer_prompt` this screen lends
@@ -103,7 +103,7 @@
 //! `open_create_token_dialog` composes the same primitives for the same kind of
 //! reason (a shape the shared helpers do not carry).
 //!
-//! # The FAB permission gate (device gate G5)
+//! # The FAB permission gate
 //!
 //! The camera permission prompt is gated on the **tap**, not the sheet's own
 //! mount: [`qr_affordance`]'s press handler calls [`request_camera_access`],
@@ -119,6 +119,22 @@
 //! mounting the sheet first and asking inside it (as this used to) let the OS
 //! permission dialog show *over* the sheet's own entrance animation — asking
 //! before the sheet exists removes the race entirely.
+//!
+//! That round trip is a real async window — hundreds of ms on a slow JNI
+//! call or a stubborn OS dialog — and nothing about the tap itself debounces
+//! it, so [`request_camera_access`] also owns a single-flight latch
+//! (`ConnectState::qr_permission_pending`, an `Rc<Cell<bool>>` since a
+//! screen-retained non-reactive flag has to outlive the press handler's own
+//! borrow): swapped `true` on entry, and a re-entrant call while it already
+//! reads `true` is dropped outright rather than starting a second check that
+//! could resolve `Granted` twice and open two camera sessions on one
+//! physical camera. It clears once *this* check has fully settled, whichever
+//! way — a grant, a toast, or the no-backend fast path below — so the next,
+//! non-reentrant tap is never locked out by this one. [`qr_affordance`]'s own
+//! press handler additionally refuses the tap outright while
+//! [`ConnectController::busy_untracked`] holds (the same held-redirect rule
+//! the CTAs already apply) — belt and braces, since the root overlay host
+//! already makes this screen unreachable behind a pushed dialog.
 //!
 //! # The QR sheet
 //!
@@ -158,6 +174,7 @@
 //! from asking AVFoundation for a capture device it has no usage-description
 //! string to justify.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -235,7 +252,7 @@ const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
 /// The QR affordance's accessible name — what a screen reader announces, and
 /// what `tests/connect.rs` addresses the button by.
 pub const FAB_LABEL: &str = "Pair by QR code";
-/// The save-credential offer's title (device gate G9). The words the Sessions
+/// The save-credential offer's title. The words the Sessions
 /// banner this replaced used, since the question is the same one — only the
 /// moment it is asked at moved. It is also how `tests/connect.rs` tells *which*
 /// pushed page is up, which is why it stays a whole sentence.
@@ -332,7 +349,7 @@ const SHEET_GAP: f64 = 16.0;
 /// Generic over the state type for the same reason the pieces are — the splash
 /// composes under [`AppState`], the screen under its own [`ConnectState`].
 ///
-/// # Why the clamp lives here (device gate G2)
+/// # Why the clamp lives here
 ///
 /// It used to be the screen's own, applied in [`ConnectScreen`]'s `build`
 /// around this function's output — so on a tablet, a landscape phone or a
@@ -418,6 +435,13 @@ pub struct ConnectState {
     /// somehow mounted already-connected does not misfire a spurious clear on
     /// its first build.
     was_connected: bool,
+    /// The FAB's single-flight latch — non-reactive, so it lives here rather
+    /// than as a controller signal (nothing about it is observed by a
+    /// rebuild). `Rc<Cell<bool>>` rather than a plain `bool`: `request_camera_access`'s
+    /// completion runs from inside its own `spawn_local` future, off this
+    /// press handler's `&mut ConnectState`, so the flag needs a handle that
+    /// outlives the borrow. See [`qr_affordance`].
+    qr_permission_pending: Rc<Cell<bool>>,
 }
 
 impl Component for ConnectScreen {
@@ -442,9 +466,10 @@ impl Component for ConnectScreen {
             move || ConnectController::new(repository, credentials, tokens, connection)
         });
         // The credential-save seam `crate::connection` calls when the user
-        // accepts the offer Sessions raises: installed here, where the flow's
-        // dependencies are already resolved, and held weakly by the connection
-        // handle (see `ConnectController::credential_saver`).
+        // accepts the save offer this screen raises (see the module docs'
+        // offer section): installed here, where the flow's dependencies are
+        // already resolved, and held weakly by the connection handle (see
+        // `ConnectController::credential_saver`).
         connection.set_credential_saver(controller.credential_saver());
 
         ConnectState {
@@ -457,6 +482,7 @@ impl Component for ConnectScreen {
             overlays: self.overlays.clone(),
             connection,
             was_connected,
+            qr_permission_pending: Rc::new(Cell::new(false)),
         }
     }
 
@@ -483,10 +509,10 @@ impl Component for ConnectScreen {
 
         let live = Live {
             controller: Arc::clone(&state.controller),
-            // The manual CTA also carries the save-credential offer's dialog
-            // (device gate G9): the controller holds its own redirect while
-            // that question is up, and the prompt below is what asks it — see
-            // the module docs' offer section.
+            // The manual CTA also carries the save-credential offer's dialog:
+            // the controller holds its own redirect while that question is
+            // up, and the prompt below is what asks it — see the module
+            // docs' offer section.
             on_connect: {
                 let controller = Arc::clone(&state.controller);
                 let overlays = state.overlays.clone();
@@ -521,14 +547,18 @@ impl Component for ConnectScreen {
         // hand the same builder its own snapshot of the same repository — see
         // `super::pieces`' parity contract. The responsive width-clamp pass
         // (FINDINGS #21) is likewise no longer applied here: it moved into
-        // `connect_layout`, so the splash clamps identically (device gate G2).
+        // `connect_layout`, so the splash and the route clamp identically.
         let saved = state.controller.saved.get();
         let content = connect_layout(connect_pieces_with(&theme, Some(&live), &saved));
 
         any(Stack(vec![
             any(page_backdrop::<ConnectState>()),
             any(scroll_view(content)),
-            qr_affordance(&state.overlays, &state.controller),
+            qr_affordance(
+                &state.overlays,
+                &state.controller,
+                &state.qr_permission_pending,
+            ),
         ]))
     }
 }
@@ -650,14 +680,26 @@ fn offer_credential_save(
 /// `.fab`: the amber QR/pair affordance, pinned to the screen's bottom-trailing
 /// safe area.
 ///
-/// The tap itself is the camera-permission gate (device gate G5, see the
-/// module docs' "FAB permission gate" section): [`request_camera_access`]
-/// checks/requests it off the UI thread first, and only once it answers
+/// The tap itself is the camera-permission gate (see the module docs'
+/// "FAB permission gate" section): [`request_camera_access`] checks/requests
+/// it off the UI thread first, and only once it answers
 /// [`frust_camera::PermissionStatus::Granted`] does [`open_qr_sheet`] push
 /// the sheet — never before, so the OS permission dialog never races the
 /// sheet's own entrance animation onto the screen. Every other outcome is
 /// handled by `request_camera_access` itself (a toast, never a mount); the
 /// FAB stays tappable either way, so a re-tap is the retry.
+///
+/// `pending` (`ConnectState::qr_permission_pending`) is threaded down rather
+/// than resolved here: it has to survive across rebuilds (a fresh cell every
+/// `build` would guard nothing), and cloning the screen's own handle each
+/// time is what lets it. Two taps land on two builds' worth of press handlers,
+/// and both close over the *same* cell.
+///
+/// Refuses the tap outright while [`ConnectController::busy_untracked`]
+/// holds — a tap during the held save is inert, the same rule the CTAs
+/// already apply (belt and braces: the root overlay host already makes this
+/// screen unreachable behind a pushed dialog, so this does not depend on
+/// that holding true).
 ///
 /// An [`icon_button`] rather than [`button`]: the affordance is a **mark**, and
 /// `frust::button` takes a `String` label and nothing else, which is exactly
@@ -668,9 +710,11 @@ fn offer_credential_save(
 fn qr_affordance(
     overlays: &frust::NavigatorController<AppState>,
     controller: &Arc<ConnectController>,
+    pending: &Rc<Cell<bool>>,
 ) -> AnyView<ConnectState> {
     let overlays = overlays.clone();
     let controller = Arc::clone(controller);
+    let pending = Rc::clone(pending);
     let theme = active_theme();
     let scheme = theme.scheme();
     any(safe_area(Align(
@@ -678,9 +722,12 @@ fn qr_affordance(
         Padding(
             EdgeInsets::all(FAB_MARGIN),
             icon_button(SCAN_MARK, FAB_LABEL, move |_state: &mut ConnectState| {
+                if controller.busy_untracked() {
+                    return;
+                }
                 let overlays = overlays.clone();
                 let controller = Arc::clone(&controller);
-                request_camera_access(move || open_qr_sheet(&overlays, controller));
+                request_camera_access(&pending, move || open_qr_sheet(&overlays, controller));
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA
@@ -718,19 +765,29 @@ fn open_qr_sheet(
     });
 }
 
-/// The FAB permission gate (device gate G5): checks/requests the camera
-/// permission off the UI thread and calls `on_granted` only once the
-/// platform answers [`frust_camera::PermissionStatus::Granted`]; every other
-/// outcome raises a toast through [`app_toasts`] instead and never calls
-/// `on_granted` — see [`permission_outcome_message`] for the whole decision
-/// table.
+/// The FAB permission gate: checks/requests the camera permission off the UI
+/// thread and calls `on_granted` only once the platform answers
+/// [`frust_camera::PermissionStatus::Granted`]; every other outcome raises a
+/// toast through [`app_toasts`] instead and never calls `on_granted` — see
+/// [`permission_outcome_message`] for the whole decision table.
 ///
 /// Gated the same as [`open_camera`]: the camera is a phone/tablet
 /// affordance only (the module docs' gating note). On a build with no camera
 /// backend at all there is no OS dialog to race the sheet against, so this
 /// calls `on_granted` directly — [`camera_backend_available`] is what makes
 /// the sheet itself render the right unavailable state once it mounts.
-fn request_camera_access(on_granted: impl FnOnce() + 'static) {
+///
+/// `pending` is the FAB's single-flight latch (the module docs' "FAB
+/// permission gate" section): a re-entrant call while it already reads
+/// `true` is dropped before doing anything else — no second permission
+/// check, no second toast, no second call to `on_granted` — so a fast
+/// double-tap can resolve at most one outcome. It clears once *this* call has
+/// fully settled, on every branch below, including the no-backend fast path,
+/// so the very next tap (not a reentrant one) is always admitted.
+fn request_camera_access(pending: &Rc<Cell<bool>>, on_granted: impl FnOnce() + 'static) {
+    if pending.replace(true) {
+        return;
+    }
     if !camera_backend_available() {
         // No OS permission dialog exists on this build (the module docs'
         // gating note) — the sheet decides for itself what to render
@@ -738,8 +795,10 @@ fn request_camera_access(on_granted: impl FnOnce() + 'static) {
         // opens it directly rather than probing a permission API with
         // nothing behind it.
         on_granted();
+        pending.set(false);
         return;
     }
+    let pending = Rc::clone(pending);
     spawn_local(async move {
         let outcome = match frust::spawn_blocking(request_permission_checked).await {
             Ok(result) => result,
@@ -749,6 +808,7 @@ fn request_camera_access(on_granted: impl FnOnce() + 'static) {
             None => on_granted(),
             Some(message) => app_toasts().show(message),
         }
+        pending.set(false);
     });
 }
 
@@ -1245,8 +1305,6 @@ fn inked(style: &TextStyle, color: Color) -> TextStyle {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use super::*;
     use frust::authoring::{BezPath, Shape};
 
@@ -1302,18 +1360,21 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The FAB permission gate (device gate G5)
+    // The FAB permission gate
     //
     // `request_permission_checked`'s real (Android/iOS) arm is
     // `#[cfg(target_os = "android"/"ios")]`-gated — the module docs' desktop
     // AVFoundation guard — so it never compiles on this host, and a true
     // end-to-end "FAB tap → real permission check → sheet opens/refuses" test
-    // cannot run headless here. These pin the two halves that arm is built on
+    // cannot run headless here. These pin the pieces that arm is built on
     // instead: the outcome→action decision table
-    // (`permission_outcome_message`), and `request_camera_access`'s
-    // pass-through behaviour on a build with no camera backend at all, which
-    // *does* run on this host and is exactly what a desktop/headless call
-    // takes.
+    // (`permission_outcome_message`), `request_camera_access`'s pass-through
+    // behaviour on a build with no camera backend at all (which *does* run on
+    // this host and is exactly what a desktop/headless call takes), and its
+    // single-flight latch — simulated below by re-entering from inside a
+    // call's own `on_granted`, since the real permission check settles
+    // synchronously on this host and leaves no other window to fire a second
+    // tap into.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1355,13 +1416,57 @@ mod tests {
         // placeholder — see `sheet_stage`.
         assert!(!camera_backend_available());
 
+        let pending = Rc::new(Cell::new(false));
         let opened = Rc::new(Cell::new(false));
         let flag = Rc::clone(&opened);
-        request_camera_access(move || flag.set(true));
+        request_camera_access(&pending, move || flag.set(true));
         assert!(
             opened.get(),
             "request_camera_access must call on_granted directly when there \
              is no camera backend to ask permission of"
+        );
+        assert!(
+            !pending.get(),
+            "…and clear its latch once that fast path has settled, so the \
+             next tap is admitted"
+        );
+    }
+
+    #[test]
+    fn a_second_tap_while_the_first_permission_check_is_still_open_is_dropped() {
+        // Fire the FAB's own guarded entry point twice, the second time
+        // re-entering from *inside* the first call's `on_granted` — before
+        // `request_camera_access` has cleared `pending` — so it lands exactly
+        // as a fast double real-world tap would land during the async window
+        // a device's own permission check leaves open (see the module docs'
+        // "FAB permission gate" section and the section header above).
+        let pending = Rc::new(Cell::new(false));
+        let opens = Rc::new(Cell::new(0_u32));
+
+        fn tap(pending: &Rc<Cell<bool>>, opens: &Rc<Cell<u32>>) {
+            let pending_reentrant = Rc::clone(pending);
+            let opens_reentrant = Rc::clone(opens);
+            request_camera_access(pending, move || {
+                opens_reentrant.set(opens_reentrant.get() + 1);
+                // The "second tap": `pending` is still `true` here, since
+                // `request_camera_access` only clears it once this whole
+                // closure returns.
+                tap(&pending_reentrant, &opens_reentrant);
+            });
+        }
+
+        tap(&pending, &opens);
+
+        assert_eq!(
+            opens.get(),
+            1,
+            "a re-entrant tap while the first check is still open must not \
+             open a second sheet"
+        );
+        assert!(
+            !pending.get(),
+            "the latch clears once its own check has fully settled, so a \
+             later, non-reentrant tap is still admitted"
         );
     }
 }

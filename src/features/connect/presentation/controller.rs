@@ -121,7 +121,7 @@
 //! [`ConnectController::connect_from_pairing`]'s success branch, beside the
 //! token scrub.
 //!
-//! # The held redirect (device gate G9)
+//! # The held redirect
 //!
 //! A manual connect that raised a credential offer does **not** push
 //! [`SESSIONS_LOCATION`] when it settles. [`ConnectController::connect`]'s
@@ -464,8 +464,12 @@ impl ConnectController {
     }
 
     /// [`Self::busy`] without subscribing — the guard a press handler reads,
-    /// where there is no owner to subscribe.
-    fn busy_untracked(&self) -> bool {
+    /// where there is no owner to subscribe. `pub(crate)` rather than private:
+    /// `super::pages`' FAB press handler reads it the same way this
+    /// controller's own methods do, to stay inert while the held redirect
+    /// holds — belt and braces, since the root overlay host already makes the
+    /// screen unreachable behind a pushed dialog.
+    pub(crate) fn busy_untracked(&self) -> bool {
         self.connection.connecting.get_untracked()
             || self.unlocking.get_untracked()
             || self.resolving_offer.get_untracked()
@@ -656,8 +660,8 @@ impl ConnectController {
     /// docs), leaves the form as the user typed it — token included, so a retry
     /// is one tap — and never navigates.
     ///
-    /// **The push is conditional** (device gate G9, the module docs' held
-    /// redirect): a settle that raised a credential offer hands `offer_prompt`
+    /// **The push is conditional** (the module docs' held redirect): a
+    /// settle that raised a credential offer hands `offer_prompt`
     /// the server's label instead of pushing, and the push then belongs to
     /// whichever of [`Self::accept_offer_then_navigate`] /
     /// [`Self::decline_offer_then_navigate`] answers the dialog that prompt
