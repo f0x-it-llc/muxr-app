@@ -133,8 +133,9 @@
 //! non-reentrant tap is never locked out by this one. [`qr_affordance`]'s own
 //! press handler additionally refuses the tap outright while
 //! [`ConnectController::busy_untracked`] holds (the same held-redirect rule
-//! the CTAs already apply) — belt and braces, since the root overlay host
-//! already makes this screen unreachable behind a pushed dialog.
+//! the CTAs already apply). That guard is load-bearing, not redundant: the
+//! offer dialog pops synchronously on accept, so for the rest of the held
+//! save this screen is uncovered and the affordance is genuinely reachable.
 //!
 //! # The QR sheet
 //!
@@ -697,9 +698,9 @@ fn offer_credential_save(
 ///
 /// Refuses the tap outright while [`ConnectController::busy_untracked`]
 /// holds — a tap during the held save is inert, the same rule the CTAs
-/// already apply (belt and braces: the root overlay host already makes this
-/// screen unreachable behind a pushed dialog, so this does not depend on
-/// that holding true).
+/// already apply. Load-bearing, not defense-in-depth: the offer dialog pops
+/// synchronously on accept, so the screen is uncovered — and this affordance
+/// reachable — for the remainder of the held save.
 ///
 /// An [`icon_button`] rather than [`button`]: the affordance is a **mark**, and
 /// `frust::button` takes a `String` label and nothing else, which is exactly
