@@ -82,6 +82,23 @@
 //! choosing it. A saved-row tap has no equivalent moment: the row was chosen
 //! for its endpoint, not its posture, so the posture needs its own prompt.
 //!
+//! # The FAB permission gate (device gate G5)
+//!
+//! The camera permission prompt is gated on the **tap**, not the sheet's own
+//! mount: [`qr_affordance`]'s press handler calls [`request_camera_access`],
+//! which runs `frust_camera::Camera::request_permission`'s blocking call off
+//! the UI thread (`spawn_local` + `frust::spawn_blocking`, the same pairing
+//! [`ConnectController::begin_credential_save`] uses for its own blocking
+//! work) and pushes [`open_qr_sheet`] only once the platform answers
+//! [`frust_camera::PermissionStatus::Granted`]. Every other outcome — a
+//! refusal, an unsettled answer, or a platform error — never mounts the sheet
+//! at all; it raises a short toast through [`crate::ui::toasts`] instead
+//! ([`permission_outcome_message`] is the whole decision table), and the FAB
+//! stays tappable for the user to try again. That ordering is the fix:
+//! mounting the sheet first and asking inside it (as this used to) let the OS
+//! permission dialog show *over* the sheet's own entrance animation — asking
+//! before the sheet exists removes the race entirely.
+//!
 //! # The QR sheet
 //!
 //! [`qr_sheet_body`] is a `Component` of its own ([`QrScanSheet`]), not a plain
@@ -89,13 +106,12 @@
 //! open on mount, tear down on every way out (a scrim tap, `Escape`, an Android
 //! back press). That is what `Component::init`'s `on_cleanup` gives it, and why
 //! the session is never a `Drop` impl (`docs/CODE_STANDARDS.md`'s State &
-//! Reactivity rule). The wiring follows `examples/glyph-catalog`'s camera page,
-//! the sanctioned `frust-camera` integration precedent, point for point:
-//! `use_task` + `spawn_blocking` for the blocking permission call, an
-//! `Arc<Mutex<Option<Arc<CameraSession>>>>` cell (an `Arc` because `on_cleanup`
-//! takes a `Send + Sync` closure), the session opened once per grant from
-//! `build`, and **no signal write from inside the detection callback**, which
-//! runs on a plugin-owned thread.
+//! Reactivity rule). The wiring follows `examples/glyph-catalog`'s camera page
+//! for everything past permission (which now belongs to the FAB gate above,
+//! not this component): an `Arc<Mutex<Option<Arc<CameraSession>>>>` cell (an
+//! `Arc` because `on_cleanup` takes a `Send + Sync` closure), the session
+//! opened once from `build`, and **no signal write from inside the detection
+//! callback**, which runs on a plugin-owned thread.
 //!
 //! The hand-off is therefore explicit: `on_detect` copies the raw value into a
 //! plain mutex cell, and a UI-thread poll loop ([`spawn_detection_pump`], the
@@ -109,14 +125,17 @@
 //! the clear, and it lives in a [`Zeroizing`] holder from the callback until
 //! the parse consumes it.
 //!
-//! **The camera is a phone/tablet affordance.** [`open_camera`] and
-//! [`request_camera_permission`] are gated to Android and iOS: every other
-//! target renders the sheet's unavailable state instead. That is not a
-//! stand-in for the plugin's own desktop fail-soft — it is the product line the
-//! Flutter client already draws (macOS is not a muxr target and deliberately
-//! carries no camera entitlement), and it is what keeps a desktop preview, and
-//! every headless test on a developer's Mac, from asking AVFoundation for a
-//! capture device it has no usage-description string to justify.
+//! **The camera is a phone/tablet affordance.** [`open_camera`] and the real
+//! half of [`request_camera_access`] are gated to Android and iOS: every
+//! other target has no OS dialog to gate the tap on, so the tap opens the
+//! sheet directly and the sheet renders its own unavailable state instead
+//! ([`camera_backend_available`] is that same gate, read from inside the
+//! sheet). That is not a stand-in for the plugin's own desktop fail-soft — it
+//! is the product line the Flutter client already draws (macOS is not a muxr
+//! target and deliberately carries no camera entitlement), and it is what
+//! keeps a desktop preview, and every headless test on a developer's Mac,
+//! from asking AVFoundation for a capture device it has no usage-description
+//! string to justify.
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,10 +146,10 @@ use clean_signals_frust::use_controller;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
 use frust::{
-    Align, Alignment, AnyView, AsyncValue, Axis, ButtonStyle, Component, CrossAxisAlignment,
-    EdgeInsets, FlexView, Get, GetUntracked, IconSource, Padding, SizedBox, Stack, Theme, UseTask,
-    WindowMetrics, any, button, component, icon, inflexible, on_cleanup, platform_view, safe_area,
-    scroll_view, spawn_local, text, use_context,
+    Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets,
+    FlexView, Get, GetUntracked, IconSource, Padding, SizedBox, Stack, Theme, WindowMetrics, any,
+    button, component, icon, inflexible, on_cleanup, platform_view, safe_area, scroll_view,
+    spawn_local, text, use_context,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat};
 use frust_camera::{
@@ -152,6 +171,7 @@ use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::dialogs::confirm_dialog;
 use crate::ui::sheet::show_sheet;
+use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::icon_button;
 
 /// `.connect{padding:30px 22px}` (`.ui-layer`'s too) — horizontal.
@@ -472,6 +492,15 @@ fn handle_saved_row_tap(
 /// `.fab`: the amber QR/pair affordance, pinned to the screen's bottom-trailing
 /// safe area.
 ///
+/// The tap itself is the camera-permission gate (device gate G5, see the
+/// module docs' "FAB permission gate" section): [`request_camera_access`]
+/// checks/requests it off the UI thread first, and only once it answers
+/// [`frust_camera::PermissionStatus::Granted`] does [`open_qr_sheet`] push
+/// the sheet — never before, so the OS permission dialog never races the
+/// sheet's own entrance animation onto the screen. Every other outcome is
+/// handled by `request_camera_access` itself (a toast, never a mount); the
+/// FAB stays tappable either way, so a re-tap is the retry.
+///
 /// An [`icon_button`] rather than [`button`]: the affordance is a **mark**, and
 /// `frust::button` takes a `String` label and nothing else, which is exactly
 /// how it came to be a font glyph in the first place (see [`SCAN_MARK`]). What
@@ -491,22 +520,9 @@ fn qr_affordance(
         Padding(
             EdgeInsets::all(FAB_MARGIN),
             icon_button(SCAN_MARK, FAB_LABEL, move |_state: &mut ConnectState| {
+                let overlays = overlays.clone();
                 let controller = Arc::clone(&controller);
-                show_sheet(&overlays, move |sheet| {
-                    // The sheet closes itself the moment a payload lands, so
-                    // its handle is threaded in as the one-shot closer the
-                    // scan pump fires — the same `Rc<dyn Fn()>` shape
-                    // `ui::sheet`'s own `on_dismiss` takes, and gated by the
-                    // same at-most-one-pop handle every other closer goes
-                    // through.
-                    let sheet = sheet.clone();
-                    qr_sheet_body(
-                        Rc::new(move || {
-                            sheet.close();
-                        }),
-                        Arc::clone(&controller),
-                    )
-                })
+                request_camera_access(move || open_qr_sheet(&overlays, controller));
             })
             // The mock's amber disc and the ink the design pairs with it — the
             // same `primary_container`/`on_primary_container` pair the CTA
@@ -520,6 +536,103 @@ fn qr_affordance(
     )))
 }
 
+/// Push the QR sheet as a page of `overlays`, wired to close itself the
+/// moment a scanned payload lands — [`qr_affordance`]'s FAB tap handler calls
+/// this once [`request_camera_access`] has confirmed permission (or found
+/// nothing to ask, on a build with no camera backend at all).
+fn open_qr_sheet(
+    overlays: &frust::NavigatorController<AppState>,
+    controller: Arc<ConnectController>,
+) {
+    show_sheet(overlays, move |sheet| {
+        // The sheet closes itself the moment a payload lands, so its handle
+        // is threaded in as the one-shot closer the scan pump fires — the
+        // same `Rc<dyn Fn()>` shape `ui::sheet`'s own `on_dismiss` takes, and
+        // gated by the same at-most-one-pop handle every other closer goes
+        // through.
+        let sheet = sheet.clone();
+        qr_sheet_body(
+            Rc::new(move || {
+                sheet.close();
+            }),
+            Arc::clone(&controller),
+        )
+    });
+}
+
+/// The FAB permission gate (device gate G5): checks/requests the camera
+/// permission off the UI thread and calls `on_granted` only once the
+/// platform answers [`frust_camera::PermissionStatus::Granted`]; every other
+/// outcome raises a toast through [`app_toasts`] instead and never calls
+/// `on_granted` — see [`permission_outcome_message`] for the whole decision
+/// table.
+///
+/// Gated the same as [`open_camera`]: the camera is a phone/tablet
+/// affordance only (the module docs' gating note). On a build with no camera
+/// backend at all there is no OS dialog to race the sheet against, so this
+/// calls `on_granted` directly — [`camera_backend_available`] is what makes
+/// the sheet itself render the right unavailable state once it mounts.
+fn request_camera_access(on_granted: impl FnOnce() + 'static) {
+    if !camera_backend_available() {
+        // No OS permission dialog exists on this build (the module docs'
+        // gating note) — the sheet decides for itself what to render
+        // (`sheet_stage`'s own `camera_backend_available` gate), so this tap
+        // opens it directly rather than probing a permission API with
+        // nothing behind it.
+        on_granted();
+        return;
+    }
+    spawn_local(async move {
+        let outcome = match frust::spawn_blocking(request_permission_checked).await {
+            Ok(result) => result,
+            Err(join_error) => Err(CameraError::Platform(join_error.to_string())),
+        };
+        match permission_outcome_message(&outcome) {
+            None => on_granted(),
+            Some(message) => app_toasts().show(message),
+        }
+    });
+}
+
+/// [`frust_camera::Camera::request_permission`], gated the same way
+/// [`open_camera`] is: the real blocking call on Android/iOS, an immediate
+/// `Err` everywhere else — so a build with no camera backend never reaches
+/// AVFoundation (or the plugin's Android JNI surface) at all (the module
+/// docs' gating note). [`request_camera_access`] only calls this once
+/// [`camera_backend_available`] has already confirmed there is a backend to
+/// ask, so the `Err` arm below is reachable only in principle.
+fn request_permission_checked() -> Result<PermissionStatus, CameraError> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        frust_camera::Camera::request_permission()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Err(CameraError::PlatformNotInitialized)
+    }
+}
+
+/// What a [`request_camera_access`] outcome means for the FAB gate: `None`
+/// opens the sheet, `Some` is the toast to show instead of opening it.
+///
+/// Split out from [`request_camera_access`] so the outcome mapping itself is
+/// unit-testable independent of the real (target-gated) platform call behind
+/// it — see this module's own tests for why that split matters here.
+fn permission_outcome_message(
+    outcome: &Result<PermissionStatus, CameraError>,
+) -> Option<&'static str> {
+    match outcome {
+        Ok(PermissionStatus::Granted) => None,
+        Ok(PermissionStatus::Denied) => Some(PERMISSION_DENIED),
+        Ok(PermissionStatus::NeedsUi) => Some(PERMISSION_NEEDS_UI),
+        Ok(PermissionStatus::Pending) => Some(PERMISSION_PENDING),
+        // `PermissionStatus` is `#[non_exhaustive]`: an answer this build has
+        // never heard of reads as an unspecified refusal, same as the
+        // sheet's own fallback for an unrecognized `Ready` value used to.
+        Ok(_) | Err(_) => Some(CAMERA_UNAVAILABLE),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The QR sheet (see the module docs)
 // ---------------------------------------------------------------------------
@@ -529,8 +642,12 @@ fn qr_affordance(
 const SHEET_TITLE: &str = FAB_LABEL;
 /// The live viewfinder's copy — the Flutter sheet's own subtitle.
 const SCAN_HINT: &str = "Point the camera at the QR code shown by muxrctl on your server.";
-/// …while the platform is still answering the permission request.
-const PERMISSION_PENDING: &str = "Requesting camera permission…";
+/// …when a concurrent permission request raced this tap's own call out — the
+/// system dialog is resolving the *other* caller's ask, not this one
+/// (`frust_camera::PermissionStatus::Pending`'s own doc). Transient by
+/// construction, so the FAB's own re-tap is the retry.
+const PERMISSION_PENDING: &str =
+    "Camera permission request already in progress — try again in a moment.";
 /// …once it has refused. No retry is offered: iOS shows its permission dialog
 /// once per install, so a second ask is a no-op and the only way forward is the
 /// system settings app (the Flutter sheet draws the same line).
@@ -544,18 +661,18 @@ const PERMISSION_NEEDS_UI: &str =
     "The permission dialog needs muxr in the foreground — try again from here.";
 /// …on a build with no camera backend at all: the desktop preview, and every
 /// headless test. Pairing by hand is the whole path, so this is a plain
-/// instruction rather than an error.
+/// instruction rather than an error — rendered by the sheet itself
+/// ([`camera_backend_available`]), since a build with no backend has no OS
+/// dialog for the FAB's own gate to ask in the first place.
 pub const NO_CAMERA: &str =
     "Camera pairing needs a phone or tablet — enter the server URL and token by hand instead.";
-/// …when the camera exists but refused to open or to stream. The plugin's own
-/// detail is deliberately not shown (`crate::failure`'s rule: internal detail
-/// never reaches the user).
+/// …when the camera exists but refused to open or to stream, or when the
+/// permission check itself failed outright (a platform error, or an answer
+/// this build doesn't recognize). The plugin's own detail is deliberately not
+/// shown (`crate::failure`'s rule: internal detail never reaches the user).
 const CAMERA_UNAVAILABLE: &str = "Camera unavailable.";
 /// The retry action's label — the Flutter sheet's own copy.
 const RETRY_LABEL: &str = "try again";
-/// The torch toggle's two labels.
-const TORCH_ON_LABEL: &str = "torch on";
-const TORCH_OFF_LABEL: &str = "torch off";
 /// What a screen reader announces over the live preview slot: the platform
 /// view carries no frust-visible semantics of its own, so this label is the
 /// only signal that region gives (`platform_view`'s documented v1 gap).
@@ -594,27 +711,19 @@ struct QrScanSheet {
 
 /// The QR sheet's retained state.
 pub struct QrSheetState {
-    /// The camera-permission probe, or `None` on a target with no camera
-    /// backend — where the sheet renders [`NO_CAMERA`] immediately rather than
-    /// awaiting an answer nothing will give (see the module docs' gating note).
-    permission: Option<UseTask<PermissionStatus>>,
     /// The open session. `Arc<Mutex<..>>` rather than an `Rc`/`RefCell` only
     /// because [`on_cleanup`] takes a `Send + Sync` closure — the
     /// `examples/glyph-catalog` camera page's own reason for the same shape.
     session: Arc<Mutex<Option<Arc<CameraSession>>>>,
     /// Where the plugin thread leaves what it decoded.
     detections: Arc<Detections>,
-    /// Whether the camera has been opened for the current grant — so a refusal
-    /// is not retried on every rebuild.
+    /// Whether the camera has been opened for the current mount — so a
+    /// refusal is not retried on every rebuild.
     opened: bool,
     /// Whether opening the camera, or starting its barcode stream, failed.
     /// A plain flag: the plugin's message is diagnostic, and this sheet shows
     /// the user [`CAMERA_UNAVAILABLE`] instead of it.
     camera_failed: bool,
-    /// The torch's last *requested* state. Optimistic by necessity —
-    /// `set_torch` is "accepted, not confirmed" (`plugins/camera`'s §5), so
-    /// this mirrors the last call this sheet made, never the LED.
-    torch_on: bool,
 }
 
 /// The one-slot hand-off between the camera's decode thread and the UI thread.
@@ -656,8 +765,8 @@ impl Component for QrScanSheet {
             // The mandatory teardown: this sheet holds the device's single
             // image-stream claim, and every way out of it (payload applied,
             // scrim, `Escape`, Android back) disposes this component's owner.
-            // `CameraSession::close` stops the running barcode stream and takes
-            // the torch out with it, so this one call is the whole teardown.
+            // `CameraSession::close` stops the running barcode stream, so this
+            // one call is the whole teardown.
             let cell = Arc::clone(&session);
             on_cleanup(move || {
                 let session = cell.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -675,12 +784,10 @@ impl Component for QrScanSheet {
         );
 
         QrSheetState {
-            permission: request_camera_permission(),
             session,
             detections,
             opened: false,
             camera_failed: false,
-            torch_on: false,
         }
     }
 
@@ -689,7 +796,6 @@ impl Component for QrScanSheet {
         open_camera_once(state);
         match sheet_stage(state) {
             Stage::Live => live_body(state, &theme),
-            Stage::Waiting => message_body(&theme, PERMISSION_PENDING, MessageTone::Muted, false),
             Stage::Unavailable(message, tone, retryable) => {
                 message_body(&theme, message, tone, retryable)
             }
@@ -699,8 +805,6 @@ impl Component for QrScanSheet {
 
 /// What the sheet is showing this frame.
 enum Stage {
-    /// The permission request is still out.
-    Waiting,
     /// A session is open: the live viewfinder.
     Live,
     /// No viewfinder — the copy that says why, its ink, and whether a retry
@@ -711,40 +815,44 @@ enum Stage {
 /// Whether a message reads as an ordinary instruction or as a failure.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MessageTone {
-    /// `on_surface_variant` — nothing went wrong (the desktop path, the wait).
+    /// `on_surface_variant` — nothing went wrong (the desktop/no-backend
+    /// path).
     Muted,
     /// `error` — the camera is there and refused.
     Failed,
 }
 
-/// Which [`Stage`] `state` is in. Reads the permission task's signal, so the
-/// sheet rebuilds when the platform answers.
+/// Which [`Stage`] `state` is in.
+///
+/// Permission is assumed granted by the time this sheet ever mounts (the
+/// module docs' "FAB permission gate" section) — this only decides between
+/// "no camera backend on this build at all" ([`camera_backend_available`]),
+/// "the camera exists but refused" (`state.camera_failed`), and "live".
+/// `build` always runs [`open_camera_once`] immediately before calling this,
+/// so on a target with a backend the open has already settled one way or the
+/// other by the time this reads it — there is no "waiting" stage to render.
 fn sheet_stage(state: &QrSheetState) -> Stage {
-    let Some(permission) = &state.permission else {
+    if !camera_backend_available() {
         return Stage::Unavailable(NO_CAMERA, MessageTone::Muted, false);
-    };
+    }
     if state.camera_failed {
         return Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true);
     }
     if has_session(state) {
         return Stage::Live;
     }
-    match permission.signal().get() {
-        AsyncValue::Idle | AsyncValue::Loading(_) => Stage::Waiting,
-        AsyncValue::Ready(PermissionStatus::Granted) => Stage::Waiting,
-        AsyncValue::Ready(PermissionStatus::Pending) => Stage::Waiting,
-        AsyncValue::Ready(PermissionStatus::Denied) => {
-            Stage::Unavailable(PERMISSION_DENIED, MessageTone::Failed, false)
-        }
-        AsyncValue::Ready(PermissionStatus::NeedsUi) => {
-            Stage::Unavailable(PERMISSION_NEEDS_UI, MessageTone::Failed, true)
-        }
-        // `PermissionStatus` is `#[non_exhaustive]`: a variant this build has
-        // never heard of reads as an unspecified refusal rather than a compile
-        // break, and a retry is the only honest offer to make about it.
-        AsyncValue::Ready(_) => Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true),
-        AsyncValue::Error(_) => Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true),
-    }
+    // Unreachable in practice: `open_camera_once` above either opens a
+    // session or sets `camera_failed` on a backend-carrying target, so
+    // nothing leaves both false. A safe fallback rather than a
+    // `panic!`/`unreachable!`, since the read costs nothing.
+    Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true)
+}
+
+/// Whether this build has a real camera backend to open a session on — the
+/// same target gate [`open_camera`]/the real half of [`request_camera_access`]
+/// apply (see the module docs' gating note).
+const fn camera_backend_available() -> bool {
+    cfg!(any(target_os = "android", target_os = "ios"))
 }
 
 /// Whether a session is open right now.
@@ -756,16 +864,13 @@ fn has_session(state: &QrSheetState) -> bool {
         .is_some()
 }
 
-/// Open the camera and start scanning — once per grant, from `build`, the
-/// `examples/glyph-catalog` camera page's own idempotent open branch.
+/// Open the camera and start scanning — once per mount, from `build`, the
+/// `examples/glyph-catalog` camera page's own idempotent open branch. A no-op
+/// on a build with no camera backend at all ([`camera_backend_available`]):
+/// [`sheet_stage`] renders [`NO_CAMERA`] for that case without ever calling
+/// [`open_camera`].
 fn open_camera_once(state: &mut QrSheetState) {
-    let granted = state.permission.as_ref().is_some_and(|permission| {
-        matches!(
-            permission.signal().get(),
-            AsyncValue::Ready(PermissionStatus::Granted)
-        )
-    });
-    if state.opened || !granted {
+    if state.opened || !camera_backend_available() {
         return;
     }
     state.opened = true;
@@ -848,7 +953,7 @@ fn spawn_detection_pump(
 }
 
 /// The live sheet: the platform preview inside the same framed viewfinder the
-/// placeholder draws, the scan hint, and — where the lens has one — the torch.
+/// placeholder draws, and the scan hint.
 fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     let scheme = theme.scheme();
     let guard = state.session.lock().unwrap_or_else(PoisonError::into_inner);
@@ -863,10 +968,6 @@ fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     // (`plugins/camera`'s README §2).
     let view_type = session.preview_view_type().to_string();
     let params = session.params_json();
-    // Read fresh every build rather than cached: Android answers `false` until
-    // CameraX finishes binding, so a control gated on the first answer would
-    // never appear (`plugins/camera`'s README §5's re-check note).
-    let torch_available = session.torch_available();
     drop(guard);
 
     let viewfinder = panel(
@@ -881,7 +982,7 @@ fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     )
     .border(scheme.outline);
 
-    let mut children = vec![
+    let children = vec![
         inflexible(any(Align(Alignment::CENTER, viewfinder))),
         inflexible(any(SizedBox::<QrSheetState>(None, Some(SHEET_GAP)))),
         inflexible(any(
@@ -893,46 +994,8 @@ fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
             scheme.on_surface_variant,
         )))),
     ];
-    if torch_available {
-        children.push(inflexible(any(SizedBox::<QrSheetState>(
-            None,
-            Some(SHEET_GAP),
-        ))));
-        children.push(inflexible(any(Align(
-            Alignment::CENTER,
-            button(torch_label(state.torch_on), toggle_torch).style(ButtonStyle::Secondary),
-        ))));
-    }
 
     any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
-}
-
-/// The torch toggle's label at `on`.
-fn torch_label(on: bool) -> &'static str {
-    if on { TORCH_ON_LABEL } else { TORCH_OFF_LABEL }
-}
-
-/// Flip the torch. Non-blocking and callable from any thread, the UI one
-/// included (`plugins/camera`'s README §5), so this runs straight from the
-/// press handler rather than through `spawn_blocking`.
-///
-/// The requested state is recorded only when the call was accepted; a refusal
-/// leaves the label reading what the LED is actually doing, which is all a
-/// caller can honestly claim about a control the platform confirms
-/// asynchronously (or, on Apple, not at all).
-fn toggle_torch(state: &mut QrSheetState) {
-    let session = state
-        .session
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
-    let Some(session) = session else {
-        return;
-    };
-    let requested = !state.torch_on;
-    if session.set_torch(requested).is_ok() {
-        state.torch_on = requested;
-    }
 }
 
 /// The sheet with no live camera: the placeholder viewfinder over `message`,
@@ -986,38 +1049,14 @@ fn message_body(
     any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
 }
 
-/// Ask again: re-run the permission probe and let `build`'s own open branch —
-/// not a second one — reopen the camera on the next rebuild.
+/// Ask again: clear the failure and let `build`'s own open branch — not a
+/// second one — reopen the camera on the next rebuild. Permission itself is
+/// not re-asked here: it was already confirmed before this sheet ever
+/// mounted (the FAB gate, see the module docs), so a camera-open failure's
+/// retry is purely about the camera, not the permission.
 fn retry_camera(state: &mut QrSheetState) {
     state.camera_failed = false;
     state.opened = false;
-    if let Some(permission) = &state.permission {
-        permission.restart();
-    }
-}
-
-/// Request camera permission off the UI thread, or `None` where this build has
-/// no camera backend to ask (see the module docs' gating note).
-///
-/// `Camera::request_permission` **blocks** until the platform machinery
-/// resolves — a system dialog on Android, `requestAccessForMediaType:` on iOS —
-/// so it is paired with `spawn_blocking` and flattened into one `Result` for
-/// `use_task`'s single-error bound, exactly as the glyph-catalog camera page
-/// does.
-fn request_camera_permission() -> Option<UseTask<PermissionStatus>> {
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        Some(frust::use_task(|| async {
-            match frust::spawn_blocking(frust_camera::Camera::request_permission).await {
-                Ok(result) => result,
-                Err(join_error) => Err(CameraError::Platform(join_error.to_string())),
-            }
-        }))
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        None
-    }
 }
 
 /// Open the back camera, or refuse on a build with no camera backend.
@@ -1048,6 +1087,8 @@ fn inked(style: &TextStyle, color: Color) -> TextStyle {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use frust::authoring::{BezPath, Shape};
 
@@ -1100,5 +1141,69 @@ mod tests {
         const MIN_TAP_TARGET: f64 = 44.0;
         const { assert!(FAB_BOX >= MIN_TAP_TARGET) };
         const { assert!(FAB_MARK < FAB_BOX) };
+    }
+
+    // -----------------------------------------------------------------------
+    // The FAB permission gate (device gate G5)
+    //
+    // `request_permission_checked`'s real (Android/iOS) arm is
+    // `#[cfg(target_os = "android"/"ios")]`-gated — the module docs' desktop
+    // AVFoundation guard — so it never compiles on this host, and a true
+    // end-to-end "FAB tap → real permission check → sheet opens/refuses" test
+    // cannot run headless here. These pin the two halves that arm is built on
+    // instead: the outcome→action decision table
+    // (`permission_outcome_message`), and `request_camera_access`'s
+    // pass-through behaviour on a build with no camera backend at all, which
+    // *does* run on this host and is exactly what a desktop/headless call
+    // takes.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn only_a_granted_outcome_opens_the_sheet() {
+        assert_eq!(
+            permission_outcome_message(&Ok(PermissionStatus::Granted)),
+            None,
+            "a grant carries no feedback — the gate opens the sheet instead"
+        );
+    }
+
+    #[test]
+    fn every_other_outcome_carries_feedback_and_never_opens_the_sheet() {
+        assert_eq!(
+            permission_outcome_message(&Ok(PermissionStatus::Denied)),
+            Some(PERMISSION_DENIED)
+        );
+        assert_eq!(
+            permission_outcome_message(&Ok(PermissionStatus::NeedsUi)),
+            Some(PERMISSION_NEEDS_UI)
+        );
+        assert_eq!(
+            permission_outcome_message(&Ok(PermissionStatus::Pending)),
+            Some(PERMISSION_PENDING)
+        );
+        assert_eq!(
+            permission_outcome_message(&Err(CameraError::PlatformNotInitialized)),
+            Some(CAMERA_UNAVAILABLE),
+            "a platform error is an unspecified refusal, not a panic or a \
+             silent open"
+        );
+    }
+
+    #[test]
+    fn a_build_with_no_camera_backend_has_no_dialog_to_gate_on() {
+        // No OS permission dialog exists to race the sheet against on this
+        // build (`camera_backend_available` is `false` here), so the tap
+        // opens the sheet directly and lets it render its own `NO_CAMERA`
+        // placeholder — see `sheet_stage`.
+        assert!(!camera_backend_available());
+
+        let opened = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&opened);
+        request_camera_access(move || flag.set(true));
+        assert!(
+            opened.get(),
+            "request_camera_access must call on_granted directly when there \
+             is no camera backend to ask permission of"
+        );
     }
 }
