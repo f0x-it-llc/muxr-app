@@ -70,8 +70,13 @@
 //!    confirm dialog *before* calling this method at all, since the unlock
 //!    this method starts recovers a real secret that a connection with no
 //!    verification then sends over a channel that authenticates nothing.
-//! 4. **Delete** — ungated, and owned by the Settings screen (this feature's
-//!    only delete is `forget_unreadable`'s cleanup after an invalidated key).
+//! 4. **Delete** — ungated, and shared with the Settings screen. Here it is
+//!    [`ConnectController::forget_saved_server`], the saved row's own delete
+//!    affordance: drop this device's stored credential, then its saved row.
+//!    **Strictly local** — nothing is revoked or deleted on the server, and no
+//!    RPC is made at all (Settings owns the flow that also revokes). The
+//!    other, internal delete is `forget_unreadable`'s cleanup after an
+//!    invalidated key.
 //! 5. **Upsert on login** — every successful connect through this controller
 //!    writes the server's metadata row back (`LoginUpsert`), carrying the
 //!    credential fields forward: rebuilding the row from scratch on each login
@@ -170,16 +175,36 @@ use crate::ui::toasts::app_toasts;
 /// `crate::routes`; this is the one place the Connect flow names it.
 pub const SESSIONS_LOCATION: &str = "/sessions";
 
-/// What [`ConnectController::connect`] calls, with the offered server's label,
-/// when a settled connect raised a credential offer instead of navigating —
-/// the module docs' held redirect.
+/// What a settled connect's credential offer tells the screen's dialog about
+/// the server it is asking for.
+///
+/// Two facts, because one question has two shapes: a first-time save, and a
+/// replacement of the credential this device already holds (see
+/// [`Self::replacing`]).
+pub struct CredentialOffer {
+    /// The offered server's label — the words the dialog names it by.
+    pub label: String,
+    /// Whether a stored credential for that server already exists, so the
+    /// dialog asks to **replace** one rather than to keep a first.
+    ///
+    /// Read before the dial, from the same saved-list snapshot the offer
+    /// decision itself was taken from
+    /// ([`ConnectController::validated_target`]) — the login upsert that runs
+    /// in between carries `has_credential` forward rather than rewriting it,
+    /// so the answer is the same either side of the connect.
+    pub replacing: bool,
+}
+
+/// What [`ConnectController::connect`] calls, with the offered server's
+/// [`CredentialOffer`], when a settled connect raised a credential offer
+/// instead of navigating — the module docs' held redirect.
 ///
 /// The screen supplies it (`super::pages`'s `credential_offer_prompt`), because
 /// raising the dialog needs the overlay host this controller deliberately does
 /// not hold. An [`Rc`] for the same reason [`Nav`] is one: it is built per
 /// build pass, captured by a completion closure that only ever runs on the UI
 /// thread, and never crosses to another.
-pub type OfferPrompt = Rc<dyn Fn(String)>;
+pub type OfferPrompt = Rc<dyn Fn(CredentialOffer)>;
 
 /// The trust posture a fresh form starts on — the safe one, and the mock's own
 /// pre-selected row (`docs/redesign.html`'s `.radio-dot.sel` sits on "Public
@@ -385,11 +410,23 @@ impl ConnectController {
         self.remember.set(!self.remember.get_untracked());
     }
 
+    /// The saved row at `index`, as the list was last read — `None` for an
+    /// out-of-range index, which the list can only have become between the
+    /// frame that painted the row and the press that hit it.
+    ///
+    /// The one lookup every by-index caller here shares, and the seam the
+    /// screen reads a row through when it has to name one in a dialog (the
+    /// delete confirmation) — a dialog belongs to the screen, not to a
+    /// controller (`docs/ARCHITECTURE.md`'s "Building a Screen" charter), so
+    /// this only ever answers what the row *is*.
+    pub fn saved_row(&self, index: usize) -> Option<SavedServer> {
+        self.saved.get_untracked().get(index).cloned()
+    }
+
     /// Refill the form from the saved row at `index`. Out-of-range indices are
-    /// ignored (the list can only have shrunk between the frame that painted
-    /// the row and the press that hit it).
+    /// ignored (see [`Self::saved_row`]).
     pub fn select_saved(&self, index: usize) {
-        let Some(server) = self.saved.get_untracked().get(index).cloned() else {
+        let Some(server) = self.saved_row(index) else {
             return;
         };
         self.prefill(&server);
@@ -413,7 +450,7 @@ impl ConnectController {
     /// recoverAndConnect : selectSaved`). A row with no credential has nothing
     /// to unlock, so tapping it must not raise a prompt.
     pub fn saved_row_tapped(self: &Arc<Self>, index: usize, nav: &Nav) {
-        let Some(server) = self.saved.get_untracked().get(index).cloned() else {
+        let Some(server) = self.saved_row(index) else {
             return;
         };
         if server.has_credential {
@@ -438,7 +475,7 @@ impl ConnectController {
     /// a controller's), so `super::pages::ConnectScreen` is what calls this
     /// before deciding whether to raise one.
     pub fn saved_row_needs_confirmation(&self, index: usize) -> Option<SavedServer> {
-        let server = self.saved.get_untracked().get(index).cloned()?;
+        let server = self.saved_row(index)?;
         (server.has_credential && server.trust_mode == TrustMode::NoVerification).then_some(server)
     }
 
@@ -590,11 +627,21 @@ impl ConnectController {
     /// The [`ConnectTarget`] this form describes, or why it doesn't.
     ///
     /// Split out from [`Self::connect`] so the validation + target mapping is
-    /// unit-testable without a live navigator. `offer_credential` is set only
-    /// when the user asked to be remembered **and** this endpoint isn't already
-    /// saved — re-offering a server the user already stored is noise. That is
+    /// unit-testable without a live navigator. `offer_credential` is set
+    /// whenever the user asked to be remembered and this connect is not a
+    /// pairing — **including for an endpoint this device already saved**. A
+    /// user typing a token at a server the app already knows is precisely the
+    /// case where the stored credential needs replacing: the token behind it
+    /// can have been revoked server-side, and suppressing the offer there
+    /// leaves every later launch reaching for a credential that can no longer
+    /// log in, with no way to refresh it short of clearing the row. That is
     /// the caller's half of the credential-offer decision `crate::connection`
     /// documents; the read-only half is the connection controller's.
+    ///
+    /// The **unlock** path is not this path: a login through a saved row's own
+    /// stored credential builds its own target ([`Self::connect_recovered`])
+    /// with `offer_credential` off and never comes through here, so widening
+    /// the term above cannot re-offer a credential the app has just read.
     ///
     /// A hand-picked [`TrustMode::Pinned`] carries no `fingerprint` and so
     /// fails closed before dialing rather than silently dropping to a weaker
@@ -632,7 +679,7 @@ impl ConnectController {
             // A known endpoint keeps its stored label; a new one is labelled by
             // its own host, which is what the credential offer will show.
             label: known.map_or_else(|| endpoint.host.clone(), |server| server.label.clone()),
-            offer_credential: !paired && remember && known.is_none(),
+            offer_credential: !paired && remember,
             host: endpoint.host,
             port: endpoint.port,
             trust_mode,
@@ -640,6 +687,16 @@ impl ConnectController {
             remember,
             fingerprint,
         })
+    }
+
+    /// Whether this device already holds a stored credential for `host:port`
+    /// — what makes a save offer a *replacement* rather than a first save
+    /// (see [`CredentialOffer::replacing`]).
+    fn stores_credential_for(&self, host: &str, port: u16) -> bool {
+        self.saved
+            .get_untracked()
+            .iter()
+            .any(|server| server.host == host && server.port == port && server.has_credential)
     }
 
     /// Validate the form and, if it holds up, open the connection and — once it
@@ -692,6 +749,11 @@ impl ConnectController {
                 // and flags the hold on this controller's.
                 let offer = self.connection.credential_offer;
                 let resolving = self.resolving_offer;
+                // Whether the offer this connect may raise is a *replacement*
+                // — taken here, before the dial, from the same saved list
+                // `validated_target` just read (see
+                // [`CredentialOffer::replacing`]).
+                let replacing = self.stores_credential_for(&target.host, target.port);
                 let upsert = self.login_upsert(&target);
                 self.connection.connect_with(target, move |outcome| {
                     if outcome.is_err() {
@@ -702,7 +764,7 @@ impl ConnectController {
                     match offer.get_untracked() {
                         Some(label) => {
                             resolving.set(true);
-                            offer_prompt(label);
+                            offer_prompt(CredentialOffer { label, replacing });
                         }
                         None => nav.push(SESSIONS_LOCATION),
                     }
@@ -1055,6 +1117,69 @@ impl ConnectController {
             row.has_credential = false;
             row.token_name = None;
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Flow 4 — forgetting a saved server (this device only)
+    // -----------------------------------------------------------------------
+
+    /// Drop everything this device holds for `server`: its stored credential,
+    /// then its saved row.
+    ///
+    /// **Strictly local.** Nothing is revoked or deleted on the server and no
+    /// RPC is made from here at all — the token behind the credential keeps
+    /// working until the user revokes it (`muxrctl`, or the Settings screen's
+    /// own flow, which is the one that pairs a delete with a revoke). Removing
+    /// the row of the server this app is *currently connected to* is therefore
+    /// harmless: it clears local storage, and the live session is untouched.
+    ///
+    /// Returns immediately; both stores are touched from the UI thread's task
+    /// queue behind this call, since the credential seam is `async` (see
+    /// [`CredentialService`](crate::features::connect::domain::repositories::CredentialService))
+    /// even for this one operation, which runs no gate.
+    ///
+    /// The form is deliberately left as the user has it — text they typed (or
+    /// a prefill they are about to connect with) is theirs, and losing it
+    /// because a row went away would be a worse surprise than a stale
+    /// address. What cannot survive is anything derived from the row's
+    /// `has_credential`: the credential chip, the tap-to-unlock branch and the
+    /// no-verification confirm gate all read [`Self::saved`], which the
+    /// refresh at the end of this flow rewrites.
+    pub fn forget_saved_server(self: &Arc<Self>, server: SavedServer) {
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            controller.forget_saved(server).await;
+        });
+    }
+
+    /// [`Self::forget_saved_server`]'s body.
+    ///
+    /// **Ordering contract: the secret first, the row second — and the row
+    /// only if the secret went.** The row *is* the key its secret is filed
+    /// under ([`SavedServer::endpoint`], the one spelling both stores share),
+    /// so a row removed ahead of a failed credential delete would strand a
+    /// secret nothing can ever name again. A failure at either step surfaces
+    /// through the screen's own toast bridge and stops the flow where it is,
+    /// rather than leaving the two stores half-agreed.
+    async fn forget_saved(&self, server: SavedServer) {
+        let endpoint = server.endpoint();
+        if let Err(failure) = self.credentials.delete(endpoint.clone()).await {
+            app_toasts().raise(&failure);
+            return;
+        }
+        if let Err(failure) = self.repository.remove(&endpoint) {
+            app_toasts().raise(&failure);
+            // The secret is gone either way, so a row that survived the remove
+            // must at least stop claiming one — otherwise its next tap raises
+            // a gate that can only answer "not found"
+            // ([`Self::forget_unreadable`]'s own reasoning).
+            self.update_saved(&endpoint, |row| {
+                row.has_credential = false;
+                row.token_name = None;
+            });
+            return;
+        }
+        self.reload_saved();
     }
 
     // -----------------------------------------------------------------------

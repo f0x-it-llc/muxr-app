@@ -85,6 +85,18 @@
 //! choosing it. A saved-row tap has no equivalent moment: the row was chosen
 //! for its endpoint, not its posture, so the posture needs its own prompt.
 //!
+//! # Removing a saved server
+//!
+//! Each saved row carries its own delete affordance
+//! ([`super::pieces::saved_row`]), and [`handle_saved_row_delete`] is what it
+//! reaches: a [`confirm_dialog`] on the overlay host, and — only on confirm —
+//! [`ConnectController::forget_saved_server`], which drops the stored
+//! credential and then the row. **Strictly local**, which is what the
+//! confirmation says in as many words: nothing is revoked or deleted on the
+//! server, and this screen makes no call to one. Removing the row of the
+//! server the app is *currently connected to* is allowed for the same reason —
+//! it clears local storage, and the live session is untouched.
+//!
 //! # The save-credential offer
 //!
 //! A connect that raised a credential offer is answered **here**, before the
@@ -210,7 +222,7 @@ use frust_camera::{
 use zeroize::Zeroizing;
 
 use super::chrome::panel;
-use super::controller::{ConnectController, OfferPrompt};
+use super::controller::{ConnectController, CredentialOffer, OfferPrompt};
 use super::pieces::{Live, active_theme, connect_pieces_with};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
@@ -265,19 +277,47 @@ const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
 /// The QR affordance's accessible name — what a screen reader announces, and
 /// what `tests/connect.rs` addresses the button by.
 pub const FAB_LABEL: &str = "Pair by QR code";
-/// The save-credential offer's title. The words the Sessions
-/// banner this replaced used, since the question is the same one — only the
-/// moment it is asked at moved. It is also how `tests/connect.rs` tells *which*
-/// pushed page is up, which is why it stays a whole sentence.
+/// The save-credential offer's title, for a server this device holds no
+/// credential for yet. The words the Sessions banner this replaced used, since
+/// the question is the same one — only the moment it is asked at moved. It is
+/// also how `tests/connect.rs` tells *which* pushed page is up, which is why it
+/// stays a whole sentence.
 const OFFER_TITLE: &str = "Save this server?";
 /// …and its body, with the server's own label. Likewise the banner's.
 fn offer_body(label: &str) -> String {
     format!("Keep {label}'s credential so the next connect is one tap.")
 }
+/// The same offer's title when a credential for that server is **already**
+/// stored ([`CredentialOffer::replacing`]): accepting mints a fresh token and
+/// overwrites the stored secret, so the question is a replacement rather than a
+/// first save — and asking it as one is the whole point of offering at a known
+/// server at all (a token revoked server-side leaves the stored credential
+/// dead, and this is how it gets refreshed).
+const REPLACE_TITLE: &str = "Replace saved credential?";
+/// …and its body. It says *fresh* because the accept never stores the token
+/// just typed: it mints one of this device's own (see
+/// [`ConnectController::begin_credential_save`]).
+fn replace_body(label: &str) -> String {
+    format!("Replace the saved credential for {label} with a fresh one for this device?")
+}
 /// The offer's accept action — what raises the biometric prompt.
 const OFFER_ACCEPT_LABEL: &str = "Save";
 /// …and its decline, which is also what every dismissal route resolves as.
 const OFFER_DECLINE_LABEL: &str = "Not now";
+/// The saved-row delete confirmation's title.
+const REMOVE_TITLE: &str = "Remove server?";
+/// …its body, which states the scope honestly: this device only. A user who
+/// wants the *token* gone revokes it where tokens live (`muxrctl`, or the
+/// Settings screen's own saved-server actions) — this flow makes no call to
+/// the server at all.
+fn remove_body(label: &str) -> String {
+    format!(
+        "{label} and its saved credential are removed from this device only. \
+         Nothing is deleted on the server."
+    )
+}
+/// …and its confirm action.
+const REMOVE_CONFIRM_LABEL: &str = "Remove";
 /// The FAB's box, in logical px. The mock's `.fab` is a 46px disc; this is the
 /// same box, which also clears the 44px platform minimum tap target.
 const FAB_BOX: f64 = 46.0;
@@ -552,6 +592,14 @@ impl Component for ConnectScreen {
                 let nav = state.app_nav.clone();
                 Rc::new(move |index| handle_saved_row_tap(&controller, &overlays, &nav, index))
             },
+            // The delete affordance needs the overlay host and nothing else:
+            // its confirmation is a dialog, and what it confirms navigates
+            // nowhere (see the module docs' "removing a saved server").
+            on_saved_delete: {
+                let controller = Arc::clone(&state.controller);
+                let overlays = state.overlays.clone();
+                Rc::new(move |index| handle_saved_row_delete(&controller, &overlays, index))
+            },
         };
 
         // Piece 7's rows, read here rather than inside the piece: this is the
@@ -608,9 +656,40 @@ fn handle_saved_row_tap(
     );
 }
 
+/// A saved row's delete affordance at `index` was pressed: confirm, then drop
+/// this device's copy of that server.
+///
+/// The confirmation is [`confirm_dialog`]'s stock destructive shape, on the
+/// **overlay host's** navigator like every other dialog this screen raises —
+/// and its body states the scope ([`remove_body`]), because "remove" over a
+/// server row is exactly the word a user could read as "revoke this on the
+/// server". See the [module docs](self)'s "removing a saved server" section.
+///
+/// A row that has gone away between the frame that painted it and the press
+/// that hit it simply does nothing — there is nothing left to confirm.
+fn handle_saved_row_delete(
+    controller: &Arc<ConnectController>,
+    overlays: &frust::NavigatorController<AppState>,
+    index: usize,
+) {
+    let Some(server) = controller.saved_row(index) else {
+        return;
+    };
+    let controller = Arc::clone(controller);
+    confirm_dialog(
+        overlays,
+        REMOVE_TITLE,
+        remove_body(&server.label),
+        REMOVE_CONFIRM_LABEL,
+        move |_app: &mut AppState| {
+            controller.forget_saved_server(server.clone());
+        },
+    );
+}
+
 /// The `offer_prompt` this screen lends [`ConnectController::connect`]: raise
-/// [`offer_credential_save`] for the offered server's label. See the
-/// [module docs](self)'s offer section.
+/// [`offer_credential_save`] for the settled connect's [`CredentialOffer`]. See
+/// the [module docs](self)'s offer section.
 ///
 /// Built per press rather than held in [`ConnectState`] because it captures the
 /// three handles a dialog needs and nothing retains it past the connect it was
@@ -623,8 +702,8 @@ fn credential_offer_prompt(
     let controller = Arc::clone(controller);
     let overlays = overlays.clone();
     let nav = nav.clone();
-    Rc::new(move |label: String| {
-        offer_credential_save(&controller, &overlays, &nav, &label);
+    Rc::new(move |offer: CredentialOffer| {
+        offer_credential_save(&controller, &overlays, &nav, &offer);
     })
 }
 
@@ -639,13 +718,22 @@ fn credential_offer_prompt(
 /// would leave the user parked on a Connect screen whose connection is already
 /// open. See the [module docs](self)'s offer section for why this composes the
 /// glyph primitives directly.
+///
+/// The question comes in two wordings, one per [`CredentialOffer::replacing`]:
+/// a first-time save ([`OFFER_TITLE`]) and a replacement of the credential this
+/// device already holds ([`REPLACE_TITLE`]). Only the words differ — both
+/// answers resolve the held redirect through the same two methods below.
 fn offer_credential_save(
     controller: &Arc<ConnectController>,
     overlays: &frust::NavigatorController<AppState>,
     nav: &Nav,
-    label: &str,
+    offer: &CredentialOffer,
 ) {
-    let body = offer_body(label);
+    let (title, body) = if offer.replacing {
+        (REPLACE_TITLE, replace_body(&offer.label))
+    } else {
+        (OFFER_TITLE, offer_body(&offer.label))
+    };
     let page_nav = overlays.clone();
     let controller = Arc::clone(controller);
     let nav = nav.clone();
@@ -657,7 +745,7 @@ fn offer_credential_save(
             let decline_nav = page_nav.clone();
             let accept_nav = page_nav.clone();
             glyph_dialog()
-                .title(OFFER_TITLE)
+                .title(title)
                 .body(body.clone())
                 .action(any(button(
                     OFFER_DECLINE_LABEL,

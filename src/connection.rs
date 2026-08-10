@@ -121,11 +121,12 @@
 //!
 //! Eligibility is split deliberately: the **caller** decides whether a target
 //! is offerable at all ([`ConnectTarget::offer_credential`] — a manual,
-//! non-pairing connect the user asked to be remembered, for an endpoint no
-//! stored credential already covers), because only the caller has the saved
-//! server list, and this module must not depend on a feature's repository. The
-//! controller ANDs that with the one fact only a completed login knows: a
-//! read-only credential is never offered for saving.
+//! non-pairing connect the user asked to be remembered, saved endpoint or not,
+//! since a typed token at a known server is exactly how a stored credential
+//! gets replaced), because only the caller has the saved server list, and this
+//! module must not depend on a feature's repository. The controller ANDs that
+//! with the one fact only a completed login knows: a read-only credential is
+//! never offered for saving.
 //!
 //! Accepting the offer has to *do* something, and what it does — mint a token,
 //! raise a biometric prompt, write a secure store, update a saved-server row —

@@ -92,7 +92,7 @@ use muxr::features::connect::domain::entities::{
 };
 use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
-use muxr::features::connect::presentation::controller::ConnectController;
+use muxr::features::connect::presentation::controller::{ConnectController, CredentialOffer};
 use muxr::features::connect::presentation::pages::{
     NO_CAMERA, connect_layout, connect_page, qr_sheet_body,
 };
@@ -791,28 +791,40 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
     });
     let scene = harness.settle();
 
-    // A `frust::icon` paints exactly one **filled path**, and nothing else on
-    // Connect paints one at all: every other piece is rounded rects (swatches,
-    // panels, the CTA bar) and stroked borders. So "the affordance is a
-    // vector" is literally "there is a filled path, and it is inside the FAB".
+    // A `frust::icon` paints exactly one **filled path** each, and nothing
+    // else on Connect paints one at all: every other piece is rounded rects
+    // (swatches, panels, the CTA bar) and stroked borders. So "the affordance
+    // is a vector" is literally "there is a filled path inside the FAB" — one
+    // of exactly as many paths as this screen has vector marks: the FAB, plus
+    // one delete affordance per saved row.
+    let rows = expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .len();
     assert_eq!(
         scene.paths.len(),
-        1,
-        "the scan mark is the screen's one vector: {:?}",
+        rows + 1,
+        "every vector on the screen is the FAB's mark or a row's delete mark: {:?}",
         scene.paths
     );
-    let (origin, size) = scene.paths[0];
-    assert!(
-        origin.x >= fab.x0 - 0.5
-            && origin.y >= fab.y0 - 0.5
-            && origin.x + size.width <= fab.x1 + 0.5
-            && origin.y + size.height <= fab.y1 + 0.5,
-        "the mark paints inside the FAB's own box: {origin:?}/{size:?} in \
-         {fab:?}"
-    );
+    let (origin, size) = *scene
+        .paths
+        .iter()
+        .find(|(origin, size)| {
+            origin.x >= fab.x0 - 0.5
+                && origin.y >= fab.y0 - 0.5
+                && origin.x + size.width <= fab.x1 + 0.5
+                && origin.y + size.height <= fab.y1 + 0.5
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the scan mark paints inside the FAB's own box: {:?} in {fab:?}",
+                scene.paths
+            )
+        });
     assert!(
         size.width > 0.0 && size.height > 0.0,
-        "…and it is a real shape, not a collapsed path: {size:?}"
+        "…and it is a real shape, not a collapsed path: {origin:?}/{size:?}"
     );
 
     // The other half: no run anywhere on the screen carries the old mark, so
@@ -883,6 +895,13 @@ fn a_valid_url_connects_and_lands_on_sessions() {
 
     harness.tap_node("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    // A manual connect with remember on always raises the save offer now — a
+    // saved row is no longer a reason to suppress it (see the offer section
+    // below). This case is about the *connect*, so the question is answered
+    // "not now" and the held redirect goes through on the spot.
+    harness.tap_node("the offer's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_NOT_NOW)
     });
 
     let connection = expect_connection_controller();
@@ -1218,9 +1237,10 @@ impl Form {
             on_connect: Rc::new(|| {}),
             on_connect_pinned,
             // This fixture's store is empty, so no saved row is ever painted
-            // and nothing can reach this callback (the screen's own wiring is
+            // and nothing can reach either of these (the screen's own wiring is
             // exercised through `Harness` instead).
             on_saved_tap: Rc::new(|_index| {}),
+            on_saved_delete: Rc::new(|_index| {}),
         };
         let logic: FormLogic = Box::new(move |_state: &mut ()| {
             // Piece 7's rows are an input to the builder now (the splash passes
@@ -1696,6 +1716,13 @@ fn the_ordinary_cta_still_connects_while_a_matching_pairing_is_stashed() {
 const CRED_ENDPOINT: &str = "cred.example:50051";
 /// …and the secret stored for it.
 const CRED_TOKEN: &str = "stored-s3cr3t";
+/// [`credential_row`]'s delete affordance's accessible name — transcribed, not
+/// imported, for the reason [`QR_LABEL`] is. It names the *server*, since every
+/// row carries one of these buttons.
+const DELETE_CRED_LABEL: &str = "Delete Cred rig";
+/// The delete confirmation's title and confirm action, likewise transcribed.
+const REMOVE_TITLE: &str = "Remove server?";
+const REMOVE_CONFIRM: &str = "Remove";
 
 /// A saved row for [`CRED_ENDPOINT`], with or without a stored credential.
 fn credential_row(has_credential: bool, token_name: Option<&str>) -> SavedServer {
@@ -1982,14 +2009,17 @@ fn a_saved_row_with_no_credential_refills_the_form_without_raising_a_prompt() {
 /// itself (mint, gate, rotate) through the connection's own accept, so what
 /// matters here is only that the held redirect stayed held — the screen-level
 /// suite below is where the dialog and the navigation it resolves are driven
-/// end to end.
-fn connect_fixture(creds: &Creds) -> Rc<RefCell<Vec<String>>> {
-    let offered: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+/// end to end. Each recorded entry is the offer's label and whether it asked to
+/// *replace* a credential this device already holds.
+fn connect_fixture(creds: &Creds) -> Rc<RefCell<Vec<(String, bool)>>> {
+    let offered: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&offered);
     creds.controller.set_url(CRED_ENDPOINT.to_string());
     creds.controller.connect(
         &app_nav(),
-        Rc::new(move |label: String| record.borrow_mut().push(label)),
+        Rc::new(move |offer: CredentialOffer| {
+            record.borrow_mut().push((offer.label, offer.replacing))
+        }),
     );
     assert!(
         creds.connection.connected.get_untracked(),
@@ -2006,9 +2036,10 @@ fn accepting_the_offer_mints_a_token_stores_it_and_records_it_on_the_row() {
     let offered = connect_fixture(&creds);
     assert_eq!(
         offered.borrow().as_slice(),
-        ["cred.example".to_string()],
+        [("cred.example".to_string(), false)],
         "the connect handed its offer to the screen's prompt rather than \
-         redirecting past it (the held redirect)"
+         redirecting past it (the held redirect) — as a first-time save, since \
+         this device holds nothing for that rig yet"
     );
     creds
         .connection
@@ -2269,6 +2300,241 @@ fn a_successful_connect_writes_the_servers_metadata_row() {
     );
 }
 
+// --- Flow 4: forgetting a saved server (this device only) --------------------
+
+/// Every saved row the fixture's store currently holds.
+fn fixture_rows(servers: &MockSavedServersRepository) -> Vec<SavedServer> {
+    servers.list().expect("the mock store never fails")
+}
+
+#[test]
+fn forgetting_a_saved_server_drops_its_credential_its_row_and_nothing_else() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+    let tokens_before: Vec<String> = creds
+        .tokens
+        .snapshot()
+        .into_iter()
+        .map(|token| token.name)
+        .collect();
+    // The form is prefilled from the very row about to go — typed (or
+    // prefilled) text belongs to the user and must survive the row it came
+    // from.
+    creds.controller.select_saved(0);
+    creds.controller.set_token("typed-by-hand".to_string());
+
+    creds
+        .controller
+        .forget_saved_server(stored_row(&creds.servers));
+    pump_until_done("the local delete", || {
+        fixture_rows(&creds.servers).is_empty()
+    });
+
+    assert_eq!(
+        creds.credentials.stored(CRED_ENDPOINT),
+        None,
+        "the secret goes with the row it was filed under"
+    );
+    assert!(
+        creds.credentials.prompts().is_empty(),
+        "…through the one credential operation that runs no gate: {:?}",
+        creds.credentials.prompts()
+    );
+    assert_eq!(
+        creds.controller.saved.get_untracked().len(),
+        0,
+        "…and the screen's own list is refreshed rather than left stale"
+    );
+    let tokens_after: Vec<String> = creds
+        .tokens
+        .snapshot()
+        .into_iter()
+        .map(|token| token.name)
+        .collect();
+    assert_eq!(
+        tokens_after, tokens_before,
+        "this delete is local: the server-side token behind the credential is \
+         untouched (revoking one is `muxrctl`'s job, and Settings' own flow)"
+    );
+    assert_eq!(
+        creds.controller.url.get_untracked(),
+        CRED_ENDPOINT,
+        "the form keeps the address the user was about to connect with"
+    );
+    assert_eq!(
+        creds.controller.token.get_untracked().as_str(),
+        "typed-by-hand",
+        "…and the token they typed into it"
+    );
+}
+
+#[test]
+fn forgetting_the_currently_connected_server_leaves_the_live_session_alone() {
+    // A local delete clears local storage and nothing else: the session was
+    // opened with a token the server still honours, so there is nothing about
+    // dropping this device's copy that should end it.
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+    connect_fixture(&creds);
+    assert!(creds.connection.connected.get_untracked());
+
+    creds
+        .controller
+        .forget_saved_server(stored_row(&creds.servers));
+    pump_until_done("the local delete", || {
+        fixture_rows(&creds.servers).is_empty()
+    });
+
+    assert!(
+        creds.connection.connected.get_untracked(),
+        "the connection is untouched by a delete that only clears storage"
+    );
+    assert!(
+        creds.connection.server_info.get_untracked().is_some(),
+        "…facts and all"
+    );
+}
+
+#[test]
+fn a_failed_credential_delete_leaves_the_row_and_its_secret_exactly_as_they_were() {
+    // The ordering contract: the secret first, the row only if the secret went
+    // — a row removed ahead of a failed delete would strand a secret filed
+    // under the very endpoint that stopped being listed.
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+    creds.credentials.set_delete_failure(true);
+    app_toasts().clear();
+
+    creds
+        .controller
+        .forget_saved_server(stored_row(&creds.servers));
+    pump_until_done("the refused delete", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(
+        fixture_rows(&creds.servers).len(),
+        1,
+        "the row survives a delete that could not clear its secret"
+    );
+    assert_eq!(
+        creds.credentials.stored(CRED_ENDPOINT).as_deref(),
+        Some(CRED_TOKEN),
+        "…and so does the secret itself"
+    );
+    assert!(
+        stored_row(&creds.servers).has_credential,
+        "…so the row still tells the truth about it"
+    );
+}
+
+#[test]
+fn a_saved_credential_login_never_re_raises_the_save_offer() {
+    // The non-goal of widening `validated_target`'s offer term: the unlock
+    // path builds its own target with the offer switched off and never comes
+    // through `validated_target` at all, so a login *with* a stored credential
+    // must still never be asked to store one.
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, CRED_TOKEN);
+
+    creds
+        .controller
+        .recover_and_connect(stored_row(&creds.servers), &app_nav());
+    pump_until_done("the recovered connect", || {
+        creds.connection.connected.get_untracked()
+    });
+
+    assert_eq!(
+        creds.connection.credential_offer.get_untracked(),
+        None,
+        "a credential this connect just read is never offered back"
+    );
+    assert_eq!(
+        creds.credentials.prompts(),
+        vec!["Unlock Cred rig".to_string()],
+        "…and the unlock's own prompt is the only one raised"
+    );
+}
+
+#[test]
+fn accepting_the_offer_at_a_known_server_replaces_its_credential_and_keeps_one_row() {
+    let _g = serial();
+    let _ambient = setup();
+    // A row that already holds a credential, whose token has (as far as this
+    // device can tell) stopped working — the case a suppressed offer used to
+    // make unrecoverable.
+    let creds = credential_fixture(vec![credential_row(true, Some("token_2"))]);
+    creds.credentials.seed(CRED_ENDPOINT, "stale-token");
+
+    let offered = connect_fixture(&creds);
+    assert_eq!(
+        offered.borrow().as_slice(),
+        [("Cred rig".to_string(), true)],
+        "a manual connect at a known server raises the offer, labelled by the \
+         row's own stored label — and as a *replacement*, since a credential \
+         for it is already stored"
+    );
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+
+    creds.connection.accept_credential_offer();
+    // Waiting on the *rotation* rather than on the stored secret: the replaced
+    // token is revoked only once the new credential is persisted, so the store
+    // changing first is exactly what this must not mistake for done.
+    pump_until_done("the replacement save", || {
+        !creds
+            .tokens
+            .snapshot()
+            .iter()
+            .any(|token| token.name == "token_2")
+    });
+
+    let rows = fixture_rows(&creds.servers);
+    assert_eq!(
+        rows.iter()
+            .filter(|server| server.endpoint() == CRED_ENDPOINT)
+            .count(),
+        1,
+        "the save upserts the row it already had rather than adding a second: {rows:?}"
+    );
+    let row = stored_row(&creds.servers);
+    assert!(row.has_credential);
+    let token_name = row.token_name.clone().expect("the minted token's name");
+    assert_ne!(
+        token_name, "token_2",
+        "the row records the new token, not the one it replaced"
+    );
+    assert_eq!(
+        creds.credentials.stored(CRED_ENDPOINT),
+        Some(format!("mock-secret-{token_name}")),
+        "…and the store holds the freshly minted secret, keyed by the same \
+         endpoint, so the stale one is genuinely overwritten"
+    );
+    let names: Vec<String> = creds
+        .tokens
+        .snapshot()
+        .into_iter()
+        .map(|token| token.name)
+        .collect();
+    assert!(
+        !names.contains(&"token_2".to_string()),
+        "…and the replaced token is rotated out once the new one is stored: {names:?}"
+    );
+}
+
 // --- The screen, end to end --------------------------------------------------
 
 #[test]
@@ -2304,6 +2570,160 @@ fn tapping_a_credential_row_on_the_real_screen_unlocks_and_lands_on_sessions() {
         "the tap raised exactly one prompt"
     );
     assert!(harness.nav.depth() > before, "…and landed on /sessions");
+}
+
+// ---------------------------------------------------------------------------
+// The saved row's delete affordance (local only)
+// ---------------------------------------------------------------------------
+
+/// Mount the real screen with [`credential_row`] saved and its secret seeded —
+/// the app's own DI stores, in `mount_seeded`'s window, so the row, the
+/// affordance and both stores are the production wiring.
+///
+/// Stamped now, so the row sorts ahead of the seeded ones and lays out inside
+/// the fixture's surface — the list is most-recently-used first.
+fn mount_with_credential_row() -> Harness {
+    Harness::mount_seeded(|| {
+        let mut row = credential_row(true, Some("token_2"));
+        row.last_used_ms = epoch_millis();
+        expect_saved_servers()
+            .save(row)
+            .expect("the mock store never fails");
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed(CRED_ENDPOINT, CRED_TOKEN);
+    })
+}
+
+/// Whether the app's own store still holds a row for [`CRED_ENDPOINT`].
+fn cred_row_is_stored() -> bool {
+    expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .any(|server| server.endpoint() == CRED_ENDPOINT)
+}
+
+#[test]
+fn the_delete_affordance_confirms_first_and_never_fires_the_rows_own_tap() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_credential_row();
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the row's delete affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(DELETE_CRED_LABEL)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the confirmation is pushed as its own page, ahead of any deletion"
+    );
+    assert!(
+        shows_text(&harness, REMOVE_TITLE),
+        "…and it is the remove confirmation, not some other dialog: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "a local delete raises no biometric prompt at any point"
+    );
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "…and the row's own tap never fired: the affordance consumes only its \
+         own press, so pressing it does not also unlock and connect"
+    );
+
+    // A scrim tap is `confirm_dialog`'s cancel route (it pops with an empty
+    // result), so nothing at all should have been touched.
+    harness.tap(SCRIM_POINT);
+    harness.settle();
+
+    assert_eq!(harness.nav.depth(), before, "the dialog closed");
+    assert!(cred_row_is_stored(), "a cancelled delete keeps the row");
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT).as_deref(),
+        Some(CRED_TOKEN),
+        "…and its stored credential"
+    );
+}
+
+#[test]
+fn confirming_the_delete_clears_the_row_and_its_credential_from_this_device() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_credential_row();
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the row's delete affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(DELETE_CRED_LABEL)
+    });
+    harness.tap_node("the confirmation's Remove action", |node| {
+        node.role() == Role::Button && node.label() == Some(REMOVE_CONFIRM)
+    });
+    harness.pump_until("the local delete", |_harness| !cred_row_is_stored());
+
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT),
+        None,
+        "the credential goes with the row it was filed under"
+    );
+    assert!(
+        !harness.shows_value(CRED_ENDPOINT),
+        "…and the list refreshes in place rather than painting a row the store \
+         no longer holds: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        !shows_text(&harness, DELETE_CRED_LABEL),
+        "…affordance included"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "a delete navigates nowhere: the dialog popped and nothing was pushed"
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "nothing was gated: {:?}",
+        credentials.prompts()
+    );
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "…and nothing connected"
+    );
+}
+
+#[test]
+fn every_saved_row_carries_its_own_named_delete_affordance() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+
+    // The seeded store's three rigs, each addressable by its own name — a bare
+    // "Delete" repeated three times would leave a screen reader with no way to
+    // tell which row it is about to remove.
+    let deletes: Vec<String> = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::Button)
+        .filter_map(|(_, node)| node.label().map(str::to_string))
+        .filter(|label| label.starts_with("Delete "))
+        .collect();
+    assert_eq!(
+        deletes,
+        vec![
+            "Delete Home rig".to_string(),
+            "Delete zelli".to_string(),
+            "Delete herdr staging".to_string(),
+        ],
+        "one per seeded row, in list order, each naming its own server"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2475,6 +2895,12 @@ fn a_verified_saved_rows_credential_flow_is_never_gated() {
 const OFFER_TITLE: &str = "Save this server?";
 const OFFER_SAVE: &str = "Save";
 const OFFER_NOT_NOW: &str = "Not now";
+/// …and the same dialog's title and body when the server already holds a
+/// stored credential, which makes the question a replacement rather than a
+/// first save. Likewise transcribed.
+const REPLACE_TITLE: &str = "Replace saved credential?";
+const REPLACE_BODY: &str =
+    "Replace the saved credential for Cred rig with a fresh one for this device?";
 
 /// [`CredentialStatus::Failed`]'s own sentence — what a refused gate is
 /// reported with (`CredentialStatus::message`).
@@ -2490,16 +2916,24 @@ fn connect_through_the_cta(harness: &mut Harness, url: &str) {
     });
 }
 
-/// Whether the offer dialog is the page on screen. A pushed dialog's *title* is
-/// the only thing that names which page is up — the depth alone cannot tell a
-/// dialog from the `/sessions` push it is holding back.
-fn offer_dialog_up(harness: &Harness) -> bool {
+/// Whether `text` is on screen as some node's label or value — a pushed
+/// dialog's *title* is the only thing that names which page is up, since the
+/// depth alone cannot tell a dialog from the `/sessions` push it is holding
+/// back.
+fn shows_text(harness: &Harness, text: &str) -> bool {
     harness
         .root
         .semantics()
         .nodes
         .iter()
-        .any(|(_, node)| node.label() == Some(OFFER_TITLE) || node.value() == Some(OFFER_TITLE))
+        .any(|(_, node)| node.label() == Some(text) || node.value() == Some(text))
+}
+
+/// Whether the offer dialog is the page on screen, in **either** of its two
+/// wordings (a first-time save, or a replacement of a credential already
+/// stored).
+fn offer_dialog_up(harness: &Harness) -> bool {
+    shows_text(harness, OFFER_TITLE) || shows_text(harness, REPLACE_TITLE)
 }
 
 /// The saved row for `endpoint` as the app's own store holds it.
@@ -2734,33 +3168,77 @@ fn a_denied_gate_says_why_and_still_lands_on_sessions() {
 }
 
 #[test]
-fn a_repeat_connect_to_a_known_server_never_asks_at_all() {
+fn a_repeat_connect_to_a_known_server_still_asks() {
     let _g = serial();
     let _ambient = setup();
     let mut harness = Harness::mount();
     let credentials = mock_credentials().expect("tests/support opted this process into the mock");
 
-    // `VALID_URL` is one of the seeded rows, so this is the second connect to a
-    // server the app already knows — the no-offer path, unchanged by G9.
+    // `VALID_URL` is one of the seeded rows, so this is a second connect to a
+    // server the app already knows — and a typed token at a known server is
+    // exactly the case a suppressed offer used to strand: nothing could ever
+    // replace the stored credential once its token was revoked server-side.
     connect_through_the_cta(&mut harness, VALID_URL);
 
     assert!(
-        !offer_dialog_up(&harness),
-        "a server the app already saved is not re-offered: {:?}",
+        offer_dialog_up(&harness),
+        "an already-saved row is no longer a reason to withhold the offer: {:?}",
         node_labels(&harness.root)
     );
-    assert_eq!(
-        expect_connection_controller()
-            .credential_offer
-            .get_untracked(),
-        None,
-        "…and no offer was ever raised"
+    assert!(
+        shows_text(&harness, OFFER_TITLE),
+        "…and with nothing stored for it yet, the question is still a plain \
+         first-time save: {:?}",
+        node_labels(&harness.root)
     );
-    assert!(credentials.prompts().is_empty(), "nothing gated");
+    assert!(
+        credentials.prompts().is_empty(),
+        "nothing is gated until the question is answered"
+    );
+
+    harness.tap_node("the offer's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_NOT_NOW)
+    });
     assert_eq!(
         harness.nav.depth(),
         2,
-        "the connect pushed /sessions directly, exactly as it always did"
+        "…and declining lands on /sessions exactly as the connect always did"
+    );
+}
+
+#[test]
+fn a_manual_connect_at_a_server_with_a_stored_credential_asks_to_replace_it() {
+    let _g = serial();
+    let _ambient = setup();
+    // The app's own stores, seeded in `mount_seeded`'s window: a saved row that
+    // already holds a credential, which is what turns the offer's wording from
+    // a save into a replacement.
+    let mut harness = Harness::mount_seeded(|| {
+        let mut row = credential_row(true, Some("token_2"));
+        row.last_used_ms = epoch_millis();
+        expect_saved_servers()
+            .save(row)
+            .expect("the mock store never fails");
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed(CRED_ENDPOINT, CRED_TOKEN);
+    });
+
+    connect_through_the_cta(&mut harness, CRED_ENDPOINT);
+
+    assert!(
+        shows_text(&harness, REPLACE_TITLE),
+        "the dialog reads as an update, not as a first-time save: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        shows_text(&harness, REPLACE_BODY),
+        "…and its body names the server whose credential is being replaced: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        !shows_text(&harness, OFFER_TITLE),
+        "…rather than both wordings at once"
     );
 }
 
