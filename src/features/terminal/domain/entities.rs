@@ -76,6 +76,44 @@ pub struct Space {
     pub selected: bool,
 }
 
+/// One pane inside a [`TabEntry`] — mirrors the wire's `PaneMsg`
+/// (`proto/muxr.proto`), carrying only what the app consumes: no wire-only
+/// bookkeeping (`command`) and nothing this screen has no affordance to show
+/// yet. The four geometry fields are cells, matching every other geometry
+/// value in this app (the wire's own `x`/`y`/`rows`/`cols`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneEntry {
+    /// The wire's `PaneMsg.id` — unique within its own
+    /// [`is_plugin`](Self::is_plugin) namespace, never across the two (a
+    /// terminal pane and a plugin pane can share an id).
+    pub id: u32,
+    /// The pane's display title.
+    pub title: String,
+    /// The pane's current working directory, when the backend reports one.
+    pub cwd: String,
+    /// Whether this pane is focused within its layer (tiled/floating).
+    pub focused: bool,
+    /// Whether this pane floats rather than tiles.
+    pub floating: bool,
+    /// Whether the pane's command has exited (command panes only).
+    pub exited: bool,
+    /// Whether this is a plugin pane rather than a terminal one — the flag
+    /// [`TerminalRepository`](super::repositories::TerminalRepository)'s
+    /// pane-targeted verbs need to pick the wire's `PaneId::Plugin` vs
+    /// `PaneId::Terminal` namespace.
+    pub is_plugin: bool,
+    /// Whether this pane is currently fullscreened.
+    pub is_fullscreen: bool,
+    /// Geometry: left edge, in cells.
+    pub x: u32,
+    /// Geometry: top edge, in cells.
+    pub y: u32,
+    /// Geometry: height, in cells.
+    pub rows: u32,
+    /// Geometry: width, in cells.
+    pub cols: u32,
+}
+
 /// One tab in the attached session — a `TABS` entry, whole.
 ///
 /// The mock's map is keyed by [`key`](Self::key) (`devbox`) while the pill
@@ -107,6 +145,13 @@ pub struct TabEntry {
     pub pane_name: String,
     /// The sheet pane item's path (`/home/ed`).
     pub pane_path: String,
+    /// Every pane in this tab, in wire order — the "panes & tabs" sheet's own
+    /// pane list. Separate from [`pane_title`](Self::pane_title)/
+    /// [`pane_name`](Self::pane_name)/[`pane_path`](Self::pane_path), which
+    /// stay the *focused*-pane convenience the mock era minted and every
+    /// existing caller still reads; this field is additive, so nothing above
+    /// this file changes shape.
+    pub panes: Vec<PaneEntry>,
     /// Whether this is the tab the card shows on arrival (`devbox`).
     pub active: bool,
 }
@@ -116,6 +161,23 @@ impl TabEntry {
     pub fn pill_label(&self) -> String {
         format!("{} {}", self.index, self.label)
     }
+}
+
+/// Wheel-scroll granularity
+/// [`TerminalRepository::scroll_pane`](super::repositories::TerminalRepository::scroll_pane)
+/// sends.
+///
+/// The wire's `ScrollDirection` also carries page/half-page/top/bottom, but
+/// nothing on this screen drives anything but a mouse-wheel notch yet (see
+/// `docs/ARCHITECTURE.md`'s Planned section) — so this domain enum only names
+/// the two a wheel actually produces, rather than pre-minting five verbs
+/// nothing calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollStep {
+    /// One wheel notch up.
+    Up,
+    /// One wheel notch down.
+    Down,
 }
 
 /// Which kind of line a [`TermLine`] is — each has its own ink (the mock's
@@ -231,6 +293,7 @@ mod tests {
             pane_title: "ed@devbox: ~".to_string(),
             pane_name: "ed@devbox".to_string(),
             pane_path: "/home/ed".to_string(),
+            panes: Vec::new(),
             active: true,
         };
         assert_eq!(tab.pill_label(), "4 devbox");
@@ -261,6 +324,7 @@ mod tests {
             pane_title: String::new(),
             pane_name: String::new(),
             pane_path: String::new(),
+            panes: Vec::new(),
             active,
         };
         let mut workspace = Workspace {
@@ -277,5 +341,40 @@ mod tests {
         );
 
         assert_eq!(Workspace::default().active_key(), None);
+    }
+
+    #[test]
+    fn a_tabs_pane_list_carries_every_pane_it_was_built_with() {
+        let pane = PaneEntry {
+            id: 3,
+            title: "zsh".to_string(),
+            cwd: "/srv".to_string(),
+            focused: true,
+            floating: false,
+            exited: false,
+            is_plugin: false,
+            is_fullscreen: false,
+            x: 0,
+            y: 0,
+            rows: 24,
+            cols: 80,
+        };
+        let tab = TabEntry {
+            index: 1,
+            tab_id: 1,
+            key: "devbox".to_string(),
+            label: "devbox".to_string(),
+            pane_title: String::new(),
+            pane_name: String::new(),
+            pane_path: String::new(),
+            panes: vec![pane.clone()],
+            active: true,
+        };
+        assert_eq!(tab.panes, vec![pane]);
+    }
+
+    #[test]
+    fn scroll_step_has_exactly_two_wheel_notch_values() {
+        assert_ne!(ScrollStep::Up, ScrollStep::Down);
     }
 }

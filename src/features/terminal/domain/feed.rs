@@ -48,6 +48,32 @@
 //! Framework-free like the rest of `domain`: no `frust::`, no signals, no
 //! `vt100` (the emulator is the *presentation* layer's business — this port
 //! deals only in bytes, so a feed can be tested without one).
+//!
+//! # A sixth, structured verb: `send_mouse`
+//!
+//! [`TerminalFeed::send_mouse`] is additive, alongside `send_input`/`resize`
+//! (decision 5, above) rather than folded into `send_input`'s raw byte
+//! stream: the wire carries it as its own `ClientFrame.mouse` variant
+//! (`proto/muxr.proto`'s `MouseInput`), structured and zero-based in the same
+//! grid `resize` establishes, not an ANSI mouse-reporting escape this port
+//! would have to encode and the multiplexer would have to decode back out.
+//! `&self`, not `&mut self` like its five siblings: nothing this trait's
+//! shipping implementations do to send one needs exclusive access, and a
+//! feed with nothing to route it to (the mock-era
+//! [`DemoFeed`](crate::features::terminal::data::feeds::demo_feed::DemoFeed))
+//! inherits the default no-op and stays untouched.
+
+/// Wheel direction [`TerminalFeed::send_mouse`] sends — mirrors the wire's
+/// `MouseKind`, which also reserves press/drag values for later
+/// (`proto/muxr.proto`'s own comment on the enum); nothing on this screen
+/// produces anything but a wheel notch yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelKind {
+    /// One wheel notch up.
+    Up,
+    /// One wheel notch down.
+    Down,
+}
 
 /// A live, bidirectional stream of terminal bytes.
 ///
@@ -86,5 +112,41 @@ pub trait TerminalFeed {
     /// with no natural end (a live session) says nothing.
     fn is_open(&self) -> bool {
         true
+    }
+
+    /// Send a wheel-scroll mouse event at `(col, row)` — zero-based cells in
+    /// this feed's own grid (the same grid [`resize`](Self::resize)
+    /// established), routed by the multiplexer to whichever pane sits under
+    /// them.
+    ///
+    /// Defaults to a no-op — see the [module docs](self)' "A sixth,
+    /// structured verb" section.
+    fn send_mouse(&self, _kind: WheelKind, _col: u32, _row: u32) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare feed overriding only the three original required methods
+    /// compiles unmodified, and its inherited `send_mouse` is a genuine
+    /// no-op — nothing to assert on but that it does not panic.
+    struct BareFeed;
+
+    impl TerminalFeed for BareFeed {
+        fn drain_output(&mut self, _sink: &mut dyn FnMut(&[u8])) -> usize {
+            0
+        }
+
+        fn send_input(&mut self, _bytes: &[u8]) {}
+
+        fn resize(&mut self, _cols: u16, _rows: u16) {}
+    }
+
+    #[test]
+    fn send_mouse_defaults_to_a_no_op() {
+        let feed = BareFeed;
+        feed.send_mouse(WheelKind::Up, 3, 7);
+        feed.send_mouse(WheelKind::Down, 0, 0);
     }
 }

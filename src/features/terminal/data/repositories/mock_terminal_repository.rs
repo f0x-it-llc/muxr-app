@@ -134,6 +134,7 @@ fn seed_tabs() -> Vec<TabEntry> {
             pane_title: "ed@precision: ~".to_string(),
             pane_name: "ed@precision".to_string(),
             pane_path: "/home/ed".to_string(),
+            panes: Vec::new(),
             active: false,
         },
         TabEntry {
@@ -144,6 +145,7 @@ fn seed_tabs() -> Vec<TabEntry> {
             pane_title: "ed@minefit: ~/api".to_string(),
             pane_name: "ed@minefit".to_string(),
             pane_path: "~/api".to_string(),
+            panes: Vec::new(),
             active: false,
         },
         TabEntry {
@@ -154,6 +156,7 @@ fn seed_tabs() -> Vec<TabEntry> {
             pane_title: "ed@gohora: ~/src".to_string(),
             pane_name: "ed@gohora".to_string(),
             pane_path: "~/src".to_string(),
+            panes: Vec::new(),
             active: false,
         },
         TabEntry {
@@ -164,6 +167,7 @@ fn seed_tabs() -> Vec<TabEntry> {
             pane_title: "ed@devbox: ~".to_string(),
             pane_name: "ed@devbox".to_string(),
             pane_path: "/home/ed".to_string(),
+            panes: Vec::new(),
             active: true,
         },
     ]
