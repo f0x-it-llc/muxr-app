@@ -193,8 +193,8 @@ const MENU_DETACH_INDEX: usize = 2;
 
 /// The rename dialog's title.
 const RENAME_TITLE: &str = "Rename session";
-/// What the two UI-only affordances (the add pills, the new-pane row) say.
-const UNAVAILABLE_TOAST: &str = "not yet available";
+/// The create-space dialog's title — the `+ space` pill's press.
+const CREATE_SPACE_TITLE: &str = "New space";
 /// …and what a landed detach says on the way back to the list.
 const DETACHED_TOAST: &str = "detached";
 /// What a control a read-only credential may not use says when it is reached
@@ -1053,15 +1053,52 @@ impl Actions {
         });
     }
 
-    /// What the sheet's **create** affordances say when tapped: `+` and `+ new
-    /// pane` — plus `+ space` on a backend that has spaces at all — are drawn
-    /// and unwired, and this is how they say so rather than appearing to work.
+    /// Open the create-space dialog — the `+ space` pill's press (herdr
+    /// only; [`sheet_body`](Self::sheet_body) withdraws the pill itself on
+    /// any backend with no spaces, and for a read-only credential).
     ///
-    /// A read-only credential withdraws them from the sheet outright (see
-    /// [`sheet_body`](Self::sheet_body)) — offering a create nobody may
-    /// perform is worse than not offering one.
-    pub fn unavailable(&self) {
-        app_toasts().show(UNAVAILABLE_TOAST);
+    /// The same [`name_input_dialog`] the rename row uses, seeded **empty**
+    /// rather than with a current name — there is nothing to prefill a space
+    /// that does not exist yet with. Its own non-blank guard is the only
+    /// client-side check this screen adds; the server owns the label's
+    /// charset/length, and a rejection surfaces through the usual failure
+    /// sink ([`TerminalController::create_space`]'s own doc).
+    pub fn open_create_space_dialog(&self) {
+        let controller = Arc::clone(&self.controller);
+        name_input_dialog(
+            &self.overlays,
+            CREATE_SPACE_TITLE,
+            "",
+            move |_app: &mut AppState, label: String| {
+                let controller = Arc::clone(&controller);
+                spawn_local(async move {
+                    controller.create_space(label).await;
+                });
+            },
+        );
+    }
+
+    /// Open a new, unnamed tab — the `+` tab pill's press. No dialog, unlike
+    /// the space pill (original-app parity): the server names it, and
+    /// [`TerminalController::new_tab`]'s own reload brings the sheet's browse
+    /// onto whatever it focused. The sheet stays up either way.
+    pub fn new_tab(&self) {
+        let controller = Arc::clone(&self.controller);
+        spawn_local(async move {
+            controller.new_tab().await;
+        });
+    }
+
+    /// Open a new pane in the tab the session is on — the new-pane row's
+    /// press: tiled (`floating = false`) on a tap, floating (`floating =
+    /// true`) on a long-press ([`pieces::new_pane_row`]'s own two gestures).
+    /// A backend that ignores the flag still gets it — no client-side
+    /// gating to add. The sheet stays up either way.
+    pub fn new_pane(&self, floating: bool) {
+        let controller = Arc::clone(&self.controller);
+        spawn_local(async move {
+            controller.new_pane(floating).await;
+        });
     }
 
     // -- the sheet ---------------------------------------------------------
@@ -1115,7 +1152,12 @@ impl Actions {
                 })
                 .collect();
             if !read_only {
-                space_pills.push(self.add_pill(ADD_SPACE, &colors));
+                let actions = self.clone();
+                space_pills.push(
+                    self.add_pill(ADD_SPACE, &colors, move |_app: &mut AppState| {
+                        actions.open_create_space_dialog()
+                    }),
+                );
             }
             children.push(super::chrome::wrap_row(space_pills, PILL_GAP));
             // The section's own trailing gap, so the tabs label below sits the
@@ -1149,7 +1191,10 @@ impl Actions {
             })
             .collect();
         if !read_only {
-            tab_pills.push(self.add_pill(ADD_TAB, &colors));
+            let actions = self.clone();
+            tab_pills.push(self.add_pill(ADD_TAB, &colors, move |_app: &mut AppState| {
+                actions.new_tab()
+            }));
         }
         children.push(super::chrome::wrap_row(tab_pills, PILL_GAP));
 
@@ -1179,10 +1224,13 @@ impl Actions {
             }
         }
         if !read_only {
-            let actions = self.clone();
-            children.push(pieces::new_pane_row(&colors, move |_app: &mut AppState| {
-                actions.unavailable()
-            }));
+            let tap_actions = self.clone();
+            let hold_actions = self.clone();
+            children.push(pieces::new_pane_row(
+                &colors,
+                move |_app: &mut AppState| tap_actions.new_pane(false),
+                move |_app: &mut AppState| hold_actions.new_pane(true),
+            ));
         }
 
         any(pieces::column(children))
@@ -1198,12 +1246,14 @@ impl Actions {
         })
     }
 
-    /// One `.pill.add` — dashed, dim, and (this phase) a toast.
-    fn add_pill(&self, label: &'static str, colors: &Palette) -> AnyView<AppState> {
-        let actions = self.clone();
-        pieces::pill(label, PillState::Add, colors, move |_app: &mut AppState| {
-            actions.unavailable()
-        })
+    /// One `.pill.add` — dashed and dim, wired to `on_tap`.
+    fn add_pill<F: Fn(&mut AppState) + 'static>(
+        &self,
+        label: &'static str,
+        colors: &Palette,
+        on_tap: F,
+    ) -> AnyView<AppState> {
+        pieces::pill(label, PillState::Add, colors, on_tap)
     }
 }
 
