@@ -52,6 +52,10 @@ use frust::{
     any, navigator, provide_context,
 };
 use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
+// Test-only peek at the OS system-UI slot `frust::set_system_ui_mode` writes
+// — see `Cargo.toml`'s dev-dependency comment for why this is
+// `frust-shell-common` directly rather than `frust::`.
+use frust_shell_common::{SystemUiMode, current_system_ui_mode};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
@@ -97,6 +101,7 @@ const ROW_PANES: usize = 0;
 const SHEET_LABEL: &str = "panes & tabs";
 
 const EXPAND: &str = "Fullscreen";
+const COLLAPSE: &str = "Exit fullscreen";
 
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
@@ -702,7 +707,8 @@ fn resize_reaches_the_feed_only_on_an_actual_cell_grid_delta() {
 }
 
 // ---------------------------------------------------------------------------
-// 6 — fullscreen keeps the chrome geometry correct with a live pane
+// 6 — fullscreen keeps the chrome geometry correct with a live pane, and
+//     drives the OS system UI mode alongside the app's own chrome
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -722,6 +728,25 @@ fn fullscreen_with_the_live_pane_still_fills_the_screen() {
     assert!(radius < EPSILON, "{radius}");
     // …and the live grid is still there, still painting.
     let _ = grid_rect(&scene);
+    // The OS status/nav bars mirror the card's own request — see `pages`'s
+    // module docs' "OS system UI" section. The write is synchronous with the
+    // press (`Actions::toggle_fullscreen`), not build-time, so it is already
+    // observable before any of the settle above ran.
+    assert_eq!(
+        current_system_ui_mode().1,
+        SystemUiMode::ImmersiveSticky,
+        "expand hides the OS bars too"
+    );
+
+    // Collapsing reverses it — `pages::restore_system_ui`'s other call site
+    // besides `init`'s `on_cleanup`.
+    h.tap_label(COLLAPSE);
+    h.settle_motion(3_000.0);
+    assert_eq!(
+        current_system_ui_mode().1,
+        SystemUiMode::EdgeToEdge,
+        "collapse restores the OS bars"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -953,10 +978,24 @@ fn unmounting_drops_the_published_chrome_and_the_live_probe() {
     h.frame();
     assert!(debug_live_probe().is_some());
 
+    // Unmounting *while fullscreen* is the regression this exists for: a
+    // back-nav straight out of fullscreen must not strand hidden OS bars on
+    // whatever screen comes back into view (`pages::restore_system_ui`'s doc
+    // — every exit that isn't `toggle_fullscreen`'s own collapse branch is an
+    // unmount, and `init`'s `on_cleanup` is the one choke point they share).
+    h.tap_label(EXPAND);
+    h.settle_motion(1_000.0);
+    assert_eq!(current_system_ui_mode().1, SystemUiMode::ImmersiveSticky);
+
     h.unmount_screen();
     assert!(
         debug_live_probe().is_none(),
         "the screen's own cleanup withdrew its chrome"
+    );
+    assert_eq!(
+        current_system_ui_mode().1,
+        SystemUiMode::EdgeToEdge,
+        "the screen's own cleanup restored the OS bars too"
     );
 }
 

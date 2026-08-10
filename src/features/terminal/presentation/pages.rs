@@ -53,6 +53,29 @@
 //! registers an [`on_cleanup`] that does, which is what stops a back-nav out
 //! of fullscreen from stranding a hidden bar on `/sessions`.
 //!
+//! # OS system UI: edge-triggered, never build-time
+//!
+//! The three consumers above are all *build-time*, re-derived from
+//! [`TerminalController::fullscreen`] every rebuild — cheap because a mobile
+//! rebuild runs every frame and each of them is a plain layout/paint read.
+//! `frust::set_system_ui_mode` is not that kind of call: it bumps a
+//! process-global generation counter a shell watcher polls once per frame,
+//! so driving it from `build` would re-request the same mode every single
+//! frame this screen is mounted. So hiding/restoring the OS status and
+//! navigation bars (Flutter `SystemChrome.setEnabledSystemUIMode` parity) is
+//! instead a **one-shot call at the state-transition edge**, never a
+//! reactive `build`-time read: [`Actions::toggle_fullscreen`] itself
+//! requests [`SystemUiMode::ImmersiveSticky`] on expand (a swipe reveals the
+//! bars transiently, then they auto-hide again — the shadertoy precedent,
+//! right for a terminal) and calls [`restore_system_ui`] on collapse. Every
+//! other exit — a back-nav pop, Detach's landing on `/sessions`, a
+//! session-guard bounce/disconnect elsewhere — is an *unmount*, not a
+//! `toggle_fullscreen` call, so it is covered the same way the bar's own
+//! `bar_fullscreen.set(false)` already is: `init`'s [`on_cleanup`] calls
+//! [`restore_system_ui`] unconditionally, since `ComponentWidget::teardown`
+//! disposing this screen's `Owner` is the one choke point every one of those
+//! exits passes through.
+//!
 //! # The component-state boundary, and the app bar's press
 //!
 //! A `Component`'s subtree is bound to its own `State`, so this screen's own
@@ -122,8 +145,8 @@ use frust::authoring::{Rect, WindowInsets};
 use frust::glyph::{MenuEntry, menu_item, show_glyph_menu};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, WindowMetrics, any, button, component, flexible,
-    inflexible, on_cleanup, spawn_local, use_context,
+    NavigatorController, Padding, PopResult, SystemUiMode, WindowMetrics, any, button, component,
+    flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -503,6 +526,15 @@ impl Component for TerminalScreen {
             // Leaving fullscreen set behind would strand a hidden bar on
             // whatever route this one popped back to.
             bar_fullscreen.set(false);
+            // …and, for the identical reason, a hidden OS status/nav bar:
+            // every exit that does not go through `toggle_fullscreen`'s own
+            // collapse branch (a back-nav pop, Detach's landing on
+            // `/sessions`, a session-guard bounce/disconnect elsewhere) is an
+            // unmount, and this is the one choke point all of them share —
+            // see the module docs' "OS system UI" section. Unconditional,
+            // like the bar restore above: re-requesting an already-restored
+            // mode costs a shell watcher a no-op poll, not a visible flicker.
+            restore_system_ui();
             TERMINAL_CHROME.with(|cell| {
                 let mut published = cell.borrow_mut();
                 if published.as_ref().is_some_and(|actions| actions.id == id) {
@@ -720,6 +752,17 @@ fn toggle_fullscreen(state: &mut TerminalState) {
     state.actions.toggle_fullscreen();
 }
 
+/// Give the OS status/navigation bars back
+/// ([`SystemUiMode::EdgeToEdge`], the platform default) — the one restore
+/// helper every fullscreen exit path calls (see the module docs' "OS system
+/// UI" section): [`Actions::toggle_fullscreen`]'s own collapse branch, and
+/// `init`'s [`on_cleanup`], which is what every *other* exit funnels through
+/// since each of them unmounts this screen rather than calling
+/// `toggle_fullscreen` directly.
+fn restore_system_ui() {
+    set_system_ui_mode(SystemUiMode::EdgeToEdge);
+}
+
 /// The card's link strip for `link`, or `None` when there is nothing to say.
 ///
 /// Four of the feed's five states are silent: `Idle` and `Connected` are a
@@ -766,11 +809,24 @@ fn link_strip(link: Option<FeedStatus>, colors: &Palette) -> Option<AnyView<Term
 
 impl Actions {
     /// Flip fullscreen: the card animates itself off the controller's flag,
-    /// and the **shell's bar** is told to animate away through its own
-    /// existing hidden/reveal driver.
+    /// the **shell's bar** is told to animate away through its own existing
+    /// hidden/reveal driver, and the **OS** status/nav bars follow suit —
+    /// see the module docs' "OS system UI" section for why this is a
+    /// one-shot call here rather than a `build`-time read.
     pub fn toggle_fullscreen(&self) {
         let on = self.controller.toggle_fullscreen();
         self.app_nav.set_fullscreen(on);
+        if on {
+            // Immersive-sticky, not plain immersive: a swipe from the edge
+            // reveals the bars transiently and they auto-hide again, rather
+            // than staying shown until a second explicit action — the
+            // right feel for a terminal a user dips in and out of
+            // (`examples/shadertoy`'s own `ImmersiveSticky` call is the same
+            // choice for its fullscreen shader view).
+            set_system_ui_mode(SystemUiMode::ImmersiveSticky);
+        } else {
+            restore_system_ui();
+        }
     }
 
     /// Open the app bar's overflow menu, anchored to the bar slot the `⋮`

@@ -2604,6 +2604,7 @@ dependencies = [
  "frust-scene",
  "frust-secure-storage",
  "frust-shared-preferences",
+ "frust-shell-common",
  "frust-text",
  "kurbo",
  "log",
