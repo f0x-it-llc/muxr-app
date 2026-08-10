@@ -13,9 +13,14 @@
 //!   everything else there is `pub(super)`, arranged by `pages` alone.
 //! - `chrome` — the screen's hand-rolled panel/swatch/dashed-box primitives,
 //!   for the boxes the Glyph catalog has no counterpart for. Private: only
-//!   `pieces` paints with them.
+//!   `pieces` and `heartbeat` paint with them.
+//! - `heartbeat` — the `.conn-row` strip's connection heartbeat: the ping
+//!   ring's geometry and clock, the rolling latency readout, and the frame
+//!   ticker that drives both. Private: the screen mounts it, `pieces` renders
+//!   the pose it computes.
 
 mod chrome;
 pub mod controllers;
+mod heartbeat;
 pub mod pages;
 pub mod pieces;

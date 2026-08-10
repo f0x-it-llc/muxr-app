@@ -9,7 +9,7 @@
 //!
 //! | Piece | Redesign element |
 //! |---|---|
-//! | [`server_strip`] | `.conn-row` — success dot, `host:port`, `zellij 0.44.3 · 36ms`, the `insecure` chip |
+//! | [`server_strip`] | `.conn-row` — the heartbeat's success dot, `zellij 0.44.3 · herdr 0.3.1`, `36ms`, the `insecure` chip |
 //! | [`session_card`] | `.sess-card` — accent, avatar, name, chips, the three meta spans, pane pills |
 //! | [`new_session_row`] | `.new-sess-btn` — the dashed, centered "+ new session" row |
 //! | [`empty_view`] | the emptied-list state (no HTML block; Glyph's own `empty_state`) |
@@ -55,8 +55,8 @@
 //! by alpha — the same derivation, with the same constant, the Connect screen's
 //! own pieces document.
 
+use frust::authoring::Color;
 use frust::authoring::text::TextStyle;
-use frust::authoring::{Color, Size};
 use frust::glyph::{
     BadgeVariant, GlyphListItem, avatar, badge, empty_state, glyph_list, glyph_list_item,
 };
@@ -71,7 +71,8 @@ use crate::AppState;
 use crate::connection::{ServerInfo, TrustMode};
 use crate::features::sessions::domain::entities::{Session, SessionStatus};
 
-use super::chrome::{RADIUS_FULL, dashed_box, panel, swatch};
+use super::chrome::{dashed_box, panel};
+use super::heartbeat::{self, HeartbeatVisual};
 use super::pages::SessionsState;
 
 /// `.sess-avatar{width:26px;height:26px}`.
@@ -95,8 +96,10 @@ const STRIP_PAD_X: f64 = 16.0;
 const STRIP_PAD_Y: f64 = 13.0;
 /// `.conn-row{gap:10px}`.
 const STRIP_GAP: f64 = 10.0;
-/// `.dot-ok{width:7px;height:7px}`.
-const DOT: f64 = 7.0;
+/// `.dot-ok{width:7px;height:7px}` — and, through
+/// [`super::heartbeat`], the unscaled diameter of the ping ring that expands
+/// around it, so the two cannot drift apart.
+pub(super) const DOT: f64 = 7.0;
 /// `.new-sess-btn{padding:13px}`.
 const NEW_ROW_PAD: f64 = 13.0;
 /// Gap between the amber `+` and the "new session" label — the source's
@@ -114,8 +117,8 @@ const MAX_PREVIEW_PILLS: usize = 2;
 /// The label the `.conn-row` prints for the one TLS posture that skips
 /// certificate validation — the source's `.warn-badge`.
 const INSECURE_CHIP: &str = "insecure";
-/// The separator between the strip's version and its latency
-/// (`zellij 0.44.3 · 36ms`).
+/// The separator between the strip's per-backend versions
+/// (`zellij 0.44.3 · herdr 0.3.1`).
 const META_SEPARATOR: &str = " \u{b7} ";
 
 /// The active theme, or the Glyph baseline when none is threaded (headless
@@ -236,21 +239,32 @@ pub(super) fn page_tone(
 // `.conn-row` — the server-info strip
 // ---------------------------------------------------------------------------
 
-/// The connected server's facts as one fixed strip under the top bar: a
-/// glowing success dot, `host:port`, the dim `zellij 0.44.3 · 36ms` meta, and —
+/// The connected server's facts as one fixed strip under the top bar: the
+/// heartbeat's glowing success dot and ping ring, the dim
+/// `zellij 0.44.3 · herdr 0.3.1` version meta, the live `36ms` latency, and —
 /// only for the posture that actually skips certificate validation — the
 /// `insecure` warning chip. Closed by a hairline rule.
 ///
+/// **No endpoint here.** The shell's floating bar already titles the connected
+/// host, and printing `host:port` again beside the meta ran the two text runs
+/// into each other on a phone-width strip. The meta text takes the flexible
+/// slot instead, so nothing in the row can overlap at any width.
+///
 /// Read from [`crate::connection::ConnectionController::server_info`], which is
 /// app-scoped precisely because this screen renders it (see that module's
-/// docs). Latency lives **here only**: Settings renders the endpoint and TLS
-/// posture again, but a live round-trip time belongs next to the session list
-/// it gates.
+/// docs). Latency lives **here only**: Settings renders the endpoint, the TLS
+/// posture and the versions again, but a live round-trip time belongs next to
+/// the session list it gates — see [`super::heartbeat`] for what keeps it
+/// live.
 ///
 /// `None` renders a muted "not connected" line rather than nothing: the session
 /// guard means it is unreachable in practice, and a silent gap would be the
 /// worse failure if it ever were.
-pub(super) fn server_strip(info: Option<&ServerInfo>, colors: &Palette) -> AnyView<SessionsState> {
+pub(super) fn server_strip(
+    info: Option<&ServerInfo>,
+    beat: HeartbeatVisual,
+    colors: &Palette,
+) -> AnyView<SessionsState> {
     let theme = active_theme();
     let content = match info {
         None => row(vec![inflexible(
@@ -258,19 +272,25 @@ pub(super) fn server_strip(info: Option<&ServerInfo>, colors: &Palette) -> AnyVi
         )]),
         Some(info) => {
             let mut children = vec![
-                inflexible(
-                    swatch(Size::new(DOT, DOT), colors.success, RADIUS_FULL).glow(colors.success),
-                ),
+                inflexible(heartbeat::pinging_dot(beat.ring, colors.success)),
                 h_gap(STRIP_GAP),
                 flexible(
                     1,
-                    text(info.endpoint.clone())
-                        .style(inked(&theme.type_scale.body_medium, colors.fg)),
-                ),
-                h_gap(STRIP_GAP),
-                inflexible(
                     text(meta_line(info)).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
                 ),
+                h_gap(STRIP_GAP),
+                // Amber while the reading rolls, dim once it settles — the one
+                // place this screen inks with the brand hue for something
+                // other than a call to action, and it is a *transition* cue
+                // rather than a health one (see the module docs' colour rule).
+                inflexible(text(format!("{}ms", beat.latency_ms)).style(inked(
+                    &theme.type_scale.body_small,
+                    if beat.rolling {
+                        colors.amber
+                    } else {
+                        colors.fg_dim
+                    },
+                ))),
             ];
             if let Some(chip) = insecure_chip(info.trust_mode) {
                 children.push(h_gap(STRIP_GAP));
@@ -290,9 +310,22 @@ pub(super) fn server_strip(info: Option<&ServerInfo>, colors: &Palette) -> AnyVi
     .bottom_rule(colors.rule))
 }
 
-/// The strip's dim meta text: `"zellij 0.44.3 · 36ms"`.
+/// The strip's dim meta text: every backend the handshake detected, as
+/// `"zellij 0.44.3 · herdr 0.3.1"`.
+///
+/// A server that reported no backends at all (an older daemon) falls back to
+/// [`ServerInfo::version`], which the handshake already derived from that
+/// server's back-compat zellij field in exactly this `<label> <version>`
+/// spelling.
 fn meta_line(info: &ServerInfo) -> String {
-    format!("{}{}{}ms", info.version, META_SEPARATOR, info.latency_ms)
+    if info.backend_versions.is_empty() {
+        return info.version.clone();
+    }
+    info.backend_versions
+        .iter()
+        .map(|entry| format!("{} {}", entry.backend.label(), entry.version))
+        .collect::<Vec<String>>()
+        .join(META_SEPARATOR)
 }
 
 /// The `.warn-badge` the strip prints for a TLS posture — `Some` only for the
@@ -312,8 +345,8 @@ fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
 }
 
 /// The host half of a `host:port` endpoint — what the top bar's centered title
-/// shows (`100.71.31.57`, while the strip under it prints the whole
-/// `100.71.31.57:50051`).
+/// shows (`100.71.31.57`). The bar is where the endpoint is named now: the
+/// strip under it prints versions and latency only (see [`server_strip`]).
 ///
 /// `pub(crate)` rather than `pub(super)` because the bar moved out of this
 /// screen: `crate::routes`' `BarTitle::ConnectedHost` resolves `/sessions`'
@@ -632,28 +665,62 @@ pub fn picker_heading(count: usize) -> AnyView<crate::AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::{BackendVersion, ServerBackend};
 
-    /// The strip renders five of [`ServerInfo`]'s facts; the rest belong to
-    /// screens that are not this one, so this fixture leaves them empty.
-    fn info(mode: TrustMode) -> ServerInfo {
+    /// The facts the strip renders; the rest belong to screens that are not
+    /// this one, so this fixture leaves them empty. `backend_versions` is the
+    /// per-case input below, since it is what the meta text is made of.
+    fn info(mode: TrustMode, backends: Vec<BackendVersion>) -> ServerInfo {
         ServerInfo {
             endpoint: "100.71.31.57:50051".to_string(),
             trust_mode: mode,
             tls_label: "No verification".to_string(),
             version: "zellij 0.44.3".to_string(),
             latency_ms: 36,
-            backend_versions: Vec::new(),
+            backend_versions: backends,
             available_backends: Vec::new(),
             capabilities: std::collections::BTreeSet::new(),
             is_read_only: false,
         }
     }
 
+    /// One detected backend, as the handshake reports it.
+    fn backend(backend: ServerBackend, version: &str) -> BackendVersion {
+        BackendVersion {
+            backend,
+            version: version.to_string(),
+        }
+    }
+
     #[test]
-    fn the_strips_meta_line_is_the_redesigns() {
+    fn the_strips_meta_line_names_every_detected_backend() {
         assert_eq!(
-            meta_line(&info(TrustMode::NoVerification)),
-            "zellij 0.44.3 \u{b7} 36ms"
+            meta_line(&info(
+                TrustMode::NoVerification,
+                vec![
+                    backend(ServerBackend::Zellij, "0.44.3"),
+                    backend(ServerBackend::Herdr, "0.3.1"),
+                ]
+            )),
+            "zellij 0.44.3 \u{b7} herdr 0.3.1"
+        );
+        assert_eq!(
+            meta_line(&info(
+                TrustMode::NoVerification,
+                vec![backend(ServerBackend::Zellij, "0.44.3")]
+            )),
+            "zellij 0.44.3",
+            "one backend prints on its own, with no dangling separator"
+        );
+    }
+
+    #[test]
+    fn a_server_that_reported_no_backends_falls_back_to_the_handshakes_version() {
+        // An older daemon: `ServerInfo::version` is already spelled
+        // `<label> <version>`, so the fallback needs no reformatting.
+        assert_eq!(
+            meta_line(&info(TrustMode::NoVerification, Vec::new())),
+            "zellij 0.44.3"
         );
     }
 
