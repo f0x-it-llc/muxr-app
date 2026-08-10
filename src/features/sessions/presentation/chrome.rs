@@ -379,11 +379,14 @@ impl Widget for SwatchWidget {
 /// edges in [`DASH_ON`]/[`DASH_OFF`] steps with [`PaintScene::stroke_line`] —
 /// the same workaround `frust::glyph::empty_state` makes for its own dashed
 /// panel (`stroke_dashed_rect`), which is the framework's own precedent that
-/// this is the available shape rather than a shortcut. The corner arcs are
-/// left open (the catalog's version has no radius to worry about): dashing a
-/// curve needs the path walking the missing pattern support would give us, and
-/// at a 4px period an open corner reads as one more gap. **Replace the whole
-/// widget with a dashed `Stroke` the day frust grows dash support.**
+/// this is the available shape rather than a shortcut. The four corners are
+/// dashed the same way: [`dash_arc`] walks each quarter-circle's own
+/// arc-length in the same on/off period and strokes every on-segment as a
+/// straight chord rather than a true curve — at this widget's radius (~10px)
+/// a 4px dash's chord deviates from the true arc by well under a quarter
+/// pixel, invisible at this scale, and reusing [`PaintScene::stroke_line`]
+/// needs no new imports. **Replace the whole widget with a dashed `Stroke`
+/// the day frust grows dash support.**
 pub(super) struct DashedBoxView<State: 'static> {
     child: AnyView<State>,
     color: Color,
@@ -456,7 +459,8 @@ impl Widget for DashedBoxWidget {
         let (left, top) = (origin.x + half, origin.y + half);
         let (right, bottom) = (origin.x + size.width - half, origin.y + size.height - half);
         // Horizontal edges, then vertical ones — each inset by the corner
-        // radius, since the arcs themselves stay undashed (see the type docs).
+        // radius, leaving the four quarter-arcs below to cover that inset
+        // themselves.
         for y in [top, bottom] {
             dash_run(scene, left + radius, right - radius, self.color, |x| {
                 (Point::new(x.0, y), Point::new(x.1, y))
@@ -467,6 +471,47 @@ impl Widget for DashedBoxWidget {
                 (Point::new(x, y.0), Point::new(x, y.1))
             });
         }
+        // The four corner arcs, dashed the same way (type docs). Each center
+        // sits `radius` in from its corner along the same half-hairline-inset
+        // lines the edges above already use, so an arc's two endpoints land
+        // exactly on its neighboring edges' own endpoints — no jog. Angles
+        // follow the ordinary math convention (0 = +x, increasing toward
+        // +y); a zero `radius` makes every sweep's arc-length zero, so
+        // `dash_arc` paints nothing and the corner is left exactly as the
+        // un-rounded case already draws it (edges meeting at a point).
+        use std::f64::consts::FRAC_PI_2;
+        dash_arc(
+            scene,
+            Point::new(left + radius, top + radius),
+            radius,
+            -FRAC_PI_2,
+            -FRAC_PI_2,
+            self.color,
+        ); // top-left
+        dash_arc(
+            scene,
+            Point::new(right - radius, top + radius),
+            radius,
+            -FRAC_PI_2,
+            FRAC_PI_2,
+            self.color,
+        ); // top-right
+        dash_arc(
+            scene,
+            Point::new(right - radius, bottom - radius),
+            radius,
+            0.0,
+            FRAC_PI_2,
+            self.color,
+        ); // bottom-right
+        dash_arc(
+            scene,
+            Point::new(left + radius, bottom - radius),
+            radius,
+            FRAC_PI_2,
+            FRAC_PI_2,
+            self.color,
+        ); // bottom-left
         self.child.paint_child(ctx, scene);
     }
 
@@ -493,6 +538,45 @@ fn dash_run(
         let end = (at + DASH_ON).min(to);
         let (p0, p1) = segment((at, end));
         scene.stroke_line(p0, p1, HAIRLINE, color);
+        at = end + DASH_OFF;
+    }
+}
+
+/// Stroke one quarter-circle corner (`center`, `radius`) as a dashed run,
+/// [`dash_run`]'s own on/off walk generalized from a straight run's length to
+/// an arc's arc-length. `start_angle` is where the sweep begins (`0` = +x,
+/// increasing toward +y — the ordinary math convention); `sweep` is the
+/// signed quarter-turn (`±FRAC_PI_2`) to walk from there. Each on-segment is
+/// stroked as a straight chord between its two endpoint angles rather than a
+/// true curve — see the type docs for why that approximation is invisible at
+/// this widget's scale. A zero (or negative, already clamped away by
+/// [`effective_radius`]) `radius` makes the arc-length zero, so this paints
+/// nothing — the same "nothing to dash" case [`dash_run`] hits when `from`
+/// already meets `to`.
+fn dash_arc(
+    scene: &mut dyn PaintScene,
+    center: Point,
+    radius: f64,
+    start_angle: f64,
+    sweep: f64,
+    color: Color,
+) {
+    if radius <= 0.0 {
+        return;
+    }
+    let arc_len = radius * sweep.abs();
+    let direction = sweep.signum();
+    let point_at = |len: f64| {
+        let angle = start_angle + direction * (len / radius);
+        Point::new(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        )
+    };
+    let mut at = 0.0;
+    while at < arc_len {
+        let end = (at + DASH_ON).min(arc_len);
+        scene.stroke_line(point_at(at), point_at(end), HAIRLINE, color);
         at = end + DASH_OFF;
     }
 }
@@ -544,6 +628,154 @@ mod tests {
             scene.lines[2],
             (Point::new(16.0, 0.0), Point::new(20.0, 0.0))
         );
+    }
+
+    #[test]
+    fn a_dash_arc_walks_the_quarter_circles_own_arc_length_in_chords() {
+        let mut scene = RecScene::default();
+        let center = Point::new(50.0, 50.0);
+        let radius = 10.0;
+        dash_arc(
+            &mut scene,
+            center,
+            radius,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+            Color::WHITE,
+        );
+        assert!(
+            !scene.lines.is_empty(),
+            "a 10px-radius quarter arc must dash something"
+        );
+        for (p0, p1) in &scene.lines {
+            // Every chord endpoint lands exactly on the circle…
+            assert!((p0.distance(center) - radius).abs() < 1e-6);
+            assert!((p1.distance(center) - radius).abs() < 1e-6);
+            // …and inside the quarter's own bounding square — the region
+            // edges-only dashing left entirely empty.
+            for p in [p0, p1] {
+                assert!(p.x >= center.x - 1e-9 && p.x <= center.x + radius + 1e-9);
+                assert!(p.y >= center.y - 1e-9 && p.y <= center.y + radius + 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn a_dash_arc_with_zero_radius_paints_nothing() {
+        let mut scene = RecScene::default();
+        dash_arc(
+            &mut scene,
+            Point::new(5.0, 5.0),
+            0.0,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+            Color::WHITE,
+        );
+        assert!(scene.lines.is_empty());
+    }
+
+    #[test]
+    fn a_dash_arc_shorter_than_one_dash_still_paints_a_segment() {
+        // radius small enough that the whole quarter-circle's arc-length
+        // (r * π/2) is shorter than one DASH_ON step — must still draw the
+        // one segment that fits rather than nothing.
+        let radius = 1.0;
+        assert!(radius * std::f64::consts::FRAC_PI_2 < DASH_ON);
+        let mut scene = RecScene::default();
+        dash_arc(
+            &mut scene,
+            Point::new(0.0, 0.0),
+            radius,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+            Color::WHITE,
+        );
+        assert_eq!(
+            scene.lines.len(),
+            1,
+            "one segment covering the whole short arc"
+        );
+    }
+
+    #[test]
+    fn a_dashed_box_paints_dashed_arcs_in_every_rounded_corner() {
+        let stand_in = SwatchWidget {
+            size: Size::ZERO,
+            fill: Color::TRANSPARENT,
+            radius: 0.0,
+            glow: None,
+        };
+        let mut widget = DashedBoxWidget {
+            child: ChildPod::new(Box::new(stand_in)),
+            color: Color::WHITE,
+            radius: 10.0,
+        };
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 60.0));
+        widget.paint(&mut ctx, &mut scene);
+
+        let radius = 10.0;
+        let half = HAIRLINE / 2.0;
+        let centers = [
+            Point::new(half + radius, half + radius),         // top-left
+            Point::new(100.0 - half - radius, half + radius), // top-right
+            Point::new(100.0 - half - radius, 60.0 - half - radius), // bottom-right
+            Point::new(half + radius, 60.0 - half - radius),  // bottom-left
+        ];
+        for center in centers {
+            let on_this_arc = scene
+                .lines
+                .iter()
+                .filter(|(p0, p1)| {
+                    (p0.distance(center) - radius).abs() < 1e-6
+                        && (p1.distance(center) - radius).abs() < 1e-6
+                })
+                .count();
+            assert!(
+                on_this_arc > 0,
+                "expected a dashed segment on the arc centered at {:?}, got lines {:?}",
+                center,
+                scene.lines
+            );
+        }
+    }
+
+    #[test]
+    fn a_dashed_box_with_zero_radius_paints_no_corner_segments_beyond_the_edge_runs() {
+        let size = Size::new(100.0, 60.0);
+        let stand_in = SwatchWidget {
+            size: Size::ZERO,
+            fill: Color::TRANSPARENT,
+            radius: 0.0,
+            glow: None,
+        };
+        let mut widget = DashedBoxWidget {
+            child: ChildPod::new(Box::new(stand_in)),
+            color: Color::WHITE,
+            radius: 0.0,
+        };
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, size);
+        widget.paint(&mut ctx, &mut scene);
+
+        // Reproduce exactly what the four straight edges alone paint when the
+        // radius collapses to 0 (no corner inset) and compare: any output
+        // from a corner arc would show up here as extra, unaccounted lines.
+        let mut expected = RecScene::default();
+        let half = HAIRLINE / 2.0;
+        let (left, top) = (half, half);
+        let (right, bottom) = (size.width - half, size.height - half);
+        for y in [top, bottom] {
+            dash_run(&mut expected, left, right, Color::WHITE, |x| {
+                (Point::new(x.0, y), Point::new(x.1, y))
+            });
+        }
+        for x in [left, right] {
+            dash_run(&mut expected, top, bottom, Color::WHITE, |y| {
+                (Point::new(x, y.0), Point::new(x, y.1))
+            });
+        }
+        assert_eq!(scene.lines, expected.lines);
     }
 
     #[test]
