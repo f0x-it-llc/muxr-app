@@ -153,8 +153,25 @@ const DETACHED_TOAST: &str = "detached";
 const READ_ONLY_TOAST: &str = "read-only session";
 
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
-/// card prints once the *second* of two rapid pill taps has landed.
+/// card prints once a pane row inside it has been committed.
 const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
+
+/// The sheet's three section labels, transcribed from `presentation::pages`
+/// (private there). The third names the tab whose panes it is listing, which
+/// is the **browsed** tab — the sheet's own record of where the browse is.
+const SECTION_SPACES: &str = "spaces";
+const SECTION_TABS: &str = "tabs";
+const SECTION_PANES: &str = "panes \u{2014} ";
+
+/// `presentation::pieces`' own `--amber-faint` alpha, transcribed — the wash a
+/// selected pill and the `focused` chip share (see [`focused_chip`]).
+const AMBER_FAINT: f32 = 0.12;
+
+/// A **herdr** session id: the one prefix that turns the sheet's spaces
+/// section on (`presentation::controller`'s backend discriminator). The
+/// sessions mock carries no session under this id, which is fine — only the
+/// rename dialog's seed reads a session's name, and no test here does both.
+const HERDR_SESSION_ID: &str = "herdr:work";
 
 /// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
@@ -212,9 +229,22 @@ impl Harness {
         Self::mount()
     }
 
+    /// [`mount`](Self::mount) attached to `session` instead of
+    /// [`SESSION_ID`] — how the suite reaches a **herdr** session, whose id
+    /// prefix is the one thing the sheet's spaces section is gated on
+    /// (`presentation::controller`'s own backend discriminator).
+    fn mount_session(session: &str) -> Self {
+        Self::themed_session(Theme::glyph_baseline(), session)
+    }
+
     /// [`mount`](Self::mount) under an explicit theme — how the suite drives
     /// `reduce_motion`.
     fn themed(theme: Theme) -> Self {
+        Self::themed_session(theme, SESSION_ID)
+    }
+
+    /// [`themed`](Self::themed), attached to `session`.
+    fn themed_session(theme: Theme, session: &str) -> Self {
         // The real composition root: it publishes the app-scoped connection
         // controller and calls every feature's `di::provide` — including this
         // feature's repository and the sessions one it renames through.
@@ -227,7 +257,7 @@ impl Harness {
         // the recorded query survives — a bounced push records `/`'s, not
         // `/terminal`'s).
         expect_connection_controller().connect(mock_target());
-        app_nav().push(&format!("/terminal?session={SESSION_ID}"));
+        app_nav().push(&format!("/terminal?session={session}"));
 
         let mounted = Rc::new(Cell::new(true));
         let logic_nav = nav.clone();
@@ -353,6 +383,17 @@ impl Harness {
     /// A full tap at `point`.
     fn tap(&mut self, point: Point) {
         tap(&mut self.root, &mut self.state, point);
+    }
+
+    /// Tap the open sheet's `index`-th pane row, top to bottom — the sheet's
+    /// one committing gesture (see [`pane_rows`]). Renders its own frame, so
+    /// the rows are the ones the *current* browse lists.
+    fn tap_pane_row(&mut self, index: usize) {
+        let rows = pane_rows(&self.frame());
+        let row = *rows
+            .get(index)
+            .unwrap_or_else(|| panic!("pane row {index}; the sheet lists {}", rows.len()));
+        self.tap(center(row));
     }
 
     /// Tap the first node *labelled* `label` (the expand button, the sheet's
@@ -569,6 +610,45 @@ fn carets(scene: &RecScene) -> usize {
 /// The overlay panel in `added` — the biggest rect an overlay added.
 fn panel(added: &[(Point, Size)]) -> (Point, Size) {
     largest(added).expect("an overlay always paints its own panel")
+}
+
+/// The sheet's pane rows, top to bottom — the `--bg-base` tiles
+/// (`presentation::pieces`' own `Palette::base`, the scheme's
+/// `surface_container_low`), which nothing else on this screen paints.
+fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
+    let base = Theme::glyph_baseline().scheme().surface_container_low;
+    let mut rows: Vec<(Point, Size)> = rounded_in(scene, base)
+        .into_iter()
+        .map(|(origin, size, _)| (origin, size))
+        .collect();
+    rows.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
+    rows
+}
+
+/// Which pane row wears the focused mark — its amber mark box and its
+/// `focused` chip — or `None` when no row does.
+///
+/// A selected pill shares that same amber-faint wash, so the row is found by
+/// *containment* rather than by tone alone: the chip and the mark box are the
+/// only amber-faint tiles that sit inside a [`pane_rows`] rect.
+fn focused_row(scene: &RecScene) -> Option<usize> {
+    let theme = Theme::glyph_baseline();
+    let faint = theme.scheme().primary.with_alpha(AMBER_FAINT);
+    let rows = pane_rows(scene);
+    rounded_in(scene, faint)
+        .into_iter()
+        .find_map(|(origin, size, _)| {
+            let point = center((origin, size));
+            rows.iter().position(|row| inside(*row, point))
+        })
+}
+
+/// Whether `point` sits inside `rect`.
+fn inside((origin, size): (Point, Size), point: Point) -> bool {
+    point.x >= origin.x
+        && point.x <= origin.x + size.width
+        && point.y >= origin.y
+        && point.y <= origin.y + size.height
 }
 
 /// The sheet's pill rects, in reading order (top to bottom, then left to
@@ -1066,7 +1146,7 @@ fn the_terminal_route_carries_the_kebab_and_it_opens_a_menu() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_menus_first_row_opens_the_sheet_with_every_pill_row_and_the_pane_item() {
+fn the_menus_first_row_opens_the_sheet_on_the_tab_row_and_the_browsed_tabs_panes() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -1084,13 +1164,20 @@ fn the_menus_first_row_opens_the_sheet_with_every_pill_row_and_the_pane_item() {
         origin.y + size.height > SURFACE.height,
         "bottom-anchored, like every muxr sheet: {origin:?}/{size:?}"
     );
-    // Three spaces + `+ space`, then four tabs + `+`.
+    // Four tabs + `+`, and **no** spaces row at all: this session is zellij,
+    // which has no spaces (see `a_herdr_session_is_the_only_one_offered_spaces`).
     assert_eq!(
         pills(&sheet).len(),
-        3 + 1 + 4 + 1,
-        "every pill row, add pills included: {sheet:?}"
+        4 + 1,
+        "the tab row, its add pill, and nothing above it: {sheet:?}"
     );
-    // The pane item's own mark box, and the dashed new-pane row (which paints
+    assert!(!h.shows(SECTION_SPACES), "no label, and no gap under one");
+    assert!(h.shows(SECTION_TABS));
+    // The sheet opens browsing the tab the session is on, and lists *its*
+    // panes — both of the mock's, not one hardcoded row.
+    assert!(h.shows(&format!("{SECTION_PANES}devbox")));
+    assert_eq!(pane_rows(&after).len(), 2, "every pane of the browsed tab");
+    // The pane rows' mark boxes, and the dashed new-pane row (which paints
     // no fill at all, only strokes).
     assert!(
         !added(&before.strokes, &after.strokes).is_empty(),
@@ -1099,30 +1186,134 @@ fn the_menus_first_row_opens_the_sheet_with_every_pill_row_and_the_pane_item() {
 }
 
 #[test]
-fn a_tab_pill_switches_the_card_and_then_closes_the_sheet() {
+fn a_herdr_session_is_the_only_one_offered_spaces() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+
+    assert!(
+        h.shows(SECTION_SPACES),
+        "herdr has spaces, so the sheet does"
+    );
+    // Three spaces + `+ space`, then four tabs + `+`.
+    assert_eq!(
+        pills(&sheet).len(),
+        3 + 1 + 4 + 1,
+        "every pill row, add pills included: {sheet:?}"
+    );
+}
+
+#[test]
+fn a_tab_pill_browses_locally_and_leaves_the_card_and_the_sheet_alone() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
 
     let (before, after) = h.open_sheet();
     let sheet = added(&before.rounded, &after.rounded);
-    // Reading order: the four space pills, then the five tab ones. `1 btop` is
-    // the first of the second row.
-    let btop = pills(&sheet)[4];
-    h.tap(center(btop));
+    // Reading order: the four tab pills, then `+`. `1 btop` is the first.
+    h.tap(center(pills(&sheet)[0]));
+    h.settle();
 
-    // The switch is async (a repository read), and the sheet closes a beat
-    // after it lands.
+    // The pane section re-sliced to the browsed tab, out of the tab world the
+    // one load already carried…
+    assert!(h.shows(&format!("{SECTION_PANES}btop")));
+    assert_eq!(pane_rows(&h.frame()).len(), 2);
+    // …while the card stayed exactly where the session is…
+    assert!(
+        h.shows(DEVBOX_TITLE),
+        "the card is the session's, not the browse's"
+    );
+    assert!(!h.shows(BTOP_TITLE));
+    // …and the sheet never closed, however long the close beat is given.
+    h.pump_for(2 * CLOSE_DELAY);
+    assert_eq!(
+        h.depth(),
+        REST_DEPTH + 1,
+        "a browse is not a destination: only a pane row dismisses"
+    );
+}
+
+#[test]
+fn a_pane_row_commits_the_browse_and_then_closes_the_sheet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    h.tap(center(pills(&sheet)[0]));
+    h.settle();
+    // The browsed tab's first pane — the one commit path there is.
+    h.tap_pane_row(0);
+
+    // The commit is async (a tab move, then a pane focus), and the sheet
+    // closes a beat after it lands.
     h.pump_until_values("the btop tab", |values| {
         values.iter().any(|v| v == BTOP_TITLE)
     });
-    assert!(h.shows(BTOP_TITLE), "the card followed the pill");
+    assert!(h.shows(BTOP_TITLE), "the card followed the pane");
     h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
     assert_eq!(h.depth(), REST_DEPTH, "…and the sheet closed behind it");
 }
 
 #[test]
-fn a_tab_switch_replays_the_reveal_from_the_top() {
+fn the_focused_badge_follows_a_commit_the_next_time_the_sheet_opens() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let (_, opened) = h.open_sheet();
+    assert_eq!(
+        focused_row(&opened),
+        Some(0),
+        "the mock seeds the first pane focused"
+    );
+
+    // Commit the *second* pane of the tab the session is already on — no tab
+    // move, just the focus.
+    h.tap_pane_row(1);
+    h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
+
+    let (_, reopened) = h.open_sheet();
+    assert_eq!(
+        focused_row(&reopened),
+        Some(1),
+        "the badge moved with the commit, without waiting for a reload"
+    );
+}
+
+#[test]
+fn a_browsed_tab_shows_no_focused_badge_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    assert_eq!(
+        focused_row(&after),
+        Some(0),
+        "the session's own tab has one"
+    );
+
+    h.tap(center(pills(&sheet)[0]));
+    let browsed = h.settle();
+
+    // The browsed tab's panes carry whatever the last load recorded, and the
+    // session is in none of them — so no row claims the badge.
+    assert_eq!(
+        focused_row(&browsed),
+        None,
+        "a stale focus flag must not read as where the session is"
+    );
+}
+
+#[test]
+fn a_pane_commit_replays_the_reveal_from_the_top() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -1132,7 +1323,9 @@ fn a_tab_switch_replays_the_reveal_from_the_top() {
 
     let (before, after) = h.open_sheet();
     let sheet = added(&before.rounded, &after.rounded);
-    h.tap(center(pills(&sheet)[4]));
+    h.tap(center(pills(&sheet)[0]));
+    h.settle();
+    h.tap_pane_row(0);
     h.pump_until_values("the btop tab", |values| {
         values.iter().any(|v| v == BTOP_TITLE)
     });
@@ -1191,7 +1384,7 @@ fn the_scrim_dismisses_the_sheet_too() {
 // 6b — the sheet closes once, whatever happens during the close beat
 // ---------------------------------------------------------------------------
 //
-// A tab pill leaves the sheet up for `CLOSE_DELAY` so the selection visibly
+// A pane row leaves the sheet up for `CLOSE_DELAY` so the selection visibly
 // moves first, and the sheet stays fully interactive for that whole beat. Every
 // test here fires a *second* dismissal inside it and asserts the same two
 // things: the sheet closes once, and the page under it (the `/terminal` route
@@ -1199,7 +1392,7 @@ fn the_scrim_dismisses_the_sheet_too() {
 // afterwards. Before `ui::sheet`'s dismissal gate, each of these popped it.
 
 #[test]
-fn a_second_tab_pill_inside_the_close_beat_still_closes_the_sheet_only_once() {
+fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -1208,13 +1401,16 @@ fn a_second_tab_pill_inside_the_close_beat_still_closes_the_sheet_only_once() {
     let (before, after) = h.open_sheet();
     assert_eq!(h.depth(), floor + 1, "the sheet is up over the route");
     let sheet = added(&before.rounded, &after.rounded);
-    let pills = pills(&sheet);
-    // Reading order: the four space pills, then the tabs — `1 btop` first,
-    // `2 minefit-api` second. Both taps land inside the same close beat.
-    h.tap(center(pills[4]));
-    h.tap(center(pills[5]));
+    // Browse `1 btop`, commit its first pane, then — inside the same close
+    // beat — browse `2 minefit-api` and commit its first pane too.
+    h.tap(center(pills(&sheet)[0]));
+    h.settle();
+    h.tap_pane_row(0);
+    h.tap(center(pills(&sheet)[1]));
+    h.settle();
+    h.tap_pane_row(0);
 
-    // Latest tap wins: the second selection is the one that lands…
+    // Latest tap wins: the second commit is the one that lands…
     h.pump_until_values("the minefit tab", |values| {
         values.iter().any(|v| v == MINEFIT_TITLE)
     });
@@ -1243,9 +1439,8 @@ fn a_scrim_dismissal_inside_the_close_beat_leaves_the_route_alone() {
     let mut h = Harness::mount();
     let floor = h.push_route_floor();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-    h.tap(center(pills(&sheet)[4]));
+    let (_before, after) = h.open_sheet();
+    h.tap(center(pane_rows(&after)[0]));
     // The sheet is still up — and still dismissible — for the whole beat.
     h.tap(SCRIM_POINT);
     h.flush();
@@ -1255,7 +1450,7 @@ fn a_scrim_dismissal_inside_the_close_beat_leaves_the_route_alone() {
     assert_eq!(
         h.depth(),
         floor,
-        "…and the pill's late close found the sheet already gone"
+        "…and the row's late close found the sheet already gone"
     );
 }
 
@@ -1266,9 +1461,8 @@ fn the_close_button_inside_the_close_beat_leaves_the_route_alone() {
     let mut h = Harness::mount();
     let floor = h.push_route_floor();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-    h.tap(center(pills(&sheet)[4]));
+    let (_before, after) = h.open_sheet();
+    h.tap(center(pane_rows(&after)[0]));
     let close = h.close_disc();
     h.tap(close);
     h.flush();
@@ -1278,7 +1472,7 @@ fn the_close_button_inside_the_close_beat_leaves_the_route_alone() {
     assert_eq!(
         h.depth(),
         floor,
-        "…and the pill's late close found the sheet already gone"
+        "…and the row's late close found the sheet already gone"
     );
     assert!(
         !node_labels(&h.root).iter().any(|l| l == CLOSE),
@@ -1424,7 +1618,7 @@ fn make_read_only(h: &mut Harness) {
 fn a_read_only_credential_withdraws_the_sheets_three_create_affordances() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
     make_read_only(&mut h);
 
     let (before, after) = h.open_sheet();
@@ -1436,14 +1630,55 @@ fn a_read_only_credential_withdraws_the_sheets_three_create_affordances() {
         3 + 4,
         "a read-only session is offered no create: {sheet:?}"
     );
-    // The pills stay tappable — switching space or tab is a per-connection
-    // *view* change, not a mutation, so a read-only credential keeps both.
-    let btop = pills(&sheet)[3];
-    h.tap(center(btop));
-    h.pump_until_values("the btop tab", |values| {
-        values.iter().any(|v| v == BTOP_TITLE)
-    });
-    assert!(h.shows(BTOP_TITLE), "the card followed the pill");
+    // The pills stay tappable — browsing a tab reads what is already loaded,
+    // and switching a space is a per-connection *view* change.
+    h.tap(center(pills(&sheet)[3]));
+    h.settle();
+    assert!(h.shows(&format!("{SECTION_PANES}btop")), "the browse moved");
+}
+
+#[test]
+fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+    make_read_only(&mut h);
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+
+    // Committing inside the tab the session is on is `FocusPane` alone, which
+    // the wire allows a read-only token — so it lands, and the sheet closes.
+    h.tap(center(pane_rows(&after)[1]));
+    h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert!(
+        !app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == READ_ONLY_TOAST),
+        "a same-tab commit is not a mutation: {:?}",
+        app_toasts().pending_untracked()
+    );
+
+    // A commit that has to move tabs first is `GoToTab`, which is MUTATING —
+    // so the row stays on screen and says why, and nothing moves.
+    h.open_sheet();
+    h.tap(center(pills(&sheet)[0]));
+    h.settle();
+    h.tap_pane_row(0);
+    h.pump_for(2 * CLOSE_DELAY);
+
+    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
+    assert!(h.shows(DEVBOX_TITLE), "…and the card never moved");
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == READ_ONLY_TOAST),
+        "the row says why: {:?}",
+        app_toasts().pending_untracked()
+    );
 }
 
 #[test]

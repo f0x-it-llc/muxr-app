@@ -2,7 +2,8 @@
 //! `examples/huddle`'s `domain/use_cases/` convention).
 //!
 //! Four, covering everything `docs/terminal.html` (v2) can do:
-//! [`LoadWorkspace`] (arrival), [`SwitchTab`] (a sheet tab pill),
+//! [`LoadWorkspace`] (arrival, and every reload a space switch drives),
+//! [`SwitchTab`] (the tab step of the sheet's pane commit),
 //! [`RenameAttachedSession`] and [`DetachSession`] (the app bar's overflow
 //! menu). Each is a thin, injected-repository
 //! [`UseCase`](clean_signals::UseCase) with no logic of its own beyond
@@ -27,6 +28,6 @@ pub mod rename_session;
 pub mod switch_tab;
 
 pub use detach_session::DetachSession;
-pub use load_workspace::LoadWorkspace;
+pub use load_workspace::{LoadWorkspace, WorkspaceQuery};
 pub use rename_session::RenameAttachedSession;
 pub use switch_tab::SwitchTab;

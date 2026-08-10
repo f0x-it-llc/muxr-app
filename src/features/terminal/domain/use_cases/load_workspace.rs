@@ -11,8 +11,30 @@ use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::terminal::domain::entities::Workspace;
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
-/// Loads the whole screen. `Params` is the attached session's id (from
-/// `/terminal?session=<id>`), or `None` for a bare `/terminal`.
+/// What one load addresses — [`LoadWorkspace`]'s params.
+///
+/// Two facts, not one, because the two reads this use case makes are addressed
+/// differently: the session *name* needs an id, and the space list needs to
+/// know whether this backend has spaces at all. Only herdr does — zellij
+/// answers an always-empty list (the wire's own `GetSpaces` documents it), so
+/// a zellij session's load skips that round trip entirely rather than paying
+/// for a guaranteed-empty answer on every arrival and every space switch.
+///
+/// The caller decides: reading a backend off a session id is
+/// `presentation`'s own one-accessor job
+/// ([`TerminalController::has_spaces`](crate::features::terminal::presentation::controller::TerminalController::has_spaces)),
+/// so this stays a plain flag and this layer stays free of the id convention.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceQuery {
+    /// The attached session's id (`/terminal?session=<id>`), or `None` for a
+    /// bare `/terminal` — what the session *name* is looked up by.
+    pub session_id: Option<String>,
+    /// Whether to read the space list at all — see the [type docs](Self).
+    pub with_spaces: bool,
+}
+
+/// Loads the whole screen. `Params` is a [`WorkspaceQuery`]: which session to
+/// name, and whether this backend has spaces to list.
 ///
 /// **Two injected repositories, on purpose.** Spaces/tabs/lines come from this
 /// feature's own [`TerminalRepository`]; the session *name* comes from the
@@ -57,18 +79,22 @@ impl LoadWorkspace {
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 impl UseCase for LoadWorkspace {
-    type Params = Option<String>;
+    type Params = WorkspaceQuery;
     type Output = Workspace;
     type Failure = AppFailure;
 
-    async fn execute(&self, session_id: Option<String>) -> Result<Workspace, AppFailure> {
-        let spaces = self.terminal.list_spaces().await?;
+    async fn execute(&self, query: WorkspaceQuery) -> Result<Workspace, AppFailure> {
+        let spaces = if query.with_spaces {
+            self.terminal.list_spaces().await?
+        } else {
+            Vec::new()
+        };
         let tabs = self.terminal.list_tabs().await?;
         let lines = match tabs.iter().find(|tab| tab.active).or_else(|| tabs.first()) {
             Some(tab) => self.terminal.tab_lines(tab.key.clone()).await?,
             None => Vec::new(),
         };
-        let session_name = self.session_name(session_id).await?;
+        let session_name = self.session_name(query.session_id).await?;
         Ok(Workspace {
             spaces,
             tabs,

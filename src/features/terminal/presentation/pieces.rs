@@ -14,7 +14,7 @@
 //! | [`sheet_top_row`] | `.sheet-toprow` — `panes & tabs` + the round close button |
 //! | [`section_label`] | `.sheet-section-lbl` — the amber `//` prefix and its dim label |
 //! | [`pill`] | `.pill`, `.pill.sel`, `.pill.add` |
-//! | [`pane_item`] | `.pane-item` — the mark box, the name/path pair, the `focused` chip |
+//! | [`pane_item`] | `.pane-item` — one pane's mark box, its title/cwd pair, the `focused` chip |
 //! | [`new_pane_row`] | `.new-pane-btn` — the dashed `+ new pane · long-press for floating` |
 //!
 //! # Colours: the canonical token wins over the mock's hex
@@ -50,7 +50,7 @@ use frust::{
     inflexible, scroll_view, text,
 };
 
-use crate::features::terminal::domain::entities::{TabEntry, TermLine};
+use crate::features::terminal::domain::entities::{PaneEntry, TermLine};
 use crate::ui::topbar::icon_button;
 
 use super::chrome::{
@@ -475,15 +475,36 @@ pub(super) fn section_label<State: 'static>(
     ]))
 }
 
-/// Which of `.pill`'s three states a pill is in.
+/// Which of `.pill`'s states a pill is in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PillState {
     /// `.pill` — raised fill, bright hairline, muted ink.
     Idle,
     /// `.pill.sel` — the amber trio.
     Selected,
+    /// The tab the **session** is on while the sheet is browsing another one.
+    ///
+    /// The one state with no `terminal.html` counterpart: the mock's sheet had
+    /// a single notion of "the tab", and the sheet now has two (the browsed one
+    /// and the session's — see
+    /// [`TerminalController::browsed_tab`](super::controller::TerminalController::browsed_tab)).
+    /// Deliberately the *smallest* thing that keeps them distinguishable: the
+    /// selected pill's amber edge and ink over an ordinary raised fill, so the
+    /// browsed pill is still the only one wearing the full amber wash.
+    Active,
     /// `.pill.add` — a dashed hairline and the dimmest ink.
     Add,
+}
+
+/// A pill's `(fill, border, ink)` for `state` — split out of [`pill`] so the
+/// four states can be asserted to actually differ.
+fn pill_tones(state: PillState, colors: &Palette) -> (Color, Color, Color) {
+    match state {
+        PillState::Idle => (colors.raised, colors.outline, colors.fg_muted),
+        PillState::Selected => (colors.amber_faint, colors.amber_border, colors.amber),
+        PillState::Active => (colors.raised, colors.amber_border, colors.amber),
+        PillState::Add => (colors.raised, colors.outline, colors.fg_dim),
+    }
 }
 
 /// One `.pill`. The label is content text, which is why the add pills' `+` is
@@ -496,11 +517,7 @@ pub(super) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
     on_tap: F,
 ) -> AnyView<State> {
     let theme = active_theme();
-    let (fill, border, ink) = match state {
-        PillState::Idle => (colors.raised, colors.outline, colors.fg_muted),
-        PillState::Selected => (colors.amber_faint, colors.amber_border, colors.amber),
-        PillState::Add => (colors.raised, colors.outline, colors.fg_dim),
-    };
+    let (fill, border, ink) = pill_tones(state, colors);
     any(GestureDetector(
         term_box(
             Padding(
@@ -516,16 +533,28 @@ pub(super) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
     .on_tap(on_tap))
 }
 
-/// `.pane-item` — the mark box, the name/path pair, and the `focused` chip.
+/// `.pane-item` — one pane's mark box, its title/cwd pair, and the `focused`
+/// chip when it is the one the session is on.
 ///
 /// The mark is [`PANE_MARK`], an app-supplied vector: the mock sets `▤` as
 /// text, which is not in the bundled Glyph faces (see
 /// `super::chrome::PANE_MARK`).
-pub(super) fn pane_item<State: 'static>(tab: &TabEntry, colors: &Palette) -> AnyView<State> {
+///
+/// **`focused` is the caller's answer, not the pane's own flag.** A pane in a
+/// tab the sheet is merely *browsing* carries whatever the last load recorded,
+/// which is not where the session is now — so the sheet only passes `true` for
+/// the tab it is actually on (`pages`' own `sheet_body`), and a browsed tab's
+/// rows all read unfocused rather than claiming a stale badge.
+///
+/// An **exited** pane's title takes the dim ink instead of the bright one — the
+/// same muted tier every other "this is no longer live" run in the app uses.
+pub(super) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
+    pane: &PaneEntry,
+    focused: bool,
+    colors: &Palette,
+    on_tap: F,
+) -> AnyView<State> {
     let theme = active_theme();
-    // The mock draws exactly one pane and marks it focused; when a real pane
-    // tree lands this becomes per-pane.
-    let focused = true;
     let (mark_fill, mark_ink) = if focused {
         (colors.amber_faint, colors.amber)
     } else {
@@ -536,56 +565,65 @@ pub(super) fn pane_item<State: 'static>(tab: &TabEntry, colors: &Palette) -> Any
     } else {
         colors.outline
     };
+    let title_ink = if pane.exited {
+        colors.fg_dim
+    } else {
+        colors.fg
+    };
 
     let info = column::<State>(vec![
-        any(text(tab.pane_name.clone()).style(sized(
+        any(text(pane.title.clone()).style(sized(
             &theme.type_scale.body_small,
             PANE_NAME_SIZE,
-            colors.fg,
+            title_ink,
         ))),
-        any(text(tab.pane_path.clone()).style(sized(
+        any(text(pane.cwd.clone()).style(sized(
             &theme.type_scale.label_small,
             PANE_PATH_SIZE,
             colors.fg_dim,
         ))),
     ]);
 
-    let chip = term_box(
-        Padding(
-            EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
-            text(FOCUSED_CHIP).style(sized(
-                &theme.type_scale.label_small,
-                CHIP_SIZE,
-                colors.amber,
+    let mut children = vec![
+        inflexible(term_box(
+            SizedBox::<State>(Some(PANE_ICON_BOX), Some(PANE_ICON_BOX)).child(Align(
+                Alignment::CENTER,
+                icon(PANE_MARK).size(PANE_ICON).color(mark_ink),
             )),
-        ),
-        colors.amber_faint,
-        RADIUS_FULL,
-    )
-    .border(colors.amber_border);
-
-    any(term_box(
-        Padding(
-            EdgeInsets::symmetric(PANE_PAD_X, PANE_PAD_Y),
-            row(vec![
-                inflexible(term_box(
-                    SizedBox::<State>(Some(PANE_ICON_BOX), Some(PANE_ICON_BOX)).child(Align(
-                        Alignment::CENTER,
-                        icon(PANE_MARK).size(PANE_ICON).color(mark_ink),
+            mark_fill,
+            theme.shape.extra_small,
+        )),
+        h_gap(PANE_GAP),
+        flexible(1, info),
+    ];
+    if focused {
+        children.push(h_gap(PANE_GAP));
+        children.push(inflexible(
+            term_box(
+                Padding(
+                    EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
+                    text(FOCUSED_CHIP).style(sized(
+                        &theme.type_scale.label_small,
+                        CHIP_SIZE,
+                        colors.amber,
                     )),
-                    mark_fill,
-                    theme.shape.extra_small,
-                )),
-                h_gap(PANE_GAP),
-                flexible(1, info),
-                h_gap(PANE_GAP),
-                inflexible(chip),
-            ]),
-        ),
-        colors.base,
-        theme.shape.small,
+                ),
+                colors.amber_faint,
+                RADIUS_FULL,
+            )
+            .border(colors.amber_border),
+        ));
+    }
+
+    any(GestureDetector(
+        term_box(
+            Padding(EdgeInsets::symmetric(PANE_PAD_X, PANE_PAD_Y), row(children)),
+            colors.base,
+            theme.shape.small,
+        )
+        .border(border),
     )
-    .border(border))
+    .on_tap(on_tap))
 }
 
 /// `.new-pane-btn` — the dashed, centred row that closes the sheet's pane
@@ -670,6 +708,35 @@ mod tests {
         assert_eq!(colors.amber_faint, primary.with_alpha(AMBER_FAINT_ALPHA));
         assert_eq!(colors.amber_border, primary.with_alpha(AMBER_BORDER_ALPHA));
         assert_eq!(colors.amber_dim, theme.scheme().primary_fixed_dim);
+    }
+
+    #[test]
+    fn every_pill_state_is_visibly_a_different_pill() {
+        // The sheet can show a browsed tab *and* the tab the session is on at
+        // once, so no two states may resolve to the same trio — an `Active`
+        // pill that painted like an `Idle` one would hide where the session is.
+        let colors = palette(&Theme::glyph_baseline());
+        let tones: Vec<(Color, Color, Color)> = [
+            PillState::Idle,
+            PillState::Selected,
+            PillState::Active,
+            PillState::Add,
+        ]
+        .into_iter()
+        .map(|state| pill_tones(state, &colors))
+        .collect();
+        for (i, a) in tones.iter().enumerate() {
+            for b in tones.iter().skip(i + 1) {
+                assert_ne!(a, b, "two pill states paint the same");
+            }
+        }
+        // …and the browsed pill is the only one wearing the full amber wash.
+        assert_eq!(tones[1].0, colors.amber_faint);
+        assert_eq!(tones[2].0, colors.raised);
+        assert_eq!(
+            tones[2].1, colors.amber_border,
+            "…while still reading amber"
+        );
     }
 
     #[test]

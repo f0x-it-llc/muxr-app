@@ -66,6 +66,30 @@
 //! are emitted on the very same [`ControllerCore`] sink `run` funnels into.
 //! The *reads* around them still go through their use cases, so the screen's
 //! one loading/activity story is unchanged.
+//!
+//! # Browsing the sheet is local; only a pane tap commits
+//!
+//! The "panes & tabs" sheet is a **browse-then-commit** surface, so it has two
+//! notions of "the tab": [`active_tab`](TerminalController::active_tab) is the
+//! tab the *session* is on (what the card shows), and
+//! [`browsed_tab`](TerminalController::browsed_tab) is the tab the sheet is
+//! *looking at*. Tapping a tab pill moves the second one and nothing else —
+//! no RPC, no reattach, no card change — because
+//! [`TabEntry::panes`](crate::features::terminal::domain::entities::TabEntry::panes)
+//! already carries every tab's panes from the one load. The two are reconciled
+//! by [`commit_pane`](TerminalController::commit_pane), the sheet's only
+//! committing path: it moves the session (a tab step when the two differ, then
+//! the pane focus itself) and only then may the sheet close.
+//!
+//! # One backend discriminator, two consequences
+//!
+//! A session id is `<backend>:<name>`, and this screen reads exactly one fact
+//! off it ([`is_herdr`]): whether the session runs on herdr. Two behaviours
+//! follow, and neither re-parses the id — spaces exist only on herdr
+//! ([`has_spaces`](TerminalController::has_spaces), which is also what keeps a
+//! zellij load from round-tripping for a guaranteed-empty list), and only
+//! herdr's stream has to be re-opened for a focus move to become visible
+//! ([`reattaches_on_switch`](TerminalController::reattaches_on_switch)).
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -83,14 +107,14 @@ use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::data::feeds::grpc_feed::{FeedStatus, GrpcTerminalFeed};
 use crate::features::terminal::domain::entities::{
-    RenameRequest, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
+    PaneEntry, RenameRequest, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
 };
 use crate::features::terminal::domain::feed::TerminalFeed;
 use crate::features::terminal::domain::repositories::{
     PreferencesRepository, SessionsRepository, TerminalRepository,
 };
 use crate::features::terminal::domain::use_cases::{
-    DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab,
+    DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
 };
 
 use super::term;
@@ -115,8 +139,13 @@ pub struct TerminalController {
     pub spaces: RwSignal<Vec<Space>>,
     /// The sheet's `tabs` pill row.
     pub tabs: RwSignal<Vec<TabEntry>>,
-    /// The key of the tab the card is showing.
+    /// The key of the tab the card is showing — the tab the *session* is on.
     pub active_tab: RwSignal<String>,
+    /// The key of the tab the sheet is *looking at* — see the [module
+    /// docs](self)' "Browsing the sheet is local". Seeded from
+    /// [`active_tab`](Self::active_tab) on every load and every sheet open,
+    /// and moved by [`browse_tab`](Self::browse_tab) alone.
+    pub browsed_tab: RwSignal<String>,
     /// The active tab's lines — what the card's body prints.
     pub lines: RwSignal<Vec<TermLine>>,
     /// The attached session's current name, for the rename dialog's seed.
@@ -265,6 +294,7 @@ impl TerminalController {
             spaces: RwSignal::new(Vec::new()),
             tabs: RwSignal::new(Vec::new()),
             active_tab: RwSignal::new(String::new()),
+            browsed_tab: RwSignal::new(String::new()),
             lines: RwSignal::new(Vec::new()),
             session_name: RwSignal::new(None),
             loaded: RwSignal::new(false),
@@ -298,10 +328,20 @@ impl TerminalController {
 
     /// Load the whole screen (spaces, tabs, the active tab's lines, the
     /// attached session's name) and play the reveal.
+    ///
+    /// The space list is only read on a backend that has one — see
+    /// [`has_spaces`](Self::has_spaces). Landing also re-seeds
+    /// [`browsed_tab`](Self::browsed_tab): a load is the one moment the sheet
+    /// has nothing of its own to preserve, and a browse pointed at a tab this
+    /// load no longer carries would list no panes at all.
     pub async fn load(&self) {
+        let query = WorkspaceQuery {
+            session_id: self.session_id.clone(),
+            with_spaces: self.has_spaces(),
+        };
         let Ok(workspace) = self
             .core
-            .run(&self.load, self.session_id.clone(), RunOptions::default())
+            .run(&self.load, query, RunOptions::default())
             .await
         else {
             return;
@@ -320,22 +360,42 @@ impl TerminalController {
             .unwrap_or_default();
         self.spaces.set(spaces);
         self.tabs.set(tabs);
-        self.active_tab.set(active);
+        self.active_tab.set(active.clone());
+        self.browsed_tab.set(active);
         self.lines.set(lines);
         self.session_name.set(session_name);
         self.loaded.set(true);
         self.replay_reveal();
     }
 
-    /// Switch the card to the tab keyed `key`: the session is told to focus
+    /// Point the sheet at the tab keyed `key` — see the [module docs](self)'
+    /// "Browsing the sheet is local".
+    ///
+    /// Deliberately **synchronous and repository-free**: every tab's panes
+    /// arrived with the load, so browsing one is a signal write and nothing
+    /// else. Nothing about the session moves, so the card, the stream and the
+    /// server's own focus all stay exactly where they were.
+    pub fn browse_tab(&self, key: String) {
+        self.browsed_tab.set(key);
+    }
+
+    /// Point the sheet back at the tab the session is on — what opening the
+    /// sheet does, so a browse never survives a dismissal.
+    pub fn begin_browsing(&self) {
+        self.browsed_tab.set(self.active_tab.get_untracked());
+    }
+
+    /// Move the session to the tab keyed `key`: the session is told to focus
     /// that tab, its lines replace the body's, and the reveal replays from the
     /// top (the mock's own behaviour — `renderTab` ends in `playReveal`).
     ///
-    /// Switching to the tab already showing still replays, which is what makes
-    /// this the one path a "replay" affordance would reuse.
-    ///
-    /// Answers whether the attached **stream** must now be re-attached — see
-    /// [`reattaches_on_switch`]: the caller owns the feed, this does not.
+    /// The **tab step of a cross-tab pane commit**
+    /// ([`commit_pane`](Self::commit_pane)), which is its one caller: a tab
+    /// pill no longer navigates anything on its own (see the [module
+    /// docs](self)' "Browsing the sheet is local"). Answers whether the move
+    /// landed; whether the attached *stream* must be re-opened on top of it is
+    /// [`reattaches_on_switch`](Self::reattaches_on_switch)'s answer, since the
+    /// caller owns the feed and this does not.
     pub async fn switch_tab(&self, key: String) -> bool {
         let Some(tab_id) = self.tab_id_for(&key) else {
             return false;
@@ -353,32 +413,122 @@ impl TerminalController {
             return false;
         };
         self.active_tab.set(key.clone());
+        self.browsed_tab.set(key.clone());
         self.tabs.update_active(&key);
         self.lines.set(lines);
         self.replay_reveal();
-        self.reattaches_on_switch()
+        true
     }
 
-    /// Make the space with [`Space::id`] `id` the active one, moving the
-    /// sheet's selection once the backend has taken it.
+    /// Commit the sheet's browse: focus the pane `pane_id` of the tab keyed
+    /// `tab_key` (`is_plugin` picking the wire's id namespace, as everywhere
+    /// else a pane is addressed).
+    ///
+    /// The sheet's **one** committing path, in the order a backend needs it:
+    ///
+    /// 1. a tab move first, when the browsed tab is not the one the session is
+    ///    on — a pane can only be focused inside the focused tab;
+    /// 2. then the pane focus itself, **except on herdr**, where focus *is* the
+    ///    attach (its relay carries only the focused pane, so the re-attach the
+    ///    caller performs is what moves it) and the RPC would be a no-op;
+    /// 3. then the focused flag moves in this screen's own tab state, so the
+    ///    sheet's badge is already right the instant it is reopened rather than
+    ///    waiting for the next load.
+    ///
+    /// Answers whether the commit landed. A step the backend refused stops the
+    /// sequence, emits on the usual failure sink, and writes **no** optimistic
+    /// state — so a caller keeps the sheet open on `false`.
+    pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
+        if tab_key != self.active_tab.get_untracked() && !self.switch_tab(tab_key.clone()).await {
+            return false;
+        }
+        if !self.is_herdr_session()
+            && !self
+                .tell(self.terminal.focus_pane(pane_id, is_plugin))
+                .await
+        {
+            return false;
+        }
+        self.focus_pane_locally(&tab_key, pane_id, is_plugin);
+        true
+    }
+
+    /// Move the focused flag onto the pane `pane_id` of the tab keyed
+    /// `tab_key`, in this screen's own state — the optimistic half of
+    /// [`commit_pane`](Self::commit_pane).
+    ///
+    /// One focused pane per tab, whatever layer it is on: the wire flags focus
+    /// per layer (a tiled *and* a floating pane can both carry it), but the
+    /// sheet shows one badge and the commit just moved the user to exactly one
+    /// pane, so the flag is cleared across the tab and set on the tapped pane.
+    /// The next load replaces this with the backend's own answer.
+    fn focus_pane_locally(&self, tab_key: &str, pane_id: u32, is_plugin: bool) {
+        let tabs = self
+            .tabs
+            .get_untracked()
+            .into_iter()
+            .map(|tab| {
+                if tab.key != tab_key {
+                    return tab;
+                }
+                let panes = tab
+                    .panes
+                    .into_iter()
+                    .map(|pane| PaneEntry {
+                        focused: pane.id == pane_id && pane.is_plugin == is_plugin,
+                        ..pane
+                    })
+                    .collect();
+                TabEntry { panes, ..tab }
+            })
+            .collect();
+        self.tabs.set(tabs);
+    }
+
+    /// Make the space with [`Space::id`] `id` the active one and reload the
+    /// tab world behind it.
     ///
     /// A **view** switch, not a mutation (see [`TerminalRepository::switch_space`]):
     /// which space this connection is looking at is per-connection state, so
     /// this stays available to a read-only credential.
+    ///
+    /// The reload is the point: a space *is* a different set of tabs, so
+    /// switching one without re-reading them left the sheet listing the tabs of
+    /// the space it had just left. [`load`](Self::load) is that read — it also
+    /// re-seeds the space selection from the backend's own answer rather than
+    /// from a local guess, and points the sheet's browse at the new space's
+    /// active tab.
     pub async fn select_space(&self, id: String) {
-        if !self.tell(self.terminal.switch_space(id.clone())).await {
+        if !self.tell(self.terminal.switch_space(id)).await {
             return;
         }
-        let spaces = self
-            .spaces
-            .get_untracked()
-            .into_iter()
-            .map(|space| Space {
-                selected: space.id == id,
-                ..space
-            })
-            .collect();
-        self.spaces.set(spaces);
+        self.load().await;
+    }
+
+    /// Whether this session's backend has **spaces** at all — the one fact the
+    /// sheet gates its whole spaces section on.
+    ///
+    /// Only herdr does: zellij's own `GetSpaces` answers an always-empty list
+    /// (`proto/muxr.proto`), so a zellij sheet draws no spaces section and a
+    /// zellij load skips that round trip entirely. Read off the session id's
+    /// `<backend>:<name>` convention through the single discriminator this
+    /// screen keeps ([`is_herdr`]) — see the [module docs](self)' "One backend
+    /// discriminator".
+    pub fn has_spaces(&self) -> bool {
+        self.is_herdr_session()
+    }
+
+    /// Whether the attached session runs on herdr — the discriminator itself,
+    /// spelled once so no call site re-parses the id.
+    ///
+    /// Answers off [`session_id`](Self::session_id) rather than
+    /// [`attached_session`](Self::attached_session): which backend a session
+    /// runs on is a fact about the session, not about whether a stream happens
+    /// to be open onto it (which is what
+    /// [`reattaches_on_switch`](Self::reattaches_on_switch) additionally
+    /// needs).
+    fn is_herdr_session(&self) -> bool {
+        self.session_id.as_deref().is_some_and(is_herdr)
     }
 
     /// The backend id of the tab keyed `key`, if the sheet is still showing
@@ -532,12 +682,20 @@ impl TerminalController {
         }
     }
 
-    /// Whether a tab switch on this session has to be followed by a fresh
-    /// attach — see [`reattaches_on_switch`].
+    /// Whether a tab or pane switch on this session has to be followed by a
+    /// fresh attach.
+    ///
+    /// herdr's relay carries **only the focused pane** on an `AttachTerminal`
+    /// stream, so a focus move the RPC performs is not something the open
+    /// stream starts reflecting — the client has to attach again to be handed
+    /// the new pane's output. zellij's relay carries the session, so its stream
+    /// follows a switch on its own and a re-attach would only cost a
+    /// screen-blanking round trip.
+    ///
+    /// Reads [`attached_session`](Self::attached_session), not merely the
+    /// backend: a screen with no stream open has nothing to re-open.
     pub fn reattaches_on_switch(&self) -> bool {
-        self.attached_session()
-            .as_deref()
-            .is_some_and(reattaches_on_switch)
+        self.attached_session().as_deref().is_some_and(is_herdr)
     }
 
     /// Re-read the terminal-appearance prefs and update
@@ -593,9 +751,8 @@ impl TerminalController {
     }
 }
 
-/// The backend prefix of a `<backend>:<name>` session id whose tab/pane switch
-/// only takes effect on a **fresh** attach — see [`reattaches_on_switch`].
-const REATTACHING_BACKEND: &str = "herdr:";
+/// The backend prefix of a `<backend>:<name>` session id — see [`is_herdr`].
+const HERDR_BACKEND: &str = "herdr:";
 
 /// Drop the current `AttachTerminal` stream and open a fresh one at the grid's
 /// current size — [`LiveSession::reattach`]'s shareable form.
@@ -605,22 +762,16 @@ const REATTACHING_BACKEND: &str = "herdr:";
 /// sees `&mut AppState` and can never reach the screen's own state.
 pub type Reattach = Rc<dyn Fn()>;
 
-/// Whether switching tab or pane on the session with id `session` requires the
-/// attached stream to be dropped and re-opened.
-///
-/// herdr's relay carries **only the focused pane** on an `AttachTerminal`
-/// stream, so a focus move the RPC performs is not something the open stream
-/// starts reflecting — the client has to attach again to be handed the new
-/// pane's output. zellij's relay carries the session, so its stream follows a
-/// switch on its own and a re-attach would only cost a screen-blanking
-/// round trip.
+/// Whether the session with id `session` runs on the **herdr** backend — this
+/// screen's one backend discriminator (see the [module docs](self)' "One
+/// backend discriminator", which records both behaviours that hang off it).
 ///
 /// Read off the id's own `<backend>:<name>` convention (`SessionInfo.id`'s own
 /// documentation), which is the same fact the `sessions` feature reconciles a
 /// rename against — no extra round trip, and one spelling of the convention
 /// per feature.
-fn reattaches_on_switch(session: &str) -> bool {
-    session.starts_with(REATTACHING_BACKEND)
+fn is_herdr(session: &str) -> bool {
+    session.starts_with(HERDR_BACKEND)
 }
 
 /// The live pane's byte source, held **concretely** so the half of it that is
@@ -982,9 +1133,17 @@ mod tests {
         block_on(c.load());
 
         assert!(c.loaded.get_untracked());
-        assert_eq!(c.spaces.get_untracked().len(), 3);
+        assert!(
+            c.spaces.get_untracked().is_empty(),
+            "a zellij session has no spaces, and its load never asks for any"
+        );
         assert_eq!(c.tabs.get_untracked().len(), 4);
         assert_eq!(c.active_tab.get_untracked(), "devbox");
+        assert_eq!(
+            c.browsed_tab.get_untracked(),
+            "devbox",
+            "the sheet opens on the tab the session is on"
+        );
         assert_eq!(
             c.active_tab_entry().map(|t| t.pane_title),
             Some("ed@devbox: ~".to_string())
@@ -994,6 +1153,22 @@ mod tests {
             Some("ed@devbox:~$ systemctl status muxrd".to_string())
         );
         assert_eq!(c.session_name.get_untracked().as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn only_a_herdr_session_reads_the_space_list() {
+        let herdr = controller(Some("herdr:work"));
+        block_on(herdr.load());
+        assert!(herdr.has_spaces());
+        assert_eq!(herdr.spaces.get_untracked().len(), 3);
+
+        let zellij = controller(Some("zellij:dev"));
+        block_on(zellij.load());
+        assert!(!zellij.has_spaces());
+        assert!(zellij.spaces.get_untracked().is_empty());
+
+        // A bare `/terminal` has no backend at all, so it has no spaces either.
+        assert!(!controller(None).has_spaces());
     }
 
     #[test]
@@ -1042,7 +1217,8 @@ mod tests {
 
     #[test]
     fn selecting_a_space_moves_the_selection() {
-        let c = controller(None);
+        // Spaces are herdr's, so every space test attaches to one.
+        let c = controller(Some("herdr:work"));
         block_on(c.load());
 
         block_on(c.select_space("cupline".to_string()));
@@ -1059,7 +1235,7 @@ mod tests {
 
     #[test]
     fn a_space_switch_the_backend_refuses_leaves_the_selection_where_it_was() {
-        let c = controller(None);
+        let c = controller(Some("herdr:work"));
         block_on(c.load());
 
         block_on(c.select_space("no-such-space".to_string()));
@@ -1163,9 +1339,9 @@ mod tests {
     fn only_a_herdr_session_re_attaches_on_a_switch() {
         // The stream carries the whole session on zellij and only the focused
         // pane on herdr, so only one of the two has to attach again.
-        assert!(reattaches_on_switch("herdr:work"));
-        assert!(!reattaches_on_switch("zellij:dev"));
-        assert!(!reattaches_on_switch("dev"));
+        assert!(is_herdr("herdr:work"));
+        assert!(!is_herdr("zellij:dev"));
+        assert!(!is_herdr("dev"));
 
         let c = controller(Some("herdr:work"));
         assert!(
@@ -1177,17 +1353,16 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_switch_reports_whether_the_stream_must_be_re_opened() {
-        let zellij = controller(Some("zellij:dev"));
-        zellij.attach_live();
-        block_on(zellij.load());
-        assert!(!block_on(zellij.switch_tab("btop".to_string())));
-        assert_eq!(zellij.active_tab.get_untracked(), "btop");
-
-        let herdr = controller(Some("herdr:work"));
-        herdr.attach_live();
-        block_on(herdr.load());
-        assert!(block_on(herdr.switch_tab("btop".to_string())));
+    fn a_tab_switch_reports_whether_it_landed() {
+        let c = controller(Some("zellij:dev"));
+        block_on(c.load());
+        assert!(block_on(c.switch_tab("btop".to_string())));
+        assert_eq!(c.active_tab.get_untracked(), "btop");
+        assert_eq!(
+            c.browsed_tab.get_untracked(),
+            "btop",
+            "the browse follows a move it drove itself"
+        );
     }
 
     #[test]
@@ -1221,9 +1396,9 @@ mod tests {
 
     #[test]
     fn a_minted_connection_id_re_binds_the_repository_and_an_unchanged_one_does_not() {
-        // The repository is the only observer of a re-bind, so a counting
+        // The repository is the only observer of a re-bind, so a recording
         // stand-in is what makes "wrote once, not once per tick" assertable.
-        let repository = Arc::new(CountingRepository::default());
+        let repository = Arc::new(RecordingRepository::default());
         let c = TerminalController::new(
             Arc::clone(&repository) as Arc<dyn TerminalRepository + Send + Sync>,
             Arc::new(MockSessionsRepository::seeded()),
@@ -1249,18 +1424,50 @@ mod tests {
         assert_eq!(repository.last_binding(), Some("conn-2".to_string()));
     }
 
-    /// A [`TerminalRepository`] that answers nothing and counts its
-    /// [`bind`](TerminalRepository::bind)s — the one call
+    /// A [`TerminalRepository`] that answers a two-tab, two-panes-apiece world
+    /// and **records every call it is asked to make**, so a sheet flow's own
+    /// RPC sequence — which calls, in which order, and which never happened at
+    /// all — is assertable rather than inferred from the state it left behind.
+    ///
+    /// One double for both jobs: it also counts
+    /// [`bind`](TerminalRepository::bind)s, the one call
     /// [`TerminalController::mirror_link`] makes that is observable at all.
     #[derive(Default)]
-    struct CountingRepository {
-        binds: AtomicU64,
+    struct RecordingRepository {
+        calls: Mutex<Vec<String>>,
         last: Mutex<Option<String>>,
+        /// The one verb that answers a failure instead of landing — how the
+        /// "a refused step writes nothing" tests are driven.
+        refuse: Mutex<Option<String>>,
     }
 
-    impl CountingRepository {
-        fn binds(&self) -> u64 {
-            self.binds.load(Ordering::Relaxed)
+    impl RecordingRepository {
+        /// Every call seen, oldest first.
+        fn calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        /// Only the calls that *move* something — the reads a load makes are
+        /// noise in a sequence assertion about a commit.
+        fn actions(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter(|call| {
+                    !call.starts_with("bind")
+                        && !call.starts_with("list_")
+                        && !call.starts_with("tab_lines")
+                })
+                .collect()
+        }
+
+        fn binds(&self) -> usize {
+            self.calls()
+                .iter()
+                .filter(|call| call.starts_with("bind"))
+                .count()
         }
 
         fn last_binding(&self) -> Option<String> {
@@ -1269,39 +1476,321 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
         }
+
+        /// Make `verb` answer [`AppFailure::Internal`] from now on.
+        fn refuse(&self, verb: &str) {
+            *self.refuse.lock().unwrap_or_else(PoisonError::into_inner) = Some(verb.to_string());
+        }
+
+        /// Record `call` and answer whatever the refusal table says.
+        fn record(&self, call: String) -> Result<(), AppFailure> {
+            let refused = self
+                .refuse
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref()
+                .is_some_and(|verb| call.starts_with(verb));
+            self.calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(call.clone());
+            if refused {
+                return Err(AppFailure::Internal(format!("{call} refused")));
+            }
+            Ok(())
+        }
+    }
+
+    /// One recorded tab: `key`/`tab_id`, and two panes whose ids are
+    /// `tab_id * 10` (focused) and one past it.
+    fn recorded_tab(index: u32, key: &str, active: bool) -> TabEntry {
+        let base = index * 10;
+        let pane = |id: u32, focused: bool| PaneEntry {
+            id,
+            title: format!("{key}-{id}"),
+            cwd: format!("/srv/{key}"),
+            focused,
+            floating: false,
+            exited: false,
+            is_plugin: false,
+            is_fullscreen: false,
+            x: 0,
+            y: 0,
+            rows: 24,
+            cols: 80,
+        };
+        TabEntry {
+            index,
+            key: key.to_string(),
+            tab_id: u64::from(index),
+            label: key.to_string(),
+            pane_title: key.to_string(),
+            pane_name: key.to_string(),
+            pane_path: format!("/srv/{key}"),
+            panes: vec![pane(base, true), pane(base + 1, false)],
+            active,
+        }
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
     #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
-    impl TerminalRepository for CountingRepository {
+    impl TerminalRepository for RecordingRepository {
         fn bind(&self, _session: Option<String>, connection_id: Option<String>) {
-            self.binds.fetch_add(1, Ordering::Relaxed);
+            let _ = self.record(format!(
+                "bind({})",
+                connection_id.clone().unwrap_or_default()
+            ));
             *self.last.lock().unwrap_or_else(PoisonError::into_inner) = connection_id;
         }
 
         async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
-            Ok(Vec::new())
+            self.record("list_spaces".to_string())?;
+            Ok(vec![
+                Space {
+                    id: "ws-1".to_string(),
+                    name: "one".to_string(),
+                    selected: true,
+                },
+                Space {
+                    id: "ws-2".to_string(),
+                    name: "two".to_string(),
+                    selected: false,
+                },
+            ])
         }
 
         async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+            self.record("list_tabs".to_string())?;
+            Ok(vec![
+                recorded_tab(1, "alpha", true),
+                recorded_tab(2, "beta", false),
+            ])
+        }
+
+        async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
+            self.record(format!("tab_lines({key})"))?;
             Ok(Vec::new())
         }
 
-        async fn tab_lines(&self, _key: String) -> Result<Vec<TermLine>, AppFailure> {
-            Ok(Vec::new())
+        async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+            self.record(format!("switch_space({space_id})"))
         }
 
-        async fn switch_space(&self, _space_id: String) -> Result<(), AppFailure> {
-            Ok(())
+        async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+            self.record(format!("go_to_tab({tab_id})"))
         }
 
-        async fn go_to_tab(&self, _tab_id: u64) -> Result<(), AppFailure> {
-            Ok(())
+        async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+            self.record(format!("detach_session({id})"))
         }
 
-        async fn detach_session(&self, _id: String) -> Result<(), AppFailure> {
-            Ok(())
+        async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+            self.record(format!("focus_pane({pane_id},{is_plugin})"))
         }
+    }
+
+    /// A controller over a fresh [`RecordingRepository`], with the first load
+    /// already landed — every sheet-flow test below starts here.
+    fn recorded(session_id: &str) -> (Arc<TerminalController>, Arc<RecordingRepository>) {
+        let repository = Arc::new(RecordingRepository::default());
+        let controller = Arc::new(TerminalController::new(
+            Arc::clone(&repository) as Arc<dyn TerminalRepository + Send + Sync>,
+            Arc::new(MockSessionsRepository::seeded()),
+            Arc::new(MockPreferencesRepository::seeded()),
+            Some(session_id.to_string()),
+        ));
+        block_on(controller.load());
+        (controller, repository)
+    }
+
+    /// The focused pane of the tab keyed `key`, as the sheet's badge reads it.
+    fn focused_pane(controller: &TerminalController, key: &str) -> Option<u32> {
+        controller
+            .tabs
+            .get_untracked()
+            .into_iter()
+            .find(|tab| tab.key == key)
+            .and_then(|tab| tab.panes.into_iter().find(|pane| pane.focused))
+            .map(|pane| pane.id)
+    }
+
+    #[test]
+    fn browsing_a_tab_touches_no_repository_at_all() {
+        let (c, repository) = recorded("zellij:dev");
+        let after_load = repository.calls();
+        let lines = c.lines.get_untracked();
+        let epoch = c.reveal_epoch.get_untracked();
+
+        c.browse_tab("beta".to_string());
+        c.browse_tab("alpha".to_string());
+        c.browse_tab("beta".to_string());
+
+        assert_eq!(c.browsed_tab.get_untracked(), "beta");
+        assert_eq!(
+            c.active_tab.get_untracked(),
+            "alpha",
+            "browsing moves the sheet, never the session"
+        );
+        assert_eq!(repository.calls(), after_load, "no RPC, none at all");
+        assert_eq!(c.lines.get_untracked(), lines, "…and no card change");
+        assert_eq!(c.reveal_epoch.get_untracked(), epoch, "…and no replay");
+    }
+
+    #[test]
+    fn opening_the_sheet_points_the_browse_back_at_the_session() {
+        let (c, _repository) = recorded("zellij:dev");
+        c.browse_tab("beta".to_string());
+
+        c.begin_browsing();
+
+        assert_eq!(c.browsed_tab.get_untracked(), "alpha");
+    }
+
+    #[test]
+    fn a_zellij_commit_inside_the_active_tab_focuses_the_pane_and_nothing_else() {
+        let (c, repository) = recorded("zellij:dev");
+
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        assert_eq!(repository.actions(), ["focus_pane(11,false)"]);
+        assert_eq!(
+            focused_pane(&c, "alpha"),
+            Some(11),
+            "the badge moves the instant the sheet reopens"
+        );
+    }
+
+    #[test]
+    fn a_zellij_commit_across_tabs_moves_the_tab_first_then_the_pane() {
+        let (c, repository) = recorded("zellij:dev");
+        c.browse_tab("beta".to_string());
+
+        assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
+
+        assert_eq!(
+            repository.actions(),
+            ["go_to_tab(2)", "focus_pane(21,false)"],
+            "a pane can only be focused inside the focused tab"
+        );
+        assert_eq!(c.active_tab.get_untracked(), "beta");
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+        assert_eq!(
+            focused_pane(&c, "alpha"),
+            Some(10),
+            "the tab left behind keeps its own focus flag"
+        );
+    }
+
+    #[test]
+    fn a_herdr_commit_re_attaches_instead_of_calling_focus_pane() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        c.browse_tab("beta".to_string());
+
+        assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
+
+        assert_eq!(
+            repository.actions(),
+            ["go_to_tab(2)"],
+            "on herdr the re-attach is the focus, so the RPC is a no-op"
+        );
+        assert!(
+            c.reattaches_on_switch(),
+            "…and the caller is told to re-open the stream"
+        );
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+    }
+
+    #[test]
+    fn a_zellij_commit_never_re_attaches() {
+        let (c, _repository) = recorded("zellij:dev");
+        c.attach_live();
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+        assert!(
+            !c.reattaches_on_switch(),
+            "zellij's stream follows the server's own focus"
+        );
+    }
+
+    #[test]
+    fn a_refused_tab_step_stops_the_commit_before_the_pane_focus() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("go_to_tab");
+        c.browse_tab("beta".to_string());
+
+        assert!(!block_on(c.commit_pane("beta".to_string(), 21, false)));
+
+        assert_eq!(
+            repository.actions(),
+            ["go_to_tab(2)"],
+            "the pane focus never went out"
+        );
+        assert_eq!(c.active_tab.get_untracked(), "alpha", "nothing moved");
+        assert_eq!(
+            focused_pane(&c, "beta"),
+            Some(20),
+            "…and nothing was written"
+        );
+    }
+
+    #[test]
+    fn a_refused_pane_focus_writes_no_optimistic_state() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("focus_pane");
+
+        assert!(!block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        assert_eq!(repository.actions(), ["focus_pane(11,false)"]);
+        assert_eq!(
+            focused_pane(&c, "alpha"),
+            Some(10),
+            "the badge stays on the pane the session is actually on"
+        );
+    }
+
+    #[test]
+    fn a_space_switch_reloads_the_tab_world_behind_it() {
+        let (c, repository) = recorded("herdr:work");
+
+        block_on(c.select_space("ws-2".to_string()));
+
+        let calls = repository.calls();
+        let after_switch: Vec<String> = calls
+            .iter()
+            .skip_while(|call| *call != "switch_space(ws-2)")
+            .cloned()
+            .collect();
+        assert_eq!(
+            after_switch,
+            [
+                "switch_space(ws-2)",
+                "list_spaces",
+                "list_tabs",
+                "tab_lines(alpha)"
+            ],
+            "a space is a different set of tabs, so the switch re-reads them"
+        );
+        assert_eq!(
+            c.browsed_tab.get_untracked(),
+            "alpha",
+            "…and the sheet lands on the new space's own active tab"
+        );
+    }
+
+    #[test]
+    fn a_refused_space_switch_reloads_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        repository.refuse("switch_space");
+        let before = repository.calls().len();
+
+        block_on(c.select_space("ws-2".to_string()));
+
+        assert_eq!(
+            repository.calls().len(),
+            before + 1,
+            "the refused switch, and no reload behind it"
+        );
+        assert!(c.loaded.get_untracked());
     }
 
     #[test]

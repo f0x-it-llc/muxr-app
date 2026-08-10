@@ -23,12 +23,14 @@
 //! Space selection is real state (the sheet's space pills toggle it), so it
 //! lives behind the mutex — [`TerminalRepository::switch_space`] is its one
 //! write path, and it addresses a space by [`Space::id`], which in this
-//! backend-less store *is* the name. Tabs and lines are **fixed**: v2's mock
-//! replays the same four tabs regardless of which session was attached (see
-//! `domain::entities`' module docs), and a tab switch is a *read*, not a
-//! write, so [`TerminalRepository::go_to_tab`] has nothing to tell and
-//! succeeds without doing anything. `detach_session` is likewise a no-op that
-//! merely validates its id — this store fronts no attachment to drop.
+//! backend-less store *is* the name. Tabs, their panes and their lines are
+//! **fixed**: v2's mock replays the same four tabs regardless of which session
+//! was attached (see `domain::entities`' module docs), and a tab or pane focus
+//! move is a *read*, not a write, so
+//! [`TerminalRepository::go_to_tab`]/[`TerminalRepository::focus_pane`] have
+//! nothing to tell and merely validate what they were handed (the sheet only
+//! ever addresses a row it just drew). `detach_session` is likewise a no-op
+//! that merely validates its id — this store fronts no attachment to drop.
 //!
 //! # Failure mapping
 //!
@@ -49,7 +51,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::failure::AppFailure;
-use crate::features::terminal::domain::entities::{Space, TabEntry, TermLine};
+use crate::features::terminal::domain::entities::{PaneEntry, Space, TabEntry, TermLine};
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
@@ -124,52 +126,81 @@ fn seed_spaces() -> Vec<Space> {
 
 /// The seeded tab world — `docs/terminal.html`'s `TABS` map, in the order its
 /// `#sheetTabRow` pills draw, with `devbox` active (`.pill.sel`).
+///
+/// Each tab also carries the **pane list** the sheet lists and commits
+/// against: the mock's own `.pane-item` (its `pane_name`/`pane_path`, focused)
+/// plus one unfocused sibling per tab, so the browse-then-commit flow this
+/// screen ships has more than one row to move a focus between. Pane ids are
+/// `<tab index>0`/`<tab index>1` — this store fronts no backend, so an id only
+/// has to be stable and unique within its own namespace.
 fn seed_tabs() -> Vec<TabEntry> {
+    let tab = |index: u32, key: &str, label: &str, title: &str, name: &str, path: &str| TabEntry {
+        index,
+        tab_id: u64::from(index),
+        key: key.to_string(),
+        label: label.to_string(),
+        pane_title: title.to_string(),
+        pane_name: name.to_string(),
+        pane_path: path.to_string(),
+        panes: seed_panes(index, name, path),
+        active: key == "devbox",
+    };
     vec![
-        TabEntry {
-            index: 1,
-            tab_id: 1,
-            key: "btop".to_string(),
-            label: "btop".to_string(),
-            pane_title: "ed@precision: ~".to_string(),
-            pane_name: "ed@precision".to_string(),
-            pane_path: "/home/ed".to_string(),
-            panes: Vec::new(),
-            active: false,
-        },
-        TabEntry {
-            index: 2,
-            tab_id: 2,
-            key: "minefit".to_string(),
-            label: "minefit-api".to_string(),
-            pane_title: "ed@minefit: ~/api".to_string(),
-            pane_name: "ed@minefit".to_string(),
-            pane_path: "~/api".to_string(),
-            panes: Vec::new(),
-            active: false,
-        },
-        TabEntry {
-            index: 3,
-            tab_id: 3,
-            key: "gohora".to_string(),
-            label: "gohora".to_string(),
-            pane_title: "ed@gohora: ~/src".to_string(),
-            pane_name: "ed@gohora".to_string(),
-            pane_path: "~/src".to_string(),
-            panes: Vec::new(),
-            active: false,
-        },
-        TabEntry {
-            index: 4,
-            tab_id: 4,
-            key: "devbox".to_string(),
-            label: "devbox".to_string(),
-            pane_title: "ed@devbox: ~".to_string(),
-            pane_name: "ed@devbox".to_string(),
-            pane_path: "/home/ed".to_string(),
-            panes: Vec::new(),
-            active: true,
-        },
+        tab(
+            1,
+            "btop",
+            "btop",
+            "ed@precision: ~",
+            "ed@precision",
+            "/home/ed",
+        ),
+        tab(
+            2,
+            "minefit",
+            "minefit-api",
+            "ed@minefit: ~/api",
+            "ed@minefit",
+            "~/api",
+        ),
+        tab(
+            3,
+            "gohora",
+            "gohora",
+            "ed@gohora: ~/src",
+            "ed@gohora",
+            "~/src",
+        ),
+        tab(
+            4,
+            "devbox",
+            "devbox",
+            "ed@devbox: ~",
+            "ed@devbox",
+            "/home/ed",
+        ),
+    ]
+}
+
+/// One tab's two panes: the mock's own focused `.pane-item`, and an unfocused
+/// `zsh` beside it — see [`seed_tabs`].
+fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
+    let pane = |id: u32, title: String, focused: bool| PaneEntry {
+        id,
+        title,
+        cwd: path.to_string(),
+        focused,
+        floating: false,
+        exited: false,
+        is_plugin: false,
+        is_fullscreen: false,
+        x: 0,
+        y: 0,
+        rows: 24,
+        cols: 80,
+    };
+    vec![
+        pane(index * 10, name.to_string(), true),
+        pane(index * 10 + 1, format!("{name} zsh"), false),
     ]
 }
 
@@ -257,6 +288,23 @@ impl TerminalRepository for MockTerminalRepository {
         }
         // Nothing to drop: there is no real attachment until the `muxrd`
         // client lands (see the module docs).
+        Ok(())
+    }
+
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        // Like `go_to_tab`, this store has nothing to tell — but a pane no
+        // seeded tab carries is a bug worth surfacing, since the sheet only
+        // ever commits a row it just drew.
+        if !self.tabs.iter().any(|tab| {
+            tab.panes
+                .iter()
+                .any(|pane| pane.id == pane_id && pane.is_plugin == is_plugin)
+        }) {
+            return Err(AppFailure::Internal(format!(
+                "focus_pane: no pane {pane_id}"
+            )));
+        }
         Ok(())
     }
 }
@@ -393,6 +441,53 @@ mod tests {
             assert!(block_on(repo.go_to_tab(tab_id)).is_ok(), "{tab_id}");
         }
         assert!(block_on(repo.go_to_tab(99)).is_err());
+    }
+
+    #[test]
+    fn every_tab_carries_two_panes_with_exactly_one_focused() {
+        let repo = MockTerminalRepository::seeded();
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+
+        for tab in &tabs {
+            assert_eq!(tab.panes.len(), 2, "{}", tab.key);
+            let focused: Vec<u32> = tab
+                .panes
+                .iter()
+                .filter(|pane| pane.focused)
+                .map(|pane| pane.id)
+                .collect();
+            assert_eq!(focused, [tab.index * 10], "{}", tab.key);
+            // The mock's own `.pane-item` is the focused one, verbatim.
+            assert_eq!(tab.panes[0].title, tab.pane_name);
+            assert_eq!(tab.panes[0].cwd, tab.pane_path);
+        }
+        // …and no two panes share an id across the whole seed.
+        let mut ids: Vec<u32> = tabs
+            .iter()
+            .flat_map(|t| t.panes.iter().map(|p| p.id))
+            .collect();
+        ids.sort_unstable();
+        let unique = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), unique, "pane ids are unique");
+    }
+
+    #[test]
+    fn a_pane_focus_succeeds_for_every_seeded_pane_and_fails_for_no_other() {
+        let repo = MockTerminalRepository::seeded();
+        for tab in block_on(repo.list_tabs()).expect("the mock never fails to list") {
+            for pane in tab.panes {
+                assert!(
+                    block_on(repo.focus_pane(pane.id, pane.is_plugin)).is_ok(),
+                    "{}",
+                    pane.id
+                );
+            }
+        }
+        assert!(block_on(repo.focus_pane(999, false)).is_err());
+        // The two id namespaces are separate — a plugin pane with a terminal
+        // pane's id is still not a pane this store carries.
+        assert!(block_on(repo.focus_pane(10, true)).is_err());
     }
 
     #[test]
