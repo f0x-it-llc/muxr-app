@@ -105,14 +105,33 @@
 //! floating bar. The app-side bookkeeping that used to fake both — a counted
 //! modality flag driving a scrim the bar painted over itself — was deleted with
 //! the adoption; nothing here counts overlays any more.
+//!
+//! # Back on `/sessions` is a question, not a pop
+//!
+//! Every route here obeys the Android back press by popping — except
+//! [`SESSIONS_ROUTE`], the one route whose page owns something a pop would
+//! silently throw away: the live `muxrd` connection. So that push (and only
+//! that push) carries [`frust::BackPolicy::DismissAnimated`] plus a
+//! dismiss-signal cell, which makes a back press **bump the cell instead of
+//! popping the page**; the Sessions screen observes the bump and raises its own
+//! disconnect confirmation, and only a confirmed answer disconnects and pops.
+//! [`sessions_back_signal`] is where that cell is published for the screen to
+//! resolve, exactly as [`app_nav`] publishes the handle beside it.
+//!
+//! Nothing about the mirror changes: the push still records its depth and
+//! metadata the way [`Nav::push`] always did, so a back press that raises the
+//! confirmation moves neither the route stack nor the bar. And a back press
+//! with any overlay open never reaches this navigator at all (the root host
+//! outranks it — **R44-back**), which is what makes "back again while the
+//! confirmation is up" read as a cancel with no code here at all.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    AnyView, Get, GetUntracked, Location, NavigatorController, Resolution, Route, RouteParams,
-    Router, RwSignal, Set, TransitionSpec,
+    AnyView, BackPolicy, Get, GetUntracked, Location, NavigatorController, PushOptions, Resolution,
+    Route, RouteParams, Router, RwSignal, Set, TransitionSpec,
 };
 
 use crate::AppState;
@@ -125,6 +144,11 @@ use crate::features::terminal::presentation::pages::terminal_page;
 
 /// Where the session guard bounces an unauthenticated push to.
 const CONNECT_LOCATION: &str = "/";
+
+/// The `/sessions` route — the one route whose back press is a *question*
+/// rather than a pop (see the module docs' back section, and
+/// [`sessions_back_signal`]).
+const SESSIONS_ROUTE: &str = "/sessions";
 
 /// The `/` route (and the navigator's initial page): Connect. Takes the
 /// **overlay host's** [`NavigatorController`] so this function fits both
@@ -230,7 +254,7 @@ const DISCONNECTED_TITLE: &str = "muxrd";
 /// route), so the shell's bar collapses to zero height there.
 pub fn route_meta(path: &str) -> Option<RouteMeta> {
     match path {
-        "/sessions" => Some(RouteMeta {
+        SESSIONS_ROUTE => Some(RouteMeta {
             title: BarTitle::ConnectedHost,
             leading: BarLeading::Brand,
             action: Some(BarAction::Settings),
@@ -461,12 +485,24 @@ impl Nav {
     /// [`route_transition`]'s Glyph slide.
     ///
     /// Reimplements [`Router::push`]'s two lines rather than calling it,
-    /// because `Router` has no push-with-a-transition entry point: the leaf of
-    /// the resolved chain is pushed through
-    /// [`NavigatorController::push_with`] so *this* push carries the spec (and
-    /// a later pop reverses it) without making the Glyph slide the navigator's
-    /// blanket default. An unmatched location falls back to the router's own
-    /// error page, transition-less.
+    /// because `Router` has no push-with-options entry point: the leaf of the
+    /// resolved chain is pushed through
+    /// [`NavigatorController::push_with_options`] so *this* push carries the
+    /// spec (and a later pop reverses it) without making the Glyph slide the
+    /// navigator's blanket default. An unmatched location falls back to the
+    /// router's own error page, transition-less.
+    ///
+    /// [`SESSIONS_ROUTE`] carries two more things on the same options:
+    /// [`BackPolicy::DismissAnimated`] and a freshly minted dismiss cell, the
+    /// back-confirm seam (see the module docs and [`sessions_back_signal`]).
+    /// Every other route keeps [`PushOptions`]' default [`BackPolicy::Pop`],
+    /// which is what the plain [`NavigatorController::push_with`] this replaces
+    /// pushed with — so `/terminal` and `/settings` still pop on back exactly
+    /// as before.
+    ///
+    /// The policy is decided from the **resolved** path, like the mirror entry
+    /// below it: a `/sessions` the session guard bounced to `/` lands on `/`,
+    /// and takes `/`'s ordinary pop policy with it.
     pub fn push(&self, location: &str) {
         match self.router.resolve(location) {
             Resolution::Matched {
@@ -475,9 +511,15 @@ impl Nav {
                 let Some(leaf) = pages.into_iter().next_back() else {
                     return;
                 };
+                let mut options = PushOptions::opaque().transition(route_transition());
+                if location.path == SESSIONS_ROUTE {
+                    options = options
+                        .back(BackPolicy::DismissAnimated)
+                        .dismiss_signal(publish_sessions_back_signal());
+                }
                 self.router
                     .controller()
-                    .push_with(move || leaf.build(), route_transition());
+                    .push_with_options(move || leaf.build(), options);
                 self.record_push(&location);
             }
             Resolution::Error { .. } => self.router.push(location),
@@ -649,6 +691,42 @@ thread_local! {
     /// The one [`Nav`] per UI thread — see [`app_nav`] and the
     /// [module docs](self).
     static APP_NAV: RefCell<Option<Nav>> = const { RefCell::new(None) };
+
+    /// The dismiss-signal cell of the `/sessions` page currently on the stack
+    /// — see [`sessions_back_signal`]. Seeded with a cell nobody bumps, so a
+    /// screen mounted outside a [`Nav::push`] still resolves one.
+    static SESSIONS_BACK: RefCell<Rc<Cell<u64>>> = RefCell::new(Rc::new(Cell::new(0)));
+}
+
+/// Mint the dismiss cell a `/sessions` push carries, and publish it for the
+/// screen that push is about to mount.
+///
+/// A **fresh** cell per push, rather than one long-lived counter: a new mount
+/// starts at generation 0 and so cannot inherit a bump aimed at the page it
+/// replaced, and the departed page's own cell keeps whatever it had.
+fn publish_sessions_back_signal() -> Rc<Cell<u64>> {
+    let signal = Rc::new(Cell::new(0));
+    SESSIONS_BACK.with(|cell| *cell.borrow_mut() = Rc::clone(&signal));
+    signal
+}
+
+/// This thread's `/sessions` dismiss-signal cell: the navigator bumps its
+/// generation on a back press *instead of* popping the page
+/// ([`BackPolicy::DismissAnimated`]), and the Sessions screen turns that bump
+/// into its disconnect confirmation.
+///
+/// **Read it in the screen's `Component::init`, and nowhere else** — the same
+/// contract, for the same reason, as [`Nav::param`]: a page is built during the
+/// very push that published its cell, so "the cell currently published" *is*
+/// this screen's own at `init` time.
+///
+/// Unlike [`app_nav`] this never panics. A screen mounted without a push
+/// through [`Nav`] — a headless suite mounting `sessions_page` directly — gets
+/// the inert seed cell instead, which no navigator holds and nothing bumps, so
+/// the seam is simply dormant. (A suite that wants to drive it bumps that cell
+/// itself, which is exactly what the navigator would have done.)
+pub fn sessions_back_signal() -> Rc<Cell<u64>> {
+    SESSIONS_BACK.with(|cell| Rc::clone(&cell.borrow()))
 }
 
 /// Build the app's one [`Router`] over `controller` — the full route table
@@ -744,7 +822,7 @@ pub(crate) fn session_guard_with(
     connection: Arc<ConnectionController>,
 ) -> impl Fn(&Location) -> Option<String> + 'static {
     move |loc: &Location| {
-        let guarded = matches!(loc.path.as_str(), "/sessions" | "/terminal");
+        let guarded = matches!(loc.path.as_str(), SESSIONS_ROUTE | "/terminal");
         if guarded && !connection.connected.get_untracked() {
             Some(CONNECT_LOCATION.to_string())
         } else {
@@ -775,7 +853,7 @@ pub(crate) fn build_routes(
             let overlays = overlays.clone();
             move |_params: &RouteParams| home_page(overlays.clone())
         }),
-        Route::new("/sessions", {
+        Route::new(SESSIONS_ROUTE, {
             let controller = controller.clone();
             let overlays = overlays.clone();
             move |_params: &RouteParams| sessions_page(controller.clone(), overlays.clone())
@@ -1039,6 +1117,45 @@ mod tests {
             state.record_push_depth(1),
             2,
             "a stale, too-shallow depth is floored by what is already recorded"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The `/sessions` back-confirm cell
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn each_sessions_push_publishes_a_fresh_dismiss_cell_at_generation_zero() {
+        // The published cell is what the screen resolves in its `init`, and it
+        // must be *this* push's: a mount that inherited the departed page's
+        // counter would read a stale bump as a back press it never got.
+        let first = publish_sessions_back_signal();
+        assert!(
+            Rc::ptr_eq(&first, &sessions_back_signal()),
+            "the push publishes the very cell it carries"
+        );
+
+        first.set(4); // a back press or four against the page it belongs to.
+
+        let second = publish_sessions_back_signal();
+        assert_eq!(second.get(), 0, "the next mount starts unbumped");
+        assert!(
+            !Rc::ptr_eq(&first, &second),
+            "…on its own cell, not the departed page's"
+        );
+        assert_eq!(first.get(), 4, "…which is left exactly as it was");
+        assert!(Rc::ptr_eq(&second, &sessions_back_signal()));
+    }
+
+    #[test]
+    fn the_seed_cell_is_inert_rather_than_absent() {
+        // A screen mounted without a push through `Nav` (a headless suite
+        // mounting `sessions_page` directly) still resolves a cell — unlike
+        // `app_nav`, which panics — so the seam is dormant rather than fatal.
+        let seed = sessions_back_signal();
+        assert!(
+            Rc::ptr_eq(&seed, &sessions_back_signal()),
+            "stable per thread"
         );
     }
 

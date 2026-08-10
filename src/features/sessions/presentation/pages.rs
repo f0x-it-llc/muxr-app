@@ -76,6 +76,28 @@
 //! bundle of handles that a sheet row can capture and act through, with the
 //! same method body serving both sides of the boundary.
 //!
+//! # The Android back press asks before it disconnects
+//!
+//! A back press on this route would pop straight to Connect and abandon the
+//! live connection silently, so `/sessions` is the one route pushed with
+//! `BackPolicy::DismissAnimated` (`crate::routes::Nav::push`): the navigator
+//! **bumps a shared generation cell** instead of popping, and this screen owns
+//! what that means. [`BackConfirm`] is the observer — the cell resolved in
+//! `init` (`crate::routes::sessions_back_signal`), the generation already
+//! answered, and the depth mark that says the confirmation it raised is still
+//! up — and `Component::build` is where it is read, beside the poll's own
+//! depth observation and under the same rule: plain state, never a tracked
+//! write from `build`. Answering opens [`Actions::open_disconnect_confirm`] as
+//! an ordinary queued push on the overlay host, exactly like every other
+//! overlay this screen raises.
+//!
+//! Two properties fall out of the arrangement rather than out of code here: a
+//! second back press while the confirmation is up is claimed by the overlay
+//! host (**R44-back**), so it dismisses the dialog — a cancel — instead of
+//! reaching this navigator at all; and a dismissal of any kind resumes the
+//! polls through the existing `observe_depth` machinery, since the mark this
+//! screen took when it opened the dialog is the one it resumes at.
+//!
 //! # Navigating to `/terminal`
 //!
 //! A `NavigatorController` pushes page *builders*; only a `Router` resolves
@@ -87,6 +109,8 @@
 //! therefore runs the app's real table and its real (capture-based, owner-free)
 //! session guard.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,7 +127,7 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::settings::di::expect_preferences_repository;
 use crate::responsive::WIDE_BREAKPOINT_PX;
-use crate::routes::{Nav, app_nav};
+use crate::routes::{Nav, app_nav, sessions_back_signal};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
@@ -121,6 +145,15 @@ use super::pieces;
 const TERMINAL_ROUTE: &str = "/terminal";
 /// The query key [`TERMINAL_ROUTE`] carries the session id under.
 const SESSION_QUERY_KEY: &str = "session";
+
+/// The back-press confirmation, as the user reads it: its title…
+const DISCONNECT_TITLE: &str = "Disconnect from server?";
+/// …its destructive action…
+const DISCONNECT_CONFIRM_LABEL: &str = "Disconnect";
+/// …and what its body names when the connection has published no endpoint to
+/// name (unreachable behind the session guard, but the sentence still needs a
+/// subject).
+const DISCONNECT_UNKNOWN_HOST: &str = "this server";
 
 /// `.sessions-list{padding:14px 16px}`.
 const LIST_PAD_X: f64 = 16.0;
@@ -184,6 +217,83 @@ pub struct SessionsState {
     /// (see [`super::heartbeat`]). Screen-internal, unlike the two handles
     /// above: nothing outside this feature's presentation layer drives it.
     pub(super) heartbeat: HeartbeatState,
+    /// The Android back press's observer — see [`BackConfirm`] and the module
+    /// docs' back section. Screen-internal like the heartbeat.
+    pub(super) back: BackConfirm,
+}
+
+/// What a back press on `/sessions` means to this screen: the route page's
+/// dismiss-signal cell, the generation already answered, and the depth mark
+/// that says the confirmation it raised is still up.
+///
+/// **Plain state, not signals**, for exactly the reason
+/// [`SessionsController`]'s poll gate is (see that module's docs): it is read
+/// *and written* from `Component::build`, where a tracked write would re-dirty
+/// the very frame that made it.
+pub(super) struct BackConfirm {
+    /// The generation counter the navigator bumps in place of popping this
+    /// page — resolved once, in `init`, like every other app-scoped handle
+    /// (`crate::routes::sessions_back_signal`).
+    signal: Rc<Cell<u64>>,
+    /// The generation this screen has already answered. Seeded from the cell
+    /// rather than from zero, so a screen that somehow resolved a used cell
+    /// answers only what happens from its own mount onwards.
+    answered: u64,
+    /// The stack depth this screen's confirmation was raised at, or `None`
+    /// while none is up — the same mark-and-resume arithmetic
+    /// [`Actions::pause_for_push`] uses for the polls, against the same
+    /// two-navigator depth.
+    confirming_at: Option<usize>,
+}
+
+impl BackConfirm {
+    /// Resolve this mount's dismiss cell. Called from `Component::init`, where
+    /// the published cell is exactly the one the push that mounted this screen
+    /// carried (see `crate::routes::sessions_back_signal`'s contract).
+    fn new() -> Self {
+        let signal = sessions_back_signal();
+        let answered = signal.get();
+        BackConfirm {
+            signal,
+            answered,
+            confirming_at: None,
+        }
+    }
+
+    /// Whether a back press has landed since the last call, given the live
+    /// `depth` — asked once per `build`, and the only reader of the cell.
+    ///
+    /// Answers `true` **at most once per bump**, because `build` re-runs
+    /// several times per frame: `RenderRoot::rebuild` re-runs the whole app
+    /// logic after each queued op it flushes, and the push this answer makes
+    /// is itself such an op. So the generation is banked *before* the answer,
+    /// and the pass that follows sees nothing owed.
+    ///
+    /// A bump arriving while a confirmation is still up is banked and
+    /// swallowed rather than queueing a second dialog. That is belt to the
+    /// arrangement's braces: with an overlay open the root host claims the
+    /// back press ahead of the route navigator (**R44-back**), so a second
+    /// press dismisses the confirmation instead of reaching this screen at
+    /// all.
+    fn take_request(&mut self, depth: usize) -> bool {
+        if let Some(mark) = self.confirming_at
+            && depth <= mark
+        {
+            // The confirmation resolved — confirmed, cancelled or dismissed,
+            // all of which leave the stack back where it was when it opened.
+            self.confirming_at = None;
+        }
+        let generation = self.signal.get();
+        if generation == self.answered {
+            return false;
+        }
+        self.answered = generation;
+        if self.confirming_at.is_some() {
+            return false;
+        }
+        self.confirming_at = Some(depth);
+        true
+    }
 }
 
 /// Every navigation this screen performs, plus the three handles they need.
@@ -314,6 +424,10 @@ impl Component for SessionsScreen {
             },
             connection,
             heartbeat,
+            // Resolved here, with every other app-scoped handle — and here
+            // *only*: the cell published now is this mount's own (see
+            // `crate::routes::sessions_back_signal`).
+            back: BackConfirm::new(),
         }
     }
 
@@ -321,10 +435,17 @@ impl Component for SessionsScreen {
         // Page-driven poll resume (see `SessionsController`'s module docs).
         // A plain atomic, deliberately not a signal: a tracked write here
         // would re-dirty the very frame that made it.
-        state
-            .actions
-            .controller
-            .observe_depth(state.actions.stack_depth());
+        let depth = state.actions.stack_depth();
+        state.actions.controller.observe_depth(depth);
+
+        // The Android back press, answered here rather than obeyed by the
+        // navigator (see the module docs' back section). Both halves of this
+        // are the same kind of write the line above makes — plain state and a
+        // queued navigator op, never a tracked signal — which is what makes
+        // `build` a sound place to observe from.
+        if state.back.take_request(depth) {
+            state.actions.open_disconnect_confirm(&state.connection);
+        }
 
         // Start the mock poll's interval the moment its cadence resolves
         // (tracked read: `init`'s async load writing `poll_period` is what
@@ -435,6 +556,20 @@ impl Component for SessionsScreen {
     }
 }
 
+/// The disconnect confirmation's body, naming the connected `host`.
+///
+/// A function rather than a fourth constant because the host is the whole
+/// point of the sentence: it is what tells the user *which* connection a back
+/// press is about to end. The second sentence is the reassurance that stops
+/// "Disconnect" reading like "Forget server" (which is Settings' own, and does
+/// delete things).
+fn disconnect_message(host: &str) -> String {
+    format!(
+        "You will be disconnected from {host}. Saved servers and credentials stay on this \
+         device."
+    )
+}
+
 /// The list's children with a [`LIST_GAP`] spacer between consecutive ones.
 fn gapped(views: Vec<AnyView<SessionsState>>) -> Vec<FlexChild<SessionsState>> {
     let mut children = Vec::with_capacity(views.len() * 2);
@@ -534,6 +669,43 @@ impl Actions {
                 let handle = Arc::clone(&controller);
                 let id = id.clone();
                 spawn_local(async move { handle.kill(id).await });
+            },
+        );
+    }
+
+    /// Open the back press's disconnect confirmation — the one action this
+    /// screen takes that no gesture on it can reach (see the module docs' back
+    /// section).
+    ///
+    /// Confirming does both halves the connection contract splits: the
+    /// controller closes the connection and clears its signals, and the caller
+    /// navigates — through [`Nav`], so the shell bar's mirror drops this
+    /// route's entry on the same frame rather than a reconcile later. Every
+    /// dismissal route does nothing at all: the polls come back through
+    /// [`Component::build`]'s own depth observation.
+    ///
+    /// `connection` is passed in rather than held on [`Actions`] because this
+    /// is the only action that needs it, and the screen already keeps the
+    /// app-scoped handle beside the bundle.
+    pub fn open_disconnect_confirm(&self, connection: &Arc<ConnectionController>) {
+        self.pause_for_push();
+        // Untracked: a one-shot read for a sentence, at the moment the dialog
+        // opens — the same shape `open_rename_dialog` re-reads a name with.
+        let host = connection
+            .server_info
+            .get_untracked()
+            .map(|info| pieces::host_of(&info.endpoint).to_string())
+            .unwrap_or_else(|| DISCONNECT_UNKNOWN_HOST.to_string());
+        let connection = Arc::clone(connection);
+        let app_nav = self.app_nav.clone();
+        confirm_dialog(
+            &self.overlays,
+            DISCONNECT_TITLE,
+            disconnect_message(&host),
+            DISCONNECT_CONFIRM_LABEL,
+            move |_app: &mut AppState| {
+                connection.disconnect();
+                app_nav.pop();
             },
         );
     }
@@ -690,6 +862,96 @@ mod tests {
         assert_eq!(
             loc.query.get(SESSION_QUERY_KEY).map(String::as_str),
             Some("s-1")
+        );
+    }
+
+    /// An observer over `signal`, mounted (as `init` mounts one) at whatever
+    /// generation the cell already carries.
+    fn observer(signal: &Rc<Cell<u64>>) -> BackConfirm {
+        BackConfirm {
+            signal: Rc::clone(signal),
+            answered: signal.get(),
+            confirming_at: None,
+        }
+    }
+
+    /// One back press against `signal` — what the navigator does to a
+    /// `DismissAnimated` page instead of popping it.
+    fn back_press(signal: &Rc<Cell<u64>>) {
+        signal.set(signal.get().wrapping_add(1));
+    }
+
+    #[test]
+    fn one_back_press_raises_one_confirmation_however_often_build_reruns() {
+        // The depths are the screen's own two-navigator sum: 3 while the route
+        // is on top with nothing over it, 4 while the confirmation is up.
+        const AT_REST: usize = 3;
+        const CONFIRMING: usize = 4;
+
+        let signal = Rc::new(Cell::new(0));
+        let mut back = observer(&signal);
+        assert!(!back.take_request(AT_REST), "nothing owed at rest");
+
+        back_press(&signal);
+        assert!(
+            back.take_request(AT_REST),
+            "the press raises a confirmation"
+        );
+        // `build` re-runs within the same frame once the queued push lands —
+        // the pass that opens the dialog is never the last one.
+        assert!(
+            !back.take_request(CONFIRMING),
+            "…exactly one, not one per rebuild"
+        );
+
+        // A press that somehow reaches this screen while the confirmation is
+        // up is banked and swallowed rather than queueing a second dialog.
+        back_press(&signal);
+        assert!(!back.take_request(CONFIRMING));
+        assert!(!back.take_request(CONFIRMING));
+
+        // Dismissed (confirmed, cancelled, scrim-tapped — all the same shape):
+        // the stack falls back to the mark, and the seam is armed again.
+        assert!(
+            !back.take_request(AT_REST),
+            "the swallowed press stays spent"
+        );
+        back_press(&signal);
+        assert!(
+            back.take_request(AT_REST),
+            "the next press raises a fresh confirmation"
+        );
+    }
+
+    #[test]
+    fn a_screen_that_mounted_over_a_used_cell_answers_only_its_own_presses() {
+        // The seed cell a `sessions_page` mounted outside `Nav::push` resolves
+        // may carry any generation; a mount must not read that as a press.
+        let signal = Rc::new(Cell::new(7));
+        let mut back = observer(&signal);
+        assert!(
+            !back.take_request(3),
+            "the mount answers nothing on its own"
+        );
+        back_press(&signal);
+        assert!(back.take_request(3));
+    }
+
+    #[test]
+    fn the_disconnect_wording_names_the_host_and_promises_the_saved_rows_stay() {
+        // The whole point of the sentence is *which* connection is ending, and
+        // the reassurance that this is not Settings' "Forget server" (which
+        // does delete things).
+        let message = disconnect_message("100.71.31.57");
+        assert!(message.contains("100.71.31.57"), "{message}");
+        assert!(message.contains("Saved servers"), "{message}");
+        assert!(
+            DISCONNECT_TITLE.ends_with('?'),
+            "it asks: {DISCONNECT_TITLE}"
+        );
+        assert!(
+            disconnect_message(DISCONNECT_UNKNOWN_HOST).contains(DISCONNECT_UNKNOWN_HOST),
+            "…and still reads as a sentence with no endpoint published"
         );
     }
 

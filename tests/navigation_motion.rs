@@ -79,7 +79,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use frust::{AnyView, Component, SizedBox, Theme, any};
+use frust::{AnyView, Component, GetUntracked, SizedBox, Theme, any};
 use frust_core::accesskit::Role;
 use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot};
 use frust_reactive::TrackedScope;
@@ -87,7 +87,7 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
-use muxr::routes::app_nav;
+use muxr::routes::{app_nav, sessions_back_signal};
 use muxr::ui::dialogs::confirm_dialog;
 use muxr::ui::sheet::{SheetHandle, show_sheet};
 use muxr::{AppState, MuxrApp};
@@ -1238,6 +1238,257 @@ fn a_back_press_that_bypassed_the_handle_still_retitles_the_bar() {
 }
 
 // ---------------------------------------------------------------------------
+// 3e — back on /sessions is a question, not a pop
+// ---------------------------------------------------------------------------
+//
+// `/sessions` is the one route pushed with `BackPolicy::DismissAnimated`
+// (`routes::Nav::push`), so a back press there **bumps the page's dismiss cell
+// instead of popping it** and the screen raises its own disconnect
+// confirmation. This suite is where that belongs — not `sessions.rs`, which
+// mounts the screen *beside* a navigator rather than as a page pushed through
+// `Nav`, so nothing there carries the policy the arbitration reads. Here the
+// press is delivered exactly as section 3c's R44-back test delivers one
+// (`frust::push_back_press`, the process-wide platform source), against the
+// whole app, and every claim below is read off the two real stacks.
+//
+// What the *bar* contributes is the negative half, which is the whole point of
+// the feature: neither stack moves, so the mirror never hears of the press —
+// `/sessions` is still titled once the question is answered "no", and while it
+// is up the bar is not addressable at all (the host forwards its top page
+// only).
+
+/// The confirmation's title, as the user reads it — transcribed rather than
+/// imported, like [`BRAND`]/[`BACK`]/[`GEAR`] above (`features::sessions`'
+/// constants are the implementation's; a test that imported them could not
+/// catch one of them changing).
+const DISCONNECT_TITLE: &str = "Disconnect from server?";
+/// …its destructive action…
+const DISCONNECT_ACTION: &str = "Disconnect";
+/// …and the affordance that answers "no" (`ui::dialogs`' shared spelling).
+const CANCEL_ACTION: &str = "Cancel";
+
+/// Whether the app still holds its (mock) connection.
+fn connected() -> bool {
+    expect_connection_controller().connected.get_untracked()
+}
+
+/// Whether the disconnect confirmation is the thing on screen — title, body
+/// naming the connected host, and destructive action.
+fn showing_confirmation(h: &Harness) -> bool {
+    h.values().iter().any(|v| v == DISCONNECT_TITLE)
+        && h.values().iter().any(|v| v.contains(HOST))
+        && h.labels().iter().any(|l| l == DISCONNECT_ACTION)
+}
+
+/// One platform back press, driven to the app's parking point.
+fn press_back(h: &mut Harness) {
+    frust::push_back_press();
+    h.settle();
+    h.park();
+}
+
+/// Where a tap must land to take the confirmation's `label` action.
+fn confirmation_action(h: &Harness, label: &str) -> Point {
+    node_centers_by_label(&h.root, label)
+        .first()
+        .copied()
+        .unwrap_or_else(|| {
+            panic!(
+                "the confirmation carries no {label:?} action: {:?}",
+                h.labels()
+            )
+        })
+}
+
+#[test]
+fn back_on_sessions_asks_instead_of_popping_and_bumps_the_cell_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    let route_depth = h.depth();
+    let generation = sessions_back_signal().get();
+
+    press_back(&mut h);
+
+    assert_eq!(
+        h.depth(),
+        route_depth,
+        "the route stack is untouched — the page was asked, not popped"
+    );
+    assert_eq!(
+        sessions_back_signal().get(),
+        generation + 1,
+        "…the navigator bumped the page's dismiss cell exactly once"
+    );
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "…and the screen turned that into one confirmation"
+    );
+    assert!(
+        showing_confirmation(&h),
+        "…the disconnect confirmation, naming the host: {:?} / {:?}",
+        h.values(),
+        h.labels()
+    );
+    assert!(connected(), "nothing is disconnected until it is confirmed");
+    assert!(
+        !h.has_bar(),
+        "…and the app under the confirmation is inert, bar included: {:?}",
+        node_roles(&h.root)
+    );
+}
+
+#[test]
+fn a_bump_that_lands_while_the_confirmation_is_up_is_swallowed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+
+    press_back(&mut h);
+    assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the confirmation is up");
+
+    // A bump reaching the screen while its confirmation is already showing —
+    // what the navigator would do if a press ever got past the overlay host
+    // (it cannot: R44-back gives the host the press, which is the *next* test).
+    // The screen banks it and raises nothing.
+    let signal = sessions_back_signal();
+    signal.set(signal.get().wrapping_add(1));
+    h.park();
+
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "still exactly one confirmation, not two stacked"
+    );
+    assert!(showing_confirmation(&h), "…and it is still the same one");
+
+    // The half that makes the assertion above mean something: a swallowed bump
+    // must be *spent*, not merely deferred. Dismiss the confirmation and the
+    // screen owes nothing — an unbanked bump would raise its dialog here, one
+    // press behind the user.
+    press_back(&mut h);
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "the dismissal left no queued second confirmation: {:?}",
+        h.values()
+    );
+    assert!(connected(), "…and nothing was disconnected");
+}
+
+#[test]
+fn a_second_back_press_cancels_the_confirmation_and_stays_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    let route_depth = h.depth();
+
+    press_back(&mut h);
+    assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the confirmation is up");
+
+    // The overlay host outranks the route navigator (R44-back), so the second
+    // press dismisses the confirmation rather than reaching the page again —
+    // "back again" reads as a cancel with no code in the screen at all.
+    press_back(&mut h);
+
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "the second press dismissed the confirmation"
+    );
+    assert_eq!(h.depth(), route_depth, "…and popped no route with it");
+    assert!(connected(), "…leaving the connection alone");
+    assert_titled(&h, HOST);
+
+    // The seam re-arms: a dismissed confirmation is not a spent one.
+    press_back(&mut h);
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the next press asks again"
+    );
+    assert!(showing_confirmation(&h));
+
+    // …and the explicit "no" reads the same as the press did.
+    let cancel = confirmation_action(&h, CANCEL_ACTION);
+    h.tap_parked(cancel);
+    h.settle();
+    h.park();
+
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "Cancel dismissed the confirmation"
+    );
+    assert_eq!(h.depth(), route_depth, "…popping no route");
+    assert!(connected(), "…and disconnecting nothing");
+    assert_titled(&h, HOST);
+}
+
+#[test]
+fn confirming_the_disconnect_drops_the_connection_and_returns_to_connect() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+
+    press_back(&mut h);
+    let action = confirmation_action(&h, DISCONNECT_ACTION);
+
+    h.tap_parked(action);
+    h.settle();
+    h.park();
+
+    assert!(!connected(), "the confirmed answer disconnected");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "…the confirmation closed with it"
+    );
+    assert_eq!(h.depth(), 1, "…and `/sessions` popped back to Connect");
+    assert!(
+        !h.has_bar(),
+        "…which is the bar-less route: {:?}",
+        node_roles(&h.root)
+    );
+}
+
+#[test]
+fn back_on_the_terminal_route_still_pops_to_sessions_with_no_question_asked() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    let base_depth = h.depth();
+
+    h.push("/terminal?session=s-1");
+    assert_titled(&h, "terminal");
+    let generation = sessions_back_signal().get();
+
+    // Only `/sessions` carries `DismissAnimated`; every other route keeps the
+    // default `Pop`, so this press is the plain pop it always was.
+    press_back(&mut h);
+
+    assert_eq!(h.depth(), base_depth, "the back press popped `/terminal`");
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH,
+        "…asking nothing on the way: {:?}",
+        h.values()
+    );
+    assert_eq!(
+        sessions_back_signal().get(),
+        generation,
+        "…and never touching the `/sessions` cell"
+    );
+    assert!(connected(), "…nor the connection");
+    assert_titled(&h, HOST);
+}
+
+// ---------------------------------------------------------------------------
 // 4 — the GlyphSlide route transition, and its reduced-motion collapse
 // ---------------------------------------------------------------------------
 
@@ -1415,7 +1666,10 @@ fn the_navigator_survives_the_bar_appearing_and_disappearing() {
 
     h.tap_label(BACK);
     h.settle();
-    h.state.nav.controller().request_back();
+    // A bare pop, not a back press: a press on `/sessions` is a *question* now
+    // (section 3e), and what this test is about is the band reconciling in
+    // place — the pop is exactly the stack mutation a confirmed answer makes.
+    h.state.nav.controller().pop();
     h.settle();
 
     assert_eq!(
