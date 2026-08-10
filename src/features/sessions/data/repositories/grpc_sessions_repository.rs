@@ -50,17 +50,28 @@
 //! learn it. Every other field on the optimistic [`Session`] is a
 //! placeholder the following refresh overwrites within one rebuild.
 //!
-//! # Pane preview: one `GetLayout` per session
+//! # Pane preview: one `GetLayout` per session, now doing double duty
 //!
-//! `SessionInfo` carries every `.sess-meta` count directly (tabs, panes, the
-//! third metric) but not pane titles, so [`list_sessions`](SessionsRepository::list_sessions)
-//! follows every `ListSessions` answer with one `GetLayout` per *running*
-//! session and takes its first tab's first two pane titles as
-//! [`LayoutSummary::preview`] — mirroring what
+//! `ListSessions` deliberately ships `tab_count`/`pane_count` at their zero
+//! defaults for a *running* session — filling them in there would need a
+//! per-session layout query of its own, whose transient attach can briefly
+//! resize the live session; the contract is that a client wanting real
+//! numbers falls back to `GetLayout`. [`list_sessions`](SessionsRepository::list_sessions)
+//! already dials that per-session `GetLayout`, one per *running* session, to
+//! get pane titles for [`LayoutSummary::preview`] — mirroring what
 //! [`MockSessionsRepository`](super::MockSessionsRepository)'s seed
-//! hand-encodes. A resurrectible session skips the call entirely (nothing to
-//! preview); a running session with no tabs, or a first tab with no panes,
-//! tolerates the empty response gracefully rather than failing.
+//! hand-encodes — so this file derives the counts from that same response
+//! rather than discarding it: [`layout_derived_from`] turns one `Layout`
+//! into a tab count, a summed pane count, and the first tab's first two pane
+//! titles, filtering out empty/whitespace-only titles first (a blank pill is
+//! worse than no pill row). [`map_session`] prefers these layout-derived
+//! counts whenever the call succeeded and the layout has at least one tab,
+//! and otherwise falls back to `SessionInfo`'s own wire counts — the
+//! server's own numbers, and the fallback of record — for a failed
+//! `GetLayout` or a live session whose layout reports zero tabs. A
+//! resurrectible session skips the call entirely (nothing live to query);
+//! its wire counts are its saved counts and pass straight through
+//! unmodified.
 //!
 //! # Failure mapping
 //!
@@ -106,6 +117,17 @@ const NOT_CONNECTED: &str = "not connected to a server";
 /// in depth, not a reachable UI state).
 const BLANK_NAME: &str = "a session name cannot be blank";
 
+/// One running session's `GetLayout`-derived facts, computed from a single
+/// response in one pass — see the module docs' "Pane preview" section.
+/// [`GrpcSessionsRepository::layout_for`] produces this; [`map_session`]
+/// prefers it over `SessionInfo`'s own wire counts whenever `tabs` is
+/// nonzero.
+struct LayoutDerived {
+    tabs: u32,
+    panes: u32,
+    preview: Vec<String>,
+}
+
 /// The real [`SessionsRepository`], over a live `muxrd` connection. See the
 /// [module docs](self).
 pub struct GrpcSessionsRepository {
@@ -139,21 +161,22 @@ impl GrpcSessionsRepository {
         failure
     }
 
-    /// One session's pane preview: a `GetLayout` call plus
-    /// [`preview_from_layout`]. A `GetLayout` failure never fails the whole
-    /// list — the counts already came back from `ListSessions` — but an
-    /// `UNAUTHENTICATED` status still runs [`Self::map_status`]'s side
-    /// effect, the same as every other call.
-    async fn preview_for(&self, client: &MuxrClient, id: &str) -> Vec<String> {
+    /// One running session's layout-derived facts: a `GetLayout` call plus
+    /// [`layout_derived_from`]. A `GetLayout` failure returns `None` and
+    /// never fails the whole list — [`map_session`] falls back to
+    /// `ListSessions`'s own wire counts — but an `UNAUTHENTICATED` status
+    /// still runs [`Self::map_status`]'s side effect, the same as every
+    /// other call.
+    async fn layout_for(&self, client: &MuxrClient, id: &str) -> Option<LayoutDerived> {
         let request = SessionRef {
             session: id.to_string(),
             connection_id: String::new(),
         };
         match client.authed().get_layout(request).await {
-            Ok(response) => preview_from_layout(response.into_inner()),
+            Ok(response) => Some(layout_derived_from(response.into_inner())),
             Err(status) => {
                 self.map_status(status);
-                Vec::new()
+                None
             }
         }
     }
@@ -173,14 +196,15 @@ impl SessionsRepository for GrpcSessionsRepository {
 
         let mut sessions = Vec::with_capacity(response.sessions.len());
         for info in response.sessions {
-            // An idle/resurrectible session has nothing running to preview —
-            // see the module docs' "Pane preview" section.
-            let preview = if info.resurrectable {
-                Vec::new()
+            // An idle/resurrectible session has nothing running to derive
+            // counts or a preview from — see the module docs' "Pane
+            // preview" section.
+            let derived = if info.resurrectable {
+                None
             } else {
-                self.preview_for(&client, &info.id).await
+                self.layout_for(&client, &info.id).await
             };
-            sessions.push(map_session(info, preview));
+            sessions.push(map_session(info, derived));
         }
         Ok(sessions)
     }
@@ -260,9 +284,13 @@ impl SessionsRepository for GrpcSessionsRepository {
 // messages, no server fixture — see the module docs)
 // ---------------------------------------------------------------------------
 
-/// A `ListSessions` entry, plus its already-resolved preview, as the
-/// `/sessions` card renders it.
-fn map_session(info: SessionInfo, preview: Vec<String>) -> Session {
+/// A `ListSessions` entry, plus its already-resolved [`LayoutDerived`] (`None`
+/// for a resurrectible session, or a running session whose `GetLayout`
+/// failed), as the `/sessions` card renders it. Layout-derived counts win
+/// whenever the layout reports at least one tab; otherwise the wire's own
+/// `tab_count`/`pane_count` — the fallback of record — carry through with an
+/// empty preview. See the module docs' "Pane preview" section.
+fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
     let backend = map_backend(info.backend);
     let status = if info.resurrectable {
         SessionStatus::Resurrectible
@@ -270,17 +298,26 @@ fn map_session(info: SessionInfo, preview: Vec<String>) -> Session {
         SessionStatus::Running
     };
     let third = third_metric(status, backend, &info);
+    let layout = match derived {
+        Some(derived) if derived.tabs > 0 => LayoutSummary {
+            tabs: derived.tabs,
+            panes: derived.panes,
+            third,
+            preview: derived.preview,
+        },
+        _ => LayoutSummary {
+            tabs: info.tab_count,
+            panes: info.pane_count,
+            third,
+            preview: Vec::new(),
+        },
+    };
     Session {
         id: info.id,
         name: info.name,
         status,
         backend,
-        layout: LayoutSummary {
-            tabs: info.tab_count,
-            panes: info.pane_count,
-            third,
-            preview,
-        },
+        layout,
     }
 }
 
@@ -313,21 +350,33 @@ fn third_metric(status: SessionStatus, backend: SessionBackend, info: &SessionIn
     }
 }
 
-/// [`Layout::tabs`]'s first tab's first [`MAX_PREVIEW_PANES`] pane titles —
-/// the pure half of [`GrpcSessionsRepository::preview_for`]. Empty for a
-/// session with no tabs, or a first tab with no panes.
-fn preview_from_layout(layout: Layout) -> Vec<String> {
-    layout
+/// One `Layout` response, boiled down to a tab count, a pane count summed
+/// across every tab, and a preview: [`Layout::tabs`]'s first tab's first
+/// [`MAX_PREVIEW_PANES`] pane titles, skipping any title that is empty or
+/// all whitespace (a blank pill is worse than no pill row) — filtered panes
+/// still count toward `panes`. The pure half of
+/// [`GrpcSessionsRepository::layout_for`]. `preview` is empty for a session
+/// with no tabs, or a first tab with no non-blank-titled panes.
+fn layout_derived_from(layout: Layout) -> LayoutDerived {
+    let panes = layout.tabs.iter().map(|tab| tab.panes.len() as u32).sum();
+    let preview = layout
         .tabs
         .first()
         .map(|tab| {
             tab.panes
                 .iter()
+                .map(|pane| pane.title.as_str())
+                .filter(|title| !title.trim().is_empty())
                 .take(MAX_PREVIEW_PANES)
-                .map(|pane| pane.title.clone())
+                .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    LayoutDerived {
+        tabs: layout.tabs.len() as u32,
+        panes,
+        preview,
+    }
 }
 
 /// Split `id` (the `<backend>:<name>` convention `SessionInfo.id` documents)
@@ -468,7 +517,7 @@ mod tests {
     fn a_running_zellij_session_maps_its_client_count_as_the_third_metric() {
         let session = map_session(
             info("zellij:dev", "dev", Backend::Zellij as i32, false),
-            Vec::new(),
+            None,
         );
         assert_eq!(session.id, "zellij:dev");
         assert_eq!(session.name, "dev");
@@ -483,7 +532,7 @@ mod tests {
     fn a_running_herdr_session_maps_its_space_count_instead() {
         let mut source = info("herdr:work", "work", Backend::Herdr as i32, false);
         source.space_count = 5;
-        let session = map_session(source, Vec::new());
+        let session = map_session(source, None);
         assert_eq!(session.backend, SessionBackend::Herdr);
         assert_eq!(session.layout.third, ThirdMetric::Spaces(5));
     }
@@ -492,7 +541,7 @@ mod tests {
     fn a_resurrectible_session_reports_its_saved_tab_count_regardless_of_backend() {
         let session = map_session(
             info("zellij:idle", "idle", Backend::Zellij as i32, true),
-            Vec::new(),
+            None,
         );
         assert!(!session.status.is_live());
         assert_eq!(session.layout.third, ThirdMetric::TabsSaved(4));
@@ -508,18 +557,81 @@ mod tests {
     }
 
     #[test]
-    fn the_callers_resolved_preview_carries_straight_through() {
+    fn a_successful_layout_derivation_overrides_the_wire_counts_and_carries_its_preview() {
         let session = map_session(
             info("zellij:dev", "dev", Backend::Zellij as i32, false),
-            vec!["btop".to_string()],
+            Some(LayoutDerived {
+                tabs: 1,
+                panes: 2,
+                preview: vec!["btop".to_string()],
+            }),
         );
+        assert_eq!(session.layout.tabs, 1);
+        assert_eq!(session.layout.panes, 2);
         assert_eq!(session.layout.preview, vec!["btop".to_string()]);
+    }
+
+    #[test]
+    fn a_zero_tab_layout_derivation_falls_back_to_the_wire_counts() {
+        let session = map_session(
+            info("zellij:dev", "dev", Backend::Zellij as i32, false),
+            Some(LayoutDerived {
+                tabs: 0,
+                panes: 0,
+                preview: Vec::new(),
+            }),
+        );
+        assert_eq!(session.layout.tabs, 4);
+        assert_eq!(session.layout.panes, 9);
+        assert!(session.layout.preview.is_empty());
+    }
+
+    #[test]
+    fn an_empty_getlayout_response_falls_back_to_the_wire_counts_end_to_end() {
+        // The whole chain a failed-to-derive running session actually goes
+        // through: an empty `Layout` (what `GetLayout` reports for a session
+        // whose layout query raced something) still yields `tabs: 0`, which
+        // `map_session` treats the same as a call failure.
+        let derived = layout_derived_from(Layout { tabs: Vec::new() });
+        let session = map_session(
+            info("zellij:dev", "dev", Backend::Zellij as i32, false),
+            Some(derived),
+        );
+        assert_eq!(session.layout.tabs, 4);
+        assert_eq!(session.layout.panes, 9);
+        assert!(session.layout.preview.is_empty());
+    }
+
+    #[test]
+    fn a_two_pane_one_tab_layout_renders_its_own_counts_not_the_wires() {
+        let layout = Layout {
+            tabs: vec![tab(vec![pane("btop"), pane("ed@precision:~")])],
+        };
+        let session = map_session(
+            info("zellij:dev", "dev", Backend::Zellij as i32, false),
+            Some(layout_derived_from(layout)),
+        );
+        assert_eq!(session.layout.tabs, 1);
+        assert_eq!(session.layout.panes, 2);
     }
 
     // -- GetLayout's pure half ------------------------------------------------
 
     #[test]
-    fn preview_from_layout_takes_the_first_tabs_first_two_pane_titles() {
+    fn layout_derived_from_sums_panes_across_every_tab_and_counts_tabs() {
+        let layout = Layout {
+            tabs: vec![
+                tab(vec![pane("btop"), pane("ed@precision:~")]),
+                tab(vec![pane("logs")]),
+            ],
+        };
+        let derived = layout_derived_from(layout);
+        assert_eq!(derived.tabs, 2);
+        assert_eq!(derived.panes, 3);
+    }
+
+    #[test]
+    fn layout_derived_from_takes_the_first_tabs_first_two_pane_titles() {
         let layout = Layout {
             tabs: vec![tab(vec![
                 pane("btop"),
@@ -528,20 +640,34 @@ mod tests {
             ])],
         };
         assert_eq!(
-            preview_from_layout(layout),
+            layout_derived_from(layout).preview,
             vec!["btop".to_string(), "ed@precision:~".to_string()]
         );
     }
 
     #[test]
-    fn preview_from_layout_tolerates_a_tabless_or_paneless_layout() {
-        assert!(preview_from_layout(Layout { tabs: Vec::new() }).is_empty());
-        assert!(
-            preview_from_layout(Layout {
-                tabs: vec![tab(Vec::new())]
-            })
-            .is_empty()
-        );
+    fn layout_derived_from_filters_blank_titled_panes_but_still_counts_them() {
+        let layout = Layout {
+            tabs: vec![tab(vec![pane(""), pane("   "), pane("btop")])],
+        };
+        let derived = layout_derived_from(layout);
+        assert_eq!(derived.panes, 3, "blank-titled panes still count");
+        assert_eq!(derived.preview, vec!["btop".to_string()]);
+    }
+
+    #[test]
+    fn layout_derived_from_tolerates_a_tabless_or_paneless_layout() {
+        let tabless = layout_derived_from(Layout { tabs: Vec::new() });
+        assert_eq!(tabless.tabs, 0);
+        assert_eq!(tabless.panes, 0);
+        assert!(tabless.preview.is_empty());
+
+        let paneless = layout_derived_from(Layout {
+            tabs: vec![tab(Vec::new())],
+        });
+        assert_eq!(paneless.tabs, 1);
+        assert_eq!(paneless.panes, 0);
+        assert!(paneless.preview.is_empty());
     }
 
     // -- the rename reconcile --------------------------------------------------
