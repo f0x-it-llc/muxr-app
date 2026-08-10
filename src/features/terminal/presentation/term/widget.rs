@@ -120,6 +120,66 @@
 //! on the true finger position rather than on the window, so the loupe keeps
 //! showing what is under the finger even where the box cannot follow it.
 //!
+//! # The touch state machine: one `Down`, three outcomes
+//!
+//! Every pointer `Down` arms a three-way discrimination, resolved by what the
+//! finger does next rather than by asking who wants the gesture. The threshold
+//! is the framework's own [`TOUCH_SLOP`] — the same constant the enclosing
+//! [`GestureDetector`](frust::GestureDetector) disarms its long-press at, so a
+//! press can never be a scroll here and a long-press there:
+//!
+//! - **past the slop before the long-press threshold** → a **drag-scroll** for
+//!   the rest of the gesture. Each `Move`'s `dy` accumulates, and every whole
+//!   cell height of it emits one wheel step through
+//!   [`on_wheel`](TerminalGridView::on_wheel) at the cell under the *current*
+//!   finger, the remainder carried rather than dropped. A finger moving **down**
+//!   reveals **earlier** lines, i.e. emits wheel-**up** steps — the incumbent's
+//!   mapping.
+//! - **held past the long-press threshold within the slop** → the selection
+//!   above, verbatim. The detector fires
+//!   [`SelectionSeam::begin`](super::SelectionSeam::begin) and every later phase
+//!   is the selection's; this machine disarms on the first phase the selection
+//!   answers `Handled`, so no step and no tap can come out of a gesture the
+//!   selection is driving.
+//! - **released within the slop before either** → a **content tap**: the tapped
+//!   CELL, through [`on_content_tap`](TerminalGridView::on_content_tap).
+//!
+//! **The focus claim is invariant across all three.** The `Down` arm claims the
+//! focus session exactly as it always did — before this machine can know which
+//! outcome it is looking at — because frust-core reads *any* `Down` that
+//! requested no focus as a blur (`RenderRoot::event`), so a claim deferred to
+//! the tap branch would blur the grid on every drag and every hold. A content
+//! tap is therefore reported **in addition to** the claim, never instead of it.
+//!
+//! Both hooks are **optional and report-only**: they name a cell and nothing
+//! else (see the [parent module](super)' layout-blindness note), they survive
+//! [`read_only`](TerminalGridView::read_only) exactly as the selection does —
+//! the read-only gate is the *input* gate, and looking at a session you cannot
+//! type into is what a read-only terminal is for — and a grid with neither
+//! wired behaves precisely as it did before they existed: a tap is a focus
+//! claim, and a scroll is ignored.
+//!
+//! A desktop `InputEvent::Scroll` folds into the **same** step machinery (one
+//! step per wheel line, cell under the cursor), so there is one accumulator and
+//! one hook rather than a second path that could drift from it.
+//!
+//! **Accepted limitation: no fling.** Steps stop when the finger stops — there
+//! is no velocity phase carrying the scrollback on after the release. That
+//! matches the incumbent, and a fling over a *remote* scrollback (every step is
+//! an RPC round trip) is a decision to take with a device in hand.
+//!
+//! **Residual, recorded rather than papered over:** the long-press threshold is
+//! wall time, and only the *detector* holds a clock — the event pass carries
+//! none. So on the detector's rarer fire-on-release path (a hold released
+//! within the same frame it crossed the threshold, before any rebuild delivered
+//! the `Housekeeping` fire), this widget sees an in-slop `Up` it cannot tell
+//! from a tap, and reports the cell *before* the detector's own callback
+//! selects the word. The result is one extra content tap alongside a correct
+//! selection, i.e. one redundant focus report on the pane the user is already
+//! working in — not a lost or wrong gesture. Closing it would mean duplicating
+//! the framework's own (unexported) long-press threshold as a second app-side
+//! constant, which is a worse trade than the redundant report.
+//!
 //! # Not here
 //!
 //! No scrollback view, no key repeat, no selection handles, no double-tap-select
@@ -134,15 +194,16 @@ use frust::authoring::text::{TextContext, TextLayout};
 use frust::authoring::{
     Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, RoundedRect,
-    SemanticsCtx, Shape, Size, Vec2, View, Widget,
+    ScrollDelta, SemanticsCtx, Shape, Size, Vec2, View, Widget,
 };
+use frust::input::TOUCH_SLOP;
 use frust::{FrameTime, Theme};
 
 use super::batch::{RunBatch, batch_screen};
 use super::geometry::{CellGeometry, measure_cell, solve_cell_geometry};
-use super::selection::{self, Segment};
+use super::selection::{self, GridPoint, Segment};
 use super::style::{CellStyle, TerminalPalette};
-use super::{CursorStyle, InputSeam, SelectionSeam, SharedEmulator};
+use super::{ContentTapSink, CursorStyle, InputSeam, SelectionSeam, SharedEmulator, WheelSink};
 
 /// The caret's blink period, in ms — one full on/off cycle.
 ///
@@ -164,6 +225,15 @@ const OUTLINE_TOLERANCE: f64 = 0.1;
 /// of the cell height — carried from the measured S9 renderer.
 const TEXT_UNDERLINE_WIDTH: f64 = 1.0;
 const TEXT_UNDERLINE_Y_FRACTION: f64 = 0.92;
+
+/// Ceiling on the wheel steps one event may emit.
+///
+/// A guard, not a design limit: 256 lines is far past any real drag or wheel
+/// notch, and the cap is what stops a synthetic or degenerate delta (a NaN-free
+/// but enormous `dy`, a cell height measured near zero) from spinning the step
+/// loop — the same shape of backstop [`geometry`](super::geometry)'s own
+/// `MAX_CELLS_PER_AXIS` is.
+const MAX_WHEEL_STEPS: f64 = 256.0;
 
 /// Whether the caret is lit `elapsed_ms` into its blink cycle.
 pub fn cursor_lit(elapsed_ms: f64) -> bool {
@@ -262,6 +332,8 @@ pub struct TerminalGridView {
     input: Option<InputSeam>,
     read_only: bool,
     selection: Option<SelectionSeam>,
+    on_content_tap: Option<ContentTapSink>,
+    on_wheel: Option<WheelSink>,
 }
 
 /// Build a grid view over `emulator` at `generation` (see
@@ -286,6 +358,8 @@ pub fn terminal_grid(
         input: None,
         read_only: false,
         selection: None,
+        on_content_tap: None,
+        on_wheel: None,
     }
 }
 
@@ -354,6 +428,63 @@ impl TerminalGridView {
         self.selection = Some(seam);
         self
     }
+
+    /// Report the **cell** a content tap landed on (see the
+    /// [module docs](self)' touch state machine).
+    ///
+    /// Fires on the tap branch only — a release within [`TOUCH_SLOP`] of the
+    /// press, before a long-press or a drag-scroll claimed the gesture — and
+    /// always **in addition to** the focus claim the `Down` already made, never
+    /// instead of it. Not gated on [`read_only`](Self::read_only): pointing at
+    /// a pane you cannot type into is still pointing at it.
+    ///
+    /// Without one, a tap claims focus and reports nothing, exactly as it did
+    /// before this hook existed.
+    #[must_use]
+    pub fn on_content_tap(mut self, sink: ContentTapSink) -> Self {
+        self.on_content_tap = Some(sink);
+        self
+    }
+
+    /// Report one wheel step per line of scroll, at the cell it applies to.
+    ///
+    /// One hook for both sources: a touch drag past the slop (its `dy`
+    /// accumulated against the cell height, finger-down meaning wheel-up) and a
+    /// desktop [`InputEvent::Scroll`] (one step per wheel line, cell under the
+    /// cursor). See the [module docs](self) for the accumulation and the
+    /// direction mapping.
+    ///
+    /// Without one, a drag scrolls nothing and an `InputEvent::Scroll` stays
+    /// `Ignored`, exactly as it was.
+    #[must_use]
+    pub fn on_wheel(mut self, sink: WheelSink) -> Self {
+        self.on_wheel = Some(sink);
+        self
+    }
+}
+
+/// The pointer gesture in flight — the touch state machine's whole state (see
+/// the [module docs](self)).
+///
+/// `Copy` so an event arm can read it by value and reassign in the same
+/// expression, the shape frust's own gesture recogniser uses.
+#[derive(Clone, Copy, Debug)]
+enum Grab {
+    /// No press this widget armed: nothing down, or a gesture the selection —
+    /// or a `Down` outside the grid's own box — disarmed.
+    Idle,
+    /// A finger is down and still within [`TOUCH_SLOP`] of where it landed: a
+    /// tap, a drag-scroll and a long-press selection are all still open.
+    Armed {
+        /// Where the press landed, in widget-local px.
+        origin: Point,
+    },
+    /// The press crossed the slop before the long-press fired, so this gesture
+    /// is a scroll for the rest of its life.
+    Scrolling {
+        /// The position the scroll accumulator has already consumed up to.
+        last: Point,
+    },
 }
 
 /// The retained grid: re-batches and re-shapes the emulator's screen on every
@@ -397,6 +528,17 @@ pub struct TerminalGridWidget {
     /// tells a hand-off to the key bar from a real blur — see
     /// [`InputSeam::focus_claim`].
     focus_claim: u64,
+    /// The pointer gesture in flight (see [`Grab`]).
+    grab: Grab,
+    /// The scroll accumulator's sub-step remainder, in **lines**: travel
+    /// shorter than one cell height is carried to the next event rather than
+    /// dropped, which is what makes a slow drag scroll smoothly instead of
+    /// swallowing everything under a line. Reset at every press.
+    scroll_carry: f64,
+    /// Where a content tap is reported, when a screen asked for them.
+    on_content_tap: Option<ContentTapSink>,
+    /// Where wheel steps are reported, when a screen asked for them.
+    on_wheel: Option<WheelSink>,
 }
 
 impl<State: 'static> View<State> for TerminalGridView {
@@ -433,6 +575,10 @@ impl<State: 'static> View<State> for TerminalGridView {
             caret_rect: None,
             was_focused: self.focused,
             focus_claim: self.input.as_ref().map_or(0, InputSeam::focus_claim),
+            grab: Grab::Idle,
+            scroll_carry: 0.0,
+            on_content_tap: self.on_content_tap.clone(),
+            on_wheel: self.on_wheel.clone(),
         }
     }
 
@@ -488,6 +634,11 @@ impl<State: 'static> View<State> for TerminalGridView {
             || prev.selection.is_some() != self.selection.is_some();
         element.input = self.input.clone();
         element.selection = self.selection.clone();
+        // The two gesture hooks are reinstalled every rebuild for the same
+        // reason, and change nothing painted or announced: an `Rc<dyn Fn>` is
+        // two pointer bumps to clone and not comparable at all.
+        element.on_content_tap = self.on_content_tap.clone();
+        element.on_wheel = self.on_wheel.clone();
         if clienthood {
             element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
@@ -644,64 +795,19 @@ impl Widget for TerminalGridWidget {
         // the sole wake source (module docs, rule 2).
     }
 
-    /// The keystroke source's event half **and** the selection gesture's hands —
-    /// see the [module docs](self).
+    /// The keystroke source's event half, the selection gesture's hands **and**
+    /// the touch state machine — see the [module docs](self).
     ///
-    /// The two are deliberately ordered: every pointer phase goes through the
-    /// selection arms first (they work `read_only` and with no [`InputSeam`] at
-    /// all), and only a `Down` that did *not* dismiss a selection falls through
-    /// to claiming focus. A grid with neither seam is inert exactly as it was.
+    /// One dispatch per event class, each arm's own method carrying the
+    /// ordering it owes the others; a grid with no seams and no hooks is inert
+    /// exactly as it was.
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if let InputEvent::Pointer(pointer) = event
-            && let Some(selection) = self.selection.clone()
-            && let Some(result) = self.selection_event(ctx, pointer, &selection)
-        {
-            return result;
-        }
-        // Cloned, not borrowed: the arms below write `self.focus_claim` while
-        // the seam is in hand, and the clone is two `Rc` bumps.
-        let Some(seam) = self.input.clone() else {
-            return EventResult::Ignored;
-        };
-        if self.read_only {
-            return EventResult::Ignored;
-        }
         match event {
-            InputEvent::Pointer(pointer) => {
-                if pointer.phase != PointerPhase::Down || !inside(pointer.position, ctx.size()) {
-                    return EventResult::Ignored;
-                }
-                // Every tap re-claims focus and re-publishes `active: true`, so
-                // a keyboard the user dismissed comes back on the next tap
-                // rather than needing a blur first. The claim is recorded so
-                // the next blur edge can tell a real blur from the key bar
-                // taking the surface (see `note_focus_edge`).
-                self.focus_claim = seam.claim_focus();
-                ctx.request_focus();
-                let state = seam.ime_state(self.caret_rect);
-                ctx.publish_ime_state(state);
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            InputEvent::Key(_) | InputEvent::Ime(_) => {
-                if !ctx.has_focus() {
-                    return EventResult::Ignored;
-                }
-                // One shared fold, so the key bar's caps derive bytes exactly
-                // the same way this widget does (see [`InputSeam::absorb`]).
-                if seam.absorb(event).is_none() {
-                    return EventResult::Ignored;
-                }
-                // The publish is unconditional and idempotent: leaving a stale
-                // editing state behind would make a shell's steady-active
-                // reconcile push the *pre-keystroke* text back into the
-                // platform mirror.
-                let state = seam.ime_state(self.caret_rect);
-                ctx.publish_ime_state(state);
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            InputEvent::Scroll { .. } => EventResult::Ignored,
+            InputEvent::Pointer(pointer) => self.pointer_event(ctx, pointer),
+            // The desktop wheel folds into the touch drag's own accumulator —
+            // one choke point (module docs).
+            InputEvent::Scroll { position, delta } => self.wheel_event(*position, *delta),
+            InputEvent::Key(_) | InputEvent::Ime(_) => self.key_event(ctx, event),
             // Not user input — this widget queues no deferred callback for the
             // broadcast to run, so it simply falls through.
             InputEvent::Housekeeping => EventResult::Ignored,
@@ -787,9 +893,221 @@ impl TerminalGridWidget {
         });
     }
 
-    /// The selection half of `event` — see [`Widget::event`]'s own doc for the
-    /// ordering. `Some(result)` when this phase was the selection's to answer,
-    /// `None` to fall through to the focus/IME path.
+    /// Every pointer phase, in the order the two owners must see it: the
+    /// selection arms first (they work `read_only` and with no [`InputSeam`] at
+    /// all), then the touch state machine.
+    ///
+    /// The hand-over point is `Handled`, not "the selection had an opinion":
+    /// its arms answer `Ignored` for the phases it has nothing to do with (a
+    /// `Move` with no drag live, an `Up` that ends nothing), and those are
+    /// exactly the phases a scroll or a tap is made of.
+    fn pointer_event(&mut self, ctx: &mut EventCtx, pointer: &PointerEvent) -> EventResult {
+        if let Some(seam) = self.selection.clone()
+            && let Some(result) = self.selection_event(ctx, pointer, &seam)
+            && matches!(result, EventResult::Handled)
+        {
+            // A phase the selection owned — a clearing tap's `Down`, or any
+            // phase of a live selection drag. Disarm rather than race it: no
+            // content tap and no wheel step comes out of a gesture the
+            // selection is driving.
+            self.grab = Grab::Idle;
+            return result;
+        }
+        match pointer.phase {
+            PointerPhase::Down => self.press(ctx, pointer.position),
+            PointerPhase::Move => self.drag(pointer.position),
+            PointerPhase::Up => self.release(pointer.position),
+            // Flags only — a `Cancel` arm never touches app state
+            // (`docs/CODE_STANDARDS.md`'s Interaction Semantics), and a stolen
+            // gesture reports neither a tap nor a step.
+            PointerPhase::Cancel => {
+                self.grab = Grab::Idle;
+                EventResult::Ignored
+            }
+        }
+    }
+
+    /// A `Down`: arm the touch machine, then claim the focus session exactly as
+    /// this widget always has — the claim is invariant across all three
+    /// outcomes (see the [module docs](self)).
+    fn press(&mut self, ctx: &mut EventCtx, at: Point) -> EventResult {
+        // Armed only inside the grid's own box: the surface stack is
+        // full-bleed, so a press on the sub-cell remainder strip is not a cell
+        // and must not become one on release.
+        let inside_grid = inside(at, ctx.size());
+        self.grab = if inside_grid {
+            Grab::Armed { origin: at }
+        } else {
+            Grab::Idle
+        };
+        self.scroll_carry = 0.0;
+
+        // Cloned, not borrowed: the arm below writes `self.focus_claim` while
+        // the seam is in hand, and the clone is two `Rc` bumps.
+        let Some(seam) = self.input.clone() else {
+            return EventResult::Ignored;
+        };
+        if self.read_only || !inside_grid {
+            return EventResult::Ignored;
+        }
+        // Every tap re-claims focus and re-publishes `active: true`, so a
+        // keyboard the user dismissed comes back on the next tap rather than
+        // needing a blur first. The claim is recorded so the next blur edge can
+        // tell a real blur from the key bar taking the surface (see
+        // `note_focus_edge`).
+        self.focus_claim = seam.claim_focus();
+        ctx.request_focus();
+        let state = seam.ime_state(self.caret_rect);
+        ctx.publish_ime_state(state);
+        ctx.request_redraw();
+        EventResult::Handled
+    }
+
+    /// A `Move` the selection did not take: the slop test once, and scroll
+    /// input from then on.
+    fn drag(&mut self, at: Point) -> EventResult {
+        match self.grab {
+            // No press of ours: a desktop hover move, or a gesture the
+            // selection (or the bounds check) already disarmed.
+            Grab::Idle => EventResult::Ignored,
+            Grab::Armed { origin } => {
+                if (at - origin).hypot() <= TOUCH_SLOP {
+                    return EventResult::Ignored;
+                }
+                // Past the slop before the long-press threshold, so this is a
+                // scroll for the rest of the gesture. The accumulator starts at
+                // the press **origin**, so the steps a drag emits count its
+                // whole travel rather than only what is left after the slop.
+                self.grab = Grab::Scrolling { last: origin };
+                self.scroll_to(at)
+            }
+            Grab::Scrolling { .. } => self.scroll_to(at),
+        }
+    }
+
+    /// Consume the drag from wherever the accumulator got to up to `at`.
+    fn scroll_to(&mut self, at: Point) -> EventResult {
+        let Grab::Scrolling { last } = self.grab else {
+            return EventResult::Ignored;
+        };
+        self.grab = Grab::Scrolling { last: at };
+        let Some(height) = self.line_height() else {
+            return EventResult::Ignored;
+        };
+        self.wheel_steps((at.y - last.y) / height, at)
+    }
+
+    /// An `Up` the selection did not take: the tap branch.
+    fn release(&mut self, at: Point) -> EventResult {
+        let tapped = matches!(
+            self.grab,
+            Grab::Armed { origin } if (at - origin).hypot() <= TOUCH_SLOP
+        );
+        self.grab = Grab::Idle;
+        if !tapped {
+            return EventResult::Ignored;
+        }
+        let (Some(sink), Some(cell)) = (self.on_content_tap.clone(), self.cell_at(at)) else {
+            return EventResult::Ignored;
+        };
+        sink(u32::from(cell.col), u32::from(cell.row));
+        EventResult::Handled
+    }
+
+    /// The desktop wheel, through the **same** step machinery a touch drag goes
+    /// through.
+    ///
+    /// A line delta already *is* steps; a precision (trackpad) delta is pixels
+    /// and divides by the cell height exactly like a finger's `dy`. Either way
+    /// positive `y` means the content moves **down** — earlier lines revealed —
+    /// which is the same thing a finger moving down means, so both reach
+    /// [`wheel_steps`](Self::wheel_steps) with one sign convention.
+    fn wheel_event(&mut self, position: Point, delta: ScrollDelta) -> EventResult {
+        let lines = match delta {
+            ScrollDelta::Lines(_, y) => y,
+            ScrollDelta::Pixels(_, y) => {
+                let Some(height) = self.line_height() else {
+                    return EventResult::Ignored;
+                };
+                y / height
+            }
+        };
+        self.wheel_steps(lines, position)
+    }
+
+    /// Fold `lines` of scroll into the accumulator and emit one step per whole
+    /// line it crosses, at the cell under `at`, keeping the remainder.
+    ///
+    /// Positive `lines` is content moving **down** (a finger dragging down, a
+    /// wheel rolling away from the hand): earlier lines are revealed, which is
+    /// a wheel **up** step — the incumbent's mapping.
+    fn wheel_steps(&mut self, lines: f64, at: Point) -> EventResult {
+        if !lines.is_finite() || lines == 0.0 {
+            return EventResult::Ignored;
+        }
+        let (Some(sink), Some(cell)) = (self.on_wheel.clone(), self.cell_at(at)) else {
+            // Nothing to report to: the accumulator stays where it was rather
+            // than banking travel a hook wired later would inherit.
+            return EventResult::Ignored;
+        };
+        // Clamped, so a degenerate delta cannot spin the loop below.
+        self.scroll_carry = (self.scroll_carry + lines).clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
+        let (col, row) = (u32::from(cell.col), u32::from(cell.row));
+        let mut steps = 0u32;
+        while self.scroll_carry.abs() >= 1.0 {
+            let up = self.scroll_carry > 0.0;
+            self.scroll_carry -= if up { 1.0 } else { -1.0 };
+            sink(up, col, row);
+            steps += 1;
+        }
+        if steps == 0 {
+            EventResult::Ignored
+        } else {
+            EventResult::Handled
+        }
+    }
+
+    /// The measured cell height, once `layout` has solved one and it is usable
+    /// as a divisor.
+    fn line_height(&self) -> Option<f64> {
+        self.geometry
+            .map(|(_, _, geometry)| geometry.height)
+            .filter(|height| height.is_finite() && *height > 0.0)
+    }
+
+    /// The zero-based cell under a widget-local `at`, clamped to the grid —
+    /// `None` before the first `layout` measured one.
+    fn cell_at(&self, at: Point) -> Option<GridPoint> {
+        self.geometry
+            .map(|(_, _, geometry)| selection::cell_at(at, geometry))
+    }
+
+    /// One **focus-routed** event folded into the shared keystroke source (see
+    /// the [module docs](self)).
+    fn key_event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let Some(seam) = self.input.clone() else {
+            return EventResult::Ignored;
+        };
+        if self.read_only || !ctx.has_focus() {
+            return EventResult::Ignored;
+        }
+        // One shared fold, so the key bar's caps derive bytes exactly the same
+        // way this widget does (see [`InputSeam::absorb`]).
+        if seam.absorb(event).is_none() {
+            return EventResult::Ignored;
+        }
+        // The publish is unconditional and idempotent: leaving a stale editing
+        // state behind would make a shell's steady-active reconcile push the
+        // *pre-keystroke* text back into the platform mirror.
+        let state = seam.ime_state(self.caret_rect);
+        ctx.publish_ime_state(state);
+        ctx.request_redraw();
+        EventResult::Handled
+    }
+
+    /// The selection half of `event` — see
+    /// [`pointer_event`](Self::pointer_event) for the ordering. `Some(result)`
+    /// when this phase was the selection's to answer, `None` to fall through.
     ///
     /// Deliberately **no** `capture_pointer` here: the enclosing
     /// [`GestureDetector`](frust::GestureDetector) that
@@ -1177,5 +1495,476 @@ impl TerminalGridWidget {
     /// The generation the widget currently holds — a test accessor.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The touch state machine, driven by synthesized pointer sequences.
+    //!
+    //! Deliberately **below** the mounted suites (`tests/term_widget.rs`,
+    //! `tests/term_selection.rs`): those own the assembly — the real
+    //! [`GestureDetector`](frust::GestureDetector), its wall-clock long-press
+    //! and the Copy chip — while what has to be pinned here is the
+    //! discrimination itself, which is a property of this widget's own `event`
+    //! and is exercised one phase at a time. The one thing that costs is the
+    //! long-press: the detector is what fires it, so a test stands in for the
+    //! detector by calling [`SelectionSeam::begin`](super::SelectionSeam::begin)
+    //! at the point the threshold would have, exactly as the detector's
+    //! `on_long_press` does.
+
+    use std::any::Any;
+    use std::cell::RefCell;
+
+    use frust::authoring::PointerButton;
+
+    use crate::features::terminal::domain::feed::TerminalFeed;
+
+    use super::super::{SharedFeed, TerminalEmulator};
+    use super::*;
+
+    /// The font size every test lays out at — the app's own terminal default.
+    const FONT_SIZE: f32 = 13.0;
+
+    /// A phone-shaped content box, in logical px (the OP9's safe-area box).
+    const PHONE: Size = Size::new(392.7, 872.7);
+
+    /// The screen every test points at: two lines of ordinary words, so a
+    /// long-press has something to select and a tap has something to land on.
+    const FIXTURE: &[u8] = b"cargo build release\r\nusr local bin";
+
+    /// A feed that neither produces nor accepts anything — the grid's pointer
+    /// half touches neither direction, and a session's bytes are not what these
+    /// tests are about.
+    struct NullFeed;
+
+    impl TerminalFeed for NullFeed {
+        fn drain_output(&mut self, _sink: &mut dyn FnMut(&[u8])) -> usize {
+            0
+        }
+
+        fn send_input(&mut self, _bytes: &[u8]) {}
+
+        fn resize(&mut self, _cols: u16, _rows: u16) {}
+    }
+
+    /// A built, laid-out grid plus every handle a test pokes it through.
+    struct Probe {
+        widget: TerminalGridWidget,
+        /// The cell box `layout` solved — every coordinate below is derived
+        /// from it rather than from an assumed font metric.
+        geo: CellGeometry,
+        /// `(col, row)` per content tap reported, in order.
+        taps: Rc<RefCell<Vec<(u32, u32)>>>,
+        /// `(up, col, row)` per wheel step reported, in order.
+        steps: Rc<RefCell<Vec<(bool, u32, u32)>>>,
+        input: InputSeam,
+        selection: SelectionSeam,
+    }
+
+    impl Probe {
+        /// A grid with both hooks wired.
+        fn new() -> Self {
+            Self::build(true, false)
+        }
+
+        /// …with neither wired: the pre-hook grid, bit for bit.
+        fn unwired() -> Self {
+            Self::build(false, false)
+        }
+
+        /// …with both wired over a read-only session.
+        fn read_only() -> Self {
+            Self::build(true, true)
+        }
+
+        fn build(hooks: bool, read_only: bool) -> Self {
+            let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+            emulator.borrow_mut().feed(FIXTURE);
+            let feed: SharedFeed = Rc::new(RefCell::new(NullFeed));
+            let input = InputSeam::new(feed);
+            let selection = SelectionSeam::new(Rc::clone(&emulator));
+            let taps: Rc<RefCell<Vec<(u32, u32)>>> = Rc::new(RefCell::new(Vec::new()));
+            let steps: Rc<RefCell<Vec<(bool, u32, u32)>>> = Rc::new(RefCell::new(Vec::new()));
+
+            let mut view = terminal_grid(
+                Rc::clone(&emulator),
+                1,
+                TerminalPalette::fallback(),
+                FONT_SIZE,
+            )
+            .input(input.clone())
+            .read_only(read_only)
+            .selection(selection.clone());
+            if hooks {
+                let tapped = Rc::clone(&taps);
+                let stepped = Rc::clone(&steps);
+                view = view
+                    .on_content_tap(Rc::new(move |col, row| {
+                        tapped.borrow_mut().push((col, row))
+                    }))
+                    .on_wheel(Rc::new(move |up, col, row| {
+                        stepped.borrow_mut().push((up, col, row));
+                    }));
+            }
+
+            let mut counter = 0u64;
+            let mut widget = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+            let mut text_ctx = TextContext::new();
+            {
+                let erased: &mut dyn Any = &mut text_ctx;
+                let mut ctx = LayoutCtx::with_text_context(erased);
+                widget.layout(&mut ctx, &BoxConstraints::loose(PHONE));
+            }
+            let geo = widget.geometry().expect("solved during layout");
+            Probe {
+                widget,
+                geo,
+                taps,
+                steps,
+                input,
+                selection,
+            }
+        }
+
+        /// Deliver one pointer phase at `at`, reporting what the grid did.
+        fn pointer(&mut self, phase: PointerPhase, at: Point) -> EventResult {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase,
+                position: at,
+                button: PointerButton::Primary,
+            });
+            self.dispatch(&event)
+        }
+
+        /// Deliver one desktop wheel event at `at`.
+        fn scroll(&mut self, delta: ScrollDelta, at: Point) -> EventResult {
+            self.dispatch(&InputEvent::Scroll {
+                position: at,
+                delta,
+            })
+        }
+
+        fn dispatch(&mut self, event: &InputEvent) -> EventResult {
+            let mut state = ();
+            let mut ctx = EventCtx::new(&mut state, Point::ZERO, self.geo.grid_size());
+            self.widget.event(&mut ctx, event)
+        }
+
+        /// The centre of cell `(col, row)`, in widget-local px.
+        fn cell(&self, col: u16, row: u16) -> Point {
+            Point::new(
+                (f64::from(col) + 0.5) * self.geo.width,
+                (f64::from(row) + 0.5) * self.geo.height,
+            )
+        }
+
+        /// `n` cell heights, as a vertical offset.
+        fn lines(&self, n: f64) -> Vec2 {
+            Vec2::new(0.0, self.geo.height * n)
+        }
+
+        fn taps(&self) -> Vec<(u32, u32)> {
+            self.taps.borrow().clone()
+        }
+
+        fn steps(&self) -> Vec<(bool, u32, u32)> {
+            self.steps.borrow().clone()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The tap branch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_tap_reports_the_cell_it_landed_on_and_still_claims_the_focus_session() {
+        let mut probe = Probe::new();
+        let at = probe.cell(7, 3);
+        let before = probe.input.focus_claim();
+
+        assert_eq!(probe.pointer(PointerPhase::Down, at), EventResult::Handled);
+        assert!(
+            probe.input.focus_claim() > before,
+            "the Down claims focus exactly as it always did — before anything \
+             knows whether this gesture is a tap"
+        );
+        // No finger is perfectly still: a jitter inside the slop is still a tap.
+        let lifted = at + Vec2::new(2.0, -3.0);
+        probe.pointer(PointerPhase::Move, lifted);
+        assert_eq!(
+            probe.pointer(PointerPhase::Up, lifted),
+            EventResult::Handled
+        );
+
+        assert_eq!(probe.taps(), vec![(7, 3)], "one tap, at the cell under it");
+        assert!(probe.steps().is_empty(), "a tap is not a scroll");
+    }
+
+    #[test]
+    fn a_read_only_session_still_reports_taps_and_steps() {
+        // The read-only gate is the *input* gate: it stops keystrokes, not
+        // looking at a pane (the app layer decides what a reported cell is
+        // allowed to do with it).
+        let mut probe = Probe::read_only();
+        let at = probe.cell(2, 1);
+        let before = probe.input.focus_claim();
+
+        probe.pointer(PointerPhase::Down, at);
+        assert_eq!(
+            probe.input.focus_claim(),
+            before,
+            "a read-only grid still claims no focus"
+        );
+        probe.pointer(PointerPhase::Up, at);
+        assert_eq!(probe.taps(), vec![(2, 1)]);
+
+        probe.scroll(ScrollDelta::Lines(0.0, 1.0), at);
+        assert_eq!(probe.steps(), vec![(true, 2, 1)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // The drag-scroll branch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_vertical_drag_emits_one_step_per_line_height_and_carries_the_remainder() {
+        let mut probe = Probe::new();
+        let start = probe.cell(4, 10);
+        // 5.4 cell heights: five whole lines and a remainder that must survive
+        // to the next Move rather than being dropped.
+        let end = start + probe.lines(5.4);
+
+        probe.pointer(PointerPhase::Down, start);
+        assert_eq!(probe.pointer(PointerPhase::Move, end), EventResult::Handled);
+
+        let steps = probe.steps();
+        assert_eq!(steps.len(), 5, "floor(5.4) whole lines: {steps:?}");
+        assert!(
+            steps.iter().all(|(up, ..)| *up),
+            "a finger moving DOWN reveals EARLIER lines, i.e. wheel-up: {steps:?}"
+        );
+        let cell = selection::cell_at(end, probe.geo);
+        assert!(
+            steps
+                .iter()
+                .all(|(_, col, row)| (*col, *row) == (u32::from(cell.col), u32::from(cell.row))),
+            "every step names the cell under the CURRENT finger: {steps:?}"
+        );
+
+        // 0.6 more lines completes the sixth step — proof the 0.4 remainder was
+        // retained across the two events.
+        probe.pointer(PointerPhase::Move, end + probe.lines(0.6));
+        assert_eq!(
+            probe.steps().len(),
+            6,
+            "the sub-line remainder is carried, never dropped"
+        );
+        assert!(probe.taps().is_empty(), "a drag is not a tap");
+    }
+
+    #[test]
+    fn a_drag_the_other_way_emits_wheel_down_steps() {
+        let mut probe = Probe::new();
+        let start = probe.cell(4, 20);
+        probe.pointer(PointerPhase::Down, start);
+        probe.pointer(PointerPhase::Move, start - probe.lines(3.0));
+
+        let steps = probe.steps();
+        assert_eq!(steps.len(), 3);
+        assert!(
+            steps.iter().all(|(up, ..)| !*up),
+            "a finger moving UP reveals LATER lines, i.e. wheel-down: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_movement_inside_the_slop_scrolls_nothing_at_all() {
+        let mut probe = Probe::new();
+        let start = probe.cell(6, 6);
+        probe.pointer(PointerPhase::Down, start);
+        // Half the slop, in the axis that scrolls: still a tap candidate.
+        let jittered = start + Vec2::new(0.0, TOUCH_SLOP / 2.0);
+        assert_eq!(
+            probe.pointer(PointerPhase::Move, jittered),
+            EventResult::Ignored
+        );
+        assert!(probe.steps().is_empty(), "the slop is the whole point");
+        probe.pointer(PointerPhase::Up, jittered);
+        assert_eq!(probe.taps().len(), 1, "and it is still a tap on release");
+    }
+
+    #[test]
+    fn a_drag_past_the_slop_stays_a_scroll_even_when_the_finger_then_holds() {
+        let mut probe = Probe::new();
+        let start = probe.cell(2, 2);
+        let dragged = start + probe.lines(2.0);
+
+        probe.pointer(PointerPhase::Down, start);
+        probe.pointer(PointerPhase::Move, dragged);
+        assert_eq!(probe.steps().len(), 2);
+
+        // A hold after the crossing is just another Move at the same place: the
+        // gesture stays in scroll mode (it moved nothing, so it emits nothing),
+        // and nothing arms a selection — the enclosing detector disarmed its own
+        // long-press at the same slop.
+        assert_eq!(
+            probe.pointer(PointerPhase::Move, dragged),
+            EventResult::Ignored
+        );
+        assert_eq!(probe.steps().len(), 2, "a stationary Move adds no step");
+        assert!(
+            probe.selection.range().is_none(),
+            "no selection comes out of a scroll"
+        );
+
+        // …and the release is not a tap.
+        assert_eq!(
+            probe.pointer(PointerPhase::Up, dragged),
+            EventResult::Ignored
+        );
+        assert!(probe.taps().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // The long-press branch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_long_press_within_the_slop_selects_and_reports_neither_tap_nor_step() {
+        let mut probe = Probe::new();
+        // Inside "cargo" on the top row.
+        let at = probe.cell(2, 0);
+        probe.pointer(PointerPhase::Down, at);
+
+        // What the enclosing GestureDetector does at the threshold — the grid
+        // is the gesture's hands, never its recogniser.
+        probe.selection.begin();
+        assert!(probe.selection.dragging(), "the selection drag is live");
+
+        // A drag that now crosses the slop belongs to the selection, not to the
+        // scroll: it extends the range and emits no step.
+        let dragged = at + Vec2::new(probe.geo.width * 6.0, 0.0);
+        assert_eq!(
+            probe.pointer(PointerPhase::Move, dragged),
+            EventResult::Handled
+        );
+        assert_eq!(
+            probe.pointer(PointerPhase::Up, dragged),
+            EventResult::Handled
+        );
+
+        assert!(
+            probe.selection.range().is_some(),
+            "the long press selected, exactly as it did before"
+        );
+        assert!(probe.taps().is_empty(), "a long press is not a tap");
+        assert!(probe.steps().is_empty(), "a long press is not a scroll");
+    }
+
+    #[test]
+    fn a_tap_that_clears_a_selection_reports_no_cell() {
+        // The clearing tap's `Down` is `Handled` by the selection arm, and a
+        // dismissal must not also address a pane — the same reason it must not
+        // summon the keyboard.
+        let mut probe = Probe::new();
+        let at = probe.cell(2, 0);
+        probe.pointer(PointerPhase::Down, at);
+        probe.selection.begin();
+        probe.pointer(PointerPhase::Up, at);
+        assert!(probe.selection.is_active(), "something is selected");
+        assert!(
+            probe.taps().is_empty(),
+            "a perfectly stationary hold is not a tap either"
+        );
+
+        let elsewhere = probe.cell(9, 1);
+        assert_eq!(
+            probe.pointer(PointerPhase::Down, elsewhere),
+            EventResult::Handled
+        );
+        probe.pointer(PointerPhase::Up, elsewhere);
+        assert!(
+            probe.taps().is_empty(),
+            "the clearing tap reported no cell: {:?}",
+            probe.taps()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The desktop wheel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_desktop_scroll_emits_one_step_per_wheel_line_at_the_cell_under_the_cursor() {
+        let mut probe = Probe::new();
+        let at = probe.cell(9, 6);
+
+        assert_eq!(
+            probe.scroll(ScrollDelta::Lines(0.0, 2.0), at),
+            EventResult::Handled
+        );
+        assert_eq!(probe.steps(), vec![(true, 9, 6), (true, 9, 6)]);
+
+        probe.steps.borrow_mut().clear();
+        probe.scroll(ScrollDelta::Lines(0.0, -1.0), at);
+        assert_eq!(probe.steps(), vec![(false, 9, 6)]);
+
+        // A precision (trackpad) delta is pixels, and folds into the same
+        // accumulator: half a line is not a step, two halves are.
+        probe.steps.borrow_mut().clear();
+        let half = probe.geo.height / 2.0;
+        assert_eq!(
+            probe.scroll(ScrollDelta::Pixels(0.0, half), at),
+            EventResult::Ignored
+        );
+        assert!(probe.steps().is_empty(), "half a line is not a step yet");
+        probe.scroll(ScrollDelta::Pixels(0.0, half), at);
+        assert_eq!(probe.steps().len(), 1, "the two halves make one step");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unwired: the pre-hook grid, bit for bit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_grid_with_neither_hook_claims_focus_and_reports_nothing() {
+        let mut probe = Probe::unwired();
+        let at = probe.cell(3, 3);
+        let before = probe.input.focus_claim();
+
+        assert_eq!(
+            probe.pointer(PointerPhase::Down, at),
+            EventResult::Handled,
+            "the focus claim is untouched by the hooks' absence"
+        );
+        assert!(probe.input.focus_claim() > before);
+        assert_eq!(
+            probe.pointer(PointerPhase::Move, at + probe.lines(4.0)),
+            EventResult::Ignored,
+            "no hook, no scroll"
+        );
+        assert_eq!(probe.pointer(PointerPhase::Up, at), EventResult::Ignored);
+        assert_eq!(
+            probe.scroll(ScrollDelta::Lines(0.0, 3.0), at),
+            EventResult::Ignored,
+            "an InputEvent::Scroll stays ignored, exactly as it was"
+        );
+        assert!(probe.taps().is_empty());
+        assert!(probe.steps().is_empty());
+    }
+
+    #[test]
+    fn a_press_outside_the_grids_own_box_is_never_a_tap() {
+        // The surface stack is full-bleed, so a press can land on the sub-cell
+        // remainder strip the grid does not own.
+        let mut probe = Probe::new();
+        let outside = Point::new(probe.geo.grid_width() + 4.0, probe.geo.grid_height() + 4.0);
+        assert_eq!(
+            probe.pointer(PointerPhase::Down, outside),
+            EventResult::Ignored
+        );
+        probe.pointer(PointerPhase::Up, outside);
+        assert!(probe.taps().is_empty());
     }
 }
