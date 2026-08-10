@@ -584,6 +584,71 @@ impl TerminalController {
         }
     }
 
+    /// Rename the space with [`Space::id`] `space_id` to `label` (already
+    /// trimmed by the dialog that collected it —
+    /// `pages::Actions::open_rename_space_dialog`) and pull the sheet's own
+    /// space list up to date.
+    ///
+    /// Deliberately **not** a full [`load`](Self::load), the identical
+    /// reasoning [`create_space`](Self::create_space) already documents:
+    /// renaming a space touches no tab, so replaying the reveal and reseeding
+    /// the browse would buy nothing. No courtesy re-select is needed here the
+    /// way `create_space` needs one either — [`Space::id`] never moves on a
+    /// rename, so the freshly listed row the server answers with is already
+    /// the one that matters, selected or not.
+    pub async fn rename_space(&self, space_id: String, label: String) {
+        if !self.tell(self.terminal.rename_space(space_id, label)).await {
+            return;
+        }
+        match self.terminal.list_spaces().await {
+            Ok(spaces) => self.spaces.set(spaces),
+            Err(failure) => self.core.failures().emit(&failure),
+        }
+    }
+
+    /// Rename the tab with [`TabEntry::tab_id`] `tab_id` to `name` (already
+    /// trimmed by the dialog — `pages::Actions::open_rename_tab_dialog`), then
+    /// pull the sheet's own tab list up to date via [`reload_tabs`](Self::reload_tabs).
+    ///
+    /// Deliberately **not** a full [`load`](Self::load) either, unlike
+    /// [`new_tab`](Self::new_tab)/[`new_pane`](Self::new_pane): a rename
+    /// creates nothing for the server to refocus, so
+    /// [`active_tab`](Self::active_tab)/[`browsed_tab`](Self::browsed_tab)/
+    /// [`lines`](Self::lines) stay exactly where they were — only the label
+    /// (and the panes list it rides along with) has to catch up.
+    pub async fn rename_tab(&self, tab_id: u64, name: String) {
+        if self.tell(self.terminal.rename_tab(tab_id, name)).await {
+            self.reload_tabs().await;
+        }
+    }
+
+    /// Rename the pane `pane_id` to `name` (`is_plugin` picking the wire's id
+    /// namespace, as everywhere else a pane is addressed; already trimmed by
+    /// the dialog — `pages::Actions::open_rename_pane_dialog`), then pull the
+    /// tab list up to date the identical way [`rename_tab`](Self::rename_tab)
+    /// does — a pane's title lives inside [`TabEntry::panes`], so the same
+    /// reload carries it.
+    pub async fn rename_pane(&self, pane_id: u32, is_plugin: bool, name: String) {
+        if self
+            .tell(self.terminal.rename_pane(pane_id, is_plugin, name))
+            .await
+        {
+            self.reload_tabs().await;
+        }
+    }
+
+    /// Re-list the tabs and publish them — the reload
+    /// [`rename_tab`](Self::rename_tab)/[`rename_pane`](Self::rename_pane)
+    /// share: neither creates anything the server might refocus, so re-reading
+    /// [`tabs`](Self::tabs) alone (no [`load`](Self::load), no reveal replay)
+    /// is enough to catch a changed label up.
+    async fn reload_tabs(&self) {
+        match self.terminal.list_tabs().await {
+            Ok(tabs) => self.tabs.set(tabs),
+            Err(failure) => self.core.failures().emit(&failure),
+        }
+    }
+
     /// Whether this session's backend has **spaces** at all — the one fact the
     /// sheet gates its whole spaces section on.
     ///
@@ -1688,12 +1753,29 @@ mod tests {
             self.record(format!("create_space({label})"))
         }
 
+        async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
+            self.record(format!("rename_space({space_id},{label})"))
+        }
+
         async fn new_tab(&self) -> Result<(), AppFailure> {
             self.record("new_tab".to_string())
         }
 
+        async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
+            self.record(format!("rename_tab({tab_id},{name})"))
+        }
+
         async fn new_pane(&self, floating: bool) -> Result<(), AppFailure> {
             self.record(format!("new_pane({floating})"))
+        }
+
+        async fn rename_pane(
+            &self,
+            pane_id: u32,
+            is_plugin: bool,
+            name: String,
+        ) -> Result<(), AppFailure> {
+            self.record(format!("rename_pane({pane_id},{is_plugin},{name})"))
         }
     }
 
@@ -2009,6 +2091,95 @@ mod tests {
         block_on(c.new_pane(false));
 
         assert_eq!(repository.actions(), ["new_pane(false)"]);
+        assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
+    }
+
+    #[test]
+    fn renaming_a_space_reloads_the_list_and_writes_no_reveal() {
+        let (c, repository) = recorded("herdr:work");
+        let epoch = c.reveal_epoch.get_untracked();
+
+        block_on(c.rename_space("ws-1".to_string(), "renamed".to_string()));
+
+        assert_eq!(
+            repository.actions(),
+            ["rename_space(ws-1,renamed)"],
+            "the reload is a direct list_spaces, filtered out of `actions`"
+        );
+        assert_eq!(
+            c.reveal_epoch.get_untracked(),
+            epoch,
+            "renaming a space touches no tab, so no replay"
+        );
+    }
+
+    #[test]
+    fn a_refused_space_rename_reloads_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        repository.refuse("rename_space");
+        let before = c.spaces.get_untracked();
+
+        block_on(c.rename_space("ws-1".to_string(), "renamed".to_string()));
+
+        assert_eq!(
+            repository.calls().last(),
+            Some(&"rename_space(ws-1,renamed)".to_string()),
+            "the refused rename is the last call — no reload behind it"
+        );
+        assert_eq!(c.spaces.get_untracked(), before, "nothing was written");
+    }
+
+    #[test]
+    fn renaming_a_tab_reloads_only_the_tab_list() {
+        let (c, repository) = recorded("zellij:dev");
+        let active = c.active_tab.get_untracked();
+        let epoch = c.reveal_epoch.get_untracked();
+
+        block_on(c.rename_tab(1, "renamed".to_string()));
+
+        assert_eq!(
+            repository.actions(),
+            ["rename_tab(1,renamed)"],
+            "the reload is a direct list_tabs, filtered out of `actions`"
+        );
+        assert_eq!(c.active_tab.get_untracked(), active, "no tab moved");
+        assert_eq!(c.reveal_epoch.get_untracked(), epoch, "…and no replay");
+    }
+
+    #[test]
+    fn a_refused_tab_rename_reloads_nothing() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("rename_tab");
+        let tabs = c.tabs.get_untracked();
+
+        block_on(c.rename_tab(1, "renamed".to_string()));
+
+        assert_eq!(repository.actions(), ["rename_tab(1,renamed)"]);
+        assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
+    }
+
+    #[test]
+    fn renaming_a_pane_reloads_the_tab_list_too() {
+        let (c, repository) = recorded("zellij:dev");
+
+        block_on(c.rename_pane(10, false, "renamed".to_string()));
+
+        assert_eq!(
+            repository.actions(),
+            ["rename_pane(10,false,renamed)"],
+            "a pane's title lives inside TabEntry::panes, so the same reload carries it"
+        );
+    }
+
+    #[test]
+    fn a_refused_pane_rename_reloads_nothing() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("rename_pane");
+        let tabs = c.tabs.get_untracked();
+
+        block_on(c.rename_pane(10, false, "renamed".to_string()));
+
+        assert_eq!(repository.actions(), ["rename_pane(10,false,renamed)"]);
         assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
     }
 

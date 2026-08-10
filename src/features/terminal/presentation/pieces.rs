@@ -137,6 +137,24 @@ const NEW_PANE_PAD: f64 = 11.0;
 /// two runs, it needs a real one.
 const NEW_PANE_GAP: f64 = 6.0;
 
+/// The trailing edit affordance's drawn vector size, in logical px — smaller
+/// than every other mark this screen draws ([`CLOSE_ICON`], [`PANE_ICON`]),
+/// so it reads as *subordinate* to the label/name it sits beside rather than
+/// competing with it.
+const EDIT_ICON_SIZE: f64 = 14.0;
+/// A generous, community-approximate tap target around that small vector —
+/// the same "inflate a small glyph's own footprint" idea
+/// `frust-widgets`' `glyph::tag::REMOVE_HIT_SLOP` documents for its own
+/// remove glyph, expressed here as [`icon_button`]'s own fixed-box seam
+/// rather than a literal geometric inflate.
+const EDIT_HIT_SLOP: f64 = 4.0;
+const EDIT_TAP_BOX: f64 = EDIT_ICON_SIZE + 2.0 * EDIT_HIT_SLOP;
+/// Gap between a chip's main content and its trailing edit icon.
+const EDIT_GAP: f64 = 6.0;
+/// The edit affordance's accessible name — a *word*, never the pencil mark it
+/// draws (the [`EXPAND_LABEL`]/[`CLOSE_LABEL`] rule).
+const EDIT_LABEL: &str = "Rename";
+
 /// The expand button's accessible names — a *word* per state, never the
 /// `⛶`/`⤡` it draws (`crate::ui::topbar`'s `BACK_LABEL` rule).
 pub(super) const EXPAND_LABEL: &str = "Fullscreen";
@@ -311,6 +329,22 @@ pub(super) fn column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<
     .cross_axis(CrossAxisAlignment::Stretch)
 }
 
+/// The chip affordance's trailing edit icon — [`icons::EDIT`], a vector
+/// (chrome-icon rule: never a font glyph), its own independent tap region via
+/// [`icon_button`]'s fire-on-up-inside contract and fixed [`EDIT_TAP_BOX`]
+/// hit target. No fill, no border: unlike the sheet's close button this is
+/// deliberately unadorned, so it reads as *subordinate* to the label/name
+/// beside it rather than a second control competing for attention.
+fn edit_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
+    colors: &Palette,
+    on_edit: F,
+) -> AnyView<State> {
+    any(icon_button(icons::EDIT, EDIT_LABEL, on_edit)
+        .ink(colors.fg_dim)
+        .icon_size(EDIT_ICON_SIZE)
+        .box_size(Size::new(EDIT_TAP_BOX, EDIT_TAP_BOX)))
+}
+
 // ---------------------------------------------------------------------------
 // The card
 // ---------------------------------------------------------------------------
@@ -475,6 +509,11 @@ pub(super) fn section_label<State: 'static>(
     ]))
 }
 
+/// A chip's optional trailing edit callback — `Some` shows the icon
+/// ([`pill`]/[`pane_item`]'s own doc on why it is a shared `Rc` rather than a
+/// third generic type parameter apiece).
+pub(super) type OnEdit<State> = Option<Rc<dyn Fn(&mut State)>>;
+
 /// Which of `.pill`'s states a pill is in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PillState {
@@ -510,27 +549,68 @@ fn pill_tones(state: PillState, colors: &Palette) -> (Color, Color, Color) {
 /// One `.pill`. The label is content text, which is why the add pills' `+` is
 /// a **run** rather than a vector: it is inside the sentence, not chrome
 /// (`crate::ui::topbar`'s "font glyphs are for content text only").
+///
+/// `on_edit`, when `Some`, adds a trailing [`icons::EDIT`] vector as its
+/// **own** independent tap region — never wired for [`PillState::Add`] (there
+/// is nothing to rename yet) or for a read-only credential (the caller's
+/// job — see `pages::Actions::sheet_body`'s own `!read_only` gate).
+///
+/// **Two siblings in one row, not one detector nested inside the other.**
+/// [`GestureDetector`]'s own module docs record that it is a *transparent*
+/// wrapper: every event still reaches its child, and the wrapper fires its
+/// own callback off its own recorded press regardless of what that child did
+/// with the same press — so nesting the icon's detector *inside* the label's
+/// would fire both callbacks on an icon tap rather than either alone. Placing
+/// the two as row siblings (each hit-tested independently by the row, the
+/// same `authoring::route_event` contract [`Stack`] and every `Flex`/`Row`
+/// share) is what actually keeps them disjoint; an edit tap never reaches the
+/// label's detector, and a label tap never reaches the icon's.
 pub(super) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
     label: impl Into<String>,
     state: PillState,
     colors: &Palette,
     on_tap: F,
+    on_edit: OnEdit<State>,
 ) -> AnyView<State> {
     let theme = active_theme();
     let (fill, border, ink) = pill_tones(state, colors);
-    any(GestureDetector(
-        term_box(
-            Padding(
-                EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
-                text(label.into()).style(sized(&theme.type_scale.body_small, PILL_SIZE, ink)),
+    let label_view = text(label.into()).style(sized(&theme.type_scale.body_small, PILL_SIZE, ink));
+
+    let content: AnyView<State> = match on_edit {
+        None => any(GestureDetector(Padding(
+            EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
+            label_view,
+        ))
+        .on_tap(on_tap)),
+        Some(on_edit) => any(row(vec![
+            flexible(
+                1,
+                GestureDetector(Padding(
+                    EdgeInsets {
+                        left: PILL_PAD_X,
+                        top: PILL_PAD_Y,
+                        right: 0.0,
+                        bottom: PILL_PAD_Y,
+                    },
+                    label_view,
+                ))
+                .on_tap(on_tap),
             ),
-            fill,
-            RADIUS_FULL,
-        )
+            inflexible(Padding(
+                EdgeInsets {
+                    left: EDIT_GAP,
+                    top: 0.0,
+                    right: PILL_PAD_X,
+                    bottom: 0.0,
+                },
+                edit_icon_button(colors, move |state: &mut State| on_edit(state)),
+            )),
+        ])),
+    };
+
+    any(term_box(content, fill, RADIUS_FULL)
         .border(border)
-        .dashed(state == PillState::Add),
-    )
-    .on_tap(on_tap))
+        .dashed(state == PillState::Add))
 }
 
 /// `.pane-item` — one pane's mark box, its title/cwd pair, and the `focused`
@@ -548,11 +628,18 @@ pub(super) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
 ///
 /// An **exited** pane's title takes the dim ink instead of the bright one — the
 /// same muted tier every other "this is no longer live" run in the app uses.
+///
+/// `on_edit`, when `Some`, adds a trailing [`icons::EDIT`] vector as its own
+/// independent tap region — never wired for a read-only credential (the
+/// caller's job). See [`pill`]'s own doc for why this is a row *sibling*
+/// rather than a detector nested inside the row's main-tap one: the same
+/// "transparent wrapper still fires its own callback" hazard applies here.
 pub(super) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
     pane: &PaneEntry,
     focused: bool,
     colors: &Palette,
     on_tap: F,
+    on_edit: OnEdit<State>,
 ) -> AnyView<State> {
     let theme = active_theme();
     let (mark_fill, mark_ink) = if focused {
@@ -615,15 +702,34 @@ pub(super) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
         ));
     }
 
-    any(GestureDetector(
-        term_box(
-            Padding(EdgeInsets::symmetric(PANE_PAD_X, PANE_PAD_Y), row(children)),
-            colors.base,
-            theme.shape.small,
-        )
-        .border(border),
-    )
-    .on_tap(on_tap))
+    let main = GestureDetector(Padding(
+        EdgeInsets {
+            left: PANE_PAD_X,
+            top: PANE_PAD_Y,
+            right: if on_edit.is_some() { 0.0 } else { PANE_PAD_X },
+            bottom: PANE_PAD_Y,
+        },
+        row(children),
+    ))
+    .on_tap(on_tap);
+
+    let tile: AnyView<State> = match on_edit {
+        None => any(main),
+        Some(on_edit) => any(row(vec![
+            flexible(1, main),
+            inflexible(Padding(
+                EdgeInsets {
+                    left: 0.0,
+                    top: 0.0,
+                    right: PANE_PAD_X,
+                    bottom: 0.0,
+                },
+                edit_icon_button(colors, move |state: &mut State| on_edit(state)),
+            )),
+        ])),
+    };
+
+    any(term_box(tile, colors.base, theme.shape.small).border(border))
 }
 
 /// `.new-pane-btn` — the dashed, centred row that closes the sheet's pane

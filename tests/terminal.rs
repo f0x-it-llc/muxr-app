@@ -55,8 +55,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, NavigatorController, PopResult, Set, SizedBox, Stack, Theme, WindowMetrics,
-    any, navigator, provide_context,
+    AnyView, Component, GetUntracked, NavigatorController, PopResult, Set, SizedBox, Stack, Theme,
+    WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_text::TextContext;
@@ -65,7 +65,9 @@ use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::di::expect_sessions_repository;
-use muxr::features::terminal::presentation::pages::{open_terminal_menu, terminal_page};
+use muxr::features::terminal::presentation::pages::{
+    debug_controller, open_terminal_menu, terminal_page,
+};
 use muxr::routes::{BarAction, app_nav, install_app_router, route_meta};
 use muxr::ui::toasts::app_toasts;
 use muxr::ui::topbar::BAR_HEIGHT;
@@ -106,6 +108,9 @@ const EXPAND: &str = "Fullscreen";
 const COLLAPSE: &str = "Exit fullscreen";
 /// …and the sheet's close button's.
 const CLOSE: &str = "Close";
+/// `presentation::pieces`' own `EDIT_LABEL` (private there) — every chip's
+/// trailing edit icon shares this one accessible name.
+const EDIT_LABEL: &str = "Rename";
 
 /// `.term-wrap{padding:14px}` and `.term-card{border-radius:22px}`,
 /// transcribed — the two numbers fullscreen animates to zero.
@@ -709,6 +714,39 @@ fn inside((origin, size): (Point, Size), point: Point) -> bool {
         && point.x <= origin.x + size.width
         && point.y >= origin.y
         && point.y <= origin.y + size.height
+}
+
+/// The [`EDIT_LABEL`]-labelled icon whose center falls inside `rect` — a
+/// chip's own trailing edit icon, located by *containment* within its pill's
+/// or pane row's own rect rather than a fixed index into every "Rename" node
+/// on the sheet (there is one per renamable chip).
+fn edit_icon_in(root: &RenderRoot<AppState, AnyView<AppState>>, rect: (Point, Size)) -> Point {
+    node_centers_by_label(root, EDIT_LABEL)
+        .into_iter()
+        .find(|point| inside(rect, *point))
+        .unwrap_or_else(|| panic!("no {EDIT_LABEL:?} icon inside {rect:?}"))
+}
+
+/// A point inside `rect`'s own leading edge — reliably inside a chip's *main*
+/// tap region (never its trailing edit icon) regardless of the chip's own
+/// label width: `pieces::pill`'s icon sits at the trailing edge, so `rect`'s
+/// own [`center`] can land on it for a short enough label, while its leading
+/// padding never can.
+fn leading_point((origin, size): (Point, Size)) -> Point {
+    Point::new(origin.x + 8.0, origin.y + size.height / 2.0)
+}
+
+/// Focus a just-opened [`name_input_dialog`](muxr::ui::dialogs::name_input_dialog)'s
+/// one field, diffed against `under` (the frame painted just before it opened)
+/// — the `the_add_space_pill_opens_an_empty_dialog…` precedent's own idiom,
+/// pulled out since every chip-level rename dialog test needs it too: a field
+/// with no recorded focus routes neither a keystroke nor the submitting Enter.
+fn tap_dialog_field(h: &mut Harness, under: &RecScene) {
+    let dialog_frame = h.settle();
+    let dialog = added(&under.rounded, &dialog_frame.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
 }
 
 /// The sheet's pill rects, in reading order (top to bottom, then left to
@@ -2101,4 +2139,208 @@ fn a_long_press_on_the_new_pane_row_also_opens_no_dialog_and_leaves_the_sheet_up
     assert_eq!(h.depth(), floor, "no dialog on a long-press either");
     h.await_toast(INTERNAL_FAILURE_TOAST);
     assert_eq!(h.depth(), floor, "…and the sheet stayed up");
+}
+
+// ---------------------------------------------------------------------------
+// 12 — every chip's trailing edit icon
+// ---------------------------------------------------------------------------
+//
+// Request shapes and the reload each verb settles with are pinned at the
+// controller level (`presentation::controller`'s own `RecordingRepository`
+// suite); `MockTerminalRepository` leaves `rename_space`/`rename_tab`/
+// `rename_pane` at the shared "unsupported" default, the same standing
+// `INTERNAL_FAILURE_TOAST`'s own doc records for the sheet's three create
+// affordances — so what these pin is *flow* and, above all, that the icon's
+// own tap region is disjoint from the chip's main one: tapping it opens a
+// prefilled rename dialog and never also selects/browses/commits, while a
+// plain tap on the rest of the same chip still does exactly that.
+
+#[test]
+fn a_space_pills_edit_icon_renames_it_without_selecting_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    app_toasts().clear();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    let floor = h.depth();
+
+    // "cupline" is the sheet's first space pill — and, per the seed, not the
+    // selected one (`forgekit` is).
+    let cupline = pills(&sheet)[0];
+    h.tap(edit_icon_in(&h.root, cupline));
+    tap_dialog_field(&mut h, &after);
+
+    assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
+    assert!(h.shows("cupline"), "prefilled with the pill's current name");
+
+    // The edit tap never reached the pill's own `on_tap`: submitting a change
+    // reaches the repository (proving the dialog's flow is live) without
+    // "cupline" ever having become selected.
+    h.type_text("renamed");
+    h.press(NamedKey::Enter);
+    h.flush();
+    assert_eq!(h.depth(), floor, "the submit closed the dialog");
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+    // `await_toast` pumps the async task queue at a pinned paint clock (its
+    // own `pump_frames` never advances `frame_time`), which is not the same
+    // as settling the dialog's own pop transition — `settle()`'s own
+    // "required before tapping a pushed page" contract applies just as much
+    // to the page a pop just re-exposed.
+    h.settle();
+    let selected: Vec<String> = debug_controller()
+        .expect("mounted")
+        .spaces
+        .get_untracked()
+        .into_iter()
+        .filter(|space| space.selected)
+        .map(|space| space.name)
+        .collect();
+    assert_eq!(
+        selected,
+        ["forgekit"],
+        "the edit tap and its dialog never selected the pill they renamed"
+    );
+
+    // …while a plain tap on the same pill still selects it — the two regions
+    // are disjoint, not one having swallowed the other's gesture. Its own
+    // leading edge, not its center: a short label's pill can still center
+    // over the trailing icon, which is the exact overlap this test exists to
+    // rule out. `select_space` is async (it reloads the tab world behind the
+    // switch), so this waits for it to land rather than reading right away.
+    h.tap(leading_point(cupline));
+    h.pump_until("cupline to become selected", |_| {
+        debug_controller()
+            .expect("mounted")
+            .spaces
+            .get_untracked()
+            .iter()
+            .any(|space| space.selected && space.name == "cupline")
+    });
+    let selected: Vec<String> = debug_controller()
+        .expect("mounted")
+        .spaces
+        .get_untracked()
+        .into_iter()
+        .filter(|space| space.selected)
+        .map(|space| space.name)
+        .collect();
+    assert_eq!(selected, ["cupline"], "…and a plain tap still selects");
+}
+
+#[test]
+fn a_tab_pills_edit_icon_renames_it_without_browsing_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    let floor = h.depth();
+
+    // "btop" is the sheet's first tab pill — the session opens browsing
+    // `devbox` instead (see `DEVBOX_TITLE`).
+    let btop = pills(&sheet)[0];
+    h.tap(edit_icon_in(&h.root, btop));
+    tap_dialog_field(&mut h, &after);
+
+    assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
+    assert!(h.shows("btop"), "prefilled with the tab's current label");
+    assert_eq!(
+        debug_controller()
+            .expect("mounted")
+            .browsed_tab
+            .get_untracked(),
+        "devbox",
+        "the edit tap never browsed to the tab it names"
+    );
+
+    h.type_text("renamed");
+    h.press(NamedKey::Enter);
+    h.flush();
+    assert_eq!(h.depth(), floor, "the submit closed the dialog");
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+    // See the space test's identical note: settle the pop's own transition
+    // before treating the sheet underneath as live again.
+    h.settle();
+    assert_eq!(
+        debug_controller()
+            .expect("mounted")
+            .browsed_tab
+            .get_untracked(),
+        "devbox",
+        "…still never browsed, even once the repository answered"
+    );
+
+    // A plain tap on the same pill still browses it — its leading edge, for
+    // the same reason the space test's own equivalent tap does.
+    h.tap(leading_point(btop));
+    h.settle();
+    assert_eq!(
+        debug_controller()
+            .expect("mounted")
+            .browsed_tab
+            .get_untracked(),
+        "btop",
+        "a plain tap still browses"
+    );
+}
+
+#[test]
+fn a_pane_rows_edit_icon_renames_it_without_committing_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    let (_, opened) = h.open_sheet();
+    let floor = h.depth();
+    // The second pane row ("ed@devbox zsh") — the mock seeds the first one
+    // focused, so committing the second is an observable move.
+    let unfocused_row = pane_rows(&opened)[1];
+    h.tap(edit_icon_in(&h.root, unfocused_row));
+    tap_dialog_field(&mut h, &opened);
+
+    assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
+    assert!(h.shows("ed@devbox zsh"), "prefilled with the pane's title");
+
+    h.type_text("renamed");
+    h.press(NamedKey::Enter);
+    h.flush();
+    assert_eq!(h.depth(), floor, "the submit closed the dialog");
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+    // Give a commit's own close-beat every chance to fire before checking —
+    // the edit tap must not have started one.
+    h.pump_for(2 * CLOSE_DELAY);
+    assert_eq!(
+        h.depth(),
+        floor,
+        "the edit tap never committed the pane it names — the sheet is still up"
+    );
+    assert_eq!(
+        focused_row(&h.frame()),
+        Some(0),
+        "…and the focused pane never moved"
+    );
+
+    // A plain tap on the same row still commits it.
+    h.tap_pane_row(1);
+    h.pump_until("the sheet to close", |h| h.depth() == floor);
+    assert_eq!(h.depth(), floor, "a plain tap still commits and closes");
+}
+
+#[test]
+fn a_read_only_credential_withdraws_every_chips_edit_icon() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    make_read_only(&mut h);
+
+    h.open_sheet();
+    assert!(
+        node_centers_by_label(&h.root, EDIT_LABEL).is_empty(),
+        "a read-only session offers no rename affordance anywhere on the sheet"
+    );
 }
