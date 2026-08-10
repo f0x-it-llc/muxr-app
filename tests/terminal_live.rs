@@ -1,8 +1,18 @@
 //! Headless behavior coverage for the `/terminal` screen's **live demo pane**
-//! (task 11's cutover): the "Demo session" overflow-menu entry, the
-//! pane-content switch, settings-driven cursor/font, resize-on-delta-only,
-//! fullscreen with a live pane, the IME-active-only key bar, and the
-//! tap-to-focus-only contract at the root (section 10).
+//! (task 11's cutover): the pane-content switch, settings-driven cursor/font,
+//! resize-on-delta-only, fullscreen with a live pane, the IME-active-only key
+//! bar, and the tap-to-focus-only contract at the root (section 10).
+//!
+//! # Entering the pane, now that the menu has no row for it
+//!
+//! The overflow menu's "Demo session" row is gone (a three-row menu, uniformly
+//! spaced, is what the screen ships). The fixture replay itself is not: it is
+//! entered here through the **narrowest seam that already existed** —
+//! `pages::debug_controller`, the published test/diagnostic accessor onto the
+//! mounted screen's own controller, plus `TerminalController::enter_live`, the
+//! very method the removed row's handler called. Nothing about the composition
+//! under it changes: `TerminalScreen::build` still observes the flag and builds
+//! the seams, the feed, the pump and the grid. See [`Harness::enter_demo`].
 //!
 //! Shares `tests/terminal.rs`'s harness shape (the same two-navigator split,
 //! the same frame-stepping idiom) rather than importing it — that file's own
@@ -28,7 +38,7 @@
 //! session's real `vt100::Screen` cells through
 //! [`debug_live_probe`](muxr::features::terminal::presentation::pages::debug_live_probe) —
 //! the actual emulator the screen's grid renders, reached through the real
-//! composition root (menu tap → controller → `Component::build` →
+//! composition root (the seam above → controller → `Component::build` →
 //! `LiveSession` → the feed pump), not a bare widget-level unit test.
 
 use std::cell::{Cell, RefCell};
@@ -38,8 +48,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, PopResult, RwSignal, Set, SizedBox,
-    Stack, Theme, any, navigator, provide_context,
+    AnyView, Component, GetUntracked, NavigatorController, RwSignal, Set, SizedBox, Stack, Theme,
+    any, navigator, provide_context,
 };
 use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
 use frust_text::TextContext;
@@ -77,10 +87,14 @@ const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 const SESSION_ID: &str = "s-1";
 
-/// The overflow menu's row indices, transcribed from `presentation::pages`
-/// (private there; a test that imported them could not catch one changing) —
+/// The overflow menu's first row, transcribed from `presentation::pages`
+/// (private there; a test that imported it could not catch it changing) —
 /// `tests/terminal.rs`'s own `ROW_*` constants document the same reasoning.
-const ROW_DEMO: usize = 5;
+/// The menu carries no separators, so a row's index is its position.
+const ROW_PANES: usize = 0;
+/// …and the sheet that row opens, by the label it prints — how section 10
+/// proves its pointer tap landed on the row it aimed at.
+const SHEET_LABEL: &str = "panes & tabs";
 
 const EXPAND: &str = "Fullscreen";
 
@@ -102,7 +116,6 @@ fn mock_target() -> ConnectTarget {
 /// The screen, an overlay navigator over it, and everything a frame needs —
 /// `tests/terminal.rs::Harness`'s shape, trimmed to what this suite uses.
 struct Harness {
-    nav: NavigatorController<AppState>,
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
     state: AppState,
@@ -145,7 +158,6 @@ impl Harness {
         let mut root = RenderRoot::new();
         root.set_theme(Box::new(Theme::glyph_baseline()));
         let mut harness = Harness {
-            nav,
             root,
             logic,
             state,
@@ -215,16 +227,18 @@ impl Harness {
         self.settle()
     }
 
-    fn choose_menu_row(&mut self, index: usize) {
-        self.nav.pop_with_result(PopResult::of(index));
-        self.flush();
-    }
-
-    /// Choose the overflow menu's "Demo session" row — the one entry point
-    /// into the live pane (see `presentation::pages`' own "Demo entry" note).
+    /// Mount the checked-in fixture replay in the card, through the mounted
+    /// screen's own controller — the seam the [module docs](self) describe.
+    ///
+    /// `enter_live` only flips the controller's flag, exactly as the removed
+    /// menu row's handler did; the settle that follows is the `build` that
+    /// observes it and constructs the live session under the screen's own
+    /// reactive owner.
     fn enter_demo(&mut self) {
-        self.open_menu();
-        self.choose_menu_row(ROW_DEMO);
+        debug_controller()
+            .expect("a terminal screen is mounted")
+            .enter_live();
+        self.flush();
     }
 
     fn pump_until(&mut self, what: &str, done: impl Fn(&Harness) -> bool) {
@@ -324,20 +338,21 @@ fn menu_panel(before: &RecScene, after: &RecScene) -> (Point, Size) {
 }
 
 /// `frust::glyph::menu`'s own row metrics, transcribed rather than imported —
-/// they are private to that crate, and (like [`ROW_DEMO`]) a test that could
-/// import them could not catch one changing. Rows start [`MENU_PANEL_PAD`] below
-/// the panel's top edge, then run one [`MENU_ITEM_ROW_H`] per item and one
-/// [`MENU_SEP_TOTAL_H`] per separator.
+/// they are private to that crate, and (like [`ROW_PANES`]) a test that could
+/// import them could not catch one changing. Rows start [`MENU_PANEL_PAD`]
+/// below the panel's top edge and then run one [`MENU_ITEM_ROW_H`] apiece —
+/// with no separator between any of them, which is the shape this screen's
+/// menu now ships.
 const MENU_PANEL_PAD: f64 = 6.0;
 const MENU_ITEM_ROW_H: f64 = 34.0;
-const MENU_SEP_TOTAL_H: f64 = 11.0;
 
-/// Where a tap must land to hit the menu's "Demo session" row — the *pointer*
-/// route into the live pane, as opposed to [`Harness::choose_menu_row`]'s
-/// result-pop shortcut. `menu_entries` is item/sep/item/item/sep/**item**, so
-/// the last row sits three items and two separators down the panel.
-fn demo_row_center((origin, size): (Point, Size)) -> Point {
-    let row_top = origin.y + MENU_PANEL_PAD + MENU_ITEM_ROW_H * 3.0 + MENU_SEP_TOTAL_H * 2.0;
+/// Where a tap must land to hit menu row `index` — the *pointer* route through
+/// the menu, which is the only route this suite takes now that entering the
+/// live pane no longer goes through a row at all
+/// (`tests/terminal.rs::Harness::choose_menu_row` is where the result-pop
+/// shortcut lives, and it still drives every row's action).
+fn menu_row_center((origin, size): (Point, Size), index: usize) -> Point {
+    let row_top = origin.y + MENU_PANEL_PAD + MENU_ITEM_ROW_H * index as f64;
     Point::new(origin.x + size.width / 2.0, row_top + MENU_ITEM_ROW_H / 2.0)
 }
 
@@ -372,8 +387,11 @@ fn the_mock_stays_the_default_and_carries_no_live_probe() {
     let _ = h;
 }
 
+/// The seam's whole route, end to end: the controller call the removed menu row
+/// used to make still mounts the real grid over the checked-in fixture and
+/// replays it — nothing between the flag and the pump was menu-shaped.
 #[test]
-fn choosing_demo_session_mounts_the_live_grid_and_replays_the_fixture() {
+fn entering_the_live_pane_mounts_the_grid_and_replays_the_fixture() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -1113,39 +1131,52 @@ fn tapping_the_grid_claims_focus_and_publishes_an_active_ime_surface() {
     );
 }
 
-/// Entering the demo through a real **pointer** tap on the menu row — the
-/// device sequence, rather than [`Harness::choose_menu_row`]'s result-pop
-/// shortcut — still leaves no focus/IME session behind once the menu is gone.
+/// A real **pointer** tap on a menu row — the device sequence, rather than the
+/// result-pop shortcut `tests/terminal.rs` drives the rows' actions with —
+/// leaves no focus/IME session behind once the menu is gone, and leaves the
+/// live pane under it inert.
 ///
 /// This is the app-side end of a framework defect, filed as a FINDINGS
 /// candidate (the register lives outside this repo). `frust::glyph::menu`'s
 /// widget claims root focus on **any** pointer `Down` ("a press anywhere claims
 /// focus so a subsequent Escape has a chain to travel"), so the Down that picks
-/// this row seeds `focus_active = true` with no IME surface behind it, for as
+/// a row seeds `focus_active = true` with no IME surface behind it, for as
 /// long as the menu's exit animation and pop take. Nothing in this app asks for
 /// that, there is no seam to opt out of it, and it is the menu's claim — not
 /// the live pane's mount — that the frame-gate capture caught. What this app
 /// *can* pin is the outcome: the transient claim is released by the pop, no IME
-/// surface is ever published, and the pane the row mounted is inert until the
-/// user taps it. Green either way, so it keeps holding once the menu stops
-/// claiming.
+/// surface is ever published, and the live pane stays inert until the user taps
+/// it. Green either way, so it keeps holding once the menu stops claiming.
+///
+/// The row tapped is the first one (*Panes & tabs*), which is the menu's only
+/// remaining row whose action neither leaves the route nor opens a field — the
+/// demo row this used to tap is gone, and the pane it mounted is entered
+/// through the seam instead, before the menu is ever opened.
 #[test]
 fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
+    h.enter_demo();
     let before = h.settle();
 
     let after = h.open_menu();
     let panel = menu_panel(&before, &after);
-    h.tap(demo_row_center(panel));
+    h.tap(menu_row_center(panel, ROW_PANES));
     // Past the menu's own exit staging and the overlay pop that follows it.
     h.flush();
     h.frame();
 
     assert!(
+        support::node_values(&h.root)
+            .iter()
+            .any(|v| v == SHEET_LABEL),
+        "the tap landed on the row it aimed at: {:?}",
+        support::node_values(&h.root)
+    );
+    assert!(
         debug_live_probe().is_some(),
-        "the tap landed on the Demo session row"
+        "the live pane is still mounted"
     );
     assert_eq!(
         h.session(),

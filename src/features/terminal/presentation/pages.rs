@@ -75,11 +75,11 @@
 //! reason: `provide_context` requires `Send + Sync`, which the `Rc`-backed
 //! `NavigatorController` in the bundle can never be.
 //!
-//! # Pane-content switch: three ways in, and only one of them is real
+//! # Pane-content switch: two ways in, and a third only a test takes
 //!
 //! [`TerminalScreen::build`] branches the card's body (and the key bar's
-//! mount) on one flag, [`TerminalController::live`], and **three** things set
-//! it:
+//! mount) on one flag, [`TerminalController::live`], and **two** things set
+//! it on a device:
 //!
 //! 1. **A real attached session.** `init` flips it — through
 //!    [`TerminalController::attach_live`], which also claims the pane for the
@@ -88,17 +88,18 @@
 //!    transcript to describe, it has a stream, so it mounts
 //!    [`term::terminal_surface`] over a `GrpcTerminalFeed` from the first
 //!    frame.
-//! 2. **The overflow menu's `Demo session` row** ([`MENU_DEMO_INDEX`]), which
-//!    mounts the same grid over the checked-in fixture replay instead —
-//!    whatever is connected. It is a demonstration, and it stays one.
-//! 3. **Nothing.** A bare `/terminal`, and every headless suite (whose
+//! 2. **Nothing.** A bare `/terminal`, and every headless suite (whose
 //!    connection is mock-backed and hands out no client), keep
 //!    [`pieces::card_body`]'s seeded mock transcript — the content
 //!    `tests/terminal.rs` pins end to end through this real composition root.
 //!
-//! The demo row sits behind its own separator, after the first three: it is
-//! not a session-management action like the rest of the menu, so it is kept
-//! visually apart from them.
+//! The third is the **checked-in fixture replay** (`data::feeds::DemoFeed`),
+//! which no longer has a row of its own in the overflow menu: it is reached by
+//! calling [`TerminalController::enter_live`] on the mounted screen's own
+//! controller, published for that purpose by [`debug_controller`], and
+//! `tests/terminal_live.rs` is its one caller. Same controller call the menu's
+//! removed *Demo session* row made, so everything below it — the seams, the
+//! feed, the pump, the grid — is the very composition a device runs.
 //!
 //! [`LiveSession`] — the seams, the feed and the pump — is constructed
 //! **once**, lazily, inside `build` itself (guarded by `state.live.is_none()`
@@ -118,7 +119,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::{Rect, WindowInsets};
-use frust::glyph::{MenuEntry, menu_item, menu_separator, show_glyph_menu};
+use frust::glyph::{MenuEntry, menu_item, show_glyph_menu};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
     NavigatorController, Padding, PopResult, WindowMetrics, any, button, component, flexible,
@@ -154,19 +155,14 @@ const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(
 
 /// The overflow menu's rows, in order. Indices into the entry list
 /// [`show_glyph_menu`] hands back, so they are named once rather than spelled
-/// at the match site.
+/// at the match site — and, with no separators left in the menu (see
+/// [`menu_entries`]), a row's index is now simply its position.
 const MENU_PANES: &str = "Panes & tabs";
 const MENU_RENAME: &str = "Rename session";
 const MENU_DETACH: &str = "Detach session";
-/// The demo-session entry — see the [module docs](self)'s "Pane-content
-/// switch". Appended after its own separator rather than woven into the first
-/// three rows, so `MENU_RENAME_INDEX`/`MENU_DETACH_INDEX` (and every existing
-/// index-based test in `tests/terminal.rs`) stay exactly where they were.
-const MENU_DEMO: &str = "Demo session";
 const MENU_PANES_INDEX: usize = 0;
-const MENU_RENAME_INDEX: usize = 2;
-const MENU_DETACH_INDEX: usize = 3;
-const MENU_DEMO_INDEX: usize = 5;
+const MENU_RENAME_INDEX: usize = 1;
+const MENU_DETACH_INDEX: usize = 2;
 
 /// The rename dialog's title.
 const RENAME_TITLE: &str = "Rename session";
@@ -219,8 +215,27 @@ const SESSION_QUERY_KEY: &str = "session";
 /// too, and fullscreen must keep the card edge-to-edge at any width.
 const WIDE_WRAP_PAD_PX: f64 = 22.0;
 
+/// The portrait window's bar-to-card breathing room: a **top-only** gap
+/// between the floating bar and the card, applied at the same site (and in the
+/// same outside-the-stage way) as [`WIDE_WRAP_PAD_PX`].
+///
+/// A wide window has read as spaced since the responsive pass, because its
+/// all-round step-up lifts the card off the bar as a side effect; a narrow one
+/// took no extra padding at all and sat flush under it. The card's own
+/// clearance (`super::chrome`'s `insets.top + BAR_HEIGHT·(1−p)`) is
+/// orientation-independent and stays that way — the gap belongs to the same
+/// responsive branch that created the difference. Deliberately the wide
+/// branch's *own* extra (`WIDE_WRAP_PAD_PX − WRAP_PAD`), so both orientations
+/// breathe by the same amount at the top; the sides keep the narrow window's
+/// [`WRAP_PAD`], and fullscreen takes neither (the stage's own progress
+/// animation owns that geometry).
+const PORTRAIT_TOP_GAP_PX: f64 = WIDE_WRAP_PAD_PX - WRAP_PAD;
+
 const _: () = {
     assert!(WIDE_WRAP_PAD_PX > WRAP_PAD);
+    // …which is the portrait gap too, so neither orientation can end up
+    // sitting flush under the bar again.
+    assert!(PORTRAIT_TOP_GAP_PX > 0.0);
 };
 
 /// The Terminal screen's route entry point: a `Component` under the outer
@@ -328,9 +343,10 @@ pub struct LiveProbe {
     pub feed: Option<Rc<RefCell<DemoFeed>>>,
 }
 
-/// The mounted screen's live demo pane, if one has been entered — see
-/// [`LiveProbe`]. `None` before "Demo session" is chosen, or when no terminal
-/// screen is mounted at all.
+/// The mounted screen's live pane, if one has been entered — see
+/// [`LiveProbe`]. `None` before the pane is entered (see the [module
+/// docs](self)'s "Pane-content switch"), or when no terminal screen is mounted
+/// at all.
 pub fn debug_live_probe() -> Option<LiveProbe> {
     TERMINAL_CHROME.with(|cell| {
         cell.borrow()
@@ -376,17 +392,21 @@ thread_local! {
 /// leaves this module.
 static NEXT_CHROME_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Open the terminal's overflow menu — what `crate::shell` forwards the app
-/// bar's `⋮` press to.
+/// Test/diagnostic accessor: the mounted screen's controller, if any — reached
+/// through the same [`TERMINAL_CHROME`] handle [`open_terminal_menu`] already
+/// reads, so a headless test talks to the *mounted* screen's own view model
+/// rather than one it built itself.
 ///
-/// The feature owns its own menu; the shell only forwards (the same split the
-/// `⚙`'s route push follows). A press that arrives with no terminal screen
-/// mounted is silently ignored: the bar only ever carries this action on
-/// `/terminal`, so that is an unreachable race rather than a state to handle.
-/// Test/diagnostic accessor: the mounted screen's controller, if any — lets a
-/// headless test read `TerminalController::cursor_style`/`font_size`/`live`
-/// (e.g. the settings-reflect-into-the-live-pane acceptance test) through the
-/// same [`TERMINAL_CHROME`] handle [`open_terminal_menu`] already reads.
+/// Two things use it, both from `tests/`: reading
+/// `TerminalController::cursor_style`/`font_size`/`live` (the
+/// settings-reflect-into-the-live-pane acceptance test), and calling
+/// [`TerminalController::enter_live`] to mount the checked-in fixture replay —
+/// the **test seam** that replaced the overflow menu's removed *Demo session*
+/// row (see the [module docs](self)'s "Pane-content switch"). Reusing this one
+/// published handle is deliberate: `tests/*.rs` are integration binaries, so a
+/// `#[cfg(test)]` hook on the lib would be invisible to them, and every
+/// alternative widens the production API instead of borrowing the accessor that
+/// already exists.
 pub fn debug_controller() -> Option<Arc<TerminalController>> {
     TERMINAL_CHROME.with(|cell| {
         cell.borrow()
@@ -395,6 +415,13 @@ pub fn debug_controller() -> Option<Arc<TerminalController>> {
     })
 }
 
+/// Open the terminal's overflow menu — what `crate::shell` forwards the app
+/// bar's `⋮` press to.
+///
+/// The feature owns its own menu; the shell only forwards (the same split the
+/// `⚙`'s route push follows). A press that arrives with no terminal screen
+/// mounted is silently ignored: the bar only ever carries this action on
+/// `/terminal`, so that is an unreachable race rather than a state to handle.
 pub fn open_terminal_menu(_state: &mut AppState) {
     let actions = TERMINAL_CHROME.with(|cell| cell.borrow().clone());
     if let Some(actions) = actions {
@@ -442,7 +469,7 @@ impl Component for TerminalScreen {
         // mounts the grid from the start rather than a transcript that
         // describes nothing. Everything else — a bare `/terminal`, and every
         // headless suite, whose connection is mock-backed and hands out no
-        // client — keeps the mock transcript and its "Demo session" row.
+        // client — keeps the mock transcript.
         let connection = expect_connection_controller();
         if controller.session_id().is_some() && connection.client().is_some() {
             controller.attach_live();
@@ -551,14 +578,29 @@ impl Component for TerminalScreen {
         // harness) takes the same branch as a genuinely narrow window.
         // Fullscreen keeps the card edge-to-edge regardless of width — see
         // `WIDE_WRAP_PAD_PX`'s doc.
+        //
+        // Both non-fullscreen branches add their padding *outside* the stage:
+        // a wide window's all-round step-up, a narrow one's top-only
+        // bar-to-card gap (`PORTRAIT_TOP_GAP_PX`, whose doc records why the
+        // gap lives here rather than in the stage's own clearance).
+        // Fullscreen's own zero is spelled as insets rather than as *no*
+        // wrapper: the wrapper has to be in the tree in **every** state, since
+        // a `Padding` that comes and goes reconciles as a different child and
+        // tears the stage — the fullscreen transition's own driver included —
+        // down mid-flight, snapping the animation this screen exists to play.
         let metrics = use_context::<WindowMetrics>();
         let is_wide = metrics
             .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
             .unwrap_or(false);
-        let extra_wrap_pad = if is_wide && !fullscreen {
-            WIDE_WRAP_PAD_PX - WRAP_PAD
-        } else {
-            0.0
+        let extra_wrap_pad = match (fullscreen, is_wide) {
+            (true, _) => EdgeInsets::all(0.0),
+            (false, true) => EdgeInsets::all(WIDE_WRAP_PAD_PX - WRAP_PAD),
+            (false, false) => EdgeInsets {
+                left: 0.0,
+                top: PORTRAIT_TOP_GAP_PX,
+                right: 0.0,
+                bottom: 0.0,
+            },
         };
 
         // The card's body: the mock transcript by default (untouched, and
@@ -577,7 +619,12 @@ impl Component for TerminalScreen {
                     controller.font_size.get(),
                 )
                 .cursor(controller.cursor_style.get())
-                .label(MENU_DEMO)
+                // The grid's accessible name is "the session/pane it shows"
+                // (`term::terminal_grid`'s own contract) — the very title the
+                // status row above it prints, so a screen reader names the two
+                // the same way. Empty until the first load lands, which the
+                // widget reads as "no name" rather than announcing a blank one.
+                .label(title.clone())
                 .input(session.input.clone())
                 .read_only(read_only)
                 .selection(session.selection.clone());
@@ -623,11 +670,7 @@ impl Component for TerminalScreen {
         // wrap padding around it grows. Wrapped from the outside rather than
         // widening `terminal_stage`'s own animated padding, which fullscreen
         // must still animate to exactly zero regardless of window width.
-        let stage: AnyView<TerminalState> = if extra_wrap_pad > 0.0 {
-            any(Padding(EdgeInsets::all(extra_wrap_pad), stage))
-        } else {
-            any(stage)
-        };
+        let stage: AnyView<TerminalState> = any(Padding(extra_wrap_pad, stage));
 
         // The page tone stays **outside** the stage so it fills the whole
         // surface, bar band included: the bar slides in over it, and a page
@@ -730,14 +773,6 @@ impl Actions {
         self.app_nav.set_fullscreen(on);
     }
 
-    /// Enter the live demo pane — the overflow menu's "Demo session" row.
-    /// Only flips the controller's flag; `TerminalScreen::build` is what
-    /// actually constructs the seams/feed the first time it observes it (see
-    /// that method's own doc on why a press handler cannot do that itself).
-    pub fn enter_demo(&self) {
-        self.controller.enter_live();
-    }
-
     /// Open the app bar's overflow menu, anchored to the bar slot the `⋮`
     /// actually paints in.
     ///
@@ -767,8 +802,8 @@ impl Actions {
     /// menu widget requests focus on *any* pointer `Down` ("a press anywhere
     /// claims focus so a subsequent Escape has a chain to travel"), and
     /// [`show_glyph_menu`] exposes no seam to opt out. So the very `Down` that
-    /// picks a row — [`MENU_DEMO`]'s included — seeds a root focus session with
-    /// no IME surface behind it until the menu's exit and pop release it. It
+    /// picks a row seeds a root focus session with no IME surface behind it
+    /// until the menu's exit and pop release it. It
     /// summons no keyboard (nothing publishes a surface, and the grid is not on
     /// the focus path), and on a shell whose frame gate reads the focus/IME
     /// **edge** it costs two frames rather than a steady wake; the same press
@@ -788,7 +823,6 @@ impl Actions {
                     Some(MENU_PANES_INDEX) => actions.open_sheet(),
                     Some(MENU_RENAME_INDEX) => actions.open_rename_dialog(),
                     Some(MENU_DETACH_INDEX) => actions.detach(),
-                    Some(MENU_DEMO_INDEX) => actions.enter_demo(),
                     // Every other dismissal (scrim, Escape, back) pops empty.
                     _ => {}
                 }
@@ -1052,18 +1086,17 @@ impl Actions {
 /// session running (that is the whole difference from the sessions screen's
 /// Kill), so painting it in the error role would misdescribe it.
 ///
-/// *Demo session* sits behind its own separator, after the first three: it is
-/// not a session-management action like the rest of the menu, so it is kept
-/// visually apart from them (see the module docs' "Pane-content switch" for
-/// what each of the three entries into the live pane mounts).
+/// **No separators either.** A separator is grouping punctuation, and three
+/// rows have no groups to punctuate — one carried an 11px band of dead space
+/// (`frust::glyph::menu`'s own `SEP_TOTAL_H`) that read on device as the rows
+/// being unevenly spaced. The demo-session row that used to sit behind the
+/// second separator is gone with it (see the [module docs](self)'s
+/// "Pane-content switch").
 fn menu_entries() -> Vec<MenuEntry> {
     vec![
         menu_item(MENU_PANES),
-        menu_separator(),
         menu_item(MENU_RENAME),
         menu_item(MENU_DETACH),
-        menu_separator(),
-        menu_item(MENU_DEMO),
     ]
 }
 
@@ -1072,11 +1105,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_is_four_rows_with_a_separator_before_the_last_two_groups() {
+    fn the_menu_is_three_uniformly_spaced_rows_and_nothing_else() {
+        // The whole shape, in one assertion: no demo row, and no separator to
+        // put an 11px gap between two of the three that are left.
         let entries = menu_entries();
-        assert_eq!(entries.len(), 6, "four rows plus the two `.dd-sep`s");
-        assert!(matches!(entries[1], MenuEntry::Separator));
-        assert!(matches!(entries[4], MenuEntry::Separator));
+        assert_eq!(entries.len(), 3, "three rows, no `.dd-sep`s");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| matches!(entry, MenuEntry::Item(_))),
+            "a separator would space the rows unevenly"
+        );
         let labels: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
@@ -1084,24 +1123,22 @@ mod tests {
                 MenuEntry::Separator => None,
             })
             .collect();
-        assert_eq!(labels, [MENU_PANES, MENU_RENAME, MENU_DETACH, MENU_DEMO]);
+        assert_eq!(labels, [MENU_PANES, MENU_RENAME, MENU_DETACH]);
     }
 
     #[test]
     fn the_named_menu_indices_address_the_rows_they_claim_to() {
         // The indices the result callback matches on are into the *entry*
-        // list, separator included — an off-by-one here would silently run the
-        // wrong action.
+        // list — an off-by-one here would silently run the wrong action.
         let entries = menu_entries();
         for (index, label) in [
             (MENU_PANES_INDEX, MENU_PANES),
             (MENU_RENAME_INDEX, MENU_RENAME),
             (MENU_DETACH_INDEX, MENU_DETACH),
-            (MENU_DEMO_INDEX, MENU_DEMO),
         ] {
             match &entries[index] {
                 MenuEntry::Item(item) => assert_eq!(item.label, label),
-                MenuEntry::Separator => panic!("{label} landed on the separator"),
+                MenuEntry::Separator => panic!("{label} landed on a separator"),
             }
         }
     }

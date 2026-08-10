@@ -5,10 +5,9 @@
 //!
 //! Constructed by `presentation::controller`'s `LiveSession::enter` for a
 //! real attached session — the route carries `?session=<id>` and the app
-//! holds a live client; [`DemoFeed`](super::demo_feed::DemoFeed) is what the
-//! overflow menu's "Demo session" row (and any session `LiveSession` can't
-//! attach to) replays instead. This module is the transport and its
-//! fixture-backed tests.
+//! holds a live client; [`DemoFeed`](super::demo_feed::DemoFeed) is the
+//! checked-in fixture any session `LiveSession` can't attach to replays
+//! instead. This module is the transport and its fixture-backed tests.
 //!
 //! # The wire contract
 //!
