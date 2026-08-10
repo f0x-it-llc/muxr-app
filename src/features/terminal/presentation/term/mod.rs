@@ -17,8 +17,8 @@
 //! | [`input`] | the keystroke source's pure half: the snapshot diff, the Ctrl/Alt/Shift latch, the key-bar byte vocabulary |
 //! | [`selection`] | the selection model's pure half: word boundaries, the row-major merge, line-wise segments, the copy text |
 //! | [`chip`] | the Copy chip a released selection raises, and the injectable clipboard sink |
-//! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret, IME clienthood, the selection highlight and the loupe |
-//! | this module | the emulator wrapper, the 30 Hz feed pump, [`CursorStyle`], the [`InputSeam`] the grid and the key bar share, the [`SelectionSeam`] the grid and the chip share, and [`terminal_surface`], which assembles all of it |
+//! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret, IME clienthood, the selection highlight and the loupe, and the touch state machine behind the two hooks below |
+//! | this module | the emulator wrapper, the 30 Hz feed pump, [`CursorStyle`], the [`InputSeam`] the grid and the key bar share, the [`SelectionSeam`] the grid and the chip share, the [`ContentTapSink`]/[`WheelSink`] hooks a screen routes, and [`terminal_surface`], which assembles all of it |
 //!
 //! # The 30 Hz coalescing mechanism, and why it is app-side
 //!
@@ -83,6 +83,16 @@
 //! [`DEFAULT_SCROLLBACK`] lines, matching the Flutter incumbent. A construction
 //! input rather than a constant at the call site, since a settings-driven
 //! scrollback is a plausible next step.
+//!
+//! # This module is layout-blind, and says so in cells
+//!
+//! [`ContentTapSink`] and [`WheelSink`] are the two hooks a content tap and a
+//! scroll step leave through, and both speak **cell** coordinates on the
+//! rendered grid — never a pane, a pane id or an RPC. Mapping a cell onto the
+//! pane that occupies it (and turning that into a `FocusPane`/`ScrollPane`
+//! call) belongs to the screen that owns the session's layout; nothing in
+//! `term` knows a pane exists, which is what keeps the grid mountable by the
+//! demo replay, the mock transcript and a live session alike.
 
 pub mod batch;
 pub mod chip;
@@ -721,6 +731,30 @@ impl SelectionSeam {
     }
 }
 
+/// Where a **content tap** is reported: the zero-based `(col, row)` cell the
+/// finger lifted on, clamped to the rendered grid.
+///
+/// An `Rc<dyn Fn>` for the same reason [`CopySink`] is one — it is installed
+/// from a `build` and called from the *event* pass, where there is no reactive
+/// owner and no `&mut State`, so the screen carries whatever it needs to route
+/// the cell inside the closure. Optional at the grid
+/// ([`TerminalGridView::on_content_tap`](widget::TerminalGridView::on_content_tap)):
+/// with none wired a tap claims focus and reports nothing, exactly as it did
+/// before this hook existed.
+///
+/// Cells, not panes — see the [module docs](self)' layout-blindness note.
+pub type ContentTapSink = Rc<dyn Fn(u32, u32)>;
+
+/// Where a **wheel step** is reported: one step's direction (`up`) and the
+/// zero-based `(col, row)` cell it applies at.
+///
+/// One call per step, never a batch and never a pixel amount: the grid does the
+/// px→line accumulation (see
+/// [`TerminalGridView::on_wheel`](widget::TerminalGridView::on_wheel)) so a
+/// touch drag and a desktop wheel arrive at the screen in the identical
+/// vocabulary — the same one `muxrd`'s own scroll RPC speaks.
+pub type WheelSink = Rc<dyn Fn(bool, u32, u32)>;
+
 /// The whole interactive terminal: the grid, its long-press gesture, and the
 /// Copy chip over it.
 ///
@@ -739,8 +773,13 @@ impl SelectionSeam {
 /// 2. **`on_long_press` is the only gesture wired.** Frust's detector fires it
 ///    at the threshold in wall time (a paint latches a `Housekeeping` flush and
 ///    the next rebuild delivers it), so a perfectly stationary hold selects with
-///    no movement at all. No `on_tap`: the grid's own `Down` arm already owns
-///    tap behaviour, and it must run the clearing check before claiming focus.
+///    no movement at all. No `on_tap` and no drag handler: the grid runs its own
+///    three-way tap/drag-scroll/long-press discrimination ([`widget`]'s touch
+///    state machine) off the raw phases the detector forwards, because a tap has
+///    to be checked against a clearing selection and a focus claim the detector
+///    knows nothing about. Both recognisers use the one
+///    [`TOUCH_SLOP`](frust::input::TOUCH_SLOP), so a press cannot be a scroll
+///    here and a long-press there.
 /// 3. **The surface takes the whole offered box**, because the chip overlay is
 ///    full-bleed. The grid still takes only its own whole-cell box inside it and
 ///    still paints its own background, so the sub-cell remainder is the same
