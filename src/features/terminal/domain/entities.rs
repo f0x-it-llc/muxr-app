@@ -10,7 +10,7 @@
 //! | Type | Mock element |
 //! |---|---|
 //! | [`Space`] | the sheet's `spaces` pill row (`cupline`/`zelli_mobile`/`forgekit`) |
-//! | [`TabEntry`] | one `TABS` entry — its pill (`4 devbox`), the card's pane title, and the sheet's pane item |
+//! | [`TabEntry`]/[`PaneEntry`] | one `TABS` entry — its pill (`4 devbox`), the card's pane title, and the sheet's own pane rows |
 //! | [`TermLine`]/[`TermLineKind`] | one `.term-line` in the card's body, typed `p`/`out`/`cm` |
 //! | [`Workspace`] | one load: every space, every tab, the active tab's lines, and the attached session's name |
 //!
@@ -141,9 +141,12 @@ pub struct TabEntry {
     pub label: String,
     /// The card status row's pane title (`ed@devbox: ~`).
     pub pane_title: String,
-    /// The sheet pane item's name (`ed@devbox`).
+    /// The focused pane's name (`ed@devbox`) — the mock era's own convenience,
+    /// carried by every repository. The sheet lists [`panes`](Self::panes)
+    /// instead, so nothing on screen reads this today.
     pub pane_name: String,
-    /// The sheet pane item's path (`/home/ed`).
+    /// The focused pane's path (`/home/ed`) — same standing as
+    /// [`pane_name`](Self::pane_name).
     pub pane_path: String,
     /// Every pane in this tab, in wire order — the "panes & tabs" sheet's own
     /// pane list. Separate from [`pane_title`](Self::pane_title)/

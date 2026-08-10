@@ -172,8 +172,12 @@ use super::pieces::{
 };
 use super::term;
 
-/// How long the sheet stays up after a tab pill is tapped, so the selection
+/// How long the sheet stays up after a **pane row** is tapped, so the selection
 /// visibly moves before it closes — `setTimeout(closeSheet, 260)` in the mock.
+///
+/// A pane tap is the sheet's one dismissing gesture (see
+/// [`Actions::commit_pane`]); browsing a tab or a space leaves the sheet up
+/// indefinitely.
 const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(260);
 
 /// The overflow menu's rows, in order. Indices into the entry list
@@ -890,37 +894,73 @@ impl Actions {
     ///
     /// The body builder is re-invoked on every rebuild while the sheet is up
     /// (the navigator's page-builder contract), so its reads are tracked and a
-    /// tab switch is reflected in the pills *and* in the section label without
-    /// the sheet being rebuilt by hand.
+    /// browse is reflected in the pills, in the section label *and* in the pane
+    /// list without the sheet being rebuilt by hand.
+    ///
+    /// Opening always points the browse back at the tab the session is on
+    /// ([`TerminalController::begin_browsing`]) — a browse is a look around,
+    /// not a place the sheet remembers being.
     pub fn open_sheet(&self) {
+        self.controller.begin_browsing();
         let actions = self.clone();
         show_sheet(&self.overlays, move |sheet| actions.sheet_body(sheet));
     }
 
-    /// Switch the card to `key` and close the sheet a beat later, so the
-    /// selection visibly moves first (`setTimeout(closeSheet, 260)`).
+    /// Point the sheet at the tab keyed `key`.
     ///
-    /// The sheet stays live for that whole beat, so the tap can be repeated —
-    /// and it is [`SheetHandle::close_after`] that makes repeating it safe.
-    /// **Latest tap wins**: a second pill re-times the one pending close off
-    /// its own selection (the beat is there to be *seen*, and the second
-    /// selection is the one the user is looking at) rather than stacking a
-    /// second close behind the first, and the gate underneath means the
-    /// superseded wait cannot pop the `/terminal` route on its way out.
+    /// Local, synchronous and RPC-free: it re-slices the pane list below out of
+    /// the tab world the load already carried (see
+    /// [`TerminalController::browse_tab`]). Nothing about the session moves,
+    /// and the sheet stays up — only [`commit_pane`](Self::commit_pane) does
+    /// either of those.
+    pub fn browse_tab(&self, key: &str) {
+        self.controller.browse_tab(key.to_string());
+    }
+
+    /// Commit the sheet's browse: focus the pane `pane_id` of the tab keyed
+    /// `tab_key`, then close the sheet a beat later so the selection visibly
+    /// moves first (`setTimeout(closeSheet, 260)`).
     ///
-    /// On a backend whose stream carries only the focused pane, the switch is
-    /// not done when the RPC lands: the open stream keeps replaying the pane
-    /// it attached to, so the session has to be attached again to start
-    /// receiving the new one. [`TerminalController::switch_tab`] answers
-    /// whether that applies, and [`reattach`](Self::reattach) is how this side
-    /// of the component boundary reaches a session it cannot see.
-    pub fn switch_tab(&self, sheet: &SheetHandle, key: &str) {
+    /// The sheet's **one** navigating gesture, and its one dismissal: it stays
+    /// live for the whole close beat, so the tap can be repeated — and it is
+    /// [`SheetHandle::close_after`] that makes repeating it safe. **Latest tap
+    /// wins**: a second row re-times the one pending close off its own
+    /// selection rather than stacking a second close behind the first, and the
+    /// gate underneath means the superseded wait cannot pop the `/terminal`
+    /// route on its way out.
+    ///
+    /// A commit that has to move **tabs** first is refused for a read-only
+    /// credential rather than by the server: the wire's `GoToTab` is MUTATING
+    /// (`proto/muxr.proto`), so the row says why — the same
+    /// "the control stays, the tap does nothing" language
+    /// [`open_rename_dialog`](Self::open_rename_dialog) uses. Committing a pane
+    /// *inside* the tab the session is already on is `FocusPane` alone, which
+    /// the wire allows a read-only token, so it stays available.
+    ///
+    /// On a backend whose stream carries only the focused pane, the move is not
+    /// done when the RPCs land: the open stream keeps replaying the pane it
+    /// attached to, so the session has to be attached again to start receiving
+    /// the new one. [`TerminalController::reattaches_on_switch`] answers whether
+    /// that applies, and [`reattach`](Self::reattach) is how this side of the
+    /// component boundary reaches a session it cannot see.
+    pub fn commit_pane(&self, sheet: &SheetHandle, tab_key: &str, pane_id: u32, is_plugin: bool) {
+        // Untracked: a press handler has no reactive owner on desktop.
+        let cross_tab = tab_key != self.controller.active_tab.get_untracked();
+        if cross_tab && self.connection.is_read_only.get_untracked() {
+            app_toasts().show(READ_ONLY_TOAST);
+            return;
+        }
         let controller = Arc::clone(&self.controller);
         let reattach = Rc::clone(&self.reattach);
         let sheet = sheet.clone();
-        let key = key.to_string();
+        let tab_key = tab_key.to_string();
         spawn_local(async move {
-            if controller.switch_tab(key).await {
+            if !controller.commit_pane(tab_key, pane_id, is_plugin).await {
+                // A refused commit leaves the sheet up: nothing moved, and the
+                // failure toast is already on its way.
+                return;
+            }
+            if controller.reattaches_on_switch() {
                 // Cloned out of the cell first: the hook re-enters this screen's
                 // own state, and a borrow held across it would be a second one.
                 let hook = reattach.borrow().clone();
@@ -932,11 +972,14 @@ impl Actions {
         });
     }
 
-    /// Switch this connection's view to the space with id `id`.
+    /// Switch this connection's view to the space with id `id`, reloading the
+    /// tab world behind it.
     ///
     /// Stays available to a read-only credential: which space a client is
     /// looking at is per-connection state, not a change to the session (see
     /// [`TerminalRepository::switch_space`](crate::features::terminal::domain::repositories::TerminalRepository::switch_space)).
+    /// The sheet stays up — a space is a place to browse from, not a
+    /// destination.
     pub fn select_space(&self, id: &str) {
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
@@ -1010,9 +1053,9 @@ impl Actions {
         });
     }
 
-    /// What the sheet's three **create** affordances say when tapped: `+
-    /// space`, `+` and `+ new pane` are drawn and unwired, and this is how
-    /// they say so rather than appearing to work.
+    /// What the sheet's **create** affordances say when tapped: `+` and `+ new
+    /// pane` — plus `+ space` on a backend that has spaces at all — are drawn
+    /// and unwired, and this is how they say so rather than appearing to work.
     ///
     /// A read-only credential withdraws them from the sheet outright (see
     /// [`sheet_body`](Self::sheet_body)) — offering a create nobody may
@@ -1026,61 +1069,82 @@ impl Actions {
     /// The "panes & tabs" sheet's body — `docs/terminal.html`'s
     /// `#pickerSheet`, top to bottom, minus the handle the scaffold already
     /// draws.
+    ///
+    /// **Browse, then commit.** A tab pill points the sheet at another tab and
+    /// re-slices the pane list below it (no RPC, no dismissal); a space pill
+    /// switches this connection's view and reloads behind it (still no
+    /// dismissal); only a pane row moves the session and closes the sheet. See
+    /// [`browse_tab`](Self::browse_tab)/[`select_space`](Self::select_space)/
+    /// [`commit_pane`](Self::commit_pane).
+    ///
+    /// **The spaces section is herdr's alone** — zellij has no spaces at all
+    /// (see [`TerminalController::has_spaces`]), so the section is *absent*
+    /// rather than empty: no label, and no gap where one would have been.
     fn sheet_body(&self, sheet: &SheetHandle) -> AnyView<AppState> {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
-        // Tracked reads: switching a tab from inside the sheet re-runs this
-        // builder and moves the selection, and a credential turning read-only
-        // withdraws the three create affordances below.
+        // Tracked reads: browsing a tab, committing a pane or switching a
+        // space from inside the sheet re-runs this builder, and a credential
+        // turning read-only withdraws the three create affordances below.
         let spaces = self.controller.spaces.get();
         let tabs = self.controller.tabs.get();
         let active = self.controller.active_tab.get();
+        let browsed = self.controller.browsed_tab.get();
         let read_only = self.connection.is_read_only.get();
 
         let mut children = vec![self.top_row(sheet, &colors), pieces::v_gap(SECTION_TOP_GAP)];
 
-        children.push(pieces::section_label(SECTION_SPACES, &colors));
-        children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
-        let mut space_pills: Vec<AnyView<AppState>> = spaces
-            .iter()
-            .map(|space| {
-                let actions = self.clone();
-                let id = space.id.clone();
-                pieces::pill(
-                    space.name.clone(),
-                    if space.selected {
-                        PillState::Selected
-                    } else {
-                        PillState::Idle
-                    },
-                    &colors,
-                    move |_app: &mut AppState| actions.select_space(&id),
-                )
-            })
-            .collect();
-        if !read_only {
-            space_pills.push(self.add_pill(ADD_SPACE, &colors));
+        if self.controller.has_spaces() {
+            children.push(pieces::section_label(SECTION_SPACES, &colors));
+            children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
+            let mut space_pills: Vec<AnyView<AppState>> = spaces
+                .iter()
+                .map(|space| {
+                    let actions = self.clone();
+                    let id = space.id.clone();
+                    pieces::pill(
+                        space.name.clone(),
+                        if space.selected {
+                            PillState::Selected
+                        } else {
+                            PillState::Idle
+                        },
+                        &colors,
+                        move |_app: &mut AppState| actions.select_space(&id),
+                    )
+                })
+                .collect();
+            if !read_only {
+                space_pills.push(self.add_pill(ADD_SPACE, &colors));
+            }
+            children.push(super::chrome::wrap_row(space_pills, PILL_GAP));
+            // The section's own trailing gap, so the tabs label below sits the
+            // same distance from whatever precedes it either way.
+            children.push(pieces::v_gap(SECTION_TOP_GAP));
         }
-        children.push(super::chrome::wrap_row(space_pills, PILL_GAP));
 
-        children.push(pieces::v_gap(SECTION_TOP_GAP));
         children.push(pieces::section_label(SECTION_TABS, &colors));
         children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
         let mut tab_pills: Vec<AnyView<AppState>> = tabs
             .iter()
             .map(|tab| {
                 let actions = self.clone();
-                let sheet = sheet.clone();
                 let key = tab.key.clone();
+                // The browsed pill wears the full selection; the tab the
+                // session is actually on keeps an amber edge behind it, so a
+                // browse never hides where the terminal is.
+                let state = if tab.key == browsed {
+                    PillState::Selected
+                } else if tab.key == active {
+                    PillState::Active
+                } else {
+                    PillState::Idle
+                };
                 pieces::pill(
                     tab.pill_label(),
-                    if tab.key == active {
-                        PillState::Selected
-                    } else {
-                        PillState::Idle
-                    },
+                    state,
                     &colors,
-                    move |_app: &mut AppState| actions.switch_tab(&sheet, &key),
+                    move |_app: &mut AppState| actions.browse_tab(&key),
                 )
             })
             .collect();
@@ -1091,13 +1155,28 @@ impl Actions {
 
         children.push(pieces::v_gap(SECTION_TOP_GAP));
         children.push(pieces::section_label(
-            format!("{SECTION_PANES}{active}"),
+            format!("{SECTION_PANES}{browsed}"),
             &colors,
         ));
         children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
-        if let Some(tab) = tabs.iter().find(|tab| tab.key == active) {
-            children.push(pieces::pane_item(tab, &colors));
-            children.push(pieces::v_gap(PANE_ROW_GAP));
+        if let Some(tab) = tabs.iter().find(|tab| tab.key == browsed) {
+            // A tab the sheet is only *browsing* shows no badge at all: its
+            // panes carry whatever the last load recorded, and the session is
+            // not in any of them.
+            let on_session = tab.key == active;
+            for pane in &tab.panes {
+                let actions = self.clone();
+                let sheet = sheet.clone();
+                let key = tab.key.clone();
+                let (id, is_plugin) = (pane.id, pane.is_plugin);
+                children.push(pieces::pane_item(
+                    pane,
+                    on_session && pane.focused,
+                    &colors,
+                    move |_app: &mut AppState| actions.commit_pane(&sheet, &key, id, is_plugin),
+                ));
+                children.push(pieces::v_gap(PANE_ROW_GAP));
+            }
         }
         if !read_only {
             let actions = self.clone();

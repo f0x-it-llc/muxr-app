@@ -132,12 +132,19 @@ impl Harness {
     /// Mount the screen, attached to [`SESSION_ID`], with the first mock load
     /// already landed and no demo session entered yet.
     fn mount() -> Self {
+        Self::mount_session(SESSION_ID)
+    }
+
+    /// [`mount`](Self::mount), attached to `session` — how this suite reaches
+    /// a **herdr** session, whose id prefix is the one thing the sheet's
+    /// spaces section is gated on.
+    fn mount_session(session: &str) -> Self {
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         let record_only: NavigatorController<AppState> = NavigatorController::new();
         let _router = install_app_router(&record_only, &nav, expect_connection_controller());
         expect_connection_controller().connect(mock_target());
-        app_nav().push(&format!("/terminal?session={SESSION_ID}"));
+        app_nav().push(&format!("/terminal?session={session}"));
 
         let mounted = Rc::new(Cell::new(true));
         let logic_nav = nav.clone();
@@ -1221,5 +1228,116 @@ fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
         h.session(),
         (false, false),
         "the menu's transient focus claim went away with the menu"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11 — the "panes & tabs" sheet over a live pane
+// ---------------------------------------------------------------------------
+//
+// The sheet's own browse-then-commit behaviour is pinned in `tests/terminal.rs`
+// (which owns this screen's sheet harness). What only *this* suite can say is
+// what happens to the **live pane** underneath it: a commit must move the
+// session without tearing the grid, its seams or its feed down, and the spaces
+// section must follow the attached session's own backend.
+
+/// The sheet's pane rows, top to bottom — the `--bg-base` tiles
+/// (`presentation::pieces`' `Palette::base`, the scheme's
+/// `surface_container_low`), which nothing else on this screen paints.
+fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
+    let base = Theme::glyph_baseline().scheme().surface_container_low;
+    let mut rows: Vec<(Point, Size)> = scene
+        .rounded_fills
+        .iter()
+        .filter(|(_, _, _, painted)| *painted == base)
+        .map(|(origin, size, _, _)| (*origin, *size))
+        .collect();
+    rows.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
+    rows
+}
+
+/// Open the sheet the way a device does — the menu's first row, by pointer.
+///
+/// Waits for the first workspace load first: this suite's own
+/// [`Harness::await_load`] only pumps long enough for the live pane's needs,
+/// and a sheet opened before the tab world lands has nothing to list.
+fn open_sheet(h: &mut Harness) {
+    h.pump_until("the workspace to load", |_| {
+        debug_controller().is_some_and(|c| c.loaded.get_untracked())
+    });
+    let before = h.settle();
+    let after = h.open_menu();
+    let panel = menu_panel(&before, &after);
+    h.tap(menu_row_center(panel, ROW_PANES));
+    h.flush();
+    h.frame();
+}
+
+/// The sheet's section labels, transcribed from `presentation::pages` (private
+/// there, like every other constant this suite names).
+const SECTION_SPACES: &str = "spaces";
+const SECTION_TABS: &str = "tabs";
+
+#[test]
+fn a_pane_commit_moves_the_session_without_disturbing_the_live_pane() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    let emulator = Rc::clone(&debug_live_probe().expect("a live pane is mounted").emulator);
+    let feed = demo_feed();
+
+    open_sheet(&mut h);
+    let rows = pane_rows(&h.frame());
+    assert_eq!(rows.len(), 2, "the browsed tab's panes: {rows:?}");
+    // The second pane of the tab the session is already on — a `FocusPane`
+    // with no tab move behind it.
+    h.tap(center(rows[1]));
+    h.pump_until("the sheet to close", |h| {
+        !support::node_values(&h.root)
+            .iter()
+            .any(|v| v == SHEET_LABEL)
+    });
+
+    let probe = debug_live_probe().expect("the live pane survived the commit");
+    assert!(
+        Rc::ptr_eq(&probe.emulator, &emulator),
+        "the very same emulator, so the grid was never rebuilt"
+    );
+    assert!(
+        Rc::ptr_eq(&demo_feed(), &feed),
+        "…and the very same feed, so nothing re-attached behind the sheet"
+    );
+    assert_eq!(
+        h.session(),
+        (false, false),
+        "committing from the sheet summons no keyboard"
+    );
+}
+
+#[test]
+fn the_spaces_section_follows_the_attached_sessions_own_backend() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut zellij = Harness::mount();
+    open_sheet(&mut zellij);
+    let values = support::node_values(&zellij.root);
+    assert!(
+        values.iter().any(|v| v == SECTION_TABS),
+        "the sheet is up: {values:?}"
+    );
+    assert!(
+        !values.iter().any(|v| v == SECTION_SPACES),
+        "zellij has no spaces, so the section is absent entirely: {values:?}"
+    );
+    drop(zellij);
+
+    let mut herdr = Harness::mount_session("herdr:work");
+    open_sheet(&mut herdr);
+    let values = support::node_values(&herdr.root);
+    assert!(
+        values.iter().any(|v| v == SECTION_SPACES),
+        "herdr does, so the section is there: {values:?}"
     );
 }
