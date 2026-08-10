@@ -1,6 +1,6 @@
 //! Headless end-to-end coverage for the terminal **keystroke source**: the grid
 //! widget as an IME client, the last-known-state diff behind it, the one-shot
-//! Ctrl/Alt latch, and the key bar — no GPU, no window, no device.
+//! Ctrl/Alt/Shift latch, and the key bar — no GPU, no window, no device.
 //!
 //! Every test here drives the **real seam**: a `RenderRoot` with the grid
 //! mounted, a tap that claims focus, and then `InputEvent::Ime`/`InputEvent::Key`
@@ -35,6 +35,10 @@
 //!   bar hand-off, which is the same session still being typed into;
 //! - read-only is a property of the session, so a key cap over one is inert
 //!   too.
+//!
+//! One thing here is **geometry** rather than bytes: the bar's row budget
+//! (`keybar`'s own module docs) is only true of a laid-out row, so the twelve
+//! caps are measured at the narrowest phone width they must fit.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -53,14 +57,19 @@ use kurbo::{Point, Size};
 
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::domain::feed::TerminalFeed;
-use muxr::features::terminal::presentation::keybar::key_bar;
+use muxr::features::terminal::presentation::keybar::{
+    CAP_HEIGHT, CAP_PAD_X, ICON_SIZE, LABEL_SIZE, key_bar,
+};
 use muxr::features::terminal::presentation::term::{
-    InputSeam, SharedEmulator, SharedFeed, TerminalEmulator, TerminalPalette, pump_wake,
+    BarKey, InputSeam, SharedEmulator, SharedFeed, TerminalEmulator, TerminalPalette, pump_wake,
     terminal_grid,
 };
 
 mod support;
-use support::{frame_at_sized, ms, node_center_by_label, node_labels, pointer, serial, setup};
+use support::{
+    EPSILON, RecScene, frame_at_sized, ms, node_center_by_label, node_labels, pointer, serial,
+    setup,
+};
 
 /// The font size every test lays out at — the app's terminal default.
 const FONT_SIZE: f32 = 13.0;
@@ -309,6 +318,20 @@ impl Mounted {
     /// mounted grid's emulator and publish at most one generation.
     fn pump(&mut self) -> bool {
         pump_wake(&self.shared_feed, &self.emulator, self.generation)
+    }
+
+    /// One frame at an explicit surface `width`, returning what it painted —
+    /// the row-budget assertion's only handle on the bar, since a cap's width is
+    /// decided by the row it is laid out in rather than by the cap.
+    fn frame_at_width(&mut self, width: f64) -> RecScene {
+        frame_at_sized(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            Size::new(width, PHONE.height),
+            ms(0.0),
+        )
     }
 
     /// Show (or hide) the key bar, as a screen would from the published
@@ -767,7 +790,9 @@ fn the_key_bar_is_absent_until_the_ime_is_up() {
 
     mounted.set_bar(true);
     let raised = node_labels(&mounted.root);
-    for name in ["Control", "Alt", "Escape", "Tab", "Up arrow", "Delete"] {
+    for name in [
+        "Control", "Alt", "Shift", "Escape", "Tab", "Up arrow", "Delete",
+    ] {
         assert!(
             raised.iter().any(|label| label == name),
             "{name} missing from {raised:?}"
@@ -854,6 +879,70 @@ fn the_ctrl_latch_transforms_the_next_soft_keyboard_character() {
 }
 
 #[test]
+fn the_shift_cap_sends_the_shifted_sequence_and_keeps_the_grid_focused() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.set_bar(true);
+    mounted.drain();
+
+    mounted.tap_cap("Shift");
+    assert!(
+        mounted.drain().is_empty(),
+        "a latch key sends nothing of its own"
+    );
+    assert_eq!(
+        mounted.toggled("Shift"),
+        Some(Toggled::True),
+        "the cap shows itself armed"
+    );
+
+    mounted.tap_cap("Tab");
+    assert_eq!(mounted.drain_hex(), "1b5b5a", "back-tab, not \\t");
+
+    let ime = mounted
+        .root
+        .ime_state()
+        .expect("a bar tap must never dismiss the keyboard");
+    assert!(ime.active);
+
+    mounted.frame();
+    assert_eq!(
+        mounted.toggled("Shift"),
+        Some(Toggled::False),
+        "one shot: the sequence that used it spent it, and the bar noticed"
+    );
+
+    // …so the next Tab is the plain one again.
+    mounted.tap_cap("Tab");
+    assert_eq!(mounted.drain_hex(), "09");
+}
+
+#[test]
+fn the_shift_latch_never_transforms_a_typed_character() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.set_bar(true);
+    mounted.drain();
+
+    // Unlike `Ctrl`, `Shift` is not on the character path at all: the IME's own
+    // Shift already delivered the case, so the byte is the one it handed over.
+    mounted.tap_cap("Shift");
+    mounted.type_text("a");
+    assert_eq!(mounted.drain_hex(), "61", "'a', byte for byte");
+
+    mounted.frame();
+    assert_eq!(
+        mounted.toggled("Shift"),
+        Some(Toggled::False),
+        "…and the one shot is spent even though it changed nothing"
+    );
+}
+
+#[test]
 fn an_arrow_cap_leaves_the_latch_armed_for_the_character_after_it() {
     let _serial = serial();
     let _owner = setup();
@@ -872,6 +961,77 @@ fn an_arrow_cap_leaves_the_latch_armed_for_the_character_after_it() {
     );
     mounted.type_text("a");
     assert_eq!(mounted.drain_hex(), "01", "Ctrl+a");
+}
+
+// ---------------------------------------------------------------------------
+// The row budget
+// ---------------------------------------------------------------------------
+
+/// The narrowest phone width the bar is designed to fit its twelve caps in, in
+/// logical px — the reference the arithmetic in `keybar`'s own module docs is
+/// worked at, and the one width worth pinning: every wider phone spends the
+/// difference on padding, and every cap shrinks by the same percentage below it.
+const NARROW_PHONE_W: f64 = 360.0;
+
+#[test]
+fn twelve_caps_and_their_padding_fit_a_narrow_phone_row() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.set_bar(true);
+
+    // Each cap paints its fill and (over it) its border at the same box, so one
+    // entry per distinct x is one cap.
+    let scene = mounted.frame_at_width(NARROW_PHONE_W);
+    let mut caps: Vec<(Point, Size)> = Vec::new();
+    for (origin, size, _, _) in &scene.rounded_fills {
+        if (size.height - CAP_HEIGHT).abs() < EPSILON
+            && !caps
+                .iter()
+                .any(|(seen, _)| (seen.x - origin.x).abs() < EPSILON)
+        {
+            caps.push((*origin, *size));
+        }
+    }
+    caps.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+    assert_eq!(
+        caps.len(),
+        BarKey::ORDER.len(),
+        "twelve caps, all painted: {caps:?}"
+    );
+
+    let (origin, size) = *caps.last().expect("a cap");
+    assert!(
+        origin.x + size.width <= NARROW_PHONE_W,
+        "the row runs past its surface: {:.2} > {NARROW_PHONE_W}",
+        origin.x + size.width
+    );
+
+    // Every cap holds what it draws with CAP_PAD_X to spare on each side — the
+    // whole point of the budget, asserted against the **shaped** label rather
+    // than against the estimate the flex weights are derived from.
+    let theme = frust::Theme::glyph_baseline();
+    let mut style = theme.type_scale.label_small.clone();
+    style.size = LABEL_SIZE;
+    let mut tcx = TextContext::new();
+    let row_y = caps[0].0.y;
+    for (key, (origin, size)) in BarKey::ORDER.iter().copied().zip(caps) {
+        assert!(
+            (origin.y - row_y).abs() < EPSILON,
+            "{key:?} is not on the one row"
+        );
+        let content = match key {
+            BarKey::Up | BarKey::Down | BarKey::Left | BarKey::Right => ICON_SIZE,
+            _ => tcx.layout(key.label(), &style, None).size().width,
+        };
+        assert!(
+            size.width - content >= 2.0 * CAP_PAD_X,
+            "{key:?}: a {:.2}px cap around {content:.2}px of content leaves \
+             less than {CAP_PAD_X}px a side",
+            size.width
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,12 +1165,20 @@ fn a_key_bar_cap_over_a_read_only_session_emits_nothing_either() {
         "a cap over a read-only session derives nothing and sends nothing"
     );
 
-    // The latch key is inert too, so nothing is left armed for later.
-    mounted.tap_cap("Control");
-    assert_eq!(
-        mounted.toggled("Control"),
-        Some(Toggled::False),
-        "…and no latch is armed behind the gate"
+    // The latch keys are inert too, so nothing is left armed for later —
+    // including `Shift`, whose one shot would otherwise outlive the gate and
+    // rewrite the first sequence sent once the session took input again.
+    for latch in ["Control", "Alt", "Shift"] {
+        mounted.tap_cap(latch);
+        assert_eq!(
+            mounted.toggled(latch),
+            Some(Toggled::False),
+            "{latch} armed behind the read-only gate"
+        );
+    }
+    assert!(
+        mounted.drain().is_empty(),
+        "and no latch tap derived a byte either"
     );
 }
 

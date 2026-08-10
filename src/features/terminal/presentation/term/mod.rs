@@ -14,7 +14,7 @@
 //! | [`style`] | [`TerminalPalette`] (the theme-token → ANSI-16 mapping table lives in its docs) and `CellStyle` |
 //! | [`batch`] | same-style run batching, and the four vt100 traps it has to get right |
 //! | [`geometry`] | the measured cell box, and the cols x rows an available box divides into |
-//! | [`input`] | the keystroke source's pure half: the snapshot diff, the Ctrl/Alt latch, the key-bar byte vocabulary |
+//! | [`input`] | the keystroke source's pure half: the snapshot diff, the Ctrl/Alt/Shift latch, the key-bar byte vocabulary |
 //! | [`selection`] | the selection model's pure half: word boundaries, the row-major merge, line-wise segments, the copy text |
 //! | [`chip`] | the Copy chip a released selection raises, and the injectable clipboard sink |
 //! | [`widget`] | the retained grid: shaping in `layout`, replay in `paint`, the caret, IME clienthood, the selection highlight and the loupe |
