@@ -67,6 +67,26 @@
 //! The *reads* around them still go through their use cases, so the screen's
 //! one loading/activity story is unchanged.
 //!
+//! # Creating something settles by reloading, never by a dialog answer
+//!
+//! [`create_space`](TerminalController::create_space),
+//! [`new_tab`](TerminalController::new_tab) and
+//! [`new_pane`](TerminalController::new_pane) each mutate first (their own
+//! [`TerminalRepository`] verb, called directly — the same shape the two
+//! switches above use) and then settle. [`new_tab`](TerminalController::new_tab)/
+//! [`new_pane`](TerminalController::new_pane) settle with a full
+//! [`load`](TerminalController::load), because the tab world itself moved
+//! and the server focuses whatever it just opened — `load`'s own
+//! active/browsed re-seed is exactly the "the sheet follows the server"
+//! behaviour those two want, for free.
+//! [`create_space`](TerminalController::create_space) is the exception:
+//! creating a space touches no tab, so it re-lists **only** the spaces
+//! (again a direct repository call) rather than replaying the reveal and
+//! reseeding the browse for nothing — and since the wire's ack carries no
+//! id, it flags the freshly listed space whose name matches what was typed
+//! selected in the sheet's own state, a client-side courtesy pick rather
+//! than a second RPC.
+//!
 //! # Browsing the sheet is local; only a pane tap commits
 //!
 //! The "panes & tabs" sheet is a **browse-then-commit** surface, so it has two
@@ -505,6 +525,65 @@ impl TerminalController {
         self.load().await;
     }
 
+    /// Create a new space named `label` (already trimmed by the dialog that
+    /// collected it — `pages::Actions::open_create_space_dialog`) and pull
+    /// the sheet's own space list up to date.
+    ///
+    /// The wire's ack carries no id (original-app parity), so nothing here
+    /// can address the space it just created the way
+    /// [`select_space`](Self::select_space) addresses one it already knows —
+    /// this never calls [`TerminalRepository::switch_space`]. What it does
+    /// instead, once the create itself lands, is re-list the spaces
+    /// ([`TerminalRepository::list_spaces`], called directly for the same
+    /// reason [`select_space`](Self::select_space)/[`switch_tab`](Self::switch_tab)
+    /// already do — see the [module docs](self)) and, on a name match, flag
+    /// that one selected in the sheet's **own** state: a local courtesy
+    /// pick, not a second round trip. A non-match (the backend renamed it,
+    /// or named an empty `label` itself) is silently fine — whatever the
+    /// server actually answered stays exactly as reloaded.
+    ///
+    /// Deliberately **not** a full [`load`](Self::load): creating a space
+    /// touches nothing about the tab world, so re-reading it too would
+    /// replay the reveal and reseed the browse for no reason. The server
+    /// validates `label`'s charset/length; a rejection reaches
+    /// [`tell`](Self::tell)'s own failure sink like every other refused
+    /// verb, and this writes nothing when that happens.
+    pub async fn create_space(&self, label: String) {
+        if !self.tell(self.terminal.create_space(label.clone())).await {
+            return;
+        }
+        match self.terminal.list_spaces().await {
+            Ok(spaces) => self.spaces.set(select_by_label(spaces, &label)),
+            Err(failure) => self.core.failures().emit(&failure),
+        }
+    }
+
+    /// Open a new, unnamed tab (the wire names it) and reload the workspace
+    /// so it appears — the `+` tab pill's press (`pages::Actions::new_tab`),
+    /// with no dialog in front of it (original-app parity).
+    ///
+    /// A full [`load`](Self::load), unlike [`create_space`](Self::create_space):
+    /// the tab world itself changed, and the server focuses the tab it just
+    /// opened, so `load`'s own active/browsed re-seed is exactly what puts
+    /// the sheet's browse on it — nothing else has to chase that fact down.
+    pub async fn new_tab(&self) {
+        if self.tell(self.terminal.new_tab()).await {
+            self.load().await;
+        }
+    }
+
+    /// Open a new pane in the tab the session is on — tiled (`floating =
+    /// false`, a tap on the new-pane row) or floating (`floating = true`, a
+    /// long-press on it). A backend that ignores the flag (herdr does) still
+    /// receives it, so there is no client-side gating to add. Reloads the
+    /// workspace on landing, the same shape as [`new_tab`](Self::new_tab),
+    /// so the sheet's pane list picks it up.
+    pub async fn new_pane(&self, floating: bool) {
+        if self.tell(self.terminal.new_pane(floating)).await {
+            self.load().await;
+        }
+    }
+
     /// Whether this session's backend has **spaces** at all — the one fact the
     /// sheet gates its whole spaces section on.
     ///
@@ -772,6 +851,23 @@ pub type Reattach = Rc<dyn Fn()>;
 /// per feature.
 fn is_herdr(session: &str) -> bool {
     session.starts_with(HERDR_BACKEND)
+}
+
+/// Flag the space named `label` selected among `spaces`, leaving every other
+/// one's flag exactly as the server answered — the local half of
+/// [`TerminalController::create_space`]'s courtesy pick. A `label` matching
+/// nothing changes nothing: the server's own answer, whatever it is, wins.
+fn select_by_label(spaces: Vec<Space>, label: &str) -> Vec<Space> {
+    if !spaces.iter().any(|space| space.name == label) {
+        return spaces;
+    }
+    spaces
+        .into_iter()
+        .map(|space| Space {
+            selected: space.name == label,
+            ..space
+        })
+        .collect()
 }
 
 /// The live pane's byte source, held **concretely** so the half of it that is
@@ -1587,6 +1683,18 @@ mod tests {
         async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
             self.record(format!("focus_pane({pane_id},{is_plugin})"))
         }
+
+        async fn create_space(&self, label: String) -> Result<(), AppFailure> {
+            self.record(format!("create_space({label})"))
+        }
+
+        async fn new_tab(&self) -> Result<(), AppFailure> {
+            self.record("new_tab".to_string())
+        }
+
+        async fn new_pane(&self, floating: bool) -> Result<(), AppFailure> {
+            self.record(format!("new_pane({floating})"))
+        }
     }
 
     /// A controller over a fresh [`RecordingRepository`], with the first load
@@ -1791,6 +1899,117 @@ mod tests {
             "the refused switch, and no reload behind it"
         );
         assert!(c.loaded.get_untracked());
+    }
+
+    #[test]
+    fn creating_a_space_reloads_the_list_and_selects_it_by_label() {
+        let (c, repository) = recorded("herdr:work");
+
+        block_on(c.create_space("two".to_string()));
+
+        assert_eq!(
+            repository.actions(),
+            ["create_space(two)"],
+            "the reload is a direct list_spaces, filtered out of `actions`"
+        );
+        let selected: Vec<String> = c
+            .spaces
+            .get_untracked()
+            .into_iter()
+            .filter(|s| s.selected)
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(selected, ["two"], "the freshly listed match is selected");
+    }
+
+    #[test]
+    fn a_create_with_no_matching_name_leaves_the_reloaded_selection_alone() {
+        let (c, _repository) = recorded("herdr:work");
+
+        // The mock's own recorded fixture never lists anything named this —
+        // a non-match must not clear the server's own selection either.
+        block_on(c.create_space("nope".to_string()));
+
+        let selected: Vec<String> = c
+            .spaces
+            .get_untracked()
+            .into_iter()
+            .filter(|s| s.selected)
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(selected, ["one"], "whatever the server answered stands");
+    }
+
+    #[test]
+    fn a_refused_space_create_reports_the_failure_and_reloads_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        repository.refuse("create_space");
+        let before = c.spaces.get_untracked();
+
+        block_on(c.create_space("nope".to_string()));
+
+        assert_eq!(
+            repository.calls().last(),
+            Some(&"create_space(nope)".to_string()),
+            "the refused create is the last call — no reload behind it"
+        );
+        assert_eq!(c.spaces.get_untracked(), before, "nothing was written");
+    }
+
+    #[test]
+    fn a_new_tab_reloads_the_workspace_with_no_dialog_involved() {
+        let (c, repository) = recorded("zellij:dev");
+
+        block_on(c.new_tab());
+
+        assert_eq!(
+            repository.actions(),
+            ["new_tab"],
+            "one RPC — the reload behind it is reads, filtered out of `actions`"
+        );
+        assert_eq!(
+            c.browsed_tab.get_untracked(),
+            "alpha",
+            "the reload re-seeded the browse onto the server-active tab"
+        );
+    }
+
+    #[test]
+    fn a_refused_new_tab_reloads_nothing() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("new_tab");
+        let tabs = c.tabs.get_untracked();
+
+        block_on(c.new_tab());
+
+        assert_eq!(repository.actions(), ["new_tab"]);
+        assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
+    }
+
+    #[test]
+    fn a_pane_tap_opens_a_tiled_pane_and_a_long_press_opens_a_floating_one() {
+        let (c, repository) = recorded("zellij:dev");
+
+        block_on(c.new_pane(false));
+        block_on(c.new_pane(true));
+
+        assert_eq!(
+            repository.actions(),
+            ["new_pane(false)", "new_pane(true)"],
+            "the tap/long-press flag rides straight through to the verb"
+        );
+    }
+
+    #[test]
+    fn a_refused_new_pane_reloads_nothing() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("new_pane");
+        let tabs = c.tabs.get_untracked();
+
+        block_on(c.new_pane(false));
+
+        assert_eq!(repository.actions(), ["new_pane(false)"]);
+        assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
     }
 
     #[test]

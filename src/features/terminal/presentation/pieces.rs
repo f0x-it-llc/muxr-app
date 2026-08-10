@@ -628,9 +628,19 @@ pub(super) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
 
 /// `.new-pane-btn` — the dashed, centred row that closes the sheet's pane
 /// section. The `+` is amber because it is the call to action.
-pub(super) fn new_pane_row<State: 'static, F: Fn(&mut State) + 'static>(
+///
+/// Two gestures, both wired straight through: a tap fires `on_tap` (a tiled
+/// pane), a long-press fires `on_long_press` (a floating one) — the row's own
+/// label already says which is which (`new pane · long-press for floating`).
+/// [`GestureDetector`] fires exactly one of the two per press, never both.
+pub(super) fn new_pane_row<
+    State: 'static,
+    T: Fn(&mut State) + 'static,
+    L: Fn(&mut State) + 'static,
+>(
     colors: &Palette,
-    on_tap: F,
+    on_tap: T,
+    on_long_press: L,
 ) -> AnyView<State> {
     let theme = active_theme();
     let label = row(vec![
@@ -658,7 +668,8 @@ pub(super) fn new_pane_row<State: 'static, F: Fn(&mut State) + 'static>(
         .border(colors.outline)
         .dashed(true),
     )
-    .on_tap(on_tap))
+    .on_tap(on_tap)
+    .on_long_press(on_long_press))
 }
 
 #[cfg(test)]

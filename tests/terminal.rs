@@ -74,8 +74,8 @@ use muxr::{AppState, MuxrApp};
 mod support;
 use support::{
     EPSILON, RecScene, added, by_width, center, char_key, frame, frame_at_sized, largest, ms,
-    named_key, node_centers_by_label, node_labels, node_values, pointer, pump_frames, rounded_in,
-    serial, setup, tap,
+    named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer,
+    pump_frames, rounded_in, serial, setup, tap,
 };
 
 /// The surface every frame in this suite lays out at. Wider and taller than
@@ -151,6 +151,27 @@ const DETACHED_TOAST: &str = "detached";
 /// …and what a control a read-only credential may not use says instead, same
 /// provenance.
 const READ_ONLY_TOAST: &str = "read-only session";
+
+/// `muxr::failure::AppFailure::Internal`'s own `user_message()`, transcribed —
+/// what every one of the sheet's three create affordances shows once the
+/// repository actually answers, since `MockTerminalRepository` deliberately
+/// leaves `create_space`/`new_tab`/`new_pane` at
+/// `TerminalRepository`'s own default (`Err(AppFailure::Internal(_))`,
+/// "unsupported by this repository") — only `GrpcTerminalRepository` overrides
+/// them for real (`domain::repositories`' own module docs). Seeing this toast
+/// is this suite's proof an affordance actually reached the repository, in
+/// place of the withdrawn client-side `unavailable()` stub, which never
+/// touched a repository (or this sink) at all.
+const INTERNAL_FAILURE_TOAST: &str = "Something went wrong — please try again.";
+
+/// `presentation::pieces`' own `NEW_PANE_LABEL` (private there) — the
+/// new-pane row's label, and the only way this suite locates it: the row
+/// paints a **transparent**-filled, dashed-bordered box, so it shows up in
+/// neither [`RecScene::rounded`] (no fill) nor [`RecScene::strokes`] (a
+/// dashed border rides `PaintScene::stroke_line`, which this suite's recorder
+/// leaves at the trait's own no-op default) — so it is found by its
+/// accessible *value* instead.
+const NEW_PANE_LABEL: &str = "new pane \u{b7} long-press for floating";
 
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
 /// card prints once a pane row inside it has been committed.
@@ -409,6 +430,45 @@ impl Harness {
                 )
             });
         self.tap(point);
+    }
+
+    /// The new-pane row's own tap point — see [`NEW_PANE_LABEL`] for why this
+    /// goes through its accessible *value* rather than painted geometry.
+    fn new_pane_row_point(&self) -> Point {
+        node_centers_by_value(&self.root, NEW_PANE_LABEL)
+            .first()
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no node valued {NEW_PANE_LABEL:?}; values on screen: {:?}",
+                    node_values(&self.root)
+                )
+            })
+    }
+
+    /// A full long-press at `point` — [`support::long_press`]'s sized-surface
+    /// twin: that helper hardcodes the unsized default surface, and this
+    /// suite's [`SURFACE`] is taller.
+    fn long_press(&mut self, point: Point) {
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Down, point));
+        self.frame_at(0.0);
+        self.frame_at(support::HELD_MS);
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Up, point));
+    }
+
+    /// Pump until a toast reading exactly `message` is pending — how this
+    /// suite observes an async repository call's failure landing on the
+    /// failure sink (`use_failure_listener` → `app_toasts().raise`), rather
+    /// than guessing how many frames that takes.
+    fn await_toast(&mut self, message: &str) {
+        self.pump_until(&format!("a {message:?} toast"), |_| {
+            app_toasts()
+                .pending_untracked()
+                .iter()
+                .any(|m| m == message)
+        });
     }
 
     /// Type `text` into whatever holds focus, one already-resolved character
@@ -1919,4 +1979,126 @@ fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
         origin.y.abs() < EPSILON,
         "fullscreen keeps the card flush against the top edge: {origin:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 11 — the sheet's three create affordances
+// ---------------------------------------------------------------------------
+//
+// Request shapes are already pinned at the repository/mock-server level
+// (`data::repositories::grpc_terminal_repository`'s own request-construction
+// tests), and the happy-path reload/select-by-label flow is pinned at the
+// controller level (`presentation::controller`'s own `RecordingRepository`
+// suite) — `MockTerminalRepository` deliberately leaves these three verbs at
+// `TerminalRepository`'s shared "unsupported" default (see
+// `INTERNAL_FAILURE_TOAST`'s own doc), so what is left to pin here is *flow*:
+// a dialog only in front of the space pill, no client-side label validation
+// beyond "not blank", and the sheet staying up around all three regardless of
+// how the repository answers.
+
+#[test]
+fn the_add_space_pill_opens_an_empty_dialog_and_a_typed_label_reaches_the_repository() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    app_toasts().clear();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    let floor = h.depth();
+
+    // `+ space` is the space row's fourth pill (three spaces, then it).
+    h.tap(center(pills(&sheet)[3]));
+    let dialog_frame = h.settle();
+    assert_eq!(h.depth(), floor + 1, "the create-space dialog opened");
+
+    // Prefilled empty: an unmodified Enter submits nothing at all (the
+    // dialog's own non-blank guard) — a stray seed left over from the rename
+    // dialog's own pattern would have submitted here instead.
+    h.press(NamedKey::Enter);
+    h.flush();
+    assert_eq!(h.depth(), floor + 1, "nothing to submit yet — still open");
+
+    // A name with punctuation the server, not this screen, gets to judge.
+    // Diffed against `after` (the sheet, still up underneath) rather than
+    // `before` (before the sheet even opened) — the sheet's own chrome must
+    // not leak into this isolation, or the widest rect in the combined set
+    // could be one of *its* rows rather than the dialog's own field.
+    let dialog = added(&after.rounded, &dialog_frame.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
+    h.type_text("new hq #1");
+    h.press(NamedKey::Enter);
+    h.flush();
+
+    assert_eq!(
+        h.depth(),
+        floor,
+        "the submit closed the dialog, back onto the sheet"
+    );
+    // The repository actually saw the attempt — `MockTerminalRepository`
+    // rejects it (see `INTERNAL_FAILURE_TOAST`'s own doc), which the withdrawn
+    // `unavailable()` stub could never have produced, since it never touched
+    // a repository at all.
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+}
+
+#[test]
+fn the_add_tab_pill_opens_no_dialog_and_leaves_the_sheet_up() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+    let floor = h.depth();
+
+    // `+` is the tab row's fifth pill (four tabs, then it) — no spaces
+    // section on this (zellij) session.
+    h.tap(center(pills(&sheet)[4]));
+    h.settle();
+
+    assert_eq!(h.depth(), floor, "no dialog — original-app parity");
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+    assert_eq!(h.depth(), floor, "…and the sheet is still the one thing up");
+}
+
+#[test]
+fn a_tap_on_the_new_pane_row_opens_no_dialog_and_leaves_the_sheet_up() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    h.open_sheet();
+    let floor = h.depth();
+    let point = h.new_pane_row_point();
+
+    h.tap(point);
+    h.settle();
+
+    assert_eq!(h.depth(), floor, "no dialog on a tap either");
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+    assert_eq!(h.depth(), floor, "…and the sheet stayed up");
+}
+
+#[test]
+fn a_long_press_on_the_new_pane_row_also_opens_no_dialog_and_leaves_the_sheet_up() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    h.open_sheet();
+    let floor = h.depth();
+    let point = h.new_pane_row_point();
+
+    h.long_press(point);
+    h.settle();
+
+    assert_eq!(h.depth(), floor, "no dialog on a long-press either");
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+    assert_eq!(h.depth(), floor, "…and the sheet stayed up");
 }
