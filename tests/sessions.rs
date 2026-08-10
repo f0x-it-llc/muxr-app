@@ -534,12 +534,19 @@ fn the_conn_row_prints_the_connections_facts() {
 
     let values = node_values(&h.root);
     assert!(
-        values.iter().any(|v| v == "mock.example:7777"),
-        "the strip prints `host:port`: {values:?}"
+        values.iter().any(|v| v == "zellij 0.44.3"),
+        "the strip prints every detected backend's version: {values:?}"
     );
     assert!(
-        values.iter().any(|v| v == "zellij 0.44.3 \u{b7} 36ms"),
-        "…and the dim version · latency meta: {values:?}"
+        values.iter().any(|v| v == "36ms"),
+        "…and the live latency as its own trailing run: {values:?}"
+    );
+    // The endpoint is the *bar's* now: printing it here too ran the two runs
+    // into each other on a phone-width strip, and the bar above already
+    // titles the connected host.
+    assert!(
+        !values.iter().any(|v| v.contains("mock.example")),
+        "no endpoint anywhere in the strip: {values:?}"
     );
     // The bar that titles the host (and the brand beside it) is the *shell's*
     // now, not this screen's — `tests/navigation_motion.rs` owns those
@@ -1026,9 +1033,13 @@ fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
     // `scene.rounded` for it directly), but its leading success dot
     // (`pieces::DOT`-sized, the one 7×7 rounded fill in this frame) is
     // painted at the strip's own `STRIP_PAD_X` — unaffected by any centering
-    // margin — which is exactly the full-bleed proof.
+    // margin — which is exactly the full-bleed proof. The dot sits centered
+    // in the heartbeat's own ring slot rather than flush against that
+    // padding, so the slot's half-inset comes into it; all three numbers are
+    // transcribed from the build, like every other constant here.
     const STRIP_PAD_X: f64 = 16.0;
     const DOT: f64 = 7.0;
+    const RING_SLOT: f64 = 20.0;
     let dot = scene
         .rounded
         .iter()
@@ -1036,7 +1047,7 @@ fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
         .copied()
         .expect("the strip's success dot paints its own rounded fill");
     assert!(
-        (dot.0.x - STRIP_PAD_X).abs() < EPSILON,
+        (dot.0.x - (STRIP_PAD_X + (RING_SLOT - DOT) / 2.0)).abs() < EPSILON,
         "the strip is not centered/clamped like the list column: {dot:?}"
     );
 }

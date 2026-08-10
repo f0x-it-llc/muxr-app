@@ -64,6 +64,11 @@
 //! cannot reach is the encoded request frame `tonic` owns; that buffer is not
 //! addressable from this layer.
 //!
+//! [`ConnectionController::ping`] re-times that same `GetVersion` on a live
+//! connection — the Sessions strip's heartbeat — and touches no credential at
+//! all: the RPC is unauthenticated, exactly like the connect-time one, so a
+//! ping neither reads nor scrubs a token.
+//!
 //! # Threading
 //!
 //! A real dial runs on the background runtime through [`frust::spawn`], and a
@@ -670,6 +675,12 @@ pub struct ConnectionController {
     /// [`ServerInfo::is_read_only`], hoisted into its own signal because it
     /// gates controls on screens that never render the rest of the facts.
     pub is_read_only: RwSignal<bool>,
+    /// Whether a [`ping`](Self::ping) is in flight — its single-flight claim.
+    /// A heartbeat tick arriving while the previous round trip is still open is
+    /// **dropped**, never queued: the reading a queued ping would produce is
+    /// already stale by the time it ran, and stacking them would grow one RPC
+    /// per tick against a server that is simply answering slowly.
+    pinging: AtomicBool,
     /// The server label whose credential the just-settled connect should offer
     /// to save, or `None` when there is nothing to offer. Written by
     /// [`Self::settle`] **before** its `on_done`, which is what lets the Connect
@@ -693,6 +704,7 @@ impl ConnectionController {
             connecting: RwSignal::new(false),
             server_info: RwSignal::new(None),
             is_read_only: RwSignal::new(false),
+            pinging: AtomicBool::new(false),
             credential_offer: RwSignal::new(None),
             credential_saver: Mutex::new(None),
         }
@@ -813,6 +825,49 @@ impl ConnectionController {
                 on_done(Err(failure));
             }
         }
+    }
+
+    /// Re-time the connection: one unauthenticated `GetVersion` round trip,
+    /// whose measurement replaces [`ServerInfo::latency_ms`], answering the new
+    /// reading. The Sessions strip's heartbeat is the one caller.
+    ///
+    /// Single-flight through [`pinging`](Self::pinging) — a tick arriving while
+    /// a ping is open is dropped rather than queued — with the claim released
+    /// through an RAII guard, so no early return below can wedge the heartbeat
+    /// shut (`SessionsController::refresh_from_poll`'s own precedent).
+    ///
+    /// `None` means "nothing was measured", and is deliberately **silent**: a
+    /// backend with no wire behind it (the mock, or a disconnected app), or a
+    /// refused round trip. The session list's own 3s poll is what surfaces a
+    /// failing connection — session expiry included — and a heartbeat that
+    /// raised its own failure would toast every three seconds on top of it.
+    ///
+    /// The RPC is unauthenticated, exactly like the connect-time `GetVersion`
+    /// (see the module docs' token-hygiene note): no credential is read,
+    /// installed or scrubbed here.
+    pub async fn ping(&self) -> Option<u32> {
+        if self.pinging.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        struct ReleasePingClaim<'a>(&'a AtomicBool);
+        impl Drop for ReleasePingClaim<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _release = ReleasePingClaim(&self.pinging);
+
+        let client = self.client()?;
+        let started = Instant::now();
+        client.unauth().get_version(Empty {}).await.ok()?;
+        let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+
+        // The rest of the handshake's facts are the connect's; only the
+        // measurement is this call's to replace.
+        let info = self.server_info.get_untracked()?;
+        self.server_info
+            .set(Some(ServerInfo { latency_ms, ..info }));
+        Some(latency_ms)
     }
 
     /// Close the connection and clear every connection-scoped signal. Callers
@@ -1205,6 +1260,88 @@ mod tests {
         let (done, on_done) = flag();
         no_saver.accept_credential_offer_with(on_done);
         assert!(done.load(Ordering::SeqCst), "no saver installed");
+    }
+
+    // -----------------------------------------------------------------------
+    // The heartbeat ping
+    // -----------------------------------------------------------------------
+
+    /// A ping with no wire behind it measures nothing, says so quietly, and —
+    /// the part that matters — hands its single-flight claim back, so the
+    /// Sessions strip's every-3s heartbeat is not wedged shut for the rest of
+    /// the mount by one no-op tick.
+    #[tokio::test]
+    async fn a_ping_with_no_live_client_is_a_silent_no_op_that_releases_its_claim() {
+        let controller = controller();
+        controller.connect(target(false));
+        let before = controller.server_info.get_untracked();
+
+        assert_eq!(
+            controller.ping().await,
+            None,
+            "the mock has no wire to time"
+        );
+        assert!(
+            !controller.pinging.load(Ordering::SeqCst),
+            "the claim is released even on the path that measured nothing"
+        );
+
+        assert_eq!(
+            controller.ping().await,
+            None,
+            "…so a later tick still gets past the claim"
+        );
+        assert_eq!(
+            controller.server_info.get_untracked(),
+            before,
+            "an unmeasured ping publishes nothing"
+        );
+    }
+
+    /// The real flow, against the in-process fixture: a live connection's ping
+    /// re-times `GetVersion` and republishes the handshake with the new
+    /// measurement and nothing else touched.
+    #[tokio::test]
+    async fn a_ping_over_a_live_connection_republishes_only_the_latency() {
+        use crate::net::testing::{self, MuxrdFixture};
+
+        let fixture = MuxrdFixture::start().await;
+        let backend = Arc::new(NetConnectionBackend::new());
+        let controller = Arc::new(ConnectionController::new(
+            Arc::clone(&backend) as Arc<dyn ConnectionBackend>
+        ));
+        let mut connect = target(false);
+        connect.host = "127.0.0.1".to_string();
+        connect.port = fixture.port();
+        connect.trust_mode = TrustMode::Pinned;
+        connect.token = Zeroizing::new(testing::AUTH_TOKEN.to_string());
+        connect.fingerprint = Some(fixture.fingerprint_hex().to_string());
+
+        // The dial itself is driven here rather than through `connect_with`:
+        // that path hands the work to `frust::spawn`, whose runtime no plain
+        // `#[tokio::test]` stands up (the net-backend tests above take the
+        // same route). The controller holds the same backend either way, so
+        // its `client()` — all a ping needs — is the production one.
+        let ConnectRun::Pending(work) = backend.begin_connect(connect) else {
+            panic!("a real dial is never decided before it runs");
+        };
+        let info = work.await.expect("the fixture accepts its own pin + token");
+        controller.server_info.set(Some(info.clone()));
+
+        let measured = controller.ping().await.expect("a live connection is timed");
+        let after = controller
+            .server_info
+            .get_untracked()
+            .expect("the ping republished the facts");
+        assert_eq!(after.latency_ms, measured);
+        assert_eq!(
+            after,
+            ServerInfo {
+                latency_ms: measured,
+                ..info
+            },
+            "only the measurement changes — the handshake's facts are the connect's"
+        );
     }
 
     // -----------------------------------------------------------------------

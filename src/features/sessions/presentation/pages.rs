@@ -110,6 +110,7 @@ use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
+use super::heartbeat::{self, HeartbeatState, PING_PERIOD};
 use super::pieces;
 
 /// The route this screen attaches into. The session id rides as a query param
@@ -168,8 +169,8 @@ pub struct SessionsScreen {
     overlays: NavigatorController<AppState>,
 }
 
-/// The Sessions screen's retained state: the action bundle and the app-scoped
-/// connection handle, and nothing else.
+/// The Sessions screen's retained state: the action bundle, the app-scoped
+/// connection handle and the strip's heartbeat, and nothing else.
 pub struct SessionsState {
     /// Everything this screen can *do*, and the handles it needs to do it —
     /// see [`Actions`].
@@ -178,6 +179,11 @@ pub struct SessionsState {
     /// and the read-only posture that gates this screen's mutations (see
     /// [`crate::connection`]).
     pub connection: Arc<ConnectionController>,
+    /// The `.conn-row` strip's heartbeat clocks — written by the ping
+    /// interval `init` starts, read by every rebuild that renders the strip
+    /// (see [`super::heartbeat`]). Screen-internal, unlike the two handles
+    /// above: nothing outside this feature's presentation layer drives it.
+    pub(super) heartbeat: HeartbeatState,
 }
 
 /// Every navigation this screen performs, plus the three handles they need.
@@ -255,6 +261,48 @@ impl Component for SessionsScreen {
             poll_loader.poll_period.set(Some(secs));
         });
 
+        // The app-scoped connection handle, resolved here with every other
+        // app-scoped dependency — never from a press handler, and never from
+        // inside the spawned body below.
+        let connection = expect_connection_controller();
+
+        // The strip's connection heartbeat: one real timed `GetVersion` every
+        // `PING_PERIOD`, whose measurement rolls the strip's latency readout
+        // (see `super::heartbeat`). Unlike the list poll above, this cadence
+        // is a constant, so the interval starts right here — `init` runs under
+        // the component `Owner` `use_interval` needs, and the interval is
+        // disposed with it on unmount. `is_polling()` is the same
+        // covered-screen gate the list poll uses, so a dialog, the management
+        // sheet or the terminal route pauses both; nothing new to pause.
+        let heartbeat = HeartbeatState::new();
+        let beating = Arc::clone(&controller);
+        let pinged = Arc::clone(&connection);
+        use_interval(PING_PERIOD, move || {
+            if !beating.is_polling() {
+                return;
+            }
+            // The reading the roll will start from, taken before the round
+            // trip that replaces it — and, being `None` while nothing is
+            // connected, the gate on there being anything to time at all.
+            // Untracked: a callback is not a render.
+            let Some(from) = pinged
+                .server_info
+                .get_untracked()
+                .map(|info| info.latency_ms)
+            else {
+                return;
+            };
+            heartbeat.start_ping();
+            let connection = Arc::clone(&pinged);
+            spawn_local(async move {
+                // A ping that measured nothing (disconnected, or refused)
+                // rolls nothing — the list poll owns failure surfacing.
+                if let Some(measured) = connection.ping().await {
+                    heartbeat.settle(from, measured);
+                }
+            });
+        });
+
         SessionsState {
             actions: Actions {
                 nav: self.nav.clone(),
@@ -264,7 +312,8 @@ impl Component for SessionsScreen {
                 app_nav: app_nav(),
                 controller,
             },
-            connection: expect_connection_controller(),
+            connection,
+            heartbeat,
         }
     }
 
@@ -309,6 +358,15 @@ impl Component for SessionsScreen {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
 
+        // The heartbeat's pose for *this* frame. The interval writes only the
+        // two instants it clocks from; every frame in between is a wall-clock
+        // read taken here, kept coming by the ticker mounted below while
+        // there is still something to animate (see `super::heartbeat`).
+        let beat = state.heartbeat.visual(
+            info.as_ref().map_or(0, |info| info.latency_ms),
+            theme.motion.reduce_motion,
+        );
+
         // Responsive width-clamp pass (FINDINGS #21): read metrics once,
         // branch on one page constant, never touch layout again — the
         // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
@@ -351,6 +409,18 @@ impl Component for SessionsScreen {
         } else {
             scroller
         };
+        let mut bands = vec![
+            inflexible(pieces::server_strip(info.as_ref(), beat, &colors)),
+            flexible(1, scroller),
+        ];
+        // Per-frame rebuilds last exactly as long as the animation does: the
+        // ticker is mounted only while the ping ring or the latency roll still
+        // owes a frame, so a settled strip — and every reduced-motion one —
+        // asks for none. It rides at the end of the band list so the two real
+        // bands keep their positional identity as it comes and goes.
+        if beat.animating() {
+            bands.push(heartbeat::frame_ticker());
+        }
         // The page tone stays **outside** the clearance so it fills the whole
         // surface, bar band included: the bar slides in over it (see
         // `crate::shell::root_view`), and a page that stopped at the clearance
@@ -358,14 +428,7 @@ impl Component for SessionsScreen {
         // length of that entrance.
         any(pieces::page_tone(
             topbar_clearance(
-                FlexView::new(
-                    Axis::Vertical,
-                    vec![
-                        inflexible(pieces::server_strip(info.as_ref(), &colors)),
-                        flexible(1, scroller),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Stretch),
+                FlexView::new(Axis::Vertical, bands).cross_axis(CrossAxisAlignment::Stretch),
             ),
             &colors,
         ))
