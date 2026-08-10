@@ -69,9 +69,15 @@ use tonic::Status;
 
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
-use crate::features::terminal::domain::entities::{Space, TabEntry, TermLine};
+use crate::features::terminal::domain::entities::{
+    PaneEntry, ScrollStep, Space, TabEntry, TermLine,
+};
 use crate::features::terminal::domain::repositories::TerminalRepository;
-use crate::net::proto::{Layout, PaneMsg, SessionRef, SpaceList, SwitchSpaceReq, TabTarget};
+use crate::net::proto::{
+    CreateSpaceReq, Layout, NewPaneReq, NewTabReq, PaneMsg, PaneTarget, RenamePaneReq,
+    RenameSpaceReq, RenameTabReq, ScrollDirection, ScrollReq, SessionRef, SpaceList,
+    SwitchSpaceReq, TabTarget,
+};
 use crate::net::{MuxrClient, error};
 
 /// [`GrpcTerminalRepository::client`]'s failure detail when nothing is
@@ -259,6 +265,122 @@ impl TerminalRepository for GrpcTerminalRepository {
         // "Two calls that never reach the wire".
         Ok(())
     }
+
+    async fn create_space(&self, label: String) -> Result<(), AppFailure> {
+        let (session, connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = create_space_request(session, connection_id, label);
+        let ack = client
+            .authed()
+            .create_space(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
+        let (session, connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = rename_space_request(session, connection_id, space_id, label);
+        let ack = client
+            .authed()
+            .rename_space(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn new_tab(&self) -> Result<(), AppFailure> {
+        // `NewTabReq` carries no `connection_id` — see the module docs'
+        // "What it addresses".
+        let (session, _connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = new_tab_request(session);
+        let ack = client
+            .authed()
+            .new_tab(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
+        let (session, _connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = rename_tab_request(session, tab_id, name);
+        let ack = client
+            .authed()
+            .rename_tab(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn new_pane(&self, floating: bool) -> Result<(), AppFailure> {
+        let (session, _connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = new_pane_request(session, floating);
+        let ack = client
+            .authed()
+            .new_pane(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn rename_pane(
+        &self,
+        pane_id: u32,
+        is_plugin: bool,
+        name: String,
+    ) -> Result<(), AppFailure> {
+        let (session, connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = rename_pane_request(session, connection_id, pane_id, is_plugin, name);
+        let ack = client
+            .authed()
+            .rename_pane(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        let (session, connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = pane_target(session, connection_id, pane_id, is_plugin);
+        let ack = client
+            .authed()
+            .focus_pane(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
+    async fn scroll_pane(
+        &self,
+        pane_id: u32,
+        is_plugin: bool,
+        direction: ScrollStep,
+    ) -> Result<(), AppFailure> {
+        let (session, connection_id) = self.addressed()?;
+        let client = self.client()?;
+        let request = scroll_pane_request(session, connection_id, pane_id, is_plugin, direction);
+        let ack = client
+            .authed()
+            .scroll_pane(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,10 +431,144 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
                 pane_title: pane.map(|pane| pane.title.clone()).unwrap_or_default(),
                 pane_name: pane.map(|pane| pane.title.clone()).unwrap_or_default(),
                 pane_path: pane.map(|pane| pane.cwd.clone()).unwrap_or_default(),
+                panes: tab.panes.iter().map(map_pane).collect(),
                 active: tab.active,
             }
         })
         .collect()
+}
+
+/// One `PaneMsg` as [`PaneEntry`] — a field-for-field carry, in wire order
+/// (see the [module docs](self)' "Tab keys are derived" for why the tab
+/// around it derives extra identifiers but a pane does not need to: the
+/// wire's own `PaneMsg.id` is already what [`TerminalRepository`]'s
+/// pane-targeted verbs address by).
+fn map_pane(pane: &PaneMsg) -> PaneEntry {
+    PaneEntry {
+        id: pane.id,
+        title: pane.title.clone(),
+        cwd: pane.cwd.clone(),
+        focused: pane.is_focused,
+        floating: pane.is_floating,
+        exited: pane.exited,
+        is_plugin: pane.is_plugin,
+        is_fullscreen: pane.is_fullscreen,
+        x: pane.x,
+        y: pane.y,
+        rows: pane.rows,
+        cols: pane.cols,
+    }
+}
+
+/// [`ScrollStep`] onto the wire's `ScrollDirection` — only the two notch
+/// values this round sends; see `domain::entities::ScrollStep`'s own docs for
+/// why the wire's other five directions are not reachable from here yet.
+fn map_scroll_step(step: ScrollStep) -> ScrollDirection {
+    match step {
+        ScrollStep::Up => ScrollDirection::Up,
+        ScrollStep::Down => ScrollDirection::Down,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-verb request construction (pure; unit-tested directly against the
+// values they carry — the same "no server fixture needed" shape the mapping
+// functions above take)
+// ---------------------------------------------------------------------------
+
+/// A [`PaneTarget`] addressing `pane_id` over `session`/`connection_id`.
+fn pane_target(
+    session: String,
+    connection_id: String,
+    pane_id: u32,
+    is_plugin: bool,
+) -> PaneTarget {
+    PaneTarget {
+        session,
+        pane_id,
+        is_plugin,
+        connection_id,
+    }
+}
+
+/// `CreateSpace`'s request.
+fn create_space_request(session: String, connection_id: String, label: String) -> CreateSpaceReq {
+    CreateSpaceReq {
+        session,
+        label,
+        connection_id,
+    }
+}
+
+/// `RenameSpace`'s request.
+fn rename_space_request(
+    session: String,
+    connection_id: String,
+    space_id: String,
+    label: String,
+) -> RenameSpaceReq {
+    RenameSpaceReq {
+        session,
+        space_id,
+        label,
+        connection_id,
+    }
+}
+
+/// `NewTab`'s request — unnamed, per [`TerminalRepository::new_tab`]'s own
+/// doc; `NewTabReq` carries no `connection_id`.
+fn new_tab_request(session: String) -> NewTabReq {
+    NewTabReq {
+        session,
+        tab_name: String::new(),
+    }
+}
+
+/// `RenameTab`'s request — `RenameTabReq` carries no `connection_id`.
+fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabReq {
+    RenameTabReq {
+        session,
+        tab_id,
+        name,
+    }
+}
+
+/// `NewPane`'s request, unnamed like [`new_tab_request`]; `NewPaneReq` carries
+/// no `connection_id`.
+fn new_pane_request(session: String, floating: bool) -> NewPaneReq {
+    NewPaneReq {
+        session,
+        floating,
+        pane_name: String::new(),
+    }
+}
+
+/// `RenamePane`'s request.
+fn rename_pane_request(
+    session: String,
+    connection_id: String,
+    pane_id: u32,
+    is_plugin: bool,
+    name: String,
+) -> RenamePaneReq {
+    RenamePaneReq {
+        target: Some(pane_target(session, connection_id, pane_id, is_plugin)),
+        name,
+    }
+}
+
+/// `ScrollPane`'s request.
+fn scroll_pane_request(
+    session: String,
+    connection_id: String,
+    pane_id: u32,
+    is_plugin: bool,
+    direction: ScrollStep,
+) -> ScrollReq {
+    ScrollReq {
+        target: Some(pane_target(session, connection_id, pane_id, is_plugin)),
+        direction: map_scroll_step(direction) as i32,
+    }
 }
 
 /// The pane a tab's status row describes: the focused one, or — for a tab the
@@ -556,6 +812,57 @@ mod tests {
         assert!(map_tabs(Layout { tabs: Vec::new() }).is_empty());
     }
 
+    #[test]
+    fn a_multi_pane_tabs_pane_list_carries_every_pane_field_for_field_in_wire_order() {
+        let mut first = pane("htop", "/home/ed", true);
+        first.id = 3;
+        first.is_plugin = true;
+        first.is_fullscreen = true;
+        first.exited = true;
+        first.is_floating = true;
+        first.x = 1;
+        first.y = 2;
+        first.rows = 24;
+        first.cols = 80;
+        let mut second = pane("zsh", "/srv", false);
+        second.id = 9;
+
+        let tabs = map_tabs(Layout {
+            tabs: vec![tab(0, 1, "dev", true, vec![first.clone(), second.clone()])],
+        });
+
+        assert_eq!(tabs[0].panes.len(), 2, "wire order, nothing dropped");
+        let mapped_first = &tabs[0].panes[0];
+        assert_eq!(mapped_first.id, first.id);
+        assert_eq!(mapped_first.title, first.title);
+        assert_eq!(mapped_first.cwd, first.cwd);
+        assert_eq!(mapped_first.focused, first.is_focused);
+        assert_eq!(mapped_first.floating, first.is_floating);
+        assert_eq!(mapped_first.exited, first.exited);
+        assert_eq!(mapped_first.is_plugin, first.is_plugin);
+        assert_eq!(mapped_first.is_fullscreen, first.is_fullscreen);
+        assert_eq!(mapped_first.x, first.x);
+        assert_eq!(mapped_first.y, first.y);
+        assert_eq!(mapped_first.rows, first.rows);
+        assert_eq!(mapped_first.cols, first.cols);
+
+        let mapped_second = &tabs[0].panes[1];
+        assert_eq!(mapped_second.id, second.id);
+        assert_eq!(mapped_second.title, second.title);
+        assert!(
+            !mapped_second.focused,
+            "only the first pane above was marked focused"
+        );
+    }
+
+    #[test]
+    fn a_paneless_tab_maps_to_an_empty_pane_list() {
+        let tabs = map_tabs(Layout {
+            tabs: vec![tab(0, 1, "dev", true, Vec::new())],
+        });
+        assert!(tabs[0].panes.is_empty());
+    }
+
     // -- what the binding puts on the wire ------------------------------------
 
     #[test]
@@ -662,6 +969,176 @@ mod tests {
             block_on(repo.go_to_tab(3)),
             Err(AppFailure::Network(_))
         ));
+    }
+
+    #[test]
+    fn every_workspace_verb_fails_cleanly_when_disconnected() {
+        let repo = repo(Some("zellij:dev"));
+
+        assert!(matches!(
+            block_on(repo.create_space("space".to_string())),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.rename_space("ws-1".to_string(), "space".to_string())),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.new_tab()),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.rename_tab(1, "name".to_string())),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.new_pane(false)),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.rename_pane(1, false, "name".to_string())),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.focus_pane(1, false)),
+            Err(AppFailure::Network(_))
+        ));
+        assert!(matches!(
+            block_on(repo.scroll_pane(1, false, ScrollStep::Up)),
+            Err(AppFailure::Network(_))
+        ));
+    }
+
+    #[test]
+    fn an_unbound_workspace_verb_is_an_internal_failure_rather_than_a_retryable_one() {
+        let repo = repo(None);
+        assert!(matches!(
+            block_on(repo.create_space("space".to_string())),
+            Err(AppFailure::Internal(_))
+        ));
+        assert!(matches!(
+            block_on(repo.focus_pane(1, false)),
+            Err(AppFailure::Internal(_))
+        ));
+    }
+
+    // -- request construction --------------------------------------------------
+
+    #[test]
+    fn create_space_request_carries_session_label_and_connection_id() {
+        let request = create_space_request(
+            "zellij:dev".to_string(),
+            "conn-1".to_string(),
+            "ws".to_string(),
+        );
+        assert_eq!(request.session, "zellij:dev");
+        assert_eq!(request.label, "ws");
+        assert_eq!(
+            request.connection_id, "conn-1",
+            "CreateSpaceReq carries connection_id"
+        );
+    }
+
+    #[test]
+    fn rename_space_request_carries_every_field_incl_connection_id() {
+        let request = rename_space_request(
+            "zellij:dev".to_string(),
+            "conn-1".to_string(),
+            "ws-1".to_string(),
+            "renamed".to_string(),
+        );
+        assert_eq!(request.session, "zellij:dev");
+        assert_eq!(request.space_id, "ws-1");
+        assert_eq!(request.label, "renamed");
+        assert_eq!(request.connection_id, "conn-1");
+    }
+
+    #[test]
+    fn new_tab_request_carries_only_the_session_unnamed() {
+        let request = new_tab_request("zellij:dev".to_string());
+        assert_eq!(request.session, "zellij:dev");
+        assert_eq!(
+            request.tab_name, "",
+            "NewTabReq has no connection_id field, and this round names nothing"
+        );
+    }
+
+    #[test]
+    fn rename_tab_request_carries_no_connection_id_field() {
+        let request = rename_tab_request("zellij:dev".to_string(), 7, "renamed".to_string());
+        assert_eq!(request.session, "zellij:dev");
+        assert_eq!(request.tab_id, 7);
+        assert_eq!(request.name, "renamed");
+    }
+
+    #[test]
+    fn new_pane_request_carries_the_floating_flag_unnamed() {
+        let floating = new_pane_request("zellij:dev".to_string(), true);
+        assert_eq!(floating.session, "zellij:dev");
+        assert!(floating.floating);
+        assert_eq!(floating.pane_name, "");
+
+        let tiled = new_pane_request("zellij:dev".to_string(), false);
+        assert!(!tiled.floating);
+    }
+
+    #[test]
+    fn pane_target_carries_every_field_incl_connection_id() {
+        let target = pane_target("zellij:dev".to_string(), "conn-1".to_string(), 3, true);
+        assert_eq!(target.session, "zellij:dev");
+        assert_eq!(target.pane_id, 3);
+        assert!(target.is_plugin);
+        assert_eq!(
+            target.connection_id, "conn-1",
+            "PaneTarget carries connection_id"
+        );
+    }
+
+    #[test]
+    fn rename_pane_request_wraps_a_pane_target_and_carries_the_new_name() {
+        let request = rename_pane_request(
+            "zellij:dev".to_string(),
+            "conn-1".to_string(),
+            3,
+            false,
+            "renamed".to_string(),
+        );
+        let target = request.target.expect("RenamePaneReq.target is populated");
+        assert_eq!(target.session, "zellij:dev");
+        assert_eq!(target.pane_id, 3);
+        assert!(!target.is_plugin);
+        assert_eq!(target.connection_id, "conn-1");
+        assert_eq!(request.name, "renamed");
+    }
+
+    #[test]
+    fn scroll_pane_request_wraps_a_pane_target_and_maps_the_step() {
+        let up = scroll_pane_request(
+            "zellij:dev".to_string(),
+            "conn-1".to_string(),
+            3,
+            false,
+            ScrollStep::Up,
+        );
+        let target = up.target.expect("ScrollReq.target is populated");
+        assert_eq!(target.pane_id, 3);
+        assert_eq!(target.connection_id, "conn-1");
+        assert_eq!(up.direction, ScrollDirection::Up as i32);
+
+        let down = scroll_pane_request(
+            "zellij:dev".to_string(),
+            "conn-1".to_string(),
+            3,
+            false,
+            ScrollStep::Down,
+        );
+        assert_eq!(down.direction, ScrollDirection::Down as i32);
+    }
+
+    #[test]
+    fn map_scroll_step_covers_both_wheel_notches() {
+        assert_eq!(map_scroll_step(ScrollStep::Up), ScrollDirection::Up);
+        assert_eq!(map_scroll_step(ScrollStep::Down), ScrollDirection::Down);
     }
 
     // -- ack + status mapping -------------------------------------------------

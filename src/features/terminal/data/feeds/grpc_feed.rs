@@ -19,6 +19,7 @@
 //! | client → server | `attach: AttachReq{session, rows, cols}` | **mandatory first frame** of every stream, including every reconnect |
 //! | client → server | `input: bytes` | a keystroke, raw |
 //! | client → server | `resize: Resize{rows, cols}` | the grid changed shape |
+//! | client → server | `mouse: MouseInput{kind, col, row}` | a wheel-scroll event, zero-based cells in the same grid |
 //! | server → client | `render: bytes` | raw ANSI for the emulator |
 //! | server → client | `control: ControlEvent{kind, payload}` | out of band |
 //!
@@ -162,10 +163,12 @@ use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Code;
 
-use crate::features::terminal::domain::feed::TerminalFeed;
+use crate::features::terminal::domain::feed::{TerminalFeed, WheelKind};
 use crate::net::MuxrClient;
 use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
-use crate::net::proto::{AttachReq, ClientFrame, Resize, ServerFrame, client_frame, server_frame};
+use crate::net::proto::{
+    AttachReq, ClientFrame, MouseInput, MouseKind, Resize, ServerFrame, client_frame, server_frame,
+};
 
 /// The reconnect schedule: 1, 2, 4, 8, 16 seconds, **no jitter**, matching the
 /// Flutter client's own `terminal_session` timings. See the [module
@@ -491,6 +494,28 @@ impl TerminalFeed for GrpcTerminalFeed {
     fn is_open(&self) -> bool {
         let state = self.shared.state();
         !state.finished || !state.inbound.is_empty()
+    }
+
+    /// Queue `kind` at `(col, row)` as one `mouse` frame — the same
+    /// try-send-or-drop path [`send_input`](Self::send_input) takes, and
+    /// counted the identical way ([`GrpcTerminalFeed::dropped_frames`]) when
+    /// there is no stream to carry it.
+    fn send_mouse(&self, kind: WheelKind, col: u32, row: u32) {
+        self.shared.send(ClientFrame {
+            kind: Some(client_frame::Kind::Mouse(MouseInput {
+                kind: wire_wheel_kind(kind) as i32,
+                col,
+                row,
+            })),
+        });
+    }
+}
+
+/// [`WheelKind`] onto the wire's `MouseKind`.
+fn wire_wheel_kind(kind: WheelKind) -> MouseKind {
+    match kind {
+        WheelKind::Up => MouseKind::WheelUp,
+        WheelKind::Down => MouseKind::WheelDown,
     }
 }
 
@@ -1195,6 +1220,41 @@ mod tests {
             (reattach.cols, reattach.rows),
             (100, 40),
             "the reconnect attaches at the grid the user is looking at"
+        );
+    }
+
+    /// A wheel-scroll event reaches the server as one `mouse` frame, carrying
+    /// its kind and zero-based cell coordinates verbatim.
+    #[tokio::test]
+    async fn mouse_events_reach_the_server_as_mouse_frames() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+
+        feed.send_mouse(WheelKind::Up, 3, 7);
+        feed.send_mouse(WheelKind::Down, 79, 23);
+        wait_until("the server observes both mouse frames", || {
+            script.mice().len() == 2
+        })
+        .await;
+        assert_eq!(
+            script.mice(),
+            vec![
+                testing::MouseObservation {
+                    kind: crate::net::proto::MouseKind::WheelUp,
+                    col: 3,
+                    row: 7,
+                },
+                testing::MouseObservation {
+                    kind: crate::net::proto::MouseKind::WheelDown,
+                    col: 79,
+                    row: 23,
+                },
+            ]
         );
     }
 

@@ -1209,6 +1209,7 @@ mod tests {
             pane_title: title.to_string(),
             pane_name: String::new(),
             pane_path: String::new(),
+            panes: Vec::new(),
             active: false,
         };
         let tabs = vec![
