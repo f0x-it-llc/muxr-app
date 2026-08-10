@@ -277,10 +277,18 @@ tonic-prost-build = "0.14"
 # shell-owned clock may advance it in a production build). `tests/term_widget`
 # needs it to step the terminal caret's blink across a cycle; the feature is
 # **dev-only** here, so no production build ever sees the symbol.
+#
+# `frust-shell-common` is here for the same "test-only, deliberately not
+# re-exported through `frust::`" reason: `tests/terminal_live.rs` asserts on
+# `current_system_ui_mode()`, the headless peek at `frust::set_system_ui_mode`'s
+# process-global slot — a diagnostic accessor with no production caller, so
+# the facade names only the writer (`SystemUiMode`/`set_system_ui_mode`), not
+# this reader.
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core", features = ["test-support"] }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
+frust-shell-common = { path = "../../crates/frust-shell-common" }
 frust-text = { path = "../../crates/frust-text" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
