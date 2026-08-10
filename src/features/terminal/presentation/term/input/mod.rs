@@ -1,6 +1,7 @@
 //! The keystroke source's **pure half**: the last-known-state diff that turns
-//! platform IME snapshots back into terminal bytes, the one-shot Ctrl/Alt
-//! latch every emission passes through, and the key bar's own byte vocabulary.
+//! platform IME snapshots back into terminal bytes, the one-shot
+//! Ctrl/Alt/Shift latch every emission passes through, and the key bar's own
+//! byte vocabulary.
 //!
 //! No `Widget`, no `Rc`, no signals, no feed — everything here is a plain
 //! value transformation, so the whole input model is unit-testable without a
@@ -12,8 +13,8 @@
 //!
 //! | Module | Owns |
 //! |---|---|
-//! | `bytes` | the escape/sequence vocabulary, [`BarKey`], the named-key table |
-//! | `latch` | [`ModifierLatch`] and the Ctrl/Alt transform |
+//! | `bytes` | the escape/sequence vocabulary (plain and Shift), [`BarKey`], the named-key table |
+//! | `latch` | [`ModifierLatch`], and the Ctrl/Alt transform a character passes through |
 //! | `utf16` | the seam's index arithmetic and the mirror [`diff`] |
 //! | `source` | [`KeystrokeSource`]: the diff engine, its rolling window, its desync guards |
 //!
@@ -93,8 +94,10 @@ mod utf16;
 mod harness;
 
 pub use bytes::{
-    ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, BACKSPACE_BYTE, BarKey, END, ENTER_BYTE, ESC,
-    FORWARD_DELETE, HOME, PAGE_DOWN, PAGE_UP, TAB, named_key_bytes, text_bytes,
+    ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, BACK_TAB, BACKSPACE_BYTE, BarKey, END,
+    ENTER_BYTE, ESC, FORWARD_DELETE, HOME, PAGE_DOWN, PAGE_UP, SHIFT_ARROW_DOWN, SHIFT_ARROW_LEFT,
+    SHIFT_ARROW_RIGHT, SHIFT_ARROW_UP, SHIFT_FORWARD_DELETE, SHIFT_PAGE_DOWN, SHIFT_PAGE_UP, TAB,
+    named_key_bytes, shifted_sequence, text_bytes,
 };
 pub use latch::{ModifierLatch, apply_latch, single_unit};
 pub use source::{

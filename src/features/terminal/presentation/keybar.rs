@@ -1,18 +1,19 @@
-//! The terminal **key bar**: the eleven keys a soft keyboard has no room for,
+//! The terminal **key bar**: the twelve keys a soft keyboard has no room for,
 //! docked above the keyboard while — and only while — the IME is up.
 //!
 //! ```text
-//! Ctrl  Alt  Esc │ Tab  ↑  ↓  ←  → │ PgUp  PgDn │ Del
+//! Ctrl  Alt  Shift  Esc │ Tab  ↑  ↓  ←  → │ PgUp  PgDn │ Del
 //! ```
 //!
 //! Ported key for key from the Flutter incumbent (order, grouping, sequences
-//! and the one-shot latch semantics all verbatim); the *placement* is this
-//! app's v2 decision: the bar is **IME-active-only chrome**, so a resting
-//! terminal screen stays bar-free. Every byte it sends leaves through the same
-//! [`InputSeam`] the grid widget emits on, so the `Ctrl` armed here transforms
-//! the next character typed on the **OS keyboard** — the incumbent's semantic,
-//! and the reason the latch lives at the emission choke point
-//! ([`term::input`](super::term::input)) rather than in this module.
+//! and the one-shot latch semantics all verbatim), plus a `Shift` the incumbent
+//! never had; the *placement* is this app's v2 decision: the bar is
+//! **IME-active-only chrome**, so a resting terminal screen stays bar-free.
+//! Every byte it sends leaves through the same [`InputSeam`] the grid widget
+//! emits on, so the `Ctrl` armed here transforms the next character typed on the
+//! **OS keyboard** — the incumbent's semantic, and the reason the latch lives at
+//! the emission choke point ([`term::input`](super::term::input)) rather than in
+//! this module.
 //!
 //! # Three things this module is careful about
 //!
@@ -41,6 +42,27 @@
 //!    exists to close. `frust::icons` carries no directional arrow pair, so the
 //!    four marks below are app-supplied [`IconSource`]s, the same seam
 //!    [`chrome::PANE_MARK`](super::chrome::PANE_MARK) uses.
+//!
+//! # The row budget
+//!
+//! Twelve caps, their padding and three group rules share **one** row on the
+//! narrowest phone this app supports (~360 lp): frust has no horizontal-scroll
+//! primitive, and a bar that wrapped would eat rows of the terminal it is
+//! docked to. Two things buy that fit:
+//!
+//! 1. **A cap's flex weight is the width it asks for** ([`cap_weight`]) — its
+//!    content plus [`CAP_PAD_X`] a side, in logical px. Equal shares cannot
+//!    work: every cap would then have to be as wide as `Shift`, which at any
+//!    legible label size overruns the row by a third. A proportional share also
+//!    degrades the right way — below the design width every cap loses the same
+//!    *percentage*, so the padding thins long before a label is reached.
+//! 2. **The chrome is thin**: [`CAP_GAP`] between two caps, and a group rule
+//!    that *replaces* that gap rather than adding to it.
+//!
+//! The arithmetic at 360 lp: 8 px (the bar's two ends) plus 16 (eight inter-cap
+//! gaps) plus 21 (three rules) is 45 px of chrome, leaving 315 for twelve caps
+//! that ask for ~310. The few px of slack, and everything a wider phone has over
+//! 360, go to the caps in proportion — i.e. straight into their padding.
 //!
 //! # Colours
 //!
@@ -78,22 +100,41 @@ pub const CAP_HEIGHT: f64 = 34.0;
 /// Vertical padding above and below the cap row.
 const BAR_PAD_Y: f64 = 6.0;
 /// Horizontal padding at the bar's two ends.
-const BAR_PAD_X: f64 = 8.0;
+const BAR_PAD_X: f64 = 4.0;
 
 /// The bar's own height, keyboard inset excluded — what a screen reserves above
 /// the keyboard for it.
 pub const KEY_BAR_HEIGHT: f64 = CAP_HEIGHT + 2.0 * BAR_PAD_Y;
 
-/// Gap between two caps.
-const CAP_GAP: f64 = 4.0;
+/// Gap between two caps — thin, and *replaced* (not added to) by a group rule
+/// at the three group boundaries. See the row budget in the [module docs](self).
+const CAP_GAP: f64 = 2.0;
 /// A cap's corner radius — Glyph's `small` shape step, which is what every
 /// other small tile on this screen rounds to.
 const CAP_RADIUS: f64 = 8.0;
-/// A cap's label size. Small deliberately: eleven caps share a phone's width
-/// (there is no horizontal scroll primitive in frust), so `PgUp` has ~28px.
-const LABEL_SIZE: f32 = 10.5;
+/// The inset between a cap's edge and its label or mark, per side — the reason
+/// `Ctrl` reads as a key cap rather than as text with a box around it.
+///
+/// Not free: twelve caps spend `24 × this` of a ~360 lp row on it, which is what
+/// [`LABEL_SIZE`] was cut to pay for (the row budget in the [module docs](self)).
+pub const CAP_PAD_X: f64 = 4.0;
+/// A cap's label size. Small deliberately, and cut from the incumbent's 10.5 to
+/// pay for the twelfth cap and for [`CAP_PAD_X`]: it is the largest half-step
+/// that still leaves every cap its full padding at 360 lp with margin to spare —
+/// a 4-character label (`PgUp`) is the binding one, `Shift` being wider only in
+/// proportion to the share its cap asks for.
+pub const LABEL_SIZE: f32 = 8.5;
+/// One label character's advance at [`LABEL_SIZE`], in logical px: the Glyph
+/// label face is IBM Plex Mono, a 0.6 em fixed pitch, and `label_small` adds
+/// 0.475 px of tracking on top — so a label's width is exactly its character
+/// count times this.
+///
+/// Only *relative* cap widths are derived from it ([`cap_weight`]), so a font
+/// fallback that measured differently would shift a cap's padding by a fraction
+/// of a px rather than break the row.
+const LABEL_ADVANCE: f64 = 0.6 * LABEL_SIZE as f64 + 0.475;
 /// The drawn size of an arrow mark inside its cap.
-const ICON_SIZE: f64 = 13.0;
+pub const ICON_SIZE: f64 = 13.0;
 /// Group-separator width, height and the margin either side of it.
 const SEPARATOR_W: f64 = 1.0;
 const SEPARATOR_H: f64 = CAP_HEIGHT - 14.0;
@@ -147,6 +188,22 @@ fn arrow_mark(key: BarKey) -> Option<IconSource> {
     }
 }
 
+/// The main-axis share `key`'s cap asks for: what it has to draw, plus
+/// [`CAP_PAD_X`] a side — in whole logical px, used **as the flex weight**.
+///
+/// A weight rather than a size because the row must fill the width it is given
+/// and never overflow it (see the row budget in the [module docs](self)):
+/// `FlexView` hands each cap `weight / Σweights` of the space, so on the design
+/// width every cap lands on the number below, a narrower phone shrinks them all
+/// by the same percentage, and a wider one pads them all by the same percentage.
+fn cap_weight(key: BarKey) -> u32 {
+    let content = match arrow_mark(key) {
+        Some(_) => ICON_SIZE,
+        None => key.label().chars().count() as f64 * LABEL_ADVANCE,
+    };
+    (content + 2.0 * CAP_PAD_X).round() as u32
+}
+
 // ---------------------------------------------------------------------------
 // The bar
 // ---------------------------------------------------------------------------
@@ -182,15 +239,16 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
 
     let mut children: Vec<FlexChild<State>> = Vec::with_capacity(BarKey::ORDER.len() * 2);
     for (index, key) in BarKey::ORDER.iter().copied().enumerate() {
-        if index > 0 {
-            children.push(inflexible(SizedBox::<State>(Some(CAP_GAP), None)));
-        }
         if key.separator_before() {
+            // The rule stands **in place of** the gap rather than beside it: it
+            // already carries its own margin, and twelve caps leave the row no
+            // px to spend twice (the row budget in the module docs).
             children.push(inflexible(separator::<State>(&colors)));
+        } else if index > 0 {
             children.push(inflexible(SizedBox::<State>(Some(CAP_GAP), None)));
         }
         children.push(flexible(
-            1,
+            cap_weight(key),
             key_cap(key, &theme, &colors, danger, latch, seam),
         ));
     }
@@ -374,13 +432,26 @@ struct KeyCapView<State: 'static> {
 }
 
 impl<State: 'static> KeyCapView<State> {
-    /// The cap's content: a vector arrow, or its printed label.
+    /// The cap's content: a vector arrow, or its printed label — centred inside
+    /// a [`CAP_PAD_X`] inset, so nothing a cap draws reaches its own edge.
+    ///
+    /// The inset is **inside** the press target and inside the fill, not around
+    /// them: a cap's whole box stays tappable and painted, and only what it
+    /// draws is held off the rounding. It is the *content box* the inset
+    /// defines — a centred label sits in the same place either way, and what
+    /// makes the gap visible is the cap being [`cap_weight`] wide. What this
+    /// adds is the guarantee: a label is laid out in a box that already has the
+    /// padding taken out of it, so one too wide for its cap can never paint over
+    /// the border.
     fn content(&self) -> AnyView<State> {
         let inner: AnyView<State> = match arrow_mark(self.key) {
             Some(mark) => any(icon(mark).size(ICON_SIZE).color(self.ink)),
             None => any(text(self.key.label()).style(self.label.clone())),
         };
-        any(Align(Alignment::CENTER, inner))
+        any(Padding(
+            EdgeInsets::symmetric(CAP_PAD_X, 0.0),
+            Align(Alignment::CENTER, inner),
+        ))
     }
 }
 

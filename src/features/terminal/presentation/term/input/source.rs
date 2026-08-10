@@ -189,7 +189,7 @@ use std::hash::BuildHasher;
 use frust::authoring::{EditingState, Key, Modifiers, NamedKey};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::bytes::{BACKSPACE_BYTE, BarKey, named_key_bytes, text_bytes};
+use super::bytes::{BACKSPACE_BYTE, BarKey, named_key_bytes, shifted_sequence, text_bytes};
 use super::latch::{ModifierLatch, apply_latch, single_unit};
 use super::utf16::{clamp_front, clamp_index, diff, len_utf16, utf16_prefix, utf16_suffix};
 
@@ -553,7 +553,7 @@ pub struct KeystrokeSource {
     /// Armed by a `Key::Named(Backspace)`, consumed by the matching snapshot
     /// shortening (the dedupe rule).
     pending_backspaces: usize,
-    /// The one-shot Ctrl/Alt latch.
+    /// The one-shot Ctrl/Alt/Shift latch.
     latch: ModifierLatch,
     /// Bumped on every state change — mirrored into the seam's signal so the key
     /// bar's armed pips rebuild.
@@ -820,6 +820,31 @@ impl KeystrokeSource {
         out
     }
 
+    /// Emit one **sequence** key — a bar cap's or a hardware
+    /// [`NamedKey`]'s — choosing its Shift variant where an armed `Shift` has
+    /// one to choose ([`shifted_sequence`]).
+    ///
+    /// The selection is a separate step from [`emit`](Self::emit)'s transform
+    /// because that transform is structurally blind here: it only ever rewrites
+    /// a **single code unit**, where most of these are longer than one — and
+    /// even `Tab`, which is one, answers Shift with a whole other sequence
+    /// rather than a modified byte. So the variant is picked, never derived.
+    ///
+    /// Choosing one consumes the latch's `shift` — the one-shot rule, applied to
+    /// the emission that actually spent it. `Ctrl`/`Alt` are deliberately *not*
+    /// consumed here and do not reach the bytes at all: that asymmetry, and what
+    /// it costs, is [`ModifierLatch`]'s own doc.
+    fn emit_sequence(&mut self, sequence: &'static [u8], transient: ModifierLatch) -> Vec<u8> {
+        let shifted = (self.latch.shift || transient.shift)
+            .then(|| shifted_sequence(sequence))
+            .flatten();
+        let out = self.emit(shifted.unwrap_or(sequence), transient);
+        if shifted.is_some() {
+            self.latch.shift = false;
+        }
+        out
+    }
+
     // -- the mirror window ---------------------------------------------------
 
     /// Accept `next` as the platform mirror, folding it into history (whose tail
@@ -1069,7 +1094,9 @@ impl KeystrokeSource {
                     NamedKey::Backspace => InputClass::Backspace,
                     _ => InputClass::Sequence,
                 };
-                let bytes = self.emit(named_key_bytes(*named), transient);
+                // Through the sequence path, so a hardware Shift+Tab/Shift+↑
+                // picks the same variant the bar's own `Shift` does.
+                let bytes = self.emit_sequence(named_key_bytes(*named), transient);
                 let reconciled = *named == NamedKey::Enter && self.submit_line();
                 Emission {
                     bytes,
@@ -1105,14 +1132,15 @@ impl KeystrokeSource {
                 match key {
                     BarKey::Ctrl => self.latch.ctrl = !self.latch.ctrl,
                     BarKey::Alt => self.latch.alt = !self.latch.alt,
-                    // Unreachable: only the two latch keys have no sequence.
+                    BarKey::Shift => self.latch.shift = !self.latch.shift,
+                    // Unreachable: only the three latch keys have no sequence.
                     _ => {}
                 }
                 self.revision += 1;
                 Emission::inert(InputClass::Latch)
             }
             Some(sequence) => {
-                let bytes = self.emit(sequence, ModifierLatch::NONE);
+                let bytes = self.emit_sequence(sequence, ModifierLatch::NONE);
                 Emission {
                     bytes,
                     reconciled: false,
@@ -2220,6 +2248,32 @@ mod tests {
         // …and the next unmodified key is untouched.
         let plain = source.on_key(&Key::Character("c".to_string()), Modifiers::default());
         assert_eq!(hex(&plain.bytes), "63");
+    }
+
+    #[test]
+    fn a_hardware_shift_picks_the_shifted_sequence_for_its_own_event_only() {
+        let mut source = KeystrokeSource::new();
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+
+        let tab = source.on_key(&Key::Named(NamedKey::Tab), shift);
+        assert_eq!(hex(&tab.bytes), "1b5b5a", "Shift+Tab is back-tab");
+        assert_eq!(tab.class, InputClass::Sequence);
+
+        let up = source.on_key(&Key::Named(NamedKey::ArrowUp), shift);
+        assert_eq!(hex(&up.bytes), "1b5b313b3241", "Shift+↑");
+
+        // A held Shift is the event's own, never the bar's: nothing is retained
+        // and the next unmodified key is the plain sequence again.
+        assert!(!source.latch().armed());
+        let plain = source.on_key(&Key::Named(NamedKey::ArrowUp), Modifiers::default());
+        assert_eq!(hex(&plain.bytes), "1b5b41");
+
+        // …and a shifted CHARACTER is still the character the platform cased.
+        let typed = source.on_key(&Key::Character("A".to_string()), shift);
+        assert_eq!(hex(&typed.bytes), "41");
     }
 
     #[test]

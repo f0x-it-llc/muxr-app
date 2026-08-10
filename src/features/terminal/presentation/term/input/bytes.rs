@@ -2,7 +2,8 @@
 //!
 //! Constants and total tables, no state. The one rewrite anything here performs
 //! is [`text_bytes`]' `\n` → CR, which is the Return contract rather than a
-//! correction (see the [module docs](super)).
+//! correction (see the [module docs](super)); [`shifted_sequence`] *selects*
+//! between two of the tables below rather than rewriting either.
 
 use frust::authoring::NamedKey;
 
@@ -45,6 +46,61 @@ pub const HOME: &[u8] = b"\x1b[H";
 /// End, same mode as [`HOME`].
 pub const END: &[u8] = b"\x1b[F";
 
+/// `CBT` — back-tab, what Shift+`Tab` sends (the bar's `Shift` armed over
+/// [`TAB`], and a desktop Shift+Tab).
+pub const BACK_TAB: &[u8] = b"\x1b[Z";
+/// Shift+`↑`: [`ARROW_UP`]'s modified form. The `1;2` is xterm's own parameter
+/// pair — a default row count of 1 and a modifier code of 2, which is Shift.
+pub const SHIFT_ARROW_UP: &[u8] = b"\x1b[1;2A";
+/// Shift+`↓` — see [`SHIFT_ARROW_UP`].
+pub const SHIFT_ARROW_DOWN: &[u8] = b"\x1b[1;2B";
+/// Shift+`→` — see [`SHIFT_ARROW_UP`].
+pub const SHIFT_ARROW_RIGHT: &[u8] = b"\x1b[1;2C";
+/// Shift+`←` — see [`SHIFT_ARROW_UP`].
+pub const SHIFT_ARROW_LEFT: &[u8] = b"\x1b[1;2D";
+/// Shift+`PgUp` — the same modifier code, as the tilde form's second parameter.
+pub const SHIFT_PAGE_UP: &[u8] = b"\x1b[5;2~";
+/// Shift+`PgDn` — see [`SHIFT_PAGE_UP`].
+pub const SHIFT_PAGE_DOWN: &[u8] = b"\x1b[6;2~";
+/// Shift+`Del` — see [`SHIFT_PAGE_UP`].
+pub const SHIFT_FORWARD_DELETE: &[u8] = b"\x1b[3;2~";
+
+/// Every sequence that has a Shift variant, as `(plain, shifted)` — the whole
+/// of the modifier arithmetic this module performs on a sequence key.
+///
+/// Keyed on the **bytes** rather than on a key enum so the bar's `↑` and a
+/// hardware `↑` keep sending the same thing as each other shifted as they do
+/// plain ([`named_key_bytes`]' own contract), through one table instead of two.
+///
+/// Deliberately not exhaustive over the vocabulary above: [`ESC`], [`HOME`] and
+/// [`END`] have no row and are therefore sent unmodified with Shift armed, and
+/// **no other modifier is parameterized at all** — an armed `Ctrl`/`Alt` still
+/// leaves a sequence key's bytes exactly as they are (see [`ModifierLatch`]).
+const SHIFTED_SEQUENCES: [(&[u8], &[u8]); 8] = [
+    (TAB, BACK_TAB),
+    (ARROW_UP, SHIFT_ARROW_UP),
+    (ARROW_DOWN, SHIFT_ARROW_DOWN),
+    (ARROW_RIGHT, SHIFT_ARROW_RIGHT),
+    (ARROW_LEFT, SHIFT_ARROW_LEFT),
+    (PAGE_UP, SHIFT_PAGE_UP),
+    (PAGE_DOWN, SHIFT_PAGE_DOWN),
+    (FORWARD_DELETE, SHIFT_FORWARD_DELETE),
+];
+
+/// `sequence`'s Shift variant, or `None` for a sequence that has none (see
+/// [`SHIFTED_SEQUENCES`]).
+///
+/// The selector [`KeystrokeSource`](super::source::KeystrokeSource) runs before
+/// it emits a sequence key: the latch's own transform is structurally blind to
+/// anything longer than one code unit, so a shifted arrow has to be *chosen*
+/// rather than derived.
+pub fn shifted_sequence(sequence: &[u8]) -> Option<&'static [u8]> {
+    SHIFTED_SEQUENCES
+        .iter()
+        .find(|(plain, _)| *plain == sequence)
+        .map(|(_, shifted)| *shifted)
+}
+
 /// The bytes a committed run of text sends: its UTF-8, with every `\n`
 /// translated to [`ENTER_BYTE`].
 ///
@@ -56,18 +112,23 @@ pub fn text_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// One key of the terminal key bar — the eleven keys a soft keyboard has no
-/// room for, in the order the incumbent draws them.
+/// One key of the terminal key bar — the twelve keys a soft keyboard has no
+/// room for, in the order the incumbent draws them (`Shift`, which the
+/// incumbent has no counterpart for, sits with the other two latches).
 ///
-/// [`Ctrl`](Self::Ctrl)/[`Alt`](Self::Alt) send nothing: they toggle the
-/// [`ModifierLatch`] the *next* emission passes through, wherever that emission
-/// comes from (see the [module docs](super)).
+/// [`Ctrl`](Self::Ctrl)/[`Alt`](Self::Alt)/[`Shift`](Self::Shift) send nothing:
+/// they toggle the [`ModifierLatch`] the *next* emission passes through,
+/// wherever that emission comes from (see the [module docs](super)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarKey {
     /// Arms/disarms the one-shot `Ctrl`.
     Ctrl,
     /// Arms/disarms the one-shot `Alt`.
     Alt,
+    /// Arms/disarms the one-shot `Shift` — which, unlike the other two,
+    /// selects a different *sequence* rather than transforming a character
+    /// ([`SHIFTED_SEQUENCES`]).
+    Shift,
     /// `ESC`.
     Esc,
     /// `HT`.
@@ -90,11 +151,12 @@ pub enum BarKey {
 }
 
 impl BarKey {
-    /// Every key, in bar order: the two latches, `Esc`, │ `Tab` and the four
+    /// Every key, in bar order: the three latches, `Esc`, │ `Tab` and the four
     /// arrows, │ the two page keys, │ `Del`.
-    pub const ORDER: [BarKey; 11] = [
+    pub const ORDER: [BarKey; 12] = [
         BarKey::Ctrl,
         BarKey::Alt,
+        BarKey::Shift,
         BarKey::Esc,
         BarKey::Tab,
         BarKey::Up,
@@ -111,6 +173,7 @@ impl BarKey {
         match self {
             BarKey::Ctrl => "Ctrl",
             BarKey::Alt => "Alt",
+            BarKey::Shift => "Shift",
             BarKey::Esc => "Esc",
             BarKey::Tab => "Tab",
             BarKey::Up => "\u{2191}",
@@ -129,6 +192,7 @@ impl BarKey {
         match self {
             BarKey::Ctrl => "Control",
             BarKey::Alt => "Alt",
+            BarKey::Shift => "Shift",
             BarKey::Esc => "Escape",
             BarKey::Tab => "Tab",
             BarKey::Up => "Up arrow",
@@ -141,10 +205,12 @@ impl BarKey {
         }
     }
 
-    /// The bytes this key sends, or `None` for the two latch keys.
+    /// The bytes this key sends **unmodified**, or `None` for the three latch
+    /// keys. An armed `Shift` picks a different sequence for some of these —
+    /// see [`shifted_sequence`], which the source applies on the way out.
     pub fn sequence(self) -> Option<&'static [u8]> {
         match self {
-            BarKey::Ctrl | BarKey::Alt => None,
+            BarKey::Ctrl | BarKey::Alt | BarKey::Shift => None,
             BarKey::Esc => Some(ESC),
             BarKey::Tab => Some(TAB),
             BarKey::Up => Some(ARROW_UP),
@@ -174,12 +240,13 @@ impl BarKey {
         matches!(self, BarKey::Tab | BarKey::PageUp | BarKey::Del)
     }
 
-    /// Whether this key is currently armed, given `latch`. Only the two latch
+    /// Whether this key is currently armed, given `latch`. Only the three latch
     /// keys can be.
     pub fn armed(self, latch: ModifierLatch) -> bool {
         match self {
             BarKey::Ctrl => latch.ctrl,
             BarKey::Alt => latch.alt,
+            BarKey::Shift => latch.shift,
             _ => false,
         }
     }
@@ -190,7 +257,8 @@ impl BarKey {
 ///
 /// An exhaustive match, so a new [`NamedKey`] variant is a compile error here
 /// rather than a silently dropped key. Shares its sequences with [`BarKey`]:
-/// the bar's `↑` and a physical `↑` send the same three bytes.
+/// the bar's `↑` and a physical `↑` send the same three bytes — and, since the
+/// Shift selector keys on those bytes, the same six shifted ones too.
 pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
     match key {
         NamedKey::Enter => &[ENTER_BYTE],
@@ -232,6 +300,37 @@ mod tests {
         }
         assert!(BarKey::Ctrl.sequence().is_none());
         assert!(BarKey::Alt.sequence().is_none());
+        assert!(BarKey::Shift.sequence().is_none());
+    }
+
+    #[test]
+    fn every_shifted_bar_key_sends_the_documented_variant() {
+        // The other half of the table above: the same tap with `Shift` armed
+        // from the bar first.
+        let expected: [(BarKey, &str); 8] = [
+            (BarKey::Tab, "1b5b5a"),
+            (BarKey::Up, "1b5b313b3241"),
+            (BarKey::Down, "1b5b313b3242"),
+            (BarKey::Left, "1b5b313b3244"),
+            (BarKey::Right, "1b5b313b3243"),
+            (BarKey::PageUp, "1b5b353b327e"),
+            (BarKey::PageDown, "1b5b363b327e"),
+            (BarKey::Del, "1b5b333b327e"),
+        ];
+        for (key, hex_bytes) in expected {
+            let mut source = KeystrokeSource::new();
+            source.on_bar_key(BarKey::Shift);
+            assert_eq!(hex(&source.on_bar_key(key).bytes), hex_bytes, "{key:?}");
+        }
+
+        // `Esc` has no variant, so an armed `Shift` leaves it exactly as it is
+        // (and — being one code unit — spends the latch the ordinary way).
+        let mut source = KeystrokeSource::new();
+        source.on_bar_key(BarKey::Shift);
+        assert_eq!(hex(&source.on_bar_key(BarKey::Esc).bytes), "1b");
+        assert!(shifted_sequence(ESC).is_none());
+        assert!(shifted_sequence(HOME).is_none(), "nor Home/End");
+        assert!(shifted_sequence(END).is_none());
     }
 
     #[test]
@@ -239,8 +338,8 @@ mod tests {
         assert_eq!(
             BarKey::ORDER.map(BarKey::label),
             [
-                "Ctrl", "Alt", "Esc", "Tab", "\u{2191}", "\u{2193}", "\u{2190}", "\u{2192}",
-                "PgUp", "PgDn", "Del"
+                "Ctrl", "Alt", "Shift", "Esc", "Tab", "\u{2191}", "\u{2193}", "\u{2190}",
+                "\u{2192}", "PgUp", "PgDn", "Del"
             ]
         );
         let separators: Vec<&str> = BarKey::ORDER
@@ -249,6 +348,12 @@ mod tests {
             .map(|key| key.label())
             .collect();
         assert_eq!(separators, ["Tab", "PgUp", "Del"], "three group rules");
+        let latches: Vec<&str> = BarKey::ORDER
+            .iter()
+            .filter(|key| key.is_latch())
+            .map(|key| key.label())
+            .collect();
+        assert_eq!(latches, ["Ctrl", "Alt", "Shift"], "three latch keys, first");
         assert!(BarKey::Del.is_danger());
         assert!(!BarKey::Esc.is_danger());
     }
@@ -261,5 +366,20 @@ mod tests {
         assert_eq!(named_key_bytes(NamedKey::Delete), FORWARD_DELETE);
         assert_eq!(named_key_bytes(NamedKey::Enter), &[ENTER_BYTE]);
         assert_eq!(named_key_bytes(NamedKey::Backspace), &[BACKSPACE_BYTE]);
+
+        // Shifted too, because the selector keys on the bytes rather than on
+        // either key enum: one table serves both paths.
+        assert_eq!(
+            shifted_sequence(named_key_bytes(NamedKey::Tab)),
+            Some(BACK_TAB)
+        );
+        assert_eq!(
+            shifted_sequence(named_key_bytes(NamedKey::ArrowUp)),
+            shifted_sequence(BarKey::Up.sequence().expect("an arrow has a sequence"))
+        );
+        assert!(
+            shifted_sequence(named_key_bytes(NamedKey::Enter)).is_none(),
+            "Return has no shifted form here"
+        );
     }
 }

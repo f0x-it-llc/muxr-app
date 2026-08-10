@@ -8,7 +8,7 @@
 //! | [`pieces`] | one fn per visual element of `docs/terminal.html` v2, plus this screen's token palette |
 //! | [`chrome`] | the hand-rolled `View`/`Widget` pairs those pieces are built from, and the three vector marks `frust::icons` lacks |
 //! | [`term`] | the **real** terminal grid — VT emulator, run batching, cell geometry, the grid widget, and the keystroke source — what an attached session mounts (`pages`'s pane-content switch) |
-//! | [`keybar`] | the IME-active-only key bar (`Esc`/`Tab`/arrows/`PgUp`/`PgDn`/`Del` + the one-shot `Ctrl`/`Alt` latch) — mounted the same way, live-mode only |
+//! | [`keybar`] | the IME-active-only key bar (`Esc`/`Tab`/arrows/`PgUp`/`PgDn`/`Del` + the one-shot `Ctrl`/`Alt`/`Shift` latch) — mounted the same way, live-mode only |
 //!
 //! [`pages::open_terminal_menu`] is the one item outside this feature's own
 //! call graph: `crate::shell` forwards the app bar's `⋮` press to it (the bar
