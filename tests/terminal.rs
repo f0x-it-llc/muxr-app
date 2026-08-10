@@ -40,8 +40,8 @@
 //! a selection pops the menu page with `PopResult::of(index)` into the built
 //! entry list. So [`Harness::choose_menu_row`] pops with that result, which
 //! runs the very `on_result` the widget would have run. What the entry list
-//! *is* (three rows and one separator, in order) is pinned by
-//! `features::terminal::presentation::pages`' own unit tests, which can name
+//! *is* (three rows, in order, with no separator between any of them) is pinned
+//! by `features::terminal::presentation::pages`' own unit tests, which can name
 //! the constants directly.
 //!
 //! # Frame stepping
@@ -68,6 +68,7 @@ use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::terminal::presentation::pages::{open_terminal_menu, terminal_page};
 use muxr::routes::{BarAction, app_nav, install_app_router, route_meta};
 use muxr::ui::toasts::app_toasts;
+use muxr::ui::topbar::BAR_HEIGHT;
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -116,16 +117,24 @@ const CARD_RADIUS: f64 = 22.0;
 /// full-bleed at any width; only the space around it grows from
 /// [`WRAP_PAD`]'s 14px to this.
 const WIDE_WRAP_PAD: f64 = 22.0;
+/// The narrow/portrait window's **top-only** bar-to-card gap, transcribed
+/// (private to `presentation::pages`) — the same step-up the wide branch
+/// already applied on all four sides.
+const PORTRAIT_TOP_GAP: f64 = WIDE_WRAP_PAD - WRAP_PAD;
+/// `presentation::pieces`' own status-row height, transcribed: the 28px expand
+/// button plus its tightened 6px padding either side.
+const STATUS_ROW_H: f64 = 40.0;
 /// `.cur{width:7px;height:13px}` — the caret's own box, which is how a frame
 /// is asked whether the caret is lit.
 const CARET: Size = Size::new(7.0, 13.0);
 
-/// Menu row indices into the built entry list (separator included) — the
-/// contract `show_glyph_menu` pops with. Named in
-/// `presentation::pages`; transcribed here for the same reason as the labels.
+/// Menu row indices into the built entry list — the contract `show_glyph_menu`
+/// pops with. Named in `presentation::pages`; transcribed here for the same
+/// reason as the labels. The menu carries no separators, so a row's index is
+/// its position.
 const ROW_PANES: usize = 0;
-const ROW_RENAME: usize = 2;
-const ROW_DETACH: usize = 3;
+const ROW_RENAME: usize = 1;
+const ROW_DETACH: usize = 2;
 
 /// The mounted navigator's depth with no overlay up: its own (empty, full-bleed)
 /// initial page.
@@ -530,6 +539,21 @@ fn card(scene: &RecScene) -> (Point, Size, f64) {
         .expect("the card paints its own body every frame")
 }
 
+/// The card's status row — the band `GlyphInk::terminal_head` fills, at the
+/// top of the card — as `(origin, size)`.
+fn status_band(scene: &RecScene) -> (Point, Size) {
+    let ink = Theme::glyph_baseline()
+        .extension::<frust::GlyphInk>()
+        .copied()
+        .expect("the Glyph baseline carries GlyphInk");
+    let bands = rounded_in(scene, ink.terminal_head);
+    let bands: Vec<(Point, Size)> = bands
+        .into_iter()
+        .map(|(origin, size, _)| (origin, size))
+        .collect();
+    largest(&bands).expect("the status row paints its own band")
+}
+
 /// How many caret blocks the frame painted (`0` or `1`).
 fn carets(scene: &RecScene) -> usize {
     scene
@@ -662,6 +686,51 @@ fn the_card_sits_in_the_mocks_own_gutter_at_its_own_radius() {
         "{size:?}"
     );
     assert!((radius - CARD_RADIUS).abs() < EPSILON, "{radius}");
+}
+
+#[test]
+fn the_status_row_is_as_short_as_the_expand_button_allows() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let (band_origin, band_size) = status_band(&h.frame());
+    let (card_origin, card_size, _) = card(&h.frame());
+    assert!(
+        (band_size.height - STATUS_ROW_H).abs() < EPSILON,
+        "the title bar is the button plus its padding, and nothing more: \
+         {band_size:?}"
+    );
+    assert!(
+        (band_origin.y - card_origin.y).abs() < EPSILON
+            && (band_size.width - card_size.width).abs() < EPSILON,
+        "…and it still bands the card's whole top edge: {band_origin:?}/{band_size:?}"
+    );
+}
+
+#[test]
+fn the_padding_band_above_the_expand_button_toggles_fullscreen_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    // The button's *visual* is a 28px circle centred in the 40px row, so a
+    // thumb landing 2px below the card's top edge misses the circle — and must
+    // still fire the toggle, or the shorter row would have cost the press
+    // target the slack the 56px one had.
+    let (band_origin, _) = status_band(&h.frame());
+    let button = node_centers_by_label(&h.root, EXPAND)
+        .first()
+        .copied()
+        .expect("the expand button publishes its own node");
+    assert!(!app_nav().bar().fullscreen, "the bar starts lit");
+
+    h.tap(Point::new(button.x, band_origin.y + 2.0));
+
+    assert!(
+        app_nav().bar().fullscreen,
+        "the row's full height is the button's press target"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1605,10 @@ fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
         "…and the card narrowed by the same amount, not clamped to a fixed \
          column: {size:?}"
     );
+    assert!(
+        (origin.y - (BAR_HEIGHT + PORTRAIT_TOP_GAP)).abs() < EPSILON,
+        "the bar clearance plus the same step-up on top, unchanged: {origin:?}"
+    );
 }
 
 #[test]
@@ -1545,6 +1618,18 @@ fn fullscreen_stays_edge_to_edge_even_with_wide_metrics() {
     let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
 
     h.tap_label(EXPAND);
+    // Mid-flight first: the wide branch's own extra padding changes value on
+    // the toggle, and it must do so *without* the stage being rebuilt under
+    // the transition (the wrapper is always in the tree — see
+    // `presentation::pages`' own note), or the card would arrive by snapping.
+    h.frame_at(0.0);
+    h.frame_at(120.0);
+    let (mid, _, _) = card(&h.frame_at(130.0));
+    assert!(
+        mid.x > 0.0 && mid.x < WIDE_WRAP_PAD,
+        "mid-flight, not snapped: {mid:?}"
+    );
+
     let (origin, size, radius) = card(&h.settle_motion(1_000.0));
 
     assert!(
@@ -1574,4 +1659,29 @@ fn narrow_metrics_leave_the_wrap_padding_unchanged_like_no_metrics_at_all() {
     );
     assert!((size.width - (SURFACE.width - 2.0 * WRAP_PAD)).abs() < EPSILON);
     assert!((radius - CARD_RADIUS).abs() < EPSILON);
+}
+
+#[test]
+fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+
+    // Portrait used to sit flush under the floating bar while landscape read
+    // as spaced — the gap is the *top* inset only, so the sides stay at the
+    // narrow window's own `WRAP_PAD` (asserted above).
+    let (origin, _, _) = card(&h.frame());
+    assert!(
+        (origin.y - (BAR_HEIGHT + PORTRAIT_TOP_GAP)).abs() < EPSILON,
+        "the card clears the bar and then breathes: {origin:?}"
+    );
+
+    // …and fullscreen still takes neither gap: its own transition owns that
+    // geometry, top edge included.
+    h.tap_label(EXPAND);
+    let (origin, _, _) = card(&h.settle_motion(1_000.0));
+    assert!(
+        origin.y.abs() < EPSILON,
+        "fullscreen keeps the card flush against the top edge: {origin:?}"
+    );
 }

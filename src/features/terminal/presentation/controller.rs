@@ -137,13 +137,13 @@ pub struct TerminalController {
     /// see the [module docs](self)'s "Pane-content switch" note and
     /// [`LiveSession`]. Entered once per mount, either by
     /// [`attach_live`](Self::attach_live) (a real session with a live client,
-    /// decided at mount) or by [`enter_live`](Self::enter_live) (the overflow
-    /// menu's "Demo session" row); there is no path back to the mock
+    /// decided at mount) or by [`enter_live`](Self::enter_live) (the
+    /// checked-in fixture replay); there is no path back to the mock
     /// transcript within the same mount.
     pub live: RwSignal<bool>,
     /// Which of the two the live pane is: `true` once
     /// [`attach_live`](Self::attach_live) has claimed it for a real `muxrd`
-    /// session, `false` for the fixture replay the demo row mounts.
+    /// session, `false` for the fixture replay.
     ///
     /// A plain flag rather than a signal: it is decided once, before the first
     /// build that observes [`live`](Self::live), and nothing rendered branches
@@ -458,8 +458,14 @@ impl TerminalController {
             .set(self.next_epoch.fetch_add(1, Ordering::Relaxed));
     }
 
-    /// Enter the live demo pane — the fixture replay behind the overflow
-    /// menu's "Demo session" row.
+    /// Enter the live pane over the **checked-in fixture replay**.
+    ///
+    /// No production caller since the overflow menu's *Demo session* row was
+    /// withdrawn: this is now the seam `tests/terminal_live.rs` drives the real
+    /// grid through, reaching the mounted screen's controller with
+    /// `pages::debug_controller` (that suite's own module docs record the
+    /// arrangement). Everything downstream is unchanged, which is the point —
+    /// the tests exercise the composition a device runs.
     ///
     /// Idempotent from this signal's own point of view (a second call is a
     /// no-op write); the *construction* of [`LiveSession`] itself happens
@@ -468,8 +474,8 @@ impl TerminalController {
     /// method has no reactive owner to build `Rc`-backed seams under (see
     /// [`LiveSession::enter`]'s own doc).
     ///
-    /// **The demo row never attaches to a real session**, even on a screen
-    /// that could: it is the checked-in replay, and it stays that whatever is
+    /// **This entry never attaches to a real session**, even on a screen that
+    /// could: it is the checked-in replay, and it stays that whatever is
     /// connected. [`attach_live`](Self::attach_live) is the other entry.
     pub fn enter_live(&self) {
         self.live.set(true);
