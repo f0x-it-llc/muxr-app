@@ -77,10 +77,13 @@
 //! [`remember_row`] — the baseline `material` catalog's `Switch`, now
 //! compiled in via `Cargo.toml`'s explicit `"material"` feature; Glyph itself
 //! ships no toggle of its own), [`glyph::badge`] for the
-//! "insecure"/"read-only" chips, and [`GestureDetector`] for the tappable
-//! saved rows and trust rows. The rest of the mock is borders and washes with
-//! no catalog counterpart, so those compose from [`super::chrome`]'s
-//! panel/swatch primitives.
+//! "insecure"/"read-only" chips, [`GestureDetector`] for the tappable
+//! saved rows and trust rows, and the app's own [`icon_button`] for each saved
+//! row's delete affordance (see [`delete_affordance`] — a vector mark needs a
+//! press target that also contributes a labelled `Role::Button`, which is the
+//! whole reason that primitive exists). The rest of the mock is borders and
+//! washes with no catalog counterpart, so those compose from
+//! [`super::chrome`]'s panel/swatch primitives.
 //!
 //! Two pieces of chrome are still hand-composed *against* a shipping widget,
 //! each for a recorded framework gap rather than a preference: the trust rows
@@ -120,8 +123,8 @@ use frust::authoring::{Color, Size};
 use frust::glyph::{BadgeVariant, badge};
 use frust::{
     Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-    Get, Padding, SizedBox, StatusPalette, Theme, With, any, button, flexible, inflexible, switch,
-    text, text_input,
+    Get, Padding, SizedBox, StatusPalette, Theme, With, any, button, flexible, icon, icons,
+    inflexible, switch, text, text_input,
 };
 
 use super::chrome::{centered_paragraph, panel, radio_semantics, swatch, switch_semantics};
@@ -129,6 +132,7 @@ use super::controller::ConnectController;
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{PairingTrust, SavedServer, epoch_millis};
+use crate::ui::topbar::icon_button;
 
 // ---------------------------------------------------------------------------
 // The screen's live wiring
@@ -167,6 +171,13 @@ pub struct Live {
     /// or unlocks the row's stored credential and connects. A third state-free
     /// callback for the same navigator reason as the two above.
     pub on_saved_tap: Rc<dyn Fn(usize)>,
+    /// A saved row's trailing delete affordance was pressed, by index — the
+    /// screen confirms first and then drops **this device's** copy of that
+    /// server ([`ConnectController::forget_saved_server`]; nothing is deleted
+    /// on the server). A fourth state-free callback for a sibling of the same
+    /// reason: the confirmation is a dialog, and raising one needs the overlay
+    /// host the screen owns rather than the controller.
+    pub on_saved_delete: Rc<dyn Fn(usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +248,14 @@ const PAIRING_GAP: f64 = 10.0;
 /// label's size, so a [`SizedBox`] forces the floor instead of leaning on the
 /// button's own padding.
 const CTA_HEIGHT: f64 = 44.0;
+/// A saved row's delete affordance: its press target, in logical px. An
+/// original constant — the mock draws no such affordance — set at the platform
+/// minimum tap target, the same floor [`CTA_HEIGHT`] records.
+const DELETE_TARGET: f64 = 44.0;
+/// …and the mark inside that target. Deliberately smaller than the icon's own
+/// 24px design box: this is quiet chrome beside the row's content, not a
+/// second action button competing with the CTA.
+const DELETE_MARK: f64 = 18.0;
 
 /// The remember row's copy — also the toggle's accessibility label, so the
 /// switch announces the thing the row is about rather than "switch".
@@ -1199,12 +1218,23 @@ fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
 }
 
 /// One `.saved-row`: status dot, `host:port` over its meta line, a badge for a
-/// stored credential, and a read-only badge where that credential is limited.
+/// stored credential, a read-only badge where that credential is limited, and
+/// the trailing delete affordance ([`delete_affordance`]).
 ///
 /// Tapping a row with a stored credential unlocks and reconnects rather than
 /// refilling the form — the split [`Live::on_saved_tap`] dispatches (see
 /// [`ConnectController::saved_row_tapped`]), which is why the badge matters: it
 /// is what tells the user a tap here will raise a biometric prompt.
+///
+/// # Two press targets, side by side
+///
+/// The delete affordance sits **beside** the row's own tap recognizer rather
+/// than inside it. A press target nested in the row's [`GestureDetector`]
+/// would be pressed *and* still fire the row's tap: that recognizer captures
+/// on `Down` and fires on its own `Up` regardless of what a child did with the
+/// event. Laying the two out as siblings makes them disjoint by construction
+/// instead — the delete consumes only its own press, and everything else on
+/// the row still logs in.
 fn saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -1251,13 +1281,71 @@ fn saved_row<S: 'static>(
         ))));
     }
     let body = Padding(EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y), row::<S>(items));
-    match live {
+    let tappable: AnyView<S> = match live {
         None => any(body),
         Some(live) => {
             let on_tap = Rc::clone(&live.on_saved_tap);
             any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
         }
-    }
+    };
+    any(row::<S>(vec![
+        flexible(1, tappable),
+        inflexible(h_gap::<S>(SAVED_GAP)),
+        inflexible(delete_affordance(colors, server, index, live)),
+    ]))
+}
+
+/// A saved row's trailing delete affordance: a dim [`icons::DELETE`] mark in a
+/// [`DELETE_TARGET`]-square press target, which drops **this device's** copy of
+/// the server it sits on (the screen's confirmation says exactly that; nothing
+/// is deleted on the server).
+///
+/// Quiet on purpose — `fg_dim` ink and the press wash [`icon_button`] already
+/// paints — because every row carries one and none of them is the screen's
+/// primary action.
+///
+/// `live` is `None` for the splash, which paints the same mark at the same
+/// metrics with no recognizer and no `Role::Button` node of its own: the
+/// static-art rule the trust rows and the row's own tap already follow, and
+/// what keeps the handoff one picture (the [module docs](self)' parity
+/// contract) rather than a row that reflows the instant the route takes over.
+fn delete_affordance<S: 'static>(
+    colors: &Palette,
+    server: &SavedServer,
+    index: usize,
+    live: Option<&Live>,
+) -> AnyView<S> {
+    let Some(live) = live else {
+        return any(
+            SizedBox::<S>(Some(DELETE_TARGET), Some(DELETE_TARGET)).child(Align(
+                Alignment::CENTER,
+                icon(icons::DELETE).size(DELETE_MARK).color(colors.fg_dim),
+            )),
+        );
+    };
+    let on_delete = Rc::clone(&live.on_saved_delete);
+    // `crate::ui::topbar::icon_button`'s fourth caller — a *labelled*
+    // `Role::Button` over one vector, which a bare `GestureDetector`,
+    // contributing no node of its own, could not give a screen reader. (A
+    // fourth caller is also the trigger `docs/ARCHITECTURE.md`'s Planned
+    // section records for moving that primitive out of the top bar.)
+    any(icon_button(
+        icons::DELETE,
+        delete_label(&server.label),
+        move |_state: &mut S| on_delete(index),
+    )
+    .ink(colors.fg_dim)
+    .icon_size(DELETE_MARK)
+    .box_size(Size::new(DELETE_TARGET, DELETE_TARGET)))
+}
+
+/// The delete affordance's accessible name for a row labelled `label`.
+///
+/// The **server** is what a screen reader has to hear: every row carries one of
+/// these, so a bare "Delete" would announce a list of identical controls with
+/// no way to tell which one removes which rig.
+fn delete_label(label: &str) -> String {
+    format!("Delete {label}")
 }
 
 // ---------------------------------------------------------------------------
