@@ -195,6 +195,13 @@ const MENU_DETACH_INDEX: usize = 2;
 const RENAME_TITLE: &str = "Rename session";
 /// The create-space dialog's title — the `+ space` pill's press.
 const CREATE_SPACE_TITLE: &str = "New space";
+/// The sheet's three chip-level rename dialogs' titles — the space pill's,
+/// the tab pill's and the pane row's trailing edit icon, each writing
+/// through its own `TerminalRepository` verb
+/// (`rename_space`/`rename_tab`/`rename_pane`).
+const RENAME_SPACE_TITLE: &str = "Rename space";
+const RENAME_TAB_TITLE: &str = "Rename tab";
+const RENAME_PANE_TITLE: &str = "Rename pane";
 /// …and what a landed detach says on the way back to the list.
 const DETACHED_TOAST: &str = "detached";
 /// What a control a read-only credential may not use says when it is reached
@@ -1078,6 +1085,77 @@ impl Actions {
         );
     }
 
+    /// Open the rename dialog for the space `id`, prefilled with its current
+    /// `label` — the space pill's trailing edit icon (herdr only;
+    /// [`sheet_body`](Self::sheet_body) withdraws the icon on any backend with
+    /// no spaces, and for a read-only credential, the same `!read_only`
+    /// withdrawal [`open_create_space_dialog`](Self::open_create_space_dialog)
+    /// uses).
+    ///
+    /// Reloads only the space list on landing
+    /// ([`TerminalController::rename_space`]'s own doc): a label edit touches
+    /// no tab, so nothing else about the sheet has to move.
+    pub fn open_rename_space_dialog(&self, id: &str, label: &str) {
+        let controller = Arc::clone(&self.controller);
+        let id = id.to_string();
+        name_input_dialog(
+            &self.overlays,
+            RENAME_SPACE_TITLE,
+            label,
+            move |_app: &mut AppState, label: String| {
+                let controller = Arc::clone(&controller);
+                let id = id.clone();
+                spawn_local(async move {
+                    controller.rename_space(id, label).await;
+                });
+            },
+        );
+    }
+
+    /// Open the rename dialog for the tab `tab_id`, prefilled with its current
+    /// `name` — the tab pill's trailing edit icon.
+    ///
+    /// Reloads only the tab list on landing
+    /// ([`TerminalController::rename_tab`]'s own doc): the sheet's
+    /// browse/active keys are unaffected by a label edit, so a full
+    /// [`TerminalController::load`] would only replay the reveal for nothing.
+    pub fn open_rename_tab_dialog(&self, tab_id: u64, name: &str) {
+        let controller = Arc::clone(&self.controller);
+        name_input_dialog(
+            &self.overlays,
+            RENAME_TAB_TITLE,
+            name,
+            move |_app: &mut AppState, name: String| {
+                let controller = Arc::clone(&controller);
+                spawn_local(async move {
+                    controller.rename_tab(tab_id, name).await;
+                });
+            },
+        );
+    }
+
+    /// Open the rename dialog for the pane `pane_id`, prefilled with its
+    /// current `title` — the pane row's trailing edit icon. Works on both
+    /// backends (zellij pane rename is server-verified, unlike its spaces).
+    ///
+    /// Reloads only the tab list on landing, the identical shape
+    /// [`open_rename_tab_dialog`](Self::open_rename_tab_dialog) uses (a
+    /// pane's title lives inside [`TabEntry::panes`]).
+    pub fn open_rename_pane_dialog(&self, pane_id: u32, is_plugin: bool, title: &str) {
+        let controller = Arc::clone(&self.controller);
+        name_input_dialog(
+            &self.overlays,
+            RENAME_PANE_TITLE,
+            title,
+            move |_app: &mut AppState, name: String| {
+                let controller = Arc::clone(&controller);
+                spawn_local(async move {
+                    controller.rename_pane(pane_id, is_plugin, name).await;
+                });
+            },
+        );
+    }
+
     /// Open a new, unnamed tab — the `+` tab pill's press. No dialog, unlike
     /// the space pill (original-app parity): the server names it, and
     /// [`TerminalController::new_tab`]'s own reload brings the sheet's browse
@@ -1139,6 +1217,9 @@ impl Actions {
                 .map(|space| {
                     let actions = self.clone();
                     let id = space.id.clone();
+                    let edit_actions = self.clone();
+                    let edit_id = space.id.clone();
+                    let edit_label = space.name.clone();
                     pieces::pill(
                         space.name.clone(),
                         if space.selected {
@@ -1148,6 +1229,11 @@ impl Actions {
                         },
                         &colors,
                         move |_app: &mut AppState| actions.select_space(&id),
+                        (!read_only).then(|| {
+                            Rc::new(move |_app: &mut AppState| {
+                                edit_actions.open_rename_space_dialog(&edit_id, &edit_label)
+                            }) as Rc<dyn Fn(&mut AppState)>
+                        }),
                     )
                 })
                 .collect();
@@ -1182,11 +1268,19 @@ impl Actions {
                 } else {
                     PillState::Idle
                 };
+                let edit_actions = self.clone();
+                let tab_id = tab.tab_id;
+                let edit_label = tab.label.clone();
                 pieces::pill(
                     tab.pill_label(),
                     state,
                     &colors,
                     move |_app: &mut AppState| actions.browse_tab(&key),
+                    (!read_only).then(|| {
+                        Rc::new(move |_app: &mut AppState| {
+                            edit_actions.open_rename_tab_dialog(tab_id, &edit_label)
+                        }) as Rc<dyn Fn(&mut AppState)>
+                    }),
                 )
             })
             .collect();
@@ -1214,11 +1308,18 @@ impl Actions {
                 let sheet = sheet.clone();
                 let key = tab.key.clone();
                 let (id, is_plugin) = (pane.id, pane.is_plugin);
+                let edit_actions = self.clone();
+                let edit_title = pane.title.clone();
                 children.push(pieces::pane_item(
                     pane,
                     on_session && pane.focused,
                     &colors,
                     move |_app: &mut AppState| actions.commit_pane(&sheet, &key, id, is_plugin),
+                    (!read_only).then(|| {
+                        Rc::new(move |_app: &mut AppState| {
+                            edit_actions.open_rename_pane_dialog(id, is_plugin, &edit_title)
+                        }) as Rc<dyn Fn(&mut AppState)>
+                    }),
                 ));
                 children.push(pieces::v_gap(PANE_ROW_GAP));
             }
@@ -1246,14 +1347,15 @@ impl Actions {
         })
     }
 
-    /// One `.pill.add` — dashed and dim, wired to `on_tap`.
+    /// One `.pill.add` — dashed and dim, wired to `on_tap`. Never carries an
+    /// edit icon: an add pill creates something, it does not name it yet.
     fn add_pill<F: Fn(&mut AppState) + 'static>(
         &self,
         label: &'static str,
         colors: &Palette,
         on_tap: F,
     ) -> AnyView<AppState> {
-        pieces::pill(label, PillState::Add, colors, on_tap)
+        pieces::pill(label, PillState::Add, colors, on_tap, None)
     }
 }
 
