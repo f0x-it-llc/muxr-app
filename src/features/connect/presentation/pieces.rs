@@ -1336,7 +1336,8 @@ fn delete_affordance<S: 'static>(
     )
     .ink(colors.fg_dim)
     .icon_size(DELETE_MARK)
-    .box_size(Size::new(DELETE_TARGET, DELETE_TARGET)))
+    .box_size(Size::new(DELETE_TARGET, DELETE_TARGET))
+    .radius(DELETE_TARGET / 2.0))
 }
 
 /// The delete affordance's accessible name for a row labelled `label`.
