@@ -381,7 +381,8 @@ fn edit_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
     any(icon_button(icons::EDIT, EDIT_LABEL, on_edit)
         .ink(colors.fg_dim)
         .icon_size(EDIT_ICON_SIZE)
-        .box_size(Size::new(tap_box, tap_box)))
+        .box_size(Size::new(tap_box, tap_box))
+        .radius(tap_box / 2.0))
 }
 
 // ---------------------------------------------------------------------------
