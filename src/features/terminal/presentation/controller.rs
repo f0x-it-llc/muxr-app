@@ -516,13 +516,31 @@ impl TerminalController {
     /// load no longer carries would list no panes at all.
     ///
     /// **A layout fetch like any other** (see the [module docs](self)' "Layout
-    /// refresh" section): the tab world it read is committed only if no later
-    /// fetch has landed in the meantime, so the mount's own load and the
-    /// attach-settled reload behind it are safe in either completion order.
-    /// The card's own content — [`lines`](Self::lines),
-    /// [`session_name`](Self::session_name), [`loaded`](Self::loaded) and the
-    /// reveal — is outside that guard: no other fetch reads it, so the
-    /// freshest answer for it is always this one's.
+    /// refresh" section) for its **tabs**: [`publish_tabs`](Self::publish_tabs)
+    /// is committed only if no later fetch has landed in the meantime, so the
+    /// mount's own load and the attach-settled reload behind it are safe in
+    /// either completion order.
+    ///
+    /// Everything else this reads — [`spaces`](Self::spaces),
+    /// [`lines`](Self::lines), [`session_name`](Self::session_name),
+    /// [`loaded`](Self::loaded) and the reveal — is committed unconditionally,
+    /// outside that guard. For the card's own content that has always been
+    /// true: no other fetch reads it, so the freshest answer for it is always
+    /// this one's. [`spaces`](Self::spaces) joins it for the identical
+    /// reason, not by oversight: only this method and the three space verbs
+    /// ([`create_space`](Self::create_space), [`rename_space`](Self::rename_space),
+    /// [`select_space`](Self::select_space)) ever fetch spaces at all — no
+    /// poll, no tap-miss backstop, no [`reload_tabs`](Self::reload_tabs)
+    /// touches it — so a "stale" load's spaces answer is still the freshest
+    /// one there is. Leaving it under the tabs guard used to mean an
+    /// attach-settled reload winning the shared generation (its one RPC beats
+    /// this load's four-RPC chain) silently dropped the whole spaces payload,
+    /// with no automatic path ever re-fetching it — the sheet's spaces
+    /// section stayed empty until a space was created. The accepted
+    /// tradeoff: a stale in-flight load can now overwrite a
+    /// [`create_space`](Self::create_space)/[`rename_space`](Self::rename_space)
+    /// write that lands mid-flight — a narrow window that self-heals on the
+    /// next space op — traded against that far worse permanent starvation.
     pub async fn load(&self) {
         let generation = self.begin_layout_fetch();
         let query = WorkspaceQuery {
@@ -545,8 +563,11 @@ impl TerminalController {
         if !self.signals_alive() {
             return;
         }
+        // Outside the tabs staleness guard below — see this method's own doc
+        // for why a "stale" load's spaces answer is still the freshest one
+        // there is.
+        self.spaces.set(spaces);
         if self.is_newest_layout_fetch(generation) {
-            self.spaces.set(spaces);
             self.publish_tabs(tabs, Seed::Fresh);
         }
         self.lines.set(lines);
@@ -2908,6 +2929,35 @@ mod tests {
             labels(&c),
             ["alpha#3", "beta#3"],
             "the newest fetch's answer stands; the older one's is dropped"
+        );
+    }
+
+    #[test]
+    fn a_reload_tabs_that_lands_before_load_never_drops_loads_spaces() {
+        // A herdr session, so load() reads the space list at all.
+        let repository = Arc::new(RecordingRepository::default());
+        let c = TerminalController::new(
+            Arc::clone(&repository) as Arc<dyn TerminalRepository + Send + Sync>,
+            Arc::new(MockSessionsRepository::seeded()),
+            Arc::new(MockPreferencesRepository::seeded()),
+            Some("herdr:work".to_string()),
+        );
+        // load()'s first RPC (list_spaces) parks; reload_tabs()'s one RPC
+        // (list_tabs) is next in line and, unparked, lands immediately —
+        // advancing the shared generation past load()'s before load()'s own
+        // list_tabs/tab_lines even run. This is the attach-settled reload
+        // beating the mount's own load on a herdr session.
+        repository.delay_calls([Duration::from_millis(60)]);
+
+        block_on(async {
+            tokio::join!(c.load(), c.reload_tabs());
+        });
+
+        assert!(c.loaded.get_untracked());
+        assert!(
+            !c.spaces.get_untracked().is_empty(),
+            "load()'s spaces payload must survive losing the tabs generation \
+             to reload_tabs()"
         );
     }
 
