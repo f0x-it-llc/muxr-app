@@ -178,6 +178,14 @@ const INTERNAL_FAILURE_TOAST: &str = "Something went wrong — please try again.
 /// accessible *value* instead.
 const NEW_PANE_LABEL: &str = "new pane \u{b7} long-press for floating";
 
+/// `presentation::pages`' own `ADD_SPACE_LABEL`/`ADD_TAB_LABEL` (private
+/// there, G38) — the two full-size create rows' own dim label runs, found the
+/// identical way [`NEW_PANE_LABEL`] is: both paint a transparent-filled,
+/// dashed-bordered box (`Actions::add_row`), so neither shows up in
+/// [`RecScene::rounded`]/[`RecScene::strokes`].
+const ADD_SPACE_LABEL: &str = "new space";
+const ADD_TAB_LABEL: &str = "new tab";
+
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
 /// card prints once a pane row inside it has been committed.
 const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
@@ -446,6 +454,34 @@ impl Harness {
             .unwrap_or_else(|| {
                 panic!(
                     "no node valued {NEW_PANE_LABEL:?}; values on screen: {:?}",
+                    node_values(&self.root)
+                )
+            })
+    }
+
+    /// The add-space row's own tap point — the identical [`ADD_SPACE_LABEL`]
+    /// value idiom [`new_pane_row_point`] uses (G38: it is a full-size row,
+    /// not one of [`pills`]'s own rects, any more).
+    fn add_space_row_point(&self) -> Point {
+        node_centers_by_value(&self.root, ADD_SPACE_LABEL)
+            .first()
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no node valued {ADD_SPACE_LABEL:?}; values on screen: {:?}",
+                    node_values(&self.root)
+                )
+            })
+    }
+
+    /// …and the add-tab row's, the identical shape.
+    fn add_tab_row_point(&self) -> Point {
+        node_centers_by_value(&self.root, ADD_TAB_LABEL)
+            .first()
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no node valued {ADD_TAB_LABEL:?}; values on screen: {:?}",
                     node_values(&self.root)
                 )
             })
@@ -1262,12 +1298,14 @@ fn the_menus_first_row_opens_the_sheet_on_the_tab_row_and_the_browsed_tabs_panes
         origin.y + size.height > SURFACE.height,
         "bottom-anchored, like every muxr sheet: {origin:?}/{size:?}"
     );
-    // Four tabs + `+`, and **no** spaces row at all: this session is zellij,
-    // which has no spaces (see `a_herdr_session_is_the_only_one_offered_spaces`).
+    // Four tabs, and **no** spaces row at all: this session is zellij, which
+    // has no spaces (see `a_herdr_session_is_the_only_one_offered_spaces`).
+    // The add-tab row is no longer one of these — it is a full-size row of
+    // its own now (G38), not a `.pill`-shaped one `pills` would pick up.
     assert_eq!(
         pills(&sheet).len(),
-        4 + 1,
-        "the tab row, its add pill, and nothing above it: {sheet:?}"
+        4,
+        "the tab row and nothing above it: {sheet:?}"
     );
     assert!(!h.shows(SECTION_SPACES), "no label, and no gap under one");
     assert!(h.shows(SECTION_TABS));
@@ -1296,11 +1334,14 @@ fn a_herdr_session_is_the_only_one_offered_spaces() {
         h.shows(SECTION_SPACES),
         "herdr has spaces, so the sheet does"
     );
-    // Three spaces + `+ space`, then four tabs + `+`.
+    // Three spaces, then four tabs — the two add rows paint full-size and
+    // dashed now (G38), so `pills` (a `.pill`-shaped-rect scan) no longer
+    // picks either of them up; `a_read_only_credential_withdraws_the_sheets_three_create_affordances`
+    // pins that this count is identical whether or not the create rows show.
     assert_eq!(
         pills(&sheet).len(),
-        3 + 1 + 4 + 1,
-        "every pill row, add pills included: {sheet:?}"
+        3 + 4,
+        "every pill row, the two full-size add rows excluded: {sheet:?}"
     );
 }
 
@@ -2025,28 +2066,28 @@ fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
 //
 // Request shapes are already pinned at the repository/mock-server level
 // (`data::repositories::grpc_terminal_repository`'s own request-construction
-// tests), and the happy-path reload/select-by-label flow is pinned at the
-// controller level (`presentation::controller`'s own `RecordingRepository`
-// suite) — `MockTerminalRepository` deliberately leaves these three verbs at
-// `TerminalRepository`'s shared "unsupported" default (see
-// `INTERNAL_FAILURE_TOAST`'s own doc), so what is left to pin here is *flow*:
-// a dialog only in front of the space pill, no client-side label validation
-// beyond "not blank", and the sheet staying up around all three regardless of
-// how the repository answers.
+// tests), and the happy-path reload/select-by-label (or, for the tab dialog,
+// by-name) flow is pinned at the controller level (`presentation::controller`'s
+// own `RecordingRepository` suite) — `MockTerminalRepository` deliberately
+// leaves these three verbs at `TerminalRepository`'s shared "unsupported"
+// default (see `INTERNAL_FAILURE_TOAST`'s own doc), so what is left to pin
+// here is *flow*: both the space and tab rows now open a dialog (G39), the
+// space one keeps its non-blank guard while the tab one deliberately does not
+// (a blank tab name is this create's own valid default, not a disabled
+// state), and the sheet stays up around all three regardless of how the
+// repository answers.
 
 #[test]
-fn the_add_space_pill_opens_an_empty_dialog_and_a_typed_label_reaches_the_repository() {
+fn the_add_space_row_opens_an_empty_dialog_and_a_typed_label_reaches_the_repository() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
     app_toasts().clear();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
+    let (_before, after) = h.open_sheet();
     let floor = h.depth();
 
-    // `+ space` is the space row's fourth pill (three spaces, then it).
-    h.tap(center(pills(&sheet)[3]));
+    h.tap(h.add_space_row_point());
     let dialog_frame = h.settle();
     assert_eq!(h.depth(), floor + 1, "the create-space dialog opened");
 
@@ -2083,24 +2124,105 @@ fn the_add_space_pill_opens_an_empty_dialog_and_a_typed_label_reaches_the_reposi
 }
 
 #[test]
-fn the_add_tab_pill_opens_no_dialog_and_leaves_the_sheet_up() {
+fn the_add_tab_row_opens_an_empty_dialog_and_a_typed_name_reaches_the_repository() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
     app_toasts().clear();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
+    let (_before, after) = h.open_sheet();
     let floor = h.depth();
 
-    // `+` is the tab row's fifth pill (four tabs, then it) — no spaces
-    // section on this (zellij) session.
-    h.tap(center(pills(&sheet)[4]));
-    h.settle();
+    h.tap(h.add_tab_row_point());
+    let dialog_frame = h.settle();
+    assert_eq!(h.depth(), floor + 1, "the new-tab dialog opened");
 
-    assert_eq!(h.depth(), floor, "no dialog — original-app parity");
+    let dialog = added(&after.rounded, &dialog_frame.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
+    h.type_text("build");
+    h.press(NamedKey::Enter);
+    h.flush();
+
+    assert_eq!(
+        h.depth(),
+        floor,
+        "the submit closed the dialog, back onto the sheet"
+    );
     h.await_toast(INTERNAL_FAILURE_TOAST);
-    assert_eq!(h.depth(), floor, "…and the sheet is still the one thing up");
+}
+
+#[test]
+fn a_blank_confirm_on_the_add_tab_dialog_still_submits_unnamed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    let (_before, after) = h.open_sheet();
+    let floor = h.depth();
+
+    h.tap(h.add_tab_row_point());
+    let dialog_frame = h.settle();
+    assert_eq!(h.depth(), floor + 1, "the new-tab dialog opened");
+
+    // The field with no recorded focus routes neither a keystroke nor the
+    // submitting Enter (`tap_dialog_field`'s own doc), so it is tapped —
+    // and, unlike every other name prompt in this app, left untyped: a
+    // blank tab name is this create's own valid default (G39), not a
+    // disabled state, so the unmodified Enter DOES submit here.
+    let dialog = added(&after.rounded, &dialog_frame.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
+    h.press(NamedKey::Enter);
+    h.flush();
+
+    assert_eq!(
+        h.depth(),
+        floor,
+        "the blank confirm still closed the dialog, back onto the sheet"
+    );
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+}
+
+#[test]
+fn cancelling_the_add_tab_dialog_reaches_the_repository_not_at_all() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    let (_before, after) = h.open_sheet();
+    let floor = h.depth();
+
+    h.tap(h.add_tab_row_point());
+    let dialog_frame = h.settle();
+    assert_eq!(h.depth(), floor + 1, "the new-tab dialog opened");
+
+    // Escape is this app's own "cancelled" dismissal route
+    // (`crate::ui::dialogs`' module docs), the same reading a scrim tap or a
+    // back press gets — but only once the *dialog itself* holds focus
+    // (`glyph::dialog`'s own "claim focus on every Down" contract). A tap on
+    // its own field would claim focus there instead, and `TextInput` handles
+    // `Escape` itself (a self-blur, `crates/frust-widgets/src/textinput.rs`),
+    // consuming it before the dialog ever sees it — so this taps the panel's
+    // own title corner, clear of the field and both buttons, the same
+    // "somewhere on the scaffold, not a control" idiom
+    // `tests/connect.rs`'s own `the_qr_sheet_also_dismisses_on_escape` uses.
+    let dialog = added(&after.rounded, &dialog_frame.rounded);
+    let (origin, _) = panel(&dialog);
+    h.tap(Point::new(origin.x + 10.0, origin.y + 10.0));
+    h.press(NamedKey::Escape);
+    h.flush();
+
+    assert_eq!(h.depth(), floor, "escape dismissed the dialog");
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "cancel never reached the repository, so nothing failed either: {:?}",
+        app_toasts().pending_untracked()
+    );
 }
 
 #[test]

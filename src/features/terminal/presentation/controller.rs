@@ -772,9 +772,11 @@ impl TerminalController {
         }
     }
 
-    /// Open a new, unnamed tab (the wire names it) and reload the workspace
-    /// so it appears — the `+` tab pill's press (`pages::Actions::new_tab`),
-    /// with no dialog in front of it (original-app parity).
+    /// Open a new tab named `name` (empty creates **unnamed**, the wire's own
+    /// default naming) and reload the workspace so it appears — the add-tab
+    /// row's press, once its own naming dialog confirms
+    /// (`pages::Actions::open_new_tab_dialog`, G39; a cancel never reaches
+    /// this method at all).
     ///
     /// A full [`load`](Self::load), unlike [`create_space`](Self::create_space):
     /// the tab world itself changed, and the server focuses the tab it just
@@ -783,11 +785,11 @@ impl TerminalController {
     /// That load waits out [`CREATE_SETTLE`] first (the ack is an enqueue, not
     /// an apply — see that constant), and repeated presses coalesce into one
     /// create ([`claim_create`](Self::claim_create)).
-    pub async fn new_tab(&self) {
+    pub async fn new_tab(&self, name: String) {
         let Some(_claim) = self.claim_create() else {
             return;
         };
-        if self.tell(self.terminal.new_tab()).await {
+        if self.tell(self.terminal.new_tab(name)).await {
             self.settle_create().await;
             self.load().await;
         }
@@ -2327,8 +2329,8 @@ mod tests {
             self.record(format!("rename_space({space_id},{label})"))
         }
 
-        async fn new_tab(&self) -> Result<(), AppFailure> {
-            self.record("new_tab".to_string())?;
+        async fn new_tab(&self, name: String) -> Result<(), AppFailure> {
+            self.record(format!("new_tab({name})"))?;
             self.park().await;
             self.created.store(true, Ordering::SeqCst);
             Ok(())
@@ -2687,15 +2689,16 @@ mod tests {
     }
 
     #[test]
-    fn a_new_tab_reloads_the_workspace_with_no_dialog_involved() {
+    fn a_new_tab_carries_its_dialog_name_through_and_reloads_the_workspace() {
         let (c, repository) = recorded("zellij:dev");
 
-        block_on(c.new_tab());
+        block_on(c.new_tab("build".to_string()));
 
         assert_eq!(
             repository.actions(),
-            ["new_tab"],
-            "one RPC — the reload behind it is reads, filtered out of `actions`"
+            ["new_tab(build)"],
+            "one RPC, carrying the dialog's own name — the reload behind it \
+             is reads, filtered out of `actions`"
         );
         assert_eq!(
             c.browsed_tab.get_untracked(),
@@ -2705,14 +2708,28 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_dialog_confirm_creates_an_unnamed_tab() {
+        let (c, repository) = recorded("zellij:dev");
+
+        block_on(c.new_tab(String::new()));
+
+        assert_eq!(
+            repository.actions(),
+            ["new_tab()"],
+            "an empty name rides straight through — the wire's own default \
+             naming, not a client-side substitution"
+        );
+    }
+
+    #[test]
     fn a_refused_new_tab_reloads_nothing() {
         let (c, repository) = recorded("zellij:dev");
         repository.refuse("new_tab");
         let tabs = c.tabs.get_untracked();
 
-        block_on(c.new_tab());
+        block_on(c.new_tab("build".to_string()));
 
-        assert_eq!(repository.actions(), ["new_tab"]);
+        assert_eq!(repository.actions(), ["new_tab(build)"]);
         assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
     }
 
@@ -2961,7 +2978,7 @@ mod tests {
         let (c, repository) = recorded("zellij:dev");
 
         let started = std::time::Instant::now();
-        block_on(c.new_tab());
+        block_on(c.new_tab(String::new()));
 
         assert!(
             started.elapsed() >= SETTLE,
@@ -2972,7 +2989,7 @@ mod tests {
             c.tabs.get_untracked().iter().any(|tab| tab.key == "gamma"),
             "…and then reads the tab the create actually made"
         );
-        assert_eq!(repository.actions(), ["new_tab"], "one create, not two");
+        assert_eq!(repository.actions(), ["new_tab()"], "one create, not two");
         assert_eq!(
             CREATE_SETTLE.as_millis(),
             350,
@@ -2989,18 +3006,18 @@ mod tests {
         repository.delay_calls([Duration::from_millis(60)]);
 
         block_on(async {
-            tokio::join!(c.new_tab(), c.new_tab());
+            tokio::join!(c.new_tab(String::new()), c.new_tab(String::new()));
         });
 
         assert_eq!(
             repository.actions(),
-            ["new_tab"],
+            ["new_tab()"],
             "a repeated press is dropped, never queued behind the first"
         );
 
         // …and the claim released with it, so the affordance still works.
-        block_on(c.new_tab());
-        assert_eq!(repository.actions(), ["new_tab", "new_tab"]);
+        block_on(c.new_tab(String::new()));
+        assert_eq!(repository.actions(), ["new_tab()", "new_tab()"]);
     }
 
     #[test]

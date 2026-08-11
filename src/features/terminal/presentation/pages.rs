@@ -189,12 +189,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
-use frust::authoring::{Rect, WindowInsets};
-use frust::glyph::{MenuEntry, menu_item, show_glyph_menu};
+use frust::authoring::{Color, Rect, WindowInsets};
+use frust::glyph::{MenuEntry, glyph_dialog, menu_item, show_glyph_dialog, show_glyph_menu};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, SystemUiMode, WindowMetrics, any, button, component,
-    flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
+    Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets,
+    FlexView, GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult,
+    RwSignal, Set, SizedBox, SystemUiMode, WindowMetrics, any, button, component, flexible,
+    inflexible, on_cleanup, set_system_ui_mode, spawn_local, text, text_input, use_context,
 };
 
 use crate::AppState;
@@ -242,8 +243,11 @@ const MENU_DETACH_INDEX: usize = 2;
 
 /// The rename dialog's title.
 const RENAME_TITLE: &str = "Rename session";
-/// The create-space dialog's title — the `+ space` pill's press.
+/// The create-space dialog's title — the add-space row's press.
 const CREATE_SPACE_TITLE: &str = "New space";
+/// The create-tab dialog's title — the add-tab row's press
+/// ([`Actions::open_new_tab_dialog`], G39).
+const NEW_TAB_TITLE: &str = "New tab";
 /// The sheet's three chip-level rename dialogs' titles — the space pill's,
 /// the tab pill's and the pane row's trailing edit icon, each writing
 /// through its own `TerminalRepository` verb
@@ -251,6 +255,17 @@ const CREATE_SPACE_TITLE: &str = "New space";
 const RENAME_SPACE_TITLE: &str = "Rename space";
 const RENAME_TAB_TITLE: &str = "Rename tab";
 const RENAME_PANE_TITLE: &str = "Rename pane";
+/// [`Actions::open_new_tab_dialog`]'s own Cancel/Create labels — a
+/// hand-rolled dialog (see that method's own doc for why), so it spells its
+/// own pair rather than reaching into `crate::ui::dialogs`' private ones.
+const NEW_TAB_CANCEL_LABEL: &str = "Cancel";
+const NEW_TAB_SUBMIT_LABEL: &str = "Create";
+/// Vertical gap between the field and its button row, and the horizontal gap
+/// between Cancel and Create — `crate::ui::dialogs::name_input_dialog`'s own
+/// `FIELD_ACTIONS_GAP`/`ACTION_GAP`, transcribed rather than imported (both
+/// are private there).
+const NEW_TAB_FIELD_GAP: f64 = 16.0;
+const NEW_TAB_ACTION_GAP: f64 = 10.0;
 /// …and what a landed detach says on the way back to the list.
 const DETACHED_TOAST: &str = "detached";
 /// What a control a read-only credential may not use says when it is reached
@@ -271,10 +286,21 @@ const LINK_LEAVE: &str = "Back to sessions";
 const SECTION_SPACES: &str = "spaces";
 const SECTION_TABS: &str = "tabs";
 const SECTION_PANES: &str = "panes \u{2014} ";
-/// The two "add" pills (`+ space` / `+`) — content text inside a pill, not
-/// chrome, so these stay runs rather than becoming vectors.
-const ADD_SPACE: &str = "+ space";
-const ADD_TAB: &str = "+";
+/// The space/tab sections' own create rows (G38): full-size, dashed rows
+/// dimensionally consistent with [`pieces::new_pane_row`], not the small
+/// `.pill.add` round-4 shipped — see [`Actions::add_row`]. Content text, not
+/// chrome (the "+" is content the way `pieces::new_pane_row`'s own is), so
+/// these stay runs rather than becoming vectors.
+const ADD_ROW_PLUS: &str = "+";
+const ADD_SPACE_LABEL: &str = "new space";
+const ADD_TAB_LABEL: &str = "new tab";
+/// [`pieces::new_pane_row`]'s own `NEW_PANE_PAD`/`NEW_PANE_GAP`/`PILL_SIZE`,
+/// transcribed rather than imported (all three are private there) so
+/// [`Actions::add_row`] paints at the identical size (G38's own "dimensionally
+/// consistent" requirement).
+const ADD_ROW_PAD: f64 = 11.0;
+const ADD_ROW_GAP: f64 = 6.0;
+const ADD_ROW_TEXT_SIZE: f32 = 11.0;
 
 /// [`pieces::sheet_scroll_body`]'s height cap (G41): the window's own height
 /// minus this estimate of everything that sits *outside* the scrollable
@@ -1352,8 +1378,8 @@ impl Actions {
         });
     }
 
-    /// Open the create-space dialog — the `+ space` pill's press (herdr
-    /// only; [`sheet_body`](Self::sheet_body) withdraws the pill itself on
+    /// Open the create-space dialog — the add-space row's press (herdr
+    /// only; [`sheet_body`](Self::sheet_body) withdraws the row itself on
     /// any backend with no spaces, and for a read-only credential).
     ///
     /// The same [`name_input_dialog`] the rename row uses, seeded **empty**
@@ -1373,6 +1399,90 @@ impl Actions {
                 spawn_local(async move {
                     controller.create_space(label).await;
                 });
+            },
+        );
+    }
+
+    /// Open the tab-naming dialog — the add-tab row's press (G39, Ed's own
+    /// design call reversing round-4's "no dialog, original-app parity" for
+    /// this one create — see [`TerminalController::new_tab`]'s own doc).
+    /// Confirm creates: a typed name reaches the server as typed, and a
+    /// **blank** field is a legitimate choice too — the server's own default
+    /// naming, exactly what the dialog-less press used to send. Cancel (a
+    /// scrim tap, `Escape`, a back press, or the Cancel button) creates
+    /// nothing.
+    ///
+    /// A hand-rolled dialog rather than [`name_input_dialog`]
+    /// (`crate::ui::dialogs`): that helper's whole contract is "a blank field
+    /// cannot submit", which is exactly right for every other name prompt in
+    /// this app (a rename/create-space needs a real label) and exactly wrong
+    /// for this one, where blank is this create's own valid default rather
+    /// than a disabled state. Mirrors that helper's own construction
+    /// otherwise (a [`show_glyph_dialog`] page holding a field over a
+    /// Cancel/submit row), so `tests/terminal.rs`'s existing dialog-panel
+    /// idiom (`by_width` against the panel's own content width) still finds
+    /// the field the identical way.
+    pub fn open_new_tab_dialog(&self) {
+        let controller = Arc::clone(&self.controller);
+        let value = RwSignal::new(String::new());
+        let page_nav = self.overlays.clone();
+        show_glyph_dialog(
+            &self.overlays,
+            move || {
+                // Tracked read: a keystroke's `value.set` is what rebuilds
+                // this page.
+                let current = value.get();
+                let enter_nav = page_nav.clone();
+                let submit_nav = page_nav.clone();
+                let cancel_nav = page_nav.clone();
+                let field =
+                    text_input(current.clone(), move |_app: &mut AppState, next: String| {
+                        value.set(next)
+                    })
+                    .on_submit(move |_app: &mut AppState, typed: String| {
+                        enter_nav.pop_with_result(PopResult::of(typed.trim().to_string()));
+                    });
+                let buttons = FlexView::new(
+                    Axis::Horizontal,
+                    vec![
+                        flexible(1, SizedBox::<AppState>(None, None)),
+                        inflexible(
+                            button(NEW_TAB_CANCEL_LABEL, move |_app: &mut AppState| {
+                                cancel_nav.pop()
+                            })
+                            .style(ButtonStyle::Ghost)
+                            .small(),
+                        ),
+                        inflexible(SizedBox::<AppState>(Some(NEW_TAB_ACTION_GAP), None)),
+                        inflexible(
+                            button(NEW_TAB_SUBMIT_LABEL, move |_app: &mut AppState| {
+                                submit_nav
+                                    .pop_with_result(PopResult::of(current.trim().to_string()));
+                            })
+                            .style(ButtonStyle::Primary)
+                            .small(),
+                        ),
+                    ],
+                );
+                glyph_dialog()
+                    .title(NEW_TAB_TITLE)
+                    .action(any(FlexView::new(
+                        Axis::Vertical,
+                        vec![
+                            inflexible(field),
+                            inflexible(SizedBox::<AppState>(None, Some(NEW_TAB_FIELD_GAP))),
+                            inflexible(buttons),
+                        ],
+                    )
+                    .cross_axis(CrossAxisAlignment::Stretch)))
+            },
+            move |_app: &mut AppState, result: PopResult| {
+                if let Some(name) = result.take::<String>() {
+                    let controller = Arc::clone(&controller);
+                    spawn_local(async move {
+                        controller.new_tab(name).await;
+                    });
+                }
             },
         );
     }
@@ -1448,17 +1558,6 @@ impl Actions {
         );
     }
 
-    /// Open a new, unnamed tab — the `+` tab pill's press. No dialog, unlike
-    /// the space pill (original-app parity): the server names it, and
-    /// [`TerminalController::new_tab`]'s own reload brings the sheet's browse
-    /// onto whatever it focused. The sheet stays up either way.
-    pub fn new_tab(&self) {
-        let controller = Arc::clone(&self.controller);
-        spawn_local(async move {
-            controller.new_tab().await;
-        });
-    }
-
     /// Open a new pane in the tab the session is on — the new-pane row's
     /// press: tiled (`floating = false`) on a tap, floating (`floating =
     /// true`) on a long-press ([`pieces::new_pane_row`]'s own two gestures).
@@ -1514,7 +1613,7 @@ impl Actions {
         if self.controller.has_spaces() {
             children.push(pieces::section_label(SECTION_SPACES, &colors));
             children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
-            let mut space_pills: Vec<AnyView<AppState>> = spaces
+            let space_pills: Vec<AnyView<AppState>> = spaces
                 .iter()
                 .map(|space| {
                     let actions = self.clone();
@@ -1539,15 +1638,19 @@ impl Actions {
                     )
                 })
                 .collect();
-            if !read_only {
-                let actions = self.clone();
-                space_pills.push(
-                    self.add_pill(ADD_SPACE, &colors, move |_app: &mut AppState| {
-                        actions.open_create_space_dialog()
-                    }),
-                );
-            }
             children.push(super::chrome::wrap_row(space_pills, PILL_GAP));
+            // The full-size create row (G38), separate from the pill wrap
+            // above it — see `add_row`'s own doc for why it is no longer one
+            // of the wrapped pills.
+            if !read_only {
+                children.push(pieces::v_gap(PANE_ROW_GAP));
+                let actions = self.clone();
+                children.push(self.add_row(
+                    ADD_SPACE_LABEL,
+                    &colors,
+                    move |_app: &mut AppState| actions.open_create_space_dialog(),
+                ));
+            }
             // The section's own trailing gap, so the tabs label below sits the
             // same distance from whatever precedes it either way.
             children.push(pieces::v_gap(SECTION_TOP_GAP));
@@ -1555,7 +1658,7 @@ impl Actions {
 
         children.push(pieces::section_label(SECTION_TABS, &colors));
         children.push(pieces::v_gap(SECTION_BOTTOM_GAP));
-        let mut tab_pills: Vec<AnyView<AppState>> = tabs
+        let tab_pills: Vec<AnyView<AppState>> = tabs
             .iter()
             .map(|tab| {
                 let actions = self.clone();
@@ -1586,13 +1689,16 @@ impl Actions {
                 )
             })
             .collect();
-        if !read_only {
-            let actions = self.clone();
-            tab_pills.push(self.add_pill(ADD_TAB, &colors, move |_app: &mut AppState| {
-                actions.new_tab()
-            }));
-        }
         children.push(super::chrome::wrap_row(tab_pills, PILL_GAP));
+        if !read_only {
+            children.push(pieces::v_gap(PANE_ROW_GAP));
+            let actions = self.clone();
+            children.push(
+                self.add_row(ADD_TAB_LABEL, &colors, move |_app: &mut AppState| {
+                    actions.open_new_tab_dialog()
+                }),
+            );
+        }
 
         children.push(pieces::v_gap(SECTION_TOP_GAP));
         children.push(pieces::section_label(
@@ -1659,15 +1765,52 @@ impl Actions {
         })
     }
 
-    /// One `.pill.add` — dashed and dim, wired to `on_tap`. Never carries an
-    /// edit icon: an add pill creates something, it does not name it yet.
-    fn add_pill<F: Fn(&mut AppState) + 'static>(
+    /// The spaces/tabs sections' own create row (G38): full-size and dashed,
+    /// dimensionally consistent with [`pieces::new_pane_row`] — round-4's
+    /// `.pill.add` (small, wrapped in among the section's other pills) read
+    /// as an afterthought beside the pane section's own full-width row right
+    /// below it. `label` is the dim run following the amber "+" (mirroring
+    /// `new_pane_row`'s own two-tone treatment); never carries an edit icon,
+    /// the same "creates something, does not name it yet" reasoning the pill
+    /// it replaces already documented — naming now happens in the dialog the
+    /// add-tab row opens (G39), not on this row itself.
+    ///
+    /// Declared here rather than in `pieces` (only this screen calls it), and
+    /// a deliberate transcription of `new_pane_row`'s own geometry constants
+    /// rather than a shared export — see [`ADD_ROW_PAD`]/[`ADD_ROW_GAP`]/
+    /// [`ADD_ROW_TEXT_SIZE`]'s own docs.
+    fn add_row<F: Fn(&mut AppState) + 'static>(
         &self,
         label: &'static str,
         colors: &Palette,
         on_tap: F,
     ) -> AnyView<AppState> {
-        pieces::pill(label, PillState::Add, colors, on_tap, None)
+        let theme = pieces::active_theme();
+        let mut plus_style = theme.type_scale.body_small.clone();
+        plus_style.size = ADD_ROW_TEXT_SIZE;
+        plus_style.color = colors.amber;
+        let mut label_style = theme.type_scale.body_small.clone();
+        label_style.size = ADD_ROW_TEXT_SIZE;
+        label_style.color = colors.fg_dim;
+
+        let row = FlexView::new(
+            Axis::Horizontal,
+            vec![
+                inflexible(text(ADD_ROW_PLUS).style(plus_style)),
+                inflexible(SizedBox::<AppState>(Some(ADD_ROW_GAP), None)),
+                inflexible(text(label).style(label_style)),
+            ],
+        );
+        any(GestureDetector(
+            term_box(
+                Padding(EdgeInsets::all(ADD_ROW_PAD), Align(Alignment::CENTER, row)),
+                Color::TRANSPARENT,
+                theme.shape.small,
+            )
+            .border(colors.outline)
+            .dashed(true),
+        )
+        .on_tap(on_tap))
     }
 }
 
