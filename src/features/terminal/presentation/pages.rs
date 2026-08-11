@@ -134,6 +134,34 @@
 //! unmount — a press handler runs under no owner at all on desktop, and an
 //! `on_cleanup` registered there silently leaks (both functions' own
 //! "Ambient-Owner contract" docs).
+//!
+//! # Tap → FocusPane
+//!
+//! [`term::ContentTapSink`] is the live grid's content-tap hook, wired once
+//! per mount alongside [`LiveSession`]'s other seams (`TerminalScreen::build`'s
+//! live-entry arm, beside `grid_hooks`' own note). On herdr the hook is left
+//! `None` entirely — [`TerminalController::is_herdr_session`]'s own doc
+//! covers why a single-pane stream has nothing a tap could focus beyond the
+//! claim the grid's own `Down` already makes. On zellij, every tap hit-tests
+//! the SERVER-ACTIVE tab's pane rectangles ([`resolve_tapped_pane`]) and
+//! resolves to a focus call only when it lands on a different, non-fullscreen
+//! pane ([`resolve_tap_action`]); a landed focus reloads the tab list through
+//! [`TerminalController::focus_pane_from_tap`] so the rects and the sheet's
+//! own badge converge on whatever the server actually did. A tap between
+//! refreshes that misses every rect is a plain no-op, never a crash.
+//!
+//! # Wheel → mouse frames
+//!
+//! [`term::WheelSink`] is the wheel hook, wired for every live session on
+//! both backends. [`resolve_wheel_route`] is its whole decision: a server
+//! advertising [`CAP_MOUSE_INPUT`] gets a `mouse` frame straight off the
+//! attach stream (`TerminalFeed::send_mouse`, reached through
+//! [`LiveSession::feed_handle`]) at the wheel's own cell, letting the server
+//! route it to whichever pane sits underneath (an alt-screen app like `htop`
+//! included); a server with no such capability falls back to
+//! [`TerminalController::scroll_pane_from_wheel`] against the SERVER-ACTIVE
+//! tab's *focused* pane (never the pane under the pointer), and a step with
+//! no focused pane to fall back to is dropped rather than guessed at.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -150,14 +178,15 @@ use frust::{
 };
 
 use crate::AppState;
-use crate::connection::{ConnectionController, expect_connection_controller};
+use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use crate::features::terminal::di::expect_terminal_repository;
-use crate::features::terminal::domain::entities::TabEntry;
+use crate::features::terminal::domain::entities::{PaneEntry, ScrollStep, TabEntry};
+use crate::features::terminal::domain::feed::WheelKind;
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
@@ -356,6 +385,10 @@ pub struct Actions {
     /// every existing clone — the thread-local's included — see the same
     /// fill.
     live_probe: Rc<RefCell<Option<LiveProbe>>>,
+    /// The live grid's content-tap/wheel hooks, once a live session exists —
+    /// see [`GridHooks`] and [`debug_grid_hooks`]. Same shared-cell shape as
+    /// [`live_probe`](Self::live_probe), for the identical reason.
+    grid_hooks: Rc<RefCell<Option<GridHooks>>>,
 }
 
 /// A test/diagnostic handle onto the live demo pane's emulator + feed —
@@ -386,6 +419,31 @@ pub fn debug_live_probe() -> Option<LiveProbe> {
         cell.borrow()
             .as_ref()
             .and_then(|actions| actions.live_probe.borrow().clone())
+    })
+}
+
+/// A test/diagnostic handle onto the live grid's own gesture hooks —
+/// reached through [`debug_grid_hooks`], so a headless test invokes the
+/// **exact** closure `TerminalScreen::build` wires the grid to, rather than
+/// reimplementing its routing decisions. See the module docs' "Tap →
+/// FocusPane" / "Wheel → mouse frames" sections for what each routes to.
+#[derive(Clone, Default)]
+pub struct GridHooks {
+    /// `None` on herdr — see [`TerminalController::is_herdr_session`]'s own
+    /// doc on why the hook itself is never wired there.
+    pub on_content_tap: Option<term::ContentTapSink>,
+    /// `Some` for every live session, both backends.
+    pub on_wheel: Option<term::WheelSink>,
+}
+
+/// The mounted screen's live grid hooks, once a live session has been
+/// entered — see [`GridHooks`]. `None` before that, or when no terminal
+/// screen is mounted at all.
+pub fn debug_grid_hooks() -> Option<GridHooks> {
+    TERMINAL_CHROME.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|actions| actions.grid_hooks.borrow().clone())
     })
 }
 
@@ -523,6 +581,7 @@ impl Component for TerminalScreen {
             anchor: Rc::new(Cell::new(Rect::ZERO)),
             detaching: Rc::new(Cell::new(false)),
             live_probe: Rc::new(RefCell::new(None)),
+            grid_hooks: Rc::new(RefCell::new(None)),
         };
         // Publish for the app bar's `⋮` (see the module docs).
         TERMINAL_CHROME.with(|cell| *cell.borrow_mut() = Some(actions.clone()));
@@ -581,6 +640,65 @@ impl Component for TerminalScreen {
             // Published for the sheet, which switches tabs from the other side
             // of the component boundary — see `Actions::reattach`.
             *state.actions.reattach.borrow_mut() = session.reattach.clone();
+
+            // The grid's own gesture hooks (see the module docs' "Tap →
+            // FocusPane" / "Wheel → mouse frames" sections) — constructed
+            // once here, alongside the rest of this session's seams, the
+            // same reasoning `live_probe`/`reattach` above follow, and
+            // published for `TerminalScreen::build`'s own render arm (below)
+            // to attach to the grid on every rebuild via a cheap `Rc` clone.
+            let on_content_tap: Option<term::ContentTapSink> = if controller.is_herdr_session() {
+                None
+            } else {
+                let controller = Arc::clone(&controller);
+                let sink: term::ContentTapSink = Rc::new(move |col: u32, row: u32| {
+                    let Some(tab) = controller.active_tab_entry() else {
+                        return;
+                    };
+                    let Some((pane_id, is_plugin)) = resolve_tap_action(&tab, col, row) else {
+                        return;
+                    };
+                    let controller = Arc::clone(&controller);
+                    spawn_local(async move {
+                        controller.focus_pane_from_tap(pane_id, is_plugin).await;
+                    });
+                });
+                Some(sink)
+            };
+            let on_wheel: term::WheelSink = {
+                let controller = Arc::clone(&controller);
+                let connection = Arc::clone(&state.actions.connection);
+                let feed = session.feed_handle();
+                Rc::new(move |up: bool, col: u32, row: u32| {
+                    let kind = if up { WheelKind::Up } else { WheelKind::Down };
+                    let has_mouse_input = connection
+                        .server_info
+                        .get_untracked()
+                        .is_some_and(|info| info.supports(CAP_MOUSE_INPUT));
+                    let active_tab = controller.active_tab_entry();
+                    match resolve_wheel_route(has_mouse_input, active_tab.as_ref()) {
+                        WheelRoute::Mouse => feed.borrow().send_mouse(kind, col, row),
+                        WheelRoute::Scroll { pane_id, is_plugin } => {
+                            let controller = Arc::clone(&controller);
+                            let direction = match kind {
+                                WheelKind::Up => ScrollStep::Up,
+                                WheelKind::Down => ScrollStep::Down,
+                            };
+                            spawn_local(async move {
+                                controller
+                                    .scroll_pane_from_wheel(pane_id, is_plugin, direction)
+                                    .await;
+                            });
+                        }
+                        WheelRoute::Drop => {}
+                    }
+                })
+            };
+            *state.actions.grid_hooks.borrow_mut() = Some(GridHooks {
+                on_content_tap,
+                on_wheel: Some(on_wheel),
+            });
+
             state.live = Some(session);
         }
         // Resize propagation: drain whatever the *previous* layout recorded
@@ -655,7 +773,7 @@ impl Component for TerminalScreen {
                 // Tracked: the pump's one write per wake is what repaints the
                 // live pane (`term`'s own module docs on the 30 Hz mechanism).
                 let generation = session.generation.get();
-                let grid = term::terminal_grid(
+                let mut grid = term::terminal_grid(
                     Rc::clone(&session.emulator),
                     generation,
                     term::terminal_palette(&theme),
@@ -671,6 +789,16 @@ impl Component for TerminalScreen {
                 .input(session.input.clone())
                 .read_only(read_only)
                 .selection(session.selection.clone());
+                // The gesture hooks constructed once above, alongside this
+                // session's other seams — see that block's own note.
+                if let Some(hooks) = state.actions.grid_hooks.borrow().clone() {
+                    if let Some(sink) = hooks.on_content_tap {
+                        grid = grid.on_content_tap(sink);
+                    }
+                    if let Some(sink) = hooks.on_wheel {
+                        grid = grid.on_wheel(sink);
+                    }
+                }
                 let mut chip = term::copy_chip(session.selection.clone());
                 if let Some(sink) = demo_copy_sink() {
                     chip = chip.copy_sink(sink);
@@ -756,6 +884,96 @@ fn active_title(tabs: &[TabEntry], active: &str) -> String {
         .find(|tab| tab.key == active)
         .map(|tab| tab.pane_title.clone())
         .unwrap_or_default()
+}
+
+/// Hit-test a content tap's cell against `tab`'s pane rectangles — the live
+/// grid's `on_content_tap` hook's whole routing decision (see the module
+/// docs' "Tap → FocusPane" section).
+///
+/// **Fullscreen wins outright.** If any pane in `tab` is
+/// [`is_fullscreen`](PaneEntry::is_fullscreen), every tap belongs to it —
+/// the original client guards the same case with a toast telling the user
+/// why a cross-pane tap did nothing; this port matches the guard (no
+/// cross-pane focus while fullscreened) but omits the toast, a deliberate,
+/// documented tradeoff rather than an oversight.
+///
+/// **Floating beats tiled.** Past the fullscreen check, the floating layer
+/// is tried first and wins outright over the tiled layer whenever it has a
+/// hit at all — the original's own active-layer preference.
+///
+/// **Approximation, recorded rather than modeled**: the wire carries no
+/// per-pane z-order/visibility beyond [`PaneEntry::floating`], so "topmost"
+/// is read as "the last pane (in [`TabEntry::panes`]'s own wire order)
+/// whose rect contains the cell" within whichever layer is being tried.
+fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
+    if let Some(fullscreen) = tab.panes.iter().find(|pane| pane.is_fullscreen) {
+        return Some(fullscreen);
+    }
+    let contains = |pane: &&PaneEntry| {
+        col >= pane.x && col < pane.x + pane.cols && row >= pane.y && row < pane.y + pane.rows
+    };
+    tab.panes
+        .iter()
+        .filter(|pane| pane.floating)
+        .rfind(contains)
+        .or_else(|| {
+            tab.panes
+                .iter()
+                .filter(|pane| !pane.floating)
+                .rfind(contains)
+        })
+}
+
+/// The `(pane_id, is_plugin)` a content tap should focus, if any —
+/// [`resolve_tapped_pane`] plus the one early-out the module docs' "Tap →
+/// FocusPane" section describes: a tap that resolves to the pane the
+/// session is **already** on is a no-op beyond the focus claim the grid's
+/// own `Down` already made (`Down` claims focus on every phase, tap
+/// included — see `term::widget`'s own touch-state-machine doc), so this
+/// answers `None` for it exactly as it does for a stale/no-hit tap.
+fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)> {
+    let pane = resolve_tapped_pane(tab, col, row)?;
+    if pane.focused {
+        return None;
+    }
+    Some((pane.id, pane.is_plugin))
+}
+
+/// Where one wheel step should go — the live grid's `on_wheel` hook's whole
+/// routing decision (see the module docs' "Wheel → mouse frames" section).
+#[derive(Debug)]
+enum WheelRoute {
+    /// Send a mouse frame at the wheel's own cell — the primary route,
+    /// gated on the server capability alone; which pane sits under the
+    /// pointer is the server's decision, not this screen's.
+    Mouse,
+    /// RPC-fallback: scroll the SERVER-ACTIVE tab's *focused* pane, not
+    /// whatever pane the pointer happens to be over (original-app parity).
+    Scroll {
+        /// The focused pane's [`PaneEntry::id`].
+        pane_id: u32,
+        /// The focused pane's [`PaneEntry::is_plugin`].
+        is_plugin: bool,
+    },
+    /// No capability and no focused pane to fall back to — the step is
+    /// dropped silently rather than guessed at.
+    Drop,
+}
+
+/// Decide [`WheelRoute`] for one wheel step, given whether the connected
+/// server advertised [`CAP_MOUSE_INPUT`] and the SERVER-ACTIVE tab (`None`
+/// before the first load lands).
+fn resolve_wheel_route(has_mouse_input: bool, active_tab: Option<&TabEntry>) -> WheelRoute {
+    if has_mouse_input {
+        return WheelRoute::Mouse;
+    }
+    match active_tab.and_then(|tab| tab.panes.iter().find(|pane| pane.focused)) {
+        Some(pane) => WheelRoute::Scroll {
+            pane_id: pane.id,
+            is_plugin: pane.is_plugin,
+        },
+        None => WheelRoute::Drop,
+    }
 }
 
 /// The expand button's press, as the screen-state shim its callback needs.
@@ -1457,5 +1675,174 @@ mod tests {
         // The mock's own 260ms: long enough to see the pill move, short enough
         // not to feel stuck.
         assert_eq!(SHEET_CLOSE_DELAY.as_millis(), 260);
+    }
+
+    // -----------------------------------------------------------------
+    // `resolve_tapped_pane` — the live grid's content-tap hit test
+    // -----------------------------------------------------------------
+
+    /// A pane at `(x, y)`-`(x+w, y+h)` cells, `id` unique within its own
+    /// `is_plugin` namespace exactly as everywhere else a pane is addressed.
+    fn pane_at(id: u32, x: u32, y: u32, w: u32, h: u32) -> PaneEntry {
+        PaneEntry {
+            id,
+            title: String::new(),
+            cwd: String::new(),
+            focused: false,
+            floating: false,
+            exited: false,
+            is_plugin: false,
+            is_fullscreen: false,
+            x,
+            y,
+            rows: h,
+            cols: w,
+        }
+    }
+
+    fn tab_with(panes: Vec<PaneEntry>) -> TabEntry {
+        TabEntry {
+            index: 1,
+            tab_id: 1,
+            key: "devbox".to_string(),
+            label: "devbox".to_string(),
+            pane_title: String::new(),
+            pane_name: String::new(),
+            pane_path: String::new(),
+            panes,
+            active: true,
+        }
+    }
+
+    #[test]
+    fn a_tap_resolves_to_the_tiled_pane_whose_rect_contains_the_cell() {
+        let tab = tab_with(vec![pane_at(10, 0, 0, 40, 24), pane_at(11, 40, 0, 40, 24)]);
+        assert_eq!(resolve_tapped_pane(&tab, 5, 5).map(|p| p.id), Some(10));
+        assert_eq!(resolve_tapped_pane(&tab, 45, 5).map(|p| p.id), Some(11));
+    }
+
+    #[test]
+    fn a_tap_outside_every_rect_resolves_to_nothing() {
+        let tab = tab_with(vec![pane_at(10, 0, 0, 40, 24)]);
+        assert_eq!(resolve_tapped_pane(&tab, 40, 0), None, "one past the edge");
+        assert_eq!(
+            resolve_tapped_pane(&tab, 0, 24),
+            None,
+            "one past the bottom"
+        );
+        assert!(tab_with(Vec::new()).panes.is_empty());
+        assert_eq!(resolve_tapped_pane(&tab_with(Vec::new()), 5, 5), None);
+    }
+
+    #[test]
+    fn a_fullscreen_pane_claims_every_tap_regardless_of_where_it_landed() {
+        let mut fullscreen = pane_at(20, 0, 0, 10, 10);
+        fullscreen.is_fullscreen = true;
+        let tab = tab_with(vec![pane_at(10, 40, 40, 10, 10), fullscreen]);
+        // Neither cell is inside the fullscreen pane's own (tiny) rect — the
+        // point is that its rect is never even checked.
+        assert_eq!(resolve_tapped_pane(&tab, 0, 0).map(|p| p.id), Some(20));
+        assert_eq!(resolve_tapped_pane(&tab, 45, 45).map(|p| p.id), Some(20));
+    }
+
+    #[test]
+    fn a_floating_pane_wins_over_a_tiled_one_it_overlaps() {
+        let tiled = pane_at(10, 0, 0, 40, 24);
+        let mut floating = pane_at(11, 0, 0, 40, 24);
+        floating.floating = true;
+        let tab = tab_with(vec![tiled, floating]);
+        assert_eq!(
+            resolve_tapped_pane(&tab, 5, 5).map(|p| p.id),
+            Some(11),
+            "floating beats tiled on the same cell"
+        );
+    }
+
+    #[test]
+    fn the_floating_preference_only_applies_where_a_floating_pane_actually_hits() {
+        let tiled = pane_at(10, 0, 0, 40, 24);
+        let mut floating = pane_at(11, 60, 60, 10, 10);
+        floating.floating = true;
+        let tab = tab_with(vec![tiled, floating]);
+        assert_eq!(
+            resolve_tapped_pane(&tab, 5, 5).map(|p| p.id),
+            Some(10),
+            "the floating pane exists but does not cover this cell, so tiled \
+             still answers"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `resolve_tap_action` — adds the already-focused early-out
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_tap_on_another_pane_answers_its_id_and_namespace() {
+        let other = pane_at(11, 40, 0, 40, 24);
+        let mut focused = pane_at(10, 0, 0, 40, 24);
+        focused.focused = true;
+        let tab = tab_with(vec![focused, other]);
+        assert_eq!(resolve_tap_action(&tab, 45, 5), Some((11, false)));
+    }
+
+    #[test]
+    fn a_tap_on_the_already_focused_pane_answers_nothing() {
+        let mut focused = pane_at(10, 0, 0, 40, 24);
+        focused.focused = true;
+        let tab = tab_with(vec![focused, pane_at(11, 40, 0, 40, 24)]);
+        assert_eq!(
+            resolve_tap_action(&tab, 5, 5),
+            None,
+            "the Down that reached this tap already claimed focus — nothing \
+             extra to do"
+        );
+    }
+
+    #[test]
+    fn a_stale_or_no_hit_tap_answers_nothing() {
+        let tab = tab_with(vec![pane_at(10, 0, 0, 40, 24)]);
+        assert_eq!(resolve_tap_action(&tab, 90, 90), None);
+        assert_eq!(resolve_tap_action(&tab_with(Vec::new()), 0, 0), None);
+    }
+
+    // -----------------------------------------------------------------
+    // `resolve_wheel_route` — the live grid's wheel hook's routing
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn capability_present_always_routes_to_a_mouse_frame() {
+        let mut focused = pane_at(10, 0, 0, 40, 24);
+        focused.focused = true;
+        let tab = tab_with(vec![focused]);
+        assert!(matches!(
+            resolve_wheel_route(true, Some(&tab)),
+            WheelRoute::Mouse
+        ));
+        assert!(matches!(resolve_wheel_route(true, None), WheelRoute::Mouse));
+    }
+
+    #[test]
+    fn capability_absent_falls_back_to_the_active_tabs_focused_pane() {
+        let mut focused = pane_at(10, 0, 0, 40, 24);
+        focused.focused = true;
+        let other = pane_at(11, 40, 0, 40, 24);
+        let tab = tab_with(vec![other, focused]);
+        match resolve_wheel_route(false, Some(&tab)) {
+            WheelRoute::Scroll { pane_id, is_plugin } => {
+                assert_eq!(pane_id, 10);
+                assert!(!is_plugin);
+            }
+            other => panic!("expected a Scroll route, got a different one: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_absent_with_nothing_focused_drops_the_step() {
+        let tab = tab_with(vec![pane_at(10, 0, 0, 40, 24)]);
+        assert!(matches!(
+            resolve_wheel_route(false, Some(&tab)),
+            WheelRoute::Drop
+        ));
+        assert!(matches!(resolve_wheel_route(false, None), WheelRoute::Drop));
     }
 }

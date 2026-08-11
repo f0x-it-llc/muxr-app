@@ -68,7 +68,8 @@ use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::pages::{
-    debug_controller, debug_live_probe, open_terminal_menu, set_demo_copy_sink, terminal_page,
+    debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
+    terminal_page,
 };
 use muxr::features::terminal::presentation::term::CursorStyle as GridCursorStyle;
 use muxr::features::terminal::presentation::term::chip::{CHIP_H, CHIP_W};
@@ -1340,4 +1341,85 @@ fn the_spaces_section_follows_the_attached_sessions_own_backend() {
         values.iter().any(|v| v == SECTION_SPACES),
         "herdr does, so the section is there: {values:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The live grid's gesture hooks: tap → FocusPane (zellij only) and
+// wheel → mouse frames / ScrollPane fallback (always).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_grid_gesture_hooks_wire_tap_only_off_herdr_and_wheel_always() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut zellij = Harness::mount_session("zellij:dev");
+    zellij.enter_demo();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    assert!(
+        hooks.on_content_tap.is_some(),
+        "not herdr, so the grid's content-tap hook is wired"
+    );
+    assert!(
+        hooks.on_wheel.is_some(),
+        "the wheel hook is always wired once a live session exists"
+    );
+    // A real unmount (not merely dropping the harness), so the feed pump/
+    // appearance-poll background tasks this session's `enter_demo` spun up
+    // are disposed before a second screen mounts over the same reactive
+    // runtime — `docs/ARCHITECTURE.md`'s Building a Screen section covers
+    // why an `on_cleanup` never fires from a bare `Drop`.
+    zellij.unmount_screen();
+
+    let mut herdr = Harness::mount_session("herdr:work");
+    herdr.enter_demo();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    assert!(
+        hooks.on_content_tap.is_none(),
+        "herdr's single-pane stream has nothing a tap could focus beyond \
+         the claim its own Down already makes"
+    );
+    assert!(hooks.on_wheel.is_some(), "scroll still works on herdr");
+}
+
+#[test]
+fn invoking_the_wired_hooks_never_panics_on_a_hit_a_miss_or_either_wheel_route() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session("zellij:dev");
+    h.enter_demo();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    let on_content_tap = hooks.on_content_tap.expect("zellij wires the tap hook");
+    let on_wheel = hooks.on_wheel.expect("the wheel hook is always wired");
+
+    // A no-hit tap (the mock's seeded panes sit at (0,0)-(80,24)) — no RPC,
+    // no crash (`resolve_tap_action`'s own "stale/no-hit tap" case).
+    on_content_tap(500, 500);
+    h.pump_for(Duration::from_millis(50));
+
+    // A hit tap — both of the mock's seeded panes share the same rect, so
+    // this always resolves to *some* pane and exercises the real
+    // `focus_pane_from_tap` round trip end to end.
+    on_content_tap(5, 5);
+    h.pump_for(Duration::from_millis(50));
+
+    // Capability present (the mock connection backend's own default,
+    // `connection::MockConnectionBackend`) — the mouse-frame route, against
+    // a demo feed whose `send_mouse` is `TerminalFeed`'s own no-op default.
+    on_wheel(true, 5, 5);
+    on_wheel(false, 5, 5);
+    h.pump_for(Duration::from_millis(50));
+
+    // Capability absent — the `ScrollPane` RPC fallback, against a mock
+    // repository that answers "unsupported" (no override) and is silently
+    // dropped (see `TerminalController::scroll_pane_from_wheel`'s own doc).
+    let cc = expect_connection_controller();
+    let mut info = cc.server_info.get_untracked().expect("connected");
+    info.capabilities.clear();
+    cc.server_info.set(Some(info));
+    on_wheel(true, 5, 5);
+    h.pump_for(Duration::from_millis(50));
+
+    // Nothing above panicked, and the screen is still alive.
+    h.frame();
 }
