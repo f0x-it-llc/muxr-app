@@ -53,6 +53,7 @@ use frust::{
     AnyView, Component, GetUntracked, NavigatorController, RwSignal, Set, SizedBox, Stack, Theme,
     any, navigator, provide_context,
 };
+use frust_core::accesskit::Role;
 use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
 // Test-only peek at the OS system-UI slot `frust::set_system_ui_mode` writes
 // — see `Cargo.toml`'s dev-dependency comment for why this is
@@ -1815,4 +1816,32 @@ fn the_first_content_tap_that_resolves_to_nothing_re_reads_the_layout_once() {
     );
 
     clear_test_tabs();
+}
+
+// ---------------------------------------------------------------------------
+// The sheet body composes a scroll container (G41)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_sheet_body_composes_a_scroll_container() {
+    // Structure-level pin, per the task's own note: no screenshot/pixel
+    // assert (visual sizing is Ed's own device gate — headless has no
+    // `WindowMetrics`, so `pieces::sheet_scroll_body`'s own cap never
+    // engages here, and the region always sizes to its content exactly as
+    // the plain column it replaced did). What this pins is that the sheet's
+    // scrollable sections really are wrapped in a `frust::scroll_view`,
+    // which — unlike a label or a colour — publishes its own unambiguous
+    // `Role::ScrollView` accessibility node (`frust_widgets::scroll`'s own
+    // `semantics` impl), the same role-based locator
+    // `tests/navigation_motion.rs` already pins the shell's bar structure
+    // with.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session("zellij:dev");
+    open_sheet(&mut h);
+    assert!(
+        support::node_roles(&h.root).contains(&Role::ScrollView),
+        "the sheet body has no scroll container: {:?}",
+        support::node_roles(&h.root)
+    );
 }

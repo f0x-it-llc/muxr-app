@@ -16,6 +16,7 @@
 //! | [`pill`] | `.pill`, `.pill.sel`, `.pill.add` |
 //! | [`pane_item`] | `.pane-item` — one pane's mark box, its title/cwd pair, the `focused` chip |
 //! | [`new_pane_row`] | `.new-pane-btn` — the dashed `+ new pane · long-press for floating` |
+//! | [`sheet_scroll_body`] | the sheet's own scrollable region (G41) — no mock counterpart, a device-only fix |
 //!
 //! # Colours: the canonical token wins over the mock's hex
 //!
@@ -99,8 +100,13 @@ const CLOSE_SIZE: f64 = 26.0;
 const CLOSE_ICON: f64 = 13.0;
 /// The close button's accessible name — a *word*, never the `×` it draws.
 pub(super) const CLOSE_LABEL: &str = "Close";
-/// `.sheet-section-lbl{font-size:10px; margin:16px 0 10px; gap:6px}`.
-const SECTION_SIZE: f32 = 10.0;
+/// `label_medium`'s own canonical size (G36) — round-4's ad-hoc 10px
+/// (below even `label_small`'s 11px floor, and what Ed found the sheet's
+/// three section labels indistinguishable at) replaced by an established
+/// Glyph type-scale role rather than another hand-picked float; the
+/// `margin`/`gap` figures below are still the mock's own
+/// (`.sheet-section-lbl{margin:16px 0 10px; gap:6px}`).
+const SECTION_SIZE: f32 = 12.0;
 pub(super) const SECTION_TOP_GAP: f64 = 16.0;
 pub(super) const SECTION_BOTTOM_GAP: f64 = 10.0;
 const SECTION_GAP: f64 = 6.0;
@@ -137,18 +143,48 @@ const NEW_PANE_PAD: f64 = 11.0;
 /// two runs, it needs a real one.
 const NEW_PANE_GAP: f64 = 6.0;
 
-/// The trailing edit affordance's drawn vector size, in logical px — smaller
-/// than every other mark this screen draws ([`CLOSE_ICON`], [`PANE_ICON`]),
-/// so it reads as *subordinate* to the label/name it sits beside rather than
-/// competing with it.
-const EDIT_ICON_SIZE: f64 = 14.0;
-/// A generous, community-approximate tap target around that small vector —
-/// the same "inflate a small glyph's own footprint" idea
-/// `frust-widgets`' `glyph::tag::REMOVE_HIT_SLOP` documents for its own
-/// remove glyph, expressed here as [`icon_button`]'s own fixed-box seam
-/// rather than a literal geometric inflate.
-const EDIT_HIT_SLOP: f64 = 4.0;
-const EDIT_TAP_BOX: f64 = EDIT_ICON_SIZE + 2.0 * EDIT_HIT_SLOP;
+/// The trailing edit affordance's drawn vector size, in logical px — grown
+/// modestly from round-4's 14px alongside the bigger tap boxes below (G37),
+/// while staying smaller than every other mark this screen draws
+/// ([`CLOSE_ICON`], [`PANE_ICON`]) so it still reads as *subordinate* to the
+/// label/name it sits beside rather than competing with it.
+const EDIT_ICON_SIZE: f64 = 16.0;
+/// The pill chip's own edit tap box (G37; round-4 task 15's `EDIT_TAP_BOX`,
+/// grown as far as it safely can be) — [`icon_button`]'s own fixed-box seam,
+/// the "inflate a small glyph's own footprint" idea `frust-widgets`'
+/// `glyph::tag::REMOVE_HIT_SLOP` documents for its own remove glyph, but
+/// expressed as an actual layout box rather than a beyond-bounds hit-test
+/// inflate: this chip's edit icon is a row *sibling* of its main tap surface
+/// ([`pill`]'s own doc on why — the nested-`GestureDetector`-double-fires
+/// hazard round-4 found and this task preserves), and every sibling's hit
+/// region is exactly its own laid-out rect
+/// (`frust_widgets::authoring::route_event`'s `ChildPod::contains` gate,
+/// checked *before* a sibling's own `event` ever runs) — there is no way to
+/// extend a sibling's tap surface past its own box without also growing
+/// whatever else that box feeds into.
+///
+/// A pill's own rounded fill is 33px tall (measured against the Glyph
+/// baseline theme — `PILL_PAD_Y * 2` plus `body_small`'s own rendered line
+/// box), driven entirely by its label; round-4 picked `EDIT_TAP_BOX=22` to
+/// stay comfortably under that number so every pill — an "add" pill, with no
+/// edit icon at all, included — keeps sharing that one height, which is
+/// exactly what `tests/terminal.rs`'s `pills()` locator groups all nine of
+/// them by. This constant stays under the same ceiling, with a few px of
+/// margin — 30px, short of the 40–44px G37 asks for elsewhere, because
+/// widening it past 33px would grow every *renamable* pill taller than the
+/// "add" pills beside it and split that one shared-height group in two, and
+/// `tests/terminal.rs` (out of this task's own file list) pins the
+/// undivided group. See [`PANE_EDIT_TAP_BOX`] for the row this ceiling does
+/// not bind.
+const PILL_EDIT_TAP_BOX: f64 = 30.0;
+/// The pane row's own edit tap box — meets G37's 44px-preferred target
+/// outright: a pane row's own height (53px, same measurement basis as
+/// [`PILL_EDIT_TAP_BOX`]'s own doc — `PANE_PAD_Y * 2` plus the taller of the
+/// mark box and the title/cwd column) leaves comfortable headroom under it,
+/// and every pane row carries an edit icon (there is no "add pane row"
+/// counterpart the way a pill section has an add pill), so there is no
+/// second height class this could split.
+const PANE_EDIT_TAP_BOX: f64 = 44.0;
 /// Gap between a chip's main content and its trailing edit icon.
 const EDIT_GAP: f64 = 6.0;
 /// The edit affordance's accessible name — a *word*, never the pencil mark it
@@ -331,18 +367,21 @@ pub(super) fn column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<
 
 /// The chip affordance's trailing edit icon — [`icons::EDIT`], a vector
 /// (chrome-icon rule: never a font glyph), its own independent tap region via
-/// [`icon_button`]'s fire-on-up-inside contract and fixed [`EDIT_TAP_BOX`]
-/// hit target. No fill, no border: unlike the sheet's close button this is
-/// deliberately unadorned, so it reads as *subordinate* to the label/name
-/// beside it rather than a second control competing for attention.
+/// [`icon_button`]'s fire-on-up-inside contract and a fixed `tap_box` hit
+/// target the caller picks ([`PILL_EDIT_TAP_BOX`]/[`PANE_EDIT_TAP_BOX`], each
+/// tuned to its own row's height ceiling — see their own docs). No fill, no
+/// border: unlike the sheet's close button this is deliberately unadorned,
+/// so it reads as *subordinate* to the label/name beside it rather than a
+/// second control competing for attention.
 fn edit_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
     colors: &Palette,
+    tap_box: f64,
     on_edit: F,
 ) -> AnyView<State> {
     any(icon_button(icons::EDIT, EDIT_LABEL, on_edit)
         .ink(colors.fg_dim)
         .icon_size(EDIT_ICON_SIZE)
-        .box_size(Size::new(EDIT_TAP_BOX, EDIT_TAP_BOX)))
+        .box_size(Size::new(tap_box, tap_box)))
 }
 
 // ---------------------------------------------------------------------------
@@ -490,18 +529,32 @@ pub(super) fn sheet_top_row<State: 'static, F: Fn(&mut State) + 'static>(
     ]))
 }
 
-/// `.sheet-section-lbl` — a dim 10px label behind an amber `//` prefix.
+/// `.sheet-section-lbl` — a dim label behind an amber `//` prefix, sized and
+/// weighted for hierarchy rather than selection (G36): `label_medium`'s own
+/// canonical size, `_emphasized` (bold) rather than a further size bump, so
+/// "spaces"/"tabs"/"panes" reads as a clear step up from round-4's 10px
+/// without growing past the sheet's own top-row label
+/// ([`SHEET_LABEL_SIZE`]'s 12.5px) or reaching for the amber selection tone
+/// a pill/chip owns (see [`pill`]) — amber stays the *selected* colour, this
+/// label is only ever `amber_dim`/`fg_dim`. `label_medium`'s own line box
+/// (16px, unchanged by either the size or the `_emphasized` variant —
+/// `frust-theme`'s type-scale table) is identical to the role this replaces,
+/// so no row this label sits in grows.
 pub(super) fn section_label<State: 'static>(
     label: impl Into<String>,
     colors: &Palette,
 ) -> AnyView<State> {
     let theme = active_theme();
     let prefix = sized(
-        &theme.type_scale.label_small,
+        &theme.type_scale.label_medium_emphasized,
         SECTION_SIZE,
         colors.amber_dim,
     );
-    let body = sized(&theme.type_scale.label_small, SECTION_SIZE, colors.fg_dim);
+    let body = sized(
+        &theme.type_scale.label_medium_emphasized,
+        SECTION_SIZE,
+        colors.fg_dim,
+    );
     any(row(vec![
         inflexible(text(SECTION_PREFIX).style(prefix)),
         h_gap(SECTION_GAP),
@@ -603,7 +656,9 @@ pub(super) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
                     right: PILL_PAD_X,
                     bottom: 0.0,
                 },
-                edit_icon_button(colors, move |state: &mut State| on_edit(state)),
+                edit_icon_button(colors, PILL_EDIT_TAP_BOX, move |state: &mut State| {
+                    on_edit(state)
+                }),
             )),
         ])),
     };
@@ -724,7 +779,9 @@ pub(super) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
                     right: PANE_PAD_X,
                     bottom: 0.0,
                 },
-                edit_icon_button(colors, move |state: &mut State| on_edit(state)),
+                edit_icon_button(colors, PANE_EDIT_TAP_BOX, move |state: &mut State| {
+                    on_edit(state)
+                }),
             )),
         ])),
     };
@@ -776,6 +833,50 @@ pub(super) fn new_pane_row<
     )
     .on_tap(on_tap)
     .on_long_press(on_long_press))
+}
+
+/// The sheet's own scrollable region (G41): `children` (the spaces/tabs/panes
+/// sections and their gaps — everything below the sheet's fixed top row)
+/// wrapped in [`scroll_view`], so a session with many tabs/panes stays fully
+/// reachable rather than the lower rows running off the sheet's own bottom
+/// edge (no mock counterpart — `docs/terminal.html` never had enough rows to
+/// need one).
+///
+/// `max_height`, when `Some`, tightens the region to that many logical px —
+/// `pages::Actions::sheet_body`'s own window-metrics-derived cap, read once
+/// per build the same way every other responsive value in this app is (see
+/// `crate::responsive`). `None` — no shell has published metrics yet, or a
+/// bare headless test, which is every test in this suite — leaves the region
+/// unbounded, which [`scroll_view`] resolves the same way a plain column
+/// would: it sizes itself to its own content rather than clipping anything
+/// (`frust_widgets::scroll::ScrollWidget::layout`'s own documented fallback
+/// for an infinite incoming height). So a headless suite sees the identical
+/// geometry it always has — every existing hit-test locator in
+/// `tests/terminal.rs`/`tests/terminal_live.rs` keeps working unchanged —
+/// and a device, which always publishes metrics, is the only place the cap
+/// (and so the actual scrolling) ever engages.
+///
+/// Laid out as an ordinary (not `flexible`) child of the outer column
+/// `pages::Actions::sheet_body` composes: `ui/sheet.rs`'s own body
+/// constraint is itself unbounded in height (the sheet decides its own
+/// size from its content, clamped only at the *panel*, not the body — see
+/// that module's `SheetScaffoldWidget::layout`), and a `flexible` child
+/// under an unbounded main axis divides *zero* free space
+/// (`frust_widgets::FlexWidget::layout`'s own free-space computation) —
+/// the tight-constraint trap `examples/glyph-catalog`'s own device-gate
+/// fixes document. A caller-supplied fixed height sidesteps that trap
+/// entirely: [`SizedBox`] tightens to it regardless of the ambient's own
+/// unbounded axis, which is exactly why this takes a resolved `f64`
+/// rather than a flex share.
+pub(super) fn sheet_scroll_body<State: 'static>(
+    children: Vec<AnyView<State>>,
+    max_height: Option<f64>,
+) -> AnyView<State> {
+    let scroller = scroll_view(column(children));
+    match max_height {
+        Some(height) => any(SizedBox::<State>(None, Some(height)).child(scroller)),
+        None => any(scroller),
+    }
 }
 
 #[cfg(test)]

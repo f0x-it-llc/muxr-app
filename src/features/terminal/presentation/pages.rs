@@ -276,6 +276,22 @@ const SECTION_PANES: &str = "panes \u{2014} ";
 const ADD_SPACE: &str = "+ space";
 const ADD_TAB: &str = "+";
 
+/// [`pieces::sheet_scroll_body`]'s height cap (G41): the window's own height
+/// minus this estimate of everything that sits *outside* the scrollable
+/// region — `ui/sheet.rs`'s own handle zone, panel padding and safe-area
+/// inset on one side, this sheet's fixed top row and the gap under it on the
+/// other. A generous, community-approximate constant rather than an exact
+/// figure imported from `ui/sheet.rs`'s own private geometry: G41's own note
+/// prefers keeping this fix in the screen's own body over widening the
+/// shared substrate's surface, and the cost of a generous estimate is a
+/// slightly shorter scroll band than the sheet could technically spare, not
+/// a broken one.
+const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
+/// The scrollable region's floor, so a short window still leaves a usable,
+/// clearly-scrollable band rather than the reserve above collapsing it
+/// toward zero.
+const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
+
 /// The query key `/terminal?session=<id>` carries the attached session's id
 /// under.
 ///
@@ -1471,6 +1487,15 @@ impl Actions {
     /// **The spaces section is herdr's alone** — zellij has no spaces at all
     /// (see [`TerminalController::has_spaces`]), so the section is *absent*
     /// rather than empty: no label, and no gap where one would have been.
+    ///
+    /// **The top row stays fixed; everything under it scrolls (G41).** Split
+    /// into two pieces of the outer column this fn returns: [`Self::top_row`]
+    /// (the `panes & tabs` label and the close button) painted once, outside
+    /// the scroll region, and every section below it handed to
+    /// [`pieces::sheet_scroll_body`] — so a session with many tabs/panes
+    /// stays fully reachable instead of the lower rows running off the
+    /// sheet's own bottom edge. See that fn's own doc for why the region's
+    /// height cap only ever engages on a real device.
     fn sheet_body(&self, sheet: &SheetHandle) -> AnyView<AppState> {
         let theme = pieces::active_theme();
         let colors = pieces::palette(&theme);
@@ -1483,7 +1508,8 @@ impl Actions {
         let browsed = self.controller.browsed_tab.get();
         let read_only = self.connection.is_read_only.get();
 
-        let mut children = vec![self.top_row(sheet, &colors), pieces::v_gap(SECTION_TOP_GAP)];
+        let top_row = self.top_row(sheet, &colors);
+        let mut children = vec![pieces::v_gap(SECTION_TOP_GAP)];
 
         if self.controller.has_spaces() {
             children.push(pieces::section_label(SECTION_SPACES, &colors));
@@ -1610,7 +1636,17 @@ impl Actions {
             ));
         }
 
-        any(pieces::column(children))
+        // G41: the window's own height, read once per build like every other
+        // responsive value this app reads (`crate::responsive`) — `None` in
+        // every headless suite (no shell has published metrics), which is
+        // exactly what keeps this fix from touching any existing test's own
+        // geometry (see `pieces::sheet_scroll_body`'s own doc).
+        let scroll_max_h = use_context::<WindowMetrics>().map(|metrics| {
+            (metrics.size.height - SHEET_SCROLL_RESERVE_PX).max(SHEET_SCROLL_FLOOR_PX)
+        });
+        let scroll_body = pieces::sheet_scroll_body(children, scroll_max_h);
+
+        any(pieces::column(vec![top_row, scroll_body]))
     }
 
     /// The sheet's top row, whose close button pops it — through the same one
