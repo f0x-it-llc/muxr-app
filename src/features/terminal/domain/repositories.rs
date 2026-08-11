@@ -153,10 +153,12 @@ pub trait TerminalRepository {
         Err(unsupported("rename_space"))
     }
 
-    /// Open a new tab, unnamed — the wire's `NewTabReq.tab_name` is left
-    /// empty; give it a name afterward through
-    /// [`rename_tab`](Self::rename_tab). MUTATING.
-    async fn new_tab(&self) -> Result<(), AppFailure> {
+    /// Open a new tab named `name` (the wire's `NewTabReq.tab_name`); an
+    /// empty `name` leaves it unnamed, letting the backend choose one — the
+    /// sheet's add-tab dialog sends exactly that on a blank confirm (G39),
+    /// the same "may be empty" shape [`create_space`](Self::create_space)'s
+    /// own `label` already takes. MUTATING.
+    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
         Err(unsupported("new_tab"))
     }
 
@@ -270,7 +272,7 @@ mod tests {
             Err(AppFailure::Internal(_))
         ));
         assert!(matches!(
-            block_on(repo.new_tab()),
+            block_on(repo.new_tab("name".to_string())),
             Err(AppFailure::Internal(_))
         ));
         assert!(matches!(

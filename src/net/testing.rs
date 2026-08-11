@@ -982,7 +982,7 @@ mod tests {
 
         let new_tab = NewTabReq {
             session: "zellij:dev".to_string(),
-            tab_name: String::new(),
+            tab_name: "build".to_string(),
         };
         assert!(
             client

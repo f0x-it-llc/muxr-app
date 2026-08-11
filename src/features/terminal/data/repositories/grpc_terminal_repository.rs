@@ -292,12 +292,12 @@ impl TerminalRepository for GrpcTerminalRepository {
         error::ack_result(&ack)
     }
 
-    async fn new_tab(&self) -> Result<(), AppFailure> {
+    async fn new_tab(&self, name: String) -> Result<(), AppFailure> {
         // `NewTabReq` carries no `connection_id` — see the module docs'
         // "What it addresses".
         let (session, _connection_id) = self.addressed()?;
         let client = self.client()?;
-        let request = new_tab_request(session);
+        let request = new_tab_request(session, name);
         let ack = client
             .authed()
             .new_tab(request)
@@ -515,13 +515,10 @@ fn rename_space_request(
     }
 }
 
-/// `NewTab`'s request — unnamed, per [`TerminalRepository::new_tab`]'s own
-/// doc; `NewTabReq` carries no `connection_id`.
-fn new_tab_request(session: String) -> NewTabReq {
-    NewTabReq {
-        session,
-        tab_name: String::new(),
-    }
+/// `NewTab`'s request; `NewTabReq` carries no `connection_id`, unlike
+/// [`create_space_request`]'s own `label` field.
+fn new_tab_request(session: String, tab_name: String) -> NewTabReq {
+    NewTabReq { session, tab_name }
 }
 
 /// `RenameTab`'s request — `RenameTabReq` carries no `connection_id`.
@@ -533,8 +530,9 @@ fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabRe
     }
 }
 
-/// `NewPane`'s request, unnamed like [`new_tab_request`]; `NewPaneReq` carries
-/// no `connection_id`.
+/// `NewPane`'s request — always unnamed (the sheet's new-pane row has no
+/// naming dialog in front of it, unlike [`new_tab_request`]'s own);
+/// `NewPaneReq` carries no `connection_id`.
 fn new_pane_request(session: String, floating: bool) -> NewPaneReq {
     NewPaneReq {
         session,
@@ -984,7 +982,7 @@ mod tests {
             Err(AppFailure::Network(_))
         ));
         assert!(matches!(
-            block_on(repo.new_tab()),
+            block_on(repo.new_tab("name".to_string())),
             Err(AppFailure::Network(_))
         ));
         assert!(matches!(
@@ -1054,12 +1052,20 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_request_carries_only_the_session_unnamed() {
-        let request = new_tab_request("zellij:dev".to_string());
+    fn new_tab_request_carries_the_session_and_name() {
+        let request = new_tab_request("zellij:dev".to_string(), "build".to_string());
+        assert_eq!(request.session, "zellij:dev");
+        assert_eq!(request.tab_name, "build");
+    }
+
+    #[test]
+    fn new_tab_request_carries_an_empty_name_when_the_dialog_confirms_blank() {
+        let request = new_tab_request("zellij:dev".to_string(), String::new());
         assert_eq!(request.session, "zellij:dev");
         assert_eq!(
             request.tab_name, "",
-            "NewTabReq has no connection_id field, and this round names nothing"
+            "a blank confirm is this create's own valid default (G39), not a \
+             disabled state — NewTabReq has no connection_id field either way"
         );
     }
 
