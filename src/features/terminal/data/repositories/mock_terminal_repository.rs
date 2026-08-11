@@ -23,14 +23,34 @@
 //! Space selection is real state (the sheet's space pills toggle it), so it
 //! lives behind the mutex — [`TerminalRepository::switch_space`] is its one
 //! write path, and it addresses a space by [`Space::id`], which in this
-//! backend-less store *is* the name. Tabs, their panes and their lines are
-//! **fixed**: v2's mock replays the same four tabs regardless of which session
-//! was attached (see `domain::entities`' module docs), and a tab or pane focus
-//! move is a *read*, not a write, so
-//! [`TerminalRepository::go_to_tab`]/[`TerminalRepository::focus_pane`] have
-//! nothing to tell and merely validate what they were handed (the sheet only
-//! ever addresses a row it just drew). `detach_session` is likewise a no-op
-//! that merely validates its id — this store fronts no attachment to drop.
+//! backend-less store *is* the name. **Pane focus is real state too**: a
+//! [`TerminalRepository::focus_pane`] moves the `focused` flag onto the pane it
+//! was handed, so a later [`TerminalRepository::list_tabs`] agrees with the
+//! focus move that was just made — a client that re-reads the layout after a
+//! commit (this app does, from several triggers) would otherwise be told the
+//! commit never happened. The tab *set* itself, its panes' identities and its
+//! lines are **fixed**: v2's mock replays the same four tabs regardless of
+//! which session was attached (see `domain::entities`' module docs), and which
+//! tab a session is on is a fact this store fronts nothing to hold, so
+//! [`TerminalRepository::go_to_tab`] merely validates what it was handed (the
+//! sheet only ever addresses a row it just drew). `detach_session` is likewise
+//! a no-op that merely validates its id — this store fronts no attachment to
+//! drop.
+//!
+//! # The headless-test tab seam
+//!
+//! A tab world that never moves cannot exercise the screen's whole reason for
+//! re-reading one (a tab opened from *elsewhere* — another client, or the
+//! session itself — which no server-push signal announces). So
+//! [`add_test_tab`]/[`clear_test_tabs`] append synthetic tabs to every later
+//! [`TerminalRepository::list_tabs`] answer. Process-global rather than
+//! per-instance because a suite reaches this store only as the
+//! `Arc<dyn TerminalRepository>` its `di` published — the same shape
+//! `presentation::pages::set_demo_copy_sink` takes, and never touched by
+//! production code (nothing outside `tests/` calls either function). Being
+//! process-global, it belongs to a **serialized** suite (`tests/*.rs`, each of
+//! whose tests holds `support::serial`): a caller appending one is deciding
+//! what every `list_tabs` in the process answers until it clears it again.
 //!
 //! # Failure mapping
 //!
@@ -57,12 +77,58 @@ use crate::features::terminal::domain::repositories::TerminalRepository;
 /// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
 
+/// The synthetic tabs [`add_test_tab`] appends to every later `list_tabs`
+/// answer — see the [module docs](self)' headless-test tab seam.
+static TEST_TABS: Mutex<Vec<TabEntry>> = Mutex::new(Vec::new());
+
+/// Append a tab keyed (and labelled) `key` to every later `list_tabs` answer,
+/// for a headless test that needs the tab world to move behind the screen's
+/// back — see the [module docs](self). Never called by production code.
+pub fn add_test_tab(key: &str) {
+    let mut tabs = lock_test_tabs();
+    // Past the four seeded tabs, so an appended tab's index/id collides with
+    // nothing the seed already carries.
+    let index = seed_tabs().len() as u32 + tabs.len() as u32 + 1;
+    tabs.push(test_tab(index, key));
+}
+
+/// Drop every tab [`add_test_tab`] appended — a suite's own teardown, and its
+/// setup, since this store outlives any one mount of the screen.
+pub fn clear_test_tabs() {
+    lock_test_tabs().clear();
+}
+
+/// The appended-tab store, poisoned locks recovered like every other lock
+/// here.
+fn lock_test_tabs() -> std::sync::MutexGuard<'static, Vec<TabEntry>> {
+    TEST_TABS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One appended tab, shaped exactly like a seeded one (see [`seed_tabs`]) so
+/// nothing downstream can tell the two apart.
+fn test_tab(index: u32, key: &str) -> TabEntry {
+    TabEntry {
+        index,
+        tab_id: u64::from(index),
+        key: key.to_string(),
+        label: key.to_string(),
+        pane_title: format!("ed@{key}: ~"),
+        pane_name: format!("ed@{key}"),
+        pane_path: "/home/ed".to_string(),
+        panes: seed_panes(index, &format!("ed@{key}"), "/home/ed"),
+        active: false,
+    }
+}
+
 /// An in-memory [`TerminalRepository`]. See the [module docs](self).
 pub struct MockTerminalRepository {
-    /// The space list — the one thing on this screen that mutates.
+    /// The space list — one of the two things this store lets move.
     spaces: Mutex<Vec<Space>>,
-    /// The tab world, fixed for the mock era.
-    tabs: Vec<TabEntry>,
+    /// The tab world: a fixed set of tabs whose pane **focus** moves (see the
+    /// [module docs](self)' "What mutates").
+    tabs: Mutex<Vec<TabEntry>>,
 }
 
 impl MockTerminalRepository {
@@ -70,7 +136,7 @@ impl MockTerminalRepository {
     pub fn seeded() -> Self {
         Self {
             spaces: Mutex::new(seed_spaces()),
-            tabs: seed_tabs(),
+            tabs: Mutex::new(seed_tabs()),
         }
     }
 
@@ -89,11 +155,25 @@ impl MockTerminalRepository {
         self.lock().clone()
     }
 
+    /// The seeded tabs plus whatever [`add_test_tab`] appended, cloned.
+    fn tabs_snapshot(&self) -> Vec<TabEntry> {
+        let mut tabs = self.lock_tabs().clone();
+        tabs.extend(lock_test_tabs().iter().cloned());
+        tabs
+    }
+
     /// The store, with a poisoned lock recovered rather than propagated: a
     /// panicking test must not cascade into every later call (the sessions
     /// mock's own recovery).
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Space>> {
         self.spaces
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The tab store, recovered the same way [`lock`](Self::lock) is.
+    fn lock_tabs(&self) -> std::sync::MutexGuard<'_, Vec<TabEntry>> {
+        self.tabs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -248,7 +328,7 @@ impl TerminalRepository for MockTerminalRepository {
 
     async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
-        Ok(self.tabs.clone())
+        Ok(self.tabs_snapshot())
     }
 
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -273,7 +353,7 @@ impl TerminalRepository for MockTerminalRepository {
         // switch is `tab_lines` (see the module docs). An id no seeded tab
         // carries is still a bug worth surfacing — the sheet only ever
         // addresses a tab it just drew.
-        if !self.tabs.iter().any(|tab| tab.tab_id == tab_id) {
+        if !self.tabs_snapshot().iter().any(|tab| tab.tab_id == tab_id) {
             return Err(AppFailure::Internal(format!("go_to_tab: no tab {tab_id}")));
         }
         Ok(())
@@ -293,17 +373,21 @@ impl TerminalRepository for MockTerminalRepository {
 
     async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
-        // Like `go_to_tab`, this store has nothing to tell — but a pane no
-        // seeded tab carries is a bug worth surfacing, since the sheet only
-        // ever commits a row it just drew.
-        if !self.tabs.iter().any(|tab| {
-            tab.panes
-                .iter()
-                .any(|pane| pane.id == pane_id && pane.is_plugin == is_plugin)
-        }) {
+        // A pane no seeded tab carries is a bug worth surfacing, since the
+        // sheet only ever commits a row it just drew.
+        let addressed = |pane: &PaneEntry| pane.id == pane_id && pane.is_plugin == is_plugin;
+        let mut tabs = self.lock_tabs();
+        let Some(tab) = tabs.iter_mut().find(|tab| tab.panes.iter().any(addressed)) else {
             return Err(AppFailure::Internal(format!(
                 "focus_pane: no pane {pane_id}"
             )));
+        };
+        // One focused pane per tab, and it is the one just addressed — so a
+        // client re-reading the layout is told what it just asked for (see the
+        // module docs' "What mutates").
+        for pane in &mut tab.panes {
+            let focused = addressed(pane);
+            pane.focused = focused;
         }
         Ok(())
     }
@@ -488,6 +572,57 @@ mod tests {
         // The two id namespaces are separate — a plugin pane with a terminal
         // pane's id is still not a pane this store carries.
         assert!(block_on(repo.focus_pane(10, true)).is_err());
+    }
+
+    #[test]
+    fn a_pane_focus_moves_the_focused_flag_so_a_later_list_agrees_with_it() {
+        let repo = MockTerminalRepository::seeded();
+        // The second pane of the first tab — the mock seeds the first focused.
+        assert!(block_on(repo.focus_pane(11, false)).is_ok());
+
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        let focused: Vec<u32> = tabs[0]
+            .panes
+            .iter()
+            .filter(|pane| pane.focused)
+            .map(|pane| pane.id)
+            .collect();
+        assert_eq!(
+            focused,
+            [11],
+            "one focused pane per tab, and it is the one just addressed"
+        );
+        assert_eq!(
+            tabs[1]
+                .panes
+                .iter()
+                .filter(|pane| pane.focused)
+                .map(|pane| pane.id)
+                .collect::<Vec<u32>>(),
+            [20],
+            "…and no other tab's focus moved with it"
+        );
+    }
+
+    #[test]
+    fn an_appended_test_tab_is_shaped_exactly_like_a_seeded_one() {
+        // The seam's *effect* on `list_tabs` is exercised from
+        // `tests/terminal_live.rs`, whose suite is serialized — this binary
+        // runs its tests in parallel, and the appended-tab store is
+        // process-global (see the module docs), so appending one here would
+        // land in a neighbouring test's own answer.
+        let appended = test_tab(5, "scratch");
+        assert_eq!(appended.pill_label(), "5 scratch");
+        assert_eq!(appended.tab_id, 5);
+        assert!(
+            !seed_tabs().iter().any(|tab| tab.tab_id == appended.tab_id),
+            "an appended tab's id collides with no seeded one"
+        );
+        assert_eq!(
+            appended.panes.len(),
+            seed_tabs()[0].panes.len(),
+            "…and it carries the same pane shape"
+        );
     }
 
     #[test]
