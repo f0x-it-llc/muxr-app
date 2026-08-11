@@ -263,8 +263,18 @@ fn seed_tabs() -> Vec<TabEntry> {
 
 /// One tab's two panes: the mock's own focused `.pane-item`, and an unfocused
 /// `zsh` beside it — see [`seed_tabs`].
+///
+/// The two are **side by side**, splitting a classic 80x24 grid down the
+/// middle (focused left, sibling right), rather than sharing one full-grid
+/// rect. The rects are what `presentation::pages`' content-tap hit test
+/// resolves a tapped cell against, and identical ones resolve *every*
+/// in-bounds tap to the same pane (the last match wins within a layer) —
+/// leaving no cell anybody could aim at the **focused** pane. Two disjoint
+/// halves make "tap the pane you are already on" and "tap the other one" both
+/// expressible, which is exactly the distinction a tap's
+/// focus-or-keyboard verdict turns on.
 fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
-    let pane = |id: u32, title: String, focused: bool| PaneEntry {
+    let pane = |id: u32, title: String, focused: bool, x: u32| PaneEntry {
         id,
         title,
         cwd: path.to_string(),
@@ -273,14 +283,14 @@ fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
         exited: false,
         is_plugin: false,
         is_fullscreen: false,
-        x: 0,
+        x,
         y: 0,
         rows: 24,
-        cols: 80,
+        cols: 40,
     };
     vec![
-        pane(index * 10, name.to_string(), true),
-        pane(index * 10 + 1, format!("{name} zsh"), false),
+        pane(index * 10, name.to_string(), true, 0),
+        pane(index * 10 + 1, format!("{name} zsh"), false, 40),
     ]
 }
 

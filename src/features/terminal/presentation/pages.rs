@@ -154,6 +154,22 @@
 //! that landed empty makes every tap a miss, and that is the one state a user
 //! cannot tap their way out of. Every later miss is the plain no-op again.
 //!
+//! # Tap → keyboard, the other half of the same answer
+//!
+//! The hook answers the grid a `bool` — *should this tap raise the keyboard?*
+//! ([`term::ContentTapSink`]) — and it is the same resolution, read the other
+//! way round: `Some` (a tap that lands on a **different** pane) focuses that
+//! pane and answers `false`, so moving zellij's own focus border is a pointing
+//! gesture with no keyboard behind it; `None` — the pane the session is
+//! already on, or no hit at all — answers `true`. Tapping an unfocused pane
+//! twice therefore does the natural thing without any extra state: the first
+//! tap's optimistic focus move (`focus_pane_from_tap`) is what makes the
+//! second one resolve `None`, and the second one raises the keyboard. herdr,
+//! whose hook is never wired, keeps the unconditional tap → keyboard the grid
+//! falls back to. A drag-scroll never reaches this hook at all (the grid's own
+//! touch state machine resolves it as a scroll), which is what stops a scroll
+//! summoning a keyboard on either backend.
+//!
 //! # Wheel → mouse frames
 //!
 //! [`term::WheelSink`] is the wheel hook, wired for every live session on
@@ -674,12 +690,20 @@ impl Component for TerminalScreen {
                             let controller = Arc::clone(&controller);
                             spawn_local(async move { controller.reload_tabs().await });
                         }
-                        return;
+                        // Nothing to focus, so this tap is about the pane the
+                        // user is already on: raise the keyboard.
+                        return true;
                     };
                     let controller = Arc::clone(&controller);
                     spawn_local(async move {
                         controller.focus_pane_from_tap(pane_id, is_plugin).await;
                     });
+                    // A tap that *moved* the focus is a pointing gesture, not a
+                    // typing one — no keyboard. The optimistic focus move
+                    // `focus_pane_from_tap` makes is what turns the next tap on
+                    // the same pane into the `None` arm above, and that one
+                    // raises it.
+                    false
                 });
                 Some(sink)
             };
@@ -945,10 +969,15 @@ fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry>
 /// The `(pane_id, is_plugin)` a content tap should focus, if any —
 /// [`resolve_tapped_pane`] plus the one early-out the module docs' "Tap →
 /// FocusPane" section describes: a tap that resolves to the pane the
-/// session is **already** on is a no-op beyond the focus claim the grid's
-/// own `Down` already made (`Down` claims focus on every phase, tap
-/// included — see `term::widget`'s own touch-state-machine doc), so this
-/// answers `None` for it exactly as it does for a stale/no-hit tap.
+/// session is **already** on moves no focus, so this answers `None` for it
+/// exactly as it does for a stale/no-hit tap.
+///
+/// `None` is also what the caller reads as "**raise the keyboard**" (the
+/// module docs' section on the other half of the decision): a tap on the
+/// pane the user is already working in is a typing gesture, while a `Some`
+/// is a pointing one. The focus *claim* is separate from both and made by
+/// the grid's own `Down` whatever this answers — see `term::widget`'s
+/// touch-state-machine doc.
 fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)> {
     let pane = resolve_tapped_pane(tab, col, row)?;
     if pane.focused {

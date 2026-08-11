@@ -709,11 +709,18 @@ fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
     mounted.frame(700.0);
     assert!(mounted.selection.range().is_some(), "something to clear");
     // The press that *started* the gesture found no selection to clear, so it
-    // fell through and behaved as an ordinary tap: focus claimed, keyboard up.
-    // That is what makes the next assertion about ordering rather than about a
-    // grid that never focuses at all.
+    // fell through and claimed the focus session exactly as any other press
+    // does — the claim is invariant across all three outcomes of the touch
+    // machine, which is what makes the next assertion about *ordering* rather
+    // than about a grid that never focuses at all. It raised no keyboard: a
+    // hold is not a tap, and only the tap branch publishes an IME surface
+    // (`term::widget`'s IME-client docs).
     assert!(mounted.root.is_focus_active());
-    assert!(mounted.root.ime_state().is_some());
+    assert!(
+        mounted.root.ime_state().is_none(),
+        "a long press selects a word; it does not summon a keyboard over the \
+         thing it just selected"
+    );
 
     // The clearing tap — deliberately somewhere the chip is not.
     let elsewhere = mounted.cell(2, 2);

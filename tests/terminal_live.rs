@@ -1,7 +1,8 @@
-//! Headless behavior coverage for the `/terminal` screen's **live demo pane**
-//! (task 11's cutover): the pane-content switch, settings-driven cursor/font,
-//! resize-on-delta-only, fullscreen with a live pane, the IME-active-only key
-//! bar, and the tap-to-focus-only contract at the root (section 10).
+//! Headless behavior coverage for the `/terminal` screen's **live demo pane**:
+//! the pane-content switch, settings-driven cursor/font, resize-on-delta-only,
+//! fullscreen with a live pane, the IME-active-only key bar, and the
+//! tap-to-focus-only contract at the root (section 10) — including which taps
+//! may raise a keyboard and which may not.
 //!
 //! # Entering the pane, now that the menu has no row for it
 //!
@@ -47,6 +48,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+use frust::input::TOUCH_SLOP;
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, RwSignal, Set, SizedBox, Stack, Theme,
     any, navigator, provide_context,
@@ -57,7 +59,7 @@ use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
 // `frust-shell-common` directly rather than `frust::`.
 use frust_shell_common::{SystemUiMode, current_system_ui_mode};
 use frust_text::TextContext;
-use kurbo::{Point, Size};
+use kurbo::{Point, Size, Vec2};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::settings::di::expect_preferences_repository;
@@ -329,6 +331,68 @@ fn grid_rect(scene: &RecScene) -> (Point, Size) {
         .find(|(_, _, color)| *color == ink.terminal_bg)
         .map(|(origin, size, _)| (origin, size))
         .expect("the live grid paints its own plain background fill")
+}
+
+/// The pixel a tap must land on to name grid cell `(col, row)` — the grid's
+/// own painted box divided by the emulator's cell grid, the derivation
+/// section 3's long press already uses.
+///
+/// **Approximate by construction**, and safely so: the widget takes at most
+/// one cell less than the box it painted per axis (its `layout` doc's
+/// remainder strip), so the derived cell box runs up to one cell wide per
+/// *grid* — an error under half a cell at the columns anything here aims at.
+/// Every caller targets the middle of a pane rect dozens of cells across, so a
+/// cell either way cannot change which pane the tap resolves to.
+fn cell_point(scene: &RecScene, col: u16, row: u16) -> Point {
+    let (origin, size) = grid_rect(scene);
+    let (rows, cols) = debug_live_probe()
+        .expect("a live pane is mounted")
+        .emulator
+        .borrow()
+        .screen()
+        .size();
+    assert!(
+        col < cols && row < rows,
+        "cell ({col},{row}) is outside the rendered {cols}x{rows} grid"
+    );
+    let cell_w = size.width / f64::from(cols);
+    let cell_h = size.height / f64::from(rows);
+    Point::new(
+        origin.x + cell_w * (f64::from(col) + 0.5),
+        origin.y + cell_h * (f64::from(row) + 0.5),
+    )
+}
+
+/// A cell well inside the mock's **focused** pane — its seed is the left half
+/// of a classic 80x24 grid (`mock_terminal_repository::seed_panes`).
+const FOCUSED_CELL: (u16, u16) = (5, 5);
+/// …and one well inside its unfocused sibling, the right half.
+const SIBLING_CELL: (u16, u16) = (45, 5);
+
+/// The id of the SERVER-ACTIVE tab's focused pane, as the mounted screen's own
+/// tab world holds it — how a test reads whether a tap moved the focus.
+fn focused_pane_id() -> Option<u32> {
+    debug_controller()?
+        .active_tab_entry()?
+        .panes
+        .iter()
+        .find(|pane| pane.focused)
+        .map(|pane| pane.id)
+}
+
+/// One finger drag from `from`, far enough past the framework's own
+/// [`TOUCH_SLOP`] that the grid's touch state machine can only read it as a
+/// **scroll**: Down, one Move that crosses the slop, then Up where the Move
+/// left off (a release inside the slop of the *press* is what makes a tap, and
+/// this one is nowhere near it).
+fn drag_scroll(h: &mut Harness, from: Point) {
+    let to = from + Vec2::new(0.0, TOUCH_SLOP * 4.0);
+    h.root
+        .event(&mut h.state, &pointer(frust_core::PointerPhase::Down, from));
+    h.root
+        .event(&mut h.state, &pointer(frust_core::PointerPhase::Move, to));
+    h.root
+        .event(&mut h.state, &pointer(frust_core::PointerPhase::Up, to));
 }
 
 /// The terminal card — the stage's own rounded fill — as `(origin, size,
@@ -1114,11 +1178,20 @@ fn a_keystroke_after_drain_echoes_synchronously_in_the_same_dispatch_call() {
 //
 // The screen's v2 design is **tap-to-focus only**: the keyboard and the key bar
 // are IME-active-only, so mounting the live pane must claim nothing at all and
-// only a tap on the grid itself may open a focus/IME session. These three pin
-// both halves of that at the root — `RenderRoot::is_focus_active`/`ime_state`
-// are literally what a shell reads to decide whether to show a soft keyboard,
-// so they are the honest place to assert it (a widget-level `has_focus` would
-// not have caught the seeding these tests exist for).
+// only a tap on the grid itself may open a focus/IME session. These pin both
+// halves of that at the root — `RenderRoot::is_focus_active`/`ime_state` are
+// literally what a shell reads to decide whether to show a soft keyboard, so
+// they are the honest place to assert it (a widget-level `has_focus` would not
+// have caught the seeding these tests exist for).
+//
+// "A tap" is where the two-stage pane semantics live, and the same pair of
+// reads is what pins them: a tap on the pane the session is already on raises
+// the keyboard, a tap on a *different* pane only moves the focus there (a
+// pointing gesture — the second tap on it then raises one), and a drag-scroll
+// raises nothing at all. herdr, whose single-pane stream wires no tap hook,
+// keeps the unconditional tap → keyboard. The focus *claim* is invariant across
+// every one of them: it is the keyboard that is conditional, never the claim
+// (`term::widget`'s own touch-state-machine docs).
 
 /// A freshly mounted live pane claims **nothing** — no root focus, no published
 /// IME surface, not even a focus/IME generation edge for a shell to wake on.
@@ -1156,29 +1229,171 @@ fn mounting_the_live_pane_claims_no_focus_and_publishes_no_ime_surface() {
     );
 }
 
-/// The other half: tapping the grid *does* open the session — focus claimed and
-/// an **active** IME surface published, which is what brings the keyboard (and
-/// with it the key bar) up.
+/// The other half: tapping the grid **on the pane the session is already on**
+/// opens the session — focus claimed and an **active** IME surface published,
+/// which is what brings the keyboard (and with it the key bar) up.
+///
+/// Aimed at [`FOCUSED_CELL`] rather than the grid's centre: the hit test
+/// resolves a tapped cell against the mock's seeded pane rects, and only a tap
+/// on the *focused* one is the typing gesture this pins (a tap on the sibling
+/// is the pointing gesture the next test owns).
 #[test]
 fn tapping_the_grid_claims_focus_and_publishes_an_active_ime_surface() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
+    // The hit test runs against the loaded tab world, so the tap only *means*
+    // "on the focused pane" once that world has landed.
+    await_workspace(&mut h);
     let scene = h.frame();
+    let focused = focused_pane_id().expect("the mock seeds one focused pane per tab");
 
-    let (origin, size) = grid_rect(&scene);
-    h.tap(center((origin, size)));
+    h.tap(cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1));
 
     assert_eq!(
         h.session(),
         (true, true),
-        "a tap on the grid is the one thing that opens the session"
+        "a tap on the focused pane is the one thing that opens the session"
+    );
+    assert_eq!(
+        focused_pane_id(),
+        Some(focused),
+        "…and it moved no focus: the pane it landed on was already the one"
     );
     assert!(
         h.root.ime_state().expect("a surface is published").active,
         "and the surface it publishes is an active one"
     );
+}
+
+/// A tap on a **different** pane is a pointing gesture: it claims focus (every
+/// `Down` does), fires `FocusPane` so zellij's own border moves, and publishes
+/// no IME surface at all — no keyboard covering the pane the user just asked
+/// to see.
+#[test]
+fn a_tap_on_an_unfocused_pane_focuses_it_and_summons_no_keyboard() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let scene = h.frame();
+    let before = focused_pane_id().expect("the mock seeds one focused pane per tab");
+
+    h.tap(cell_point(&scene, SIBLING_CELL.0, SIBLING_CELL.1));
+
+    assert_eq!(
+        h.session(),
+        (true, false),
+        "the tap claims focus, exactly as every Down does, and publishes nothing"
+    );
+    h.pump_until("the FocusPane to land", |_| {
+        focused_pane_id().is_some_and(|id| id != before)
+    });
+    // …and the frames the landing woke must not raise one behind its back:
+    // the focused-paint republish is gated on engagement, not on focus.
+    h.frame();
+    assert_eq!(
+        h.session(),
+        (true, false),
+        "no later paint resurrects a surface the tap declined to publish"
+    );
+}
+
+/// …and the second tap on that same pane — now the focused one, thanks to the
+/// optimistic move the first tap's `FocusPane` made — *is* the typing gesture,
+/// so it raises the keyboard. Two taps, no extra state: exactly the spec.
+#[test]
+fn a_second_tap_on_the_newly_focused_pane_raises_the_keyboard() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let scene = h.frame();
+    let before = focused_pane_id().expect("the mock seeds one focused pane per tab");
+
+    let at = cell_point(&scene, SIBLING_CELL.0, SIBLING_CELL.1);
+    h.tap(at);
+    h.pump_until("the FocusPane to land", |_| {
+        focused_pane_id().is_some_and(|id| id != before)
+    });
+    assert_eq!(h.session(), (true, false), "the first tap raised nothing");
+
+    h.tap(at);
+    assert_eq!(
+        h.session(),
+        (true, true),
+        "the second tap on the pane the session is now on raises the keyboard"
+    );
+    assert!(h.root.ime_state().expect("a surface is published").active);
+}
+
+/// A drag-scroll raises nothing, wherever it starts. The gesture the terminal
+/// is used with most is the one that must never cover it with a keyboard.
+#[test]
+fn a_drag_scroll_publishes_no_ime_surface() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    let scene = h.frame();
+
+    // Starts on the focused pane — the one cell a *tap* would raise a keyboard
+    // from, so nothing about the destination is doing the work here.
+    let start = cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1);
+    drag_scroll(&mut h, start);
+
+    assert_eq!(
+        h.session(),
+        (true, false),
+        "a scroll claims focus like any Down and publishes no surface"
+    );
+    h.frame();
+    assert_eq!(
+        h.session(),
+        (true, false),
+        "…and no paint after it puts one up either"
+    );
+}
+
+/// herdr wires no tap hook at all (its single-pane stream has no second pane to
+/// point at), so the grid answers for itself: a tap raises the keyboard, and a
+/// scroll still does not. The scroll runs first, so the tap's own claim cannot
+/// be what the scroll is measured against.
+#[test]
+fn herdr_keeps_tap_to_keyboard_while_its_scroll_raises_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session("herdr:work");
+    h.enter_demo();
+    let scene = h.frame();
+    assert!(
+        debug_grid_hooks()
+            .expect("a live session is mounted")
+            .on_content_tap
+            .is_none(),
+        "herdr wires no tap hook — that absence is what this pins"
+    );
+
+    let at = cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1);
+    drag_scroll(&mut h, at);
+    h.frame();
+    assert_eq!(
+        h.session(),
+        (true, false),
+        "a scroll never raises a keyboard on herdr either — not in the event \
+         pass, and not on the paint after it"
+    );
+
+    h.tap(at);
+    assert_eq!(
+        h.session(),
+        (true, true),
+        "…but a tap does, with nothing to ask about it"
+    );
+    assert!(h.root.ime_state().expect("a surface is published").active);
 }
 
 /// A real **pointer** tap on a menu row — the device sequence, rather than the
@@ -1395,15 +1610,29 @@ fn invoking_the_wired_hooks_never_panics_on_a_hit_a_miss_or_either_wheel_route()
     let on_content_tap = hooks.on_content_tap.expect("zellij wires the tap hook");
     let on_wheel = hooks.on_wheel.expect("the wheel hook is always wired");
 
-    // A no-hit tap (the mock's seeded panes sit at (0,0)-(80,24)) — no RPC,
-    // no crash (`resolve_tap_action`'s own "stale/no-hit tap" case).
-    on_content_tap(500, 500);
+    // A no-hit tap (the mock's seeded panes tile (0,0)-(80,24) between them) —
+    // no RPC, no crash (`resolve_tap_action`'s own "stale/no-hit tap" case),
+    // and the keyboard verdict a tap with nothing under it gets.
+    assert!(
+        on_content_tap(500, 500),
+        "a tap that resolves to nothing raises the keyboard"
+    );
     h.pump_for(Duration::from_millis(50));
 
-    // A hit tap — both of the mock's seeded panes share the same rect, so
-    // this always resolves to *some* pane and exercises the real
-    // `focus_pane_from_tap` round trip end to end.
-    on_content_tap(5, 5);
+    // A hit on the pane the session is already on: no RPC either, same
+    // verdict — this is the typing gesture.
+    assert!(
+        on_content_tap(u32::from(FOCUSED_CELL.0), u32::from(FOCUSED_CELL.1)),
+        "a tap on the focused pane raises the keyboard"
+    );
+    h.pump_for(Duration::from_millis(50));
+
+    // A hit on the *sibling* — the pointing gesture: it exercises the real
+    // `focus_pane_from_tap` round trip end to end, and raises nothing.
+    assert!(
+        !on_content_tap(u32::from(SIBLING_CELL.0), u32::from(SIBLING_CELL.1)),
+        "a tap that moves the focus raises no keyboard"
+    );
     h.pump_for(Duration::from_millis(50));
 
     // Capability present (the mock connection backend's own default,
@@ -1568,13 +1797,17 @@ fn the_first_content_tap_that_resolves_to_nothing_re_reads_the_layout_once() {
     // all — the first miss re-reads it rather than leaving the user to find
     // the sheet.
     add_test_tab(SCRATCH_TAB);
-    on_content_tap(500, 500);
+    assert!(
+        on_content_tap(500, 500),
+        "a miss still answers 'raise' — the backstop is about the layout, not \
+         the keyboard"
+    );
     h.pump_until("the backstop reload", |_| published_tab(SCRATCH_TAB));
 
     // …once per mount. A second miss is the plain no-op it always was.
     clear_test_tabs();
     add_test_tab("scratch-two");
-    on_content_tap(500, 500);
+    assert!(on_content_tap(500, 500));
     h.pump_for(Duration::from_millis(200));
     assert!(
         !published_tab("scratch-two"),
