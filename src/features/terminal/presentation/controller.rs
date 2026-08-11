@@ -104,12 +104,17 @@
 //! # One backend discriminator, two consequences
 //!
 //! A session id is `<backend>:<name>`, and this screen reads exactly one fact
-//! off it ([`is_herdr`]): whether the session runs on herdr. Two behaviours
-//! follow, and neither re-parses the id — spaces exist only on herdr
+//! off it ([`is_herdr`]): whether the session runs on herdr. Three behaviours
+//! follow, and none re-parses the id — spaces exist only on herdr
 //! ([`has_spaces`](TerminalController::has_spaces), which is also what keeps a
-//! zellij load from round-tripping for a guaranteed-empty list), and only
+//! zellij load from round-tripping for a guaranteed-empty list), only
 //! herdr's stream has to be re-opened for a focus move to become visible
-//! ([`reattaches_on_switch`](TerminalController::reattaches_on_switch)).
+//! ([`reattaches_on_switch`](TerminalController::reattaches_on_switch)), and
+//! the live grid's content-tap hook is never wired on herdr at all — its
+//! stream carries one pane, so there is nothing a tap could focus beyond the
+//! claim the grid's own `Down` already makes
+//! ([`is_herdr_session`](TerminalController::is_herdr_session),
+//! `presentation::pages`' own "Tap → FocusPane" wiring).
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -127,7 +132,7 @@ use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::data::feeds::grpc_feed::{FeedStatus, GrpcTerminalFeed};
 use crate::features::terminal::domain::entities::{
-    PaneEntry, RenameRequest, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
+    PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
 };
 use crate::features::terminal::domain::feed::TerminalFeed;
 use crate::features::terminal::domain::repositories::{
@@ -473,6 +478,42 @@ impl TerminalController {
         true
     }
 
+    /// Focus the pane `pane_id` of the tab the live session is on —
+    /// `presentation::pages`' content-tap hook's one route (its own
+    /// "Tap → FocusPane" wiring). Never called for a herdr session: the
+    /// hook itself is never wired there (see [`is_herdr_session`](Self::is_herdr_session)'s
+    /// own doc).
+    ///
+    /// Unlike [`commit_pane`](Self::commit_pane) — the sheet's own
+    /// browse-then-commit path — a grid tap never crosses tabs: it only ever
+    /// hit-tests the SERVER-ACTIVE tab's own pane rectangles
+    /// (`presentation::pages`' `resolve_tapped_pane`), so this skips the
+    /// tab-switch step entirely and calls straight through to `focus_pane`.
+    /// Reloads the tab list on landing — unlike `commit_pane`, which leaves
+    /// the optimistic move as the sheet's whole story — so a tap's rect and
+    /// the sheet's own badge both converge on whatever the server actually
+    /// did, the same [`reload_tabs`](Self::reload_tabs) call
+    /// [`rename_tab`](Self::rename_tab)/[`rename_pane`](Self::rename_pane)
+    /// already make for an equally rect-affecting change.
+    ///
+    /// Answers whether the commit landed, for parity with
+    /// [`commit_pane`](Self::commit_pane) — unused by production code today
+    /// (the caller's own closure reports nothing back), kept for the same
+    /// reason every other `tell`-backed verb here does: a refused call
+    /// writes no optimistic state and a caller can tell why nothing moved.
+    pub async fn focus_pane_from_tap(&self, pane_id: u32, is_plugin: bool) -> bool {
+        let tab_key = self.active_tab.get_untracked();
+        if !self
+            .tell(self.terminal.focus_pane(pane_id, is_plugin))
+            .await
+        {
+            return false;
+        }
+        self.focus_pane_locally(&tab_key, pane_id, is_plugin);
+        self.reload_tabs().await;
+        true
+    }
+
     /// Move the focused flag onto the pane `pane_id` of the tab keyed
     /// `tab_key`, in this screen's own state — the optimistic half of
     /// [`commit_pane`](Self::commit_pane).
@@ -637,6 +678,30 @@ impl TerminalController {
         }
     }
 
+    /// Scroll the pane `pane_id` one wheel notch in `direction` —
+    /// `presentation::pages`' wheel hook's RPC fallback for a server with no
+    /// `mouse-input` capability (its own "Wheel → mouse frames" wiring).
+    ///
+    /// Fire-and-forget, deliberately off [`ControllerCore`]'s own failure
+    /// sink (unlike [`tell`](Self::tell)-backed verbs): a drag emits one
+    /// call per line scrolled, and herdr's own wire answers this verb
+    /// "unsupported" whenever the capability is absent (which is exactly
+    /// when this fallback is reached at all), so toasting every step would
+    /// spam a whole drag rather than surface anything the user can act on —
+    /// the original client sends and ignores these too. A refused or failed
+    /// call is silently dropped; the scroll gesture itself is not.
+    pub async fn scroll_pane_from_wheel(
+        &self,
+        pane_id: u32,
+        is_plugin: bool,
+        direction: ScrollStep,
+    ) {
+        let _ = self
+            .terminal
+            .scroll_pane(pane_id, is_plugin, direction)
+            .await;
+    }
+
     /// Re-list the tabs and publish them — the reload
     /// [`rename_tab`](Self::rename_tab)/[`rename_pane`](Self::rename_pane)
     /// share: neither creates anything the server might refocus, so re-reading
@@ -671,7 +736,12 @@ impl TerminalController {
     /// to be open onto it (which is what
     /// [`reattaches_on_switch`](Self::reattaches_on_switch) additionally
     /// needs).
-    fn is_herdr_session(&self) -> bool {
+    ///
+    /// `pub` for `presentation::pages`' own read of it: whether the live
+    /// grid's content-tap hook is wired at all (see the [module docs](self)'
+    /// "One backend discriminator" section's third consequence) — the one
+    /// caller of this fact outside [`has_spaces`](Self::has_spaces) itself.
+    pub fn is_herdr_session(&self) -> bool {
         self.session_id.as_deref().is_some_and(is_herdr)
     }
 
@@ -867,13 +937,33 @@ impl TerminalController {
     /// neither, so it wakes no signal and no rebuild. Bumps
     /// [`appearance_writes`](Self::appearance_writes) exactly once per tick
     /// that wrote anything, for the test-only probe that pins this.
+    ///
+    /// **Disposal-safe across the one `await` above.** Both the "one read
+    /// right away" kickoff and an interval-driven tick
+    /// ([`LiveSession::enter`]'s own doc) spawn this call detached from the
+    /// owner that created [`cursor_style`](Self::cursor_style)/
+    /// [`font_size`](Self::font_size) — `use_interval`'s alive-flag only
+    /// stops its *own* repeat loop from firing again, not whatever a given
+    /// tick's `spawn_local` already has in flight, so a mount that tears
+    /// down while `load_preferences` is still pending resumes this call
+    /// against signals its own [`on_cleanup`] has already disposed. Reading
+    /// [`cursor_style`](Self::cursor_style) with
+    /// [`try_get_untracked`](GetUntracked::try_get_untracked) rather than
+    /// the plain [`get_untracked`](GetUntracked::get_untracked) every other
+    /// read on this controller uses turns that race into a silent no-op —
+    /// both signals share one owner (both minted back to back in
+    /// [`TerminalController::new`]), so one answering `None` stands for the
+    /// whole controller's reactive state being gone.
     pub async fn refresh_appearance(&self) {
         let Ok(prefs) = self.preferences.load_preferences().await else {
             return;
         };
+        let Some(current_cursor) = self.cursor_style.try_get_untracked() else {
+            return;
+        };
         let mut wrote = false;
         let cursor = map_cursor_style(prefs.appearance.cursor_style);
-        if self.cursor_style.get_untracked() != cursor {
+        if current_cursor != cursor {
             self.cursor_style.set(cursor);
             wrote = true;
         }
@@ -1177,6 +1267,19 @@ impl LiveSession {
     /// Tell the session the grid changed shape.
     pub fn resize(&self, cols: u16, rows: u16) {
         self.feed.shared().borrow_mut().resize(cols, rows);
+    }
+
+    /// A cloneable handle onto this session's own byte stream, typed as the
+    /// [`TerminalFeed`] trait object — [`LiveFeed::shared`]'s own accessor,
+    /// exposed for `presentation::pages`' wheel hook, which needs to reach
+    /// `TerminalFeed::send_mouse` from a closure built once alongside this
+    /// session's other seams rather than from a method borrowing `&self`.
+    /// The same live cell every call returns (see `shared`'s own doc), not a
+    /// snapshot — a re-attach that swaps [`feed`](Self::feed) is visible
+    /// through a handle taken before it, exactly as it already is through
+    /// [`input`](Self::input)'s.
+    pub fn feed_handle(&self) -> term::SharedFeed {
+        self.feed.shared()
     }
 }
 
@@ -1749,6 +1852,15 @@ mod tests {
             self.record(format!("focus_pane({pane_id},{is_plugin})"))
         }
 
+        async fn scroll_pane(
+            &self,
+            pane_id: u32,
+            is_plugin: bool,
+            direction: ScrollStep,
+        ) -> Result<(), AppFailure> {
+            self.record(format!("scroll_pane({pane_id},{is_plugin},{direction:?})"))
+        }
+
         async fn create_space(&self, label: String) -> Result<(), AppFailure> {
             self.record(format!("create_space({label})"))
         }
@@ -1936,6 +2048,81 @@ mod tests {
             Some(10),
             "the badge stays on the pane the session is actually on"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // The live grid's content-tap hook (`presentation::pages`' own wiring)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_grid_tap_focus_never_switches_tabs_and_reloads_after() {
+        let (c, repository) = recorded("zellij:dev");
+        let after_load = repository.calls();
+
+        assert!(block_on(c.focus_pane_from_tap(11, false)));
+
+        let since_load: Vec<String> = repository
+            .calls()
+            .into_iter()
+            .skip(after_load.len())
+            .collect();
+        // `focus_pane_locally`'s own optimistic move is already pinned by
+        // `a_zellij_commit_inside_the_active_tab_focuses_the_pane_and_nothing_else`
+        // (the shared code path) — what a grid tap adds beyond `commit_pane`
+        // is this reload, so that is what this test pins: no `go_to_tab` at
+        // all (a grid tap never crosses the SERVER-ACTIVE tab) and a reload
+        // right after the focus lands. `RecordingRepository::list_tabs` is a
+        // fixed fixture, so it is not asserted here as a proxy for "the
+        // server's own rects converged" — only that the call actually goes
+        // out.
+        assert_eq!(
+            since_load,
+            ["focus_pane(11,false)", "list_tabs"],
+            "no go_to_tab at all — a grid tap never crosses the SERVER-ACTIVE \
+             tab — and a reload lands after the focus, unlike commit_pane's \
+             own optimistic-only story"
+        );
+    }
+
+    #[test]
+    fn a_refused_grid_tap_focus_writes_no_optimistic_state_and_reloads_nothing() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("focus_pane");
+
+        assert!(!block_on(c.focus_pane_from_tap(11, false)));
+
+        assert_eq!(repository.actions(), ["focus_pane(11,false)"]);
+        assert_eq!(
+            focused_pane(&c, "alpha"),
+            Some(10),
+            "nothing moved, and nothing was reloaded either"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // The live grid's wheel hook (`presentation::pages`' own wiring)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_wheel_scroll_fallback_calls_scroll_pane_and_ignores_its_answer() {
+        let (c, repository) = recorded("zellij:dev");
+
+        block_on(c.scroll_pane_from_wheel(21, false, ScrollStep::Up));
+
+        assert_eq!(repository.actions(), ["scroll_pane(21,false,Up)"]);
+    }
+
+    #[test]
+    fn a_refused_wheel_scroll_fallback_is_silently_dropped() {
+        let (c, repository) = recorded("herdr:work");
+        repository.refuse("scroll_pane");
+
+        // Fire-and-forget: no panic, and no `Result` to inspect — the whole
+        // point (see the method's own doc on why this stays off the failure
+        // sink).
+        block_on(c.scroll_pane_from_wheel(21, false, ScrollStep::Down));
+
+        assert_eq!(repository.actions(), ["scroll_pane(21,false,Down)"]);
     }
 
     #[test]
