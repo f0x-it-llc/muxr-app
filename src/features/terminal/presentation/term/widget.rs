@@ -48,23 +48,37 @@
 //! Given an [`InputSeam`] (and `read_only` clear), this widget *is* the
 //! terminal's keystroke source — the one place `request_focus` and
 //! `publish_ime_state` are called, because both are reachable only from inside
-//! a `Widget` impl:
+//! a `Widget` impl. The two are deliberately **not** the same moment:
 //!
-//! - a pointer `Down` claims focus and publishes an
-//!   [`ImeContentType::Terminal`] surface, which is what raises the soft
-//!   keyboard and what tells both platforms to switch off autocorrect, smart
-//!   quotes/dashes and autocapitalization;
+//! - a pointer `Down` claims the focus session, unconditionally, and publishes
+//!   **nothing**. It cannot yet know whether the gesture is a tap, a scroll or
+//!   a hold (see the touch state machine below), and the claim has to happen
+//!   anyway;
+//! - the **tap branch** is what publishes the [`ImeContentType::Terminal`]
+//!   surface — what raises the soft keyboard and what tells both platforms to
+//!   switch off autocorrect, smart quotes/dashes and autocapitalization — and
+//!   only when the screen's own [`ContentTapSink`] answers `true` (or none is
+//!   wired at all). A scroll therefore never raises the keyboard, and a screen
+//!   that routes a tap onto a *different* pane can move the session's focus
+//!   there without summoning one;
 //! - every focus-routed `Key`/`Ime` event is handed to the shared
 //!   [`KeystrokeSource`](super::KeystrokeSource), whose bytes go straight to
 //!   the feed through [`InputSeam::dispatch`] — see [`input`](super::input) for
 //!   the diff engine, the latch and every rule they implement;
-//! - the surface is **re-published after every handled event and on every
-//!   focused paint**, exactly as `frust-widgets`' own `TextInput` does. That is
-//!   deliberately idempotent: both mobile bridges compare the published state
-//!   against their live mirror and do nothing when they already agree, so the
-//!   only publication that actually costs a platform `restartInput` is the one
-//!   following a window **re-anchor** (`Emission::reconciled`) — see
-//!   `KeystrokeSource`'s own rolling-window docs.
+//! - once **engaged** — by that tap, or by a keystroke, which implies the
+//!   keyboard is already up — the surface is **re-published after every handled
+//!   event and on every focused paint**, exactly as `frust-widgets`' own
+//!   `TextInput` does. That is deliberately idempotent: both mobile bridges
+//!   compare the published state against their live mirror and do nothing when
+//!   they already agree, so the only publication that actually costs a platform
+//!   `restartInput` is the one following a window **re-anchor**
+//!   (`Emission::reconciled`) — see `KeystrokeSource`'s own rolling-window docs.
+//!
+//! Engagement is a latch, not a per-gesture decision: once the keyboard is up
+//! it stays up across every later scroll and tap, and only a **real blur**
+//! ([`note_focus_edge`](TerminalGridWidget::note_focus_edge), the same edge the
+//! scrub keys off) drops it. Nothing here dismisses a keyboard the user is
+//! still typing on.
 //!
 //! Without a seam — every call site before the input task, and every
 //! `read_only` grid — the widget claims no focus, publishes nothing and emits
@@ -142,7 +156,9 @@
 //!   answers `Handled`, so no step and no tap can come out of a gesture the
 //!   selection is driving.
 //! - **released within the slop before either** → a **content tap**: the tapped
-//!   CELL, through [`on_content_tap`](TerminalGridView::on_content_tap).
+//!   CELL, through [`on_content_tap`](TerminalGridView::on_content_tap) — and,
+//!   if that hook answers `true` (or none is wired), the keyboard. This is the
+//!   only one of the three branches that can raise it.
 //!
 //! **The focus claim is invariant across all three.** The `Down` arm claims the
 //! focus session exactly as it always did — before this machine can know which
@@ -151,13 +167,21 @@
 //! the tap branch would blur the grid on every drag and every hold. A content
 //! tap is therefore reported **in addition to** the claim, never instead of it.
 //!
-//! Both hooks are **optional and report-only**: they name a cell and nothing
-//! else (see the [parent module](super)' layout-blindness note), they survive
+//! **The keyboard is not**, and that is what makes the split possible: the blur
+//! contract keys off `is_focus_requested` alone and never looks at the
+//! published surface, so moving the IME publish to the tap branch costs the
+//! claim nothing. A drag-scroll leaves the keyboard exactly where it was, and a
+//! tap that lands on an unfocused pane can move the session's focus border with
+//! no keyboard at all — the screen decides, per tap.
+//!
+//! Both hooks are **optional and cell-shaped**: they name a cell and nothing
+//! else (see the [parent module](super)' layout-blindness note) and they survive
 //! [`read_only`](TerminalGridView::read_only) exactly as the selection does —
 //! the read-only gate is the *input* gate, and looking at a session you cannot
-//! type into is what a read-only terminal is for — and a grid with neither
-//! wired behaves precisely as it did before they existed: a tap is a focus
-//! claim, and a scroll is ignored.
+//! type into is what a read-only terminal is for. The tap hook's `bool` answer
+//! is the one thing that flows back in: with no hook wired at all a tap claims
+//! focus and raises the keyboard, the unconditional behaviour every session had
+//! before a screen could answer for itself, and a scroll is ignored.
 //!
 //! A desktop `InputEvent::Scroll` folds into the **same** step machinery (one
 //! step per wheel line, cell under the cursor), so there is one accumulator and
@@ -429,8 +453,9 @@ impl TerminalGridView {
         self
     }
 
-    /// Report the **cell** a content tap landed on (see the
-    /// [module docs](self)' touch state machine).
+    /// Report the **cell** a content tap landed on, and ask whether that tap
+    /// should raise the keyboard (see the [module docs](self)' touch state
+    /// machine).
     ///
     /// Fires on the tap branch only — a release within [`TOUCH_SLOP`] of the
     /// press, before a long-press or a drag-scroll claimed the gesture — and
@@ -438,8 +463,14 @@ impl TerminalGridView {
     /// instead of it. Not gated on [`read_only`](Self::read_only): pointing at
     /// a pane you cannot type into is still pointing at it.
     ///
-    /// Without one, a tap claims focus and reports nothing, exactly as it did
-    /// before this hook existed.
+    /// The `bool` it answers is synchronous and per tap: `true` publishes the
+    /// IME surface right there, `false` leaves the keyboard exactly as it was
+    /// (down if it was down — see [`ContentTapSink`]). That publish *is* gated
+    /// on [`read_only`](Self::read_only), like every other byte-bearing path
+    /// here: a read-only grid reports the tap and raises nothing.
+    ///
+    /// Without one, a tap claims focus and raises the keyboard, exactly as it
+    /// did before this hook existed.
     #[must_use]
     pub fn on_content_tap(mut self, sink: ContentTapSink) -> Self {
         self.on_content_tap = Some(sink);
@@ -528,6 +559,16 @@ pub struct TerminalGridWidget {
     /// tells a hand-off to the key bar from a real blur — see
     /// [`InputSeam::focus_claim`].
     focus_claim: u64,
+    /// Whether this grid has an IME surface **up**: raised by a qualifying tap
+    /// (or by a keystroke, which implies one is already up), dropped only on a
+    /// real blur (see the [module docs](self)' IME-client section and
+    /// [`note_focus_edge`](Self::note_focus_edge)).
+    ///
+    /// The gate on the focused-paint republish, which is what makes the
+    /// deferral real: `press`'s `request_focus` makes `has_focus()` true by the
+    /// very next frame, so a republish keyed on focus alone would raise the
+    /// keyboard on every `Down` whatever the tap branch decided.
+    ime_engaged: bool,
     /// The pointer gesture in flight (see [`Grab`]).
     grab: Grab,
     /// The scroll accumulator's sub-step remainder, in **lines**: travel
@@ -575,6 +616,7 @@ impl<State: 'static> View<State> for TerminalGridView {
             caret_rect: None,
             was_focused: self.focused,
             focus_claim: self.input.as_ref().map_or(0, InputSeam::focus_claim),
+            ime_engaged: false,
             grab: Grab::Idle,
             scroll_carry: 0.0,
             on_content_tap: self.on_content_tap.clone(),
@@ -763,13 +805,20 @@ impl Widget for TerminalGridWidget {
             })
         });
 
-        // Republish the IME surface every painted frame while focused, so a
-        // platform mirror reseeded behind our back (a shell's steady-active
-        // reconcile) converges on what this widget believes it holds. Idempotent
-        // by construction — see the module docs.
+        // Republish the IME surface every painted frame while focused **and
+        // engaged**, so a platform mirror reseeded behind our back (a shell's
+        // steady-active reconcile) converges on what this widget believes it
+        // holds. Idempotent by construction — see the module docs.
+        //
+        // The `ime_engaged` half is load-bearing, not belt-and-braces: `press`
+        // requests focus on every `Down`, so `has_focus()` is true by the next
+        // frame whatever the gesture turns out to be, and a republish gated on
+        // focus alone would put the keyboard back up behind the tap branch's
+        // back — the exact defect the deferral exists to fix.
         if let Some(seam) = self.input.as_ref()
             && !self.read_only
             && ctx.has_focus()
+            && self.ime_engaged
         {
             let state = seam.ime_state(self.caret_rect);
             ctx.publish_ime_state(state);
@@ -916,7 +965,7 @@ impl TerminalGridWidget {
         match pointer.phase {
             PointerPhase::Down => self.press(ctx, pointer.position),
             PointerPhase::Move => self.drag(pointer.position),
-            PointerPhase::Up => self.release(pointer.position),
+            PointerPhase::Up => self.release(ctx, pointer.position),
             // Flags only — a `Cancel` arm never touches app state
             // (`docs/CODE_STANDARDS.md`'s Interaction Semantics), and a stolen
             // gesture reports neither a tap nor a step.
@@ -950,15 +999,17 @@ impl TerminalGridWidget {
         if self.read_only || !inside_grid {
             return EventResult::Ignored;
         }
-        // Every tap re-claims focus and re-publishes `active: true`, so a
-        // keyboard the user dismissed comes back on the next tap rather than
-        // needing a blur first. The claim is recorded so the next blur edge can
-        // tell a real blur from the key bar taking the surface (see
-        // `note_focus_edge`).
+        // Every `Down` re-claims the focus session — unconditionally, and
+        // before this widget can know whether the gesture is a tap, a scroll or
+        // a hold, because frust-core reads a `Down` that requested no focus as
+        // a blur. The claim is recorded so the next blur edge can tell a real
+        // blur from the key bar taking the surface (see `note_focus_edge`).
+        //
+        // No IME publish here: raising the keyboard is the tap branch's call
+        // (`release`), and the blur contract never looks at the surface — see
+        // the module docs' IME-client section.
         self.focus_claim = seam.claim_focus();
         ctx.request_focus();
-        let state = seam.ime_state(self.caret_rect);
-        ctx.publish_ime_state(state);
         ctx.request_redraw();
         EventResult::Handled
     }
@@ -997,8 +1048,16 @@ impl TerminalGridWidget {
         self.wheel_steps((at.y - last.y) / height, at)
     }
 
-    /// An `Up` the selection did not take: the tap branch.
-    fn release(&mut self, at: Point) -> EventResult {
+    /// An `Up` the selection did not take: the tap branch — the cell report,
+    /// and the one place the keyboard can come up.
+    ///
+    /// A gesture that turned into a scroll (or never armed inside the grid)
+    /// leaves here having done nothing at all, which is what keeps a
+    /// drag-scroll from summoning a keyboard. A qualifying tap reports its
+    /// cell and obeys the sink's answer; with no sink to ask — herdr, the mock,
+    /// any grid mounted without the hook — it raises, the unconditional
+    /// behaviour that predates the hook.
+    fn release(&mut self, ctx: &mut EventCtx, at: Point) -> EventResult {
         let tapped = matches!(
             self.grab,
             Grab::Armed { origin } if (at - origin).hypot() <= TOUCH_SLOP
@@ -1007,11 +1066,38 @@ impl TerminalGridWidget {
         if !tapped {
             return EventResult::Ignored;
         }
-        let (Some(sink), Some(cell)) = (self.on_content_tap.clone(), self.cell_at(at)) else {
-            return EventResult::Ignored;
+        let reported = match (self.on_content_tap.clone(), self.cell_at(at)) {
+            (Some(sink), Some(cell)) => Some(sink(u32::from(cell.col), u32::from(cell.row))),
+            // No hook (or no geometry to name a cell with): nobody to ask, so
+            // the tap answers for itself.
+            _ => None,
         };
-        sink(u32::from(cell.col), u32::from(cell.row));
-        EventResult::Handled
+        let raised = reported.unwrap_or(true) && self.engage_ime(ctx);
+        if reported.is_some() || raised {
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Raise the keyboard: latch [`ime_engaged`](Self::ime_engaged) and publish
+    /// the surface, reporting whether anything was actually published.
+    ///
+    /// Gated exactly as the paint-time republish is — a grid with no
+    /// [`InputSeam`], or a `read_only` one, is not an IME client at all and
+    /// publishes nothing however it was tapped.
+    fn engage_ime(&mut self, ctx: &mut EventCtx) -> bool {
+        let Some(seam) = self.input.clone() else {
+            return false;
+        };
+        if self.read_only {
+            return false;
+        }
+        self.ime_engaged = true;
+        let state = seam.ime_state(self.caret_rect);
+        ctx.publish_ime_state(state);
+        ctx.request_redraw();
+        true
     }
 
     /// The desktop wheel, through the **same** step machinery a touch drag goes
@@ -1096,6 +1182,9 @@ impl TerminalGridWidget {
         if seam.absorb(event).is_none() {
             return EventResult::Ignored;
         }
+        // A keystroke arrived, so a keyboard is up whatever this widget last
+        // decided about one: engage, and keep engaging every focused paint.
+        self.ime_engaged = true;
         // The publish is unconditional and idempotent: leaving a stale editing
         // state behind would make a shell's steady-active reconcile push the
         // *pre-keystroke* text back into the platform mirror.
@@ -1218,6 +1307,12 @@ impl TerminalGridWidget {
     /// teardown (or the grid's next real blur). Every path that *submits* a
     /// line already scrubs at the source, which is where a typed secret
     /// actually ends.
+    ///
+    /// The same edge is where the IME latch drops: a real blur is the one
+    /// thing that takes the keyboard away, so
+    /// [`ime_engaged`](Self::ime_engaged) is cleared here and nowhere else —
+    /// a hand-off to the key bar (the claim-counter cases above) leaves the
+    /// keyboard up, which is exactly what the user sees.
     fn note_focus_edge(&mut self, focused: bool) {
         let Some(seam) = self.input.clone() else {
             return;
@@ -1225,6 +1320,7 @@ impl TerminalGridWidget {
         if focused {
             self.focus_claim = seam.focus_claim();
         } else if seam.focus_claim() == self.focus_claim {
+            self.ime_engaged = false;
             seam.scrub();
         }
     }
@@ -1573,6 +1669,12 @@ mod tests {
             Self::build(false, false)
         }
 
+        /// …with neither wired, over a read-only session: nothing to report a
+        /// tap to, and nothing a tap may publish either.
+        fn unwired_read_only() -> Self {
+            Self::build(false, true)
+        }
+
         /// …with both wired over a read-only session.
         fn read_only() -> Self {
             Self::build(true, true)
@@ -1601,7 +1703,15 @@ mod tests {
                 let stepped = Rc::clone(&steps);
                 view = view
                     .on_content_tap(Rc::new(move |col, row| {
-                        tapped.borrow_mut().push((col, row))
+                        tapped.borrow_mut().push((col, row));
+                        // The verdict itself is a *root*-level fact (whether an
+                        // IME surface reaches `RenderRoot`), and
+                        // `EventCtx::take_ime_state` is crate-private, so what
+                        // it does is pinned by `tests/terminal_live.rs`'s
+                        // section 10 rather than from here. This half of the
+                        // suite owns the discrimination, and answers the
+                        // screen's default.
+                        true
                     }))
                     .on_wheel(Rc::new(move |up, col, row| {
                         stepped.borrow_mut().push((up, col, row));
@@ -1944,6 +2054,8 @@ mod tests {
             EventResult::Ignored,
             "no hook, no scroll"
         );
+        // …but the drag past the slop is no longer a tap, so the release
+        // reports nothing and raises nothing either.
         assert_eq!(probe.pointer(PointerPhase::Up, at), EventResult::Ignored);
         assert_eq!(
             probe.scroll(ScrollDelta::Lines(0.0, 3.0), at),
@@ -1952,6 +2064,35 @@ mod tests {
         );
         assert!(probe.taps().is_empty());
         assert!(probe.steps().is_empty());
+    }
+
+    #[test]
+    fn an_unasked_tap_still_raises_the_keyboard_unless_the_session_is_read_only() {
+        // With no hook there is nobody to ask, so the tap answers for itself
+        // and publishes — the pre-hook behaviour, now on the release rather
+        // than the press. `Handled` is the observable half of it here: the
+        // published surface itself is a root-level fact (see the sink comment
+        // in `Probe::build`).
+        let mut probe = Probe::unwired();
+        let at = probe.cell(3, 3);
+        probe.pointer(PointerPhase::Down, at);
+        assert_eq!(
+            probe.pointer(PointerPhase::Up, at),
+            EventResult::Handled,
+            "an unasked tap raises the keyboard"
+        );
+        assert!(probe.taps().is_empty(), "…and still reports no cell");
+
+        // A read-only grid is not an IME client at all, whatever it is tapped
+        // with — the same gate `press` and the focused-paint republish apply.
+        let mut probe = Probe::unwired_read_only();
+        let at = probe.cell(3, 3);
+        probe.pointer(PointerPhase::Down, at);
+        assert_eq!(
+            probe.pointer(PointerPhase::Up, at),
+            EventResult::Ignored,
+            "a read-only session publishes nothing however it is tapped"
+        );
     }
 
     #[test]

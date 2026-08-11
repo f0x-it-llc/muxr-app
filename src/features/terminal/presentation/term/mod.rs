@@ -5,9 +5,10 @@
 //! (`benchmarks/frust_bench`'s `s9_terminal` in the Frust checkout), minus its
 //! bench scaffolding and behind an app-shaped seam.
 //!
-//! Nothing here is wired into the `/terminal` screen yet: that screen still
-//! renders [`pieces`](super::pieces)' mock transcript, and the cutover is its
-//! own task. This module is complete, tested and unmounted.
+//! This is what the `/terminal` screen mounts for a **live** session (a real
+//! `muxrd` stream or the checked-in fixture replay); a bare `/terminal` and
+//! every headless suite still render [`pieces`](super::pieces)' mock transcript
+//! instead — see `presentation::pages`' own "Pane-content switch" section.
 //!
 //! | Module | What it owns |
 //! |---|---|
@@ -93,6 +94,11 @@
 //! call) belongs to the screen that owns the session's layout; nothing in
 //! `term` knows a pane exists, which is what keeps the grid mountable by the
 //! demo replay, the mock transcript and a live session alike.
+//!
+//! [`ContentTapSink`]'s `bool` answer is the one thing that flows back, and it
+//! does not widen that: the question is "should this tap raise the keyboard?",
+//! never "which pane did it hit". The grid acts on the answer without ever
+//! learning what the screen resolved the cell to.
 
 pub mod batch;
 pub mod chip;
@@ -732,18 +738,31 @@ impl SelectionSeam {
 }
 
 /// Where a **content tap** is reported: the zero-based `(col, row)` cell the
-/// finger lifted on, clamped to the rendered grid.
+/// finger lifted on, clamped to the rendered grid. The `bool` it answers is
+/// **whether this tap should raise the keyboard**.
 ///
 /// An `Rc<dyn Fn>` for the same reason [`CopySink`] is one — it is installed
 /// from a `build` and called from the *event* pass, where there is no reactive
 /// owner and no `&mut State`, so the screen carries whatever it needs to route
 /// the cell inside the closure. Optional at the grid
 /// ([`TerminalGridView::on_content_tap`](widget::TerminalGridView::on_content_tap)):
-/// with none wired a tap claims focus and reports nothing, exactly as it did
-/// before this hook existed.
+/// with none wired a tap claims focus and raises the keyboard, exactly as it
+/// did before this hook existed.
+///
+/// The answer is **synchronous by necessity**: the grid publishes its IME
+/// surface inside the very event pass the release arrives in (`EventCtx` is the
+/// only route to `publish_ime_state`), so a verdict that needed a round trip
+/// could not be honoured. It is a question a screen can always answer from
+/// state it already holds — "does this cell belong to a pane the session is not
+/// on?" — and everything the answer *causes* (a `FocusPane` RPC, a layout
+/// re-read) stays asynchronous behind it.
+///
+/// `true` raises the keyboard; `false` leaves it exactly where it was, which is
+/// down on a first tap and **up** on any tap after one that raised it (see
+/// [`widget`]'s IME-client docs — the grid never dismisses a keyboard).
 ///
 /// Cells, not panes — see the [module docs](self)' layout-blindness note.
-pub type ContentTapSink = Rc<dyn Fn(u32, u32)>;
+pub type ContentTapSink = Rc<dyn Fn(u32, u32) -> bool>;
 
 /// Where a **wheel step** is reported: one step's direction (`up`) and the
 /// zero-based `(col, row)` cell it applies at.
