@@ -67,13 +67,52 @@
 //! The *reads* around them still go through their use cases, so the screen's
 //! one loading/activity story is unchanged.
 //!
+//! # Layout refresh: one guarded mechanism, several triggers
+//!
+//! The tab/pane world has **no server-push signal** — the wire answers
+//! `list_tabs` and nothing tells this client when the answer changed. So every
+//! refresh is a round trip this screen decides to make, and there are several
+//! reasons to make one: the mount's own [`load`](TerminalController::load), the
+//! settle behind a landed mutation (a create, a rename, a grid tap's focus),
+//! the attach handshake completing
+//! ([`mirror_link`](TerminalController::mirror_link)'s one-shot answer), the
+//! sheet being opened, the live grid's own tap-miss backstop
+//! (`presentation::pages`' "Tap → FocusPane" section), and the continuous
+//! [`LAYOUT_POLL_INTERVAL`] poll an attached mount runs for its own lifetime.
+//!
+//! They race each other freely, so they share one reconciliation:
+//!
+//! - **A generation counter** ([`begin_layout_fetch`](TerminalController::begin_layout_fetch))
+//!   is bumped at the start of every one of them, and a round trip only
+//!   commits if it is still the newest when it lands. Nothing below this
+//!   controller serializes anything — `ControllerCore::run` offers no
+//!   last-write-wins guard of its own — so without this an earlier, slower
+//!   fetch landing after a later one silently rolls the layout back.
+//! - **Read-compare-then-write** ([`publish_tabs`](TerminalController::publish_tabs)),
+//!   for the same reason [`refresh_appearance`](TerminalController::refresh_appearance)
+//!   does it: the poll ticks for the life of the mount, and an unconditional
+//!   `set` on a tracked signal would wake a whole-app rebuild on every tick
+//!   forever, even while nothing about the session moved.
+//! - **Self-healing keys**: a partial reload re-seeds
+//!   [`active_tab`](TerminalController::active_tab)/[`browsed_tab`](TerminalController::browsed_tab)
+//!   only when they no longer name a tab in the answer. A snapshot that landed
+//!   empty (a load racing the attach handshake used to leave exactly that)
+//!   therefore recovers on the next refresh instead of staying dead until the
+//!   screen is left, and a load that landed fine is never second-guessed.
+//! - **Single flight**, twice over: a poll tick that is still in the air skips
+//!   the next one rather than stacking round trips on a slow link, and a create
+//!   verb in flight drops a repeated one rather than queueing it.
+//!
 //! # Creating something settles by reloading, never by a dialog answer
 //!
 //! [`create_space`](TerminalController::create_space),
 //! [`new_tab`](TerminalController::new_tab) and
 //! [`new_pane`](TerminalController::new_pane) each mutate first (their own
 //! [`TerminalRepository`] verb, called directly — the same shape the two
-//! switches above use) and then settle. [`new_tab`](TerminalController::new_tab)/
+//! switches above use), wait out [`CREATE_SETTLE`] — the relay acks a create
+//! when it is *enqueued*, not when it is applied, so a reload sent on the ack
+//! reads the world as it was before it — and then settle.
+//! [`new_tab`](TerminalController::new_tab)/
 //! [`new_pane`](TerminalController::new_pane) settle with a full
 //! [`load`](TerminalController::load), because the tab world itself moved
 //! and the server focuses whatever it just opened — `load`'s own
@@ -125,7 +164,7 @@ use std::time::Duration;
 
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
-use frust::{GetUntracked, RwSignal, Set, spawn_local};
+use frust::{GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
 
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
@@ -246,6 +285,37 @@ pub struct TerminalController {
     /// link this crate without `cfg(test)`, so a literal `#[cfg(test)]` item
     /// would be invisible to them.
     appearance_writes: AtomicU64,
+    /// The staleness guard every layout fetch shares — see the [module
+    /// docs](self)' "Layout refresh" section. Bumped by
+    /// [`begin_layout_fetch`](Self::begin_layout_fetch) before the round trip
+    /// goes out, and checked again before its answer is committed.
+    layout_generation: AtomicU64,
+    /// Whether a poll-driven layout reload is currently outstanding — the
+    /// in-flight claim [`take_layout_poll_tick`](Self::take_layout_poll_tick)
+    /// takes and [`refresh_layout_from_poll`](Self::refresh_layout_from_poll)
+    /// releases, so a link slower than the poll's own cadence never stacks
+    /// round trips (the same shape `sessions`' own poll claim uses).
+    /// Deliberately scoped to the poll: a refresh a *user action* asked for is
+    /// never dropped because a poll happens to be mid-flight —
+    /// [`layout_generation`](Self::layout_generation) keeps that case honest
+    /// instead.
+    layout_poll_in_flight: AtomicBool,
+    /// Whether a create verb is in flight — the coalescing claim
+    /// [`claim_create`](Self::claim_create) takes, so repeated presses on a
+    /// create affordance issue **one** create rather than one per press. A
+    /// dropped press stays dropped, never queued: a second tab the user did
+    /// not knowingly ask for is exactly what this exists to stop.
+    create_in_flight: AtomicBool,
+    /// Whether the attached stream's handshake has already been seen to
+    /// settle — [`mirror_link`](Self::mirror_link) answers `true` on the one
+    /// wake that flips this, and `false` on every wake after.
+    attach_settled: AtomicBool,
+    /// Test/diagnostic-only: how many layout fetches actually wrote a signal —
+    /// the exact counterpart of [`appearance_writes`](Self::appearance_writes)
+    /// (see that field for why this is a plain accessor rather than a
+    /// `#[cfg(test)]` item), and what pins that an idle poll tick, whose
+    /// answer matches what is already published, wakes no rebuild at all.
+    layout_writes: AtomicU64,
 }
 
 /// The shipped default font size, px — settings' own `Preferences::defaults()`'s
@@ -272,6 +342,86 @@ const DEFAULT_LIVE_FONT_SIZE: f32 = 12.0;
 /// also now reads-compares-writes (below), so even this coarser cadence's
 /// idle ticks wake no signal, and no rebuild, once prefs settle.
 const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// How often an **attached** live mount re-reads the tab/pane layout — the
+/// continuous half of the refresh mechanism the [module docs](self)' "Layout
+/// refresh" section describes.
+///
+/// The wire has no layout-changed signal, so a tab or pane opened from another
+/// client (or by the session itself) is only ever discovered by asking again.
+/// **3s, the cadence the original client polls at** — deliberately not
+/// tighter: every RPC shares the app's one HTTP/2 connection with the open
+/// attach stream, whose own inbound flow control can already backpressure that
+/// connection (`docs/ARCHITECTURE.md`'s Planned section records the risk and
+/// its designed remedy), so a poll cadence is a cost paid against the terminal
+/// output itself.
+const LAYOUT_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// How long a landed create waits before re-reading what it created.
+///
+/// The relay acks a create when the action is **enqueued**, not when it has
+/// been applied, so a reload sent the instant the ack lands reads the world as
+/// it was just before — and the freshly created tab/pane/space is missing from
+/// a sheet that was opened to watch it appear. 350ms is the original client's
+/// own settle for exactly this, transcribed rather than re-derived.
+const CREATE_SETTLE: Duration = Duration::from_millis(350);
+
+/// The sentinel [`CREATE_SETTLE_OVERRIDE_MS`] holds when no test override is
+/// installed — no real settle is anywhere near this long.
+const NO_SETTLE_OVERRIDE: u64 = u64::MAX;
+
+/// The settle a test installed with [`set_create_settle_for_tests`], in
+/// milliseconds, or [`NO_SETTLE_OVERRIDE`].
+static CREATE_SETTLE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(NO_SETTLE_OVERRIDE);
+
+/// Override [`CREATE_SETTLE`] for a headless test, so a suite can pin the
+/// post-create reload's *ordering* without spending a real 350ms per create;
+/// `None` restores the shipped value.
+///
+/// A published setter rather than a `#[cfg(test)]` item for the same reason
+/// `pages::set_demo_copy_sink` is one: `tests/*.rs` are integration binaries
+/// linking the normal build of this crate, where a `cfg(test)` seam is
+/// invisible. Never called by production code.
+pub fn set_create_settle_for_tests(settle: Option<Duration>) {
+    let value = settle.map_or(NO_SETTLE_OVERRIDE, |settle| settle.as_millis() as u64);
+    CREATE_SETTLE_OVERRIDE_MS.store(value, Ordering::Relaxed);
+}
+
+/// The settle a create actually waits — [`CREATE_SETTLE`], unless a test
+/// installed its own (see [`set_create_settle_for_tests`]).
+fn create_settle() -> Duration {
+    match CREATE_SETTLE_OVERRIDE_MS.load(Ordering::Relaxed) {
+        NO_SETTLE_OVERRIDE => CREATE_SETTLE,
+        millis => Duration::from_millis(millis),
+    }
+}
+
+/// Whether a freshly read tab list re-seeds the active/browsed keys.
+///
+/// A full [`TerminalController::load`] re-seeds both outright (it is the one
+/// moment the sheet has nothing of its own to preserve); every partial reload
+/// only **heals** a key that no longer names a tab in the answer, so a browse
+/// the user chose is left exactly where they put it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seed {
+    /// Take the answer's own active tab, whatever the keys currently say.
+    Fresh,
+    /// Keep the current keys unless the answer no longer carries them.
+    Heal,
+}
+
+/// Whether a layout fetch's failure is reported to the user.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Report {
+    /// Emit on [`ControllerCore`]'s own failure sink — the screen's toast
+    /// bridge. Every user-initiated refresh.
+    Toast,
+    /// Swallow it: the poll runs unattended every [`LAYOUT_POLL_INTERVAL`] for
+    /// the life of the mount, so a link that is down would otherwise toast on
+    /// a cadence, burying everything else — and the card's own link strip
+    /// already says so, in the one place the user is looking.
+    Silent,
+}
 
 /// Map `settings`' own `CursorStyle` (reached via
 /// [`entities::SettingsCursorStyle`](crate::features::terminal::domain::entities::SettingsCursorStyle),
@@ -334,6 +484,11 @@ impl TerminalController {
             font_size: RwSignal::new(DEFAULT_LIVE_FONT_SIZE),
             preferences,
             appearance_writes: AtomicU64::new(0),
+            layout_generation: AtomicU64::new(0),
+            layout_poll_in_flight: AtomicBool::new(false),
+            create_in_flight: AtomicBool::new(false),
+            attach_settled: AtomicBool::new(false),
+            layout_writes: AtomicU64::new(0),
         }
     }
 
@@ -359,7 +514,17 @@ impl TerminalController {
     /// [`browsed_tab`](Self::browsed_tab): a load is the one moment the sheet
     /// has nothing of its own to preserve, and a browse pointed at a tab this
     /// load no longer carries would list no panes at all.
+    ///
+    /// **A layout fetch like any other** (see the [module docs](self)' "Layout
+    /// refresh" section): the tab world it read is committed only if no later
+    /// fetch has landed in the meantime, so the mount's own load and the
+    /// attach-settled reload behind it are safe in either completion order.
+    /// The card's own content — [`lines`](Self::lines),
+    /// [`session_name`](Self::session_name), [`loaded`](Self::loaded) and the
+    /// reveal — is outside that guard: no other fetch reads it, so the
+    /// freshest answer for it is always this one's.
     pub async fn load(&self) {
+        let generation = self.begin_layout_fetch();
         let query = WorkspaceQuery {
             session_id: self.session_id.clone(),
             with_spaces: self.has_spaces(),
@@ -377,16 +542,13 @@ impl TerminalController {
             lines,
             session_name,
         } = workspace;
-        let active = tabs
-            .iter()
-            .find(|tab| tab.active)
-            .or_else(|| tabs.first())
-            .map(|tab| tab.key.clone())
-            .unwrap_or_default();
-        self.spaces.set(spaces);
-        self.tabs.set(tabs);
-        self.active_tab.set(active.clone());
-        self.browsed_tab.set(active);
+        if !self.signals_alive() {
+            return;
+        }
+        if self.is_newest_layout_fetch(generation) {
+            self.spaces.set(spaces);
+            self.publish_tabs(tabs, Seed::Fresh);
+        }
         self.lines.set(lines);
         self.session_name.set(session_name);
         self.loaded.set(true);
@@ -585,16 +747,27 @@ impl TerminalController {
     ///
     /// Deliberately **not** a full [`load`](Self::load): creating a space
     /// touches nothing about the tab world, so re-reading it too would
-    /// replay the reveal and reseed the browse for no reason. The server
+    /// replay the reveal and reseed the browse for no reason. The re-list
+    /// still waits out [`CREATE_SETTLE`] like the other two creates, and
+    /// repeated presses coalesce into one create
+    /// ([`claim_create`](Self::claim_create)). The server
     /// validates `label`'s charset/length; a rejection reaches
     /// [`tell`](Self::tell)'s own failure sink like every other refused
     /// verb, and this writes nothing when that happens.
     pub async fn create_space(&self, label: String) {
+        let Some(_claim) = self.claim_create() else {
+            return;
+        };
         if !self.tell(self.terminal.create_space(label.clone())).await {
             return;
         }
+        self.settle_create().await;
         match self.terminal.list_spaces().await {
-            Ok(spaces) => self.spaces.set(select_by_label(spaces, &label)),
+            Ok(spaces) => {
+                if self.signals_alive() {
+                    self.spaces.set(select_by_label(spaces, &label));
+                }
+            }
             Err(failure) => self.core.failures().emit(&failure),
         }
     }
@@ -607,8 +780,15 @@ impl TerminalController {
     /// the tab world itself changed, and the server focuses the tab it just
     /// opened, so `load`'s own active/browsed re-seed is exactly what puts
     /// the sheet's browse on it — nothing else has to chase that fact down.
+    /// That load waits out [`CREATE_SETTLE`] first (the ack is an enqueue, not
+    /// an apply — see that constant), and repeated presses coalesce into one
+    /// create ([`claim_create`](Self::claim_create)).
     pub async fn new_tab(&self) {
+        let Some(_claim) = self.claim_create() else {
+            return;
+        };
         if self.tell(self.terminal.new_tab()).await {
+            self.settle_create().await;
             self.load().await;
         }
     }
@@ -617,10 +797,14 @@ impl TerminalController {
     /// false`, a tap on the new-pane row) or floating (`floating = true`, a
     /// long-press on it). A backend that ignores the flag (herdr does) still
     /// receives it, so there is no client-side gating to add. Reloads the
-    /// workspace on landing, the same shape as [`new_tab`](Self::new_tab),
-    /// so the sheet's pane list picks it up.
+    /// workspace on landing, the same shape as [`new_tab`](Self::new_tab) —
+    /// settle included, and coalescing repeated presses the same way.
     pub async fn new_pane(&self, floating: bool) {
+        let Some(_claim) = self.claim_create() else {
+            return;
+        };
         if self.tell(self.terminal.new_pane(floating)).await {
+            self.settle_create().await;
             self.load().await;
         }
     }
@@ -702,16 +886,175 @@ impl TerminalController {
             .await;
     }
 
-    /// Re-list the tabs and publish them — the reload
-    /// [`rename_tab`](Self::rename_tab)/[`rename_pane`](Self::rename_pane)
-    /// share: neither creates anything the server might refocus, so re-reading
+    /// Re-list the tabs and publish them — the partial refresh every trigger
+    /// but the mount's own load shares (see the [module docs](self)' "Layout
+    /// refresh" section): the two renames, a landed grid tap, the attach
+    /// handshake settling, opening the sheet, and the poll. None of them
+    /// creates anything the server might refocus, so re-reading
     /// [`tabs`](Self::tabs) alone (no [`load`](Self::load), no reveal replay)
-    /// is enough to catch a changed label up.
-    async fn reload_tabs(&self) {
+    /// is enough — and a key that no longer names a tab in the answer heals
+    /// itself on the way through ([`Seed::Heal`]).
+    ///
+    /// `pub` for `presentation::pages`: the sheet's own open refreshes through
+    /// it (its pages see `&mut AppState` and reach this controller by capture),
+    /// as does the live grid's tap-miss backstop.
+    pub async fn reload_tabs(&self) {
+        self.refresh_layout(Report::Toast).await;
+    }
+
+    /// [`reload_tabs`](Self::reload_tabs)'s body, with the failure policy
+    /// spelled by the caller — see [`Report`].
+    async fn refresh_layout(&self, report: Report) {
+        let generation = self.begin_layout_fetch();
         match self.terminal.list_tabs().await {
-            Ok(tabs) => self.tabs.set(tabs),
-            Err(failure) => self.core.failures().emit(&failure),
+            Ok(tabs) => {
+                if self.is_newest_layout_fetch(generation) {
+                    self.publish_tabs(tabs, Seed::Heal);
+                }
+            }
+            Err(failure) => {
+                if report == Report::Toast {
+                    self.core.failures().emit(&failure);
+                }
+            }
         }
+    }
+
+    /// **Consume** one layout poll tick, answering whether the caller should
+    /// refresh now — `sessions`' own `take_poll_tick`, for this screen's tab
+    /// world.
+    ///
+    /// A controller whose first load has not landed skips (that load is
+    /// already in flight; a second concurrent read would race it for nothing),
+    /// and so does one whose *previous* tick is still outstanding. The caller
+    /// owns the timing ([`LiveSession::enter`]'s own `use_interval`, started
+    /// for an attached mount only) and the async spawn — through
+    /// [`refresh_layout_from_poll`](Self::refresh_layout_from_poll), which
+    /// releases the claim this takes — so this stays synchronous and
+    /// unit-testable.
+    pub fn take_layout_poll_tick(&self) -> bool {
+        self.loaded.get_untracked() && !self.layout_poll_in_flight.swap(true, Ordering::SeqCst)
+    }
+
+    /// The refresh a claimed poll tick runs: [`reload_tabs`](Self::reload_tabs)
+    /// with its failures swallowed ([`Report::Silent`]), wrapped with the
+    /// release of the claim [`take_layout_poll_tick`](Self::take_layout_poll_tick)
+    /// took for it. The release is an RAII guard rather than a trailing
+    /// statement so a future early return cannot leak the claim and wedge the
+    /// poll shut (`sessions`' own `refresh_from_poll` takes the same shape).
+    pub async fn refresh_layout_from_poll(&self) {
+        struct ReleasePollClaim<'a>(&'a AtomicBool);
+        impl Drop for ReleasePollClaim<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _release = ReleasePollClaim(&self.layout_poll_in_flight);
+        self.refresh_layout(Report::Silent).await;
+    }
+
+    /// Open a fresh layout fetch and answer its generation — see the [module
+    /// docs](self)' "Layout refresh" section.
+    fn begin_layout_fetch(&self) -> u64 {
+        self.layout_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether the fetch that took `generation` is still the newest one, i.e.
+    /// whether its answer may be committed.
+    fn is_newest_layout_fetch(&self, generation: u64) -> bool {
+        self.layout_generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Publish a freshly read tab list, **read-compare-then-write** and with
+    /// the active/browsed keys reconciled per `seed` — the one commit point
+    /// every layout fetch goes through (see the [module docs](self)' "Layout
+    /// refresh" section).
+    ///
+    /// Nothing is written that has not actually moved: `Set::set` notifies
+    /// unconditionally, [`tabs`](Self::tabs) is a tracked read in both the
+    /// screen's `build` and the sheet's body, and the poll ticks for the life
+    /// of the mount — so an unconditional write here would wake a whole-app
+    /// rebuild every cadence, forever, on a session sitting perfectly idle.
+    /// A tick that writes anything at all bumps
+    /// [`layout_writes`](Self::layout_writes), the test-only probe that pins
+    /// exactly that.
+    ///
+    /// **Disposal-safe**, the same way [`refresh_appearance`](Self::refresh_appearance)
+    /// is: a poll tick already in flight when the mount tears down resumes
+    /// against signals its own `on_cleanup` has disposed, so the compare's
+    /// read is a `try_*` one and a disposed controller makes the whole commit
+    /// a silent no-op.
+    fn publish_tabs(&self, tabs: Vec<TabEntry>, seed: Seed) {
+        let Some(unchanged) = self.tabs.try_with_untracked(|current| *current == tabs) else {
+            return;
+        };
+        let mut wrote = false;
+        let current = self.active_tab.get_untracked();
+        let carries = |key: &str| !key.is_empty() && tabs.iter().any(|tab| tab.key == key);
+        // Whichever tab the answer itself flags active, falling back to its
+        // first — what a load seeds from, and what a heal recovers onto.
+        let answered = || {
+            tabs.iter()
+                .find(|tab| tab.active)
+                .or_else(|| tabs.first())
+                .map(|tab| tab.key.clone())
+                .unwrap_or_default()
+        };
+        let active = match seed {
+            Seed::Fresh => answered(),
+            Seed::Heal if carries(&current) => current.clone(),
+            Seed::Heal => answered(),
+        };
+        if current != active {
+            self.active_tab.set(active.clone());
+            wrote = true;
+        }
+        // The browse follows on a load, and otherwise only when the tab it was
+        // pointing at is gone — a browse the user chose stays where they put
+        // it, but one listing a tab that no longer exists lists no panes at
+        // all.
+        let browsed = self.browsed_tab.get_untracked();
+        if (seed == Seed::Fresh || !carries(&browsed)) && browsed != active {
+            self.browsed_tab.set(active);
+            wrote = true;
+        }
+        if !unchanged {
+            self.tabs.set(tabs);
+            wrote = true;
+        }
+        if wrote {
+            self.layout_writes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether this controller's reactive state is still alive — `false` once
+    /// the mount that owns it has been disposed, which every fetch checks
+    /// before writing anything (see [`publish_tabs`](Self::publish_tabs)'s own
+    /// disposal note; the signals share one owner, so one answering is the
+    /// whole controller answering).
+    fn signals_alive(&self) -> bool {
+        self.tabs.try_with_untracked(|_| ()).is_some()
+    }
+
+    /// Claim the one in-flight create slot, or `None` when a create is already
+    /// running — see [`create_in_flight`](Self::create_in_flight). The claim
+    /// releases itself on drop, so a refused create (or a future early return)
+    /// re-arms the affordance rather than wedging it shut.
+    fn claim_create(&self) -> Option<CreateClaim<'_>> {
+        (!self.create_in_flight.swap(true, Ordering::SeqCst))
+            .then(|| CreateClaim(&self.create_in_flight))
+    }
+
+    /// Wait out [`CREATE_SETTLE`] between a create's ack and the reload that
+    /// reads it back — see that constant's own doc.
+    async fn settle_create(&self) {
+        clean_signals::time::sleep(create_settle()).await;
+    }
+
+    /// Test/diagnostic-only accessor for [`layout_writes`](Self::layout_writes)
+    /// — see that field's own doc. Never called by production code.
+    pub fn layout_writes(&self) -> u64 {
+        self.layout_writes.load(Ordering::Relaxed)
     }
 
     /// Whether this session's backend has **spaces** at all — the one fact the
@@ -880,7 +1223,16 @@ impl TerminalController {
     /// [`link`](Self::link) is a tracked read in the screen's `build`, so an
     /// unconditional `set` would wake a whole-app rebuild 30 times a second
     /// for the life of the mount. A status that has not moved writes nothing.
-    pub fn mirror_link(&self, status: FeedStatus, connection_id: Option<String>) {
+    ///
+    /// **Answers whether the attach just settled** — `true` on the first wake
+    /// that sees a real connection id (or a connected stream), `false` on
+    /// every wake before and after. The mount's own load goes out before any
+    /// of that has happened, and until it has, this screen's requests carry no
+    /// connection id to route by; the caller ([`LiveSession::enter`]'s pump
+    /// callback) turns the one `true` into a single catch-up
+    /// [`reload_tabs`](Self::reload_tabs), which is what stops a layout read
+    /// that raced the handshake from being the last word for the whole mount.
+    pub fn mirror_link(&self, status: FeedStatus, connection_id: Option<String>) -> bool {
         if self.link.get_untracked() != Some(status) {
             self.link.set(Some(status));
         }
@@ -892,8 +1244,14 @@ impl TerminalController {
         if *bound != connection_id {
             connection_id.clone_into(&mut bound);
             self.terminal
-                .bind(self.session_id.clone(), Some(connection_id));
+                .bind(self.session_id.clone(), Some(connection_id.clone()));
         }
+        let settled = !connection_id.is_empty() || status == FeedStatus::Connected;
+        settled
+            && self
+                .attach_settled
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
     }
 
     /// Whether a tab or pane switch on this session has to be followed by a
@@ -982,6 +1340,17 @@ impl TerminalController {
     /// doc. Never called by production code.
     pub fn appearance_writes(&self) -> u64 {
         self.appearance_writes.load(Ordering::Relaxed)
+    }
+}
+
+/// The in-flight create claim [`TerminalController::claim_create`] hands out —
+/// released on drop, so it covers the whole verb (ack, settle and reload)
+/// however that verb returns.
+struct CreateClaim<'a>(&'a AtomicBool);
+
+impl Drop for CreateClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1195,7 +1564,14 @@ impl LiveSession {
                             let feed = watch.borrow();
                             (feed.status(), feed.connection_id())
                         };
-                        mirror.mirror_link(status, connection_id);
+                        if mirror.mirror_link(status, connection_id) {
+                            // The handshake has settled (this fires once per
+                            // mount — `mirror_link`'s own answer): re-read the
+                            // layout, since the mount's own load went out
+                            // before there was a connection id to route it by.
+                            let settled = Arc::clone(&mirror);
+                            spawn_local(async move { settled.reload_tabs().await });
+                        }
                         if flag.swap(false, Ordering::AcqRel) {
                             expiry.on_session_expired();
                         }
@@ -1219,6 +1595,25 @@ impl LiveSession {
             let poll = Arc::clone(&poll);
             spawn_local(async move { poll.refresh_appearance().await });
         });
+
+        // …and the layout poll beside it, for a mount that actually **attached**
+        // (the `Grpc` arm above, not the fixture replay): a replay fronts no
+        // server whose tab world could move behind this screen's back, so
+        // polling one would be a round trip per cadence for a
+        // guaranteed-unchanged answer. Same lifetime as the appearance poll
+        // above — `use_interval`'s own `on_cleanup` binds to this screen's
+        // owner, so it stops with the mount (see this method's own
+        // ambient-owner contract).
+        if matches!(feed, LiveFeed::Grpc(_)) {
+            let layout = Arc::clone(controller);
+            use_interval(LAYOUT_POLL_INTERVAL, move || {
+                if !layout.take_layout_poll_tick() {
+                    return;
+                }
+                let layout = Arc::clone(&layout);
+                spawn_local(async move { layout.refresh_layout_from_poll().await });
+            });
+        }
 
         Self {
             emulator,
@@ -1363,6 +1758,8 @@ mod tests {
     // only *production* site where `presentation` meets `data`). Test code
     // never ships, so this is not the layering edge `docs/ARCHITECTURE.md`
     // closes — it is test wiring standing in for the composition root.
+    use std::collections::VecDeque;
+
     use crate::features::sessions::data::repositories::MockSessionsRepository;
     use crate::features::settings::data::repositories::MockPreferencesRepository;
     use crate::features::terminal::data::repositories::MockTerminalRepository;
@@ -1703,6 +2100,23 @@ mod tests {
         /// The one verb that answers a failure instead of landing — how the
         /// "a refused step writes nothing" tests are driven.
         refuse: Mutex<Option<String>>,
+        /// How long each successive call parks before answering, oldest first;
+        /// a call past the end of the queue answers immediately. Two tests
+        /// need it: one lands an earlier layout fetch *after* a later one, and
+        /// one keeps a create in flight long enough for a second press to
+        /// arrive while it is.
+        delays: Mutex<VecDeque<Duration>>,
+        /// How many [`list_tabs`](TerminalRepository::list_tabs) calls have
+        /// been taken. Stamped into every answered tab's `label` while
+        /// [`stamp_lists`](Self::stamp_lists) is on, so a test can tell which
+        /// round trip a published tab list came from — off by default, since a
+        /// stamped answer differs on every call and would defeat the
+        /// unchanged-answer-writes-nothing tests.
+        lists: AtomicU64,
+        stamp: AtomicBool,
+        /// Whether a create has landed — a created tab shows up in every later
+        /// `list_tabs` answer, the way a real backend's would.
+        created: AtomicBool,
     }
 
     impl RecordingRepository {
@@ -1744,6 +2158,33 @@ mod tests {
         /// Make `verb` answer [`AppFailure::Internal`] from now on.
         fn refuse(&self, verb: &str) {
             *self.refuse.lock().unwrap_or_else(PoisonError::into_inner) = Some(verb.to_string());
+        }
+
+        /// Park the next calls for `delays`, oldest first — see that field.
+        fn delay_calls(&self, delays: impl IntoIterator<Item = Duration>) {
+            self.delays
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(delays);
+        }
+
+        /// Stamp every later `list_tabs` answer with its own call number —
+        /// see [`stamp`](Self::stamp).
+        fn stamp_lists(&self) {
+            self.stamp.store(true, Ordering::Relaxed);
+        }
+
+        /// Park this call for whatever [`delay_calls`](Self::delay_calls)
+        /// queued for it, if anything.
+        async fn park(&self) {
+            let delay = self
+                .delays
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front();
+            if let Some(delay) = delay {
+                clean_signals::time::sleep(delay).await;
+            }
         }
 
         /// Record `call` and answer whatever the refusal table says.
@@ -1809,6 +2250,7 @@ mod tests {
 
         async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
             self.record("list_spaces".to_string())?;
+            self.park().await;
             Ok(vec![
                 Space {
                     id: "ws-1".to_string(),
@@ -1825,14 +2267,28 @@ mod tests {
 
         async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
             self.record("list_tabs".to_string())?;
-            Ok(vec![
+            // Taken before the park below, so the answer carries the number of
+            // the round trip that *started* first even when it lands last.
+            let call = self.lists.fetch_add(1, Ordering::SeqCst) + 1;
+            self.park().await;
+            let mut tabs = vec![
                 recorded_tab(1, "alpha", true),
                 recorded_tab(2, "beta", false),
-            ])
+            ];
+            if self.created.load(Ordering::SeqCst) {
+                tabs.push(recorded_tab(3, "gamma", false));
+            }
+            if self.stamp.load(Ordering::Relaxed) {
+                for tab in &mut tabs {
+                    tab.label = format!("{}#{call}", tab.key);
+                }
+            }
+            Ok(tabs)
         }
 
         async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
             self.record(format!("tab_lines({key})"))?;
+            self.park().await;
             Ok(Vec::new())
         }
 
@@ -1862,7 +2318,9 @@ mod tests {
         }
 
         async fn create_space(&self, label: String) -> Result<(), AppFailure> {
-            self.record(format!("create_space({label})"))
+            self.record(format!("create_space({label})"))?;
+            self.park().await;
+            Ok(())
         }
 
         async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
@@ -1870,7 +2328,10 @@ mod tests {
         }
 
         async fn new_tab(&self) -> Result<(), AppFailure> {
-            self.record("new_tab".to_string())
+            self.record("new_tab".to_string())?;
+            self.park().await;
+            self.created.store(true, Ordering::SeqCst);
+            Ok(())
         }
 
         async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
@@ -2368,6 +2829,225 @@ mod tests {
 
         assert_eq!(repository.actions(), ["rename_pane(10,false,renamed)"]);
         assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
+    }
+
+    // -------------------------------------------------------------------
+    // The layout-refresh mechanism (the module docs' own section): the
+    // staleness guard, the poll's claim, the create settle and its
+    // coalescing, and the attach-settled edge.
+    // -------------------------------------------------------------------
+
+    /// Serializes the two tests that install a
+    /// [`set_create_settle_for_tests`] override: it is process-global, and a
+    /// lib test binary runs its tests on parallel threads.
+    static SETTLE_OVERRIDE: Mutex<()> = Mutex::new(());
+
+    /// An installed create-settle override, restored to the shipped
+    /// [`CREATE_SETTLE`] when it drops.
+    struct SettleOverride(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl SettleOverride {
+        fn install(settle: Duration) -> Self {
+            let guard = SETTLE_OVERRIDE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            set_create_settle_for_tests(Some(settle));
+            Self(guard)
+        }
+    }
+
+    impl Drop for SettleOverride {
+        fn drop(&mut self) {
+            set_create_settle_for_tests(None);
+        }
+    }
+
+    /// Every published tab's label, in order — the round-trip stamp
+    /// [`RecordingRepository::stamp_lists`] writes.
+    fn labels(controller: &TerminalController) -> Vec<String> {
+        controller
+            .tabs
+            .get_untracked()
+            .into_iter()
+            .map(|tab| tab.label)
+            .collect()
+    }
+
+    #[test]
+    fn an_earlier_layout_fetch_landing_late_never_clobbers_the_fresher_one() {
+        let (c, repository) = recorded("zellij:dev");
+        repository.stamp_lists();
+        // The first reload parks; the second answers immediately — so the
+        // round trip that *started* first is the one that lands last, which is
+        // exactly what a slow link produces between a poll tick and whatever
+        // the user just did.
+        repository.delay_calls([Duration::from_millis(60), Duration::ZERO]);
+
+        block_on(async {
+            tokio::join!(c.reload_tabs(), c.reload_tabs());
+        });
+
+        assert_eq!(
+            labels(&c),
+            ["alpha#3", "beta#3"],
+            "the newest fetch's answer stands; the older one's is dropped"
+        );
+    }
+
+    #[test]
+    fn a_layout_poll_tick_needs_a_landed_load_and_never_stacks_two_reloads() {
+        let c = controller(Some("zellij:dev"));
+        assert!(
+            !c.take_layout_poll_tick(),
+            "no poll before the first load has landed"
+        );
+
+        block_on(c.load());
+        assert!(c.take_layout_poll_tick());
+        assert!(
+            !c.take_layout_poll_tick(),
+            "the previous tick is still outstanding"
+        );
+
+        block_on(c.refresh_layout_from_poll());
+        assert!(c.take_layout_poll_tick(), "…and finishing re-arms it");
+    }
+
+    #[test]
+    fn a_poll_tick_whose_answer_has_not_moved_writes_nothing() {
+        let (c, _repository) = recorded("zellij:dev");
+        let after_load = c.layout_writes();
+
+        block_on(c.refresh_layout_from_poll());
+        block_on(c.refresh_layout_from_poll());
+
+        assert_eq!(
+            c.layout_writes(),
+            after_load,
+            "an unchanged tab world must wake no rebuild — the poll runs for \
+             the life of the mount"
+        );
+    }
+
+    #[test]
+    fn a_reload_heals_an_empty_snapshot_without_moving_a_browse_the_user_chose() {
+        let (c, _repository) = recorded("zellij:dev");
+        c.browse_tab("beta".to_string());
+
+        block_on(c.reload_tabs());
+
+        assert_eq!(
+            c.browsed_tab.get_untracked(),
+            "beta",
+            "a browse the user chose survives a refresh"
+        );
+
+        // …and a snapshot that landed empty (a load that raced the attach
+        // handshake used to leave exactly this) recovers on the next one,
+        // rather than leaving every tap on the grid dead.
+        c.active_tab.set(String::new());
+        c.browsed_tab.set(String::new());
+        block_on(c.reload_tabs());
+        assert_eq!(c.active_tab.get_untracked(), "alpha");
+        assert_eq!(c.browsed_tab.get_untracked(), "alpha");
+    }
+
+    #[test]
+    fn a_landed_create_waits_out_the_settle_before_reading_back_what_it_made() {
+        /// Long enough to be unmistakable against a chain of instant mock
+        /// calls, short enough not to pad the suite.
+        const SETTLE: Duration = Duration::from_millis(80);
+        let _override = SettleOverride::install(SETTLE);
+        let (c, repository) = recorded("zellij:dev");
+
+        let started = std::time::Instant::now();
+        block_on(c.new_tab());
+
+        assert!(
+            started.elapsed() >= SETTLE,
+            "the reload behind a create waits for the relay to apply it, \
+             rather than reading back the world the ack was enqueued against"
+        );
+        assert!(
+            c.tabs.get_untracked().iter().any(|tab| tab.key == "gamma"),
+            "…and then reads the tab the create actually made"
+        );
+        assert_eq!(repository.actions(), ["new_tab"], "one create, not two");
+        assert_eq!(
+            CREATE_SETTLE.as_millis(),
+            350,
+            "the shipped settle is the original client's own"
+        );
+    }
+
+    #[test]
+    fn a_second_create_press_while_one_is_in_flight_is_dropped_not_queued() {
+        let _override = SettleOverride::install(Duration::ZERO);
+        let (c, repository) = recorded("zellij:dev");
+        // The first create parks, so the second press arrives while it is
+        // genuinely in flight — the rapid double-tap this coalesces.
+        repository.delay_calls([Duration::from_millis(60)]);
+
+        block_on(async {
+            tokio::join!(c.new_tab(), c.new_tab());
+        });
+
+        assert_eq!(
+            repository.actions(),
+            ["new_tab"],
+            "a repeated press is dropped, never queued behind the first"
+        );
+
+        // …and the claim released with it, so the affordance still works.
+        block_on(c.new_tab());
+        assert_eq!(repository.actions(), ["new_tab", "new_tab"]);
+    }
+
+    #[test]
+    fn a_refused_create_re_arms_the_affordance_it_claimed() {
+        let _override = SettleOverride::install(Duration::ZERO);
+        let (c, repository) = recorded("zellij:dev");
+        repository.refuse("new_pane");
+
+        block_on(c.new_pane(false));
+        block_on(c.new_pane(false));
+
+        assert_eq!(
+            repository.actions(),
+            ["new_pane(false)", "new_pane(false)"],
+            "nothing landed, so nothing is holding the claim"
+        );
+    }
+
+    #[test]
+    fn the_attach_handshake_settles_exactly_once_per_mount() {
+        let c = controller(Some("zellij:dev"));
+        assert!(
+            !c.mirror_link(FeedStatus::Idle, None),
+            "nothing has connected yet"
+        );
+        assert!(!c.mirror_link(FeedStatus::Reconnecting, None));
+
+        assert!(
+            c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string())),
+            "the stream minted an id: the layout read that raced it needs \
+             doing again"
+        );
+        assert!(
+            !c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string())),
+            "…and it is said once"
+        );
+        assert!(
+            !c.mirror_link(FeedStatus::Connected, Some("conn-2".to_string())),
+            "a re-attach re-binds the repository but does not re-settle"
+        );
+    }
+
+    #[test]
+    fn a_connected_status_settles_the_attach_even_with_no_id_to_show_for_it() {
+        let c = controller(Some("zellij:dev"));
+        assert!(c.mirror_link(FeedStatus::Connected, None));
+        assert!(!c.mirror_link(FeedStatus::Connected, None));
     }
 
     #[test]

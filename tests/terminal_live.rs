@@ -66,6 +66,9 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
+use muxr::features::terminal::data::repositories::mock_terminal_repository::{
+    add_test_tab, clear_test_tabs,
+};
 use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
@@ -1422,4 +1425,161 @@ fn invoking_the_wired_hooks_never_panics_on_a_hit_a_miss_or_either_wheel_route()
 
     // Nothing above panicked, and the screen is still alive.
     h.frame();
+}
+
+// ---------------------------------------------------------------------------
+// 13 — layout refresh: the poll, the sheet's own re-read, and the tap-miss
+//      backstop
+// ---------------------------------------------------------------------------
+//
+// The wire has no layout-changed signal, so a tab opened from *elsewhere* (a
+// second client, or the session itself) only ever reaches this screen because
+// it asked again — `TerminalController`'s own "Layout refresh" docs. What
+// these pin is the asking: each trigger fires, the answer lands, and an idle
+// one writes nothing. `MockTerminalRepository::add_test_tab` is the tab world
+// moving behind the screen's back; it is process-global, so every test below
+// clears it on both sides (this suite is serialized, so no other test can be
+// looking at the store meanwhile).
+//
+// The **device** races these close (a snapshot poisoned by the attach
+// handshake, a created tab the relay had not applied yet) are not reproducible
+// headlessly: they need a real `AttachTerminal` stream and a real relay. These
+// pin the mechanisms; the races themselves are a device gate.
+
+/// The tab a test opens "from elsewhere", and the pill the sheet draws for it
+/// — `TabEntry::pill_label`'s `<index> <label>`, appended past the mock's four
+/// seeded tabs.
+const SCRATCH_TAB: &str = "scratch";
+const SCRATCH_PILL: &str = "5 scratch";
+
+/// Drive one controller call to completion — the same local-runtime shape
+/// section 4 uses, and for the same reason (this suite cannot fake the
+/// background runtime's timer, so a poll tick is invoked directly rather than
+/// waited out at a cadence nothing ships).
+fn drive(fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(fut);
+}
+
+/// Pump until the mounted screen's first workspace load has landed.
+fn await_workspace(h: &mut Harness) {
+    h.pump_until("the workspace to load", |_| {
+        debug_controller().is_some_and(|c| c.loaded.get_untracked())
+    });
+}
+
+/// Whether the mounted screen's published tab world carries `key`.
+fn published_tab(key: &str) -> bool {
+    debug_controller()
+        .expect("a terminal screen is mounted")
+        .tabs
+        .get_untracked()
+        .iter()
+        .any(|tab| tab.key == key)
+}
+
+#[test]
+fn a_layout_poll_tick_picks_up_a_tab_opened_elsewhere_and_an_idle_one_writes_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_test_tabs();
+    let mut h = Harness::mount();
+    await_workspace(&mut h);
+    let controller = debug_controller().expect("a terminal screen is mounted");
+    assert!(!published_tab(SCRATCH_TAB), "nothing has opened one yet");
+
+    // A tab opened from somewhere else entirely: no user action here, and
+    // nothing on the wire announces it.
+    add_test_tab(SCRATCH_TAB);
+    assert!(controller.take_layout_poll_tick(), "the poll is armed");
+    let tick = Arc::clone(&controller);
+    drive(Box::pin(
+        async move { tick.refresh_layout_from_poll().await },
+    ));
+
+    assert!(published_tab(SCRATCH_TAB), "the tick picked it up");
+    h.frame();
+
+    // …and the next tick, with the tab world exactly where that one left it,
+    // writes nothing at all — the poll runs for the life of the mount, so an
+    // idle tick that woke a rebuild would wake one forever.
+    let idle = controller.layout_writes();
+    assert!(controller.take_layout_poll_tick());
+    let tick = Arc::clone(&controller);
+    drive(Box::pin(
+        async move { tick.refresh_layout_from_poll().await },
+    ));
+    assert_eq!(
+        controller.layout_writes(),
+        idle,
+        "an unchanged answer wakes no rebuild"
+    );
+
+    clear_test_tabs();
+}
+
+#[test]
+fn opening_the_sheet_re_reads_the_layout_without_blocking_the_open_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_test_tabs();
+    let mut h = Harness::mount();
+    await_workspace(&mut h);
+
+    // Opened from elsewhere while this screen sat there — the sheet is the
+    // one surface that lists tabs, so opening it is what has to notice.
+    add_test_tab(SCRATCH_TAB);
+    open_sheet(&mut h);
+
+    assert!(
+        support::node_values(&h.root)
+            .iter()
+            .any(|v| v == SHEET_LABEL),
+        "the sheet is up on the state it already had — the open is never \
+         blocked on the round trip behind it"
+    );
+    h.pump_until("the sheet to list the tab opened elsewhere", |h| {
+        support::node_values(&h.root)
+            .iter()
+            .any(|v| v == SCRATCH_PILL)
+    });
+
+    clear_test_tabs();
+}
+
+#[test]
+fn the_first_content_tap_that_resolves_to_nothing_re_reads_the_layout_once() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_test_tabs();
+    let mut h = Harness::mount_session("zellij:dev");
+    h.enter_demo();
+    await_workspace(&mut h);
+    let on_content_tap = debug_grid_hooks()
+        .expect("a live session is mounted")
+        .on_content_tap
+        .expect("zellij wires the tap hook");
+
+    // The backstop's whole point: taps are hit-tested against the last layout
+    // answer, so a screen whose answer is stale/empty has no working tap at
+    // all — the first miss re-reads it rather than leaving the user to find
+    // the sheet.
+    add_test_tab(SCRATCH_TAB);
+    on_content_tap(500, 500);
+    h.pump_until("the backstop reload", |_| published_tab(SCRATCH_TAB));
+
+    // …once per mount. A second miss is the plain no-op it always was.
+    clear_test_tabs();
+    add_test_tab("scratch-two");
+    on_content_tap(500, 500);
+    h.pump_for(Duration::from_millis(200));
+    assert!(
+        !published_tab("scratch-two"),
+        "the backstop is a one-shot, not a reload on every miss"
+    );
+
+    clear_test_tabs();
 }

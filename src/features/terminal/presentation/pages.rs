@@ -148,7 +148,11 @@
 //! pane ([`resolve_tap_action`]); a landed focus reloads the tab list through
 //! [`TerminalController::focus_pane_from_tap`] so the rects and the sheet's
 //! own badge converge on whatever the server actually did. A tap between
-//! refreshes that misses every rect is a plain no-op, never a crash.
+//! refreshes that misses every rect is a plain no-op, never a crash — except
+//! for the **first** miss of a mount, which re-reads the layout once as a
+//! backstop: taps are hit-tested against the last layout answer, so a snapshot
+//! that landed empty makes every tap a miss, and that is the one state a user
+//! cannot tap their way out of. Every later miss is the plain no-op again.
 //!
 //! # Wheel → mouse frames
 //!
@@ -651,11 +655,25 @@ impl Component for TerminalScreen {
                 None
             } else {
                 let controller = Arc::clone(&controller);
+                // The tap-miss backstop's own latch — see the closure below.
+                let missed = Rc::new(Cell::new(false));
                 let sink: term::ContentTapSink = Rc::new(move |col: u32, row: u32| {
-                    let Some(tab) = controller.active_tab_entry() else {
-                        return;
-                    };
-                    let Some((pane_id, is_plugin)) = resolve_tap_action(&tab, col, row) else {
+                    let resolved = controller
+                        .active_tab_entry()
+                        .and_then(|tab| resolve_tap_action(&tab, col, row));
+                    let Some((pane_id, is_plugin)) = resolved else {
+                        // A tap that resolved to nothing is *usually* honest
+                        // (the pane it hit is already focused, or it landed
+                        // between rects). But a layout snapshot that is empty
+                        // or stale resolves to nothing too, and then every tap
+                        // on the grid is dead — so the **first** miss of this
+                        // mount re-reads the layout as a backstop, once, and a
+                        // screen in that state recovers without the user
+                        // having to find the sheet.
+                        if !missed.replace(true) {
+                            let controller = Arc::clone(&controller);
+                            spawn_local(async move { controller.reload_tabs().await });
+                        }
                         return;
                     };
                     let controller = Arc::clone(&controller);
@@ -1125,10 +1143,21 @@ impl Actions {
     /// Opening always points the browse back at the tab the session is on
     /// ([`TerminalController::begin_browsing`]) — a browse is a look around,
     /// not a place the sheet remembers being.
+    ///
+    /// **Opening also refreshes the layout**, which is the only way this sheet
+    /// ever shows a tab or pane opened elsewhere (from another client, or by
+    /// the session itself): there is no server-push signal, so the sheet asks
+    /// (see `TerminalController`'s own "Layout refresh" docs). The open is
+    /// **not** blocked on that round trip — the sheet goes up on the state
+    /// already cached and the fresh answer patches in through the tracked
+    /// reads [`sheet_body`](Self::sheet_body) already makes, so a slow link
+    /// costs a late pill, never a sheet that will not open.
     pub fn open_sheet(&self) {
         self.controller.begin_browsing();
         let actions = self.clone();
         show_sheet(&self.overlays, move |sheet| actions.sheet_body(sheet));
+        let controller = Arc::clone(&self.controller);
+        spawn_local(async move { controller.reload_tabs().await });
     }
 
     /// Point the sheet at the tab keyed `key`.
