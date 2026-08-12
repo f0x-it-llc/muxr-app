@@ -1,8 +1,20 @@
-//! Bundled fonts: JetBrains Mono as the app-wide (and terminal-default) face,
-//! Symbols Nerd Font Mono as the always-present nerd-font/powerline glyph
-//! fallback.
+//! The app's fonts: JetBrains Mono as the app-wide (and terminal-default)
+//! face, Symbols Nerd Font Mono as the always-present nerd-font/powerline
+//! glyph fallback — plus the downloadable Nerd Font catalog on top of them.
 //!
-//! # Registration is a push, embedded at compile time
+//! App-level infrastructure beside `crate::net`, not a feature's `data` layer:
+//! Settings browses and installs fonts, and the terminal grid shapes with
+//! them.
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | this one | the bundled faces, the app-wide theme swap, and what "installed" means |
+//! | [`manifest`] | the catalog's wire format (`displayName` vs `family`) |
+//! | [`source`] | where bytes come from — HTTPS, or a test's own source |
+//! | [`store`] | the on-disk cache, SHA-256 integrity, registration, the installed record |
+//! | [`catalog`] | the picker's reactive state and the download state machine |
+//!
+//! # Registration is a push, and the bundled half is embedded at compile time
 //!
 //! [`register_bundled_fonts`] pushes every bundled TTF's raw bytes (each
 //! `include_bytes!`d from `assets/fonts/`, see [`BUNDLED_FONTS`]) into
@@ -10,7 +22,9 @@
 //! Android/iOS/desktop, no Gradle/Xcode asset wiring. Bundled bytes rather
 //! than a loose asset file: the running shell drains the slot into its
 //! `TextContext` at construction (before the first frame), so the face must
-//! already be linked into the binary by then.
+//! already be linked into the binary by then. A **downloaded** face goes
+//! through the same slot, which every shell also drains once per frame — so a
+//! font installed mid-session shapes from the next frame on, with no relaunch.
 //!
 //! # Family names are fontique's, not ours
 //!
@@ -22,7 +36,9 @@
 //! [`SYMBOLS_FALLBACK_FAMILY`] exactly — a tripwire against silent TTF-name
 //! drift (a font update that renames its own family would otherwise leave
 //! every `FontFamily::stack`/`stack_with_generic` call below resolving to
-//! nothing, with no compile error).
+//! nothing, with no compile error). The same fact is why a *downloaded* font's
+//! family is read back from a real registration rather than taken from the
+//! manifest (see [`store`]).
 //!
 //! # Call order: register, then re-theme
 //!
@@ -34,9 +50,21 @@
 //! `family` tokens — the bytes those tokens now name must already be pending
 //! by the time this runs, or the shell falls back to whatever monospace face
 //! the platform has (the `Monospace` generic tail every stack below ends in).
+//! [`register_cached_fonts_at_startup`] joins them there, but is deliberately
+//! **asynchronous**: it reads and hashes megabytes off disk, which the UI
+//! thread must never wait on.
+
+pub mod catalog;
+mod json;
+pub mod manifest;
+pub mod source;
+pub mod store;
 
 use frust::authoring::text::{FontFamily, GenericSlot, TextStyle};
 use frust::{Theme, TypeScale, set_app_theme};
+
+pub use source::{use_font_source_for_tests, use_offline_font_source_for_tests};
+pub use store::{reset_installed_fonts_for_tests, use_font_cache_dir_for_tests};
 
 /// The app-wide and terminal-default font family — JetBrains Mono. Single
 /// source for the type-scale swap below, the terminal grid's default stack
@@ -50,15 +78,16 @@ pub const DEFAULT_TERMINAL_FAMILY: &str = "JetBrains Mono";
 /// icons/branch glyphs), so it never leads a stack itself, only trails one.
 pub const SYMBOLS_FALLBACK_FAMILY: &str = "Symbols Nerd Font Mono";
 
-const JETBRAINS_MONO_LIGHT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Light.ttf");
+const JETBRAINS_MONO_LIGHT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Light.ttf");
 const JETBRAINS_MONO_LIGHT_ITALIC: &[u8] =
-    include_bytes!("../assets/fonts/JetBrainsMono-LightItalic.ttf");
-const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
-const JETBRAINS_MONO_ITALIC: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf");
-const JETBRAINS_MONO_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
-const JETBRAINS_MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
+    include_bytes!("../../assets/fonts/JetBrainsMono-LightItalic.ttf");
+const JETBRAINS_MONO_REGULAR: &[u8] =
+    include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+const JETBRAINS_MONO_ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Italic.ttf");
+const JETBRAINS_MONO_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Medium.ttf");
+const JETBRAINS_MONO_BOLD: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf");
 const SYMBOLS_NERD_FONT_MONO: &[u8] =
-    include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
+    include_bytes!("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
 
 /// Every bundled TTF's raw bytes, in the order [`register_bundled_fonts`]
 /// registers them — the six JetBrains Mono faces (all resolve into one
@@ -76,6 +105,10 @@ const BUNDLED_FONTS: [&[u8]; 7] = [
     SYMBOLS_NERD_FONT_MONO,
 ];
 
+/// The two families that ship in the binary — always installed, never
+/// downloaded, and the floor [`installed_families`] starts from.
+const BUNDLED_FAMILIES: [&str; 2] = [DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY];
+
 /// Push every bundled TTF into `frust`'s pending font registry. Call once,
 /// from the app's setup block, before [`apply_app_wide_theme`] (see the
 /// [module docs](self)).
@@ -85,23 +118,63 @@ pub fn register_bundled_fonts() {
     }
 }
 
-/// The family names [`register_bundled_fonts`] installs — bundled-only for
-/// now (a future task extends this with downloaded faces). See the
-/// [module docs](self) for why this is asserted against fontique's actual
-/// resolution rather than just trusted.
+/// Re-register every valid cached font family, off the UI thread.
+///
+/// Call once, from the app's setup block. Fire-and-forget by design: the scan
+/// reads and hashes every cached file ([`store::scan_cache_and_register`]), so
+/// it runs on the blocking pool and folds its families into
+/// [`installed_families`] whenever it lands — a few frames into the launch at
+/// worst, long before a picker can be opened. Until then a persisted family
+/// that is only in the cache resolves to the bundled stack
+/// ([`resolve_terminal_family`]) and corrects itself on the terminal's next
+/// appearance poll, which is why nothing here blocks a frame waiting for it.
+pub fn register_cached_fonts_at_startup() {
+    frust::spawn(async move {
+        match frust::spawn_blocking(store::scan_cache_and_register).await {
+            Ok(families) if !families.is_empty() => {
+                log::info!("fonts: registered {} cached families", families.len());
+            }
+            Ok(_) => {}
+            Err(err) => log::warn!("fonts: cached-font scan failed to run: {err}"),
+        }
+    });
+}
+
+/// Every family this process can shape with: the two bundled faces plus every
+/// downloaded family registered this run (from the startup cache scan, or from
+/// a download that landed since — see [`store`]).
 pub fn installed_families() -> Vec<String> {
-    vec![
-        DEFAULT_TERMINAL_FAMILY.to_string(),
-        SYMBOLS_FALLBACK_FAMILY.to_string(),
-    ]
+    let mut families: Vec<String> = BUNDLED_FAMILIES.iter().map(|f| f.to_string()).collect();
+    for family in store::installed_downloads() {
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    families
+}
+
+/// What a family is *called* in the UI: the catalog's own label for a
+/// downloaded face (`BlexMono Nerd Font Mono` → `IBM Plex Mono Nerd Font
+/// Mono`), or the family name itself for a bundled one (whose two names are
+/// the same) and for anything this device has never installed.
+///
+/// The label survives a relaunch without a catalog: it is recorded in the
+/// cache's own sidecar (see [`store::display_name_for`]).
+///
+/// A bundled family answers its own name unconditionally — it is not the
+/// cache's to rename, even if a catalog entry's bytes once happened to
+/// register under it.
+pub fn display_name(family: &str) -> String {
+    if BUNDLED_FAMILIES.contains(&family) {
+        return family.to_string();
+    }
+    store::display_name_for(family).unwrap_or_else(|| family.to_string())
 }
 
 /// Font families a user may pick as the terminal's *primary* face:
 /// [`installed_families`] minus [`SYMBOLS_FALLBACK_FAMILY`] — a fallback face
 /// that covers private-use glyphs the primary face lacks, never something a
 /// picker should offer as the leading choice (see that constant's own doc).
-/// Dynamic rather than a const, so a later task's downloaded faces show up
-/// here for free once they land in [`installed_families`].
 pub fn pickable_terminal_families() -> Vec<String> {
     installed_families()
         .into_iter()
@@ -130,9 +203,14 @@ pub fn default_terminal_family() -> FontFamily {
 /// the `Monospace` generic, same shape as [`default_terminal_family`]); the
 /// default stack for anything else — a value persisted before this bundling
 /// existed (`docs/redesign.html`'s own `Hack Nerd Font Mono` mock), or a
-/// family a later task's catalog hasn't downloaded yet. Never errors: an
-/// unresolvable preference degrades to the shipped default rather than a
-/// blank or broken stack.
+/// downloaded family whose cache has since been cleared.
+///
+/// **This is the app's one unknown-family grace, and it lives here on
+/// purpose.** The data layer stores whatever family the user picked without
+/// judging it (a downloaded name is not in any compile-time list, and `data`
+/// is framework-free — it cannot know what is installed); this resolution, at
+/// the presentation edge, is what turns a family that no longer resolves into
+/// the shipped default rather than a blank or broken stack.
 pub fn resolve_terminal_family(stored: &str) -> FontFamily {
     if installed_families().iter().any(|family| family == stored) {
         FontFamily::stack_with_generic([stored, SYMBOLS_FALLBACK_FAMILY], GenericSlot::Monospace)
@@ -205,6 +283,11 @@ fn jetbrains_type_scale(scale: TypeScale) -> TypeScale {
 /// contract). `Theme::glyph_baseline()` — the canonical no-theme-installed
 /// fallback — is deliberately untouched everywhere else; this only ever
 /// forces the *active* theme via `frust::set_app_theme`.
+///
+/// **Only the bundled face is ever the app-wide one.** A downloaded font is a
+/// *terminal* face, never the chrome's: the catalog is monospace Nerd Fonts,
+/// and re-theming the whole app onto one would re-shape every screen from a
+/// picker row.
 pub fn apply_app_wide_theme() {
     let theme = Theme::builder(Theme::glyph_baseline())
         .map_type_scale(jetbrains_type_scale)
@@ -232,7 +315,7 @@ mod tests {
                 names.insert(family.name);
             }
         }
-        let expected: BTreeSet<String> = installed_families().into_iter().collect();
+        let expected: BTreeSet<String> = BUNDLED_FAMILIES.iter().map(|f| f.to_string()).collect();
         assert_eq!(names, expected);
     }
 
@@ -261,10 +344,14 @@ mod tests {
     }
 
     #[test]
-    fn installed_families_names_the_two_bundled_faces() {
+    fn installed_families_starts_from_the_two_bundled_faces() {
+        // Downloaded families are appended to these two, never instead of them
+        // (a suite that installed one runs under its own cache root — see
+        // `store`'s own tests).
+        let families = installed_families();
         assert_eq!(
-            installed_families(),
-            vec![
+            &families[..2],
+            &[
                 DEFAULT_TERMINAL_FAMILY.to_string(),
                 SYMBOLS_FALLBACK_FAMILY.to_string(),
             ]
@@ -273,11 +360,26 @@ mod tests {
 
     #[test]
     fn pickable_terminal_families_drops_the_symbols_fallback() {
-        assert_eq!(
-            pickable_terminal_families(),
-            vec![DEFAULT_TERMINAL_FAMILY.to_string()],
+        assert!(
+            !pickable_terminal_families()
+                .iter()
+                .any(|family| family == SYMBOLS_FALLBACK_FAMILY),
             "the fallback face is never a primary-face choice"
         );
+        assert!(
+            pickable_terminal_families()
+                .iter()
+                .any(|family| family == DEFAULT_TERMINAL_FAMILY)
+        );
+    }
+
+    #[test]
+    fn a_bundled_family_displays_under_its_own_name() {
+        assert_eq!(
+            display_name(DEFAULT_TERMINAL_FAMILY),
+            DEFAULT_TERMINAL_FAMILY
+        );
+        assert_eq!(display_name("Never Installed Mono"), "Never Installed Mono");
     }
 
     #[test]
@@ -302,8 +404,9 @@ mod tests {
 
     #[test]
     fn resolve_terminal_family_falls_back_for_an_unknown_stored_value() {
-        // A pre-task-27 persisted value (`docs/redesign.html`'s own mock
-        // default) that no longer names a bundled face.
+        // A persisted value naming a face this device does not have — a
+        // pre-bundling default (`docs/redesign.html`'s own mock), or a
+        // downloaded family whose cache was cleared.
         assert_eq!(
             resolve_terminal_family("Hack Nerd Font Mono"),
             default_terminal_family()

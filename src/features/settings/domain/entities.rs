@@ -16,13 +16,13 @@
 //! [`PollPrefs::REFRESH_CHOICES_SECS`]) beside the field it constrains, rather
 //! than in the sheet that renders them: which font sizes a terminal supports
 //! is a fact about the domain, not about the picker, and keeping the two
-//! together is what lets the screen's four pickers share one builder without
-//! any of them minting its own list. The font family is the one exception:
-//! which faces actually resolve is a fact about bundled/downloaded assets
-//! (`crate::fonts::installed_families`), not a domain-declared choice, so the
-//! picker sources that list dynamically from there instead — see
-//! [`AppearancePrefs::FONT_FAMILIES`]'s own doc for the narrower role it
-//! still plays here.
+//! together is what lets the screen's pickers share one builder without any of
+//! them minting its own list. The font family is the one exception, and has no
+//! choice set here at all: which faces resolve is a fact about this device's
+//! bundled *and downloaded* assets (`crate::fonts::installed_families`) —
+//! runtime truth a framework-free module cannot hold, and which `data` must
+//! therefore persist as given rather than clamp against a list (see
+//! `data::repositories::prefs_repository`'s own module docs).
 //!
 //! # Two labels for one value
 //!
@@ -227,25 +227,6 @@ pub struct AppearancePrefs {
 }
 
 impl AppearancePrefs {
-    /// The redesign's own four font-family names — **not** the picker's own
-    /// option list any more (`presentation::pages`' `Actions::picker` sources
-    /// that dynamically from `crate::fonts::installed_families`, which is
-    /// bundled/downloaded-asset truth this framework-free module cannot
-    /// depend on). What this const still guards is `data`'s own clamp of a
-    /// persisted value
-    /// (`data::mock_preferences_repository::validate_appearance`,
-    /// `data::prefs_repository`'s load-time clamp): a superset the picker no
-    /// longer produces every member of (`IBM Plex Mono`/`Space Mono` name no
-    /// bundled face today), left wide rather than narrowed so an
-    /// already-persisted value from before the picker's sourcing changed
-    /// keeps loading instead of silently clamping to the default.
-    pub const FONT_FAMILIES: [&'static str; 4] = [
-        DEFAULT_FONT_FAMILY,
-        "IBM Plex Mono",
-        "Space Mono",
-        "JetBrains Mono",
-    ];
-
     /// The font sizes the picker offers, in px (`10px`–`14px`).
     pub const FONT_SIZES_PX: [u32; 5] = [10, 11, 12, 13, 14];
 
@@ -380,13 +361,10 @@ mod tests {
     fn every_default_is_one_of_its_own_offered_choices() {
         // The tripwire that keeps a picker from opening with nothing selected:
         // a default outside its own option list would render every row
-        // unselected and no check mark at all.
+        // unselected and no check mark at all. (The font family has no list
+        // here — see the module docs; its own "the default is installed"
+        // tripwire is `crate::fonts`' `resolve_terminal_family` test.)
         let prefs = Preferences::defaults();
-        assert!(
-            AppearancePrefs::FONT_FAMILIES.contains(&prefs.appearance.font_family.as_str()),
-            "{:?}",
-            AppearancePrefs::FONT_FAMILIES
-        );
         assert!(AppearancePrefs::FONT_SIZES_PX.contains(&prefs.appearance.font_size_px));
         assert!(CursorStyle::ALL.contains(&prefs.appearance.cursor_style));
         assert!(PollPrefs::REFRESH_CHOICES_SECS.contains(&prefs.poll.layout_refresh_secs));
@@ -394,21 +372,8 @@ mod tests {
 
     #[test]
     fn the_pickers_option_lists_are_the_redesigns() {
-        // `FONT_FAMILIES`' first slot is `DEFAULT_FONT_FAMILY` by reference, so
-        // changing that default (`Hack Nerd Font Mono` -> `JetBrains Mono`)
-        // means it now reads `JetBrains Mono` twice — index 0 (the shipped
-        // default) and index 3 (the redesign's own fourth option).
-        // `FONT_FAMILIES` itself is deliberately left alone: a later task
-        // replaces its whole sourcing rather than hand-deduplicating it here.
-        assert_eq!(
-            AppearancePrefs::FONT_FAMILIES,
-            [
-                "JetBrains Mono",
-                "IBM Plex Mono",
-                "Space Mono",
-                "JetBrains Mono"
-            ]
-        );
+        // The font family has no list here at all: the picker sources it from
+        // `crate::fonts` (installed faces, bundled or downloaded).
         assert_eq!(AppearancePrefs::FONT_SIZES_PX, [10, 11, 12, 13, 14]);
         assert_eq!(PollPrefs::REFRESH_CHOICES_SECS, [1, 3, 5, 10]);
         assert_eq!(

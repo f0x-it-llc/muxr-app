@@ -3214,9 +3214,10 @@ mod tests {
     fn refresh_appearance_falls_back_to_the_default_stack_for_an_unknown_family() {
         let prefs = Arc::new(MockPreferencesRepository::seeded());
         let c = controller_over(&prefs);
-        // Accepted by the mock's own picker-shaped validation
-        // (`AppearancePrefs::FONT_FAMILIES`) but not a bundled face — the
-        // same gap `crate::fonts::installed_families`'s own doc records.
+        // A family the store persists happily (it stores whatever the picker
+        // produced, downloaded names included) but that this device has no
+        // face for — the unknown-family grace `crate::fonts`'
+        // `resolve_terminal_family` owns.
         let _ = block_on(prefs.save_appearance(AppearancePrefs {
             font_family: "Space Mono".to_string(),
             font_size_px: 12,

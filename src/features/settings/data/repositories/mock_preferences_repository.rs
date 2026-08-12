@@ -75,12 +75,19 @@ impl Default for MockPreferencesRepository {
 }
 
 /// Reject an appearance record carrying a value no picker could have produced.
+///
+/// The font family is deliberately **not** checked against a list: the font
+/// picker offers whatever faces are installed on the device, bundled or
+/// downloaded (`crate::fonts`), so the legal set is a runtime fact this
+/// framework-free layer cannot know — the real store
+/// ([`PrefsRepository`](super::PrefsRepository)) makes the same call, and its
+/// module docs carry the full rationale. Only an empty name is refused: it
+/// could never name a face.
 fn validate_appearance(prefs: &AppearancePrefs) -> Result<(), AppFailure> {
-    if !AppearancePrefs::FONT_FAMILIES.contains(&prefs.font_family.as_str()) {
-        return Err(AppFailure::Internal(format!(
-            "save_appearance: unknown font family {}",
-            prefs.font_family
-        )));
+    if prefs.font_family.trim().is_empty() {
+        return Err(AppFailure::Internal(
+            "save_appearance: empty font family".to_string(),
+        ));
     }
     if !AppearancePrefs::FONT_SIZES_PX.contains(&prefs.font_size_px) {
         return Err(AppFailure::Internal(format!(
@@ -184,15 +191,37 @@ mod tests {
     }
 
     #[test]
+    fn a_downloaded_font_family_survives_a_save_and_load_round_trip() {
+        // The defect this pins: the family was clamped against a four-name
+        // const, so a downloaded font's name — which appears in no
+        // compile-time list — was rejected here and silently reset to the
+        // bundled default on the next load, losing the user's choice.
+        let repo = MockPreferencesRepository::seeded();
+        let downloaded = AppearancePrefs {
+            font_family: "FiraCode Nerd Font Mono".to_string(),
+            ..Preferences::defaults().appearance
+        };
+
+        let stored = block_on(repo.save_appearance(downloaded.clone())).expect("accepted");
+
+        assert_eq!(stored, downloaded);
+        let loaded = block_on(repo.load_preferences()).expect("load");
+        assert_eq!(
+            loaded.appearance.font_family, "FiraCode Nerd Font Mono",
+            "the user's downloaded font survives the round trip"
+        );
+    }
+
+    #[test]
     fn a_value_outside_the_domains_own_choice_set_is_rejected() {
         let repo = MockPreferencesRepository::seeded();
 
-        let bad_family = AppearancePrefs {
-            font_family: "Comic Sans".to_string(),
+        let no_family = AppearancePrefs {
+            font_family: "  ".to_string(),
             ..Preferences::defaults().appearance
         };
         assert!(matches!(
-            block_on(repo.save_appearance(bad_family)).expect_err("rejected"),
+            block_on(repo.save_appearance(no_family)).expect_err("rejected"),
             AppFailure::Internal(_)
         ));
 

@@ -38,6 +38,19 @@
 //! ([`MIN_LAYOUT_REFRESH_SECS`]), `pref_font_size` to
 //! [`AppearancePrefs::FONT_SIZES_PX`]'s own `10`–`14` range.
 //!
+//! # `pref_font_family` is stored as given
+//!
+//! The font family is the one field this store does **not** validate against a
+//! list, and that is deliberate: the picker offers whatever faces are actually
+//! installed — bundled *or downloaded* (`crate::fonts`) — so the set of legal
+//! values is a runtime fact about this device's font cache, not something a
+//! framework-free `data` layer can know. This store used to clamp it against a
+//! four-name const, which silently reset a user's downloaded font to
+//! `JetBrains Mono` on the next launch. Only a non-empty string is required
+//! now; grace for a family that is no longer installed lives at the
+//! presentation edge instead (`crate::fonts::resolve_terminal_family`, whose
+//! own doc records that split).
+//!
 //! # Saves: synchronous state, fire-and-forget disk
 //!
 //! [`save_appearance`](PreferencesRepository::save_appearance)/
@@ -140,17 +153,28 @@ fn cursor_style_from_key(key: &str) -> Option<CursorStyle> {
 /// already holds, applied here too so a screen can never persist a value
 /// neither this store nor the picker sheets that produce it would recognize
 /// as valid.
+///
+/// The font family is the exception, and only an empty one is corrected — see
+/// the [module docs](self)' `pref_font_family` section.
 fn clamp_appearance(prefs: AppearancePrefs) -> AppearancePrefs {
     let (min, max) = font_size_bounds();
     let defaults = Preferences::defaults();
     AppearancePrefs {
-        font_family: if AppearancePrefs::FONT_FAMILIES.contains(&prefs.font_family.as_str()) {
-            prefs.font_family
-        } else {
-            defaults.appearance.font_family
-        },
+        font_family: sane_family(prefs.font_family, defaults.appearance.font_family),
         font_size_px: prefs.font_size_px.clamp(min, max),
         cursor_style: prefs.cursor_style,
+    }
+}
+
+/// `family` if it names anything at all, else `fallback` — the whole of this
+/// store's font-family validation (see the [module docs](self)). An empty
+/// string is the one value that could never name a face, and would leave a
+/// terminal shaping with the generic monospace tail forever.
+fn sane_family(family: String, fallback: String) -> String {
+    if family.trim().is_empty() {
+        fallback
+    } else {
+        family
     }
 }
 
@@ -170,10 +194,13 @@ impl PreferencesRepository for PrefsRepository {
         let defaults = Preferences::defaults();
         let (min_size, max_size) = font_size_bounds();
 
+        // Whatever was stored, as long as it names something (see the module
+        // docs): a downloaded family is legal here and appears in no
+        // compile-time list.
         let font_family = self
             .store
             .get_string(KEY_FONT_FAMILY)
-            .filter(|value| AppearancePrefs::FONT_FAMILIES.contains(&value.as_str()))
+            .filter(|value| !value.trim().is_empty())
             .unwrap_or(defaults.appearance.font_family);
 
         let font_size_px = self
@@ -276,29 +303,38 @@ mod tests {
     }
 
     #[test]
-    fn clamp_appearance_rejects_an_unknown_family_and_clamps_the_size() {
+    fn clamp_appearance_keeps_a_downloaded_family_and_clamps_the_size() {
+        // The defect this pins: a downloaded family appears in no
+        // compile-time list, and clamping against one silently reset the
+        // user's choice to the bundled default on the next launch.
         let clamped = clamp_appearance(AppearancePrefs {
-            font_family: "Comic Sans".to_string(),
+            font_family: "FiraCode Nerd Font Mono".to_string(),
             font_size_px: 72,
             cursor_style: CursorStyle::Bar,
         });
         assert_eq!(
-            clamped.font_family,
-            Preferences::defaults().appearance.font_family
+            clamped.font_family, "FiraCode Nerd Font Mono",
+            "the family is stored as given"
         );
         assert_eq!(clamped.font_size_px, 14, "clamped to the domain's own max");
         assert_eq!(clamped.cursor_style, CursorStyle::Bar, "left alone");
     }
 
     #[test]
-    fn clamp_appearance_keeps_a_known_family_and_in_range_size() {
-        let clamped = clamp_appearance(AppearancePrefs {
-            font_family: "Space Mono".to_string(),
-            font_size_px: 11,
-            cursor_style: CursorStyle::Underline,
-        });
-        assert_eq!(clamped.font_family, "Space Mono");
-        assert_eq!(clamped.font_size_px, 11);
+    fn clamp_appearance_replaces_an_empty_family_with_the_shipped_default() {
+        // The one family value that could never name a face.
+        for blank in ["", "   "] {
+            let clamped = clamp_appearance(AppearancePrefs {
+                font_family: blank.to_string(),
+                font_size_px: 11,
+                cursor_style: CursorStyle::Underline,
+            });
+            assert_eq!(
+                clamped.font_family,
+                Preferences::defaults().appearance.font_family
+            );
+            assert_eq!(clamped.font_size_px, 11);
+        }
     }
 
     #[test]

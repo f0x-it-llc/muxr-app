@@ -368,12 +368,19 @@ impl Component for MuxrApp {
 // to the Glyph baseline with every type-scale slot's family swapped onto
 // JetBrains Mono (see `fonts`' own module docs for the full ordering
 // contract and why registration must run first).
+// `fonts::register_cached_fonts_at_startup` re-registers the downloaded
+// families this device has cached. It is deliberately the odd one out here:
+// it returns immediately and does its reading/hashing on the blocking pool,
+// because a font cache is megabytes and the first frame must not wait on a
+// disk scan. The font *catalog* is never fetched here — only when the picker
+// asks for it (`fonts::catalog`).
 frust::app!(
     MuxrApp,
     setup = {
         frust::glyph_theme::install();
         fonts::register_bundled_fonts();
         fonts::apply_app_wide_theme();
+        fonts::register_cached_fonts_at_startup();
     }
 );
 
