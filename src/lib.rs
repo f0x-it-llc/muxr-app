@@ -41,6 +41,7 @@
 pub mod connection;
 pub mod failure;
 pub mod features;
+pub mod fonts;
 // `net` is `pub` for the same reason every module here is: the headless suites
 // in `tests/` are separate crates, and a fixture that stands a fake `muxrd` up
 // needs the generated service types by name.
@@ -360,11 +361,19 @@ impl Component for MuxrApp {
 // this call is ever skipped — never `Theme::neutral()` (the shell's own
 // no-design-system fallback) or `Theme::m3_baseline()` (huddle's
 // switchable-design-language fallback): muxr commits to Glyph as its one
-// design system, unlike huddle's three-way switcher.
+// design system, unlike huddle's three-way switcher. `fonts::register_bundled_fonts`
+// pushes the bundled JetBrains Mono + Symbols Nerd Font Mono faces into the
+// same pre-first-frame registry `glyph_theme::install` uses for its own
+// bundled faces; `fonts::apply_app_wide_theme` then forces the active theme
+// to the Glyph baseline with every type-scale slot's family swapped onto
+// JetBrains Mono (see `fonts`' own module docs for the full ordering
+// contract and why registration must run first).
 frust::app!(
     MuxrApp,
     setup = {
         frust::glyph_theme::install();
+        fonts::register_bundled_fonts();
+        fonts::apply_app_wide_theme();
     }
 );
 

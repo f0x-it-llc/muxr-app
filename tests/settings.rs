@@ -1511,6 +1511,10 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
 /// lists, which index is selected out of the box, and what picking the last
 /// option should leave in the row's value.
 const PICKERS: [(&str, usize, usize, &str); 4] = [
+    // `FONT_FAMILIES`' first slot is `DEFAULT_FONT_FAMILY` by reference
+    // (`entities.rs`'s own doc), so the initially selected row is still 0:
+    // the default is `JetBrains Mono` now, and that is exactly what index 0
+    // reads too (see that array's own test for the resulting duplicate).
     ("font family", 4, 0, "JetBrains Mono"),
     ("font size", 5, 2, "14px"),
     ("cursor style", 3, 0, "bar"),

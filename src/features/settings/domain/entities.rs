@@ -168,7 +168,10 @@ pub struct Preferences {
 
 impl Preferences {
     /// The app's shipped defaults — **and** what `docs/redesign.html`'s
-    /// settings screen draws: `Hack Nerd Font Mono`, `12px`, `block`,
+    /// settings screen draws, with one deliberate divergence: the redesign
+    /// mock draws `Hack Nerd Font Mono`, but the app ships `JetBrains Mono`
+    /// (the app-wide face bundled everywhere, including the terminal grid's
+    /// own default). Every other value is the mock's own: `12px`, `block`,
     /// `every 3s`, bell on.
     ///
     /// One definition, two consumers: the mock repository seeds from it (so
@@ -191,8 +194,10 @@ impl Preferences {
     }
 }
 
-/// The default terminal font family — the redesign's `Hack Nerd Font Mono`.
-const DEFAULT_FONT_FAMILY: &str = "Hack Nerd Font Mono";
+/// The default terminal font family — `JetBrains Mono`, the app-wide
+/// bundled face (the redesign mock itself draws `Hack Nerd Font Mono`; see
+/// [`Preferences::defaults`]'s own doc for this one deliberate divergence).
+const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
 /// The default terminal font size, in px — the redesign's `12px`.
 const DEFAULT_FONT_SIZE_PX: u32 = 12;
 /// The default layout-refresh interval, in seconds — the redesign's
@@ -346,9 +351,9 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_values_the_redesign_draws() {
+    fn the_defaults_are_the_redesigns_values_except_the_bundled_font() {
         let prefs = Preferences::defaults();
-        assert_eq!(prefs.appearance.font_family, "Hack Nerd Font Mono");
+        assert_eq!(prefs.appearance.font_family, "JetBrains Mono");
         assert_eq!(prefs.appearance.font_size_label(), "12px");
         assert_eq!(prefs.appearance.cursor_style.label(), "block");
         assert_eq!(prefs.poll.layout_refresh_label(), "every 3s");
@@ -373,10 +378,16 @@ mod tests {
 
     #[test]
     fn the_pickers_option_lists_are_the_redesigns() {
+        // `FONT_FAMILIES`' first slot is `DEFAULT_FONT_FAMILY` by reference, so
+        // changing that default (`Hack Nerd Font Mono` -> `JetBrains Mono`)
+        // means it now reads `JetBrains Mono` twice — index 0 (the shipped
+        // default) and index 3 (the redesign's own fourth option).
+        // `FONT_FAMILIES` itself is deliberately left alone: a later task
+        // replaces its whole sourcing rather than hand-deduplicating it here.
         assert_eq!(
             AppearancePrefs::FONT_FAMILIES,
             [
-                "Hack Nerd Font Mono",
+                "JetBrains Mono",
                 "IBM Plex Mono",
                 "Space Mono",
                 "JetBrains Mono"
