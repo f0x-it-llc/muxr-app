@@ -53,7 +53,7 @@ use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context,
 };
-use frust_core::accesskit::{Node, Rect, Toggled};
+use frust_core::accesskit::{Node, Rect, Role, Toggled};
 use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
 use frust_reactive::ReactiveRuntime;
 use frust_text::TextContext;
@@ -377,6 +377,27 @@ impl Harness {
             .iter()
             .find(|(_, node)| node.label() == Some("bell notifications"))
             .and_then(|(_, node)| node.toggled())
+    }
+
+    /// The create dialog's read-only toggle's announced role and state —
+    /// addressed by its own label rather than `Role::Switch` alone
+    /// (`tests/connect.rs`'s own `remember_on`, for a screen with only one
+    /// switch mounted at a time): the bell row's switch is still mounted
+    /// underneath while the dialog is open over it, so a role-only match
+    /// would be ambiguous here. `None` once the dialog itself is gone.
+    fn read_only_toggle(&self) -> Option<(Role, Toggled)> {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some("read-only"))
+            .map(|(_, node)| {
+                (
+                    node.role(),
+                    node.toggled()
+                        .expect("a switch node always carries a toggled state"),
+                )
+            })
     }
 
     /// The navigator's page-stack depth (1 = only the harness's base page).
@@ -759,10 +780,12 @@ fn revoking_a_token_confirms_first_then_removes_it() {
 /// The two submit paths differ on purpose: with no toggle tap the field still
 /// holds focus, so Enter submits it exactly like
 /// `ui::dialogs::name_input_dialog`'s own field, reading the just-typed value
-/// the framework hands its `on_submit` directly. Tapping the toggle row first
+/// the framework hands its `on_submit` directly. Tapping the switch first
 /// blurs that focus (`docs/CODE_STANDARDS.md`'s "a `Down` that doesn't
-/// (re)claim focus … blurs the chain"), so Enter would route nowhere; the Save
-/// button submits instead. Save's own "disabled" gate
+/// (re)claim focus … blurs the chain") — the switch owns its own tap target
+/// and claims no focus of its own, exactly like the `GestureDetector` it
+/// replaced — so Enter would route nowhere; the Save button submits instead.
+/// Save's own "disabled" gate
 /// (`open_create_token_dialog`'s own doc) is a `can_submit` bool captured at
 /// the dialog body's *last rebuild*, so an explicit [`Harness::frame`] after
 /// typing is what lets it see the typed name before either submit path fires
@@ -874,6 +897,47 @@ fn the_read_only_toggle_mints_a_read_only_token_that_reloads_into_the_list() {
         2,
         "the toggle's scope survives the reload: {values:?}"
     );
+}
+
+/// The create dialog's toggle is the real `frust::switch` — a `Role::Switch`
+/// node carrying the read-only label, whose state tracks a tap landing on the
+/// switch itself. `mint_token`'s own pins exercise the same tap through a
+/// full mint round trip; this one pins the semantics node directly, the same
+/// shape `tests/connect.rs`'s `remember_on`/`toggling_remember_off_…` pair
+/// pins for Connect's remember toggle.
+#[test]
+fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    open_dialog_by_value(&mut h, "create new token");
+    assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
+
+    let (role, state) = h
+        .read_only_toggle()
+        .expect("the dialog's toggle contributes a Switch node");
+    assert_eq!(
+        role,
+        Role::Switch,
+        "the create dialog's toggle is the real themed switch, not hand-drawn art"
+    );
+    assert_eq!(state, Toggled::False, "unchecked by default");
+
+    // No outer row-wide `GestureDetector` wraps the switch any more (removed
+    // for the pointer-capture conflict `pieces::dialog_read_only_row`'s own
+    // doc explains), so the switch's own semantics bounds are what a tap must
+    // land inside for this to flip. The dialog body is re-invoked on every
+    // navigator rebuild (`open_create_token_dialog`'s own doc), so one
+    // `Harness::frame` after the tap is what lets the switch's `checked`
+    // reflect the signal the tap just moved — `RwSignal::set` itself is
+    // synchronous, unlike the bell row's own async-preferences round trip.
+    h.tap_label("read-only");
+    h.frame();
+    let (_, state) = h
+        .read_only_toggle()
+        .expect("the dialog's toggle still contributes a Switch node");
+    assert_eq!(state, Toggled::True, "the tap landed on the switch itself");
 }
 
 #[test]

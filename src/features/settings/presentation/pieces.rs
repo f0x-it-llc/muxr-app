@@ -81,7 +81,7 @@ use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
     FlexView, GestureDetector, Get, GetUntracked, IconSource, NavigatorController, Padding,
     PopResult, RwSignal, Set, SizedBox, Stack, StatusPalette, Theme, any, button, flexible, icon,
-    inflexible, text, text_input,
+    inflexible, switch, text, text_input,
 };
 
 use crate::AppState;
@@ -923,62 +923,46 @@ fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_on
     nav.pop_with_result(PopResult::of((name.to_string(), read_only)));
 }
 
-/// The create dialog's read-only toggle: a label plus the same 36×21 pill
-/// [`toggle_art`] draws for the bell row, tappable across its whole row (the
-/// bell row's own "the switch is the state, not the button" idiom). Built
-/// over `AppState` — a dialog is a page on the *app's* navigator, not
-/// [`SettingsState`] — and rendered statically rather than cross-faded: the
-/// dialog's body closure already re-runs on every tap, so there is no
-/// mid-frame transition to animate between (unlike the bell row, which stays
-/// mounted and must animate its own state changes in place).
+/// The create dialog's read-only toggle: a flexible label plus the real,
+/// themed `frust::switch` — the same shape `features::connect`'s own
+/// `remember_row` draws for Connect's remember toggle, down to the "no outer
+/// `GestureDetector`" part.
+///
+/// **Why no outer `GestureDetector` wraps the row (unlike this dialog's old
+/// hand-drawn pill, and unlike the bell row's [`toggle_art`], which still has
+/// one):** both `SwitchWidget` and `GestureDetectorWidget` call
+/// `ctx.capture_pointer()` on `Down`, so nesting the real switch inside a
+/// row-wide detector would be two captures racing the same gesture. The
+/// switch owns its own tap target instead, and the label beside it stops
+/// being tappable as a consequence — Connect's own remember row makes the
+/// identical trade for the identical reason.
+///
+/// Built over `AppState` — a dialog is a page on the *app's* navigator, not
+/// [`SettingsState`] — with a callback shaped like Connect's: the switch
+/// reports the *requested* value it never self-applies (a controlled
+/// component), and the callback ignores it, flipping the caller's own
+/// `read_only` signal instead — the single source of truth the dialog body's
+/// re-run then reflects back into `on`.
 fn dialog_read_only_row(
     on: bool,
     colors: &Palette,
-    on_tap: impl Fn(&mut AppState) + 'static,
+    on_toggle: impl Fn(&mut AppState) + 'static,
 ) -> AnyView<AppState> {
     let theme = active_theme();
-    let content = row(vec![
+    let toggle = any(switch_semantics(
+        switch::<AppState, _>(on, move |state: &mut AppState, _requested: bool| {
+            on_toggle(state)
+        }),
+        READ_ONLY_TOGGLE_LABEL,
+        on,
+    ));
+    any(row(vec![
         flexible(
             1,
-            text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg)),
+            any(text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg))),
         ),
-        inflexible(switch_semantics(
-            dialog_toggle_art(on, colors),
-            READ_ONLY_TOGGLE_LABEL,
-            on,
-        )),
-    ]);
-    any(GestureDetector(content).on_tap(on_tap))
-}
-
-/// The read-only toggle's art — [`toggle_art`]'s static, `AppState`-typed
-/// sibling. See [`dialog_read_only_row`] for why this one never animates.
-fn dialog_toggle_art(on: bool, colors: &Palette) -> AnyView<AppState> {
-    let radius = TOGGLE_H / 2.0;
-    let track = Size::new(TOGGLE_W, TOGGLE_H);
-    let (track_fill, track_border) = if on {
-        (colors.amber_faint, colors.amber_border)
-    } else {
-        (colors.overlay, colors.outline)
-    };
-    let (knob_left, knob_fill) = if on {
-        (KNOB_LEFT_ON, colors.amber_fill)
-    } else {
-        (KNOB_LEFT_OFF, colors.fg_dim)
-    };
-    let track_view = panel(SizedBox::<AppState>(None, None), track_fill, radius)
-        .border(track_border)
-        .fixed(track);
-    let knob = Padding(
-        EdgeInsets {
-            left: knob_left,
-            top: KNOB_TOP,
-            right: TOGGLE_W - knob_left - KNOB,
-            bottom: TOGGLE_H - KNOB_TOP - KNOB,
-        },
-        panel(SizedBox::<AppState>(None, None), knob_fill, KNOB / 2.0).fixed(Size::new(KNOB, KNOB)),
-    );
-    any(Stack(vec![any(track_view), any(knob)]))
+        inflexible(toggle),
+    ]))
 }
 
 // ---------------------------------------------------------------------------

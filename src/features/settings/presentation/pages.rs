@@ -129,8 +129,8 @@ const DISCONNECTED_VALUE: &str = "not connected";
 /// What tapping a mutating token control says while the connected session is
 /// itself read-only — `ConnectionController::is_read_only`'s own "primary
 /// defence" note (`crate::connection`'s module docs): a read-only credential
-/// cannot mint or revoke, so both controls stay reachable but honest, the same
-/// [`UNAVAILABLE_TOAST`] idiom the `connection` rows use for a different gap.
+/// cannot mint or revoke, so both controls stay reachable but honest — raising
+/// this toast — rather than silently doing nothing.
 const READ_ONLY_TOKEN_TOAST: &str =
     "Read-only session \u{2014} reconnect with a read-write token to change this";
 
