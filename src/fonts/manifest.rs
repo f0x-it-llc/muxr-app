@@ -186,6 +186,12 @@ fn parse_file(value: &Json) -> Option<FontFile> {
         .and_then(Json::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| format!("{RAW_BASE}/{path}"));
+    // Fail closed on a non-HTTPS url, same as the hash above: integrity is
+    // carried by the sha256 either way, but a plaintext fetch would leak the
+    // request and invite junk bytes we'd only reject after downloading them.
+    if !url.starts_with("https://") {
+        return None;
+    }
     let bytes = value.get("bytes").and_then(Json::as_u64).unwrap_or(0);
     Some(FontFile {
         name: name.to_string(),
@@ -306,6 +312,19 @@ mod tests {
                 .starts_with("https://github.com/f0x-it-llc/muxr-core/releases/")
         );
         assert_eq!(file.sha256.len(), 64);
+    }
+
+    #[test]
+    fn a_plaintext_http_url_is_refused() {
+        // Fail-closed like the hash: the sha256 still guards integrity, but a
+        // manifest must not be able to point a download at a plaintext origin.
+        let doc = r#"{"fonts":[{"id":"a","displayName":"A","family":"A","license":"OFL-1.1",
+            "files":[{"path":"A.ttf","bytes":1,"url":"http://example.com/A.ttf",
+            "sha256":"aa8bbe93f5dfa90381a80ad90ee3118b36d34c1140575ee1fefca20de00c6689"}]}]}"#;
+        assert!(
+            matches!(parse_manifest(doc.as_bytes()), Err(AppFailure::Internal(_))),
+            "an entry whose only file is plaintext-http has no usable file left"
+        );
     }
 
     #[test]
