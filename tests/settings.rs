@@ -47,10 +47,11 @@
 //! Row *k* is addressed relative to the selected row's measured rect: every
 //! `.pick-row` is one line tall, so the pitch is that rect's own height.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
+    AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack, Theme,
     WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
@@ -60,10 +61,18 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::failure::AppFailure;
 use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
+use muxr::features::settings::di::SharedAuthTokensRepository;
+use muxr::features::settings::domain::entities::{AuthToken, CreateTokenRequest, MintedToken};
+use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::pages::settings_page;
+use muxr::features::settings::presentation::scramble::{
+    TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
+};
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
@@ -757,6 +766,10 @@ fn revoking_a_token_confirms_first_then_removes_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
+    // A confirmed revoke plays a timeline before the row goes (see the
+    // animation section below), so this pins its *end*: with the clock pinned,
+    // one advance past `TIMELINE_MS` is the whole animation.
+    let clock = AnimationClock::pinned();
 
     // A dismissed confirmation revokes nothing.
     open_dialog_by_label(&mut h, "revoke");
@@ -775,13 +788,326 @@ fn revoking_a_token_confirms_first_then_removes_it() {
     // Confirming does.
     let dialog = open_dialog_by_label(&mut h, "revoke");
     confirm(&mut h, &dialog);
-    h.pump_until_values("the revoked token to disappear", |values| {
-        !values.iter().any(|v| v == SEEDED_TOKENS[0])
+    clock.advance(TIMELINE_MS + 1.0);
+    // The `created` line rather than the name: the name is noise from the first
+    // frame of the scramble, so it is gone long before the row is.
+    h.pump_until_values("the revoked row to disappear", |values| {
+        !values.iter().any(|v| v == "created 2026-07-02")
     });
     assert_eq!(h.depth(), 1);
+    let values = node_values(&h.root);
     assert!(
-        node_values(&h.root).iter().any(|v| v == SEEDED_TOKENS[1]),
-        "…and only the one token went"
+        values.iter().any(|v| v == SEEDED_TOKENS[1]),
+        "…and only the one token went: {values:?}"
+    );
+    assert!(
+        scrambled_variant(&values, SEEDED_TOKENS[0]).is_none(),
+        "no trace of the collapsed row is left: {values:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3a — the revoke animation (scramble, then collapse)
+// ---------------------------------------------------------------------------
+
+/// The revoke timeline runs off a wall clock, so a suite that let it run in
+/// real time could only ever assert "eventually". Pinning that clock (through
+/// `presentation::scramble`'s own test seam) makes "three scramble frames in"
+/// and "one frame past the end" exact positions instead. Restores the wall
+/// clock on drop, so a later test in the same binary is never left holding a
+/// frozen one.
+struct AnimationClock;
+
+impl AnimationClock {
+    /// Pin the clock at the timeline's own zero.
+    fn pinned() -> Self {
+        set_animation_clock_for_tests(Some(0.0));
+        AnimationClock
+    }
+
+    /// Move it `ms` forward.
+    fn advance(&self, ms: f64) {
+        advance_animation_clock_for_tests(ms);
+    }
+}
+
+impl Drop for AnimationClock {
+    fn drop(&mut self) {
+        set_animation_clock_for_tests(None);
+    }
+}
+
+/// The rendered value that is `name` mid-scramble, if one is on screen.
+///
+/// The noise substitutes characters one for one and never a space, so a
+/// scrambled name is exactly as long as the name, still has no whitespace in
+/// it, and is not the name — which no other value this screen prints at that
+/// length is (every long one it draws, a saved server's `endpoint · recency`
+/// line included, carries spaces).
+fn scrambled_variant(values: &[String], name: &str) -> Option<String> {
+    values
+        .iter()
+        .find(|value| {
+            value.chars().count() == name.chars().count()
+                && !value.chars().any(char::is_whitespace)
+                && value.as_str() != name
+        })
+        .cloned()
+}
+
+/// An [`AuthTokensRepository`] that lists and mints like the mock but refuses
+/// every revoke — the only way a headless suite reaches the RPC's failure path,
+/// since the mock store happily revokes anything it actually holds.
+struct RefusingRevoke {
+    inner: MockAuthTokensRepository,
+}
+
+impl RefusingRevoke {
+    fn seeded() -> Self {
+        Self {
+            inner: MockAuthTokensRepository::seeded(),
+        }
+    }
+}
+
+#[clean_signals::async_trait]
+impl AuthTokensRepository for RefusingRevoke {
+    async fn list_tokens(&self) -> Result<Vec<AuthToken>, AppFailure> {
+        self.inner.list_tokens().await
+    }
+
+    async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
+        self.inner.create_token(request).await
+    }
+
+    async fn revoke_token(&self, name: String) -> Result<(), AppFailure> {
+        Err(AppFailure::Internal(format!("refused revoking {name}")))
+    }
+}
+
+/// Mount connected with `reduce_motion` forced on: the theme every piece of
+/// this screen reads through `use_context::<Theme>()`, published before the
+/// app's own `init` exactly as [`mount_with_metrics`] publishes window metrics.
+fn mount_with_reduced_motion() -> Harness {
+    let mut theme = Theme::glyph_baseline();
+    theme.motion.reduce_motion = true;
+    provide_context(theme);
+    let mut harness = Harness::mount();
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    harness.await_tokens();
+    harness
+}
+
+/// Pump until `done`, or fail at [`PUMP_DEADLINE`] rather than hang — the
+/// value-blind sibling of [`Harness::pump_until_values`], for the cases below
+/// that wait on the toast queue instead of the screen.
+fn pump_until(h: &mut Harness, what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        h.pump_once();
+    }
+}
+
+/// Whether the confirmation toast for `name`'s revoke has been raised — which
+/// the screen only does on the far side of the RPC *and* the token-list refresh
+/// it ends with, so it doubles as "the token has left `tokens`".
+fn revoke_landed(name: &str) -> bool {
+    app_toasts()
+        .pending_untracked()
+        .contains(&format!("Revoked {name}"))
+}
+
+#[test]
+fn a_confirmed_revoke_scrambles_the_row_in_place_before_it_collapses() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let clock = AnimationClock::pinned();
+
+    let second_row = h.center_of(SEEDED_TOKENS[1]).y;
+    let dialog = open_dialog_by_label(&mut h, "revoke");
+    confirm(&mut h, &dialog);
+
+    // Three of the scramble's fourteen frames in.
+    clock.advance(120.0);
+    h.frame();
+
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|v| v == SEEDED_TOKENS[0]),
+        "the name is glitching, not itself: {values:?}"
+    );
+    let glitched = scrambled_variant(&values, SEEDED_TOKENS[0])
+        .unwrap_or_else(|| panic!("no scrambled name on screen: {values:?}"));
+    assert!(
+        values.iter().any(|v| v == "created 2026-07-02"),
+        "…and the whole row is still on screen: {values:?}"
+    );
+    assert!(
+        h.center_of(&glitched).y < h.center_of(SEEDED_TOKENS[1]).y,
+        "the scrambling row is still the first of the two"
+    );
+    assert!(
+        (h.center_of(SEEDED_TOKENS[1]).y - second_row).abs() < EPSILON,
+        "…and nothing under it moved: the collapse has not started yet"
+    );
+}
+
+#[test]
+fn the_scrambling_row_outlives_the_refresh_that_removes_its_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    app_toasts().clear();
+    let clock = AnimationClock::pinned();
+
+    let second_row = h.center_of(SEEDED_TOKENS[1]).y;
+    let dialog = open_dialog_by_label(&mut h, "revoke");
+    confirm(&mut h, &dialog);
+
+    // Hold the timeline early while the RPC — and the refresh it ends with —
+    // actually land, which is the moment `tokens` stops holding this token.
+    clock.advance(200.0);
+    pump_until(&mut h, "the revoke to land", || {
+        revoke_landed(SEEDED_TOKENS[0])
+    });
+
+    let values = node_values(&h.root);
+    let glitched = scrambled_variant(&values, SEEDED_TOKENS[0]).unwrap_or_else(|| {
+        panic!("the row stopped rendering when its token left the list: {values:?}")
+    });
+    assert!(
+        values.iter().any(|v| v == "created 2026-07-02"),
+        "…the whole snapshot keeps rendering: {values:?}"
+    );
+    assert!(
+        h.center_of(&glitched).y < h.center_of(SEEDED_TOKENS[1]).y,
+        "at the index it is vanishing from, above the token that stayed"
+    );
+    assert!(
+        (h.center_of(SEEDED_TOKENS[1]).y - second_row).abs() < EPSILON,
+        "…and the row under it never jumped up into the gap"
+    );
+
+    // Past the end of the timeline, the row is gone for good.
+    clock.advance(TIMELINE_MS);
+    h.pump_once();
+    let values = node_values(&h.root);
+    assert!(
+        scrambled_variant(&values, SEEDED_TOKENS[0]).is_none(),
+        "{values:?}"
+    );
+    assert!(
+        !values.iter().any(|v| v == "created 2026-07-02"),
+        "{values:?}"
+    );
+    assert!(
+        values.iter().any(|v| v == SEEDED_TOKENS[1]),
+        "…and only that row went: {values:?}"
+    );
+    assert_eq!(
+        node_centers_by_label(&h.root, "revoke").len(),
+        1,
+        "the collapsed row's own button went with it"
+    );
+}
+
+#[test]
+fn a_refused_revoke_restores_the_row_and_raises_the_failure_toast() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_seeded(|| {
+        // Overrides the repository `settings::di::provide` published moments
+        // ago, in the same owner — the screen resolves it later still, in its
+        // own `Component::init`.
+        let refusing: SharedAuthTokensRepository = Arc::new(RefusingRevoke::seeded());
+        provide_context(refusing);
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.await_tokens();
+    app_toasts().clear();
+    let clock = AnimationClock::pinned();
+
+    let dialog = open_dialog_by_label(&mut h, "revoke");
+    confirm(&mut h, &dialog);
+    pump_until(&mut h, "the refusal to surface", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    let toasted = app_toasts().pending_untracked();
+    assert!(
+        !toasted.iter().any(|m| m.starts_with("Revoked")),
+        "a refused revoke confirms nothing: {toasted:?}"
+    );
+    assert!(
+        toasted.iter().any(|m| m.contains("Something went wrong")),
+        "…the screen's own failure bridge speaks instead: {toasted:?}"
+    );
+
+    // The row keeps collapsing (the refusal landed inside the first frames),
+    // and once the timeline is over it is back — intact, and revocable again —
+    // rather than stranded at zero height.
+    clock.advance(TIMELINE_MS + 1.0);
+    h.pump_once();
+    h.pump_once();
+    let values = node_values(&h.root);
+    assert!(
+        values.iter().any(|v| v == SEEDED_TOKENS[0]),
+        "the refused row is back: {values:?}"
+    );
+    assert!(
+        values.iter().any(|v| v == "created 2026-07-02"),
+        "…all of it: {values:?}"
+    );
+    assert_eq!(
+        node_centers_by_label(&h.root, "revoke").len(),
+        SEEDED_TOKENS.len(),
+        "…with a live revoke button on it again"
+    );
+}
+
+#[test]
+fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_reduced_motion();
+    app_toasts().clear();
+    let _clock = AnimationClock::pinned();
+
+    let dialog = open_dialog_by_label(&mut h, "revoke");
+    confirm(&mut h, &dialog);
+
+    // Every frame from the confirmation to the landed RPC: no noise, ever, and
+    // the row gone from the first of them — the behaviour that shipped before
+    // this animation existed.
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !revoke_landed(SEEDED_TOKENS[0]) {
+        let values = node_values(&h.root);
+        assert!(
+            scrambled_variant(&values, SEEDED_TOKENS[0]).is_none(),
+            "reduced motion drew a scramble frame: {values:?}"
+        );
+        assert!(
+            !values.iter().any(|v| v == SEEDED_TOKENS[0]),
+            "…and the row went at once: {values:?}"
+        );
+        assert!(Instant::now() < deadline, "the revoke never landed");
+        h.pump_once();
+    }
+
+    // Nothing is left waiting on a clock that never moves.
+    h.pump_once();
+    h.pump_once();
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|v| v == "created 2026-07-02"),
+        "{values:?}"
+    );
+    assert_eq!(
+        node_centers_by_label(&h.root, "revoke").len(),
+        1,
+        "the timeline was dropped, not left collapsed at zero height"
     );
 }
 

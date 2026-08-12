@@ -66,6 +66,13 @@
 //! revoke, and the guard raises [`READ_ONLY_TOKEN_TOAST`] rather than
 //! silently doing nothing.
 //!
+//! # Revoking a token
+//!
+//! A confirmed revoke starts the row's scramble-then-collapse animation and
+//! fires the RPC at the same moment ([`Actions::revoke`]); [`token_rows`] is
+//! what renders a group whose animating rows may no longer be in `tokens` at
+//! all. [`super::scramble`] owns the timeline, its clock and its widgets.
+//!
 //! # The component state boundary, and what it means for callbacks
 //!
 //! A `Component`'s subtree is bound to its own `State`, so this screen's own
@@ -104,7 +111,7 @@ use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
-    AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
+    AppearancePrefs, AuthToken, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
@@ -115,6 +122,7 @@ use crate::ui::topbar::topbar_clearance;
 
 use super::controller::SettingsController;
 use super::pieces::{self, Palette, Picker, PickerKind, RowAction, ValueTone};
+use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
 
 /// Where Disconnect lands. Spelled once, and the same location
 /// `crate::routes`' guard bounces an unauthenticated push to.
@@ -186,6 +194,15 @@ pub struct Actions {
     /// The app-scoped connection handle: the `connection` group reads it, and
     /// Disconnect clears it.
     pub connection: Arc<ConnectionController>,
+    /// The revoke animations in flight — screen-scoped presentation state, not
+    /// the controller's, since nothing in it is repository data (see
+    /// [`RevokeAnimations`]). `Copy`, so a dialog action on the *app's*
+    /// navigator and the future it spawns both carry the same handle.
+    ///
+    /// `pub(super)`, unlike this bundle's four handles: the timeline vocabulary
+    /// is `presentation`-internal, and nothing outside this module arranges a
+    /// row with it.
+    pub(super) scrambles: RevokeAnimations,
 }
 
 impl Component for SettingsScreen {
@@ -227,6 +244,7 @@ impl Component for SettingsScreen {
                 app_nav: app_nav(),
                 controller,
                 connection: expect_connection_controller(),
+                scrambles: RevokeAnimations::new(),
             },
         }
     }
@@ -257,12 +275,25 @@ impl Component for SettingsScreen {
         let mut body = vec![pieces::group_label("connection", &colors)];
         body.extend(connection_rows(info.as_ref(), &colors));
 
+        // The revoke timelines in flight, and what each renders this frame.
+        // Tracked: starting one — and its RPC answering — is what wakes this
+        // rebuild; every frame in between comes from the ticker the row mounts.
+        let reduce_motion = theme.motion.reduce_motion;
+        let scrambles = state.actions.scrambles;
+        let timelines = scrambles.live();
+        let showing: Vec<(RevokeScramble, ScramblePose)> = timelines
+            .iter()
+            .map(|entry| (entry.clone(), entry.pose(reduce_motion)))
+            .filter(|(entry, pose)| pose.running || !entry.answered)
+            .collect();
+        if showing.len() != timelines.len() {
+            // Something finished: drop it off the build that noticed rather
+            // than out of the middle of it (`RevokeAnimations::sweep`).
+            spawn_local(async move { scrambles.sweep(reduce_motion) });
+        }
+
         body.push(pieces::group_label("auth tokens", &colors));
-        body.extend(
-            tokens
-                .iter()
-                .map(|token| pieces::token_item(token, &colors, !read_only)),
-        );
+        body.extend(token_rows(&tokens, &showing, read_only, &colors));
         body.push(pieces::create_token_row(&colors, !read_only));
 
         body.push(pieces::group_label("saved servers", &colors));
@@ -319,6 +350,49 @@ impl Component for SettingsScreen {
 // ---------------------------------------------------------------------------
 // The four groups' rows
 // ---------------------------------------------------------------------------
+
+/// The `auth tokens` group's rows.
+///
+/// One `token_item` per token with no revoke in flight; this frame's scramble
+/// view for every token that has one; and — for a revoke whose own refresh has
+/// already taken its token out of `tokens` — the same scramble view re-inserted
+/// at the position that row is vanishing from (clamped, since the list it was
+/// snapshotted against may have shrunk), so nothing under it jumps while the
+/// collapse plays out. Orphans go back in ascending order, so two at once keep
+/// their original order between them.
+fn token_rows(
+    tokens: &[AuthToken],
+    showing: &[(RevokeScramble, ScramblePose)],
+    read_only: bool,
+    colors: &Palette,
+) -> Vec<AnyView<SettingsState>> {
+    let animating = |token: &AuthToken| {
+        showing
+            .iter()
+            .find(|(entry, _)| entry.token.name == token.name)
+    };
+    let mut rows: Vec<AnyView<SettingsState>> = tokens
+        .iter()
+        .map(|token| match animating(token) {
+            Some((entry, pose)) => pieces::scrambling_token_item(&entry.token, pose, colors),
+            None => pieces::token_item(token, colors, !read_only),
+        })
+        .collect();
+
+    let mut orphans: Vec<&(RevokeScramble, ScramblePose)> = showing
+        .iter()
+        .filter(|(entry, _)| !tokens.iter().any(|token| token.name == entry.token.name))
+        .collect();
+    orphans.sort_by_key(|(entry, _)| entry.index);
+    for (entry, pose) in orphans {
+        let at = entry.index.min(rows.len());
+        rows.insert(
+            at,
+            pieces::scrambling_token_item(&entry.token, pose, colors),
+        );
+    }
+    rows
+}
 
 /// The `connection` group: the endpoint, the TLS posture, and one version row
 /// per backend the server reports. Every value is read off `info`; `None`
@@ -686,25 +760,49 @@ impl Actions {
         if self.tokens_blocked() {
             return;
         }
-        let controller = Arc::clone(&self.controller);
+        let actions = self.clone();
         let name = name.to_string();
         confirm_dialog(
             &self.overlays,
             "Revoke token?",
             "Any client still using this token is disconnected immediately.",
             "Revoke",
-            move |_app: &mut AppState| {
-                let handle = Arc::clone(&controller);
-                let name = name.clone();
-                let confirmation = format!("Revoked {name}");
-                spawn_local(async move {
-                    // Confirm only on success — see `open_create_token_dialog`.
-                    if handle.revoke_token(name).await {
-                        app_toasts().show(confirmation);
-                    }
-                });
-            },
+            move |_app: &mut AppState| actions.revoke(&name),
         );
+    }
+
+    /// Revoke the token called `name`: the row's scramble-then-collapse and the
+    /// RPC start on the same tap.
+    ///
+    /// Concurrent on purpose — the animation is not a pre-roll waiting on the
+    /// network, and a revoke that lands in 20ms must not make the row vanish
+    /// before the eye has seen it go. The row's snapshot is taken here, ahead of
+    /// the refresh that call ends with, because that refresh is exactly what
+    /// takes the token out of `tokens` mid-animation (see [`token_rows`]).
+    fn revoke(&self, name: &str) {
+        let controller = Arc::clone(&self.controller);
+        let scrambles = self.scrambles;
+        if let Some((index, token)) = controller
+            .tokens
+            .get_untracked()
+            .into_iter()
+            .enumerate()
+            .find(|(_, token)| token.name == name)
+        {
+            scrambles.begin(&token, index);
+        }
+        let name = name.to_string();
+        let confirmation = format!("Revoked {name}");
+        spawn_local(async move {
+            // Confirm only on success — see `open_create_token_dialog`.
+            if controller.revoke_token(name.clone()).await {
+                app_toasts().show(confirmation);
+            }
+            // Either way the row may now finish: a refusal leaves the token in
+            // `tokens`, so dropping the timeline restores the row it was
+            // collapsing, and the failure toast the controller emitted stands.
+            scrambles.answered(&name);
+        });
     }
 
     /// Open the delete-credential confirmation for the saved server at
