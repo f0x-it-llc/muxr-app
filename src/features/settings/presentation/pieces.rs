@@ -443,12 +443,8 @@ impl PickerKind {
 /// What a row *does*, which also decides what sits in its trailing slot.
 #[derive(Clone, Copy)]
 pub(super) enum RowAction {
-    /// Inert: no chevron, no gesture (the two version rows).
+    /// Inert: no chevron, no gesture (the version rows and connection info rows).
     Static,
-    /// A chevron row whose destination does not exist yet — tapping it says so
-    /// (the server-url and TLS rows; both are read-only facts of the *current*
-    /// connection, and editing either means reconnecting).
-    Unavailable,
     /// A chevron row that opens a picker sheet.
     Picker(PickerKind),
     /// The bell row: a trailing switch at this state, flipped by a tap
@@ -536,7 +532,7 @@ fn trailing_slot(
 ) -> Option<AnyView<SettingsState>> {
     match action {
         RowAction::Static => None,
-        RowAction::Unavailable | RowAction::Picker(_) => Some(any(icon(CHEVRON_RIGHT)
+        RowAction::Picker(_) => Some(any(icon(CHEVRON_RIGHT)
             .size(CHEVRON)
             .color(colors.fg_faintest))),
         // The switch announces the *row's* subject rather than "switch" — the
@@ -1223,7 +1219,6 @@ mod tests {
     #[test]
     fn only_a_static_row_is_inert() {
         assert!(!RowAction::Static.interactive());
-        assert!(RowAction::Unavailable.interactive());
         assert!(RowAction::Picker(PickerKind::FontSize).interactive());
         assert!(RowAction::Bell(true).interactive());
     }
