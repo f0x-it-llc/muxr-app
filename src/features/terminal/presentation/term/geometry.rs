@@ -32,7 +32,7 @@
 //!   a grid that divides *exactly* can measure back a hundred-thousandth of a
 //!   pixel over — see [`FIT_TOLERANCE`].
 
-use frust::authoring::text::{TextContext, TextStyle};
+use frust::authoring::text::{FontFamily, TextContext, TextStyle};
 use frust::authoring::{Color, LayoutCtx, Size};
 
 use super::style::{CellStyle, LINE_HEIGHT};
@@ -212,14 +212,20 @@ fn axis_cells(available: f64, cell: f64, fallback: u16) -> u16 {
     count.clamp(1.0, f64::from(MAX_CELLS_PER_AXIS)) as u16
 }
 
-/// Measure the monospace cell box at `font_size`: shape [`CELL_PROBE`] and
-/// divide its advance by its length (its height is the shaped line box,
-/// [`LINE_HEIGHT`] x `font_size`). The probe [`solve_cell_geometry`] solves
-/// against — never an assumed advance ratio.
-pub fn measure_cell(ctx: &mut LayoutCtx, font_size: f32) -> (f64, f64) {
+/// Measure the monospace cell box at `font_size` in `family`: shape
+/// [`CELL_PROBE`] and divide its advance by its length (its height is the
+/// shaped line box, [`LINE_HEIGHT`] x `font_size`). The probe
+/// [`solve_cell_geometry`] solves against — never an assumed advance ratio.
+///
+/// `family` matters here, not just at paint time: two monospace faces can
+/// measure a different cell advance at the same size, so the grid must
+/// re-solve its geometry whenever the resolved family changes, exactly as it
+/// already does for a font-size change (`TerminalGridWidget::layout`'s own
+/// geometry cache key covers both).
+pub fn measure_cell(ctx: &mut LayoutCtx, font_size: f32, family: &FontFamily) -> (f64, f64) {
     // The ink is irrelevant to a measurement; the family/line-height are not,
     // which is why this goes through the same `CellStyle` every run shapes with.
-    let style = CellStyle::default().text_style(font_size, Color::BLACK);
+    let style = CellStyle::default().text_style(font_size, Color::BLACK, family);
     let text_ctx = ctx.text_context::<TextContext>();
     measure_with(text_ctx, &style, font_size)
 }

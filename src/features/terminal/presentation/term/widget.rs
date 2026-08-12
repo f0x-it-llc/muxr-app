@@ -214,7 +214,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::authoring::text::{TextContext, TextLayout};
+use frust::authoring::text::{FontFamily, TextContext, TextLayout};
 use frust::authoring::{
     Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, RoundedRect,
@@ -350,6 +350,7 @@ pub struct TerminalGridView {
     emulator: SharedEmulator,
     palette: TerminalPalette,
     font_size: f32,
+    font_family: FontFamily,
     cursor: CursorStyle,
     focused: bool,
     label: String,
@@ -364,7 +365,12 @@ pub struct TerminalGridView {
 /// [`TerminalGridView`]).
 ///
 /// `generation` must be a **tracked** read of the pump's signal in the caller's
-/// `build`: it is what makes a repaint happen at all.
+/// `build`: it is what makes a repaint happen at all. `font_family` starts at
+/// `crate::fonts::default_terminal_family()` — override it with
+/// [`font_family`](TerminalGridView::font_family) once a caller has a
+/// resolved preference to hand (`TerminalController::font_family`); every
+/// caller that never does (every headless grid test) still shapes with a
+/// real monospace stack.
 pub fn terminal_grid(
     emulator: SharedEmulator,
     generation: u64,
@@ -376,6 +382,7 @@ pub fn terminal_grid(
         emulator,
         palette,
         font_size,
+        font_family: crate::fonts::default_terminal_family(),
         cursor: CursorStyle::default(),
         focused: false,
         label: String::new(),
@@ -393,6 +400,18 @@ impl TerminalGridView {
     #[must_use]
     pub fn cursor(mut self, cursor: CursorStyle) -> Self {
         self.cursor = cursor;
+        self
+    }
+
+    /// The primary+fallback font stack to shape with — Settings' terminal-
+    /// appearance group, resolved (`crate::fonts::resolve_terminal_family`)
+    /// and mirrored onto `TerminalController::font_family`. Defaults to
+    /// [`crate::fonts::default_terminal_family`] (see [`terminal_grid`]'s own
+    /// doc) so a caller that never sets this still shapes with a real
+    /// monospace stack.
+    #[must_use]
+    pub fn font_family(mut self, family: FontFamily) -> Self {
+        self.font_family = family;
         self
     }
 
@@ -526,6 +545,9 @@ pub struct TerminalGridWidget {
     emulator: SharedEmulator,
     palette: TerminalPalette,
     font_size: f32,
+    /// The primary+fallback font stack every run and every measurement shapes
+    /// with — see [`TerminalGridView::font_family`]'s own doc.
+    font_family: FontFamily,
     cursor: CursorStyle,
     focused: bool,
     label: String,
@@ -533,8 +555,16 @@ pub struct TerminalGridWidget {
     /// Which generation `batch` was shaped from (`None` = never / invalidated).
     shaped: Option<u64>,
     /// The `(content box, font size)` the geometry was solved against, and the
-    /// solution. Re-solved only when either changes.
+    /// solution. Re-solved only when either changes, or when
+    /// [`geometry_family`](Self::geometry_family) no longer matches
+    /// [`font_family`](Self::font_family).
     geometry: Option<(Size, f32, CellGeometry)>,
+    /// The font family [`geometry`](Self::geometry) was solved against — a
+    /// sibling field rather than folded into that tuple, since `FontFamily`
+    /// isn't `Copy` (unlike every other element of the cache key). `None`
+    /// exactly when [`geometry`](Self::geometry) is; every site that writes
+    /// one writes both.
+    geometry_family: Option<FontFamily>,
     cursor_cell: Option<CursorCell>,
     /// Frame clock epoch the current blink cycle started from (`None` until the
     /// first focused paint, and reset whenever focus changes so a freshly
@@ -602,12 +632,14 @@ impl<State: 'static> View<State> for TerminalGridView {
             emulator: Rc::clone(&self.emulator),
             palette: self.palette,
             font_size: self.font_size,
+            font_family: self.font_family.clone(),
             cursor: self.cursor,
             focused: self.focused,
             label: self.label.clone(),
             batch: RunBatch::default(),
             shaped: None,
             geometry: None,
+            geometry_family: None,
             cursor_cell: None,
             blink_from: None,
             input: self.input.clone(),
@@ -633,14 +665,19 @@ impl<State: 'static> View<State> for TerminalGridView {
         let mut flags = ChangeFlags::NONE;
 
         // Anything that changes what is shaped forces LAYOUT — never a bare
-        // PAINT (see the module docs' rule 1).
+        // PAINT (see the module docs' rule 1). A font-family change rides the
+        // same contract a font-size change already does: `layout`'s own
+        // geometry cache (keyed on both) is what actually re-solves the cell
+        // box, this only clears the shaped run cache.
         let reshapes = prev.generation != self.generation
             || prev.font_size != self.font_size
+            || prev.font_family != self.font_family
             || prev.palette != self.palette
             || !Rc::ptr_eq(&prev.emulator, &self.emulator);
         if reshapes {
             element.generation = self.generation;
             element.font_size = self.font_size;
+            element.font_family = self.font_family.clone();
             element.palette = self.palette;
             element.emulator = Rc::clone(&self.emulator);
             element.shaped = None;
@@ -730,21 +767,32 @@ impl Widget for TerminalGridWidget {
     /// inside it and the leftover strip painted in the terminal's background.
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let available = bc.max();
-        let geometry = match self.geometry {
-            Some((solved_box, solved_size, geometry))
-                if solved_box == available && solved_size == self.font_size =>
-            {
-                geometry
-            }
-            _ => {
-                let geometry = solve_cell_geometry(available, self.font_size, |font_size| {
-                    measure_cell(ctx, font_size)
-                });
-                self.geometry = Some((available, self.font_size, geometry));
-                // Every cached run carries the old cell size.
-                self.shaped = None;
-                geometry
-            }
+        // `geometry_family` (see its own field doc) joins `solved_box`/
+        // `solved_size` in the cache key: a different family can measure a
+        // different cell advance at the identical size. A plain `bool` rather
+        // than matching `self.geometry`/`self.geometry_family` directly, so
+        // the borrow the cache check takes is dropped before the miss branch
+        // below needs to write both fields back.
+        let cache_hit = matches!(
+            (&self.geometry, self.geometry_family.as_ref()),
+            (Some((solved_box, solved_size, _)), Some(solved_family))
+                if *solved_box == available
+                    && *solved_size == self.font_size
+                    && *solved_family == self.font_family
+        );
+        let geometry = if cache_hit {
+            self.geometry
+                .expect("cache_hit only true when self.geometry is Some")
+                .2
+        } else {
+            let geometry = solve_cell_geometry(available, self.font_size, |font_size| {
+                measure_cell(ctx, font_size, &self.font_family)
+            });
+            self.geometry = Some((available, self.font_size, geometry));
+            self.geometry_family = Some(self.font_family.clone());
+            // Every cached run carries the old cell size (or family).
+            self.shaped = None;
+            geometry
         };
 
         // The grid the box divides into is what the emulator must hold: this is
@@ -903,6 +951,7 @@ impl TerminalGridWidget {
     fn reshape(&mut self, ctx: &mut LayoutCtx, geometry: CellGeometry) {
         let emulator = Rc::clone(&self.emulator);
         let palette = self.palette;
+        let font_family = self.font_family.clone();
         let (cursor_row, cursor_col, cursor_hidden, cursor_glyph) = {
             let emulator = emulator.borrow();
             let screen = emulator.screen();
@@ -922,7 +971,7 @@ impl TerminalGridWidget {
         let text_ctx = ctx.text_context::<TextContext>();
         for run in self.batch.active_mut() {
             let (fg, _) = run.style().resolve(&palette);
-            let style = run.style().text_style(geometry.font_size, fg);
+            let style = run.style().text_style(geometry.font_size, fg, &font_family);
             let layout = text_ctx.layout(run.text(), &style, None);
             run.set_layout(layout);
         }
@@ -931,7 +980,8 @@ impl TerminalGridWidget {
             // The glyph under a focused block cursor, re-inked in the
             // background so it reads as inverted rather than disappearing.
             let inverse_glyph = cursor_glyph.map(|(style, text)| {
-                let inverse = style.text_style(geometry.font_size, palette.background);
+                let inverse =
+                    style.text_style(geometry.font_size, palette.background, &font_family);
                 text_ctx.layout(&text, &inverse, None)
             });
             CursorCell {
