@@ -15,8 +15,12 @@
 //! - `chrome` — the screen's hand-rolled panel primitive and the switch's
 //!   accessibility wrapper, for the boxes the Glyph catalog has no counterpart
 //!   for. Private: only `pieces` paints with them.
+//! - [`scramble`] — the token-revoke animation's mechanism: its clock (with a
+//!   headless-test override), the transcribed noise source, the per-token
+//!   timeline state, and the two custom widgets the collapse needs.
 
 mod chrome;
 pub mod controller;
 pub mod pages;
 pub mod pieces;
+pub mod scramble;

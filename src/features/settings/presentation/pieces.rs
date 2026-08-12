@@ -292,6 +292,10 @@ pub(super) struct Palette {
     pub(super) cyan: Color,
     /// `--cyan-faint`: its fill.
     pub(super) cyan_faint: Color,
+    /// `--error`: the tint a token's name takes while it glitches through
+    /// [`scrambling_token_item`]. The `revoke`/`Disconnect` buttons resolve the
+    /// same role themselves, from `ButtonStyle::Danger`.
+    pub(super) error: Color,
 }
 
 /// Resolve [`Palette`] from `theme`.
@@ -325,6 +329,7 @@ pub(super) fn palette(theme: &Theme) -> Palette {
         cyan_faint: status.map_or(scheme.tertiary_container, |s| {
             s.colors(theme.brightness).info_container
         }),
+        error: scheme.error,
     }
 }
 
@@ -622,11 +627,68 @@ pub(super) fn token_item(
 ) -> AnyView<SettingsState> {
     let theme = active_theme();
     let name = token.name.clone();
+    let name_line =
+        any(text(token.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg)));
+    let revoke = any(button(REVOKE_LABEL, move |state: &mut SettingsState| {
+        super::pages::open_revoke_dialog(state, &name)
+    })
+    .style(if revoke_enabled {
+        ButtonStyle::Danger
+    } else {
+        ButtonStyle::Ghost
+    })
+    .small());
+    token_row(name_line, token, revoke, None, colors)
+}
+
+/// A `.token-item` mid-revoke: the same row, with the name line replaced by
+/// this frame's scramble and the whole thing collapsing.
+///
+/// `token` is the [`super::scramble::RevokeScramble`]'s own snapshot, not a row
+/// out of the live list — the RPC's refresh routinely removes the token while
+/// this is still on screen (that module's docs carry the whole contract).
+///
+/// The trailing button is a **geometric stand-in**: same widget, same style,
+/// same measured height, no handler. Dropping it would shorten the meta line
+/// and make the row jump the instant the animation started, and leaving it live
+/// would offer a second confirmation for a token already on its way out.
+pub(super) fn scrambling_token_item(
+    token: &AuthToken,
+    pose: &super::scramble::ScramblePose,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    let ink = if pose.glitching {
+        colors.error
+    } else {
+        colors.fg
+    };
+    let name_line = any(text(pose.display.clone()).style(inked(&theme.type_scale.body_small, ink)));
+    let revoke = any(button(REVOKE_LABEL, |_state: &mut SettingsState| {})
+        .style(ButtonStyle::Danger)
+        .small());
+    // The ticker rides inside the row it drives, so the scroller's paint
+    // culling can never leave one running without the other (see
+    // `super::scramble`'s module docs). Zero-height, so the row it joins is
+    // exactly the row `token_item` builds.
+    let ticker = pose.running.then(super::scramble::frame_ticker);
+    let row = token_row(name_line, token, revoke, ticker, colors);
+    super::scramble::collapsing(pose.ratio, row)
+}
+
+/// The `.token-item` box both callers above share, so a revoking row and a
+/// resting one cannot drift a pixel apart: `name_line` and `revoke` over the
+/// snapshot's scope chip and created line, plus an optional zero-height `tail`.
+fn token_row(
+    name_line: AnyView<SettingsState>,
+    token: &AuthToken,
+    revoke: AnyView<SettingsState>,
+    tail: Option<AnyView<SettingsState>>,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    let theme = active_theme();
     let top = row(vec![
-        flexible(
-            1,
-            text(token.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg)),
-        ),
+        flexible(1, name_line),
         h_gap(ROW_GAP),
         inflexible(scope_chip(token.scope, colors)),
     ]);
@@ -635,27 +697,16 @@ pub(super) fn token_item(
             text(token.created_label()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
         ),
         spacer(),
-        inflexible(
-            button(REVOKE_LABEL, move |state: &mut SettingsState| {
-                super::pages::open_revoke_dialog(state, &name)
-            })
-            .style(if revoke_enabled {
-                ButtonStyle::Danger
-            } else {
-                ButtonStyle::Ghost
-            })
-            .small(),
-        ),
+        inflexible(revoke),
     ]);
+    let mut lines = vec![
+        any(top),
+        any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
+        any(meta),
+    ];
+    lines.extend(tail);
     any(panel(
-        Padding(
-            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            column(vec![
-                any(top),
-                any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
-                any(meta),
-            ]),
-        ),
+        Padding(EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y), column(lines)),
         Color::TRANSPARENT,
         0.0,
     )
