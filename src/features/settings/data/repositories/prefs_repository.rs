@@ -15,7 +15,7 @@
 //! | `pref_font_size` | i64 | `12` | [`AppearancePrefs::font_size_px`] |
 //! | `pref_cursor_style` | String | `"block"` | [`AppearancePrefs::cursor_style`] |
 //! | `pref_bell_notifications` | bool | `true` | [`PollPrefs::bell_notifications`] |
-//! | `pref_font_family` | String | `"Hack Nerd Font Mono"` | [`AppearancePrefs::font_family`] |
+//! | `pref_font_family` | String | `"JetBrains Mono"` | [`AppearancePrefs::font_family`] |
 //!
 //! Every default above **is** [`Preferences::defaults`], read at each call
 //! site rather than re-declared here — the app's shipped defaults stay the

@@ -71,6 +71,8 @@ use frust::authoring::text::{
 };
 use frust::{Brightness, GlyphInk, StatusPalette, Theme, Tween};
 
+use crate::fonts::{DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY};
+
 /// Cell height as a multiple of the font size (CSS unitless `line-height`).
 ///
 /// 1.2 — the value kterm's `TerminalStyle.height` defaults to, and what the S9
@@ -116,11 +118,22 @@ pub const ANSI_MAGENTA: Color = Color::from_rgb8(0xd9, 0x8a, 0xdf);
 /// Named explicitly rather than taken from `Theme::type_scale`: a terminal grid
 /// is only a grid if the face is monospace, and a type scale's body role
 /// carries no such guarantee (it happens to be IBM Plex Mono under Glyph, and
-/// would be proportional under Material). Ends in the `Monospace` generic slot
-/// so a host with the bundled face missing still shapes *some* monospace face
-/// rather than falling back to a proportional one.
+/// would be proportional under Material). The stack is
+/// [`DEFAULT_TERMINAL_FAMILY`] first, then [`SYMBOLS_FALLBACK_FAMILY`] —
+/// Symbols Nerd Font Mono is what covers nerd-font/powerline private-use
+/// glyphs the primary face lacks (the classic tofu box otherwise) — and ends
+/// in the `Monospace` generic slot so a host missing both bundled faces
+/// still shapes *some* monospace face rather than falling back to a
+/// proportional one.
+///
+/// Takes no args today: the primary face is a fixed constant, not yet read
+/// from the terminal-appearance preference — a deliberate, obvious seam a
+/// later task closes.
 pub fn terminal_font_family() -> FontFamily {
-    FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+    FontFamily::stack_with_generic(
+        [DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY],
+        GenericSlot::Monospace,
+    )
 }
 
 /// Every colour the grid paints, resolved once per build from the active theme
@@ -256,9 +269,6 @@ impl CellStyle {
     pub fn text_style(self, font_size: f32, color: Color) -> TextStyle {
         TextStyle {
             family: terminal_font_family(),
-            // The bundled IBM Plex Mono ships Regular/Medium/SemiBold/Italic;
-            // 600 is its heaviest real face, so asking for it avoids the shaper
-            // synthesizing a bold from Regular.
             weight: if self.bold {
                 FontWeight::SEMI_BOLD
             } else {

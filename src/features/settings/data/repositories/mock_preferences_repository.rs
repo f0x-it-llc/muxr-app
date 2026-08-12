@@ -1,11 +1,10 @@
 //! [`MockPreferencesRepository`] — the in-memory [`PreferencesRepository`] the
 //! mock era runs on.
 //!
-//! Seeds [`Preferences::defaults`], which **is** the state
-//! `docs/redesign.html`'s settings screen draws (`Hack Nerd Font Mono`,
-//! `12px`, `block`, `every 3s`, bell on) — the seed is not transcribed a second
+//! Seeds [`Preferences::defaults`] — the seed is not transcribed a second
 //! time here, so the screen, the mock and the shipped defaults cannot drift
-//! apart.
+//! apart (see that constructor's own doc for what it holds, including its one
+//! deliberate divergence from `docs/redesign.html`'s settings-screen mock).
 //!
 //! # In-memory, and honestly so
 //!
