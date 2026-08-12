@@ -169,6 +169,17 @@ fn bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) 
         .unwrap_or_else(|| panic!("nothing labelled {label:?}"))
 }
 
+/// The bounds of **every** node labelled `label` — [`bounds_by_label`]'s
+/// all-matches sibling, for the saved-server group's `forget` (one per row).
+fn all_bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) -> Vec<Rect> {
+    root.semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node): &&(_, Node)| node.label() == Some(label))
+        .filter_map(|(_, node)| node.bounds())
+        .collect()
+}
+
 /// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
@@ -1423,4 +1434,54 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
         disconnect.width()
     );
     assert!((disconnect.x0 - ROW_PAD_X).abs() < 0.5, "{:?}", disconnect);
+}
+
+// ---------------------------------------------------------------------------
+// 8 — saved-server card clip regression at the phone-narrow width (G47)
+// ---------------------------------------------------------------------------
+
+/// A frame width matching the device's own narrow branch — the Xiaomi's 1080
+/// physical px is ~395 logical px at its density, comfortably under
+/// `crate::responsive::WIDE_BREAKPOINT_PX` (600); `360` here sits inside that
+/// same narrow band. Tall enough that the saved-server group — which sorts
+/// [`with_saved_credential`]'s freshly-stamped row to its top — is still
+/// laid out on-screen rather than below the fold (this suite's own module
+/// docs note why an off-screen row is invisible to its semantics probe).
+const NARROW_SURFACE: Size = Size::new(360.0, 3000.0);
+
+#[test]
+fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
+    let _g = serial();
+    let _ambient = setup();
+    // A credentialed row renders both `delete credential` and `forget` on the
+    // one action row — the widest case, and the one the old layout's
+    // inflexible meta-row tail actually clipped.
+    let mut h = with_saved_credential(true);
+
+    // One more frame at `NARROW_SURFACE` — `Harness::frame` always paints at
+    // `SURFACE`'s 800px wide, which never exercised the phone-narrow width
+    // the bug only shows up under.
+    frame_sized(
+        &mut h.root,
+        &mut h.logic,
+        &mut h.state,
+        &mut h.tcx,
+        NARROW_SURFACE,
+    );
+
+    let forgets = all_bounds_by_label(&h.root, "forget");
+    assert!(
+        !forgets.is_empty(),
+        "the saved-server group must still render its forget rows at this width"
+    );
+    for rect in &forgets {
+        assert!(
+            rect.x1 <= NARROW_SURFACE.width + EPSILON,
+            "forget's right edge ({:.1}) must stay inside the {:.0}px frame — the \
+             old all-inflexible-but-for-one-spacer meta row clipped it off-screen \
+             instead of ever wrapping or shrinking: {rect:?}",
+            rect.x1,
+            NARROW_SURFACE.width,
+        );
+    }
 }
