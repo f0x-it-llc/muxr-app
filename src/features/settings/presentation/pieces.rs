@@ -11,7 +11,7 @@
 //! | [`group_label`] | `.set-group-lbl` — the 10px dim uppercase band above each group |
 //! | [`settings_row`] | `.set-row` — mark tile, label over value, trailing chevron/toggle |
 //! | [`token_item`] | `.token-item` — name + scope chip, `created <date>` + `revoke` |
-//! | [`saved_server_item`] | the same shape for a remembered server — label + credential chip, endpoint + its two delete actions |
+//! | [`saved_server_item`] | a remembered server's three-row card — label + credential chip, endpoint + recency, its two delete actions right-aligned on their own row |
 //! | [`create_token_row`] | `.add-token-btn` — the dashed `+ create new token` row |
 //! | [`disconnect_button`] | `.disconnect-btn` — the outlined error-hued full-width action |
 //! | [`picker_sheet`] | screen 6 — the title row and its `.pick-row`s, one of them amber-filled |
@@ -120,6 +120,14 @@ const ROW_LINE_GAP: f64 = 2.0;
 const CHEVRON: f64 = 13.0;
 /// `.token-top{margin-bottom:4px}`.
 const TOKEN_LINE_GAP: f64 = 4.0;
+/// The vertical rhythm inside [`saved_server_item`]'s three rows — no CSS
+/// source (the mock's own `.saved-row`/`.token-item` are both two-line), so
+/// this is modeled on the sessions screen's own taller-card precedent
+/// (`features::sessions::presentation::pieces::CARD_LINE_GAP`, 10px) rather
+/// than [`TOKEN_LINE_GAP`]'s tighter two-line rhythm, since the third
+/// (actions) row needs room of its own to read as separate from the meta line
+/// above it.
+const SAVED_SERVER_LINE_GAP: f64 = 8.0;
 /// `.token-scope{padding:2px 7px}`.
 const CHIP_PAD_X: f64 = 7.0;
 const CHIP_PAD_Y: f64 = 2.0;
@@ -654,9 +662,29 @@ pub(super) fn token_item(
     .bottom_rule(colors.rule))
 }
 
-/// One saved server, in the same two-line shape as a [`token_item`]: the rig's
-/// label and its credential chip on the top line, its endpoint and the row's
-/// delete actions on the meta line.
+/// One saved server, a three-row card: the rig's label and its credential
+/// chip on the identity row, its endpoint and recency on their own meta row,
+/// then the row's delete actions right-aligned on a third row of their own.
+///
+/// The old shape packed both actions onto the meta row's trailing edge, all
+/// of it inflexible but for one spacer — frust `Flex` neither wraps nor
+/// shrinks an inflexible child, so on a narrow phone (the app's own
+/// `crate::responsive::WIDE_BREAKPOINT_PX`-gated narrow branch; see
+/// [`super::pages`]'s width-clamp pass) the tail clipped off the right screen
+/// edge instead of ever being reachable. Splitting the actions onto their own
+/// row, with both text rows above `flexible` rather than inflexible, is the
+/// structural fix: neither of the two upper rows can push a sibling wider
+/// than the card's own content width, and the action row's buttons — small
+/// enough to fit a 360 logical-px card comfortably on their own line — are
+/// never squeezed against running text.
+///
+/// The label and meta rows are `flexible` rather than truncated with an
+/// ellipsis: frust's `text` widget carries no overflow/ellipsis vocabulary at
+/// all (`features::terminal::presentation::chrome`'s own module docs record
+/// the same framework gap), so a `flexible` child wrapping to a second line
+/// is the closest available approximation — acceptable here since, unlike a
+/// single-line terminal pane title, a card row has no fixed height to
+/// protect.
 ///
 /// Two actions, because they are two different deletions and a user asking for
 /// one rarely means the other: `delete credential` (only where one is stored)
@@ -666,33 +694,36 @@ pub(super) fn token_item(
 pub(super) fn saved_server_item(server: &SavedServer, colors: &Palette) -> AnyView<SettingsState> {
     let theme = active_theme();
     let endpoint = server.endpoint();
-    let mut top = vec![flexible(
+
+    let mut identity = vec![flexible(
         1,
         text(server.label.clone()).style(inked(&theme.type_scale.body_small, colors.fg)),
     )];
     if server.has_credential {
-        top.push(h_gap(ROW_GAP));
-        top.push(inflexible(credential_chip(colors)));
+        identity.push(h_gap(ROW_GAP));
+        identity.push(inflexible(credential_chip(colors)));
     }
 
     let meta_text = format!("{} · {}", endpoint, server.last_used_label(epoch_millis()));
-    let mut meta = vec![
-        inflexible(text(meta_text).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
-        spacer(),
-    ];
+    let meta = row(vec![flexible(
+        1,
+        text(meta_text).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+    )]);
+
+    let mut actions = vec![spacer()];
     if server.has_credential {
         let key = endpoint.clone();
-        meta.push(inflexible(
+        actions.push(inflexible(
             button(DELETE_CREDENTIAL_LABEL, move |state: &mut SettingsState| {
                 super::pages::open_delete_credential_dialog(state, &key);
             })
             .style(ButtonStyle::Danger)
             .small(),
         ));
-        meta.push(h_gap(ROW_GAP));
+        actions.push(h_gap(ROW_GAP));
     }
     let key = endpoint.clone();
-    meta.push(inflexible(
+    actions.push(inflexible(
         button(FORGET_SERVER_LABEL, move |state: &mut SettingsState| {
             super::pages::open_forget_server_dialog(state, &key);
         })
@@ -704,9 +735,11 @@ pub(super) fn saved_server_item(server: &SavedServer, colors: &Palette) -> AnyVi
         Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
             column(vec![
-                any(row(top)),
-                any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
-                any(row(meta)),
+                any(row(identity)),
+                any(SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP))),
+                any(meta),
+                any(SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP))),
+                any(row(actions)),
             ]),
         ),
         Color::TRANSPARENT,
