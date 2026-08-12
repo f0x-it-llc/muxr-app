@@ -39,9 +39,9 @@ use frust::authoring::text::{FontFamily, GenericSlot, TextStyle};
 use frust::{Theme, TypeScale, set_app_theme};
 
 /// The app-wide and terminal-default font family — JetBrains Mono. Single
-/// source for the type-scale swap below, the terminal grid's own stack
-/// (`crate::features::terminal::presentation::term::style::terminal_font_family`),
-/// and the persisted preference default
+/// source for the type-scale swap below, the terminal grid's default stack
+/// ([`default_terminal_family`]/[`resolve_terminal_family`]), and the
+/// persisted preference default
 /// (`crate::features::settings::domain::entities::Preferences::defaults`).
 pub const DEFAULT_TERMINAL_FAMILY: &str = "JetBrains Mono";
 
@@ -94,6 +94,51 @@ pub fn installed_families() -> Vec<String> {
         DEFAULT_TERMINAL_FAMILY.to_string(),
         SYMBOLS_FALLBACK_FAMILY.to_string(),
     ]
+}
+
+/// Font families a user may pick as the terminal's *primary* face:
+/// [`installed_families`] minus [`SYMBOLS_FALLBACK_FAMILY`] — a fallback face
+/// that covers private-use glyphs the primary face lacks, never something a
+/// picker should offer as the leading choice (see that constant's own doc).
+/// Dynamic rather than a const, so a later task's downloaded faces show up
+/// here for free once they land in [`installed_families`].
+pub fn pickable_terminal_families() -> Vec<String> {
+    installed_families()
+        .into_iter()
+        .filter(|family| family != SYMBOLS_FALLBACK_FAMILY)
+        .collect()
+}
+
+/// The terminal grid's default font stack — [`DEFAULT_TERMINAL_FAMILY`] then
+/// [`SYMBOLS_FALLBACK_FAMILY`], ending in the `Monospace` generic slot so a
+/// host missing both bundled faces still shapes *some* monospace face rather
+/// than falling back to a proportional one. What [`resolve_terminal_family`]
+/// falls back to for an unknown/not-installed stored family, and what
+/// `TerminalController::font_family`
+/// (`crate::features::terminal::presentation::controller`) is seeded with
+/// before the live pane's first appearance-preference read lands.
+pub fn default_terminal_family() -> FontFamily {
+    FontFamily::stack_with_generic(
+        [DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY],
+        GenericSlot::Monospace,
+    )
+}
+
+/// Resolve a persisted `AppearancePrefs::font_family` string into the grid's
+/// primary+fallback stack: `stored` itself when it names an
+/// [`installed_families`] entry (trailed by [`SYMBOLS_FALLBACK_FAMILY`] and
+/// the `Monospace` generic, same shape as [`default_terminal_family`]); the
+/// default stack for anything else — a value persisted before this bundling
+/// existed (`docs/redesign.html`'s own `Hack Nerd Font Mono` mock), or a
+/// family a later task's catalog hasn't downloaded yet. Never errors: an
+/// unresolvable preference degrades to the shipped default rather than a
+/// blank or broken stack.
+pub fn resolve_terminal_family(stored: &str) -> FontFamily {
+    if installed_families().iter().any(|family| family == stored) {
+        FontFamily::stack_with_generic([stored, SYMBOLS_FALLBACK_FAMILY], GenericSlot::Monospace)
+    } else {
+        default_terminal_family()
+    }
 }
 
 /// [`DEFAULT_TERMINAL_FAMILY`] with a `Monospace` generic tail, so a host
@@ -223,6 +268,45 @@ mod tests {
                 DEFAULT_TERMINAL_FAMILY.to_string(),
                 SYMBOLS_FALLBACK_FAMILY.to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn pickable_terminal_families_drops_the_symbols_fallback() {
+        assert_eq!(
+            pickable_terminal_families(),
+            vec![DEFAULT_TERMINAL_FAMILY.to_string()],
+            "the fallback face is never a primary-face choice"
+        );
+    }
+
+    #[test]
+    fn default_terminal_family_is_the_bundled_stack() {
+        assert_eq!(
+            default_terminal_family(),
+            FontFamily::stack_with_generic(
+                [DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY],
+                GenericSlot::Monospace,
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_terminal_family_uses_an_installed_stored_value_as_the_primary() {
+        assert_eq!(
+            resolve_terminal_family(DEFAULT_TERMINAL_FAMILY),
+            default_terminal_family(),
+            "the shipped default is itself an installed family"
+        );
+    }
+
+    #[test]
+    fn resolve_terminal_family_falls_back_for_an_unknown_stored_value() {
+        // A pre-task-27 persisted value (`docs/redesign.html`'s own mock
+        // default) that no longer names a bundled face.
+        assert_eq!(
+            resolve_terminal_family("Hack Nerd Font Mono"),
+            default_terminal_family()
         );
     }
 

@@ -864,6 +864,7 @@ impl Component for TerminalScreen {
                     controller.font_size.get(),
                 )
                 .cursor(controller.cursor_style.get())
+                .font_family(controller.font_family.get())
                 // The grid's accessible name is "the session/pane it shows"
                 // (`term::terminal_grid`'s own contract) — the very title the
                 // status row above it prints, so a screen reader names the two

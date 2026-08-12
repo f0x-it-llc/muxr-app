@@ -12,12 +12,17 @@
 //! # Where the *choices* live
 //!
 //! Each preference carries the closed set of values a picker sheet may offer
-//! ([`AppearancePrefs::FONT_FAMILIES`], [`AppearancePrefs::FONT_SIZES_PX`],
-//! [`CursorStyle::ALL`], [`PollPrefs::REFRESH_CHOICES_SECS`]) beside the field
-//! it constrains, rather than in the sheet that renders them: which font sizes
-//! a terminal supports is a fact about the domain, not about the picker, and
-//! keeping the two together is what lets the screen's four pickers share one
-//! builder without any of them minting its own list.
+//! ([`AppearancePrefs::FONT_SIZES_PX`], [`CursorStyle::ALL`],
+//! [`PollPrefs::REFRESH_CHOICES_SECS`]) beside the field it constrains, rather
+//! than in the sheet that renders them: which font sizes a terminal supports
+//! is a fact about the domain, not about the picker, and keeping the two
+//! together is what lets the screen's four pickers share one builder without
+//! any of them minting its own list. The font family is the one exception:
+//! which faces actually resolve is a fact about bundled/downloaded assets
+//! (`crate::fonts::installed_families`), not a domain-declared choice, so the
+//! picker sources that list dynamically from there instead — see
+//! [`AppearancePrefs::FONT_FAMILIES`]'s own doc for the narrower role it
+//! still plays here.
 //!
 //! # Two labels for one value
 //!
@@ -222,7 +227,18 @@ pub struct AppearancePrefs {
 }
 
 impl AppearancePrefs {
-    /// The font families the picker offers — the redesign's own four.
+    /// The redesign's own four font-family names — **not** the picker's own
+    /// option list any more (`presentation::pages`' `Actions::picker` sources
+    /// that dynamically from `crate::fonts::installed_families`, which is
+    /// bundled/downloaded-asset truth this framework-free module cannot
+    /// depend on). What this const still guards is `data`'s own clamp of a
+    /// persisted value
+    /// (`data::mock_preferences_repository::validate_appearance`,
+    /// `data::prefs_repository`'s load-time clamp): a superset the picker no
+    /// longer produces every member of (`IBM Plex Mono`/`Space Mono` name no
+    /// bundled face today), left wide rather than narrowed so an
+    /// already-persisted value from before the picker's sourcing changed
+    /// keeps loading instead of silently clamping to the default.
     pub const FONT_FAMILIES: [&'static str; 4] = [
         DEFAULT_FONT_FAMILY,
         "IBM Plex Mono",

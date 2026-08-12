@@ -666,6 +666,16 @@ fn a_settings_change_reaches_the_live_panes_widget_inputs() {
             .get_untracked(),
         14.0
     );
+    // "Space Mono" isn't a bundled face (`crate::fonts::installed_families`),
+    // so the real poll must resolve it to the shipped default stack rather
+    // than shape with a family fontique has never heard of.
+    assert_eq!(
+        debug_controller()
+            .expect("mounted")
+            .font_family
+            .get_untracked(),
+        muxr::fonts::default_terminal_family()
+    );
 }
 
 /// Review finding M4: `refresh_appearance` used to `set()` both signals
@@ -720,6 +730,12 @@ fn an_idle_poll_with_unchanged_prefs_writes_nothing() {
         GridCursorStyle::Underline
     );
     assert_eq!(controller.font_size.get_untracked(), 14.0);
+    let resolved_family = controller.font_family.get_untracked();
+    assert_eq!(
+        resolved_family,
+        muxr::fonts::default_terminal_family(),
+        "\"Space Mono\" isn't bundled, so this resolves to the default stack too"
+    );
     let after_first = controller.appearance_writes();
     assert!(
         after_first >= 1,
@@ -734,6 +750,11 @@ fn an_idle_poll_with_unchanged_prefs_writes_nothing() {
     let third = Arc::clone(&controller);
     block_on(Box::pin(async move { third.refresh_appearance().await }));
 
+    assert_eq!(
+        controller.font_family.get_untracked(),
+        resolved_family,
+        "font_family rides the same idle-poll gate"
+    );
     assert_eq!(
         controller.appearance_writes(),
         after_first,

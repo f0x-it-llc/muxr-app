@@ -164,6 +164,7 @@ use std::time::Duration;
 
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
+use frust::authoring::text::FontFamily;
 use frust::{GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
 
 use crate::connection::ConnectionController;
@@ -180,6 +181,7 @@ use crate::features::terminal::domain::repositories::{
 use crate::features::terminal::domain::use_cases::{
     DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
 };
+use crate::fonts;
 
 use super::term;
 
@@ -262,6 +264,12 @@ pub struct TerminalController {
     /// Seeded with the shipped default (`12px`) for the same reason as
     /// [`cursor_style`](Self::cursor_style).
     pub font_size: RwSignal<f32>,
+    /// The live pane's primary+fallback font stack, mapped from
+    /// `AppearancePrefs::font_family` via
+    /// [`fonts::resolve_terminal_family`](crate::fonts::resolve_terminal_family).
+    /// Seeded with [`fonts::default_terminal_family`] for the same reason as
+    /// [`cursor_style`](Self::cursor_style)/[`font_size`](Self::font_size).
+    pub font_family: RwSignal<FontFamily>,
     /// The device-local preferences repository — resolved **once** by
     /// `pages.rs`'s `use_controller` factory (alongside the terminal/sessions
     /// repositories above) and stored here, per `docs/ARCHITECTURE.md`'s
@@ -273,7 +281,8 @@ pub struct TerminalController {
     preferences: Arc<dyn PreferencesRepository + Send + Sync>,
     /// Test/diagnostic-only: how many times [`refresh_appearance`](Self::refresh_appearance)
     /// has actually written [`cursor_style`](Self::cursor_style)/
-    /// [`font_size`](Self::font_size) since construction — never read by
+    /// [`font_size`](Self::font_size)/[`font_family`](Self::font_family)
+    /// since construction — never read by
     /// production code. Lets a headless test pin that an unchanged-prefs poll
     /// writes nothing (see that method's own doc on the
     /// read-compare-then-write gate this counts), without inventing a
@@ -482,6 +491,7 @@ impl TerminalController {
             bound_connection_id: Mutex::new(String::new()),
             cursor_style: RwSignal::new(term::CursorStyle::Block),
             font_size: RwSignal::new(DEFAULT_LIVE_FONT_SIZE),
+            font_family: RwSignal::new(fonts::default_terminal_family()),
             preferences,
             appearance_writes: AtomicU64::new(0),
             layout_generation: AtomicU64::new(0),
@@ -1294,7 +1304,8 @@ impl TerminalController {
     }
 
     /// Re-read the terminal-appearance prefs and update
-    /// [`cursor_style`](Self::cursor_style)/[`font_size`](Self::font_size).
+    /// [`cursor_style`](Self::cursor_style)/[`font_size`](Self::font_size)/
+    /// [`font_family`](Self::font_family).
     /// Called once immediately on entering the live pane and then on
     /// [`APPEARANCE_POLL_INTERVAL`]'s own cadence for the rest of the mount
     /// (see [`LiveSession::enter`]). A failed read leaves both signals at
@@ -1308,22 +1319,29 @@ impl TerminalController {
     /// `docs/ARCHITECTURE.md`'s Building a Screen section rules out.
     ///
     /// **Read-compare-then-write**: `Set::set` notifies unconditionally, with
-    /// no `PartialEq` gate of its own, and both signals are tracked reads in
-    /// `pages::TerminalScreen::build` — so writing either one unconditionally
+    /// no `PartialEq` gate of its own, and all three signals are tracked reads
+    /// in `pages::TerminalScreen::build` — so writing any one unconditionally
     /// on every tick would wake a whole-app rebuild + unpaced frame every
     /// [`APPEARANCE_POLL_INTERVAL`], forever, even while the live pane sits
     /// perfectly idle. Each signal is only `set()` when the freshly mapped
     /// value actually differs from its current [`get_untracked`](GetUntracked::get_untracked)
     /// reading — an idle poll (nothing changed since the last tick) writes
-    /// neither, so it wakes no signal and no rebuild. Bumps
+    /// none of them, so it wakes no signal and no rebuild. Bumps
     /// [`appearance_writes`](Self::appearance_writes) exactly once per tick
     /// that wrote anything, for the test-only probe that pins this.
+    /// [`font_family`](Self::font_family)'s own resolution — an unknown/
+    /// not-installed stored value degrading to the shipped default rather
+    /// than a broken stack — lives in
+    /// [`fonts::resolve_terminal_family`](crate::fonts::resolve_terminal_family),
+    /// not here, so [`crate::features::settings`]'s own downloaded-font task
+    /// reuses it without touching this method.
     ///
     /// **Disposal-safe across the one `await` above.** Both the "one read
     /// right away" kickoff and an interval-driven tick
     /// ([`LiveSession::enter`]'s own doc) spawn this call detached from the
     /// owner that created [`cursor_style`](Self::cursor_style)/
-    /// [`font_size`](Self::font_size) — `use_interval`'s alive-flag only
+    /// [`font_size`](Self::font_size)/[`font_family`](Self::font_family) —
+    /// `use_interval`'s alive-flag only
     /// stops its *own* repeat loop from firing again, not whatever a given
     /// tick's `spawn_local` already has in flight, so a mount that tears
     /// down while `load_preferences` is still pending resumes this call
@@ -1332,7 +1350,7 @@ impl TerminalController {
     /// [`try_get_untracked`](GetUntracked::try_get_untracked) rather than
     /// the plain [`get_untracked`](GetUntracked::get_untracked) every other
     /// read on this controller uses turns that race into a silent no-op —
-    /// both signals share one owner (both minted back to back in
+    /// all three signals share one owner (all minted back to back in
     /// [`TerminalController::new`]), so one answering `None` stands for the
     /// whole controller's reactive state being gone.
     pub async fn refresh_appearance(&self) {
@@ -1351,6 +1369,11 @@ impl TerminalController {
         let font_size = prefs.appearance.font_size_px as f32;
         if self.font_size.get_untracked() != font_size {
             self.font_size.set(font_size);
+            wrote = true;
+        }
+        let font_family = fonts::resolve_terminal_family(&prefs.appearance.font_family);
+        if self.font_family.get_untracked() != font_family {
+            self.font_family.set(font_family);
             wrote = true;
         }
         if wrote {
@@ -1785,6 +1808,7 @@ mod tests {
 
     use crate::features::sessions::data::repositories::MockSessionsRepository;
     use crate::features::settings::data::repositories::MockPreferencesRepository;
+    use crate::features::settings::domain::entities::AppearancePrefs;
     use crate::features::terminal::data::repositories::MockTerminalRepository;
 
     /// The test-wiring composition root: all three mock repositories behind
@@ -3125,6 +3149,10 @@ mod tests {
         let c = controller(None);
         assert_eq!(c.cursor_style.get_untracked(), term::CursorStyle::Block);
         assert_eq!(c.font_size.get_untracked(), DEFAULT_LIVE_FONT_SIZE);
+        assert_eq!(
+            c.font_family.get_untracked(),
+            fonts::default_terminal_family()
+        );
     }
 
     #[test]
@@ -3140,6 +3168,94 @@ mod tests {
         assert_eq!(
             map_cursor_style(SettingsCursorStyle::Bar),
             term::CursorStyle::Bar
+        );
+    }
+
+    /// A controller wired over the same [`MockPreferencesRepository`] `prefs`
+    /// names, so a test can `save_appearance` straight into the store
+    /// [`TerminalController::refresh_appearance`] reads — [`controller`]'s
+    /// own helper discards its `Arc` before a test ever gets a handle on it.
+    fn controller_over(prefs: &Arc<MockPreferencesRepository>) -> TerminalController {
+        TerminalController::new(
+            Arc::new(MockTerminalRepository::seeded()),
+            Arc::new(MockSessionsRepository::seeded()),
+            Arc::clone(prefs) as Arc<dyn PreferencesRepository + Send + Sync>,
+            None,
+        )
+    }
+
+    #[test]
+    fn refresh_appearance_resolves_an_installed_font_family_with_the_symbols_fallback() {
+        let prefs = Arc::new(MockPreferencesRepository::seeded());
+        let c = controller_over(&prefs);
+        let _ = block_on(prefs.save_appearance(AppearancePrefs {
+            font_family: fonts::DEFAULT_TERMINAL_FAMILY.to_string(),
+            font_size_px: 12,
+            cursor_style: SettingsCursorStyle::Block,
+        }));
+
+        block_on(c.refresh_appearance());
+
+        assert_eq!(
+            c.font_family.get_untracked(),
+            FontFamily::stack_with_generic(
+                [
+                    fonts::DEFAULT_TERMINAL_FAMILY,
+                    fonts::SYMBOLS_FALLBACK_FAMILY
+                ],
+                frust::authoring::text::GenericSlot::Monospace,
+            ),
+            "an installed family names itself as the primary, trailed by the \
+             Symbols fallback"
+        );
+    }
+
+    #[test]
+    fn refresh_appearance_falls_back_to_the_default_stack_for_an_unknown_family() {
+        let prefs = Arc::new(MockPreferencesRepository::seeded());
+        let c = controller_over(&prefs);
+        // Accepted by the mock's own picker-shaped validation
+        // (`AppearancePrefs::FONT_FAMILIES`) but not a bundled face — the
+        // same gap `crate::fonts::installed_families`'s own doc records.
+        let _ = block_on(prefs.save_appearance(AppearancePrefs {
+            font_family: "Space Mono".to_string(),
+            font_size_px: 12,
+            cursor_style: SettingsCursorStyle::Block,
+        }));
+
+        block_on(c.refresh_appearance());
+
+        assert_eq!(
+            c.font_family.get_untracked(),
+            fonts::default_terminal_family()
+        );
+    }
+
+    #[test]
+    fn a_second_identical_poll_writes_the_font_family_signal_nothing_further() {
+        let prefs = Arc::new(MockPreferencesRepository::seeded());
+        let c = controller_over(&prefs);
+        let _ = block_on(prefs.save_appearance(AppearancePrefs {
+            font_family: "Space Mono".to_string(),
+            font_size_px: 12,
+            cursor_style: SettingsCursorStyle::Block,
+        }));
+
+        block_on(c.refresh_appearance());
+        let resolved = c.font_family.get_untracked();
+        let after_first = c.appearance_writes();
+
+        // Nothing in the store moved since the first read landed — the
+        // read-compare-then-write gate `refresh_appearance` shares with
+        // `cursor_style`/`font_size` must write neither the signal nor the
+        // counter on this second, identical tick.
+        block_on(c.refresh_appearance());
+
+        assert_eq!(c.font_family.get_untracked(), resolved);
+        assert_eq!(
+            c.appearance_writes(),
+            after_first,
+            "an idle poll over an unchanged font_family pref must write nothing"
         );
     }
 }

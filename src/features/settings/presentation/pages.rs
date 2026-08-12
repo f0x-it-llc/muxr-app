@@ -602,20 +602,25 @@ impl Actions {
     }
 
     /// Resolve `kind` against the controller's current values — the option list
-    /// the domain declares, and which of them is stored.
+    /// the domain declares (or, for a font family, the faces actually
+    /// installed — see [`PickerKind::FontFamily`]'s own arm), and which of
+    /// them is stored.
     fn picker(&self, kind: PickerKind) -> Picker {
         let appearance = self.controller.appearance_untracked();
         let poll = self.controller.poll_untracked();
         let (options, selected): (Vec<String>, Option<usize>) = match kind {
-            PickerKind::FontFamily => (
-                AppearancePrefs::FONT_FAMILIES
+            PickerKind::FontFamily => {
+                // Dynamic, not a domain-declared const: which faces are
+                // actually installed is a fact about bundled/downloaded
+                // assets (`crate::fonts`), and offering one that never
+                // resolves to a real face would show a check mark with
+                // nothing behind it.
+                let families = crate::fonts::pickable_terminal_families();
+                let selected = families
                     .iter()
-                    .map(|family| (*family).to_string())
-                    .collect(),
-                AppearancePrefs::FONT_FAMILIES
-                    .iter()
-                    .position(|family| *family == appearance.font_family),
-            ),
+                    .position(|family| *family == appearance.font_family);
+                (families, selected)
+            }
             PickerKind::FontSize => (
                 AppearancePrefs::FONT_SIZES_PX
                     .iter()
@@ -659,11 +664,12 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         match kind {
             PickerKind::FontFamily => {
-                let Some(family) = AppearancePrefs::FONT_FAMILIES.get(index) else {
+                let families = crate::fonts::pickable_terminal_families();
+                let Some(family) = families.get(index) else {
                     return;
                 };
                 let next = AppearancePrefs {
-                    font_family: (*family).to_string(),
+                    font_family: family.clone(),
                     ..controller.appearance_untracked()
                 };
                 spawn_local(async move { controller.set_appearance(next).await });

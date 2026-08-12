@@ -66,12 +66,8 @@
 //! published, and the honest fix is a `GlyphInk` widening upstream.
 
 use frust::authoring::Color;
-use frust::authoring::text::{
-    FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextStyle,
-};
+use frust::authoring::text::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
 use frust::{Brightness, GlyphInk, StatusPalette, Theme, Tween};
-
-use crate::fonts::{DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY};
 
 /// Cell height as a multiple of the font size (CSS unitless `line-height`).
 ///
@@ -112,29 +108,6 @@ pub const ANSI_BLUE: Color = Color::from_rgb8(0x6c, 0x8c, 0xff);
 /// ANSI slot 5 (magenta). **Hand-tuned**, for the same reason as
 /// [`ANSI_BLUE`].
 pub const ANSI_MAGENTA: Color = Color::from_rgb8(0xd9, 0x8a, 0xdf);
-
-/// The monospace family stack every run and every measurement shapes with.
-///
-/// Named explicitly rather than taken from `Theme::type_scale`: a terminal grid
-/// is only a grid if the face is monospace, and a type scale's body role
-/// carries no such guarantee (it happens to be IBM Plex Mono under Glyph, and
-/// would be proportional under Material). The stack is
-/// [`DEFAULT_TERMINAL_FAMILY`] first, then [`SYMBOLS_FALLBACK_FAMILY`] —
-/// Symbols Nerd Font Mono is what covers nerd-font/powerline private-use
-/// glyphs the primary face lacks (the classic tofu box otherwise) — and ends
-/// in the `Monospace` generic slot so a host missing both bundled faces
-/// still shapes *some* monospace face rather than falling back to a
-/// proportional one.
-///
-/// Takes no args today: the primary face is a fixed constant, not yet read
-/// from the terminal-appearance preference — a deliberate, obvious seam a
-/// later task closes.
-pub fn terminal_font_family() -> FontFamily {
-    FontFamily::stack_with_generic(
-        [DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY],
-        GenericSlot::Monospace,
-    )
-}
 
 /// Every colour the grid paints, resolved once per build from the active theme
 /// (see the [module docs](self) for the mapping and its two gaps).
@@ -265,10 +238,16 @@ impl CellStyle {
         (fg, (bg != palette.background).then_some(bg))
     }
 
-    /// The shaping style for this run's text at `font_size`, inked `color`.
-    pub fn text_style(self, font_size: f32, color: Color) -> TextStyle {
+    /// The shaping style for this run's text at `font_size`, inked `color`,
+    /// in `family` — the resolved primary+fallback stack
+    /// `TerminalGridWidget` currently holds
+    /// (`crate::fonts::resolve_terminal_family`, fed from
+    /// `TerminalController::font_family`; a caller with no controller behind
+    /// it, like [`crate::features::terminal::presentation::term::geometry::measure_cell`]'s
+    /// own callers, passes `crate::fonts::default_terminal_family()`).
+    pub fn text_style(self, font_size: f32, color: Color, family: &FontFamily) -> TextStyle {
         TextStyle {
-            family: terminal_font_family(),
+            family: family.clone(),
             weight: if self.bold {
                 FontWeight::SEMI_BOLD
             } else {
@@ -463,7 +442,8 @@ mod tests {
 
     #[test]
     fn bold_and_italic_pick_real_faces_not_synthesized_ones() {
-        let plain = CellStyle::default().text_style(12.0, Color::WHITE);
+        let family = crate::fonts::default_terminal_family();
+        let plain = CellStyle::default().text_style(12.0, Color::WHITE, &family);
         assert_eq!(plain.weight, FontWeight::REGULAR);
         assert_eq!(plain.style, FontStyle::Normal);
 
@@ -472,9 +452,16 @@ mod tests {
             italic: true,
             ..CellStyle::default()
         }
-        .text_style(12.0, Color::WHITE);
+        .text_style(12.0, Color::WHITE, &family);
         assert_eq!(loud.weight, FontWeight::SEMI_BOLD);
         assert_eq!(loud.style, FontStyle::Italic);
         assert_eq!(loud.size, 12.0);
+    }
+
+    #[test]
+    fn text_style_carries_the_family_it_was_given() {
+        let family = FontFamily::named("Comic Sans");
+        let style = CellStyle::default().text_style(12.0, Color::WHITE, &family);
+        assert_eq!(style.family, family);
     }
 }

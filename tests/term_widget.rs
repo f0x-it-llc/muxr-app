@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use frust::authoring::text::FontFamily;
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Size, View,
 };
@@ -361,6 +362,41 @@ fn a_font_size_change_relayouts_and_a_cursor_change_only_repaints() {
         .label(LABEL);
     let flags = View::<()>::rebuild(&recoloured, &resized, &mut widget, &mut ctx);
     assert!(flags.needs_paint(), "the caret's shape is pixels");
+}
+
+/// A different font family can measure a different cell advance at the
+/// identical size, so it rides the same `LAYOUT` contract a font-size change
+/// does (`TerminalGridWidget::rebuild`'s own `reshapes` flag) — not a bare
+/// `PAINT`, which would leave stale runs/geometry behind under the mobile
+/// shells' intra-frame layout-skip gate.
+#[test]
+fn a_font_family_change_relayouts_too() {
+    let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+    let palette = TerminalPalette::fallback();
+    let base = terminal_grid(Rc::clone(&emulator), 1, palette, FONT_SIZE).label(LABEL);
+    let mut counter = 0u64;
+    let mut ctx = BuildCtx::new(&mut counter);
+    let mut widget = View::<()>::build(&base, &mut ctx);
+
+    let refaced = terminal_grid(Rc::clone(&emulator), 1, palette, FONT_SIZE)
+        .font_family(FontFamily::named("Comic Sans"))
+        .label(LABEL);
+    let flags = View::<()>::rebuild(&refaced, &base, &mut widget, &mut ctx);
+    assert!(
+        flags.needs_layout(),
+        "a font-family change must force LAYOUT, exactly like font-size"
+    );
+
+    // …and an identical family on the next rebuild is a no-op, like every
+    // other unchanged field here.
+    let same = terminal_grid(Rc::clone(&emulator), 1, palette, FONT_SIZE)
+        .font_family(FontFamily::named("Comic Sans"))
+        .label(LABEL);
+    let flags = View::<()>::rebuild(&same, &refaced, &mut widget, &mut ctx);
+    assert!(
+        !flags.needs_layout() && !flags.needs_paint(),
+        "an unchanged family writes nothing"
+    );
 }
 
 /// Review M-A1: `run_feed`'s scheduled loop and `InputSeam::dispatch`'s
