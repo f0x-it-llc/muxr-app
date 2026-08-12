@@ -525,6 +525,12 @@ pub fn serial() -> MutexGuard<'static, ()> {
 ///   biometric-gated credential store, whose real gate answers "unavailable"
 ///   permanently off-device and waits for a human on one. The mock is also the
 ///   only way to drive the gate's outcome table at all.
+/// - `fonts`' download source and cache — the real source is plain HTTPS
+///   against `raw.githubusercontent.com`, so the **offline** source is the
+///   headless default: no suite can reach the network by omission (a suite
+///   that wants a catalog installs its own fixture source over this one), and
+///   the cache is pointed at a throwaway temp directory so nothing writes into
+///   this machine's own app data.
 pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
     muxr::connection::use_mock_connection_for_tests();
@@ -533,6 +539,10 @@ pub fn setup() -> Owner {
     muxr::features::terminal::di::use_mock_terminal_for_tests();
     muxr::features::connect::di::use_mock_saved_servers_for_tests();
     muxr::features::connect::di::use_mock_credentials_for_tests();
+    muxr::fonts::use_offline_font_source_for_tests();
+    muxr::fonts::use_font_cache_dir_for_tests(
+        std::env::temp_dir().join(format!("muxr-test-fonts-{}", std::process::id())),
+    );
     let _runtime = ReactiveRuntime::init(recording_waker());
     let ambient = Owner::new();
     ambient.set();

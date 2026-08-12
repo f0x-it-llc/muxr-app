@@ -47,7 +47,7 @@
 //! Row *k* is addressed relative to the selected row's measured rect: every
 //! `.pick-row` is one line tall, so the pitch is that rect's own height.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use frust::{
@@ -66,13 +66,15 @@ use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
-use muxr::features::settings::di::SharedAuthTokensRepository;
+use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
 use muxr::features::settings::domain::entities::{AuthToken, CreateTokenRequest, MintedToken};
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
 };
+use muxr::fonts::catalog::{CatalogStatus, FontState};
+use muxr::fonts::source::FontSource;
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
@@ -1510,13 +1512,12 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
 /// Every picker the screen offers: the row that opens it, how many options it
 /// lists, which index is selected out of the box, and what picking the last
 /// option should leave in the row's value.
-const PICKERS: [(&str, usize, usize, &str); 4] = [
-    // The picker's own option list is dynamic now
-    // (`crate::fonts::installed_families` minus the Symbols fallback face,
-    // `presentation::pages`' `Actions::picker`), not `entities.rs`'s
-    // `FONT_FAMILIES` const — with only the bundled JetBrains Mono face
-    // installed, that list is exactly one entry, already selected.
-    ("font family", 1, 0, "JetBrains Mono"),
+///
+/// The `font family` row is **not** here: its options are not a
+/// domain-declared list but the faces this device has installed plus a
+/// downloadable catalog, so it has a sheet of its own — covered by section 4b
+/// below.
+const PICKERS: [(&str, usize, usize, &str); 3] = [
     ("font size", 5, 2, "14px"),
     ("cursor style", 3, 0, "bar"),
     ("layout refresh", 4, 1, "every 10s"),
@@ -1636,6 +1637,473 @@ fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
         "the check moved two rows down: {moved} vs {}",
         2.0 * row_height.height
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4b — the font picker sheet (its own sheet, not one of the four above)
+// ---------------------------------------------------------------------------
+//
+// The font sheet lists two sections — the faces installed on the device, and
+// the downloadable catalog — over one scrolling body. Read the same way every
+// other sheet in this suite is (see the module docs): by counted glyph runs,
+// by the one full-bleed amber fill the selected row paints, and by the row
+// value on the screen behind once a choice lands.
+//
+// **No test here touches the network.** `support::setup` installs the offline
+// font source for the whole process, and the two catalog cases install their
+// own in-memory fixture source over it.
+
+/// The bytes every fixture "download" serves — a real, parseable TTF, so the
+/// install path's own registration probe has something to resolve. It resolves
+/// to `JetBrains Mono` (`crate::fonts`' own unit test pins that), which is
+/// exactly what makes it a fixture for the *reported name wins* rule: the
+/// manifest below claims something else entirely.
+const FIXTURE_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Light.ttf");
+
+/// The catalog entry the download case installs.
+const FIXTURE_A_FAMILY: &str = "FixtureA Nerd Font Mono";
+const FIXTURE_A_DISPLAY: &str = "Fixture A Nerd Font Mono";
+/// …and the one it leaves alone (whose two names agree, like 7 of the real
+/// catalog's 34 entries).
+const FIXTURE_B_FAMILY: &str = "Fixture B Nerd Font Mono";
+
+/// The pre-seeded cache's family and catalog label — installed by writing the
+/// cache directly, the way a previous launch's download would have left it.
+const CACHED_FAMILY: &str = "Cached Nerd Font Mono";
+const CACHED_DISPLAY: &str = "Cached Display Nerd Font";
+
+/// A catalog served straight out of memory: two entries, both pointing at
+/// [`FIXTURE_FONT`], with `family` and `displayName` deliberately different on
+/// the first one.
+struct FixtureFontSource {
+    manifest: Vec<u8>,
+    fetched: Arc<Mutex<Vec<String>>>,
+    /// Serve a font whose bytes no longer hash to what the manifest vouched
+    /// for — a truncated download, or a tampered mirror.
+    corrupt: bool,
+}
+
+#[clean_signals::async_trait]
+impl FontSource for FixtureFontSource {
+    async fn fetch_manifest(&self) -> Result<Vec<u8>, AppFailure> {
+        self.fetched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push("manifest".to_string());
+        Ok(self.manifest.clone())
+    }
+
+    async fn fetch_font(&self, url: &str) -> Result<Vec<u8>, AppFailure> {
+        self.fetched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(url.to_string());
+        let mut bytes = FIXTURE_FONT.to_vec();
+        if self.corrupt {
+            // Still a font by its magic bytes — only the hash can catch this.
+            bytes[400] ^= 0xff;
+        }
+        Ok(bytes)
+    }
+}
+
+/// Install the fixture catalog as this process's font source; answer the log
+/// every fetch is recorded in.
+fn use_fixture_catalog() -> Arc<Mutex<Vec<String>>> {
+    use_fixture_catalog_serving(false)
+}
+
+/// [`use_fixture_catalog`], with `corrupt` deciding whether the font bytes it
+/// serves still match the hash its own manifest advertises.
+fn use_fixture_catalog_serving(corrupt: bool) -> Arc<Mutex<Vec<String>>> {
+    let digest = sha256_hex(FIXTURE_FONT);
+    let manifest = format!(
+        r#"{{ "version": 1, "fonts": [
+          {{ "id": "fixture-a", "displayName": "{FIXTURE_A_DISPLAY}",
+             "family": "{FIXTURE_A_FAMILY}", "license": "OFL-1.1", "isNerdFont": true,
+             "files": [ {{ "weight": 400, "style": "normal", "path": "FixtureA-Regular.ttf",
+                          "bytes": {len}, "sha256": "{digest}",
+                          "url": "https://example.invalid/FixtureA-Regular.ttf" }} ] }},
+          {{ "id": "fixture-b", "displayName": "{FIXTURE_B_FAMILY}",
+             "family": "{FIXTURE_B_FAMILY}", "license": "OFL-1.1", "isNerdFont": true,
+             "files": [ {{ "weight": 400, "style": "normal", "path": "FixtureB-Regular.ttf",
+                          "bytes": {len}, "sha256": "{digest}",
+                          "url": "https://example.invalid/FixtureB-Regular.ttf" }} ] }}
+        ] }}"#,
+        len = FIXTURE_FONT.len(),
+    );
+    let fetched = Arc::new(Mutex::new(Vec::new()));
+    muxr::fonts::use_font_source_for_tests(Arc::new(FixtureFontSource {
+        manifest: manifest.into_bytes(),
+        fetched: Arc::clone(&fetched),
+        corrupt,
+    }));
+    fetched
+}
+
+/// SHA-256 as lowercase hex — the manifest's own spelling (the store's copy of
+/// this is private to it).
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Point the font cache at a fresh temp directory of its own and forget every
+/// family this process has installed — so each case below starts from "only
+/// the bundled faces".
+fn fresh_font_cache(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "muxr-settings-fonts-{tag}-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a temp font cache");
+    muxr::fonts::use_font_cache_dir_for_tests(dir.clone());
+    muxr::fonts::reset_installed_fonts_for_tests();
+    dir
+}
+
+/// Seed `dir` with a downloaded family the way a previous launch would have
+/// left it, then run the startup scan that re-registers it.
+fn seed_cached_family(dir: &std::path::Path) {
+    let family_dir = dir.join("Cached_Nerd_Font_Mono");
+    std::fs::create_dir_all(&family_dir).expect("a family dir");
+    std::fs::write(family_dir.join("Cached-Regular.ttf"), FIXTURE_FONT).expect("the face");
+    std::fs::write(
+        family_dir.join("meta"),
+        format!(
+            "family={CACHED_FAMILY}\ndisplay={CACHED_DISPLAY}\nmanifest={CACHED_FAMILY}\n\
+             file={} Cached-Regular.ttf\n",
+            sha256_hex(FIXTURE_FONT)
+        ),
+    )
+    .expect("the sidecar");
+    let registered = muxr::fonts::store::scan_cache_and_register();
+    assert_eq!(
+        registered,
+        vec![CACHED_FAMILY.to_string()],
+        "the seeded family must register before the screen mounts"
+    );
+}
+
+/// Open the font-family sheet and answer what it painted.
+fn open_font_picker(h: &mut Harness) -> Chrome {
+    let before = h.frame();
+    h.tap_value("font family");
+    let after = h.settle();
+    let sheet = Chrome::diff(&before, &after);
+    assert_eq!(h.depth(), 2, "the font sheet is pushed as its own page");
+    sheet
+}
+
+/// Dismiss the open sheet through its scrim.
+fn close_sheet(h: &mut Harness) {
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 1, "the sheet dismissed");
+}
+
+/// Pump until the catalog settles at `expected` — the async fetch the sheet
+/// starts when it opens.
+fn await_catalog(h: &mut Harness, expected: CatalogStatus) {
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while muxr::fonts::catalog::font_catalog().status() != expected {
+        assert!(
+            Instant::now() < deadline,
+            "the catalog never reached {expected:?}"
+        );
+        h.pump_once();
+    }
+}
+
+/// The preferences the screen actually persisted — read straight out of the
+/// repository `di` published, which is what "persisted" means here.
+fn stored_font_family() -> String {
+    let repository = expect_preferences_repository();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(async move {
+            repository
+                .load_preferences()
+                .await
+                .expect("the mock store never fails a load")
+                .appearance
+                .font_family
+        })
+}
+
+#[test]
+fn the_font_sheet_lists_the_bundled_face_and_says_so_quietly_when_the_catalog_is_gone() {
+    // Offline (`support::setup`'s own default source) with nothing cached: the
+    // installed section still lists the bundled face, the catalog section says
+    // one quiet line, and **no toast is raised** — an unreachable catalog is
+    // not something the user did.
+    let _g = serial();
+    let _ambient = setup();
+    let _cache = fresh_font_cache("offline");
+    let mut h = Harness::connected();
+    app_toasts().clear();
+
+    let sheet = open_font_picker(&mut h);
+    await_catalog(&mut h, CatalogStatus::Unavailable);
+
+    assert_eq!(
+        sheet.paths.len(),
+        1,
+        "exactly one row carries the check vector: the face in use"
+    );
+    assert_eq!(
+        sheet.runs,
+        font_sheet_runs(1, 0, true),
+        "the bundled face, and one quiet line where the catalog would be"
+    );
+    // The one full-bleed amber fill is the selected installed row — the same
+    // geometry screen 6's own picker paints (see `Chrome::selected_pick_row`).
+    let (origin, size) = sheet.selected_pick_row();
+    let (panel_origin, panel_size) = sheet.panel();
+    assert!((origin.x - panel_origin.x).abs() < EPSILON, "{origin:?}");
+    assert!((size.width - panel_size.width).abs() < EPSILON);
+
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a missing catalog raises no toast: {:?}",
+        app_toasts().pending_untracked()
+    );
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 1, "dismissed");
+}
+
+#[test]
+fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family() {
+    // The whole point of the two names: the row (and the settings row behind
+    // it) prints the catalog's `displayName`, while what reaches the store is
+    // the `family` a font stack can actually resolve.
+    let _g = serial();
+    let _ambient = setup();
+    let cache = fresh_font_cache("cached");
+    seed_cached_family(&cache);
+    let mut h = Harness::connected();
+
+    assert!(
+        muxr::fonts::installed_families().contains(&CACHED_FAMILY.to_string()),
+        "the cached family is installed for this process: {:?}",
+        muxr::fonts::installed_families()
+    );
+
+    let sheet = open_font_picker(&mut h);
+    // Two installed rows now (bundled + cached), the bundled one still
+    // selected: its fill is row 0, and every font row is the same height.
+    pick(&mut h, &sheet, 0, 1);
+
+    h.pump_until_values(CACHED_DISPLAY, |values| {
+        values.iter().any(|v| v == CACHED_DISPLAY)
+    });
+    assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
+    assert_eq!(
+        stored_font_family(),
+        CACHED_FAMILY,
+        "the FAMILY is what persists — a display name would resolve to nothing"
+    );
+    assert!(
+        !node_values(&h.root).iter().any(|v| v == CACHED_FAMILY),
+        "…and the raw family name is never what the row shows: {:?}",
+        node_values(&h.root)
+    );
+}
+
+#[test]
+fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let _cache = fresh_font_cache("catalog");
+    let fetched = use_fixture_catalog();
+    let mut h = Harness::connected();
+    app_toasts().clear();
+
+    // Opening the sheet is what fetches the catalog — never app startup.
+    open_font_picker(&mut h);
+    await_catalog(&mut h, CatalogStatus::Ready);
+    assert!(
+        fetched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&"manifest".to_string()),
+        "the sheet fetched the catalog on open"
+    );
+    close_sheet(&mut h);
+
+    // Re-opened against a catalog already in hand, the sheet renders both
+    // downloadable rows beside the installed one.
+    let with_catalog = open_font_picker(&mut h).runs;
+    assert_eq!(
+        with_catalog,
+        font_sheet_runs(1, 2, false),
+        "the bundled face, then both catalog entries"
+    );
+    close_sheet(&mut h);
+
+    // Download the first entry. The rows carry no semantics of their own (a
+    // sheet is a navigator page — see the module docs) and the catalog
+    // section's offset is not derivable from painted evidence, so this drives
+    // the body of the very closure `pieces::font_picker_sheet`'s `on_download`
+    // hands each available row.
+    let catalog = muxr::fonts::catalog::font_catalog();
+    let entry = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.family == FIXTURE_A_FAMILY)
+        .cloned()
+        .expect("the fixture catalog carries it");
+    let installing = entry.clone();
+    frust::spawn_local(async move {
+        catalog
+            .install(installing)
+            .await
+            .expect("the fixture download verifies");
+    });
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while muxr::fonts::store::registered_family_for(FIXTURE_A_FAMILY).is_none() {
+        assert!(Instant::now() < deadline, "the download never landed");
+        h.pump_once();
+    }
+
+    assert!(
+        fetched
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|url| url.ends_with("FixtureA-Regular.ttf")),
+        "the entry's own file was fetched"
+    );
+    assert_eq!(
+        muxr::fonts::store::registered_family_for(FIXTURE_A_FAMILY).as_deref(),
+        Some("JetBrains Mono"),
+        "the family the bytes really register as wins over the manifest's claim"
+    );
+    assert_eq!(
+        catalog.state_of(&entry),
+        FontState::Installed,
+        "the row flips to installed"
+    );
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a clean install says nothing: {:?}",
+        app_toasts().pending_untracked()
+    );
+
+    // …and the sheet, rebuilt, drops that row out of the catalog section: an
+    // installed entry is listed once, above, under the family it registered
+    // as.
+    let after_install = open_font_picker(&mut h).runs;
+    assert_eq!(
+        after_install,
+        font_sheet_runs(1, 1, false),
+        "exactly one catalog row fewer than the sheet that offered it ({with_catalog})"
+    );
+    // The remaining row is the entry nobody downloaded.
+    assert_eq!(
+        catalog
+            .entries()
+            .iter()
+            .filter(|entry| catalog.state_of(entry) == FontState::Available)
+            .map(|entry| entry.family.clone())
+            .collect::<Vec<_>>(),
+        vec![FIXTURE_B_FAMILY.to_string()]
+    );
+}
+
+#[test]
+fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
+    // The integrity contract end to end: a served font that no longer hashes
+    // to what the manifest vouched for installs nothing, leaves the row
+    // retryable, and surfaces one failure toast — whose text is the generic
+    // user message, never the hash detail.
+    let _g = serial();
+    let _ambient = setup();
+    let cache = fresh_font_cache("corrupt");
+    use_fixture_catalog_serving(true);
+    let mut h = Harness::connected();
+    app_toasts().clear();
+
+    open_font_picker(&mut h);
+    await_catalog(&mut h, CatalogStatus::Ready);
+    close_sheet(&mut h);
+
+    let catalog = muxr::fonts::catalog::font_catalog();
+    let entry = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.family == FIXTURE_A_FAMILY)
+        .cloned()
+        .expect("the fixture catalog carries it");
+    let installing = entry.clone();
+    let failed = Arc::new(Mutex::new(false));
+    let recorded = Arc::clone(&failed);
+    frust::spawn_local(async move {
+        let outcome = catalog.install(installing).await;
+        *recorded.lock().unwrap_or_else(|p| p.into_inner()) = outcome.is_err();
+        if let Err(failure) = outcome {
+            muxr::ui::toasts::app_toasts().raise(&failure);
+        }
+    });
+
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !*failed.lock().unwrap_or_else(|p| p.into_inner()) {
+        assert!(Instant::now() < deadline, "the install never answered");
+        h.pump_once();
+    }
+
+    assert_eq!(
+        catalog.state_of(&entry),
+        FontState::Failed,
+        "the row stays retryable rather than claiming to be installed"
+    );
+    assert!(
+        !muxr::fonts::installed_families().contains(&FIXTURE_A_FAMILY.to_string()),
+        "nothing was registered: {:?}",
+        muxr::fonts::installed_families()
+    );
+    assert_eq!(
+        std::fs::read_dir(&cache)
+            .expect("the cache root")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count(),
+        0,
+        "…and nothing was cached"
+    );
+    let toasts = app_toasts().pending_untracked();
+    assert_eq!(toasts.len(), 1, "exactly one failure toast: {toasts:?}");
+    assert!(
+        !toasts[0].contains("sha256") && !toasts[0].contains(FIXTURE_A_FAMILY),
+        "the toast never leaks the integrity detail: {toasts:?}"
+    );
+}
+
+/// What the font sheet paints, in glyph runs: its title and caption, one
+/// heading per section, two runs for an installed row (display name over meta
+/// line) and three for an available one (those two plus its download
+/// affordance), plus the catalog section's one-line note when it has one.
+///
+/// Spelled as a sum rather than a magic number so a failure says *which* part
+/// of the sheet drifted.
+fn font_sheet_runs(installed: usize, available: usize, note: bool) -> usize {
+    const HEAD: usize = 2;
+    const SECTION_HEADING: usize = 1;
+    const INSTALLED_ROW: usize = 2;
+    const AVAILABLE_ROW: usize = INSTALLED_ROW + 1;
+    HEAD + SECTION_HEADING
+        + installed * INSTALLED_ROW
+        + SECTION_HEADING
+        + usize::from(note)
+        + available * AVAILABLE_ROW
 }
 
 // ---------------------------------------------------------------------------

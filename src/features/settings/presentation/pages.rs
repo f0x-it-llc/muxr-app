@@ -142,6 +142,19 @@ const DISCONNECTED_VALUE: &str = "not connected";
 const READ_ONLY_TOKEN_TOAST: &str =
     "Read-only session \u{2014} reconnect with a read-write token to change this";
 
+/// The font sheet's scroll-region reserve: the window's own height minus this
+/// estimate of everything outside the scrollable band — `ui/sheet.rs`'s handle
+/// zone, panel padding and safe-area inset on one side, this sheet's title and
+/// caption on the other. A generous, community-approximate constant rather
+/// than an exact figure imported from `ui/sheet.rs`'s private geometry (the
+/// terminal screen's own "panes & tabs" sheet makes the identical trade, and
+/// its `SHEET_SCROLL_RESERVE_PX` documents it at length): the cost of a
+/// generous estimate is a slightly shorter scroll band, not a broken one.
+const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
+/// That region's floor, so a short window still leaves a usable band rather
+/// than the reserve above collapsing it toward zero.
+const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
+
 /// The groups column's max width past [`WIDE_BREAKPOINT_PX`] (FINDINGS #21's
 /// conservative width-clamp pass) — a tablet/landscape/desktop window centers
 /// the whole scrolling group list rather than stretching it edge to edge.
@@ -516,7 +529,11 @@ fn appearance_rows(prefs: &AppearancePrefs, colors: &Palette) -> Vec<AnyView<Set
         pieces::settings_row(
             pieces::MARK_FONT_FAMILY,
             "font family",
-            prefs.font_family.clone(),
+            // The *display* name, not the persisted family: a downloaded Nerd
+            // Font stores as `BlexMono Nerd Font Mono` and is called
+            // `IBM Plex Mono Nerd Font Mono` everywhere a person reads it
+            // (`crate::fonts::display_name`).
+            crate::fonts::display_name(&prefs.font_family),
             ValueTone::Plain,
             RowAction::Picker(PickerKind::FontFamily),
             colors,
@@ -577,7 +594,16 @@ impl Actions {
     /// Module-private, with [`picker`](Self::picker)/[`pick`](Self::pick): the
     /// whole trio speaks [`PickerKind`], which is `presentation`-internal
     /// vocabulary, and [`row_tapped`] is its one caller.
+    ///
+    /// The font family is the one row that does **not** come through here: its
+    /// choices are not a domain-declared list but the faces this device has
+    /// installed plus a downloadable catalog, so it has a sheet of its own
+    /// ([`open_font_picker`](Self::open_font_picker)).
     fn open_picker(&self, kind: PickerKind) {
+        if kind == PickerKind::FontFamily {
+            self.open_font_picker();
+            return;
+        }
         let actions = self.clone();
         show_sheet(&self.overlays, move |sheet| {
             let theme = pieces::active_theme();
@@ -602,25 +628,16 @@ impl Actions {
     }
 
     /// Resolve `kind` against the controller's current values — the option list
-    /// the domain declares (or, for a font family, the faces actually
-    /// installed — see [`PickerKind::FontFamily`]'s own arm), and which of
-    /// them is stored.
+    /// the domain declares, and which of them is stored.
+    ///
+    /// [`PickerKind::FontFamily`] never reaches here (see
+    /// [`open_picker`](Self::open_picker)); its arm answers an empty picker
+    /// rather than a plausible-looking wrong one.
     fn picker(&self, kind: PickerKind) -> Picker {
         let appearance = self.controller.appearance_untracked();
         let poll = self.controller.poll_untracked();
         let (options, selected): (Vec<String>, Option<usize>) = match kind {
-            PickerKind::FontFamily => {
-                // Dynamic, not a domain-declared const: which faces are
-                // actually installed is a fact about bundled/downloaded
-                // assets (`crate::fonts`), and offering one that never
-                // resolves to a real face would show a check mark with
-                // nothing behind it.
-                let families = crate::fonts::pickable_terminal_families();
-                let selected = families
-                    .iter()
-                    .position(|family| *family == appearance.font_family);
-                (families, selected)
-            }
+            PickerKind::FontFamily => (Vec::new(), None),
             PickerKind::FontSize => (
                 AppearancePrefs::FONT_SIZES_PX
                     .iter()
@@ -663,17 +680,9 @@ impl Actions {
     fn pick(&self, kind: PickerKind, index: usize) {
         let controller = Arc::clone(&self.controller);
         match kind {
-            PickerKind::FontFamily => {
-                let families = crate::fonts::pickable_terminal_families();
-                let Some(family) = families.get(index) else {
-                    return;
-                };
-                let next = AppearancePrefs {
-                    font_family: family.clone(),
-                    ..controller.appearance_untracked()
-                };
-                spawn_local(async move { controller.set_appearance(next).await });
-            }
+            // Unreachable: the font family has its own sheet, which persists
+            // through `pick_font_family` rather than by option index.
+            PickerKind::FontFamily => {}
             PickerKind::FontSize => {
                 let Some(px) = AppearancePrefs::FONT_SIZES_PX.get(index) else {
                     return;
@@ -705,6 +714,151 @@ impl Actions {
                 spawn_local(async move { controller.set_poll_prefs(next).await });
             }
         }
+    }
+
+    /// Open the font-family sheet: the installed faces, then the downloadable
+    /// catalog.
+    ///
+    /// The catalog is fetched **here**, when the sheet opens — never at app
+    /// startup, which has no use for one (`crate::fonts::catalog`'s own
+    /// lifecycle note). `load` is single-flight and a no-op once a catalog has
+    /// landed, so re-opening the sheet costs nothing.
+    ///
+    /// Like every sheet on this screen the body closure re-runs on each
+    /// navigator rebuild, so it re-reads the catalog's signals: a download
+    /// landing is what flips its own row.
+    fn open_font_picker(&self) {
+        let catalog = crate::fonts::catalog::font_catalog();
+        spawn_local(async move { catalog.load().await });
+
+        let actions = self.clone();
+        show_sheet(&self.overlays, move |sheet| {
+            let theme = pieces::active_theme();
+            let colors = pieces::palette(&theme);
+            let picker = actions.font_picker();
+            let sheet = sheet.clone();
+            let selecting = actions.clone();
+            let downloading = actions.clone();
+            pieces::font_picker_sheet(
+                &picker,
+                &colors,
+                move |_app: &mut AppState, family: String| {
+                    // Close first, then persist — the ordering every sheet on
+                    // this screen uses, through the sheet's own single-shot
+                    // gate (`crate::ui::sheet`'s "One sheet, one dismissal").
+                    sheet.close();
+                    selecting.pick_font_family(family);
+                },
+                // A download leaves the sheet up: it makes the row selectable,
+                // it does not select it.
+                move |_app: &mut AppState, family: String| downloading.download_font(&family),
+            )
+        });
+    }
+
+    /// Assemble the font sheet's two sections from the installed faces, the
+    /// catalog's signals and the stored preference.
+    ///
+    /// Every read here is **tracked** — this runs inside the sheet's body
+    /// builder, so a catalog landing or a download flipping state is what
+    /// re-renders the rows.
+    fn font_picker(&self) -> pieces::FontPicker {
+        let catalog = crate::fonts::catalog::font_catalog();
+        let status = catalog.status();
+        let stale = catalog.is_stale();
+        let entries = catalog.entries();
+        let selected = self.controller.appearance.get().font_family;
+
+        let installed: Vec<pieces::FontRow> = crate::fonts::pickable_terminal_families()
+            .into_iter()
+            .map(|family| {
+                let display = crate::fonts::display_name(&family);
+                // Where the face came from, not what it is called: 7 of the
+                // catalog's own entries carry a `family` that already matches
+                // their display name, so comparing the two names would call a
+                // downloaded font "built-in".
+                let meta = if crate::fonts::store::is_downloaded(&family) {
+                    pieces::FONT_META_DOWNLOADED
+                } else {
+                    pieces::FONT_META_BUILT_IN
+                };
+                pieces::FontRow {
+                    family,
+                    display,
+                    meta: meta.to_string(),
+                    state: crate::fonts::catalog::FontState::Installed,
+                }
+            })
+            .collect();
+
+        let available: Vec<pieces::FontRow> = entries
+            .iter()
+            .filter_map(|entry| {
+                let state = catalog.state_of(entry);
+                // An entry already installed is listed once, in the section
+                // above — under the family it actually registered as.
+                if state == crate::fonts::catalog::FontState::Installed {
+                    return None;
+                }
+                Some(pieces::FontRow {
+                    family: entry.family.clone(),
+                    display: entry.display_name.clone(),
+                    meta: format!("{} \u{b7} {}", entry.license, entry.size_label()),
+                    state,
+                })
+            })
+            .collect();
+
+        // The window's own height, read once per build like every other
+        // responsive value in this app (`crate::responsive`) — `None` in every
+        // headless suite, which leaves the region unbounded and every existing
+        // geometric locator untouched.
+        let max_height = use_context::<WindowMetrics>().map(|metrics| {
+            (metrics.size.height - SHEET_SCROLL_RESERVE_PX).max(SHEET_SCROLL_FLOOR_PX)
+        });
+
+        pieces::FontPicker {
+            installed,
+            available,
+            selected,
+            status,
+            stale,
+            max_height,
+        }
+    }
+
+    /// Persist `family` as the terminal's face — the installed-row tap.
+    fn pick_font_family(&self, family: String) {
+        let controller = Arc::clone(&self.controller);
+        let next = AppearancePrefs {
+            font_family: family,
+            ..controller.appearance_untracked()
+        };
+        spawn_local(async move { controller.set_appearance(next).await });
+    }
+
+    /// Download the catalog entry whose family is `family`.
+    ///
+    /// Single-flight and state-tracking live in the catalog itself; this owns
+    /// the one thing that is presentation's: a failed install raises the
+    /// app's failure toast (the row's own `retry` affordance carries the
+    /// rest). A missing entry — a sheet built against a catalog that has since
+    /// been replaced — is dropped rather than guessed at.
+    fn download_font(&self, family: &str) {
+        let catalog = crate::fonts::catalog::font_catalog();
+        let Some(entry) = catalog
+            .entries_untracked()
+            .iter()
+            .find(|entry| entry.family == family)
+            .cloned()
+        else {
+            return;
+        };
+        spawn_local(async move {
+            if let Err(failure) = catalog.install(entry).await {
+                app_toasts().raise(&failure);
+            }
+        });
     }
 
     /// Flip the bell preference — a tap anywhere on that row.

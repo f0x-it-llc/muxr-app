@@ -81,12 +81,13 @@ use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
     FlexView, GestureDetector, Get, GetUntracked, IconSource, NavigatorController, Padding,
     PopResult, RwSignal, Set, SizedBox, Stack, StatusPalette, Theme, any, button, flexible, icon,
-    inflexible, switch, text, text_input,
+    inflexible, scroll_view, switch, text, text_input,
 };
 
 use crate::AppState;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
+use crate::fonts::catalog::{CatalogStatus, FontState};
 use crate::ui::toasts::app_toasts;
 
 use super::chrome::{RADIUS_FULL, panel, switch_semantics};
@@ -1241,6 +1242,248 @@ fn pick_row(
         box_ = box_.bottom_rule(colors.rule);
     }
     any(GestureDetector(box_).on_tap(on_tap))
+}
+
+// ---------------------------------------------------------------------------
+// The font picker sheet — screen 6's pattern, with two sections and a catalog
+// ---------------------------------------------------------------------------
+
+/// One row of [`font_picker_sheet`]: a font, under whatever name the catalog
+/// calls it.
+pub(super) struct FontRow {
+    /// The **family** — what a tap persists, and what a download installs.
+    /// Never printed (see [`Self::display`]).
+    pub(super) family: String,
+    /// What the row prints: the catalog's `displayName`, which differs from
+    /// the family for most Nerd Fonts (`crate::fonts::manifest`'s own note).
+    pub(super) display: String,
+    /// The dim second line — `built-in`, or `OFL-1.1 · 2.4 MB`.
+    pub(super) meta: String,
+    /// Where this font stands on the device. Every installed-section row is
+    /// [`FontState::Installed`]; an available-section row carries its own
+    /// download state.
+    pub(super) state: FontState,
+}
+
+/// Everything the font sheet renders — assembled by [`pages`](super::pages)
+/// from the installed faces, the catalog's signals and the stored preference.
+pub(super) struct FontPicker {
+    /// The faces this device can already shape with, bundled first.
+    pub(super) installed: Vec<FontRow>,
+    /// The catalog's remaining entries, in manifest order.
+    pub(super) available: Vec<FontRow>,
+    /// The persisted family, so exactly one installed row reads as chosen.
+    pub(super) selected: String,
+    /// Where the catalog itself stands — what the `available` section says
+    /// when it has no rows to show.
+    pub(super) status: CatalogStatus,
+    /// Whether the catalog on screen came from the offline cache.
+    pub(super) stale: bool,
+    /// The scroll region's height cap, from the window's own metrics. `None`
+    /// (no shell has published any — every headless suite) leaves the region
+    /// unbounded, exactly as the terminal screen's own sheet does.
+    pub(super) max_height: Option<f64>,
+}
+
+/// The font sheet's caption, under its title. Deliberately short: it sits
+/// above a scroll region on a phone-width panel, and a wrapped caption costs a
+/// row of catalog.
+const FONT_SHEET_CAPTION: &str = "Downloads are kept on this device.";
+/// The two section headings.
+const FONT_SECTION_INSTALLED: &str = "installed";
+const FONT_SECTION_AVAILABLE: &str = "available";
+/// A bundled face's meta line.
+pub(super) const FONT_META_BUILT_IN: &str = "built-in";
+/// …and a downloaded one's, once it is installed.
+pub(super) const FONT_META_DOWNLOADED: &str = "downloaded";
+/// The trailing affordance an available row carries, per state.
+pub(super) const FONT_ACTION_DOWNLOAD: &str = "download";
+pub(super) const FONT_ACTION_DOWNLOADING: &str = "downloading\u{2026}";
+pub(super) const FONT_ACTION_RETRY: &str = "retry";
+/// What the `available` section says with no catalog behind it. Quiet, and
+/// **never a toast**: a catalog nobody can reach is not something the user
+/// did (see `crate::fonts::catalog`'s own note).
+pub(super) const FONT_CATALOG_LOADING: &str = "loading\u{2026}";
+pub(super) const FONT_CATALOG_UNAVAILABLE: &str = "Catalog unavailable offline.";
+/// …and what it says when the rows on screen came off the offline cache.
+pub(super) const FONT_CATALOG_STALE: &str = "Showing the saved catalog.";
+
+/// The gap between the sheet's caption and its first section.
+const FONT_CAPTION_GAP: f64 = 12.0;
+
+/// The tap handler shared by every row of one font sheet — the family it
+/// carries, plus the `&mut AppState` a navigator page's callback is handed.
+type OnFont = Rc<dyn Fn(&mut AppState, String)>;
+
+/// The font-family picker: two sections over one scrolling body.
+///
+/// Screen 6's row idiom (a full-bleed amber fill and a `✓` on the chosen row),
+/// widened for a catalog that is 30-odd entries long: the title and caption
+/// stay put, everything under them scrolls
+/// ([`FontPicker::max_height`]), and a second section lists what can still be
+/// downloaded. `on_select` fires for an installed row (the caller persists and
+/// closes); `on_download` for an available one — **a download never selects**,
+/// it only makes the row selectable, so the sheet stays open under it.
+pub(super) fn font_picker_sheet(
+    picker: &FontPicker,
+    colors: &Palette,
+    on_select: impl Fn(&mut AppState, String) + 'static,
+    on_download: impl Fn(&mut AppState, String) + 'static,
+) -> AnyView<AppState> {
+    let theme = active_theme();
+    let on_select: OnFont = Rc::new(on_select);
+    let on_download: OnFont = Rc::new(on_download);
+
+    let head = vec![
+        any(text(PickerKind::FontFamily.title())
+            .style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
+        any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
+        any(text(FONT_SHEET_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+        any(SizedBox::<AppState>(None, Some(FONT_CAPTION_GAP))),
+    ];
+
+    let mut body = vec![font_section_label(FONT_SECTION_INSTALLED, colors)];
+    let last_installed = picker.installed.len().saturating_sub(1);
+    for (index, row) in picker.installed.iter().enumerate() {
+        let selected = row.family == picker.selected;
+        let on_select = Rc::clone(&on_select);
+        let family = row.family.clone();
+        body.push(font_pick_row(
+            row,
+            selected,
+            index < last_installed,
+            colors,
+            move |state: &mut AppState| on_select(state, family.clone()),
+        ));
+    }
+
+    body.push(font_section_label(FONT_SECTION_AVAILABLE, colors));
+    if let Some(note) = catalog_note(picker) {
+        body.push(any(Padding(
+            EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
+            text(note).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+        )));
+    }
+    let last_available = picker.available.len().saturating_sub(1);
+    for (index, row) in picker.available.iter().enumerate() {
+        let on_download = Rc::clone(&on_download);
+        let family = row.family.clone();
+        body.push(font_pick_row(
+            row,
+            false,
+            index < last_available,
+            colors,
+            move |state: &mut AppState| on_download(state, family.clone()),
+        ));
+    }
+
+    let scroller = scroll_view(column(body));
+    let scroll_body: AnyView<AppState> = match picker.max_height {
+        // A fixed height rather than a flex share: the sheet's own body
+        // constraint is unbounded in height, and a `flexible` child under an
+        // unbounded main axis divides zero free space (the tight-constraint
+        // trap `crate::features::terminal::presentation::pieces`'
+        // `sheet_scroll_body` documents at length).
+        Some(height) => any(SizedBox::<AppState>(None, Some(height)).child(scroller)),
+        None => any(scroller),
+    };
+
+    let mut children = head;
+    children.push(scroll_body);
+    any(column(children))
+}
+
+/// The one-line note the `available` section leads with, if any: what the
+/// catalog is doing, or why it has nothing to show.
+fn catalog_note(picker: &FontPicker) -> Option<&'static str> {
+    match picker.status {
+        CatalogStatus::Idle | CatalogStatus::Loading => Some(FONT_CATALOG_LOADING),
+        CatalogStatus::Unavailable => Some(FONT_CATALOG_UNAVAILABLE),
+        CatalogStatus::Ready if picker.stale => Some(FONT_CATALOG_STALE),
+        CatalogStatus::Ready => None,
+    }
+}
+
+/// A section heading inside the sheet — the screen's own `.set-group-lbl`
+/// treatment (10px dim uppercase), over `AppState` and without the row
+/// gutter, since the sheet supplies its own.
+fn font_section_label(label: &str, colors: &Palette) -> AnyView<AppState> {
+    let theme = active_theme();
+    any(Padding(
+        EdgeInsets {
+            left: PICK_PAD_X,
+            top: GROUP_PAD_TOP,
+            right: PICK_PAD_X,
+            bottom: GROUP_PAD_BOTTOM,
+        },
+        text(label.to_uppercase()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+    ))
+}
+
+/// One font row: the display name over its meta line, a trailing `✓` when it
+/// is the chosen face, and otherwise the row's own download affordance.
+///
+/// The selected row fills `--amber-faint` past the sheet's gutter, exactly as
+/// [`pick_row`] does — same look, same measured geometry, so the two sheets
+/// stay visually one pattern.
+fn font_pick_row(
+    entry: &FontRow,
+    selected: bool,
+    ruled: bool,
+    colors: &Palette,
+    on_tap: impl Fn(&mut AppState) + 'static,
+) -> AnyView<AppState> {
+    let theme = active_theme();
+    let ink = if selected { colors.amber } else { colors.fg };
+    let body = column(vec![
+        any(text(entry.display.clone()).style(inked(&theme.type_scale.label_large, ink))),
+        any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
+        any(text(entry.meta.clone()).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+    ]);
+    let mut children = vec![flexible(1, any(body))];
+    if selected {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(icon(CHECK).size(CHECK_SIZE).color(colors.amber)));
+    } else if let Some((action, tone)) = font_row_action(entry.state, colors) {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(
+            text(action).style(inked(&theme.type_scale.label_small, tone)),
+        ));
+    }
+
+    let fill = if selected {
+        colors.amber_faint
+    } else {
+        Color::TRANSPARENT
+    };
+    let mut box_ = panel(
+        Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
+        fill,
+        theme.shape.small,
+    );
+    if selected {
+        box_ = box_.bleed(PICK_BLEED);
+    }
+    if ruled {
+        box_ = box_.bottom_rule(colors.rule);
+    }
+    any(GestureDetector(box_).on_tap(on_tap))
+}
+
+/// The trailing affordance a non-selected row carries, and its ink — `None`
+/// for an installed row the user simply hasn't chosen (its own name is the
+/// whole affordance).
+///
+/// Deliberately **text**, not a vector: the app has no download glyph in
+/// `frust::icons`, and a font glyph is never chrome here
+/// (`docs/ARCHITECTURE.md`'s UI Substrate rule).
+fn font_row_action(state: FontState, colors: &Palette) -> Option<(&'static str, Color)> {
+    match state {
+        FontState::Installed => None,
+        FontState::Available => Some((FONT_ACTION_DOWNLOAD, colors.amber)),
+        FontState::Downloading => Some((FONT_ACTION_DOWNLOADING, colors.fg_dim)),
+        FontState::Failed => Some((FONT_ACTION_RETRY, colors.error)),
+    }
 }
 
 // ---------------------------------------------------------------------------

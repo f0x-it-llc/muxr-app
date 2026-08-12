@@ -247,6 +247,47 @@ frust-secure-storage = { path = "../../plugins/secure-storage" }
 # into the Connect screen's host/token fields.
 frust-camera = { path = "../../plugins/camera" }
 
+# Downloadable-font catalog (`src/fonts`): the plain-HTTPS client the manifest
+# fetch and the font downloads run over. The gRPC stack next door speaks HTTP/2
+# to `muxrd` only — a GET against `raw.githubusercontent.com` has no tonic
+# equivalent, so this is the app's one general-purpose HTTP client.
+#
+# **The feature set is load-bearing, not taste.** `default-features = false`
+# drops `default-tls` (native-tls/OpenSSL) entirely, and the roots feature is
+# the explicit `-no-provider` variant: reqwest's plain `rustls-tls` alias pulls
+# `__rustls-ring`, which would compile a **second** rustls crypto provider into
+# a tree that already carries aws-lc-rs (`rustls`/`tonic` below) — and two
+# providers is a process-wide runtime install conflict, not a compile error
+# (`docs/DEVELOPMENT.md`'s note on the single-provider rule). With no provider
+# feature of its own, reqwest's rustls config resolves the one provider the
+# tree already compiles. Roots come from the bundled Mozilla list
+# (`webpki-roots`, already declared below) rather than the platform store: a
+# font download needs no `rustls-platform-verifier` JNI initialization to
+# succeed on a cold Android start.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots-no-provider",
+] }
+
+# Platform-directory resolution for that catalog's on-disk cache
+# (`<data_dir>/<app_stem>/fonts/`), plus the temp-file+rename `atomic_write`
+# every cached font file is written through. A leaf substrate crate with zero
+# `frust-*` dependencies (the same shape `frust-plugin` above has), named
+# directly for the same reason the plugins are: it is not something the
+# `frust` facade re-exports. Same temporary path arrangement as `frust`.
+frust-paths = { path = "../../crates/frust-paths" }
+
+# Android's app-private files directory, which `frust-paths` cannot resolve
+# (its Unix branch is `$XDG_DATA_HOME`/`$HOME`, neither of which points
+# anywhere writable inside an Android app sandbox) — `src/fonts/store.rs`
+# reads it off the application `Context` through the same
+# `frust_plugin::android::with_jni_env` accessor `src/net/tls.rs` already
+# uses. Target-gated exactly like `frust-plugin`'s own `jni` dependency, and
+# pinned to the same 0.22 line the plugins in the Frust checkout use — the
+# `Env`/`JObject` types cross that accessor's closure boundary, so a version
+# mismatch is a type error, not a runtime surprise.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+
 # `muxr.v1` codegen, build-time only (`build.rs` documents the split). `protox`
 # is a protobuf compiler written in Rust, so **no `protoc` install** is needed
 # on any build machine — prost-build's own path shells out to a system binary.
