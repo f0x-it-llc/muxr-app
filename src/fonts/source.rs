@@ -107,11 +107,22 @@ pub struct HttpFontSource;
 /// runs inside `frust::spawn`, which is.
 static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
+/// What this client calls itself. Load-bearing, not cosmetic: GitHub's
+/// release-asset chain (`github.com/…/releases/download/…` → 302 →
+/// `release-assets.githubusercontent.com`) refuses User-Agent-less requests
+/// outright, while `raw.githubusercontent.com` tolerates them — so without
+/// this, the manifest loads and every font download fails on the spot.
+/// `reqwest` sends no User-Agent unless told to; the original Flutter client
+/// never hit this only because Dart's `HttpClient` always sends its own
+/// (`Dart/<sdk> (dart:io)`).
+const USER_AGENT: &str = concat!("muxr/", env!("CARGO_PKG_VERSION"));
+
 /// The shared client, or the construction error that keeps recurring.
 fn client() -> Result<&'static reqwest::Client, AppFailure> {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
+                .user_agent(USER_AGENT)
                 .timeout(FETCH_TIMEOUT)
                 .build()
                 .map_err(|err| err.to_string())
