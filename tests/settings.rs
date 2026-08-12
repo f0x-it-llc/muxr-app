@@ -661,19 +661,31 @@ fn a_disconnected_settings_screen_still_renders_every_row() {
 }
 
 #[test]
-fn tapping_a_connection_row_says_it_is_not_wired_yet() {
+fn the_connection_rows_are_informational_like_version_rows() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
     app_toasts().clear();
 
+    // Tapping server url and tls certificate rows does nothing — they are
+    // inert like version rows, not chevron rows with destinations. The gesture
+    // detector is not attached, so no tap handler fires.
     h.tap_value("server url");
     h.frame();
-
     let pending = app_toasts().pending_untracked();
     assert!(
-        pending.iter().any(|m| m.contains("Not yet available")),
-        "the row is honest rather than dead: {pending:?}"
+        pending.is_empty(),
+        "server url row is inert, no toast: {pending:?}"
+    );
+    assert_eq!(h.depth(), 1, "…and it pushed nothing");
+
+    app_toasts().clear();
+    h.tap_value("tls certificate");
+    h.frame();
+    let pending = app_toasts().pending_untracked();
+    assert!(
+        pending.is_empty(),
+        "tls certificate row is inert, no toast: {pending:?}"
     );
     assert_eq!(h.depth(), 1, "…and it pushed nothing");
 }

@@ -120,12 +120,6 @@ use super::pieces::{self, Palette, Picker, PickerKind, RowAction, ValueTone};
 /// `crate::routes`' guard bounces an unauthenticated push to.
 const CONNECT_ROUTE: &str = "/";
 
-/// What the two chevron rows in the `connection` group say when tapped.
-/// They print facts about the connection *currently* up; changing either means
-/// reconnecting, which is the Connect screen's job — so the row is honest
-/// rather than dead.
-const UNAVAILABLE_TOAST: &str = "Not yet available \u{2014} reconnect to change this";
-
 /// The `connection` group's value while nothing is connected. `/settings` is
 /// deliberately **not** guarded (`crate::routes`), so this is reachable — via a
 /// deep link, or a disconnect racing a rebuild — and a blank row would be the
@@ -344,7 +338,7 @@ fn connection_rows(info: Option<&ServerInfo>, colors: &Palette) -> Vec<AnyView<S
             "server url",
             endpoint,
             endpoint_tone,
-            RowAction::Unavailable,
+            RowAction::Static,
             colors,
         ),
         pieces::settings_row(
@@ -352,7 +346,7 @@ fn connection_rows(info: Option<&ServerInfo>, colors: &Palette) -> Vec<AnyView<S
             "tls certificate",
             tls_value,
             tls_tone,
-            RowAction::Unavailable,
+            RowAction::Static,
             colors,
         ),
     ];
@@ -499,12 +493,6 @@ fn poll_rows(prefs: &PollPrefs, colors: &Palette) -> Vec<AnyView<SettingsState>>
 // ---------------------------------------------------------------------------
 
 impl Actions {
-    /// Say that a `connection` row's destination isn't built yet. UI-only, on
-    /// purpose — see [`UNAVAILABLE_TOAST`].
-    pub fn notify_unavailable(&self) {
-        app_toasts().show(UNAVAILABLE_TOAST);
-    }
-
     /// Open `kind`'s picker sheet.
     ///
     /// The body closure is re-invoked on every navigator rebuild (the
@@ -845,7 +833,6 @@ pub(super) fn row_tapped(state: &mut SettingsState, action: RowAction) {
         // matching it exhaustively is what keeps a new `RowAction` from
         // silently doing nothing.
         RowAction::Static => {}
-        RowAction::Unavailable => state.actions.notify_unavailable(),
         RowAction::Picker(kind) => state.actions.open_picker(kind),
         RowAction::Bell(_) => state.actions.toggle_bell(),
     }
