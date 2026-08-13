@@ -43,13 +43,14 @@
 //! So a sheet is not closed by whoever happens to be holding a navigator; it is
 //! closed through [`SheetHandle`] — the identity [`show_sheet`] mints per sheet
 //! *instance* and hands to its body builder. Every app-driven path goes through
-//! [`SheetHandle::close`], which pops **at most once per instance** and is an
-//! ordinary no-op after that: a duplicate close is a routine user race, not a
-//! bug to panic on. [`show_sheet`]'s own completion callback latches the same
-//! handle, so a close still in flight when the page goes away some other way
-//! cannot pop anything either, and [`SheetHandle::close_after`] is the delayed
-//! close ("let the selection visibly move first") with latest-wins re-timing on
-//! top of the same gate.
+//! [`SheetHandle::close`] (or [`close_then`](SheetHandle::close_then), for a
+//! close with a follow-on push — see below), which closes **at most once per
+//! instance** and is an ordinary no-op after that: a duplicate close is a
+//! routine user race, not a bug to panic on. [`show_sheet`]'s own completion
+//! callback latches the same handle, so a close still in flight when the page
+//! goes away some other way cannot pop anything either, and
+//! [`SheetHandle::close_after`] is the delayed close ("let the selection
+//! visibly move first") with latest-wins re-timing on top of the same gate.
 //!
 //! **A user-driven dismissal doesn't come through here at all**: a scrim tap,
 //! a handle drag, `Escape` and a back press are the widget's own, and it pops
@@ -58,23 +59,38 @@
 //! about it when the page is gone, through the completion latch — which is
 //! what keeps a *later* stale close from popping anything.
 //!
-//! # `close` pops immediately; only the user's own dismissals stage
+//! # `close` plays the same staged exit as a user dismissal
 //!
-//! [`SheetHandle::close`] enqueues the pop straight away rather than asking the
-//! widget to play its exit first, and that ordering is load-bearing: the
-//! sessions management sheet's rows (and the settings pickers) pop the sheet
-//! **and** push a dialog in the same rebuild, so both ops land in one drain,
-//! pop first. Deferring the pop behind a 150ms exit would land the push on top
-//! of a sheet that then popped the dialog it opened. It also reads better —
-//! a sheet sliding out under a dialog fading in is two competing animations
-//! rather than one replacement, the same call `frust::glyph::dialog`'s own
-//! action buttons make.
+//! [`SheetHandle::close`] no longer pops the page straight away: it drives the
+//! widget's own staged exit through
+//! [`frust::glyph::GlyphSheetHandle::close`] — the identical scrim-fade +
+//! panel-slide motion a scrim tap, a handle drag, `Escape` or a back press
+//! plays — and the page pops only once that exit completes
+//! (`frust::glyph::sheet`'s own module docs). A bare "close, then push in the
+//! same rebuild" — the shape every dialog-opening row here used to be written
+//! as — would now land the push several frames *ahead* of the sheet's own pop
+//! (which is enqueued only when the exit finishes), so the pop that eventually
+//! lands would take the page the push just put up, not the sheet.
+//! [`close_then`](SheetHandle::close_then) is the fix: it rides frust's own
+//! composed `on_close` (the pop is enqueued first, then the chained callback,
+//! both exactly once, on the exit's completion frame — this app's own "page's
+//! pop-completion callback" idiom, `docs/ARCHITECTURE.md`'s Navigation
+//! section), so a chained push always queues strictly behind the sheet's own
+//! pop. Every close-then-push call site in this app (the sessions management
+//! sheet's Rename/Kill rows) goes through it; a close-then-*persist* site (the
+//! settings pickers, which write a value and touch no navigator at all) has
+//! nothing to chain and stays on plain [`close`](SheetHandle::close).
+//!
+//! Total dismissal timing: an unchained [`close`](SheetHandle::close) is one
+//! `durations.fast` exit (150ms unthemed) from call to pop;
+//! [`close_after`](SheetHandle::close_after) adds its own `delay` ahead of
+//! that same exit — `delay` + 150ms unthemed, end to end.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::glyph::{glyph_sheet, show_glyph_sheet};
+use frust::glyph::{GlyphSheetHandle, glyph_sheet, show_glyph_sheet};
 use frust::{
     AnyView, Column, CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, PopResult, any,
     safe_area,
@@ -135,13 +151,38 @@ pub fn show_sheet<State: 'static>(
     nav: &NavigatorController<State>,
     build_body: impl Fn(&SheetHandle) -> AnyView<State> + 'static,
 ) {
-    let pop_nav = nav.clone();
-    // The one app-driven pop, behind the one gate.
-    let sheet = SheetHandle::new(move || pop_nav.pop());
+    // The frust handle every app-driven close actually drives
+    // (`GlyphSheetHandle::close`) is minted by `show_glyph_sheet` itself, and
+    // isn't available until that call returns — which happens *after* it has
+    // already invoked `build_body` once (its own `dismissable` peek). So the
+    // closures below reach through this cell rather than capturing the handle
+    // directly: it is filled in immediately below, and nothing can observe it
+    // empty — the earliest an app-driven close can fire is a later frame's
+    // input, long after this function has returned.
+    let glyph_handle: Rc<RefCell<Option<GlyphSheetHandle>>> = Rc::new(RefCell::new(None));
+    let close_cell = Rc::clone(&glyph_handle);
+    // The one app-driven close, behind the one gate — now the widget's own
+    // staged exit (task 36's `GlyphSheetHandle::close`), not an immediate
+    // `NavigatorController::pop` (see the [module docs](self)).
+    let sheet = SheetHandle::new(move || {
+        if let Some(handle) = close_cell.borrow().as_ref() {
+            handle.close();
+        }
+    });
     let body_sheet = sheet.clone();
-    show_glyph_sheet(
+    let close_then_sheet = sheet.clone();
+    let handle = show_glyph_sheet(
         nav,
-        move || glyph_sheet(sheet_content(build_body(&body_sheet))),
+        move || {
+            glyph_sheet(sheet_content(build_body(&body_sheet))).on_close({
+                // Frust's own composed `on_close`: the pop is enqueued first,
+                // this runs second, both exactly once, on the exit's
+                // completion frame — the hook `close_then` chains a
+                // follow-on push through (see the [module docs](self)).
+                let sheet = close_then_sheet.clone();
+                move || sheet.run_pending()
+            })
+        },
         // The sheet answers through its body's own callbacks (which own
         // `&mut State` already); the pop itself carries nothing. What this
         // callback is for is the **latch**: the navigator delivers it exactly
@@ -151,6 +192,7 @@ pub fn show_sheet<State: 'static>(
         // under it now.
         move |_state: &mut State, _result: PopResult| sheet.mark_closed(),
     );
+    *glyph_handle.borrow_mut() = Some(handle);
 }
 
 /// The app-side content layer inside the Glyph sheet's content slot: a
@@ -188,23 +230,33 @@ pub struct SheetHandle {
     inner: Rc<SheetGuard>,
 }
 
-/// [`SheetHandle`]'s shared interior: the latch, the pending-close ticket, and
-/// the accounted pop they gate.
+/// [`SheetHandle`]'s shared interior: the latch, the pending-close ticket, the
+/// staged close they gate, and the follow-on
+/// [`close_then`](SheetHandle::close_then) queues onto its completion.
 struct SheetGuard {
     /// Whether this sheet instance has already been closed — set by the first
-    /// [`SheetHandle::close`] and by [`SheetHandle::mark_closed`], never
-    /// cleared (a sheet is closed exactly once, then the handle is spent).
+    /// [`SheetHandle::close`]/[`close_then`](SheetHandle::close_then) and by
+    /// [`SheetHandle::mark_closed`], never cleared (a sheet is closed exactly
+    /// once, then the handle is spent).
     closed: Cell<bool>,
     /// The newest delayed close's ticket. [`SheetHandle::close_after`] takes
     /// one on the way in and fires only if it is still the newest when its
     /// delay elapses — "latest wins", so a second selection extends the wait
     /// rather than stacking a second close behind the first.
     pending: Cell<u64>,
-    /// The one pop (`NavigatorController::pop`). Boxed (rather than the
-    /// controller itself) so the handle stays free of the navigator's `State`
-    /// parameter — a sheet body passes it around, and every one of those call
-    /// sites would otherwise carry the app's state type for no reason.
+    /// The one staged close (`frust::glyph::GlyphSheetHandle::close`, task
+    /// 36). Boxed (rather than the handle itself) so this type stays free of
+    /// the navigator's `State` parameter — a sheet body passes it around, and
+    /// every one of those call sites would otherwise carry the app's state
+    /// type for no reason.
     close: Box<dyn Fn()>,
+    /// [`close_then`](SheetHandle::close_then)'s follow-on, run once from
+    /// [`show_sheet`]'s `on_close` wiring when the staged exit completes: the
+    /// pop it lands behind is already enqueued by then (frust's own composed
+    /// `on_close` pops first), so whatever this pushes always queues after
+    /// it. `None` for a plain [`close`](SheetHandle::close) and for every
+    /// user-driven dismissal.
+    then: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl SheetHandle {
@@ -215,11 +267,12 @@ impl SheetHandle {
                 closed: Cell::new(false),
                 pending: Cell::new(0),
                 close: Box::new(close),
+                then: RefCell::new(None),
             }),
         }
     }
 
-    /// Close the sheet: enqueue the pop — **at most once per sheet
+    /// Close the sheet: play its staged exit — **at most once per sheet
     /// instance**.
     ///
     /// Returns whether *this* call is the one that closed it. A `false` is the
@@ -230,8 +283,11 @@ impl SheetHandle {
     /// exceptional — hence a returned `bool` and not a `debug_assert!`, which
     /// would turn a double tap into a crash in every debug build.
     ///
-    /// Pops immediately rather than asking the widget to play its exit first —
-    /// see the [module docs](self)' "`close` pops immediately".
+    /// Plays the identical scrim-fade + panel-slide exit a scrim tap/handle
+    /// drag/`Escape`/back press plays, and pops only on completion — see the
+    /// [module docs](self)' "`close` plays the same staged exit". A close with
+    /// a follow-on push belongs on [`close_then`](Self::close_then) instead,
+    /// which chains it to land after that pop.
     pub fn close(&self) -> bool {
         if self.inner.closed.replace(true) {
             return false;
@@ -240,8 +296,43 @@ impl SheetHandle {
         true
     }
 
+    /// Close the sheet, then run `then` once its pop actually lands — the fix
+    /// for a close-then-push call site (see the [module docs](self)' "`close`
+    /// plays the same staged exit"). `then` runs from [`show_sheet`]'s own
+    /// `on_close` wiring, on the exit's completion frame, strictly after the
+    /// pop it lands behind is already enqueued (frust's composed `on_close`
+    /// pops first) — so a dialog `then` pushes never races the sheet's own
+    /// pop.
+    ///
+    /// Same gate as [`close`](Self::close): a `false` return means this call
+    /// lost the race (a duplicate row tap, a close already in flight), and
+    /// `then` is dropped along with it rather than queued behind someone
+    /// else's close.
+    pub fn close_then(&self, then: impl FnOnce() + 'static) -> bool {
+        if self.inner.closed.replace(true) {
+            return false;
+        }
+        *self.inner.then.borrow_mut() = Some(Box::new(then));
+        (self.inner.close)();
+        true
+    }
+
+    /// Run and clear whatever [`close_then`](Self::close_then) queued —
+    /// called once, from [`show_sheet`]'s own `on_close` wiring, when the
+    /// staged exit completes. A no-op for a plain [`close`](Self::close) and
+    /// for every user-driven dismissal, neither of which ever populate the
+    /// pending slot `close_then` fills.
+    fn run_pending(&self) {
+        if let Some(then) = self.inner.then.borrow_mut().take() {
+            then();
+        }
+    }
+
     /// Close the sheet `delay` from now — the "let the selection visibly move
     /// first" close (`docs/terminal.html`'s `setTimeout(closeSheet, 260)`).
+    /// Total time from the call to the pop landing is `delay` plus the staged
+    /// exit's own duration (see the [module docs](self)' "`close` plays the
+    /// same staged exit" for that second half).
     ///
     /// **Latest wins.** Each call takes a fresh ticket, and only the newest
     /// ticket's wait actually closes: a second selection inside the window
@@ -278,9 +369,10 @@ impl SheetHandle {
 mod tests {
     use super::*;
 
-    /// A handle whose "pop" only counts itself — a bare
-    /// `NavigatorController::pop` is what [`show_sheet`] installs here, so
-    /// counting invocations *is* counting pops.
+    /// A handle whose "close" only counts itself — production wires this to
+    /// `frust::glyph::GlyphSheetHandle::close` (the staged exit, task 36), so
+    /// counting invocations here is counting how many times that seam fired,
+    /// not literal pops.
     fn counting_handle() -> (SheetHandle, Rc<Cell<usize>>) {
         let pops = Rc::new(Cell::new(0usize));
         let counted = Rc::clone(&pops);
@@ -310,6 +402,55 @@ mod tests {
         sheet.mark_closed();
         assert!(!sheet.close(), "the sheet is already gone");
         assert_eq!(pops.get(), 0);
+    }
+
+    #[test]
+    fn close_then_drives_the_staged_close_and_holds_its_callback_for_run_pending() {
+        // `close_then` fires the same underlying staged close as `close`
+        // immediately, but its own callback waits for `run_pending` — the
+        // stand-in here for `show_sheet`'s `on_close` wiring, which is what
+        // actually calls it once the exit completes.
+        let (sheet, pops) = counting_handle();
+        let ran = Rc::new(Cell::new(false));
+        let ran_write = Rc::clone(&ran);
+        assert!(
+            sheet.close_then(move || ran_write.set(true)),
+            "the first close_then is the one that closes it"
+        );
+        assert_eq!(pops.get(), 1, "the staged close fires right away");
+        assert!(
+            !ran.get(),
+            "…but the chained callback waits for run_pending"
+        );
+        sheet.run_pending();
+        assert!(
+            ran.get(),
+            "…which is what runs it, on the exit's completion"
+        );
+        ran.set(false);
+        sheet.run_pending();
+        assert!(!ran.get(), "a second run_pending is an inert no-op");
+    }
+
+    #[test]
+    fn a_close_then_after_the_sheet_is_already_closed_drops_its_callback() {
+        // Same race `a_sheet_pops_once_however_many_times_it_is_told_to_close`
+        // guards for a plain `close` — `close_then` shares the one gate, so a
+        // duplicate never queues a second follow-on behind someone else's.
+        let (sheet, pops) = counting_handle();
+        assert!(
+            sheet.close(),
+            "the sheet is already closed by a plain close"
+        );
+        let ran = Rc::new(Cell::new(false));
+        let ran_write = Rc::clone(&ran);
+        assert!(
+            !sheet.close_then(move || ran_write.set(true)),
+            "…so close_then loses the race, same gate as a duplicate close"
+        );
+        assert_eq!(pops.get(), 1, "…and never drives the staged close twice");
+        sheet.run_pending();
+        assert!(!ran.get(), "the dropped callback never runs");
     }
 
     #[test]

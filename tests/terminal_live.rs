@@ -97,6 +97,11 @@ const SURFACE: Size = Size::new(800.0, 700.0);
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 const SESSION_ID: &str = "s-1";
+/// `presentation::pages`' own `SHEET_CLOSE_DELAY`, transcribed (it is
+/// private there) — how long a pane commit leaves the sheet up so the
+/// selection visibly moves first. `tests/terminal.rs`'s own `CLOSE_DELAY`,
+/// same provenance.
+const CLOSE_DELAY: Duration = Duration::from_millis(260);
 
 /// The overflow menu's first row, transcribed from `presentation::pages`
 /// (private there; a test that imported it could not catch it changing) —
@@ -285,6 +290,22 @@ impl Harness {
                 1,
             );
         }
+    }
+
+    /// Wait for a sheet closed through `SheetHandle::close_after` (task 37's
+    /// staged `close` underneath it) to actually pop — `tests/terminal.rs`'s
+    /// own `pump_until_closed`, transcribed here for this suite's one caller
+    /// (`a_pane_commit_moves_the_session_without_disturbing_the_live_pane`).
+    /// See that method's doc for why this is two fixed beats — a real-time
+    /// wait for `close_after`'s own delay, then a small fixed clock advance
+    /// for the sheet's own short staged exit — rather than one
+    /// real-time-tracked loop.
+    fn pump_until_closed(&mut self, what: &str, done: impl Fn(&Harness) -> bool) {
+        self.pump_for(2 * CLOSE_DELAY);
+        self.frame_at(0.0);
+        self.frame_at(300.0);
+        self.frame_at(300.0);
+        assert!(done(self), "timed out waiting for {what}");
     }
 
     fn await_load(&mut self) {
@@ -1534,7 +1555,7 @@ fn a_pane_commit_moves_the_session_without_disturbing_the_live_pane() {
     // The second pane of the tab the session is already on — a `FocusPane`
     // with no tab move behind it.
     h.tap(center(rows[1]));
-    h.pump_until("the sheet to close", |h| {
+    h.pump_until_closed("the sheet to close", |h| {
         !support::node_values(&h.root)
             .iter()
             .any(|v| v == SHEET_LABEL)

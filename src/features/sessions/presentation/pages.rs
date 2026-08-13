@@ -754,10 +754,15 @@ impl Actions {
     /// raises, and the only route to rename/kill now that the card carries no
     /// buttons.
     ///
-    /// Each row pops the sheet first and then does its work, so the stack goes
-    /// sheet → dialog (or sheet → `/terminal`) in one rebuild: both ops land in
-    /// the same drain, and the poll stays paused throughout, since the mark
-    /// taken when the sheet opened is shallower than either depth.
+    /// Rename/Kill close the sheet through
+    /// [`SheetHandle::close_then`](crate::ui::sheet::SheetHandle::close_then),
+    /// so their dialog lands only once the sheet's own staged exit has popped
+    /// it — never in the same rebuild the close fires in, which would race the
+    /// pop (see [`sheet_action`]'s doc). Attach targets the route stack
+    /// instead of this sheet's own overlay host, so it has no such ordering
+    /// hazard and fires straight away. The poll stays paused throughout
+    /// either way, since the mark taken when the sheet opened is shallower
+    /// than either depth.
     ///
     /// `read_only` disables the Rename/Kill rows (never Attach) — see
     /// `pieces::sheet_row`'s doc for the disabled-state pattern.
@@ -819,6 +824,19 @@ impl ManageAction {
 /// One management-sheet row, wired to `action` for session `id`. `disabled`
 /// is always `false` for [`ManageAction::Attach`] — only
 /// create/rename/kill are read-only-gated (see [`Actions::open_manage_sheet`]).
+///
+/// Rename/Kill go through [`SheetHandle::close_then`] rather than a plain
+/// `close`: both push a dialog onto the sheet's own overlay host, and a bare
+/// `close` no longer pops immediately (`crate::ui::sheet`'s "`close` plays
+/// the same staged exit") — an unchained push here would land several frames
+/// *ahead* of the sheet's own pop, so the pop that eventually lands would
+/// take the dialog it opened, not the sheet. `close_then` chains the push to
+/// the exit's completion frame instead, strictly behind the pop.
+///
+/// Attach carries no such hazard — [`Actions::attach`] pushes the `/terminal`
+/// **route**, a different navigator than this sheet's overlay host, so
+/// there is nothing for its push to race — and stays on a plain `close`,
+/// same as before.
 fn sheet_action(
     actions: &Actions,
     sheet: &SheetHandle,
@@ -833,18 +851,24 @@ fn sheet_action(
         action.label(),
         action.destructive(),
         disabled,
-        move |_app: &mut AppState| {
-            // Close the sheet first: the dialog (or the terminal route) takes its
-            // place in the same rebuild — see `open_manage_sheet`'s docs.
-            // Through the sheet's own handle rather than a bare `pop`, so a
-            // second row tap inside the rebuild its queued pop leaves open
-            // cannot pop whatever is under it (`crate::ui::sheet`'s "One sheet,
-            // one dismissal").
-            sheet.close();
-            match action {
-                ManageAction::Attach => actions.attach(&id),
-                ManageAction::Rename => actions.open_rename_dialog(&id),
-                ManageAction::Kill => actions.open_kill_dialog(&id),
+        move |_app: &mut AppState| match action {
+            ManageAction::Attach => {
+                // Through the sheet's own handle rather than a bare `pop`, so
+                // a second row tap inside the one-rebuild window a queued pop
+                // leaves open cannot pop whatever is under it
+                // (`crate::ui::sheet`'s "One sheet, one dismissal").
+                sheet.close();
+                actions.attach(&id);
+            }
+            ManageAction::Rename => {
+                let actions = actions.clone();
+                let id = id.clone();
+                sheet.close_then(move || actions.open_rename_dialog(&id));
+            }
+            ManageAction::Kill => {
+                let actions = actions.clone();
+                let id = id.clone();
+                sheet.close_then(move || actions.open_kill_dialog(&id));
             }
         },
     )

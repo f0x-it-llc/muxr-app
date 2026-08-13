@@ -800,6 +800,50 @@ fn the_sheets_rename_row_round_trips() {
 }
 
 #[test]
+fn the_rename_row_leaves_the_sheet_mounted_until_its_exit_completes_before_the_dialog_lands() {
+    // The chain pin (G53's own follow-on): `sheet_action`'s Rename/Kill rows
+    // close through `SheetHandle::close_then` precisely because an unchained
+    // close-then-push would land the dialog *before* the sheet's own staged
+    // exit completes — racing its pop. One frame after the tap is where that
+    // race would show up: an unchained push lands synchronously (before any
+    // frame at all), so depth would already read the sheet-plus-dialog's `3`
+    // here; chained, the sheet is still mid-exit and the dialog has not
+    // landed yet, so depth is still the sheet's own `2`. Fail-then-pass
+    // verified by reasoning: reverting `sheet_action`'s Rename arm to a bare
+    // `sheet.close(); actions.open_rename_dialog(&id);` would push the dialog
+    // in the same rebuild the tap fires in, failing the assertion below.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let sheet = open_manage_sheet(&mut h, SEEDED[0]);
+    let sheet_depth = h.depth();
+    let rename = sheet.content_rows()[1];
+    let before = h.frame();
+    h.tap(center(rename));
+
+    h.frame();
+    assert_eq!(
+        h.depth(),
+        sheet_depth,
+        "the sheet is still mounted one frame after Rename — playing its \
+         exit, the dialog not yet pushed"
+    );
+
+    // Settling carries the chain to completion: the sheet pops, then the
+    // dialog it chained lands on top of the popped page — one page traded
+    // for another, so the depth the sheet itself sat at is unchanged.
+    let after = h.settle();
+    assert_eq!(
+        h.depth(),
+        sheet_depth,
+        "…and the dialog lands once the exit finishes, in the sheet's own place"
+    );
+    let dialog = Chrome::diff(&before, &after);
+    dialog.content_child();
+}
+
+#[test]
 fn the_sheets_kill_row_confirms_first_then_removes_the_card() {
     let _g = serial();
     let _ambient = setup();
