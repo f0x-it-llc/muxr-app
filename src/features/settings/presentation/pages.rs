@@ -1089,9 +1089,6 @@ pub(super) fn row_tapped(state: &mut SettingsState, action: RowAction) {
         // silently doing nothing.
         RowAction::Static => {}
         RowAction::Picker(kind) => state.actions.open_picker(kind),
-        // Bell rows no longer wrap in GestureDetector (the switch owns its tap
-        // target), so this arm is unreachable. It remains for exhaustiveness.
-        RowAction::Bell(_) => {}
     }
 }
 
