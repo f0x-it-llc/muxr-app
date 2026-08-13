@@ -90,8 +90,12 @@ use muxr::features::sessions::domain::entities::{
     LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
-use muxr::features::sessions::presentation::controllers::SessionsController;
-use muxr::features::sessions::presentation::pages::sessions_page;
+use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
+use muxr::features::sessions::presentation::pages::{resolve_poll_interval, sessions_page};
+use muxr::features::settings::data::repositories::MockPreferencesRepository;
+use muxr::features::settings::di::SharedPreferencesRepository;
+use muxr::features::settings::domain::entities::{AppearancePrefs, PollPrefs, Preferences};
+use muxr::features::settings::domain::repositories::PreferencesRepository;
 use muxr::routes::install_app_router;
 use muxr::{AppState, MuxrApp};
 
@@ -1329,4 +1333,92 @@ async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it()
         vec!["fresh".to_string()],
         "the newer, faster refresh's result wins, not the older, slower one: {names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 11 — the session-poll cadence is read live, not loaded once per mount:
+// `resolve_poll_interval` is the one seam both `pages::spawn_cadence_loop`
+// instances (the session-list poll and the ping heartbeat) call before every
+// sleep, so proving *it* re-reads live proves both loops do — no widget tree
+// needed, same "controller level" shape section 10 uses.
+// ---------------------------------------------------------------------------
+
+/// A [`PreferencesRepository`] whose every method fails — what
+/// [`a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop`]
+/// drives [`resolve_poll_interval`] against.
+struct FailingPreferencesRepo;
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl PreferencesRepository for FailingPreferencesRepo {
+    async fn load_preferences(&self) -> Result<Preferences, AppFailure> {
+        Err(AppFailure::Storage("simulated read failure".to_string()))
+    }
+
+    async fn save_appearance(
+        &self,
+        _prefs: AppearancePrefs,
+    ) -> Result<AppearancePrefs, AppFailure> {
+        unreachable!("not exercised by the cadence tests")
+    }
+
+    async fn save_poll_prefs(&self, _prefs: PollPrefs) -> Result<PollPrefs, AppFailure> {
+        unreachable!("not exercised by the cadence tests")
+    }
+}
+
+/// The shipped default (`layout_refresh_secs: 3`) resolves to the 3-second
+/// pin every existing device-gate expectation assumes — unchanged by the
+/// live-re-read rework.
+#[tokio::test]
+async fn the_default_pref_resolves_to_the_three_second_pin() {
+    let preferences: SharedPreferencesRepository = Arc::new(MockPreferencesRepository::seeded());
+
+    let interval = resolve_poll_interval(&preferences).await;
+
+    assert_eq!(interval, Duration::from_secs(u64::from(POLL_PERIOD_SECS)));
+}
+
+/// Changing the pref mid-mount changes the *next* scheduled interval — for
+/// both loops, since both re-resolve through this exact seam before every
+/// sleep (see the section header).
+#[tokio::test]
+async fn changing_the_pref_mid_mount_changes_the_next_scheduled_interval_for_both_loops() {
+    let preferences: SharedPreferencesRepository = Arc::new(MockPreferencesRepository::seeded());
+
+    let first = resolve_poll_interval(&preferences).await;
+    assert_eq!(
+        first,
+        Duration::from_secs(3),
+        "the shipped default, before any settings edit"
+    );
+
+    // The settings screen's own picker write — a live edit landing while
+    // Sessions is already mounted underneath it.
+    preferences
+        .save_poll_prefs(PollPrefs {
+            layout_refresh_secs: 10,
+            bell_notifications: true,
+        })
+        .await
+        .expect("a legal choice-set value is accepted");
+
+    let second = resolve_poll_interval(&preferences).await;
+    assert_eq!(
+        second,
+        Duration::from_secs(10),
+        "the next resolve — the one either loop's next scheduled sleep reads — sees the live value"
+    );
+}
+
+/// A preferences-repository read failure falls back to the fixed default
+/// rather than propagating — the loop that scheduled this tick keeps
+/// running on the next one instead of dying.
+#[tokio::test]
+async fn a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop() {
+    let preferences: SharedPreferencesRepository = Arc::new(FailingPreferencesRepo);
+
+    let interval = resolve_poll_interval(&preferences).await;
+
+    assert_eq!(interval, Duration::from_secs(u64::from(POLL_PERIOD_SECS)));
 }

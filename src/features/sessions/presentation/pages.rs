@@ -112,20 +112,21 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use clean_signals_frust::{use_controller, use_failure_listener, use_interval};
+use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, GetUntracked, NavigatorController, Padding, Set, SizedBox, WindowMetrics, any,
-    component, flexible, inflexible, safe_area, scroll_view, spawn_local, use_context,
+    FlexView, Get, GetUntracked, NavigatorController, Padding, SizedBox, WindowMetrics, any,
+    component, flexible, inflexible, on_cleanup, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
-use crate::features::settings::di::expect_preferences_repository;
+use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav, sessions_back_signal};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
@@ -134,7 +135,7 @@ use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
-use super::heartbeat::{self, HeartbeatState, PING_PERIOD};
+use super::heartbeat::{self, HeartbeatState};
 use super::pieces;
 
 /// The route this screen attaches into. The session id rides as a query param
@@ -320,6 +321,68 @@ pub struct Actions {
     pub controller: Arc<SessionsController>,
 }
 
+// ---------------------------------------------------------------------------
+// The session-poll cadence — one shared loop, live-resolved every tick
+// ---------------------------------------------------------------------------
+
+/// Resolve the live session-poll cadence — `settings`' own stored
+/// `layout_refresh_secs` preference — as a [`Duration`], reading through
+/// `preferences` (the one handle [`Component::init`](SessionsScreen::init)
+/// resolves; never a fresh `settings::di::expect_preferences_repository()`
+/// call). Falls back to [`POLL_PERIOD_SECS`] on a read failure, which never
+/// actually happens in practice (both the mock and the real preferences
+/// repository resolve every field to a default rather than erroring) — a
+/// storage hiccup slows or speeds *one* tick, never kills the loop that
+/// scheduled it.
+///
+/// The **one** seam both [`spawn_cadence_loop`] instances this screen starts
+/// — the session-list poll and the ping heartbeat alike — call before every
+/// sleep, and the same seam `tests/sessions.rs` drives directly (no widget
+/// tree needed) to pin the live-re-read contract.
+pub async fn resolve_poll_interval(preferences: &SharedPreferencesRepository) -> Duration {
+    let secs = preferences
+        .load_preferences()
+        .await
+        .map(|prefs| prefs.poll.layout_refresh_secs)
+        .unwrap_or(POLL_PERIOD_SECS);
+    Duration::from_secs(u64::from(secs))
+}
+
+/// Start a self-rescheduling loop that runs `tick` forever, re-resolving
+/// [`resolve_poll_interval`] before every sleep rather than baking a period
+/// in at mount time — see [`SessionsController`]'s "Session poll cadence"
+/// module docs. Mirrors `clean_signals_frust::use_interval`'s
+/// spawn/sleep/alive-flag shape, but a fixed `Duration` argument won't do
+/// here: the whole point is reading the *live* pref on every iteration, so
+/// this hand-rolls the loop instead of wrapping that helper. Must run where
+/// a reactive `Owner` is ambient — i.e. from
+/// [`Component::init`](SessionsScreen::init), `use_interval`'s own
+/// contract — `on_cleanup` silently no-ops outside one, so a call from
+/// anywhere else never stops.
+///
+/// No per-tick signal write happens here or in `tick`'s scheduling: the
+/// resolved cadence only ever feeds `clean_signals::time::sleep`'s argument
+/// (the idle-heat discipline `docs/CODE_STANDARDS.md` describes).
+fn spawn_cadence_loop(
+    preferences: SharedPreferencesRepository,
+    tick: impl Fn() + Send + Sync + 'static,
+) {
+    let alive = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&alive);
+    on_cleanup(move || flag.store(false, Ordering::SeqCst));
+
+    spawn_local(async move {
+        loop {
+            let period = resolve_poll_interval(&preferences).await;
+            clean_signals::time::sleep(period).await;
+            if !alive.load(Ordering::SeqCst) {
+                break;
+            }
+            tick();
+        }
+    });
+}
+
 impl Component for SessionsScreen {
     type State = SessionsState;
 
@@ -342,52 +405,49 @@ impl Component for SessionsScreen {
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
-        // The mock poll's cadence: resolved once from `settings`' own stored
-        // `layout_refresh_secs` preference (this mount only — see
-        // `SessionsController`'s "Poll cadence" module docs for why a pref
-        // changed while this screen is already mounted applies only from the
-        // *next* mount). `settings::di::expect_preferences_repository()` is
-        // resolved directly here, the same di.rs-is-composition-root-wiring
+        // `settings::di::expect_preferences_repository()` is resolved exactly
+        // once, right here — the same di.rs-is-composition-root-wiring
         // widening `terminal`'s page already uses for this exact repository
         // (`docs/ARCHITECTURE.md`'s Feature Slices section) — and resolved
-        // *synchronously, right here in `init`*, never inside the spawned
-        // future body below: `Component::init` runs under this component's
-        // real `Owner`, but the `frust::spawn_local` poller that later polls
-        // this future installs no ambient owner, so a `use_context`-backed
-        // lookup taken from inside the future's first poll would panic on
-        // the first real `/sessions` mount (a headless suite masks this
-        // because its harness keeps an ambient owner live throughout).
-        // Only the resolved `Arc` crosses into the spawned block.
-        // `Component::build` starts `use_interval` itself, the moment
-        // `poll_period` resolves.
-        let poll_loader = Arc::clone(&controller);
+        // *synchronously, right here in `init`*, never inside a spawned
+        // future's body: `Component::init` runs under this component's real
+        // `Owner`, but the `frust::spawn_local` poller that later polls a
+        // loop's future installs no ambient owner, so a `use_context`-backed
+        // lookup taken from inside a future's first poll would panic on the
+        // first real `/sessions` mount (a headless suite masks this because
+        // its harness keeps an ambient owner live throughout). Only the
+        // resolved `Arc` — never a second `expect_preferences_repository()`
+        // call — crosses into either cadence loop below (see
+        // `SessionsController`'s "Session poll cadence" module docs).
         let preferences = expect_preferences_repository();
-        spawn_local(async move {
-            let secs = preferences
-                .load_preferences()
-                .await
-                .map(|prefs| prefs.poll.layout_refresh_secs)
-                .unwrap_or(POLL_PERIOD_SECS);
-            poll_loader.poll_period.set(Some(secs));
+
+        // The session-list poll: `spawn_cadence_loop` re-resolves
+        // `layout_refresh_secs` before every sleep, so a pref change applies
+        // live rather than only from the *next* mount.
+        let polling = Arc::clone(&controller);
+        spawn_cadence_loop(Arc::clone(&preferences), move || {
+            if polling.take_poll_tick() {
+                let handle = Arc::clone(&polling);
+                spawn_local(async move { handle.refresh_from_poll().await });
+            }
         });
 
         // The app-scoped connection handle, resolved here with every other
         // app-scoped dependency — never from a press handler, and never from
-        // inside the spawned body below.
+        // inside a spawned body.
         let connection = expect_connection_controller();
 
-        // The strip's connection heartbeat: one real timed `GetVersion` every
-        // `PING_PERIOD`, whose measurement rolls the strip's latency readout
-        // (see `super::heartbeat`). Unlike the list poll above, this cadence
-        // is a constant, so the interval starts right here — `init` runs under
-        // the component `Owner` `use_interval` needs, and the interval is
-        // disposed with it on unmount. `is_polling()` is the same
+        // The strip's connection heartbeat: one real timed `GetVersion`, on
+        // the **same** live-resolved cadence as the list poll above (see
+        // `SessionsController`'s "Session poll cadence" module docs) — the
+        // 300ms roll `heartbeat::HeartbeatState::settle` animates over is a
+        // separate, untouched display concern. `is_polling()` is the same
         // covered-screen gate the list poll uses, so a dialog, the management
         // sheet or the terminal route pauses both; nothing new to pause.
         let heartbeat = HeartbeatState::new();
         let beating = Arc::clone(&controller);
         let pinged = Arc::clone(&connection);
-        use_interval(PING_PERIOD, move || {
+        spawn_cadence_loop(preferences, move || {
             if !beating.is_polling() {
                 return;
             }
@@ -445,26 +505,6 @@ impl Component for SessionsScreen {
         // `build` a sound place to observe from.
         if state.back.take_request(depth) {
             state.actions.open_disconnect_confirm(&state.connection);
-        }
-
-        // Start the mock poll's interval the moment its cadence resolves
-        // (tracked read: `init`'s async load writing `poll_period` is what
-        // wakes this rebuild). `claim_poll_interval_start` makes the actual
-        // `use_interval` call run exactly once even though `build` re-runs
-        // on every later tracked write — see `SessionsController`'s "Poll
-        // cadence" module docs for why this lives in `build` rather than
-        // `init` (both run under the same component `Owner`, so
-        // `use_interval` is exactly as safe to start from here).
-        if let Some(secs) = state.actions.controller.poll_period.get()
-            && state.actions.controller.claim_poll_interval_start()
-        {
-            let polling = Arc::clone(&state.actions.controller);
-            use_interval(Duration::from_secs(u64::from(secs)), move || {
-                if polling.take_poll_tick() {
-                    let handle = Arc::clone(&polling);
-                    spawn_local(async move { handle.refresh_from_poll().await });
-                }
-            });
         }
 
         // Tracked reads: a load, a mutation, or a connection change is what
