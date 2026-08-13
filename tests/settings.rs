@@ -1392,23 +1392,13 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
 // so this pin is the app-level proof, not a behavior change of its own.
 //
 // The fix's OTHER half — a `Down` on dead panel space blurs the focused field
-// without dismissing the dialog — has **no app-level pin here**: it is gated
-// on `GlyphDialogWidget::body` (the `.content()` slot), and every dialog in
-// this app (`pieces::open_create_token_dialog`, `ui::dialogs::name_input_dialog`)
-// passes its focusable field through `.action()` instead (a pre-existing
-// workaround predating `.content()`'s own addition to frust — see
-// `ui/dialogs.rs`'s module docs, now stale on that point). Reaching the field
-// via `route_event(&mut self.actions, ..)` focuses it fine, but
-// `content_held_session` never sees it, so a dead-space `Down` on this app's
-// real dialogs still falls through to the pre-fix behavior: the field stays
-// focused and the keyboard stays up. Verified directly against this exact
-// dialog (a headless `Down` at the panel's own top-left padding corner,
-// `panel.origin + (2, 2)` — inside `DIALOG_PADDING`, before the title and
-// before the actions row's own `y` offset) before writing this note. Making
-// the pin pass needs either a frust-side change (widen the dead-space check
-// to the actions row's focused children too) or an app-side one (move the
-// field into `.content()`) — both out of this task's declared scope (no
-// src/ changes, app-repo only) — see this task's Completion Summary.
+// without dismissing the dialog — **is** pinned below now
+// (`a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog`).
+// It reads from `GlyphDialogWidget::body` (the `.content()` slot), and this
+// dialog's field (plus its read-only toggle) now composes through
+// `.content(...)` rather than `.action(...)` — the workaround
+// `ui/dialogs.rs`'s module docs used to describe, retired now that
+// `.content()` exists (gate-r8 task 35, `19-dialog-content-slot`).
 
 #[test]
 fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
@@ -1448,6 +1438,45 @@ fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
             "{label} sits fully inside the keyboard-free area (0..{free_bottom}): {bounds:?}"
         );
     }
+}
+
+/// The fix's other half (see the [module comment](self) above): a `Down` on
+/// the dialog's own dead panel space blurs the focused field's IME session
+/// without dismissing the dialog, and a second tap on the field re-engages
+/// it. Modeled on `crates/frust-widgets/src/glyph/dialog.rs`'s own
+/// `dead_space_down_ends_the_field_session_and_keeps_the_dialog_open` fixture
+/// — `panel.origin + (2, 2)` sits inside `DIALOG_PADDING`, above the title
+/// and above the content/action rows, so no child lives there.
+#[test]
+fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let dialog = open_dialog_by_value(&mut h, "create new token");
+    assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
+
+    h.tap(center(dialog.content_child()));
+    assert!(
+        h.root.ime_state().is_some(),
+        "precondition: the field owns a live IME session"
+    );
+
+    let (panel_origin, _) = dialog.panel();
+    let dead = Point::new(panel_origin.x + 2.0, panel_origin.y + 2.0);
+    h.tap(dead);
+
+    assert!(
+        h.root.ime_state().is_none(),
+        "a Down on dead panel space ends the field's IME session — the keyboard retracts"
+    );
+    assert_eq!(h.depth(), 2, "the dialog itself is still open");
+
+    h.tap(center(dialog.content_child()));
+    assert!(
+        h.root.ime_state().is_some(),
+        "a second tap on the field re-engages it"
+    );
 }
 
 // ---------------------------------------------------------------------------
