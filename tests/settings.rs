@@ -2139,6 +2139,36 @@ fn the_bell_row_toggles_its_preference() {
     assert_eq!(h.depth(), 1, "the bell row pushes nothing");
 }
 
+/// The bell switch is the real themed switch widget, not hand-drawn art. The
+/// [`bell_state`] harness helper pins this by looking for a Switch role labelled
+/// "bell notifications"; this test pins that the switch's own tap flips the
+/// preference.
+#[test]
+fn the_bell_switch_is_a_real_switch_role_whose_own_tap_flips_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    assert_eq!(
+        h.bell_state(),
+        Some(Toggled::True),
+        "the mock seeds the bell on, and bell_state() finds a Switch role"
+    );
+
+    // No outer row-wide `GestureDetector` wraps the switch (removed for the
+    // pointer-capture conflict `pieces::bell_notifications_row`'s own doc
+    // explains), so the switch's own semantics bounds are what a tap must land
+    // inside to flip it. The settings screen doesn't rebuild on preference
+    // change (unlike the dialog, which rebuilds on navigator mount), so the
+    // preference signal update flows back through the async round trip.
+    h.tap_label("bell notifications");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while h.bell_state() != Some(Toggled::False) {
+        assert!(Instant::now() < deadline, "the switch never turned off");
+        h.pump_once();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 6 — Disconnect
 // ---------------------------------------------------------------------------
