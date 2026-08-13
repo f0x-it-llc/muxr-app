@@ -9,7 +9,7 @@
 //! arbitrary filled/bordered rect, a dashed outline, an ellipsized single-line
 //! run, or a per-line staggered reveal, so these [`View`]/[`Widget`] pairs —
 //! authored through [`frust::authoring`], the seam `crate::ui::backdrop`/
-//! `crate::ui::sheet`/`crate::ui::topbar` already use — fill the gap.
+//! `crate::ui::topbar` already use — fill the gap.
 //!
 //! | Piece | Mock element |
 //! |---|---|
@@ -33,7 +33,7 @@
 //! exception is [`terminal_stage`], which reads `reduce_motion` and the motion
 //! tokens from the **paint-time** theme, because that is the only pass where a
 //! theme is in scope when a transition actually starts (the deferred-driver
-//! idiom `crate::ui::sheet`/`crate::ui::topbar` document).
+//! idiom `crate::ui::topbar` documents).
 //!
 //! # Frust gaps these work around
 //!
@@ -146,7 +146,7 @@ fn effective_radius(radius: f64, size: Size) -> f64 {
 }
 
 /// Coerce a possibly-infinite constraint dimension to a finite value (mirrors
-/// `crate::ui::sheet`'s helper of the same name).
+/// the helper of the same name `frust::glyph`'s own modal widgets carry).
 fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }
@@ -948,8 +948,8 @@ const BAR_SLOT: f64 = 30.0;
 /// eases its progress, and the `from..to` range the eased progress is then
 /// interpolated across.
 ///
-/// The same shape (and for the same reason) as `crate::ui::topbar`'s `Reveal`
-/// and `crate::ui::sheet`'s `ModalStage`: the range is what makes an
+/// The same shape (and for the same reason) as `crate::ui::topbar`'s `Reveal`:
+/// the range is what makes an
 /// *interrupted* transition value-continuous — a second tap mid-flight starts a
 /// fresh driver from wherever the card actually is (see [`start`](Self::start)),
 /// the "value continuity, not velocity continuity" contract `frust::motion`'s
@@ -1036,7 +1036,7 @@ impl FullscreenStage {
 /// `.app-bar`'s collapse, `.term-wrap`'s padding and `.term-card`'s radius
 /// together), and because a padding that animates is a *layout* fact — frust
 /// has no animated-padding widget, and the paint-origin trick
-/// `crate::ui::topbar`/`crate::ui::sheet` use cannot resize a child.
+/// `crate::ui::topbar` uses cannot resize a child.
 ///
 /// It also records the app bar's trailing-slot rect into
 /// [`anchor`](TerminalStageView::anchor) — see [`BAR_PAD_X`]: the overflow
@@ -1082,7 +1082,7 @@ pub(super) struct TerminalStageWidget {
     /// The in-flight transition, `None` at rest. Created on the first
     /// **paint** after a flip, not on the rebuild that staged it: a `BuildCtx`
     /// carries no theme to resolve `reduce_motion`/the motion tokens from (the
-    /// deferred-driver idiom `crate::ui::sheet` documents).
+    /// deferred-driver idiom `crate::ui::topbar` documents).
     stage: Option<FullscreenStage>,
     /// A flip the last rebuild staged, awaiting that first paint.
     pending: bool,

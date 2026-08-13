@@ -1181,9 +1181,9 @@ impl Actions {
     /// until the menu's exit and pop release it. It
     /// summons no keyboard (nothing publishes a surface, and the grid is not on
     /// the focus path), and on a shell whose frame gate reads the focus/IME
-    /// **edge** it costs two frames rather than a steady wake; the same press
-    /// pattern lives in `crate::ui::sheet`'s own `ModalStage`, whose claim
-    /// instead lasts as long as the sheet is up. `tests/terminal_live.rs`'s
+    /// **edge** it costs two frames rather than a steady wake; the Glyph sheet
+    /// claims focus on every press the same way, except that its claim lasts
+    /// as long as the sheet is up. `tests/terminal_live.rs`'s
     /// section 10 pins what this side controls: mounting the live pane claims
     /// nothing, the transient claim leaves with the menu, and only a tap on the
     /// grid opens a real session.

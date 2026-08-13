@@ -149,7 +149,7 @@ use crate::ui::topbar::icon_button;
 /// method because connecting also *navigates*, and the navigator handle it needs
 /// (`frust::Router`, `Rc`-backed) cannot live on a `Send + Sync` controller —
 /// the screen owns it and closes over it here. Same shape, and for the same
-/// reason, as `crate::ui::sheet`'s `on_dismiss`.
+/// reason, as the state-free close `frust::glyph`'s own modal widgets take.
 pub struct Live {
     /// The screen's form/view model.
     pub controller: Arc<ConnectController>,

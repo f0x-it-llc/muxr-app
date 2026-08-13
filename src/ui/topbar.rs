@@ -60,7 +60,7 @@
 //! with a title centered on the **bar**, not on the space left over between the
 //! slots — a difference no `AppBarView` builder expresses. So this is a
 //! [`View`]/[`Widget`] pair over [`frust::authoring`] (the
-//! `crate::ui::backdrop`/`crate::ui::sheet` precedent).
+//! `crate::ui::backdrop` precedent).
 //!
 //! # Hidden, never unmounted
 //!

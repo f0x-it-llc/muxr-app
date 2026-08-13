@@ -1293,9 +1293,11 @@ fn the_menus_first_row_opens_the_sheet_on_the_tab_row_and_the_browsed_tabs_panes
     );
 
     let sheet = added(&before.rounded, &after.rounded);
-    let (origin, size) = panel(&sheet);
+    // The panel is a *path*, not a rounded rect: only its top corners are
+    // rounded, which `fill_rounded_rect` cannot express.
+    let (origin, size) = panel(&added(&before.paths, &after.paths));
     assert!(
-        origin.y + size.height > SURFACE.height,
+        (origin.y + size.height - SURFACE.height).abs() < EPSILON,
         "bottom-anchored, like every muxr sheet: {origin:?}/{size:?}"
     );
     // Four tabs, and **no** spaces row at all: this session is zellij, which

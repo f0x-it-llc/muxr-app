@@ -63,8 +63,8 @@
 //! [`clear_pending_secret`](Self::clear_pending_secret) is the reveal's own
 //! "dismissed, gone forever" — the cleared `Option`'s dropped `Zeroizing`
 //! secret scrubs its buffer right there. There is deliberately no
-//! auto-clearing tied to a *scrim* dismissal of that sheet (`ui::sheet` gives
-//! its caller no dismiss hook to hang one off — see that module's own docs):
+//! auto-clearing tied to a *scrim* dismissal of that sheet (`ui::sheet` hands
+//! its caller no dismissal hook to hang one off):
 //! the value simply sits until the next mint overwrites it or an explicit
 //! dismissal clears it, never logged and never read anywhere but that one
 //! sheet.

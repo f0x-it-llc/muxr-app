@@ -775,7 +775,8 @@ const PARK_FRAME_CAP: usize = 600;
 
 /// Open the app's **real** bottom sheet over `h` (the same helper every screen
 /// calls), run to the parking point, and report where its panel is painting —
-/// the biggest rect the sheet *added* to the covered screen's own chrome.
+/// the biggest *path* the sheet added to the covered screen's own chrome, a
+/// Glyph sheet's panel being top-rounded only and so painted as a path.
 fn open_real_sheet(h: &mut Harness) -> (Point, Size) {
     let before = h.park();
     show_sheet(&h.state.overlays, |_sheet| {
@@ -787,7 +788,7 @@ fn open_real_sheet(h: &mut Harness) -> (Point, Size) {
         "a sheet dims the bar and takes its input: {:?}",
         node_roles(&h.root)
     );
-    largest(&added(&before.rounded, &open.rounded)).expect("the sheet paints its own panel")
+    largest(&added(&before.paths, &open.paths)).expect("the sheet paints its own panel")
 }
 
 #[test]
@@ -916,11 +917,11 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
 /// open overlay claims the press ahead of the route stack under it). Nothing
 /// here names a controller to pop — that choice **is** what is under test.
 ///
-/// It doubles as the original defect's guard (frust #41): a back press pops the
-/// sheet's page through `BackPolicy::Pop`, bypassing the widget's own staged
-/// exit entirely, so nothing app-side ever hears about the dismissal. The bar
-/// must be lit and live again regardless — which it is, because it never knew
-/// about the overlay in the first place.
+/// It doubles as the original defect's guard: the press reaches this sheet as
+/// `BackPolicy::DismissAnimated`, so the widget plays its own staged exit and
+/// pops itself, and the app hears about the dismissal only through the page's
+/// completion latch. The bar must be lit and live again regardless — which it
+/// is, because it never knew about the overlay in the first place.
 #[test]
 fn an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone() {
     let _g = serial();

@@ -40,7 +40,8 @@
 //! - **which one is selected** — only that row paints a fill, and it is the
 //!   one rect as wide as the panel itself (`.pick-row.sel{margin:0 -20px}`
 //!   bleeding exactly the sheet's own 20px gutter on each side), plus the one
-//!   filled vector path the sheet adds (the `✓`);
+//!   filled vector path the sheet adds beyond its own panel (the `✓` — see
+//!   `Chrome::vectors`);
 //! - **what the rows say** — by picking one and watching the row value on the
 //!   screen behind change, which is the round trip that matters anyway.
 //!
@@ -468,9 +469,27 @@ impl Chrome {
         }
     }
 
-    /// The overlay's own panel — the biggest rect it painted.
+    /// The overlay's own panel — the biggest surface it filled.
+    ///
+    /// Both channels, because the two overlays paint their panel differently: a
+    /// dialog's is a plain rounded rect, while the Glyph sheet's is a *path*
+    /// (only its top corners are rounded, which `fill_rounded_rect` cannot
+    /// express).
     fn panel(&self) -> (Point, Size) {
-        largest(&self.rounded).expect("an overlay always paints its own panel")
+        let mut candidates = self.rounded.clone();
+        candidates.extend(self.paths.iter().copied());
+        largest(&candidates).expect("an overlay always paints its own panel")
+    }
+
+    /// The overlay's own vector paths with its panel taken back out — a picker
+    /// row's `✓`, and nothing else (see [`Chrome::panel`]).
+    fn vectors(&self) -> Vec<(Point, Size)> {
+        let panel = self.panel();
+        self.paths
+            .iter()
+            .copied()
+            .filter(|painted| *painted != panel)
+            .collect()
     }
 
     /// The overlay's full-content-width child: a dialog's name field.
@@ -1538,7 +1557,7 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
             "{row}: one run per option plus the title"
         );
         assert_eq!(
-            sheet.paths.len(),
+            sheet.vectors().len(),
             1,
             "{row}: exactly one row carries the check vector"
         );
@@ -1854,7 +1873,7 @@ fn the_font_sheet_lists_the_bundled_face_and_says_so_quietly_when_the_catalog_is
     await_catalog(&mut h, CatalogStatus::Unavailable);
 
     assert_eq!(
-        sheet.paths.len(),
+        sheet.vectors().len(),
         1,
         "exactly one row carries the check vector: the face in use"
     );

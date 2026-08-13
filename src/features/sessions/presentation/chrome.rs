@@ -8,8 +8,8 @@
 //! `bg-base` tile, `.conn-row`'s `border-bottom`, `.dot-ok`'s glowing dot, and
 //! `.new-sess-btn`'s dashed outline. No facade widget paints an arbitrary
 //! filled/bordered rect, so these [`View`]/[`Widget`] pairs — authored through
-//! [`frust::authoring`], the same seam `crate::ui::backdrop`/`crate::ui::sheet`
-//! use — fill the gap.
+//! [`frust::authoring`], the same seam `crate::ui::backdrop` uses — fill the
+//! gap.
 //!
 //! **Feature-local, and knowingly parallel to `features::connect`'s own
 //! `chrome`.** The two screens each own a panel/swatch pair rather than sharing
