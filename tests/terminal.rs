@@ -407,6 +407,37 @@ impl Harness {
         }
     }
 
+    /// Wait for a sheet closed through
+    /// [`SheetHandle::close_after`](crate::ui::sheet::SheetHandle::close_after)
+    /// (task 37's own staged `close` underneath it) to actually pop — every
+    /// call site here is `commit_pane`'s own delayed close, `CLOSE_DELAY`
+    /// out.
+    ///
+    /// Two beats, on purpose rather than one real-time-tracked loop:
+    ///
+    /// 1. [`pump_for`](Self::pump_for) rides out `close_after`'s own delay —
+    ///    a real timer, at the zero paint clock throughout (its own idiom),
+    ///    so nothing here nudges any paint-clock-driven animation live in the
+    ///    same tree.
+    /// 2. A small, **fixed** clock advance — [`settle`](Self::settle)'s own
+    ///    three-frame shape, seed/complete/finalize — carries the sheet's own
+    ///    short staged exit (`durations.fast`, ~150ms) to completion. Fixed
+    ///    rather than driven by however long step 1 actually took in real
+    ///    time: this screen's staggered reveal restarts on the very same
+    ///    commit, and a clock racing ahead with real elapsed time would carry
+    ///    it past its own ~480ms settle window too, baking in "already
+    ///    settled" before a caller gets to read it fresh
+    ///    (`a_pane_commit_replays_the_reveal_from_the_top`'s own concern).
+    ///    300ms clears the exit with room to spare while staying well short
+    ///    of that.
+    fn pump_until_closed(&mut self, what: &str, done: impl Fn(&Harness) -> bool) {
+        self.pump_for(2 * CLOSE_DELAY);
+        self.frame_at(0.0);
+        self.frame_at(300.0);
+        self.frame_at(300.0);
+        assert!(done(self), "timed out waiting for {what}");
+    }
+
     /// Wait for the async first load (spaces, tabs, lines, session name).
     fn await_load(&mut self) {
         self.pump_until_values("the seeded workspace", |values| {
@@ -1397,7 +1428,7 @@ fn a_pane_row_commits_the_browse_and_then_closes_the_sheet() {
         values.iter().any(|v| v == BTOP_TITLE)
     });
     assert!(h.shows(BTOP_TITLE), "the card followed the pane");
-    h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
     assert_eq!(h.depth(), REST_DEPTH, "…and the sheet closed behind it");
 }
 
@@ -1417,7 +1448,7 @@ fn the_focused_badge_follows_a_commit_the_next_time_the_sheet_opens() {
     // Commit the *second* pane of the tab the session is already on — no tab
     // move, just the focus.
     h.tap_pane_row(1);
-    h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
     let (_, reopened) = h.open_sheet();
     assert_eq!(
@@ -1470,7 +1501,7 @@ fn a_pane_commit_replays_the_reveal_from_the_top() {
     h.pump_until_values("the btop tab", |values| {
         values.iter().any(|v| v == BTOP_TITLE)
     });
-    h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
     // The replayed reveal starts from nothing again, then fills back in.
     let restarted = runs_at(&mut h, 0.0);
@@ -1557,7 +1588,7 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     });
     // …one close fires (`<=`, not `==`: two stacked closes can land in the
     // same rebuild, and this test must report *that* rather than time out)…
-    h.pump_until("the sheet to close", |h| h.depth() <= floor);
+    h.pump_until_closed("the sheet to close", |h| h.depth() <= floor);
     // …and the superseded one, given every chance to wake, lands on nothing.
     h.pump_for(2 * CLOSE_DELAY);
 
@@ -1792,7 +1823,7 @@ fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
     // Committing inside the tab the session is on is `FocusPane` alone, which
     // the wire allows a read-only token — so it lands, and the sheet closes.
     h.tap(center(pane_rows(&after)[1]));
-    h.pump_until("the sheet to close", |h| h.depth() == REST_DEPTH);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
     assert!(
         !app_toasts()
             .pending_untracked()
@@ -2451,8 +2482,12 @@ fn a_pane_rows_edit_icon_renames_it_without_committing_it() {
 
     // A plain tap on the same row still commits it.
     h.tap_pane_row(1);
-    h.pump_until("the sheet to close", |h| h.depth() == floor);
-    assert_eq!(h.depth(), floor, "a plain tap still commits and closes");
+    // `floor - 1`: depth is already `floor` (the sheet, still up) before this
+    // tap — the wait has to watch for the sheet's own pop, not the level it
+    // is already sitting at (a stale `floor` here would make this a no-op
+    // wait that never actually observed the close).
+    h.pump_until_closed("the sheet to close", |h| h.depth() == floor - 1);
+    assert_eq!(h.depth(), floor - 1, "a plain tap still commits and closes");
 }
 
 #[test]

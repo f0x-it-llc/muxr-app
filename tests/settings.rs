@@ -2037,6 +2037,57 @@ fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family(
 }
 
 #[test]
+fn selecting_a_font_row_plays_the_staged_exit_rather_than_vanishing_the_sheet() {
+    // G53 — the anti-vanish pin. Before frust's `GlyphSheetHandle` seam
+    // (task 36) `SheetHandle::close` rode, a picked row's `sheet.close()`
+    // enqueued the page's pop straight away: one frame later — enough for
+    // `NavigatorController`'s queued op to land (`a_second_tap_on_a_picker_row_
+    // closes_the_sheet_once_and_keeps_the_route`'s own "a pop only *lands* at
+    // the next rebuild") — the sheet was already gone, with no animation at
+    // all (the device symptom task 36 was filed for). `close` now rides the
+    // widget's own staged exit instead (`crate::ui::sheet`'s "`close` plays
+    // the same staged exit"), so that same one frame still finds it mounted,
+    // mid-exit. Fail-then-pass verified by reasoning rather than a temporary
+    // revert: reverting `SheetHandle`'s `close` closure to a bare
+    // `NavigatorController::pop` would apply that pop on this test's very
+    // first `h.frame()` below, failing the `depth() == 2` assertion — exactly
+    // the shape this pin exists to catch.
+    let _g = serial();
+    let _ambient = setup();
+    let cache = fresh_font_cache("anti-vanish");
+    seed_cached_family(&cache);
+    let mut h = Harness::connected();
+
+    let sheet = open_font_picker(&mut h);
+    // Two installed rows (bundled + cached); pick the second.
+    let row = pick_row(&sheet, 0, 1);
+    h.tap(row);
+
+    // One frame — the OLD immediate-pop code would already have applied its
+    // queued pop by here; the new staged close is still playing its exit.
+    h.frame();
+    assert_eq!(
+        h.depth(),
+        2,
+        "the sheet is still mounted one frame after the pick — playing its \
+         exit, not gone"
+    );
+
+    // Settling carries the exit to completion: the pop lands, exactly once,
+    // and the choice it carried still reaches the repository behind it.
+    h.flush();
+    assert_eq!(h.depth(), 1, "…and the pop lands once the exit finishes");
+    h.pump_until_values(CACHED_DISPLAY, |values| {
+        values.iter().any(|v| v == CACHED_DISPLAY)
+    });
+    assert_eq!(
+        stored_font_family(),
+        CACHED_FAMILY,
+        "the picked family still persists behind the staged close"
+    );
+}
+
+#[test]
 fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_row() {
     let _g = serial();
     let _ambient = setup();
