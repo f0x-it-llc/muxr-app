@@ -76,11 +76,10 @@ use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
 use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::icons::{CHECK, CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH};
-use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
     FlexView, GestureDetector, Get, GetUntracked, IconSource, NavigatorController, Padding,
-    PopResult, RwSignal, Set, SizedBox, Stack, StatusPalette, Theme, any, button, flexible, icon,
+    PopResult, RwSignal, Set, SizedBox, StatusPalette, Theme, any, button, flexible, icon,
     inflexible, scroll_view, switch, text, text_input,
 };
 
@@ -143,14 +142,6 @@ const ADD_GAP: f64 = 6.0;
 /// `.disconnect-btn{margin:20px 16px 4px}`.
 const DISCONNECT_MARGIN_TOP: f64 = 20.0;
 const DISCONNECT_MARGIN_BOTTOM: f64 = 4.0;
-/// `.toggle{width:36px;height:21px}` and `.toggle::after` — the knob, its
-/// **off** inset (`left:2px;top:2px`) and its **on** one (`left:17px`).
-const TOGGLE_W: f64 = 36.0;
-const TOGGLE_H: f64 = 21.0;
-const KNOB: f64 = 15.0;
-const KNOB_LEFT_OFF: f64 = 2.0;
-const KNOB_LEFT_ON: f64 = 17.0;
-const KNOB_TOP: f64 = 2.0;
 /// `.pick-row{padding:13px 4px}`.
 const PICK_PAD_X: f64 = 4.0;
 const PICK_PAD_Y: f64 = 13.0;
@@ -262,7 +253,8 @@ pub(super) struct Palette {
     pub(super) base: Color,
     /// `--bg-raised`: the mark tile and the read-write chip's fill.
     pub(super) raised: Color,
-    /// `--bg-overlay`: the toggle's **off** track.
+    /// `--bg-overlay`: was used by the hand-drawn toggle (now deleted).
+    #[allow(dead_code)]
     pub(super) overlay: Color,
     /// `--border-bright`: the read-write chip's hairline and the dashed row's.
     pub(super) outline: Color,
@@ -272,10 +264,11 @@ pub(super) struct Palette {
     pub(super) amber: Color,
     /// `--amber-faint`, derived (see [`AMBER_FAINT_ALPHA`]).
     pub(super) amber_faint: Color,
-    /// `--amber-border`, derived (see [`AMBER_BORDER_ALPHA`]).
+    /// `--amber-border`: was used by the hand-drawn toggle (now deleted).
+    #[allow(dead_code)]
     pub(super) amber_border: Color,
-    /// The bright accent *fill* — the toggle's on-knob (never `primary`, which
-    /// is accent ink; under Glyph light the two differ).
+    /// The bright accent *fill* — was used by the hand-drawn toggle (now deleted).
+    #[allow(dead_code)]
     pub(super) amber_fill: Color,
     /// `--fg`: primary text.
     pub(super) fg: Color,
@@ -456,18 +449,20 @@ impl PickerKind {
 
 /// What a row *does*, which also decides what sits in its trailing slot.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub(super) enum RowAction {
     /// Inert: no chevron, no gesture (the version rows and connection info rows).
     Static,
     /// A chevron row that opens a picker sheet.
     Picker(PickerKind),
-    /// The bell row: a trailing switch at this state, flipped by a tap
-    /// anywhere on the row.
+    /// The bell row: kept for exhaustiveness in patterns, but no longer
+    /// constructed (the bell row is now composed directly in [`bell_notifications_row`]).
     Bell(bool),
 }
 
 impl RowAction {
     /// Whether a tap on this row does anything at all.
+    #[allow(dead_code)]
     fn interactive(self) -> bool {
         !matches!(self, RowAction::Static)
     }
@@ -517,11 +512,11 @@ pub(super) fn settings_row(
     )
     .bottom_rule(colors.rule);
 
-    if action.interactive() {
-        any(GestureDetector(box_)
-            .on_tap(move |state: &mut SettingsState| super::pages::row_tapped(state, action)))
-    } else {
-        any(box_)
+    match action {
+        RowAction::Static => any(box_),
+        RowAction::Picker(_) => any(GestureDetector(box_)
+            .on_tap(move |state: &mut SettingsState| super::pages::row_tapped(state, action))),
+        RowAction::Bell(_) => any(box_),
     }
 }
 
@@ -538,10 +533,10 @@ fn mark_tile(mark: RowMark, colors: &Palette) -> AnyView<SettingsState> {
 }
 
 /// A row's trailing slot: the faintest chevron for anything that leads
-/// somewhere, the switch for the bell row, nothing for a static fact.
+/// somewhere, nothing for a static fact.
 fn trailing_slot(
     action: RowAction,
-    label: &'static str,
+    _label: &'static str,
     colors: &Palette,
 ) -> Option<AnyView<SettingsState>> {
     match action {
@@ -549,62 +544,8 @@ fn trailing_slot(
         RowAction::Picker(_) => Some(any(icon(CHEVRON_RIGHT)
             .size(CHEVRON)
             .color(colors.fg_faintest))),
-        // The switch announces the *row's* subject rather than "switch" — the
-        // same choice the Connect screen's remember toggle makes.
-        RowAction::Bell(on) => Some(any(switch_semantics(toggle_art(on, colors), label, on))),
+        RowAction::Bell(_) => None,
     }
-}
-
-/// `.toggle` — the 36×21 pill and its 15px knob, in the requested state.
-///
-/// Both states are composed and cross-faded rather than one being recoloured,
-/// which is what makes the on-track the amber wash **over the page tone** the
-/// design authored: painting a 12%-alpha wash over an opaque `--bg-overlay`
-/// track would composite 88% of that dark track straight back through (the
-/// exact defect the Connect screen's own toggle documents, transcribed here
-/// rather than re-discovered).
-fn toggle_art(on: bool, colors: &Palette) -> AnyView<SettingsState> {
-    let radius = TOGGLE_H / 2.0;
-    let track = Size::new(TOGGLE_W, TOGGLE_H);
-    let off_track = panel(
-        SizedBox::<SettingsState>(None, None),
-        colors.overlay,
-        radius,
-    )
-    .border(colors.outline)
-    .fixed(track);
-    let on_track = panel(
-        SizedBox::<SettingsState>(None, None),
-        colors.amber_faint,
-        radius,
-    )
-    .border(colors.amber_border)
-    .fixed(track);
-    let knob = |left: f64, fill: Color| {
-        Padding(
-            EdgeInsets {
-                left,
-                top: KNOB_TOP,
-                right: TOGGLE_W - left - KNOB,
-                bottom: TOGGLE_H - KNOB_TOP - KNOB,
-            },
-            panel(SizedBox::<SettingsState>(None, None), fill, KNOB / 2.0)
-                .fixed(Size::new(KNOB, KNOB)),
-        )
-    };
-    let (on_opacity, off_opacity) = if on { (1.0, 0.0) } else { (0.0, 1.0) };
-    any(Stack(vec![
-        any(AnimatedOpacity::<SettingsState, _>(off_opacity, off_track)),
-        any(AnimatedOpacity::<SettingsState, _>(on_opacity, on_track)),
-        any(AnimatedOpacity::<SettingsState, _>(
-            off_opacity,
-            knob(KNOB_LEFT_OFF, colors.fg_dim),
-        )),
-        any(AnimatedOpacity::<SettingsState, _>(
-            on_opacity,
-            knob(KNOB_LEFT_ON, colors.amber_fill),
-        )),
-    ]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,14 +954,12 @@ fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_on
 /// `remember_row` draws for Connect's remember toggle, down to the "no outer
 /// `GestureDetector`" part.
 ///
-/// **Why no outer `GestureDetector` wraps the row (unlike this dialog's old
-/// hand-drawn pill, and unlike the bell row's [`toggle_art`], which still has
-/// one):** both `SwitchWidget` and `GestureDetectorWidget` call
-/// `ctx.capture_pointer()` on `Down`, so nesting the real switch inside a
-/// row-wide detector would be two captures racing the same gesture. The
-/// switch owns its own tap target instead, and the label beside it stops
-/// being tappable as a consequence — Connect's own remember row makes the
-/// identical trade for the identical reason.
+/// **Why no outer `GestureDetector` wraps the row:** both `SwitchWidget` and
+/// `GestureDetectorWidget` call `ctx.capture_pointer()` on `Down`, so nesting
+/// the real switch inside a row-wide detector would be two captures racing the
+/// same gesture. The switch owns its own tap target instead, and the label
+/// beside it stops being tappable as a consequence — Connect's own remember row
+/// makes the identical trade for the identical reason.
 ///
 /// Built over `AppState` — a dialog is a page on the *app's* navigator, not
 /// [`SettingsState`] — with a callback shaped like Connect's: the switch
@@ -1048,6 +987,48 @@ fn dialog_read_only_row(
         ),
         inflexible(toggle),
     ]))
+}
+
+/// The settings page's bell-notifications row: a complete row with mark tile,
+/// flexible label/subtitle column, and the real, themed `frust::switch` —
+/// structured exactly like other [`settings_row`]s but with the switch owning
+/// its tap target (no outer `GestureDetector` wrapper, same pointer-capture
+/// constraint as [`dialog_read_only_row`]). Includes a subtitle describing what
+/// the bell-on state means: "haptic + badge".
+pub(super) fn bell_notifications_row(
+    on: bool,
+    colors: &Palette,
+    on_toggle: impl Fn(&mut SettingsState) + 'static,
+) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    let toggle = any(switch_semantics(
+        switch::<SettingsState, _>(on, move |state: &mut SettingsState, _requested: bool| {
+            on_toggle(state)
+        }),
+        "bell notifications",
+        on,
+    ));
+    let label_column = column(vec![
+        any(text("bell notifications").style(inked(&theme.type_scale.label_large, colors.fg))),
+        any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
+        any(text(BELL_VALUE).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
+    ]);
+    let children = vec![
+        inflexible(mark_tile(MARK_BELL, colors)),
+        h_gap(ROW_GAP),
+        flexible(1, any(label_column)),
+        h_gap(ROW_GAP),
+        inflexible(toggle),
+    ];
+
+    let box_ = panel(
+        Padding(EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y), row(children)),
+        Color::TRANSPARENT,
+        0.0,
+    )
+    .bottom_rule(colors.rule);
+
+    any(box_)
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,15 +1543,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_toggles_knob_never_escapes_its_track() {
-        const { assert!(KNOB_LEFT_OFF + KNOB <= TOGGLE_W) };
-        const { assert!(KNOB_LEFT_ON + KNOB <= TOGGLE_W) };
-        const { assert!(KNOB_TOP + KNOB <= TOGGLE_H) };
-        // …and the on-state knob really is the right-hand one.
-        const { assert!(KNOB_LEFT_OFF < KNOB_LEFT_ON) };
     }
 
     #[test]

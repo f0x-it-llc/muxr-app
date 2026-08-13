@@ -568,13 +568,10 @@ fn poll_rows(prefs: &PollPrefs, colors: &Palette) -> Vec<AnyView<SettingsState>>
             RowAction::Picker(PickerKind::LayoutRefresh),
             colors,
         ),
-        pieces::settings_row(
-            pieces::MARK_BELL,
-            "bell notifications",
-            pieces::BELL_VALUE,
-            ValueTone::Plain,
-            RowAction::Bell(prefs.bell_notifications),
+        pieces::bell_notifications_row(
+            prefs.bell_notifications,
             colors,
+            |state: &mut SettingsState| state.actions.toggle_bell(),
         ),
     ]
 }
@@ -1092,7 +1089,9 @@ pub(super) fn row_tapped(state: &mut SettingsState, action: RowAction) {
         // silently doing nothing.
         RowAction::Static => {}
         RowAction::Picker(kind) => state.actions.open_picker(kind),
-        RowAction::Bell(_) => state.actions.toggle_bell(),
+        // Bell rows no longer wrap in GestureDetector (the switch owns its tap
+        // target), so this arm is unreachable. It remains for exhaustiveness.
+        RowAction::Bell(_) => {}
     }
 }
 
