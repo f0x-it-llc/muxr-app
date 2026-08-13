@@ -38,34 +38,40 @@
 //! stack (`apply_ops` builds the page *before* `pages.push`), so a
 //! mount-time baseline would be one short.
 //!
-//! # Poll cadence, loaded once per mount
+//! # Session poll cadence, live
 //!
-//! The mock poll's *period* used to be the hardcoded [`POLL_PERIOD_SECS`]
-//! constant; it now comes from `settings`' own stored `layout_refresh_secs`
-//! preference, resolved by an async load `pages.rs`'s `Component::init`
-//! kicks off (`settings::di::expect_preferences_repository()`, the same
+//! `settings`' own stored `layout_refresh_secs` preference (the "session
+//! poll" group) is the **one** cadence for both the session-list poll below
+//! and the `.conn-row` strip's ping heartbeat (`super::heartbeat`) — a
+//! settings change applies live, no remount required, rather than resolving
+//! once at mount time the way an earlier version of this screen did.
+//! `pages.rs`'s `Component::init` resolves
+//! `settings::di::expect_preferences_repository()` exactly once (the same
 //! di.rs-is-composition-root-wiring widening `terminal`'s page already uses
 //! for the identical repository — `docs/ARCHITECTURE.md`'s Feature Slices
-//! section). [`poll_period`](Self::poll_period) holds the result: `None`
-//! until that load resolves, `Some(secs)` once it does (falling back to
-//! [`POLL_PERIOD_SECS`] on a load failure, which never actually happens in
-//! practice — both the mock and the real preferences repository resolve
-//! every field to a default rather than erroring). `Component::build` starts
-//! `clean_signals_frust::use_interval` the moment this flips to `Some`,
-//! **exactly once** per mount ([`claim_poll_interval_start`](Self::claim_poll_interval_start)
-//! guards the once-ness, since `build` re-runs on every tracked write and
-//! `poll_period` stays `Some` forever after) — see `pages.rs`'s own docs for
-//! why the call has to live in `build` rather than `init`. A pref changed
-//! while this screen is *already* mounted therefore does not retroactively
-//! reschedule this mount's interval — it applies from the **next** Sessions
-//! mount, which re-runs the whole load-then-start sequence fresh.
+//! section) and hands that one handle to `pages.rs`'s shared
+//! cadence-loop helper, started twice — once for the poll, once for the
+//! ping — rather than re-resolving it from context a second time (a
+//! `use_context`-backed lookup taken from inside a spawned async block's
+//! first poll installs no ambient owner and panics; `layering.rs`'s
+//! conformance test catches a regression here).
 //!
-//! `use_interval` itself, per its own doc, must be called where a reactive
-//! `Owner` is ambient; `ComponentWidget::rebuild` (`frust-core`'s own
-//! `component` module) runs `Component::build` under the *same* owner
-//! `Component::init` does, so starting it from `build` is exactly as sound
-//! as starting it from `init` — it just gets to wait for a value `init`
-//! couldn't have had synchronously.
+//! Each loop re-resolves the pref (a repository read, not a signal) right
+//! before it schedules its *next* sleep, so a pref change lands within one
+//! old-cadence tick regardless of whether Sessions stayed mounted beneath
+//! the settings route — see `pages.rs`'s own docs for the loop's exact
+//! shape. [`POLL_PERIOD_SECS`] is now only the fallback a read failure falls
+//! back to, never a mount-time snapshot — the pref never actually fails to
+//! load in practice (both the mock and the real preferences repository
+//! resolve every field to a default rather than erroring), so a storage
+//! hiccup slows or speeds one tick but never kills the loop that scheduled
+//! it.
+//!
+//! Neither loop is a signal write on every tick: the cadence value only ever
+//! feeds the sleep argument (the idle-heat discipline
+//! `docs/CODE_STANDARDS.md` describes) — [`sessions`](Self::sessions) and
+//! [`loaded`](Self::loaded) are still the only signals this controller
+//! writes, exactly as before.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -84,9 +90,9 @@ use crate::features::sessions::domain::use_cases::{
 /// running — no real navigator depth ever reaches it.
 const NOT_PAUSED: usize = usize::MAX;
 
-/// The mock poll's fallback period, in seconds, used only if the async load
-/// of `settings`' own `layout_refresh_secs` preference fails (see the
-/// [module docs](self)' "Poll cadence" section) — matches
+/// The session-poll cadence's fallback period, in seconds — used only if a
+/// live read of `settings`' own `layout_refresh_secs` preference fails (see
+/// the [module docs](self)' "Session poll cadence" section) — matches
 /// `docs/redesign.html`'s settings row ("layout refresh — every 3s"), the
 /// same value `settings::domain::entities::Preferences::defaults` ships.
 pub const POLL_PERIOD_SECS: u32 = 3;
@@ -111,13 +117,6 @@ pub struct SessionsController {
     /// Mock poll ticks actually taken (i.e. not skipped by the pause) — the
     /// observable the pause's own tests assert on.
     polls: AtomicU32,
-    /// The poll's resolved cadence — `None` until the async preferences load
-    /// [`pages.rs`](super::pages) kicks off from `Component::init` resolves.
-    /// See the [module docs](self)' "Poll cadence" section.
-    pub poll_period: RwSignal<Option<u32>>,
-    /// Guards [`claim_poll_interval_start`](Self::claim_poll_interval_start)'s
-    /// once-only contract.
-    poll_interval_started: AtomicBool,
     /// Whether a poll-triggered refresh is currently outstanding — the
     /// in-flight claim that bounds the mock poll's own concurrency to one.
     /// Without it, an RPC round trip slower than the poll's own period lets
@@ -160,8 +159,6 @@ impl SessionsController {
             loaded: RwSignal::new(false),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
-            poll_period: RwSignal::new(None),
-            poll_interval_started: AtomicBool::new(false),
             poll_in_flight: AtomicBool::new(false),
             generation: AtomicU64::new(0),
         }
@@ -281,12 +278,12 @@ impl SessionsController {
     /// paused or not-yet-loaded controller never touches the flag at all.
     /// Only a taken tick counts towards [`polls_taken`](Self::polls_taken).
     ///
-    /// The caller drives the timing (`clean_signals_frust::use_interval` in
-    /// the screen's `build`, once [`poll_period`](Self::poll_period)
-    /// resolves — see the [module docs](self)' "Poll cadence" section) and
-    /// the async spawn (through [`refresh_from_poll`](Self::refresh_from_poll),
-    /// which releases the claim this takes), so this stays synchronous and
-    /// unit-testable.
+    /// The caller drives the timing (`pages.rs`'s shared cadence-loop
+    /// helper, re-resolving `settings`' `layout_refresh_secs` preference
+    /// before every sleep — see the [module docs](self)' "Session poll
+    /// cadence" section) and the async spawn (through
+    /// [`refresh_from_poll`](Self::refresh_from_poll), which releases the
+    /// claim this takes), so this stays synchronous and unit-testable.
     pub fn take_poll_tick(&self) -> bool {
         let poll = self.is_polling()
             && self.loaded.get_untracked()
@@ -295,18 +292,6 @@ impl SessionsController {
             self.polls.fetch_add(1, Ordering::Relaxed);
         }
         poll
-    }
-
-    /// Claims the one-time right to start the mock poll's `use_interval`.
-    /// Returns `true` exactly once per controller (the caller then starts
-    /// the interval), `false` on every later call — `Component::build`
-    /// re-runs on every tracked write, and [`poll_period`](Self::poll_period)
-    /// stays `Some` forever after it first resolves, so without this a
-    /// second rebuild would start a second interval.
-    pub fn claim_poll_interval_start(&self) -> bool {
-        self.poll_interval_started
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
     }
 
     /// Whether the mock poll is currently running (i.e. nothing this screen
@@ -484,22 +469,5 @@ mod tests {
 
         c.observe_depth(1);
         assert!(c.is_polling());
-    }
-
-    #[test]
-    fn poll_period_starts_unresolved() {
-        let c = controller();
-        assert_eq!(c.poll_period.get_untracked(), None);
-    }
-
-    #[test]
-    fn claim_poll_interval_start_succeeds_exactly_once() {
-        let c = controller();
-        assert!(c.claim_poll_interval_start(), "the first claim wins");
-        assert!(
-            !c.claim_poll_interval_start(),
-            "a second claim (a later rebuild) must not win again"
-        );
-        assert!(!c.claim_poll_interval_start());
     }
 }

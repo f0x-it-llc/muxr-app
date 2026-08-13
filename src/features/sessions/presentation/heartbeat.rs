@@ -1,13 +1,17 @@
 //! The `.conn-row` strip's connection heartbeat: a radar ping ring around its
 //! success dot, and the rolling latency readout at the other end of the row.
 //!
-//! Every [`PING_PERIOD`] the screen times one real `GetVersion` round trip
+//! `pages.rs`'s `Component::init` times one real `GetVersion` round trip
 //! ([`crate::connection::ConnectionController::ping`]) while `/sessions` is on
-//! top. Each tick starts the ring's own clock; the measurement that comes back
-//! is **rolled** into the readout over [`ROLL_MS`] rather than snapping to it.
-//! Ported from `examples/glyph-catalog`'s "connection heartbeat" interaction
-//! moment — the catalog drives that moment off a canned latency cycle, this
-//! one off the wire.
+//! top, on the **same live-resolved cadence** as the session-list poll —
+//! `settings`' own stored `layout_refresh_secs` preference, the "session
+//! poll" group (`super::controllers`' module docs' "Session poll cadence"
+//! section) — rather than a heartbeat-private constant. Each tick starts the
+//! ring's own clock; the measurement that comes back is **rolled** into the
+//! readout over [`ROLL_MS`] rather than snapping to it. Ported from
+//! `examples/glyph-catalog`'s "connection heartbeat" interaction moment — the
+//! catalog drives that moment off a canned latency cycle, this one off the
+//! wire.
 //!
 //! # Wall clock, and the frame ticker that keeps it moving
 //!
@@ -67,12 +71,6 @@ use frust::{
 use super::chrome::{RADIUS_FULL, panel, swatch};
 use super::pages::SessionsState;
 use super::pieces::DOT;
-
-/// How often the strip re-times the connection. The original app's fixed 3s
-/// heartbeat — deliberately **not** `settings`' `layout_refresh_secs`, which
-/// paces the session *list* poll and is the user's to retune; the ping's
-/// cadence is the strip's own.
-pub(super) const PING_PERIOD: Duration = Duration::from_secs(3);
 
 /// How long one ping ring takes to expand and fade out.
 const RING_MS: f64 = 1600.0;
