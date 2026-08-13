@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
 use frust_core::accesskit::{Node, Role};
 use frust_core::{
     FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
-    PointerEvent, PointerPhase, RenderRoot, View,
+    PointerEvent, PointerPhase, RenderRoot, View, WindowEdgeInsets, WindowInsets,
 };
 use frust_reactive::{FrameWaker, ReactiveRuntime};
 use frust_scene::GlyphRun;
@@ -75,6 +75,22 @@ pub const EPSILON: f64 = 0.5;
 /// The default surface every un-sized frame helper lays out at ([`W`]×[`H`]).
 pub fn surface() -> Size {
     Size::new(W, H)
+}
+
+/// A [`WindowInsets`] carrying only an IME (`view_insets`) bottom occlusion —
+/// the layout input a shell's keyboard listener pushes (Android
+/// `WindowInsetsCompat.Type.ime()`, iOS `keyboardWillChangeFrame`), landing as
+/// `view_insets.bottom` (never `view_padding` — system bars are not the IME,
+/// see `frust_core::WindowInsets`'s own doc). Mirrors
+/// `frust-widgets`' `glyph::dialog` test module's own private `ime_insets`
+/// helper, transcribed here since that one isn't public. Publish it onto a
+/// harness's `RenderRoot` with [`RenderRoot::set_insets`] before the frame
+/// that should see the keyboard up.
+pub fn ime_bottom_inset(bottom: f64) -> WindowInsets {
+    WindowInsets::new(
+        WindowEdgeInsets::ZERO,
+        WindowEdgeInsets::new(0.0, 0.0, 0.0, bottom),
+    )
 }
 
 /// A GPU-free paint target: counts glyph runs (one per painted `Text` — enough
