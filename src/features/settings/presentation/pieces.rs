@@ -221,8 +221,6 @@ const COPY_SECRET_FAILED_TOAST: &str = "Couldn't copy to clipboard";
 /// `ColorScheme` role carries a translucent accent wash, so it derives from
 /// `primary` by alpha — the Connect screen's own constant.
 const AMBER_FAINT_ALPHA: f32 = 0.12;
-/// `--amber-border: rgba(255,182,39,0.35)` — same derivation, hairline weight.
-const AMBER_BORDER_ALPHA: f32 = 0.35;
 /// `--fg-dim` derived from `on_surface_variant` by alpha — the constant both
 /// other screens document.
 const FG_DIM_ALPHA: f32 = 0.62;
@@ -253,9 +251,6 @@ pub(super) struct Palette {
     pub(super) base: Color,
     /// `--bg-raised`: the mark tile and the read-write chip's fill.
     pub(super) raised: Color,
-    /// `--bg-overlay`: was used by the hand-drawn toggle (now deleted).
-    #[allow(dead_code)]
-    pub(super) overlay: Color,
     /// `--border-bright`: the read-write chip's hairline and the dashed row's.
     pub(super) outline: Color,
     /// `--border`: every row's bottom rule, and the picker's separators.
@@ -264,12 +259,6 @@ pub(super) struct Palette {
     pub(super) amber: Color,
     /// `--amber-faint`, derived (see [`AMBER_FAINT_ALPHA`]).
     pub(super) amber_faint: Color,
-    /// `--amber-border`: was used by the hand-drawn toggle (now deleted).
-    #[allow(dead_code)]
-    pub(super) amber_border: Color,
-    /// The bright accent *fill* — was used by the hand-drawn toggle (now deleted).
-    #[allow(dead_code)]
-    pub(super) amber_fill: Color,
     /// `--fg`: primary text.
     pub(super) fg: Color,
     /// `--fg-muted`: the mark tiles' ink and the read-write chip's.
@@ -303,13 +292,10 @@ pub(super) fn palette(theme: &Theme) -> Palette {
     Palette {
         base: scheme.surface_container_low,
         raised: scheme.surface_container_high,
-        overlay: scheme.surface_container_highest,
         outline: scheme.outline,
         rule: scheme.outline_variant,
         amber: scheme.primary,
         amber_faint: scheme.primary.with_alpha(AMBER_FAINT_ALPHA),
-        amber_border: scheme.primary.with_alpha(AMBER_BORDER_ALPHA),
-        amber_fill: scheme.primary_container,
         fg: scheme.on_surface,
         fg_muted: scheme.on_surface_variant,
         fg_dim: scheme.on_surface_variant.with_alpha(FG_DIM_ALPHA),
@@ -448,33 +434,23 @@ impl PickerKind {
 }
 
 /// What a row *does*, which also decides what sits in its trailing slot.
+/// (The bell row is not a `RowAction` — it is composed directly in
+/// [`bell_notifications_row`], where the real switch owns the tap target.)
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub(super) enum RowAction {
     /// Inert: no chevron, no gesture (the version rows and connection info rows).
     Static,
     /// A chevron row that opens a picker sheet.
     Picker(PickerKind),
-    /// The bell row: kept for exhaustiveness in patterns, but no longer
-    /// constructed (the bell row is now composed directly in [`bell_notifications_row`]).
-    Bell(bool),
-}
-
-impl RowAction {
-    /// Whether a tap on this row does anything at all.
-    #[allow(dead_code)]
-    fn interactive(self) -> bool {
-        !matches!(self, RowAction::Static)
-    }
 }
 
 /// One `.set-row`: the mark tile, the label over its value, and a trailing
-/// chevron or switch.
+/// chevron for anything that leads somewhere.
 ///
-/// The **whole row** is the control (the mock draws no separate hit target, and
-/// a 28px chevron would be an unreachable one on a phone), so the bell row's
-/// switch flips on a tap anywhere along it — the switch is the state, not the
-/// button.
+/// For a [`RowAction::Picker`] the **whole row** is the control (the mock draws
+/// no separate hit target, and a 28px chevron would be an unreachable one on a
+/// phone). The bell row is not built here — [`bell_notifications_row`] composes
+/// it around the real switch, which owns its own tap target.
 pub(super) fn settings_row(
     mark: RowMark,
     label: &'static str,
@@ -516,7 +492,6 @@ pub(super) fn settings_row(
         RowAction::Static => any(box_),
         RowAction::Picker(_) => any(GestureDetector(box_)
             .on_tap(move |state: &mut SettingsState| super::pages::row_tapped(state, action))),
-        RowAction::Bell(_) => any(box_),
     }
 }
 
@@ -544,7 +519,6 @@ fn trailing_slot(
         RowAction::Picker(_) => Some(any(icon(CHEVRON_RIGHT)
             .size(CHEVRON)
             .color(colors.fg_faintest))),
-        RowAction::Bell(_) => None,
     }
 }
 
@@ -1509,13 +1483,6 @@ mod tests {
     }
 
     #[test]
-    fn only_a_static_row_is_inert() {
-        assert!(!RowAction::Static.interactive());
-        assert!(RowAction::Picker(PickerKind::FontSize).interactive());
-        assert!(RowAction::Bell(true).interactive());
-    }
-
-    #[test]
     fn no_mark_is_an_emoji() {
         // The tripwire for this screen's hardest-won rule (see the module
         // docs): a text mark must stay inside the BMP ranges the app's one
@@ -1558,12 +1525,7 @@ mod tests {
 
     #[test]
     fn the_derived_alphas_stay_legal_and_ordered() {
-        for alpha in [
-            AMBER_FAINT_ALPHA,
-            AMBER_BORDER_ALPHA,
-            FG_DIM_ALPHA,
-            FG_FAINTEST_ALPHA,
-        ] {
+        for alpha in [AMBER_FAINT_ALPHA, FG_DIM_ALPHA, FG_FAINTEST_ALPHA] {
             assert!((0.0..=1.0).contains(&alpha), "{alpha}");
         }
         // "Faintest" has to actually be fainter than "dim", or the chevrons
