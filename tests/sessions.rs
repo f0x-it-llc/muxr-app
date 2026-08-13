@@ -455,6 +455,7 @@ fn open_manage_sheet(h: &mut Harness, name: &str) -> Chrome {
 struct Chrome {
     rounded: Vec<(Point, Size)>,
     strokes: Vec<(Point, Size)>,
+    paths: Vec<(Point, Size)>,
 }
 
 impl Chrome {
@@ -462,12 +463,20 @@ impl Chrome {
         Chrome {
             rounded: added(&before.rounded, &after.rounded),
             strokes: added(&before.strokes, &after.strokes),
+            paths: added(&before.paths, &after.paths),
         }
     }
 
-    /// The overlay's own panel — the biggest rect it painted.
+    /// The overlay's own panel — the biggest surface it filled.
+    ///
+    /// Both channels, because the two overlays paint their panel differently: a
+    /// dialog's is a plain rounded rect, while the Glyph sheet's is a *path*
+    /// (only its top corners are rounded, which `fill_rounded_rect` cannot
+    /// express).
     fn panel(&self) -> (Point, Size) {
-        largest(&self.rounded).expect("an overlay always paints its own panel")
+        let mut candidates = self.rounded.clone();
+        candidates.extend(self.paths.iter().copied());
+        largest(&candidates).expect("an overlay always paints its own panel")
     }
 
     /// The overlay's full-content-width child: a dialog's name field, or the
@@ -717,11 +726,11 @@ fn a_long_press_opens_the_management_sheet_without_attaching() {
     let sheet = open_manage_sheet(&mut h, SEEDED[0]);
     assert_eq!(h.depth(), 2, "the sheet is pushed as its own page");
 
-    // Bottom-anchored: the panel's own bottom edge overshoots the viewport by
-    // one corner radius (`ui::sheet`'s top-rounded-only trick).
+    // Bottom-anchored: the panel's own bottom edge is the viewport's, where a
+    // dialog's panel floats clear of it.
     let (origin, size) = sheet.panel();
     assert!(
-        origin.y + size.height > support::H,
+        (origin.y + size.height - support::H).abs() < EPSILON,
         "a sheet, not a dialog: {origin:?}/{size:?}"
     );
     // Two ordinary rows (Attach, Rename…) plus the destructive one, which

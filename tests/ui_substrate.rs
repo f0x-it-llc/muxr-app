@@ -36,15 +36,18 @@ use peniko::Color;
 
 use muxr::failure::AppFailure;
 use muxr::ui::dialogs::{confirm_dialog, name_input_dialog};
-use muxr::ui::sheet::{SCRIM_ALPHA, show_sheet};
+use muxr::ui::sheet::{SCRIM_ALPHA, SheetHandle, show_sheet};
 use muxr::ui::toasts::{app_toasts, toast_layer};
 use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    RecScene, alpha_of, by_width, center, char_key, fills_at, frame, frame_at, largest, ms,
-    named_key, node_labels, pointer, serial, settle, setup, smallest, tap,
+    EPSILON, RecScene, alpha_of, by_width, center, char_key, fills_at, frame, frame_at, largest,
+    ms, named_key, node_labels, pointer, serial, settle, setup, smallest, tap,
 };
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The panel gutter both overlays use, transcribed: `frust::glyph::dialog`'s
 /// `DIALOG_PADDING` and `ui::sheet`'s `PANEL_PAD` are both 20px, so a
@@ -94,9 +97,9 @@ impl Harness {
         Self::themed(None)
     }
 
-    /// Mount under `theme` — what the sheet-staging tests need, since a
-    /// `ModalStage`'s durations, easings and `reduce_motion` collapse are all
-    /// theme reads (an unthemed mount stages on the transcribed Glyph
+    /// Mount under `theme` — what the sheet-staging tests need, since the
+    /// staging's durations, easings and `reduce_motion` collapse are all theme
+    /// reads (an unthemed mount stages on the widget's own transcribed Glyph
     /// fallbacks instead, which is what every other test here runs on).
     fn themed(theme: Option<Theme>) -> Self {
         let controller: NavigatorController<State> = NavigatorController::new();
@@ -174,9 +177,15 @@ impl Harness {
     }
 }
 
-/// The overlay panel in `scene` — the biggest filled rect it painted.
+/// The overlay panel in `scene` — the biggest surface it filled.
+///
+/// Both channels, because the two overlays paint their panel differently: a
+/// dialog's is a plain rounded rect, while the Glyph sheet's is a *path* (only
+/// its top corners are rounded, which `fill_rounded_rect` cannot express).
 fn panel(scene: &RecScene) -> (Point, Size) {
-    largest(&scene.rounded).expect("an overlay always paints its own panel")
+    let mut candidates = scene.rounded.clone();
+    candidates.extend(scene.paths.iter().copied());
+    largest(&candidates).expect("an overlay always paints its own panel")
 }
 
 /// An overlay's full-content-width child — the dialog's name field, the
@@ -357,6 +366,47 @@ fn open_sheet(h: &mut Harness) -> RecScene {
     h.settle()
 }
 
+/// Open a sheet and hand back the [`SheetHandle`] its body builder was given —
+/// the app-side closer every row, button and delayed close goes through.
+fn open_sheet_with_handle(h: &mut Harness) -> SheetHandle {
+    let captured: Rc<RefCell<Option<SheetHandle>>> = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&captured);
+    show_sheet(&h.controller, move |sheet| {
+        *sink.borrow_mut() = Some(sheet.clone());
+        any(text("panes & tabs"))
+    });
+    h.settle();
+    let handle = captured.borrow().clone();
+    handle.expect("the body builder ran, so it was handed a handle")
+}
+
+/// A point inside the sheet's own drag-handle strip: the top band of the
+/// panel, which carries no control — where a dismiss drag starts.
+fn handle_point(scene: &RecScene) -> Point {
+    let (origin, size) = panel(scene);
+    Point::new(origin.x + size.width / 2.0, origin.y + 10.0)
+}
+
+/// How far below its resting place the panel is painting this frame.
+///
+/// The Glyph sheet slides by pushing **one** translate around its panel and
+/// painting its scrim outside it (that split is the whole point of the
+/// staging), so the recorded panel rect never moves and this transform *is*
+/// the slide — see `support::RecScene`'s own docs.
+/// The largest y translation of the frame, rather than "the only one": a page
+/// still inside its own push is wrapped in the navigator's transform too, which
+/// is the identity here (the sheet is pushed with no page transition at all).
+fn panel_offset(scene: &RecScene) -> f64 {
+    scene
+        .transforms
+        .iter()
+        .map(|transform| transform.as_coeffs()[5])
+        .fold(
+            0.0,
+            |widest, y| if y.abs() > widest.abs() { y } else { widest },
+        )
+}
+
 #[test]
 fn sheet_opens_renders_its_body_and_dismisses_on_a_scrim_tap() {
     let _g = serial();
@@ -370,28 +420,20 @@ fn sheet_opens_renders_its_body_and_dismisses_on_a_scrim_tap() {
     let body = content_child(&scene);
     assert!(
         body.0.y > panel_origin.y && body.1.width < panel_size.width,
-        "the body renders inside the panel: body {body:?}, panel \
-         {panel_origin:?}/{panel_size:?}"
+        "the body renders inside the panel, inset by its gutter: body {body:?}, \
+         panel {panel_origin:?}/{panel_size:?}"
     );
-    // Bottom-anchored, clamped and centered on this 800px-wide viewport.
-    assert_eq!(
-        panel_size.width,
-        muxr::ui::sheet::MAX_WIDTH,
-        "a wide viewport clamps the panel to the 640dp cap"
-    );
+    // Edge to edge: a Glyph sheet's panel spans the viewport (the 640dp
+    // Material cap went with the app's own hand-rolled chrome).
     assert!(
-        (panel_origin.x - (support::W - muxr::ui::sheet::MAX_WIDTH) / 2.0).abs() < 0.5,
-        "…and centers it: {panel_origin:?}"
+        (panel_size.width - support::W).abs() < EPSILON && panel_origin.x.abs() < EPSILON,
+        "the panel spans the whole width: {panel_origin:?}/{panel_size:?}"
     );
-    // The panel is *painted* deliberately past the bottom edge so its bottom
-    // corner rounding falls off-screen (see `ui/sheet.rs`'s paint) — its
-    // layout rect is flush with it, and the overshoot is exactly one corner
-    // radius.
-    let painted_bottom = panel_origin.y + panel_size.height;
+    // Bottom-anchored, and flush: only the panel's top corners are rounded, so
+    // nothing is painted past the bottom edge to hide a rounding with.
     assert!(
-        painted_bottom > support::H && painted_bottom - support::H < 2.0 * PANEL_PADDING,
-        "…anchored to the bottom edge, overshooting it by one corner radius \
-         only: {painted_bottom}"
+        (panel_origin.y + panel_size.height - support::H).abs() < EPSILON,
+        "…anchored to the bottom edge: {panel_origin:?}/{panel_size:?}"
     );
 
     h.tap(SCRIM_POINT);
@@ -421,18 +463,128 @@ fn a_tap_on_the_sheet_panel_never_dismisses_it() {
 
     // Then the regression a plain `Align`-in-`Stack` composition has: a press
     // on the panel's own *background* falling through to the scrim behind it.
-    // The drag-handle band at the panel's top edge is panel with no control
-    // under it — the body starts below the handle zone.
+    // The drag-handle strip is panel with no control under it, and a press
+    // that goes nowhere (no travel before its release) leaves the sheet up.
     let scene = h.settle();
-    let (panel_origin, panel_size) = panel(&scene);
-    let bare_panel = Point::new(
-        panel_origin.x + panel_size.width / 2.0,
-        panel_origin.y + 4.0,
-    );
-    h.tap(bare_panel);
+    h.tap(handle_point(&scene));
     h.flush();
     assert_eq!(h.state.confirmed, 1, "…and it hit no control");
     assert_eq!(h.depth(), 2, "the sheet stays up");
+}
+
+#[test]
+fn a_drag_down_from_the_handle_dismisses_the_sheet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let scene = open_sheet(&mut h);
+    let (_, panel_size) = panel(&scene);
+    let start = handle_point(&scene);
+    // Past the half-panel-height threshold the Glyph sheet dismisses on: the
+    // release is what decides, so the drag is Down → Move → Up.
+    let end = Point::new(start.x, start.y + panel_size.height * 0.75);
+
+    h.root
+        .event(&mut h.state, &pointer(PointerPhase::Down, start));
+    h.root
+        .event(&mut h.state, &pointer(PointerPhase::Move, end));
+    h.root.event(&mut h.state, &pointer(PointerPhase::Up, end));
+    h.flush();
+
+    assert_eq!(h.depth(), 1, "a past-threshold handle drag dismisses");
+    assert_eq!(
+        h.state.confirmed, 0,
+        "…without ever pressing the body it dragged over"
+    );
+}
+
+#[test]
+fn a_short_drag_from_the_handle_leaves_the_sheet_up() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let scene = open_sheet(&mut h);
+    let start = handle_point(&scene);
+    let end = Point::new(start.x, start.y + 8.0);
+
+    h.root
+        .event(&mut h.state, &pointer(PointerPhase::Down, start));
+    h.root
+        .event(&mut h.state, &pointer(PointerPhase::Move, end));
+    h.root.event(&mut h.state, &pointer(PointerPhase::Up, end));
+    h.flush();
+
+    assert_eq!(
+        h.depth(),
+        2,
+        "a short drag settles back rather than dismissing"
+    );
+}
+
+#[test]
+fn escape_dismisses_the_sheet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let scene = open_sheet(&mut h);
+    // A press on the handle strip claims focus for the sheet itself (and hits
+    // no control), which is the chain `Escape` then travels: content holding
+    // the deeper focus path would get first crack at the key instead.
+    h.tap(handle_point(&scene));
+    h.press(NamedKey::Escape);
+    h.flush();
+
+    assert_eq!(h.depth(), 1, "Escape dismisses the sheet");
+}
+
+#[test]
+fn a_duplicate_close_pops_the_sheet_once_and_leaves_the_page_under_it_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    // A page under the sheet to be wrongly popped — in the app that is
+    // whatever overlay (or route) the sheet went up over.
+    h.controller.push(|| any(text("under the sheet")));
+    h.settle();
+    assert_eq!(h.depth(), 2);
+
+    let sheet = open_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), 3, "the sheet is pushed over it");
+
+    // The defect the gate exists for: a pop lands a rebuild after it is
+    // enqueued, so for one whole frame a second closer can still fire.
+    assert!(sheet.close(), "the first close is the one that closes it");
+    assert!(!sheet.close(), "…and the second is a no-op");
+    h.flush();
+
+    assert_eq!(h.depth(), 2, "exactly one page popped — the sheet's own");
+}
+
+#[test]
+fn a_close_after_the_sheet_is_already_gone_pops_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    h.controller.push(|| any(text("under the sheet")));
+    h.settle();
+    let sheet = open_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), 3);
+
+    // The sheet leaves by its own staged exit (a scrim tap), which the app's
+    // handle never sees — the completion latch is what stops a close still in
+    // flight from landing on the page underneath.
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 2, "the scrim tap took the sheet");
+
+    assert!(!sheet.close(), "the handle was latched when the page went");
+    h.flush();
+    assert_eq!(h.depth(), 2, "…so nothing else popped");
 }
 
 // ---------------------------------------------------------------------------
@@ -444,11 +596,16 @@ fn a_tap_on_the_sheet_panel_never_dismisses_it() {
 /// its start, so a partial frame is genuinely partial.
 const MID_STAGING_MS: f64 = 60.0;
 
+/// The framework's own reduced-motion collapse, transcribed
+/// (`frust`'s `nav::transition::REDUCE_MOTION_DURATION`, which the Glyph sheet
+/// resolves both of its timings to when a theme asks for reduced motion).
+const REDUCE_MOTION_MS: f64 = 120.0;
+
 /// The sheet's scrim in `scene`: every plain fill covering the **whole**
-/// surface, which is where `SheetScaffoldWidget::paint` puts it on every frame
-/// regardless of staging. A scrim found anywhere else would be the defect this
-/// section exists for — the old whole-page `SlideUp` translated it with the
-/// panel, so it wiped up the screen instead of fading in place.
+/// surface, which is where the Glyph sheet puts it on every frame regardless of
+/// staging. A scrim found anywhere else would be the defect this section exists
+/// for — a whole-page `SlideUp` translates it with the panel, so it wipes up the
+/// screen instead of fading in place.
 fn scrim(scene: &RecScene) -> Vec<Color> {
     fills_at(scene, Point::ZERO, support::surface())
 }
@@ -490,23 +647,25 @@ fn the_panel_rises_while_the_scrim_fades_in_place() {
     let _ambient = setup();
 
     let (mut h, mid) = mid_entrance(Theme::glyph_baseline());
-    let mid_panel = panel(&mid);
+    let mid_offset = panel_offset(&mid);
     let mid_scrim = scrim_alpha(&mid);
 
     let settled = h.settle();
-    let settled_panel = panel(&settled);
 
     // The panel is still on its way up…
     assert!(
-        mid_panel.0.y > settled_panel.0.y + 0.5,
-        "mid-entrance the panel is still below its resting place ({} vs {})",
-        mid_panel.0.y,
-        settled_panel.0.y
+        mid_offset > 0.5,
+        "mid-entrance the panel is still below its resting place ({mid_offset})"
+    );
+    assert!(
+        panel_offset(&settled).abs() < EPSILON,
+        "…and rests flush once it arrives ({})",
+        panel_offset(&settled)
     );
     // …while the scrim is *already* partially dimmed at FULL coverage. That
-    // pair is the whole point: under the old `PageTransition::SlideUp` the
-    // scrim was part of the page and so was displaced by exactly the same
-    // amount as the panel — a black rectangle wiping up the screen.
+    // pair is the whole point: under a whole-page `PageTransition::SlideUp` the
+    // scrim is part of the page and so is displaced by exactly the same amount
+    // as the panel — a black rectangle wiping up the screen.
     assert!(
         mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
         "mid-entrance the scrim is partly faded in ({mid_scrim} of \
@@ -552,7 +711,7 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
     let mut h = Harness::themed(Some(Theme::glyph_baseline()));
     show_sheet(&h.controller, |_sheet| any(text("pair a host")));
     let settled = h.settle();
-    let settled_panel = panel(&settled);
+    assert!(panel_offset(&settled).abs() < EPSILON);
     assert_eq!(h.depth(), 2);
 
     // A scrim tap stages the exit; the pop is deferred until it has played.
@@ -564,14 +723,12 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
     let mid = h.frame_at(support::SETTLE_MS + 60.0);
     assert_eq!(h.depth(), 2, "the sheet is still up while it leaves");
 
-    let mid_panel = panel(&mid);
-    let mid_scrim = scrim_alpha(&mid);
     assert!(
-        mid_panel.0.y > settled_panel.0.y + 0.5,
-        "mid-exit the panel is on its way back down ({} vs {})",
-        mid_panel.0.y,
-        settled_panel.0.y
+        panel_offset(&mid) > 0.5,
+        "mid-exit the panel is on its way back down ({})",
+        panel_offset(&mid)
     );
+    let mid_scrim = scrim_alpha(&mid);
     assert!(
         mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
         "…while the scrim fades out with it ({mid_scrim})"
@@ -583,35 +740,37 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
 }
 
 #[test]
-fn reduce_motion_collapses_the_sheet_to_a_pure_fade() {
+fn reduce_motion_collapses_the_sheet_to_the_frameworks_linear_staging() {
     let _g = serial();
     let _ambient = setup();
 
     let mut theme = Theme::glyph_baseline();
     theme.motion.reduce_motion = true;
     let (mut h, mid) = mid_entrance(theme);
-    let mid_panel = panel(&mid);
-    let mid_scrim = scrim_alpha(&mid);
 
-    let settled_panel = panel(&h.settle());
+    // Both channels run the framework's reduced timeline: one collapsed
+    // duration, **linear** — which is what the probe below discriminates, the
+    // authored `spatial`/`effects` easings being well past linear at this
+    // point in the entrance.
+    let progress = (MID_STAGING_MS / REDUCE_MOTION_MS) as f32;
+    assert!(
+        (scrim_alpha(&mid) - SCRIM_ALPHA * progress).abs() < 0.02,
+        "the scrim fades linearly under reduced motion ({} vs {})",
+        scrim_alpha(&mid),
+        SCRIM_ALPHA * progress
+    );
 
-    // Glyph's hard accessibility rule at this seam: the panel does not travel
-    // at all — it is already where it belongs on the very first frame — and
-    // only the fade plays. (The fade is what makes this an assertion rather
-    // than a vacuous read: something is still animating.)
+    // …and it is over by that duration, where the full entrance still has
+    // 100ms to run.
+    let collapsed = h.frame_at(REDUCE_MOTION_MS + 5.0);
     assert!(
-        (mid_panel.0.y - settled_panel.0.y).abs() < 0.5,
-        "reduced motion must not slide the panel ({} vs {})",
-        mid_panel.0.y,
-        settled_panel.0.y
-    );
-    assert_eq!(
-        mid_panel.1, settled_panel.1,
-        "…nor stretch it (no overshoot to paint past)"
+        panel_offset(&collapsed).abs() < EPSILON,
+        "the panel has arrived ({})",
+        panel_offset(&collapsed)
     );
     assert!(
-        mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
-        "…while the scrim still fades in ({mid_scrim})"
+        (scrim_alpha(&collapsed) - SCRIM_ALPHA).abs() < 1e-6,
+        "…and the scrim is fully dimmed"
     );
 }
 

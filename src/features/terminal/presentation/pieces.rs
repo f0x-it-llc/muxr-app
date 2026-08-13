@@ -499,8 +499,8 @@ pub(super) fn card_body<State: 'static>(
 
 /// `.sheet-toprow` — the sheet's own label and its round close button.
 ///
-/// The handle above it is the scaffold's (`crate::ui::sheet` draws one at the
-/// panel's top), so this deliberately draws none: two would read as a mistake.
+/// The handle above it is the Glyph sheet's own (it draws one at the panel's
+/// top), so this deliberately draws none: two would read as a mistake.
 pub(super) fn sheet_top_row<State: 'static, F: Fn(&mut State) + 'static>(
     colors: &Palette,
     on_close: F,
@@ -858,10 +858,9 @@ pub(super) fn new_pane_row<
 /// (and so the actual scrolling) ever engages.
 ///
 /// Laid out as an ordinary (not `flexible`) child of the outer column
-/// `pages::Actions::sheet_body` composes: `ui/sheet.rs`'s own body
-/// constraint is itself unbounded in height (the sheet decides its own
-/// size from its content, clamped only at the *panel*, not the body — see
-/// that module's `SheetScaffoldWidget::layout`), and a `flexible` child
+/// `pages::Actions::sheet_body` composes: a sheet's body is laid out at its
+/// own intrinsic height (the panel grows to fit it), so there is no free
+/// main-axis space to take a share of — and a `flexible` child
 /// under an unbounded main axis divides *zero* free space
 /// (`frust_widgets::FlexWidget::layout`'s own free-space computation) —
 /// the tight-constraint trap `examples/glyph-catalog`'s own device-gate

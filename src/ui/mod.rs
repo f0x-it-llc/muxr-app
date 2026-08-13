@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`backdrop`] | The full-bleed page background both the Connect screen and the splash overlay paint |
 //! | [`dialogs`] | Confirm / name-input modal helpers over `frust::glyph`'s dialog |
-//! | [`sheet`] | The modal bottom-sheet scaffold (a workaround — frust has no sheet primitive) |
+//! | [`sheet`] | The modal bottom-sheet adapter over `frust::glyph`'s own sheet (`show_sheet` + its dismissal gate) |
 //! | [`splash`] | The cold-start splash sequence (see `docs/splash.html`/`docs/muxr-app-icons` for the design reference) |
 //! | [`toasts`] | The failure→toast queue handle and the toast layer the shell mounts |
 //! | [`topbar`] | The branded `muxr` top bar (brand-or-back leading slot + crossfading centered title + one icon slot) |

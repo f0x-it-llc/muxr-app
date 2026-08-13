@@ -9,7 +9,7 @@
 //! `.pick-row`'s separator and `.pick-row.sel`'s amber fill — and no facade
 //! widget paints an arbitrary filled/bordered rect. So this [`View`]/[`Widget`]
 //! pair — authored through [`frust::authoring`], the same seam
-//! `crate::ui::backdrop`/`crate::ui::sheet` use — fills the gap.
+//! `crate::ui::backdrop` uses — fills the gap.
 //!
 //! **Feature-local, and knowingly the third copy.** `features::connect` and
 //! `features::sessions` each own a panel of their own, because a feature never

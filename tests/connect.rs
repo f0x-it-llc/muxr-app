@@ -1163,8 +1163,8 @@ fn the_qr_sheet_also_dismisses_on_escape() {
     harness.tap_node("the QR affordance", |node| {
         node.role() == Role::Button && node.label() == Some(QR_LABEL)
     });
-    // The scaffold claims focus on the press that opened it, so `Escape` has a
-    // chain to travel (`ui::sheet`'s dismissal contract).
+    // The sheet claims focus on any press inside it, so `Escape` has a chain
+    // to travel.
     harness.tap(Point::new(SURFACE.width / 2.0, SURFACE.height - 40.0));
     harness
         .root

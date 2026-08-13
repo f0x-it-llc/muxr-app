@@ -60,7 +60,7 @@ use frust_core::{
 use frust_reactive::{FrameWaker, ReactiveRuntime};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
-use kurbo::{Point, Rect, Shape, Size};
+use kurbo::{Affine, Point, Rect, Shape, Size};
 use peniko::{Brush, Color};
 use reactive_graph::owner::Owner;
 
@@ -99,6 +99,14 @@ pub fn surface() -> Size {
 ///   radius-carrying sibling. Most chrome in this app is a **rounded** fill, so
 ///   a suite asserting on the *tone* of a card (or on a radius that animates)
 ///   needs the same channel `fills` gives plain rects.
+/// - [`RecScene::transforms`] — every pushed `Affine`. Each other channel
+///   records the geometry a widget *hands* the scene, which is its resting
+///   geometry when the widget animates by pushing a transform around its paint
+///   instead of by moving pod origins (`frust::glyph`'s sheet slides its panel
+///   that way). Recording the transform itself is the only way such a slide is
+///   observable at all here — this recorder deliberately does not compose it
+///   into the coordinates it stores, so every pre-existing suite reads
+///   unchanged.
 #[derive(Default)]
 pub struct RecScene {
     pub glyph_runs: usize,
@@ -114,6 +122,8 @@ pub struct RecScene {
     /// the struct docs. Parallel to [`RecScene::rounded`], which stays
     /// geometry-only so every existing suite reads unchanged.
     pub rounded_fills: Vec<(Point, Size, f64, Color)>,
+    /// Every `push_transform`, in paint order — see the struct docs.
+    pub transforms: Vec<Affine>,
 }
 
 impl PaintScene for RecScene {
@@ -138,6 +148,9 @@ impl PaintScene for RecScene {
         let bounds = path.bounding_box();
         self.strokes
             .push((origin, Size::new(bounds.width(), bounds.height())));
+    }
+    fn push_transform(&mut self, transform: Affine) {
+        self.transforms.push(transform);
     }
 }
 
