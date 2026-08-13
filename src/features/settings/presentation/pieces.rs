@@ -153,14 +153,14 @@ const PICK_BLEED: f64 = 20.0;
 const PICK_TITLE_GAP: f64 = 18.0;
 /// The `✓` on the selected picker row.
 const CHECK_SIZE: f64 = 13.0;
-/// Vertical gap between a dialog's field/toggle/action rows — the same value
-/// `ui::dialogs::name_input_dialog`'s own `FIELD_ACTIONS_GAP` uses, duplicated
-/// here since this feature composes its own create-token dialog directly (see
-/// [`open_create_token_dialog`]'s own doc for why).
+/// Vertical gap inside the create dialog's `.content()` column — between the
+/// name field and the read-only toggle row — and (elsewhere in this file)
+/// between the secret-reveal sheet's own stacked rows. The gap from the
+/// dialog's title down to that column, and from the column down to its
+/// action row, is `glyph::dialog`'s own internal `TITLE_BODY_GAP`/
+/// `BODY_ACTIONS_GAP` now that the field/toggle live in `.content()` and
+/// Cancel/Save are real `.action(...)` buttons, not a hand-built row.
 const DIALOG_FIELD_GAP: f64 = 16.0;
-/// Horizontal gap between the create dialog's Cancel/Save buttons — mirrors
-/// `ui::dialogs`'s own `ACTION_GAP`.
-const DIALOG_ACTION_GAP: f64 = 10.0;
 
 // ---------------------------------------------------------------------------
 // Copy
@@ -816,7 +816,11 @@ pub(super) fn create_token_row(colors: &Palette, enabled: bool) -> AnyView<Setti
 /// `glyph_dialog`/`show_glyph_dialog` primitives that helper wraps, directly
 /// — the same shape (a controlled [`RwSignal`] field, a "disabled" submit per
 /// the framework's own no-disabled-`Button` gap `ui::dialogs`'s own doc
-/// names) with one more control.
+/// names) with one more control: the field and toggle are the dialog's real
+/// `.content()` (a stacked column — `glyph_dialog`'s dead-space blur reads
+/// from this slot, `crates/frust-widgets/src/glyph/dialog.rs`), and
+/// Cancel/Save are two real `.action(...)` buttons, not a single hand-built
+/// action row.
 ///
 /// `on_submit` receives the **trimmed**, non-empty name and the toggle's
 /// value; every dismissal route (cancel, scrim, `Escape`, back) closes the
@@ -849,53 +853,44 @@ pub(super) fn open_create_token_dialog(
             let toggle = dialog_read_only_row(ro, &colors, move |_state: &mut AppState| {
                 read_only.set(!read_only.get_untracked())
             });
-            let buttons = FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    flexible(1, SizedBox::<AppState>(None, None)),
-                    inflexible(
-                        button(DIALOG_CANCEL_LABEL, move |_state: &mut AppState| {
-                            cancel_nav.pop()
-                        })
-                        .style(ButtonStyle::Ghost)
-                        .small(),
-                    ),
-                    inflexible(SizedBox::<AppState>(Some(DIALOG_ACTION_GAP), None)),
-                    inflexible(
-                        button(DIALOG_SUBMIT_LABEL, move |_state: &mut AppState| {
-                            // "Disabled": the style below is the visual half,
-                            // this guard the behavioral one (see the module
-                            // docs' framework-gap note).
-                            if can_submit {
-                                submit_create_token(
-                                    &submit_nav,
-                                    &submit_current,
-                                    read_only.get_untracked(),
-                                );
-                            }
-                        })
-                        .style(if can_submit {
-                            ButtonStyle::Primary
-                        } else {
-                            ButtonStyle::Ghost
-                        })
-                        .small(),
-                    ),
-                ],
-            );
             glyph_dialog()
                 .title(CREATE_TOKEN_TITLE)
-                .action(any(FlexView::new(
+                .content(any(FlexView::new(
                     Axis::Vertical,
                     vec![
                         inflexible(field),
                         inflexible(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
                         inflexible(toggle),
-                        inflexible(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
-                        inflexible(buttons),
                     ],
                 )
                 .cross_axis(CrossAxisAlignment::Stretch)))
+                .action(any(button(
+                    DIALOG_CANCEL_LABEL,
+                    move |_state: &mut AppState| cancel_nav.pop(),
+                )
+                .style(ButtonStyle::Ghost)
+                .small()))
+                .action(any(button(
+                    DIALOG_SUBMIT_LABEL,
+                    move |_state: &mut AppState| {
+                        // "Disabled": the style below is the visual half,
+                        // this guard the behavioral one (see the module
+                        // docs' framework-gap note).
+                        if can_submit {
+                            submit_create_token(
+                                &submit_nav,
+                                &submit_current,
+                                read_only.get_untracked(),
+                            );
+                        }
+                    },
+                )
+                .style(if can_submit {
+                    ButtonStyle::Primary
+                } else {
+                    ButtonStyle::Ghost
+                })
+                .small()))
         },
         move |state: &mut AppState, result: PopResult| {
             if let Some((typed, read_only)) = result.take::<(String, bool)>() {

@@ -871,6 +871,49 @@ fn the_dashed_row_creates_a_session() {
     );
 }
 
+/// `ui::dialogs::name_input_dialog`'s field now composes through
+/// `glyph_dialog`'s `.content()` slot (gate-r8 task 35), so it gets the
+/// framework's dead-space blur: a `Down` on the dialog's own dead panel space
+/// ends the field's IME session without dismissing the dialog, and a second
+/// tap on the field re-engages it. The same pin as `tests/settings.rs`'s own
+/// (New Token dialog), driven against the create-session dialog here since
+/// this suite already owns it. Modeled on
+/// `crates/frust-widgets/src/glyph/dialog.rs`'s own
+/// `dead_space_down_ends_the_field_session_and_keeps_the_dialog_open` fixture
+/// — `panel.origin + (2, 2)` sits inside `PANEL_PADDING`, above the title and
+/// above the content/action rows, so no child lives there.
+#[test]
+fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
+
+    h.tap(center(dialog.content_child()));
+    assert!(
+        h.root.ime_state().is_some(),
+        "precondition: the field owns a live IME session"
+    );
+
+    let (panel_origin, _) = dialog.panel();
+    let dead = Point::new(panel_origin.x + 2.0, panel_origin.y + 2.0);
+    h.tap(dead);
+
+    assert!(
+        h.root.ime_state().is_none(),
+        "a Down on dead panel space ends the field's IME session — the keyboard retracts"
+    );
+    assert_eq!(h.depth(), 2, "the dialog itself is still open");
+
+    h.tap(center(dialog.content_child()));
+    assert!(
+        h.root.ime_state().is_some(),
+        "a second tap on the field re-engages it"
+    );
+}
+
 #[test]
 fn killing_every_session_shows_the_empty_state_and_creates_from_it() {
     let _g = serial();

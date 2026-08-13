@@ -32,31 +32,26 @@
 //!   [`name_input_dialog`]'s submit "disables" by rendering
 //!   [`frust::ButtonStyle::Ghost`] and no-op'ing its own `on_press` while the
 //!   field is blank (see [`SUBMIT_ENABLED_STYLE`]).
-//! - **`glyph_dialog` has no content slot.** Its body is a `String`; arbitrary
-//!   content can only be an *action*. [`name_input_dialog`] therefore passes
-//!   one action holding the whole field-over-buttons column — laid out
-//!   correctly (the action row is right-aligned, and this single action spans
-//!   the panel's content width), but plainly a workaround for a missing
-//!   `.content(AnyView)` builder.
+//!
+//! [`name_input_dialog`]'s field lives in `glyph_dialog`'s real `.content()`
+//! slot, and Cancel/Save are two real `.action(...)` buttons (the framework
+//! lays the action row out itself, right-aligned in reading order) — not the
+//! single hand-built field-over-buttons action this file used before
+//! `.content()` existed. The content slot matters beyond layout: a dialog's
+//! dead-space-blur contract (tapping the panel's own dead space clears the
+//! field's IME session without dismissing the dialog) reads specifically from
+//! that slot (`crates/frust-widgets/src/glyph/dialog.rs`), so a
+//! content-slotted field gets it and an action-slotted one would not.
 
 use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::{
-    Axis, ButtonStyle, CrossAxisAlignment, FlexView, Get, NavigatorController, PopResult, RwSignal,
-    Set, SizedBox, any, button, flexible, inflexible, text_input,
+    ButtonStyle, Get, NavigatorController, PopResult, RwSignal, Set, any, button, text_input,
 };
 
 /// The shared cancel affordance's label — one spelling for every dialog here.
 const CANCEL_LABEL: &str = "Cancel";
 /// [`name_input_dialog`]'s submit label — "Save" covers both create and rename.
 const SUBMIT_LABEL: &str = "Save";
-/// Vertical gap between [`name_input_dialog`]'s field and its button row, in
-/// logical px (Glyph's `--space-4`; the dialog's own padding supplies the
-/// panel gutter).
-const FIELD_ACTIONS_GAP: f64 = 16.0;
-/// Horizontal gap between the cancel and submit buttons, in logical px —
-/// matches `glyph::dialog`'s own `ACTION_GAP`, since this row stands in for
-/// that widget's action row.
-const ACTION_GAP: f64 = 10.0;
 /// The submit button's style while the field holds a usable name.
 const SUBMIT_ENABLED_STYLE: ButtonStyle = ButtonStyle::Primary;
 /// …and while it is blank: low-emphasis, paired with a no-op `on_press` (see
@@ -161,52 +156,32 @@ pub fn name_input_dialog<State: 'static>(
                 value.set(next)
             })
             .on_submit(move |_state: &mut State, typed: String| submit(&enter_nav, &typed));
-            let buttons = FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    // Flex v1 has no space-between (`MainAxisAlignment::Start`
-                    // only), so a flexible spacer is what pins the pair to the
-                    // trailing edge — `features::connect`'s `remember_row`
-                    // uses the same trick.
-                    flexible(1, SizedBox::<State>(None, None)),
-                    inflexible(
-                        button(CANCEL_LABEL, move |_state: &mut State| cancel_nav.pop())
-                            .style(ButtonStyle::Ghost)
-                            .small(),
-                    ),
-                    inflexible(SizedBox::<State>(Some(ACTION_GAP), None)),
-                    inflexible(
-                        button(SUBMIT_LABEL, move |_state: &mut State| {
-                            // "Disabled": the style below is the visual half,
-                            // this guard the behavioral one (see the module
-                            // docs' framework-gap note).
-                            if can_submit {
-                                submit(&submit_nav, &current);
-                            }
-                        })
-                        .style(if can_submit {
-                            SUBMIT_ENABLED_STYLE
-                        } else {
-                            SUBMIT_DISABLED_STYLE
-                        })
-                        .small(),
-                    ),
-                ],
-            );
             glyph_dialog()
                 .title(title.clone())
-                .action(any(FlexView::new(
-                    Axis::Vertical,
-                    vec![
-                        inflexible(field),
-                        inflexible(SizedBox::<State>(None, Some(FIELD_ACTIONS_GAP))),
-                        inflexible(buttons),
-                    ],
-                )
-                // Stretch so the field spans the panel's content width — see
-                // the module docs' "no content slot" note for why this whole
-                // column is a single dialog *action*.
-                .cross_axis(CrossAxisAlignment::Stretch)))
+                // The content slot's own loose-width constraints fill the
+                // panel's content width intrinsically (`TextInput::layout`
+                // reaches for `bc.max().width` whenever it's finite) — no
+                // stretch wrapper needed for a single child.
+                .content(any(field))
+                .action(any(button(CANCEL_LABEL, move |_state: &mut State| {
+                    cancel_nav.pop()
+                })
+                .style(ButtonStyle::Ghost)
+                .small()))
+                .action(any(button(SUBMIT_LABEL, move |_state: &mut State| {
+                    // "Disabled": the style below is the visual half,
+                    // this guard the behavioral one (see the module
+                    // docs' framework-gap note).
+                    if can_submit {
+                        submit(&submit_nav, &current);
+                    }
+                })
+                .style(if can_submit {
+                    SUBMIT_ENABLED_STYLE
+                } else {
+                    SUBMIT_DISABLED_STYLE
+                })
+                .small()))
         },
         move |state: &mut State, result: PopResult| {
             if let Some(name) = result.take::<String>() {
