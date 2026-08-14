@@ -1,25 +1,16 @@
-//! Headless end-to-end coverage for the terminal's **selection, loupe and
-//! copy** — no GPU, no window, no device, and no touching the developer's real
-//! clipboard.
+//! Headless end-to-end coverage for the terminal's **selection, loupe and copy** —
+//! no GPU, no window, no device, and no touching the developer's real clipboard.
 //!
-//! Every test drives the real assembly
-//! (`presentation::term::terminal_surface`): a `RenderRoot` over the grid, its
-//! `GestureDetector`, and the Copy chip above it. That is the point of the suite
-//! — the pure halves (word boundaries, the row-major merge, the copy text, the
-//! chip's clamp arithmetic, the loupe's box) are already unit-tested next to
-//! their code in `term::selection`/`term::chip`/`term::widget`, so what is left
-//! to prove is the wiring:
-//!
-//! - a **perfectly stationary** hold really does select at the threshold. This
-//!   is frust's threshold-fire long-press (`frust_widgets::gesture`) meeting its
-//!   first real consumer: no `Move`, no `Up`, just paints past the threshold and
-//!   the rebuild that drains the `Housekeeping` flush;
-//! - the selection-click haptic fires **exactly once per gesture**;
-//! - a clearing tap really is checked *before* the focus claim, so it cannot
-//!   also summon the keyboard;
-//! - `Copy` really hands the exact expected string to the clipboard seam — read
-//!   through an **injected sink**, because the desktop backend would otherwise
-//!   overwrite the real clipboard on every `cargo test`.
+//! Every test drives the real assembly (`term::terminal_surface`): a `RenderRoot`
+//! over the grid, its `GestureDetector`, and the Copy chip above it. The pure halves
+//! are unit-tested next to their code, so what is left to prove is the wiring — a
+//! **perfectly stationary** hold selects at the threshold (frust's threshold-fire
+//! long-press meeting its first real consumer: no `Move`, no `Up`, just paints past
+//! the threshold and the rebuild that drains the `Housekeeping` flush); the
+//! selection-click haptic fires **exactly once per gesture**; a clearing tap is
+//! checked *before* the focus claim, so it cannot also summon the keyboard; and
+//! `Copy` hands the exact expected string to the clipboard seam, read through an
+//! **injected sink**.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -258,10 +249,9 @@ impl Mounted {
     }
 
     /// Simulate the feed pump publishing a new generation — i.e. new output
-    /// arrived on the underlying session (see [`pump_wake`](
-    /// muxr::features::terminal::presentation::term::pump_wake), which this
-    /// mirrors at the one-signal-write granularity that matters here: the
-    /// value itself is a test-visible counter, not the wire format).
+    /// arrived on the underlying session (see
+    /// [`pump_wake`](muxr::features::terminal::presentation::term::pump_wake),
+    /// which this mirrors at the one-signal-write granularity that matters).
     fn advance_generation(&mut self) {
         let next = self.generation.get_untracked() + 1;
         self.generation.set(next);
@@ -282,11 +272,9 @@ impl Mounted {
         self.root.event(&mut self.state, &pointer(phase, at));
     }
 
-    /// The centre of cell `(row, col)`, in surface coordinates.
-    ///
-    /// Requires at least one [`frame`](Self::frame) first — the cell box is
-    /// solved in `layout`, and this is the accessor the grid publishes it
-    /// through.
+    /// The centre of cell `(row, col)`, in surface coordinates. Requires at
+    /// least one [`frame`](Self::frame) first — the cell box is solved in
+    /// `layout`, and this is the accessor the grid publishes it through.
     fn cell(&self, row: u16, col: u16) -> Point {
         let geo = self
             .selection
@@ -299,13 +287,11 @@ impl Mounted {
     }
 
     /// Press at `at` and hold, perfectly still, past the long-press threshold —
-    /// **no pointer event other than the `Down`**.
-    ///
-    /// The three frames are the whole mechanism: the first records the press
-    /// epoch, the second crosses the threshold (marking `elapsed` and latching a
-    /// `Housekeeping` flush), and the third's *rebuild* drains that flush and
-    /// fires `on_long_press`. Every shipping shell runs rebuild before paint on
-    /// every frame, which is exactly what this reproduces.
+    /// **no pointer event other than the `Down`**. The three frames are the whole
+    /// mechanism: the first records the press epoch, the second crosses the
+    /// threshold (marking `elapsed` and latching a `Housekeeping` flush), and the
+    /// third's *rebuild* drains that flush and fires `on_long_press` — which is
+    /// what every shipping shell does, rebuild before paint on every frame.
     fn hold(&mut self, at: Point) {
         self.event(PointerPhase::Down, at);
         self.frame(0.0);
@@ -709,12 +695,10 @@ fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
     mounted.frame(700.0);
     assert!(mounted.selection.range().is_some(), "something to clear");
     // The press that *started* the gesture found no selection to clear, so it
-    // fell through and claimed the focus session exactly as any other press
-    // does — the claim is invariant across all three outcomes of the touch
-    // machine, which is what makes the next assertion about *ordering* rather
-    // than about a grid that never focuses at all. It raised no keyboard: a
-    // hold is not a tap, and only the tap branch publishes an IME surface
-    // (`term::widget`'s IME-client docs).
+    // fell through and claimed the focus session exactly as any other press does
+    // — the claim is invariant across all three outcomes of the touch machine,
+    // which is what makes the next assertion about *ordering*. It raised no
+    // keyboard: a hold is not a tap, and only the tap branch publishes a surface.
     assert!(mounted.root.is_focus_active());
     assert!(
         mounted.root.ime_state().is_none(),
@@ -787,15 +771,13 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
         "sanity: something to clear"
     );
 
-    // The clearing tap. Deliberately far from the floating Copy chip's own
-    // pill (which anchors near the release point, top-left here) — a tap
-    // landing on the chip's own Dismiss half clears the selection through
-    // `ChipTarget::Dismiss` instead, never reaching the grid's own selection
-    // Down arm at all. Consumed entirely by *this grid's* Down arm —
-    // `Handled`, and frust-core still forces a focus-path blur on it
-    // (`RenderRoot::event`: any pointer `Down` that claims no focus is a
-    // blur, `Handled` or not) — the exact edge case `note_focus_edge` now
-    // has to tell apart from a real departure.
+    // The clearing tap. Deliberately far from the floating Copy chip's own pill —
+    // a tap landing on the chip's own Dismiss half clears the selection through
+    // `ChipTarget::Dismiss` instead, never reaching the grid's own selection Down
+    // arm. Consumed entirely by *this grid's* Down arm — `Handled`, and
+    // frust-core still forces a focus-path blur on it (any pointer `Down` that
+    // claims no focus is a blur, `Handled` or not) — the exact edge case
+    // `note_focus_edge` has to tell apart from a real departure.
     let elsewhere = Point::new(PHONE.width - 20.0, PHONE.height - 20.0);
     assert!(
         !chip_rect(mounted.cell(0, 8), PHONE).contains(elsewhere),
@@ -1018,11 +1000,10 @@ fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
         "sanity: selected"
     );
 
-    // The grid shrinks under the held selection — a rotation, a font-size
-    // bump, a fullscreen collapse. `TerminalGridWidget::layout` resizes the
-    // emulator to the new geometry and then calls `SelectionSeam::set_metrics`
-    // with it, in that order; this simulates exactly that pair of calls
-    // directly, at a width narrower than the selection's own begin column.
+    // The grid shrinks under the held selection — a rotation, a font-size bump, a
+    // fullscreen collapse. `TerminalGridWidget::layout` resizes the emulator and
+    // then calls `SelectionSeam::set_metrics`, in that order; this simulates that
+    // pair directly, at a width narrower than the selection's own begin column.
     let geo = mounted.selection.metrics().expect("laid out once already");
     let narrow = CellGeometry { cols: 5, ..geo };
     mounted

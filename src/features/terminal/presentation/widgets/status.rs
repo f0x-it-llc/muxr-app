@@ -19,21 +19,17 @@ use super::card::CardInk;
 use super::util::{h_gap, row, sized};
 
 /// `.term-statusrow{padding:14px 14px 14px 18px}` — with the **vertical** pair
-/// tightened to 6px: the mock's 14px made a 56px band of chrome above the
-/// terminal, and the title bar is meant to be as small as it can be while still
-/// carrying the one expand button. The two horizontal values are the mock's,
-/// untouched.
+/// tightened to 6px: the mock's 14px made a 56px band of chrome above the terminal.
+/// The two horizontal values are the mock's, untouched.
 const STATUS_PAD_TOP: f64 = 6.0;
 const STATUS_PAD_RIGHT: f64 = 14.0;
 const STATUS_PAD_LEFT: f64 = 18.0;
-/// The status row's whole height, and so the expand button's press target (see
-/// [`status_row`]): the 28px button — the floor the row cannot shrink past —
-/// plus [`STATUS_PAD_TOP`] above and below it. The title's own line box (18px)
-/// is well under it and never decides this number.
+/// The status row's whole height, and so the expand button's press target: the 28px
+/// button — the floor the row cannot shrink past — plus [`STATUS_PAD_TOP`] above and
+/// below it. The title's own line box (18px) never decides this number.
 const STATUS_ROW_H: f64 = EXPAND_SIZE + 2.0 * STATUS_PAD_TOP;
 /// `.term-pane-title{font-size:13.5px}` — a fixed-size logotype-ish run, so it
-/// overrides the display role's size (and only that; family/weight stay Space
-/// Mono 700, which *is* what the role carries) — the `crate::ui::topbar`
+/// overrides the display role's size and only that; the `crate::ui::topbar`
 /// brand-wordmark precedent.
 const TITLE_SIZE: f32 = 13.5;
 /// …and its line box, tightened to match (the display role's 36px box would
@@ -46,30 +42,20 @@ const TITLE_LINE_HEIGHT: f32 = 18.0;
 const EXPAND_LABEL: &str = "Fullscreen";
 const COLLAPSE_LABEL: &str = "Exit fullscreen";
 
-/// `.term-statusrow` — the pane title (ellipsized, single line) and, at the
-/// trailing edge, the **one** fullscreen affordance.
+/// `.term-statusrow` — the pane title (ellipsized, single line) and, at the trailing
+/// edge, the **one** fullscreen affordance: no menu row, no gesture ("one button,
+/// always in the same place").
 ///
-/// The row this replaced in v1 was three cosmetic dots; here the trailing
-/// circle is an actual button, and it is the only place fullscreen is reachable
-/// from — no menu row, no gesture (the mock: "one button, always in the same
-/// place").
-///
-/// # The row is [`STATUS_ROW_H`] tall, and so is the button's press target
-///
-/// The padding is applied to the **title** rather than to the whole row, which
-/// is what lets the button's column run the row's full height: a 28px circle
-/// centred in a 40px column, with the padding band above and below it part of
-/// the same target. Padding the row instead would put those two 6px bands
-/// outside every child and leave a 28px target in a 40px row — a thumb-sized
-/// regression against the 56px row this replaced, where the same circle at
-/// least had 14px of visual slack around it.
+/// The padding is applied to the **title** rather than to the whole row, which is
+/// what lets the button's column run the row's full [`STATUS_ROW_H`]: a 28px circle
+/// centred in a 40px column, with the padding band above and below part of the same
+/// target. Padding the row instead would leave a 28px target in a 40px row.
 ///
 /// Two press paths, one callback, never both: the column is a [`Stack`] whose
-/// **top** child is the button itself and whose bottom child is a
-/// [`GestureDetector`] over the full-height box. A hit-test runs topmost-first
-/// and stops at the first child that handles, so a press on the circle is the
-/// button's (press-scale visual included) and a press on the band above or
-/// below it is the detector's — the same toggle either way.
+/// **top** child is the button and whose bottom child is a [`GestureDetector`] over
+/// the full-height box. A hit-test runs topmost-first and stops at the first child
+/// that handles, so a press on the circle is the button's (press-scale visual
+/// included) and a press on the band above or below it is the detector's.
 pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     title: &str,
     fullscreen: bool,
@@ -152,10 +138,8 @@ mod tests {
 
     #[test]
     fn the_transcribed_geometry_is_the_mocks() {
-        // A 14px padding and an 18px one live a line apart in the source; a
-        // swap is invisible in review and obvious on screen. The vertical pair
-        // is the one deliberate departure from the mock (see
-        // `STATUS_PAD_TOP`).
+        // A 14px padding and an 18px one live a line apart in the source; a swap
+        // is invisible in review and obvious on screen.
         assert_eq!(
             (STATUS_PAD_TOP, STATUS_PAD_RIGHT, STATUS_PAD_LEFT),
             (6.0, 14.0, 18.0)

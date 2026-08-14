@@ -1,30 +1,24 @@
 //! The terminal card's own colour vocabulary ([`CardInk`]) and its body —
 //! `.term-body`, the scrollable, staggered, caret-terminated transcript.
 //!
-//! # Colours: the canonical token wins over the mock's hex
-//!
-//! The card's own ink is **`GlyphInk`** (`theme.extension::<GlyphInk>()`), not
-//! `terminal.html`'s `--term-*` variables: `terminal_bg` for the body,
-//! `terminal_head` for the status band, `terminal_prompt` for the prompt runs,
+//! **The canonical token wins over the mock's hex.** The card's ink is
+//! **`GlyphInk`**, not `terminal.html`'s `--term-*` variables: `terminal_bg` for the
+//! body, `terminal_head` for the status band, `terminal_prompt` for the prompt runs,
 //! the caret and the pane title, `terminal_out`/`terminal_comment` for the two
-//! dimmer tiers. That is the framework's own brightness-invariant terminal
-//! palette, and using it means this screen matches `frust::glyph::term_block`
-//! wherever the two ever sit on the same page. (`GlyphInk::terminal_fg`, the
-//! *untyped* body tone, is the one field [`CardInk`] does not resolve: v2
-//! types every line it prints `p`/`out`/`cm`, so nothing would ink from it.)
+//! dimmer tiers. That is the framework's own brightness-invariant terminal palette,
+//! so this screen matches `frust::glyph::term_block` wherever the two share a page.
+//! (`GlyphInk::terminal_fg`, the *untyped* body tone, is the one field [`CardInk`]
+//! does not resolve: v2 types every line it prints.)
 //!
 //! Two card tones have **no** token and so are local constants:
-//! [`TERMINAL_BORDER_RGB`] (the mock's `--term-border`) and the expand
-//! button's resting wash. `GlyphInk` carries no border/hairline field at all,
-//! and the nearest `ColorScheme` outline is brightness-swapped while this card
-//! is not — so approximating one with an unrelated role would tie a fixed-tone
-//! card to the scheme's own light/dark swap.
+//! [`TERMINAL_BORDER_RGB`] and the expand button's resting wash. `GlyphInk` carries
+//! no border/hairline field, and the nearest `ColorScheme` outline is
+//! brightness-swapped while this card is not.
 //!
-//! This whole struct stays terminal-local for the same reason
-//! `term::style`'s `TerminalPalette` does: it tints one screen's fixed-tone
-//! card, not a role any other screen shares. Everything *outside* the card
-//! resolves [`crate::ui::palette::Palette`] instead — see the [directory
-//! docs](super).
+//! This struct stays terminal-local for the same reason `term::style`'s
+//! `TerminalPalette` does: it tints one screen's fixed-tone card, not a role any
+//! other screen shares. Everything *outside* the card resolves
+//! [`crate::ui::palette::Palette`] instead — see the [directory docs](super).
 
 use frust::authoring::Color;
 use frust::{AnyView, EdgeInsets, GlyphInk, Padding, Theme, any, scroll_view};
@@ -44,10 +38,8 @@ const BODY_PAD_Y: f64 = 18.0;
 pub(crate) const BODY_SIZE: f32 = 12.5;
 pub(crate) const BODY_LINE_HEIGHT: f32 = 2.0;
 
-/// `--term-border: rgba(255,238,210,0.07)` — the card's hairline.
-///
-/// A **local** constant: `GlyphInk` carries no border/hairline field (see the
-/// [module docs](self)).
+/// `--term-border: rgba(255,238,210,0.07)` — the card's hairline. A **local**
+/// constant: `GlyphInk` carries no border/hairline field.
 const TERMINAL_BORDER_RGB: (u8, u8, u8) = (0xff, 0xee, 0xd2);
 const TERMINAL_BORDER_ALPHA: f32 = 0.07;
 /// `.expand-btn{background:rgba(255,238,210,0.06)}` — same family, one step
@@ -99,10 +91,8 @@ impl CardInk {
 }
 
 /// `.term-body` — the transcript, scrollable, staggered and caret-terminated.
-///
-/// `epoch` is the controller's replay token: a change to it (a tab switch)
-/// replays the reveal from the top, which is the mock's `renderTab`→
-/// `playReveal` behaviour.
+/// `epoch` is the controller's replay token: a change to it (a tab switch) replays
+/// the reveal from the top, the mock's `renderTab`→`playReveal` behaviour.
 pub(crate) fn card_body<State: 'static>(
     lines: Vec<TermLine>,
     epoch: u64,

@@ -1,22 +1,16 @@
 //! Headless behavior coverage for the real terminal grid
 //! (`muxr::features::terminal::presentation::term`) — no GPU, no window.
 //!
-//! Two shapes of test, because the grid has two kinds of behavior:
+//! Two shapes of test, because the grid has two kinds of behavior: **widget-level**,
+//! the `View`/`Widget` pair driven directly against [`GridScene`], a recorder
+//! keeping the four channels this widget paints into (`tests/support`'s `RecScene`
+//! records neither `stroke_line` nor plain clips, and a leaf widget needs no
+//! `RenderRoot` to lay out); and **mounted**, a one-widget `Component` in a real
+//! `RenderRoot` — the only way to exercise the feed pump's `on_cleanup` cancellation
+//! and the semantics pass, both properties of being *mounted*.
 //!
-//! - **Widget-level** — the `View`/`Widget` pair driven directly
-//!   (`build`/`rebuild`/`layout`/`paint`), against [`GridScene`], a recorder
-//!   that keeps the four channels this widget actually paints into (fills,
-//!   glyph runs, clips, stroked outlines). `tests/support`'s own `RecScene`
-//!   records neither `stroke_line` nor plain clips, and a leaf widget needs no
-//!   `RenderRoot` to be laid out, so this suite records its own rather than
-//!   widening a scene four other suites share.
-//! - **Mounted** — a one-widget `Component` in a real `RenderRoot`, driven
-//!   through `tests/support`'s frame stepping and reactive-runtime setup. That
-//!   is the only way to exercise the feed pump's `on_cleanup` cancellation and
-//!   the semantics pass, both of which are properties of being *mounted*.
-//!
-//! The blink and every other clock-driven behavior is **stepped**, never waited
-//! on: a paint at `t` is the caret at `t`.
+//! Clock-driven behavior is **stepped**, never waited on: a paint at `t` is the
+//! caret at `t`.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -52,8 +46,7 @@ use support::{frame_at_sized, ms, node_roles, pump_frames, serial, setup};
 /// default).
 const FONT_SIZE: f32 = 13.0;
 
-/// A phone-shaped content box, in logical px (the OP9's safe-area box, which is
-/// the geometry every S9 number was taken against).
+/// A phone-shaped content box, in logical px.
 const PHONE: Size = Size::new(392.7, 872.7);
 
 /// The label the grid publishes as its accessible name.
@@ -364,11 +357,10 @@ fn a_font_size_change_relayouts_and_a_cursor_change_only_repaints() {
     assert!(flags.needs_paint(), "the caret's shape is pixels");
 }
 
-/// A different font family can measure a different cell advance at the
-/// identical size, so it rides the same `LAYOUT` contract a font-size change
-/// does (`TerminalGridWidget::rebuild`'s own `reshapes` flag) — not a bare
-/// `PAINT`, which would leave stale runs/geometry behind under the mobile
-/// shells' intra-frame layout-skip gate.
+/// A different font family can measure a different cell advance at the identical
+/// size, so it rides the same `LAYOUT` contract a font-size change does — not a bare
+/// `PAINT`, which would leave stale runs/geometry behind under the mobile shells'
+/// intra-frame layout-skip gate.
 #[test]
 fn a_font_family_change_relayouts_too() {
     let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
@@ -399,12 +391,10 @@ fn a_font_family_change_relayouts_too() {
     );
 }
 
-/// Review M-A1: `run_feed`'s scheduled loop and `InputSeam::dispatch`'s
-/// synchronous echo drain share one `generation` signal via `pump_wake`.
-/// This pins the dropped-frame case the fix closes: a keystroke's own
-/// dispatch bump must not collide with `run_feed`'s very next wake — if it
-/// did, that wake's freshly fed replay content would never reshape (see
-/// `pump_wake`'s own doc for the mechanism).
+/// `run_feed`'s scheduled loop and `InputSeam::dispatch`'s synchronous echo drain
+/// share one `generation` signal via `pump_wake`. This pins the dropped-frame case:
+/// a keystroke's own dispatch bump must not collide with `run_feed`'s very next
+/// wake — if it did, that wake's freshly fed replay content would never reshape.
 #[test]
 fn a_keystroke_during_replay_still_reshapes_on_the_wake_after_it() {
     let _serial = serial();
@@ -445,11 +435,10 @@ fn a_keystroke_during_replay_still_reshapes_on_the_wake_after_it() {
     let flags = View::<()>::rebuild(&view_dispatch, &view_wake1, &mut widget, &mut ctx);
     assert!(flags.needs_layout(), "the dispatch's own wake must reshape");
 
-    // Wake 2: `run_feed`'s next scheduled wake, with more real replay
-    // content due — the dropped-frame case. Under the pre-fix bug this
-    // duplicated `g_dispatch` instead of moving past it, and the rebuild
-    // below would see `prev.generation == self.generation` and skip layout,
-    // freezing the grid on stale content for that whole wake.
+    // Wake 2: `run_feed`'s next scheduled wake, with more real replay content due
+    // — the dropped-frame case. Duplicating `g_dispatch` instead of moving past
+    // it would leave the rebuild seeing `prev.generation == self.generation` and
+    // skipping layout, freezing the grid on stale content for that whole wake.
     feed.borrow_mut().set_elapsed(Duration::from_millis(100));
     assert!(pump_wake(&feed_dyn, &emulator, generation));
     let g_wake2 = generation.get_untracked();

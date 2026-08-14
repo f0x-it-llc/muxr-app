@@ -20,10 +20,9 @@ const CLOSE_ICON: f64 = 13.0;
 /// The close button's accessible name — a *word*, never the `×` it draws.
 const CLOSE_LABEL: &str = "Close";
 /// `label_medium`'s own canonical size — an established Glyph type-scale role
-/// rather than a hand-picked float, since anything below `label_small`'s 11px
-/// floor made the sheet's three section labels indistinguishable on device.
-/// The `margin`/`gap` figures below are the mock's own
-/// (`.sheet-section-lbl{margin:16px 0 10px; gap:6px}`), on the shared scale.
+/// rather than a hand-picked float, since anything below `label_small`'s 11px floor
+/// made the sheet's three section labels indistinguishable on device. The
+/// `margin`/`gap` figures below are the mock's own, on the shared scale.
 const SECTION_SIZE: f32 = 12.0;
 pub(crate) const SECTION_TOP_GAP: f64 = spacing::XL;
 pub(crate) const SECTION_BOTTOM_GAP: f64 = spacing::MD;
@@ -31,10 +30,8 @@ const SECTION_GAP: f64 = spacing::XS;
 /// `.sheet-section-lbl::before{content:'//'}`.
 const SECTION_PREFIX: &str = "//";
 
-/// `.sheet-toprow` — the sheet's own label and its round close button.
-///
-/// The handle above it is the Glyph sheet's own (it draws one at the panel's
-/// top), so this deliberately draws none: two would read as a mistake.
+/// `.sheet-toprow` — the sheet's own label and its round close button. The handle
+/// above it is the Glyph sheet's own, so this deliberately draws none.
 pub(crate) fn sheet_top_row<State: 'static, F: Fn(&mut State) + 'static>(
     colors: &Palette,
     on_close: F,
@@ -49,10 +46,9 @@ pub(crate) fn sheet_top_row<State: 'static, F: Fn(&mut State) + 'static>(
                 colors.fg,
             )),
         ),
-        // `crate::ui::topbar::icon_button`'s third caller (after the bar's own
-        // slots and the Connect FAB): a *labelled* `Role::Button` over one
-        // vector, which a bare `GestureDetector` — contributing no node of its
-        // own — could not give a screen reader.
+        // `crate::ui::topbar::icon_button`'s third caller: a *labelled*
+        // `Role::Button` over one vector, which a bare `GestureDetector` —
+        // contributing no node of its own — could not give a screen reader.
         inflexible(
             icon_button(icons::CLOSE, CLOSE_LABEL, on_close)
                 .ink(colors.fg_dim)
@@ -65,16 +61,11 @@ pub(crate) fn sheet_top_row<State: 'static, F: Fn(&mut State) + 'static>(
 }
 
 /// `.sheet-section-lbl` — a dim label behind an amber `//` prefix, sized and
-/// weighted for hierarchy rather than selection: `label_medium`'s own
-/// canonical size, `_emphasized` (bold) rather than a further size bump, so
-/// "spaces"/"tabs"/"panes" reads as a clear step up without growing past the
-/// sheet's own top-row label ([`SHEET_LABEL_SIZE`]'s 12.5px) or reaching for
-/// the amber selection tone a pill/chip owns (see
-/// [`super::pills::pill`]) — amber stays the *selected* colour, this label is
-/// only ever `amber_dim`/`fg_dim`. `label_medium`'s own line box (16px,
-/// unchanged by either the size or the `_emphasized` variant —
-/// `frust-theme`'s type-scale table) is identical to the plain role, so no row
-/// this label sits in grows.
+/// weighted for hierarchy rather than selection: `label_medium`'s canonical size,
+/// `_emphasized` (bold) rather than a further size bump, so "spaces"/"tabs"/"panes"
+/// reads as a clear step up without growing past the sheet's own top-row label or
+/// reaching for the amber selection tone a pill owns. Its line box (16px, unchanged
+/// by the `_emphasized` variant) is identical to the plain role, so no row grows.
 pub(crate) fn section_label<State: 'static>(
     label: impl Into<String>,
     colors: &Palette,
@@ -97,38 +88,24 @@ pub(crate) fn section_label<State: 'static>(
     ]))
 }
 
-/// The sheet's own scrollable region: `children` (the spaces/tabs/panes
-/// sections and their gaps — everything below the sheet's fixed top row)
-/// wrapped in [`scroll_view`], so a session with many tabs/panes stays fully
-/// reachable rather than the lower rows running off the sheet's own bottom
-/// edge (no mock counterpart — `docs/terminal.html` never had enough rows to
-/// need one).
+/// The sheet's own scrollable region: `children` (everything below the sheet's
+/// fixed top row) wrapped in [`scroll_view`], so a session with many tabs/panes
+/// stays fully reachable rather than the lower rows running off the sheet's bottom
+/// edge (no mock counterpart).
 ///
 /// `max_height`, when `Some`, tightens the region to that many logical px —
-/// [`super::panes_sheet::sheet_body`]'s own window-metrics-derived cap, read
-/// once per build the same way every other responsive value in this app is (see
-/// `crate::responsive`). `None` — no shell has published metrics yet, or a
-/// bare headless test, which is every test in this suite — leaves the region
-/// unbounded, which [`scroll_view`] resolves the same way a plain column
-/// would: it sizes itself to its own content rather than clipping anything
-/// (`frust_widgets::scroll::ScrollWidget::layout`'s own documented fallback
-/// for an infinite incoming height). So a headless suite sees the identical
-/// geometry it always has — every existing hit-test locator in
-/// `tests/terminal.rs`/`tests/terminal_live.rs` keeps working unchanged —
-/// and a device, which always publishes metrics, is the only place the cap
-/// (and so the actual scrolling) ever engages.
+/// [`super::panes_sheet::sheet_body`]'s window-metrics-derived cap. `None` (no shell
+/// has published metrics, i.e. every headless test) leaves the region unbounded,
+/// which [`scroll_view`] resolves the same way a plain column would: it sizes itself
+/// to its content rather than clipping. So a headless suite sees the geometry it
+/// always has, and a device is the only place the cap ever engages.
 ///
-/// Laid out as an ordinary (not `flexible`) child of the outer column
-/// [`super::panes_sheet::sheet_body`] composes: a sheet's body is laid out at
-/// its own intrinsic height (the panel grows to fit it), so there is no free
-/// main-axis space to take a share of — and a `flexible` child
-/// under an unbounded main axis divides *zero* free space
-/// (`frust_widgets::FlexWidget::layout`'s own free-space computation) —
-/// the tight-constraint trap `examples/glyph-catalog`'s own device-gate
-/// fixes document. A caller-supplied fixed height sidesteps that trap
-/// entirely: [`SizedBox`] tightens to it regardless of the ambient's own
-/// unbounded axis, which is exactly why this takes a resolved `f64`
-/// rather than a flex share.
+/// Laid out as an ordinary (not `flexible`) child of the outer column: a sheet's
+/// body is laid out at its own intrinsic height, so there is no free main-axis space
+/// to take a share of — and a `flexible` child under an unbounded main axis divides
+/// *zero* free space, the tight-constraint trap `examples/glyph-catalog`'s device
+/// gate documents. A caller-supplied fixed height sidesteps it: [`SizedBox`]
+/// tightens regardless of the ambient's unbounded axis.
 pub(crate) fn sheet_scroll_body<State: 'static>(
     children: Vec<AnyView<State>>,
     max_height: Option<f64>,

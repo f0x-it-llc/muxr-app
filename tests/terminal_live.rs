@@ -1,46 +1,22 @@
-//! Headless behavior coverage for the `/terminal` screen's **live demo pane**:
-//! the pane-content switch, settings-driven cursor/font, resize-on-delta-only,
+//! Headless behavior coverage for the `/terminal` screen's **live pane**: the
+//! pane-content switch, settings-driven cursor/font, resize-on-delta-only,
 //! fullscreen with a live pane, the IME-active-only key bar, and the
-//! tap-to-focus-only contract at the root (section 10) — including which taps
-//! may raise a keyboard and which may not.
+//! tap-to-focus-only contract at the root — including which taps may raise a
+//! keyboard and which may not.
 //!
-//! # Entering the pane, now that the menu has no row for it
+//! The fixture replay is entered through the narrowest seam that already existed —
+//! `pages::debug_controller` plus `TerminalController::enter_live` — so nothing
+//! about the composition under it changes (see [`Harness::enter_demo`]). Shares
+//! `tests/terminal.rs`'s harness shape rather than importing it: every `tests/*.rs`
+//! file is its own crate root.
 //!
-//! The overflow menu's "Demo session" row is gone (a three-row menu, uniformly
-//! spaced, is what the screen ships). The fixture replay itself is not: it is
-//! entered here through the **narrowest seam that already existed** —
-//! `pages::debug_controller`, the published test/diagnostic accessor onto the
-//! mounted screen's own controller, plus `TerminalController::enter_live`, the
-//! very method the removed row's handler called. Nothing about the composition
-//! under it changes: `TerminalScreen::build` still observes the flag and builds
-//! the seams, the feed, the pump and the grid. See [`Harness::enter_demo`].
-//!
-//! Shares `tests/terminal.rs`'s harness shape (the same two-navigator split,
-//! the same frame-stepping idiom) rather than importing it — that file's own
-//! `Harness` is private to its crate (every `tests/*.rs` file is its own
-//! crate root) — see its module docs for the two-navigator rationale this
-//! harness reuses verbatim.
-//!
-//! # Locating the live grid without a widget-level handle
-//!
-//! [`TerminalGridWidget`](muxr::features::terminal::presentation::term::widget::TerminalGridWidget)
-//! paints its own background with a **plain** `fill_rect` (not the rounded
-//! fill every `term_box`/`terminal_stage` tile in this app uses), in exactly
-//! `GlyphInk::terminal_bg` — the same tone, but a different [`RecScene`]
-//! channel, so [`grid_rect`] picks it out of a frame unambiguously: nothing
-//! else on this screen plain-fills that colour.
-//!
-//! # Byte-correctness without a text-capturing paint recorder
-//!
-//! `frust_scene::GlyphRun` carries shaped glyph ids, not the source string —
-//! there is no way to recover printed text from [`RecScene`]. So typed-byte
-//! and fixture-replay correctness are asserted the same way
-//! `presentation::term`'s own unit tests do: reading the mounted live
-//! session's real `vt100::Screen` cells through
-//! [`debug_live_probe`](muxr::features::terminal::presentation::pages::debug_live_probe) —
-//! the actual emulator the screen's grid renders, reached through the real
-//! composition root (the seam above → controller → `Component::build` →
-//! `LiveSession` → the feed pump), not a bare widget-level unit test.
+//! The grid is **located by paint**: it fills its background with a plain
+//! `fill_rect` in `GlyphInk::terminal_bg`, a different [`RecScene`] channel from
+//! every rounded tile on this screen. Byte-correctness is asserted off the real
+//! emulator instead of the scene, since `GlyphRun` carries shaped glyph ids rather
+//! than the source string:
+//! [`debug_live_probe`](muxr::features::terminal::presentation::pages::debug_live_probe)
+//! reaches the actual `vt100::Screen` the mounted screen renders.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -97,16 +73,14 @@ const SURFACE: Size = Size::new(800.0, 700.0);
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 const SESSION_ID: &str = "s-1";
-/// `presentation::pages`' own `SHEET_CLOSE_DELAY`, transcribed (it is
-/// private there) — how long a pane commit leaves the sheet up so the
-/// selection visibly moves first. `tests/terminal.rs`'s own `CLOSE_DELAY`,
-/// same provenance.
+/// `presentation::pages`' own `SHEET_CLOSE_DELAY`, transcribed (it is private
+/// there) — how long a pane commit leaves the sheet up so the selection visibly
+/// moves first.
 const CLOSE_DELAY: Duration = Duration::from_millis(260);
 
-/// The overflow menu's first row, transcribed from `presentation::pages`
-/// (private there; a test that imported it could not catch it changing) —
-/// `tests/terminal.rs`'s own `ROW_*` constants document the same reasoning.
-/// The menu carries no separators, so a row's index is its position.
+/// The overflow menu's first row, transcribed from `presentation::pages` (private
+/// there; a test that imported it could not catch it changing). The menu carries
+/// no separators, so a row's index is its position.
 const ROW_PANES: usize = 0;
 /// …and the sheet that row opens, by the label it prints — how section 10
 /// proves its pointer tap landed on the row it aimed at.
@@ -253,11 +227,9 @@ impl Harness {
 
     /// Mount the checked-in fixture replay in the card, through the mounted
     /// screen's own controller — the seam the [module docs](self) describe.
-    ///
-    /// `enter_live` only flips the controller's flag, exactly as the removed
-    /// menu row's handler did; the settle that follows is the `build` that
-    /// observes it and constructs the live session under the screen's own
-    /// reactive owner.
+    /// `enter_live` only flips the controller's flag; the settle that follows is
+    /// the `build` that observes it and constructs the live session under the
+    /// screen's own reactive owner.
     fn enter_demo(&mut self) {
         debug_controller()
             .expect("a terminal screen is mounted")
@@ -292,14 +264,10 @@ impl Harness {
         }
     }
 
-    /// Wait for a sheet closed through `SheetHandle::close_after` (task 37's
-    /// staged `close` underneath it) to actually pop — `tests/terminal.rs`'s
-    /// own `pump_until_closed`, transcribed here for this suite's one caller
-    /// (`a_pane_commit_moves_the_session_without_disturbing_the_live_pane`).
-    /// See that method's doc for why this is two fixed beats — a real-time
-    /// wait for `close_after`'s own delay, then a small fixed clock advance
-    /// for the sheet's own short staged exit — rather than one
-    /// real-time-tracked loop.
+    /// Wait for a sheet closed through `SheetHandle::close_after` to actually
+    /// pop — `tests/terminal.rs`'s own `pump_until_closed`, transcribed here for
+    /// this suite's one caller. See that method's doc for why this is two fixed
+    /// beats rather than one real-time-tracked loop.
     fn pump_until_closed(&mut self, what: &str, done: impl Fn(&Harness) -> bool) {
         self.pump_for(2 * CLOSE_DELAY);
         self.frame_at(0.0);
@@ -328,11 +296,9 @@ impl Harness {
     }
 }
 
-/// The mounted session's demo feed.
-///
-/// `LiveProbe::feed` is an `Option` because the same probe also fronts a live
-/// **`muxrd`** session, whose feed is a real stream with no replay cursor to
-/// read; every test in this suite drives the demo entry, which always has one.
+/// The mounted session's demo feed. `LiveProbe::feed` is an `Option` because the
+/// same probe also fronts a live **`muxrd`** session, whose feed is a real stream
+/// with no replay cursor; every test here drives the demo entry, which has one.
 fn demo_feed() -> Rc<RefCell<DemoFeed>> {
     debug_live_probe()
         .expect("a live pane is mounted")
@@ -355,16 +321,14 @@ fn grid_rect(scene: &RecScene) -> (Point, Size) {
         .expect("the live grid paints its own plain background fill")
 }
 
-/// The pixel a tap must land on to name grid cell `(col, row)` — the grid's
-/// own painted box divided by the emulator's cell grid, the derivation
-/// section 3's long press already uses.
+/// The pixel a tap must land on to name grid cell `(col, row)` — the grid's own
+/// painted box divided by the emulator's cell grid.
 ///
-/// **Approximate by construction**, and safely so: the widget takes at most
-/// one cell less than the box it painted per axis (its `layout` doc's
-/// remainder strip), so the derived cell box runs up to one cell wide per
-/// *grid* — an error under half a cell at the columns anything here aims at.
-/// Every caller targets the middle of a pane rect dozens of cells across, so a
-/// cell either way cannot change which pane the tap resolves to.
+/// **Approximate by construction**, and safely so: the widget takes at most one
+/// cell less than the box it painted per axis, so the derived cell box runs up to
+/// one cell wide per *grid* — an error under half a cell at the columns anything
+/// here aims at, and every caller targets the middle of a pane rect dozens of cells
+/// across.
 fn cell_point(scene: &RecScene, col: u16, row: u16) -> Point {
     let (origin, size) = grid_rect(scene);
     let (rows, cols) = debug_live_probe()
@@ -402,11 +366,9 @@ fn focused_pane_id() -> Option<u32> {
         .map(|pane| pane.id)
 }
 
-/// One finger drag from `from`, far enough past the framework's own
-/// [`TOUCH_SLOP`] that the grid's touch state machine can only read it as a
-/// **scroll**: Down, one Move that crosses the slop, then Up where the Move
-/// left off (a release inside the slop of the *press* is what makes a tap, and
-/// this one is nowhere near it).
+/// One finger drag from `from`, far enough past the framework's own [`TOUCH_SLOP`]
+/// that the grid's touch state machine can only read it as a **scroll**: Down, one
+/// Move that crosses the slop, then Up where the Move left off.
 fn drag_scroll(h: &mut Harness, from: Point) {
     let to = from + Vec2::new(0.0, TOUCH_SLOP * 4.0);
     h.root
@@ -429,30 +391,25 @@ fn card(scene: &RecScene) -> (Point, Size, f64) {
     cards.first().copied().expect("the card paints itself")
 }
 
-/// The overflow menu's **panel**, diffed out of the screen painting underneath
-/// it: an open `frust::glyph` menu adds exactly one rounded fill to the frame
-/// (its drop shadow is a blurred path and its border a stroke, so neither lands
-/// in [`RecScene::rounded`]).
+/// The overflow menu's **panel**, diffed out of the screen painting underneath it:
+/// an open `frust::glyph` menu adds exactly one rounded fill to the frame (its drop
+/// shadow is a blurred path and its border a stroke).
 fn menu_panel(before: &RecScene, after: &RecScene) -> (Point, Size) {
     let new = added(&before.rounded, &after.rounded);
     assert_eq!(new.len(), 1, "an open menu adds exactly its panel: {new:?}");
     largest(&new).expect("the menu panel painted itself")
 }
 
-/// `frust::glyph::menu`'s own row metrics, transcribed rather than imported —
-/// they are private to that crate, and (like [`ROW_PANES`]) a test that could
-/// import them could not catch one changing. Rows start [`MENU_PANEL_PAD`]
-/// below the panel's top edge and then run one [`MENU_ITEM_ROW_H`] apiece —
-/// with no separator between any of them, which is the shape this screen's
-/// menu now ships.
+/// `frust::glyph::menu`'s own row metrics, transcribed rather than imported — they
+/// are private to that crate, and a test that could import them could not catch one
+/// changing. Rows start [`MENU_PANEL_PAD`] below the panel's top edge and then run
+/// one [`MENU_ITEM_ROW_H`] apiece, with no separator between any of them.
 const MENU_PANEL_PAD: f64 = 6.0;
 const MENU_ITEM_ROW_H: f64 = 34.0;
 
-/// Where a tap must land to hit menu row `index` — the *pointer* route through
-/// the menu, which is the only route this suite takes now that entering the
-/// live pane no longer goes through a row at all
-/// (`tests/terminal.rs::Harness::choose_menu_row` is where the result-pop
-/// shortcut lives, and it still drives every row's action).
+/// Where a tap must land to hit menu row `index` — the *pointer* route through the
+/// menu, which is the only route this suite takes now that entering the live pane
+/// no longer goes through a row at all.
 fn menu_row_center((origin, size): (Point, Size), index: usize) -> Point {
     let row_top = origin.y + MENU_PANEL_PAD + MENU_ITEM_ROW_H * index as f64;
     Point::new(origin.x + size.width / 2.0, row_top + MENU_ITEM_ROW_H / 2.0)
@@ -593,10 +550,9 @@ fn a_long_press_selects_and_copy_reaches_the_injected_sink() {
     let cell_h = size.height / f64::from(rows);
     let point = Point::new(origin.x + cell_w * 24.0, origin.y + cell_h * 0.5);
 
-    // `support::long_press` lays out at its own default (800x600) surface —
-    // this suite's `SURFACE` is taller, so the press is driven by hand here,
-    // at this harness's own sized frames, to keep the grid's geometry (and
-    // `point`'s meaning) consistent across the whole gesture.
+    // `support::long_press` lays out at its own default (800x600) surface — this
+    // suite's `SURFACE` is taller, so the press is driven by hand here, at this
+    // harness's own sized frames, to keep the grid's geometry consistent.
     h.root.event(
         &mut h.state,
         &pointer(frust_core::PointerPhase::Down, point),
@@ -648,10 +604,9 @@ fn a_settings_change_reaches_the_live_panes_widget_inputs() {
         GridCursorStyle::Block
     );
 
-    // Write straight into the shared preferences repository — standing in
-    // for the settings screen's own picker save, the same store
-    // `crate::features::settings::di::expect_preferences_repository`
-    // publishes app-wide.
+    // Write straight into the shared preferences repository — standing in for
+    // the settings screen's own picker save, the same store
+    // `crate::features::settings::di::expect_preferences_repository` publishes.
     let repository = expect_preferences_repository();
     let block_on = |fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>| {
         tokio::runtime::Builder::new_current_thread()
@@ -699,18 +654,12 @@ fn a_settings_change_reaches_the_live_panes_widget_inputs() {
     );
 }
 
-/// Review finding M4: `refresh_appearance` used to `set()` both signals
-/// unconditionally on every poll tick, waking a tracked rebuild + unpaced
-/// frame every poll interval, forever, even while the live pane sat
-/// perfectly idle. Pins the fix's read-compare-then-write gate directly:
-/// invoking `TerminalController::refresh_appearance` twice in a row is
-/// exactly what two real poll ticks do (`LiveSession::enter`'s
-/// `use_interval` callback is nothing but
-/// `spawn_local(async move { poll.refresh_appearance().await })`), without
-/// waiting on that interval's own real-time cadence — this suite has no way
-/// to fake the background tokio runtime's timer, and a test that genuinely
-/// waited out two production-cadence ticks would be both slow and, at any
-/// shortened test-only cadence, testing a cadence nothing ships.
+/// `refresh_appearance` must not `set()` its signals unconditionally on every poll
+/// tick, waking a tracked rebuild + unpaced frame forever while the pane sits idle.
+/// Invoking it twice in a row is exactly what two real poll ticks do, without
+/// waiting on that interval's real-time cadence: nothing here can fake the
+/// background runtime's timer, and a shortened test-only cadence would test a
+/// cadence nothing ships.
 #[test]
 fn an_idle_poll_with_unchanged_prefs_writes_nothing() {
     let _g = serial();
@@ -824,10 +773,8 @@ fn resize_reaches_the_feed_only_on_an_actual_cell_grid_delta() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 6 — fullscreen keeps the chrome geometry correct with a live pane, and
-//     drives the OS system UI mode alongside the app's own chrome
-// ---------------------------------------------------------------------------
+// 6 — fullscreen keeps the chrome geometry correct with a live pane, and drives
+//     the OS system UI mode alongside the app's own chrome.
 
 #[test]
 fn fullscreen_with_the_live_pane_still_fills_the_screen() {
@@ -846,10 +793,9 @@ fn fullscreen_with_the_live_pane_still_fills_the_screen() {
     assert!(radius < EPSILON, "{radius}");
     // …and the live grid is still there, still painting.
     let _ = grid_rect(&scene);
-    // The OS status/nav bars mirror the card's own request — see `pages`'s
-    // module docs' "OS system UI" section. The write is synchronous with the
-    // press (`Actions::toggle_fullscreen`), not build-time, so it is already
-    // observable before any of the settle above ran.
+    // The OS status/nav bars mirror the card's own request. The write is
+    // synchronous with the press (`Actions::toggle_fullscreen`), not build-time,
+    // so it is already observable before any of the settle above ran.
     assert_eq!(
         current_system_ui_mode().1,
         SystemUiMode::ImmersiveSticky,
@@ -873,8 +819,7 @@ fn fullscreen_with_the_live_pane_still_fills_the_screen() {
 
 /// A word every key cap announces — enough to prove the bar mounted without
 /// pixel-hunting its geometry. `BarKey::name()` (the accessible name), not
-/// `BarKey::label()` (the cap's printed text, `"Ctrl"`) — the two
-/// deliberately differ (`term::input::BarKey`'s own doc).
+/// `BarKey::label()` (the cap's printed text) — the two deliberately differ.
 const A_KEY_CAP_LABEL: &str = "Control";
 
 fn keyboard_insets(bottom: f64) -> WindowInsets {
@@ -927,18 +872,14 @@ fn the_key_bar_mounts_only_while_live_and_the_keyboard_is_up() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 7b — the link strip
-// ---------------------------------------------------------------------------
+// 7b — the link strip.
 //
-// The strip renders off one mirrored signal
-// (`TerminalController::link`), which is exactly the seam a live
-// `GrpcTerminalFeed` writes through on every wake of the repaint pump. Driving
-// that signal directly is therefore the whole surface under test on this side:
-// what the *feed* publishes into it (the backoff schedule, the exit control,
-// the auth short-circuit) is pinned by that type's own fixture-backed tests,
-// and standing a TLS server up inside a headless UI suite would test the
-// transport twice and the screen not at all.
+// The strip renders off one mirrored signal (`TerminalController::link`), which
+// is the seam a live `GrpcTerminalFeed` writes through on every wake of the
+// repaint pump. Driving that signal directly is therefore the whole surface
+// under test here: what the *feed* publishes into it is pinned by that type's
+// own fixture-backed tests, and standing a TLS server up inside a headless UI
+// suite would test the transport twice and the screen not at all.
 
 /// The strip's three messages and two affordances, transcribed from
 /// `presentation::pages` (private there; a test that imported them could not
@@ -1098,9 +1039,7 @@ fn unmounting_drops_the_published_chrome_and_the_live_probe() {
 
     // Unmounting *while fullscreen* is the regression this exists for: a
     // back-nav straight out of fullscreen must not strand hidden OS bars on
-    // whatever screen comes back into view (`pages::restore_system_ui`'s doc
-    // — every exit that isn't `toggle_fullscreen`'s own collapse branch is an
-    // unmount, and `init`'s `on_cleanup` is the one choke point they share).
+    // whatever screen comes back into view (`pages::restore_system_ui`'s doc).
     h.tap_label(EXPAND);
     h.settle_motion(1_000.0);
     assert_eq!(current_system_ui_mode().1, SystemUiMode::ImmersiveSticky);
@@ -1117,18 +1056,13 @@ fn unmounting_drops_the_published_chrome_and_the_live_probe() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 9 — pump hygiene: the timer stops once nothing is left to say (task 06)
-// ---------------------------------------------------------------------------
+// 9 — pump hygiene: the timer stops once nothing is left to say.
 //
 // These two drive the real `DemoFeed`/`InputSeam`/`run_feed` triple directly
 // rather than through the mounted screen: `LiveSession::enter` constructs a
-// `DemoFeed::new()`, whose real wall clock takes a genuine 30 seconds to
-// drain the fixture — far too slow to wait out in a test — so these use
-// `DemoFeed::manual()` instead (`tests/term_widget.rs`'s/`tests/term_input.rs`'s
-// own precedent), wiring the exact same seams `LiveSession::enter` wires
-// together in production (`InputSeam::wire_pump`), just with the replay's
-// clock in the test's own hands.
+// `DemoFeed::new()`, whose real wall clock takes a genuine 30 seconds to drain
+// the fixture, so these use `DemoFeed::manual()` instead, wiring the exact same
+// seams `LiveSession::enter` wires in production, with the clock in test hands.
 
 #[test]
 fn run_feed_exits_once_a_drained_feed_has_nothing_left_to_say() {
@@ -1145,11 +1079,10 @@ fn run_feed_exits_once_a_drained_feed_has_nothing_left_to_say() {
     let generation = RwSignal::new(0u64);
     let cancelled = Arc::new(AtomicBool::new(false));
 
-    // `run_feed` never reaches its own sleep on this path — the very first
-    // wake already sees a closed feed and returns — so a plain
-    // current-thread runtime drives it to completion with no real
-    // wall-clock wait at all. Under the old `!is_drained() || echo` rule
-    // (echo defaults on) this call would never return.
+    // `run_feed` never reaches its own sleep on this path — the very first wake
+    // already sees a closed feed and returns — so a plain current-thread runtime
+    // drives it to completion with no real wall-clock wait. Under the old
+    // `!is_drained() || echo` rule (echo defaults on) this would never return.
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a current-thread runtime");
@@ -1215,26 +1148,21 @@ fn a_keystroke_after_drain_echoes_synchronously_in_the_same_dispatch_call() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 10 — focus/IME hygiene: nothing summons a keyboard the user did not ask for
-// ---------------------------------------------------------------------------
+// 10 — focus/IME hygiene: nothing summons a keyboard the user did not ask for.
 //
 // The screen's v2 design is **tap-to-focus only**: the keyboard and the key bar
 // are IME-active-only, so mounting the live pane must claim nothing at all and
-// only a tap on the grid itself may open a focus/IME session. These pin both
-// halves of that at the root — `RenderRoot::is_focus_active`/`ime_state` are
-// literally what a shell reads to decide whether to show a soft keyboard, so
-// they are the honest place to assert it (a widget-level `has_focus` would not
-// have caught the seeding these tests exist for).
+// only a tap on the grid itself may open a focus/IME session.
+// `RenderRoot::is_focus_active`/`ime_state` are literally what a shell reads to
+// decide whether to show a soft keyboard, so they are the honest place to assert
+// it (a widget-level `has_focus` would not have caught the seeding these exist
+// for).
 //
-// "A tap" is where the two-stage pane semantics live, and the same pair of
-// reads is what pins them: a tap on the pane the session is already on raises
-// the keyboard, a tap on a *different* pane only moves the focus there (a
-// pointing gesture — the second tap on it then raises one), and a drag-scroll
-// raises nothing at all. herdr, whose single-pane stream wires no tap hook,
-// keeps the unconditional tap → keyboard. The focus *claim* is invariant across
-// every one of them: it is the keyboard that is conditional, never the claim
-// (`term::widget`'s own touch-state-machine docs).
+// "A tap" is where the two-stage pane semantics live: a tap on the pane the
+// session is already on raises the keyboard, a tap on a *different* pane only
+// moves the focus there, and a drag-scroll raises nothing at all. herdr, whose
+// single-pane stream wires no tap hook, keeps the unconditional tap → keyboard.
+// The focus *claim* is invariant across every one of them.
 
 /// A freshly mounted live pane claims **nothing** — no root focus, no published
 /// IME surface, not even a focus/IME generation edge for a shell to wake on.
@@ -1272,14 +1200,11 @@ fn mounting_the_live_pane_claims_no_focus_and_publishes_no_ime_surface() {
     );
 }
 
-/// The other half: tapping the grid **on the pane the session is already on**
-/// opens the session — focus claimed and an **active** IME surface published,
-/// which is what brings the keyboard (and with it the key bar) up.
-///
-/// Aimed at [`FOCUSED_CELL`] rather than the grid's centre: the hit test
-/// resolves a tapped cell against the mock's seeded pane rects, and only a tap
-/// on the *focused* one is the typing gesture this pins (a tap on the sibling
-/// is the pointing gesture the next test owns).
+/// The other half: tapping the grid **on the pane the session is already on** opens
+/// the session — focus claimed and an **active** IME surface published, which is
+/// what brings the keyboard (and with it the key bar) up. Aimed at [`FOCUSED_CELL`]
+/// rather than the grid's centre: only a tap on the *focused* pane is the typing
+/// gesture this pins.
 #[test]
 fn tapping_the_grid_claims_focus_and_publishes_an_active_ime_surface() {
     let _g = serial();
@@ -1311,9 +1236,8 @@ fn tapping_the_grid_claims_focus_and_publishes_an_active_ime_surface() {
 }
 
 /// A tap on a **different** pane is a pointing gesture: it claims focus (every
-/// `Down` does), fires `FocusPane` so zellij's own border moves, and publishes
-/// no IME surface at all — no keyboard covering the pane the user just asked
-/// to see.
+/// `Down` does), fires `FocusPane` so zellij's own border moves, and publishes no
+/// IME surface at all — no keyboard covering the pane the user just asked to see.
 #[test]
 fn a_tap_on_an_unfocused_pane_focuses_it_and_summons_no_keyboard() {
     let _g = serial();
@@ -1403,8 +1327,8 @@ fn a_drag_scroll_publishes_no_ime_surface() {
 
 /// herdr wires no tap hook at all (its single-pane stream has no second pane to
 /// point at), so the grid answers for itself: a tap raises the keyboard, and a
-/// scroll still does not. The scroll runs first, so the tap's own claim cannot
-/// be what the scroll is measured against.
+/// scroll still does not. The scroll runs first, so the tap's own claim cannot be
+/// what the scroll is measured against.
 #[test]
 fn herdr_keeps_tap_to_keyboard_while_its_scroll_raises_nothing() {
     let _g = serial();
@@ -1440,26 +1364,18 @@ fn herdr_keeps_tap_to_keyboard_while_its_scroll_raises_nothing() {
 }
 
 /// A real **pointer** tap on a menu row — the device sequence, rather than the
-/// result-pop shortcut `tests/terminal.rs` drives the rows' actions with —
-/// leaves no focus/IME session behind once the menu is gone, and leaves the
-/// live pane under it inert.
+/// result-pop shortcut `tests/terminal.rs` drives the rows' actions with — leaves
+/// no focus/IME session behind once the menu is gone, and leaves the live pane
+/// under it inert.
 ///
-/// This is the app-side end of a framework defect, filed as a FINDINGS
-/// candidate (the register lives outside this repo). `frust::glyph::menu`'s
-/// widget claims root focus on **any** pointer `Down` ("a press anywhere claims
-/// focus so a subsequent Escape has a chain to travel"), so the Down that picks
-/// a row seeds `focus_active = true` with no IME surface behind it, for as
-/// long as the menu's exit animation and pop take. Nothing in this app asks for
-/// that, there is no seam to opt out of it, and it is the menu's claim — not
-/// the live pane's mount — that the frame-gate capture caught. What this app
+/// This is the app-side end of a framework-side gap: `frust::glyph::menu`'s widget
+/// claims root focus on **any** pointer `Down` (so a subsequent Escape has a chain
+/// to travel), seeding `focus_active = true` with no IME surface behind it for as
+/// long as the menu's exit and pop take, with no seam to opt out. What this app
 /// *can* pin is the outcome: the transient claim is released by the pop, no IME
-/// surface is ever published, and the live pane stays inert until the user taps
-/// it. Green either way, so it keeps holding once the menu stops claiming.
-///
-/// The row tapped is the first one (*Panes & tabs*), which is the menu's only
-/// remaining row whose action neither leaves the route nor opens a field — the
-/// demo row this used to tap is gone, and the pane it mounted is entered
-/// through the seam instead, before the menu is ever opened.
+/// surface is ever published, and the live pane stays inert until the user taps it.
+/// The row tapped is the first one, the menu's only remaining row whose action
+/// neither leaves the route nor opens a field.
 #[test]
 fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
     let _g = serial();
@@ -1493,15 +1409,12 @@ fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 11 — the "panes & tabs" sheet over a live pane
-// ---------------------------------------------------------------------------
+// 11 — the "panes & tabs" sheet over a live pane.
 //
-// The sheet's own browse-then-commit behaviour is pinned in `tests/terminal.rs`
-// (which owns this screen's sheet harness). What only *this* suite can say is
-// what happens to the **live pane** underneath it: a commit must move the
-// session without tearing the grid, its seams or its feed down, and the spaces
-// section must follow the attached session's own backend.
+// The sheet's own browse-then-commit behaviour is pinned in `tests/terminal.rs`.
+// What only *this* suite can say is what happens to the **live pane** underneath
+// it: a commit must move the session without tearing the grid, its seams or its
+// feed down, and the spaces section must follow the attached session's backend.
 
 /// The sheet's pane rows, top to bottom — the `--bg-base` tiles
 /// (`presentation::pieces`' `Palette::base`, the scheme's
@@ -1518,11 +1431,10 @@ fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
     rows
 }
 
-/// Open the sheet the way a device does — the menu's first row, by pointer.
-///
-/// Waits for the first workspace load first: this suite's own
-/// [`Harness::await_load`] only pumps long enough for the live pane's needs,
-/// and a sheet opened before the tab world lands has nothing to list.
+/// Open the sheet the way a device does — the menu's first row, by pointer. Waits
+/// for the first workspace load first: this suite's own [`Harness::await_load`]
+/// only pumps long enough for the live pane's needs, and a sheet opened before the
+/// tab world lands has nothing to list.
 fn open_sheet(h: &mut Harness) {
     h.pump_until("the workspace to load", |_| {
         debug_controller().is_some_and(|c| c.loaded.get_untracked())
@@ -1604,10 +1516,8 @@ fn the_spaces_section_follows_the_attached_sessions_own_backend() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The live grid's gesture hooks: tap → FocusPane (zellij only) and
 // wheel → mouse frames / ScrollPane fallback (always).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_grid_gesture_hooks_wire_tap_only_off_herdr_and_wheel_always() {
@@ -1625,11 +1535,10 @@ fn the_grid_gesture_hooks_wire_tap_only_off_herdr_and_wheel_always() {
         hooks.on_wheel.is_some(),
         "the wheel hook is always wired once a live session exists"
     );
-    // A real unmount (not merely dropping the harness), so the feed pump/
-    // appearance-poll background tasks this session's `enter_demo` spun up
-    // are disposed before a second screen mounts over the same reactive
-    // runtime — `docs/ARCHITECTURE.md`'s Building a Screen section covers
-    // why an `on_cleanup` never fires from a bare `Drop`.
+    // A real unmount (not merely dropping the harness), so the feed pump and
+    // appearance-poll background tasks this session spun up are disposed before
+    // a second screen mounts over the same reactive runtime — an `on_cleanup`
+    // never fires from a bare `Drop`.
     zellij.unmount_screen();
 
     let mut herdr = Harness::mount_session("herdr:work");
@@ -1699,24 +1608,19 @@ fn invoking_the_wired_hooks_never_panics_on_a_hit_a_miss_or_either_wheel_route()
     h.frame();
 }
 
-// ---------------------------------------------------------------------------
 // 13 — layout refresh: the poll, the sheet's own re-read, and the tap-miss
-//      backstop
-// ---------------------------------------------------------------------------
+//      backstop.
 //
-// The wire has no layout-changed signal, so a tab opened from *elsewhere* (a
-// second client, or the session itself) only ever reaches this screen because
-// it asked again — `TerminalController`'s own "Layout refresh" docs. What
-// these pin is the asking: each trigger fires, the answer lands, and an idle
-// one writes nothing. `MockTerminalRepository::add_test_tab` is the tab world
-// moving behind the screen's back; it is process-global, so every test below
-// clears it on both sides (this suite is serialized, so no other test can be
-// looking at the store meanwhile).
+// The wire has no layout-changed signal, so a tab opened from *elsewhere* only
+// ever reaches this screen because it asked again. What these pin is the asking:
+// each trigger fires, the answer lands, and an idle one writes nothing.
+// `MockTerminalRepository::add_test_tab` is the tab world moving behind the
+// screen's back; it is process-global, so every test below clears it on both
+// sides (this suite is serialized).
 //
-// The **device** races these close (a snapshot poisoned by the attach
-// handshake, a created tab the relay had not applied yet) are not reproducible
-// headlessly: they need a real `AttachTerminal` stream and a real relay. These
-// pin the mechanisms; the races themselves are a device gate.
+// The **device** races these close (a snapshot poisoned by the attach handshake,
+// a created tab the relay had not applied yet) are not reproducible headlessly:
+// they need a real `AttachTerminal` stream and a real relay.
 
 /// The tab a test opens "from elsewhere", and the pill the sheet draws for it
 /// — `TabEntry::pill_label`'s `<index> <label>`, appended past the mock's four
@@ -1724,10 +1628,9 @@ fn invoking_the_wired_hooks_never_panics_on_a_hit_a_miss_or_either_wheel_route()
 const SCRATCH_TAB: &str = "scratch";
 const SCRATCH_PILL: &str = "5 scratch";
 
-/// Drive one controller call to completion — the same local-runtime shape
-/// section 4 uses, and for the same reason (this suite cannot fake the
-/// background runtime's timer, so a poll tick is invoked directly rather than
-/// waited out at a cadence nothing ships).
+/// Drive one controller call to completion — the same local-runtime shape section 4
+/// uses, and for the same reason (this suite cannot fake the background runtime's
+/// timer, so a poll tick is invoked directly rather than waited out).
 fn drive(fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>) {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -1836,9 +1739,8 @@ fn the_first_content_tap_that_resolves_to_nothing_re_reads_the_layout_once() {
         .expect("zellij wires the tap hook");
 
     // The backstop's whole point: taps are hit-tested against the last layout
-    // answer, so a screen whose answer is stale/empty has no working tap at
-    // all — the first miss re-reads it rather than leaving the user to find
-    // the sheet.
+    // answer, so a screen whose answer is stale/empty has no working tap at all
+    // — the first miss re-reads it rather than leaving the user to find the sheet.
     add_test_tab(SCRATCH_TAB);
     assert!(
         on_content_tap(500, 500),
@@ -1861,22 +1763,18 @@ fn the_first_content_tap_that_resolves_to_nothing_re_reads_the_layout_once() {
 }
 
 // ---------------------------------------------------------------------------
-// The sheet body composes a scroll container (G41)
+// The sheet body composes a scroll container.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn the_sheet_body_composes_a_scroll_container() {
-    // Structure-level pin, per the task's own note: no screenshot/pixel
-    // assert (visual sizing is Ed's own device gate — headless has no
-    // `WindowMetrics`, so `pieces::sheet_scroll_body`'s own cap never
-    // engages here, and the region always sizes to its content exactly as
-    // the plain column it replaced did). What this pins is that the sheet's
-    // scrollable sections really are wrapped in a `frust::scroll_view`,
-    // which — unlike a label or a colour — publishes its own unambiguous
-    // `Role::ScrollView` accessibility node (`frust_widgets::scroll`'s own
-    // `semantics` impl), the same role-based locator
-    // `tests/navigation_motion.rs` already pins the shell's bar structure
-    // with.
+    // Structure-level pin: no screenshot/pixel assert (visual sizing is a device
+    // gate — headless has no `WindowMetrics`, so the scroll region's own cap
+    // never engages here and it always sizes to its content exactly as the plain
+    // column it replaced did). What this pins is that the sheet's scrollable
+    // sections really are wrapped in a `frust::scroll_view`, which — unlike a
+    // label or a colour — publishes its own unambiguous `Role::ScrollView` node,
+    // the same role-based locator `tests/navigation_motion.rs` uses.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session("zellij:dev");

@@ -1,54 +1,24 @@
 //! The Terminal screen's hand-rolled primitives — the boxes, the animated
 //! terminal card, the body's own text pipeline, and the three vector marks
-//! `frust::icons` does not carry.
-//!
-//! `docs/terminal.html` (v2) is mostly boxes, hairlines and monospace runs:
-//! `.term-card`'s filled + bordered + *animating* wrap, `.term-statusrow`'s
-//! band, `.pill`/`.pane-item`'s tiles (some dashed), and a `.term-body` whose
-//! lines stagger in behind a blinking block caret. No facade widget paints an
-//! arbitrary filled/bordered rect, a dashed outline, an ellipsized single-line
-//! run, or a per-line staggered reveal, so these [`View`]/[`Widget`] pairs —
-//! authored through [`frust::authoring`], the seam `crate::ui::backdrop`/
-//! `crate::ui::topbar` already use — fill the gap.
-//!
-//! | Piece | Mock element |
-//! |---|---|
-//! | [`term_box`] | `.pill`, `.pane-item`, `.new-pane-btn`, `.term-statusrow`, `.sheet-close` — one filled/bordered box, optionally dashed |
-//! | [`clipped_label`] | `.term-pane-title` — a single-line run, ellipsized to fit |
-//! | [`status_strip`] | the card's one-line link notice and its affordance — no mock element; a live session's own |
-//! | [`expand_button`] | `.expand-btn` — the 28px circle that toggles fullscreen |
-//! | [`terminal_stage`] | `.term-wrap` + `.term-card` — the animated clearance/padding/radius, the card fill/border/shadow, and the bar's anchor rect |
-//! | [`term_body`] | `.term-body` — typed lines, the staggered reveal, the blinking caret |
+//! `frust::icons` does not carry: [`term_box`] (`.pill`/`.pane-item`/
+//! `.term-statusrow`), [`clipped_label`] (`.term-pane-title`), [`status_strip`]
+//! (the link notice), [`expand_button`] (`.expand-btn`), [`terminal_stage`]
+//! (`.term-wrap` + `.term-card`, animated) and [`term_body`] (`.term-body`).
 //!
 //! **Feature-local, and knowingly parallel to `features::sessions`' own
-//! `chrome`.** The two screens each own their box primitives rather than
-//! sharing one, because a feature never imports a sibling's `presentation`
-//! (`docs/ARCHITECTURE.md`'s cross-feature rule). Promoting them into
-//! `crate::ui` is a job for the sweep that touches both screens at once —
-//! `examples/huddle` promoted its `fill_box` on exactly that trigger.
+//! `chrome`**: a feature never imports a sibling's `presentation`, so promoting
+//! these into `crate::ui` is a job for a sweep that touches both screens.
 //!
-//! Like the other two screens', every one of these takes already-resolved
-//! [`Color`]s/[`TextStyle`]s: [`super::pieces`] resolves each from the active
-//! [`frust::Theme`] once per build, so these stay dumb about theming. The one
-//! exception is [`terminal_stage`], which reads `reduce_motion` and the motion
-//! tokens from the **paint-time** theme, because that is the only pass where a
-//! theme is in scope when a transition actually starts (the deferred-driver
-//! idiom `crate::ui::topbar` documents).
+//! Every piece takes already-resolved [`Color`]s/[`TextStyle`]s —
+//! [`super::widgets`] resolves them from the active [`frust::Theme`] once per
+//! build. The exception is [`terminal_stage`], which reads `reduce_motion` and
+//! the motion tokens from the **paint-time** theme, the only pass where a theme
+//! is in scope when a transition starts (the deferred-driver idiom
+//! `crate::ui::topbar` documents).
 //!
-//! # Frust gaps these work around
-//!
-//! - **No dash pattern on `PaintScene`** — `stroke_path`/`stroke_line` take a
-//!   plain width. [`TermBoxWidget`] walks each edge in on/off steps, the same
-//!   workaround `frust::glyph::empty_state` and `features::sessions`' own
-//!   `dashed_box` make.
-//! - **No text overflow/ellipsis vocabulary** — `frust::text` has no
-//!   `max_lines`/`overflow` builder, so a too-long pane title would wrap
-//!   instead of ellipsizing. [`ClippedLabelWidget`] measures and truncates
-//!   itself.
-//! - **No per-corner radius** — the card's status row would poke square
-//!   corners through the card's 22px rounding, so the stage clips its child to
-//!   its own rounded rect (`push_clip_rounded`) rather than compositing two
-//!   radii.
+//! Three frust gaps these work around: no dash pattern on `PaintScene`, no text
+//! overflow/ellipsis vocabulary, and no per-corner radius (so the stage clips its
+//! child to its own rounded rect rather than compositing two radii).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -71,9 +41,7 @@ use frust::{
 use crate::features::terminal::domain::entities::{TermLine, TermLineKind};
 use crate::ui::topbar::BAR_HEIGHT;
 
-// ---------------------------------------------------------------------------
-// App-supplied vector marks (the "chrome icons are vectors" rule)
-// ---------------------------------------------------------------------------
+// App-supplied vector marks (the "chrome icons are vectors" rule).
 
 /// The side length of the square design box every mark here is authored
 /// against — Material Symbols' own 24, which [`frust::icons`]' generated
@@ -81,17 +49,10 @@ use crate::ui::topbar::BAR_HEIGHT;
 const ICON_DESIGN_BOX: f64 = 24.0;
 
 /// `.expand-btn`'s resting mark (the mock's `⛶`): the four corner brackets of
-/// Material Icons' `fullscreen`.
-///
-/// **Why an app-supplied source.** `frust::icons` is a 42-entry starter set
-/// with no fullscreen pair at all, so the collection cannot express the mark
-/// the mock asks for — and `⛶` (`U+26F6`) is absent from the bundled Glyph
-/// faces, which is exactly the font-fallback trap `crate::ui::topbar`'s
-/// "Chrome icons are vectors" rule exists to close (the `⚙` it replaced was
-/// simply invisible on iPhone). Transcribed from the Material Icons 24px
-/// `fullscreen` glyph, so its stroke weight and corner cuts match the
-/// vendored set beside it. [`CHEVRON_LEFT`](crate::ui::topbar::CHEVRON_LEFT)
-/// is the app's first use of this same `IconSource` seam.
+/// Material Icons' `fullscreen`, transcribed so its stroke weight and corner cuts
+/// match the vendored set. App-supplied because `frust::icons`' starter set
+/// carries no fullscreen pair and `⛶` (`U+26F6`) is absent from the bundled Glyph
+/// faces — the font-fallback trap the "chrome icons are vectors" rule closes.
 pub const FULLSCREEN_EXPAND: IconSource = IconSource {
     d: "M 7 14 H 5 v 5 h 5 v -2 H 7 v -3 Z M 5 10 h 2 V 7 h 3 V 5 H 5 v 5 Z \
         M 17 17 h -3 v 2 h 5 v -5 h -2 v 3 Z M 14 5 v 2 h 3 v 3 h 2 V 5 h -5 Z",
@@ -106,23 +67,17 @@ pub const FULLSCREEN_EXIT: IconSource = IconSource {
     design: ICON_DESIGN_BOX,
 };
 
-/// The pane mark (the mock's `▤`, "square with horizontal fill"): three
-/// stacked bars in the 24px box.
-///
-/// Drawn rather than set as text for the same reason as the pair above —
-/// `▤` (`U+25A4`) is a Geometric Shapes glyph absent from IBM Plex Mono, so on
-/// device it resolves through each platform's own fallback chain (or not at
-/// all). Three separated bars read as the source's striped square at the 12px
-/// the sheet draws it, and as a filled square at a glance. Authored here (no
-/// Material Symbols counterpart is in the vendored set).
+/// The pane mark (the mock's `▤`): three stacked bars in the 24px box, authored
+/// here since the vendored Material set has no counterpart. Drawn rather than set
+/// as text for the same reason as the pair above: `▤` (`U+25A4`) is absent from
+/// IBM Plex Mono, so on device it resolves through each platform's own fallback
+/// chain, or not at all.
 pub const PANE_MARK: IconSource = IconSource {
     d: "M 4 5 h 16 v 4 H 4 V 5 Z M 4 10 h 16 v 4 H 4 v -4 Z M 4 15 h 16 v 4 H 4 v -4 Z",
     design: ICON_DESIGN_BOX,
 };
 
-// ---------------------------------------------------------------------------
-// Shared paint helpers
-// ---------------------------------------------------------------------------
+// Shared paint helpers.
 
 /// Hairline border width in logical px (`1px solid` on every bordered rule in
 /// `docs/terminal.html`). Matches `frust-widgets`' own `BORDER_WIDTH`.
@@ -133,9 +88,8 @@ pub(super) const RADIUS_FULL: f64 = 999.0;
 /// Flattening tolerance for a rounded-rect border path — the value
 /// `frust-widgets`' own border strokes use.
 const BORDER_TOLERANCE: f64 = 0.1;
-/// `border-style:dashed` — the on/off step of the hand-drawn dash, in logical
-/// px. CSS leaves the period to the UA; 4/4 is the common rendering and the
-/// value `features::sessions`' own dashed row uses.
+/// `border-style:dashed` — the on/off step of the hand-drawn dash, in logical px.
+/// CSS leaves the period to the UA; 4/4 is the common rendering.
 const DASH_ON: f64 = 4.0;
 const DASH_OFF: f64 = 4.0;
 
@@ -189,10 +143,6 @@ fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
-// ---------------------------------------------------------------------------
-// `term_box` — a filled/bordered (optionally dashed) box behind one child
-// ---------------------------------------------------------------------------
-
 /// A rounded fill plus an optional hairline border, painted *behind* a child
 /// it sizes itself to. Every tile on this screen is one of these.
 pub(super) struct TermBoxView<State: 'static> {
@@ -225,8 +175,7 @@ impl<State: 'static> TermBoxView<State> {
         self
     }
 
-    /// Draw that border dashed (`.pill.add`, `.new-pane-btn`) — see the
-    /// [module docs](self)'s frust-gap note.
+    /// Draw that border dashed (`.pill.add`, `.new-pane-btn`).
     pub(super) fn dashed(mut self, dashed: bool) -> Self {
         self.dashed = dashed;
         self
@@ -300,9 +249,8 @@ impl Widget for TermBoxWidget {
                 let half = HAIRLINE / 2.0;
                 let (left, top) = (origin.x + half, origin.y + half);
                 let (right, bottom) = (origin.x + size.width - half, origin.y + size.height - half);
-                // The corner arcs stay undashed (dashing a curve needs the
-                // pattern support frust lacks); at a 4px period an open corner
-                // reads as one more gap.
+                // The corner arcs stay undashed (dashing a curve needs pattern
+                // support frust lacks); at a 4px period a corner reads as a gap.
                 for y in [top, bottom] {
                     dash_run(scene, left + radius, right - radius, border, |x| {
                         (Point::new(x.0, y), Point::new(x.1, y))
@@ -321,9 +269,8 @@ impl Widget for TermBoxWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A decorative single-child container still MUST route, or everything
-        // it backs is silently unreachable (the sessions `panel` precedent):
-        // every pill's gesture detector sits under one of these.
+        // A decorative single-child container still MUST route, or everything it
+        // backs is silently unreachable.
         route_event_single(&mut self.child, ctx, event)
     }
 
@@ -334,18 +281,9 @@ impl Widget for TermBoxWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `wrap_row` — `.pill-row{display:flex; gap:8px; flex-wrap:wrap}`
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// The card's status strip
-// ---------------------------------------------------------------------------
-
-/// The strip's own gutters — the status row's (`.term-statusrow`'s 18px lead,
-/// 14px trail), transcribed a second time because that row's constants are
-/// private to [`super::pieces`]; the two are the card's one left edge, so they
-/// have to agree.
+/// The strip's own gutters — the status row's 18px lead/14px trail, transcribed a
+/// second time because that row's constants are private to [`super::widgets`];
+/// the two are the card's one left edge, so they have to agree.
 const STRIP_PAD_LEFT: f64 = 18.0;
 const STRIP_PAD_RIGHT: f64 = 14.0;
 /// Tighter than the status row's 14px: this band is a transient notice above a
@@ -355,18 +293,12 @@ const STRIP_PAD_Y: f64 = 10.0;
 /// gap, so the card and its sheet breathe alike.
 const STRIP_GAP: f64 = 8.0;
 
-/// A one-line notice band across the card, optionally ending in one
-/// affordance: what the screen surfaces a live session's link state through.
-///
-/// A band rather than an overlay because it must not cover terminal output the
-/// user is still reading — a reconnecting session is *stale*, not gone, and
-/// what it last printed is often exactly what explains why. Square-cornered
-/// and full-bleed for the same reason the status row above it is: the card
-/// clips to its own radius, so a band inside it never needs one of its own.
-///
-/// `action` is an already-built view rather than a label plus a callback, so
-/// this stays free of a closure type parameter and the caller keeps whatever
-/// button vocabulary the rest of its screen uses.
+/// A one-line notice band across the card, optionally ending in one affordance:
+/// how the screen surfaces a live session's link state. A band rather than an
+/// overlay because it must not cover output the user is still reading — a
+/// reconnecting session is *stale*, not gone. Square-cornered and full-bleed,
+/// since the card clips to its own radius. `action` is an already-built view
+/// rather than a label plus a callback, so this stays free of a type parameter.
 pub(super) fn status_strip<State: 'static>(
     message: impl Into<String>,
     style: TextStyle,
@@ -393,15 +325,10 @@ pub(super) fn status_strip<State: 'static>(
     ))
 }
 
-/// A row of children that wraps onto further lines when it runs out of width,
-/// with `gap` between neighbours on both axes.
-///
-/// Hand-rolled because **frust's `Flex` has no wrap** (`FlexView` is a single
-/// line, `MainAxisAlignment::Start` only) — another entry in the same
-/// framework-gap list as the dash pattern above. The sheet's tab row is what
-/// forces the issue: five pills at 11px come to roughly 390 logical px, which
-/// is wider than the panel on every phone this app targets, and an unwrapped
-/// row would simply run its last pill off the edge.
+/// A row of children that wraps onto further lines when it runs out of width, with
+/// `gap` between neighbours on both axes. Hand-rolled because **frust's `Flex` has
+/// no wrap**: the sheet's five tab pills come to roughly 390 logical px, wider
+/// than the panel on every phone this app targets.
 pub(super) struct WrapRowView<State: 'static> {
     children: Vec<AnyView<State>>,
     gap: f64,
@@ -441,9 +368,7 @@ impl<State: 'static> View<State> for WrapRowView<State> {
         let mut flags = ChangeFlags::NONE;
         if prev.children.len() != self.children.len() {
             // A changed child *count* cannot be reconciled positionally (the
-            // erased types no longer line up), so the row is rebuilt whole —
-            // the same rule `crate::shell::root_view`'s stable-`Stack`
-            // invariant states from the other side.
+            // erased types no longer line up), so the row is rebuilt whole.
             for (view, pod) in prev.children.iter().zip(element.children.iter_mut()) {
                 teardown_child(view, pod, ctx);
             }
@@ -480,10 +405,9 @@ impl<State: 'static> View<State> for WrapRowView<State> {
 impl Widget for WrapRowWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let max_width = finite_or_zero(bc.max().width);
-        // The **height** is passed through unclamped, infinity included: a
-        // vertical `Flex` hands its children an unbounded main axis, and
-        // coercing that to zero (as the width has to be, to wrap against it)
-        // would flatten every child to nothing.
+        // The **height** is passed through unclamped, infinity included: a vertical
+        // `Flex` hands its children an unbounded main axis, and coercing that to
+        // zero (as the width has to be, to wrap against it) would flatten them.
         let child_bc = BoxConstraints::loose(Size::new(max_width, bc.max().height));
         let (mut x, mut y) = (0.0f64, 0.0f64);
         let mut line_height = 0.0f64;
@@ -520,16 +444,11 @@ impl Widget for WrapRowWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `clipped_label` — a single-line run, ellipsized to fit
-// ---------------------------------------------------------------------------
-
 /// The mark appended to a truncated run (`text-overflow:ellipsis`).
 const ELLIPSIS: char = '\u{2026}';
 
-/// A minimal retained text run — `frust-widgets`' own per-module
-/// `GlyphLabel` helper, re-derived here because it is crate-private (the same
-/// re-derivation `examples/glyph-catalog` makes for `build_child`).
+/// A minimal retained text run — `frust-widgets`' own per-module `GlyphLabel`
+/// helper, re-derived here because it is crate-private.
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
@@ -546,8 +465,7 @@ impl GlyphLabel {
     }
 
     /// Shape `content` at `style`, reusing the cached layout when neither has
-    /// changed. `max_width` is only ever `None` here: every caller either
-    /// measures unconstrained (and truncates itself) or lets the line wrap.
+    /// changed. `max_width` is only ever `None` here.
     fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
         let key = (style.clone(), self.content.clone());
         if let Some(cached) = &self.layout
@@ -580,11 +498,9 @@ impl GlyphLabel {
 }
 
 /// A single-line run truncated with an ellipsis when it does not fit —
-/// `.term-pane-title`'s `white-space:nowrap; text-overflow:ellipsis`.
-///
-/// Hand-rolled because `frust::text` carries no overflow vocabulary at all
-/// (see the [module docs](self)): left to it, a long pane title would wrap to
-/// a second line and grow the card's status row.
+/// `.term-pane-title`'s `white-space:nowrap; text-overflow:ellipsis`. Hand-rolled
+/// because `frust::text` carries no overflow vocabulary: left to it, a long pane
+/// title wraps and grows the card's status row.
 pub(super) struct ClippedLabelView {
     content: String,
     style: TextStyle,
@@ -637,11 +553,9 @@ impl<State: 'static> View<State> for ClippedLabelView {
 
 impl ClippedLabelWidget {
     /// The longest prefix of `content` that fits `max_width` once an ellipsis
-    /// is appended, or the whole string when it already fits.
-    ///
-    /// A linear walk over character boundaries rather than a binary search:
-    /// a pane title is a handful of characters, and each step is a cached
-    /// shaping call.
+    /// is appended, or the whole string when it already fits. A linear walk
+    /// over character boundaries rather than a binary search: a pane title is a
+    /// handful of characters, and each step is a cached shaping call.
     fn fitted(&self, ctx: &mut LayoutCtx, max_width: f64) -> String {
         if GlyphLabel::measure(ctx, &self.content, &self.style).width <= max_width {
             return self.content.clone();
@@ -685,28 +599,19 @@ impl Widget for ClippedLabelWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `expand_button` — `.expand-btn`, the fullscreen toggle
-// ---------------------------------------------------------------------------
-
 /// `.expand-btn{width:28px;height:28px}`.
 pub(super) const EXPAND_SIZE: f64 = 28.0;
-/// The drawn size of the vector inside that circle. An original value: the
-/// source sets its glyph at 12px, and a Material-weight outline at 12px reads
-/// thinner than a glyph does, so the mark is drawn a step up.
+/// The drawn size of the vector inside that circle. An original value: the source
+/// sets its glyph at 12px, and a Material-weight outline reads thinner than a
+/// glyph does at that size.
 const EXPAND_ICON_SIZE: f64 = 15.0;
 /// `.expand-btn:active{transform:scale(0.9)}`.
 const PRESS_SCALE: f64 = 0.9;
 
-/// The 28px circle on the card's status row: the **only** fullscreen
-/// affordance, and the one that stays in the same place in both states ("one
-/// button, always in the same place" — the mock's own note).
-///
-/// Hand-rolled rather than `crate::ui::topbar::icon_button` because it needs
-/// two things that leaf deliberately does not have: a hairline **border** (the
-/// source's `1px solid var(--term-border)`) and the `:active` **scale** press
-/// treatment rather than a tone wash. Everything else — one vector mark, one
-/// labelled `Role::Button` node, fire-on-up-inside — is the same contract.
+/// The 28px circle on the card's status row: the **only** fullscreen affordance,
+/// in the same place in both states. Hand-rolled rather than
+/// `crate::ui::topbar::icon_button` because it needs a hairline border and the
+/// `:active` scale press treatment rather than a tone wash.
 pub(super) struct ExpandButtonView<State: 'static> {
     mark: IconData,
     label: String,
@@ -738,7 +643,7 @@ pub(super) fn expand_button<State: 'static, F: Fn(&mut State) + 'static>(
 
 impl<State: 'static> ExpandButtonView<State> {
     /// The resting (or, with [`on`](Self::on), the active) fill, ink and
-    /// border — resolved by [`super::pieces`], like every other colour here.
+    /// border — resolved by [`super::widgets`], like every other colour here.
     pub(super) fn tones(mut self, fill: Color, ink: Color, border: Color) -> Self {
         self.fill = fill;
         self.ink = ink;
@@ -746,9 +651,8 @@ impl<State: 'static> ExpandButtonView<State> {
         self
     }
 
-    /// Whether the button is in its `.on` state (fullscreen is engaged).
-    /// Purely a *semantics* input — the caller passes the amber trio through
-    /// [`tones`](Self::tones) — so a screen reader announces the toggle state.
+    /// Whether the button is in its `.on` state. Purely a *semantics* input —
+    /// the caller passes the amber trio through [`tones`](Self::tones).
     pub(super) fn on(mut self, on: bool) -> Self {
         self.on = on;
         self
@@ -842,10 +746,9 @@ impl Widget for ExpandButtonWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
-        // `:active{transform:scale(0.9)}` about the button's own centre. A
-        // transform (rather than a smaller rect) so the mark shrinks with the
-        // circle; hit testing deliberately stays at full size, exactly as the
-        // CSS does.
+        // `:active{transform:scale(0.9)}` about the button's own centre: a
+        // transform rather than a smaller rect, so the mark shrinks with the
+        // circle and hit testing stays at full size, as the CSS does.
         if self.pressed {
             let centre = Vec2::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
             scene.push_transform(
@@ -919,10 +822,6 @@ impl Widget for ExpandButtonWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `terminal_stage` — `.term-wrap` + `.term-card`, both directions animated
-// ---------------------------------------------------------------------------
-
 /// `.term-wrap{padding:14px}` — the gap around the card in the windowed state,
 /// which fullscreen animates to zero.
 pub(super) const WRAP_PAD: f64 = 14.0;
@@ -937,44 +836,29 @@ const SHADOW_STD_DEV: f64 = 25.0;
 const SHADOW_ALPHA: f32 = 0.4;
 
 /// `.topbar{padding:0 16px}`/`.topbar-icon{width:30px}`, transcribed from
-/// `crate::ui::topbar` (whose own constants are private) so this screen can
-/// hand `frust::glyph::show_glyph_menu` the window-coordinate rect of the bar
-/// slot its `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is imported
-/// rather than transcribed.
+/// `crate::ui::topbar` (whose own constants are private) so this screen can hand
+/// `frust::glyph::show_glyph_menu` the window-coordinate rect of the bar slot its
+/// `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is imported.
 const BAR_PAD_X: f64 = 16.0;
 const BAR_SLOT: f64 = 30.0;
 
 /// One in-flight fullscreen transition: a linear `0→1` driver, the curve that
-/// eases its progress, and the `from..to` range the eased progress is then
-/// interpolated across.
+/// eases its progress, and the `from..to` range that eased progress is then
+/// interpolated across. The range is what makes an *interrupted* transition
+/// value-continuous — a second tap mid-flight starts a fresh driver from wherever
+/// the card actually is (see [`start`](Self::start)).
 ///
-/// The same shape (and for the same reason) as `crate::ui::topbar`'s `Reveal`:
-/// the range is what makes an
-/// *interrupted* transition value-continuous — a second tap mid-flight starts a
-/// fresh driver from wherever the card actually is (see [`start`](Self::start)),
-/// the "value continuity, not velocity continuity" contract `frust::motion`'s
-/// implicit animations document.
+/// **Ease the progress, not the position.** [`value`](Self::value) applies `curve`
+/// to the driver's `0..=1` progress *before* mapping onto `from..to`. Glyph's
+/// `spatial` curve is an authored overshoot exceeding `1.0` on roughly
+/// `t ∈ [0.45, 1.0]`, so curving the already-interpolated position would leave a
+/// collapse (`from = 1, to = 0`) clamped flush at `1.0` for the first half of its
+/// run — the card stalling in place before it visibly moves.
 ///
-/// **Ease the progress, not the position.** [`value`](Self::value) applies
-/// `curve` to the driver's own `0..=1` progress *before* mapping the result
-/// onto `from..to` — curving the already-interpolated position instead
-/// (`curve.transform(from + (to - from) · t)`) curves the wrong quantity.
-/// Glyph's `spatial` curve is an authored overshoot that exceeds `1.0` on
-/// roughly `t ∈ [0.45, 1.0]` (e.g. `y(0.5) ≈ 1.01`, `y(0.65) ≈ 1.04`); fed a
-/// *position* input, a collapse (`from = 1, to = 0`) would sit in that
-/// overshoot band for the whole first half of the driver's run and clamp
-/// flush to `1.0` there — the card stalling in place before it visibly moves,
-/// rather than animating through its full duration as this type's continuity
-/// claim (and the entry direction's mirror-image symmetry) requires.
-///
-/// **Timings are the theme's, not the mock's.** `docs/terminal.html` animates
-/// on `.32–.38s cubic-bezier(0.34,1.4,0.55,1)`; Glyph's `durations.slow`
-/// (340ms) with `easing.spatial` (`Cubic(0.34,1.35,0.64,1)`) is the same
-/// motion expressed in tokens, which is why this reaches for the authored
-/// duration/easing pair rather than the `default_spatial` **spring** slot
-/// beside it — `frust_theme`'s own Glyph motion docs say the spring slots are
-/// hand-tuned approximations of these very beziers and that "a consumer that
-/// wants the authored feel should prefer the durations/easing tokens".
+/// **Timings are the theme's, not the mock's**: Glyph's `durations.slow` (340ms)
+/// with `easing.spatial`. The authored duration/easing pair, not the
+/// `default_spatial` spring slot beside it — the springs are hand-tuned
+/// approximations of these very beziers.
 struct FullscreenStage {
     driver: AnimationController,
     from: f64,
@@ -989,12 +873,9 @@ const FALLBACK_SPATIAL: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 
 impl FullscreenStage {
     /// Stage a transition from `from` to `to` under `theme`'s motion policy.
-    ///
-    /// `from` must be the last **painted** progress (`self.progress` at the
-    /// call site below, never a raw driver `t`) — an interrupted stage's own
-    /// `value()` reads `from` at `t = 0` (see below), so seeding anything
-    /// other than the on-screen value would itself reintroduce a visible
-    /// jump on interruption.
+    /// `from` must be the last **painted** progress, never a raw driver `t`:
+    /// `value()` reads `from` at `t = 0`, so seeding anything but the on-screen
+    /// value reintroduces a jump on interruption.
     fn start(from: f64, to: f64, theme: Option<&Theme>) -> Self {
         let duration = theme.map_or(FALLBACK_SLOW, |theme| {
             Duration::from_secs_f64(theme.motion.durations.slow / 1000.0)
@@ -1009,18 +890,11 @@ impl FullscreenStage {
         }
     }
 
-    /// The eased `0..=1` geometry fraction this frame.
-    ///
-    /// Eases the driver's own progress, **then** interpolates `from..to` —
-    /// see the type docs for why the reverse order is wrong. `t = 0` always
-    /// returns exactly `from` and `t = 1` always returns exactly `to`
-    /// (`curve.transform` is endpoint-preserving), which is what makes a
-    /// freshly-[`start`](Self::start)ed stage value-continuous with whatever
-    /// was last painted.
-    ///
-    /// Clamped once, at the end: Glyph's `spatial` curve is an authored
-    /// overshoot, and "past fullscreen" is not a geometry that exists — a
-    /// negative wrap padding would push the card off its own screen.
+    /// The eased `0..=1` geometry fraction this frame: eases the driver's
+    /// progress, **then** interpolates `from..to`. `t = 0` returns exactly
+    /// `from` and `t = 1` exactly `to`, which is what makes a freshly-started
+    /// stage value-continuous. Clamped once, at the end: the `spatial` curve
+    /// overshoots, and a negative wrap padding would push the card off screen.
     fn value(&self) -> f64 {
         let eased = self.curve.transform(self.driver.value_clamped());
         (self.from + (self.to - self.from) * eased).clamp(0.0, 1.0)
@@ -1032,18 +906,11 @@ impl FullscreenStage {
 /// `child`.
 ///
 /// One widget rather than three nested ones because all three animate off the
-/// **same** progress in the same gesture (the mock transitions
-/// `.app-bar`'s collapse, `.term-wrap`'s padding and `.term-card`'s radius
-/// together), and because a padding that animates is a *layout* fact — frust
-/// has no animated-padding widget, and the paint-origin trick
-/// `crate::ui::topbar` uses cannot resize a child.
-///
-/// It also records the app bar's trailing-slot rect into
-/// [`anchor`](TerminalStageView::anchor) — see [`BAR_PAD_X`]: the overflow
-/// menu is anchored to a slot inside a *sibling* widget that this page cannot
-/// query (`show_glyph_menu` takes a caller-reported window rect, and there is
-/// no ancestor-bounds query), so the one widget that already knows both the
-/// window box and the top inset computes it.
+/// **same** progress in one gesture, and because an animated padding is a *layout*
+/// fact. It also records the app bar's trailing-slot rect into
+/// [`anchor`](TerminalStageView::anchor): the overflow menu anchors to a slot
+/// inside a sibling widget this page cannot query, so the one widget that knows
+/// both the window box and the top inset computes it.
 pub(super) struct TerminalStageView<State: 'static> {
     child: AnyView<State>,
     fullscreen: bool,
@@ -1079,10 +946,9 @@ pub(super) struct TerminalStageWidget {
     /// The painted transition: `0.0` windowed, `1.0` fullscreen. Read by
     /// **layout** (the padding/clearance it produces) and written by paint.
     progress: f64,
-    /// The in-flight transition, `None` at rest. Created on the first
-    /// **paint** after a flip, not on the rebuild that staged it: a `BuildCtx`
-    /// carries no theme to resolve `reduce_motion`/the motion tokens from (the
-    /// deferred-driver idiom `crate::ui::topbar` documents).
+    /// The in-flight transition, `None` at rest. Created on the first **paint**
+    /// after a flip, not on the rebuild that staged it: a `BuildCtx` carries no
+    /// theme to resolve `reduce_motion`/the motion tokens from.
     stage: Option<FullscreenStage>,
     /// A flip the last rebuild staged, awaiting that first paint.
     pending: bool,
@@ -1146,15 +1012,12 @@ impl Widget for TerminalStageWidget {
         let height = finite_or_zero(bc.max().height);
         let p = self.progress.clamp(0.0, 1.0);
 
-        // The clearance the floating bar occupies, shrinking to just the
-        // status-bar inset as the bar animates away (`crate::shell` drives the
-        // bar itself off the same flag). The status bar's own inset is kept in
-        // **both** states, so the pane title never sits under a notch.
+        // The clearance the floating bar occupies, shrinking to the status-bar
+        // inset as the bar animates away. Both insets are kept in **both**
+        // states: the pane title must never sit under a notch, and "edge to
+        // edge" must not mean "the last output line is under the home bar".
         let top = insets.top + BAR_HEIGHT * (1.0 - p);
         let pad = WRAP_PAD * (1.0 - p);
-        // The gesture-nav/home-indicator inset is likewise kept in both
-        // states: "edge to edge" must not mean "the last output line is under
-        // the home bar".
         let bottom = pad + insets.bottom;
 
         let card_w = (width - 2.0 * pad).max(0.0);
@@ -1163,15 +1026,13 @@ impl Widget for TerminalStageWidget {
             .layout_child(ctx, &BoxConstraints::tight(Size::new(card_w, card_h)));
         self.child.set_origin(Point::new(pad, top));
         self.card_rect = Rect::new(pad, top, pad + card_w, top + card_h);
-        // Recorded **here**, off the same `p` the box was built from, rather
-        // than re-derived in paint: paint has already advanced the driver by
-        // then, so a radius read there would run one frame ahead of the box it
-        // rounds — visible on a 22px corner mid-transition.
+        // Recorded off the same `p` the box was built from: paint has already
+        // advanced the driver, so a radius read there runs one frame ahead.
         self.card_radius = CARD_RADIUS * (1.0 - p);
 
         // The bar's trailing `⋮` slot, in window coordinates — this page is
-        // laid out at the full surface (the navigator never shrinks it), so
-        // local and window coordinates coincide here. See the type docs.
+        // laid out at the full surface, so local and window coordinates
+        // coincide here.
         let slot_x = width - BAR_PAD_X - BAR_SLOT;
         let slot_y = insets.top + (BAR_HEIGHT - BAR_SLOT) / 2.0;
         self.anchor.set(Rect::new(
@@ -1187,8 +1048,7 @@ impl Widget for TerminalStageWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         // Start a staged transition now a theme is in scope. `reduce_motion`
-        // **snaps** both directions — the documented app-wide policy, and the
-        // only honest collapse for a transition that is entirely geometric.
+        // **snaps** both directions — the documented app-wide policy.
         if self.pending {
             self.pending = false;
             let target = if self.fullscreen { 1.0 } else { 0.0 };
@@ -1203,10 +1063,9 @@ impl Widget for TerminalStageWidget {
             let animating = stage.driver.advance(ctx.frame_time());
             self.progress = stage.value();
             // `progress` is a LAYOUT input (padding/clearance/radius are
-            // computed in `layout`), so every step must request a layout
-            // pass, not just a repaint — shells honoring the layout-skip
-            // contract (Android) freeze the geometry on a bare
-            // `request_frame`. `request_layout` implies the frame.
+            // computed in `layout`), so every step must request a layout pass:
+            // a shell honoring the layout-skip contract freezes the geometry on
+            // a bare `request_frame`. `request_layout` implies the frame.
             if animating {
                 ctx.request_layout();
             } else {
@@ -1235,9 +1094,8 @@ impl Widget for TerminalStageWidget {
         scene.fill_rounded_rect(origin, size, radius, self.card);
         stroke_border(scene, origin, size, radius, self.border);
 
-        // The status row's band is a plain rect, so without this its square
-        // top corners would poke through the card's rounding (frust has no
-        // per-corner radius — see the module docs).
+        // The status row's band is a plain rect, so without this clip its
+        // square top corners poke through the card's rounding.
         scene.push_clip_rounded(origin, size, radius);
         self.child.paint_child(ctx, scene);
         scene.pop_clip();
@@ -1251,10 +1109,6 @@ impl Widget for TerminalStageWidget {
         self.child.semantics_child(ctx);
     }
 }
-
-// ---------------------------------------------------------------------------
-// `term_body` — the card's own lines, their reveal, and the caret
-// ---------------------------------------------------------------------------
 
 /// `.term-line` stagger step (`setTimeout(.., i*140 + 60)`).
 pub(super) const REVEAL_STEP_MS: f64 = 140.0;
@@ -1279,7 +1133,7 @@ const CURSOR_DROP: f64 = 2.0;
 const FALLBACK_EFFECTS: Curve = Curve::Cubic(0.16, 1.0, 0.3, 1.0);
 
 /// The three inks a line can print in, resolved once per build by
-/// [`super::pieces`] from `GlyphInk`.
+/// [`super::widgets`] from `GlyphInk`.
 #[derive(Clone, PartialEq)]
 pub(super) struct LineStyles {
     /// `.term-line .p` — `GlyphInk::terminal_prompt`.
@@ -1301,13 +1155,11 @@ impl LineStyles {
     }
 }
 
-/// `.term-body`'s lines: one shaped run each, revealed in a stagger and
-/// followed — on the line that carries it — by the blinking block caret.
-///
-/// The reveal restarts whenever the lines change **or** `epoch` does, which is
-/// what makes a tab switch replay it (the mock's `renderTab` ends in
-/// `playReveal`). `epoch` is the controller's replay token; see its docs for
-/// why per-frame progress is not a signal.
+/// `.term-body`'s lines: one shaped run each, revealed in a stagger and followed —
+/// on the line that carries it — by the blinking block caret. The reveal restarts
+/// whenever the lines change **or** `epoch` does, which is what makes a tab switch
+/// replay it; `epoch` is the controller's replay token, published because
+/// per-frame progress is deliberately not a signal.
 pub(super) struct TermBodyView {
     lines: Vec<TermLine>,
     epoch: u64,
@@ -1357,9 +1209,8 @@ pub(super) struct TermBodyWidget {
     epoch: u64,
     styles: LineStyles,
     cursor: Color,
-    /// Drives the whole stagger — one linear `0→1` controller sized to the
-    /// last line's finish, exactly the shape `frust::glyph::term_block` uses
-    /// for its own one-shot reveal.
+    /// Drives the whole stagger — one linear `0→1` controller sized to the last
+    /// line's finish, the shape `frust::glyph::term_block` uses.
     reveal: Option<AnimationController>,
     /// Set by a rebuild that changed the lines or the epoch; the next paint
     /// arms a fresh driver (or, under `reduce_motion`, none at all).
@@ -1466,10 +1317,8 @@ impl Widget for TermBodyWidget {
         let reduce_motion = theme.is_some_and(|theme| theme.motion.reduce_motion);
         let easing = theme.map_or(FALLBACK_EFFECTS, |theme| theme.motion.easing.effects);
 
-        // Arm (or, under `reduce_motion`, deliberately *don't* arm) the
-        // reveal now a theme is in scope. Reduced motion shows every line
-        // immediately — a cascade is decorative, and this one carries no
-        // information the static lines don't.
+        // Arm (or, under `reduce_motion`, deliberately don't arm) the reveal now
+        // a theme is in scope: reduced motion shows every line at once.
         if self.replay {
             self.replay = false;
             self.reveal = (!reduce_motion).then(|| {
@@ -1498,18 +1347,16 @@ impl Widget for TermBodyWidget {
             }
         };
 
-        // The caret's own clock, independent of the reveal (the mock's
-        // `@keyframes blink` runs forever). `reduce_motion` freezes it lit —
-        // a caret is a *position* cue, so it must not disappear.
+        // The caret's own clock, independent of the reveal. `reduce_motion`
+        // freezes it lit — a caret is a *position* cue.
         let lit = if reduce_motion {
             true
         } else {
             let from = *self.blink_from.get_or_insert(ctx.frame_time());
             let since = ctx.frame_time().saturating_sub(from).as_secs_f64() * 1000.0;
-            // A paceable request: a 1.1s two-state blink is exactly the
-            // "decorative loop whose exact cadence is imperceptible" class the
-            // mobile frame gate may throttle (`PaintCtx::request_frame_paced`
-            // names a caret blink as its example).
+            // Paceable: a 1.1s two-state blink is the "decorative loop whose
+            // cadence is imperceptible" class the mobile frame gate may throttle
+            // — the one paint-only exception to the LAYOUT|PAINT contract.
             ctx.request_frame_class(TickClass::CosmeticLoop);
             caret_lit(since)
         };
@@ -1551,10 +1398,8 @@ impl Widget for TermBodyWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // The body reads as one block of text — `frust::glyph::term_block`'s
-        // own choice, and the right one: a screen reader announcing four
-        // separate unlabelled runs would lose the fact that they are one
-        // transcript.
+        // The body reads as one block of text: four separate unlabelled runs
+        // would lose the fact that they are one transcript.
         let text = self
             .lines
             .iter()
@@ -1580,10 +1425,8 @@ mod tests {
 
     #[test]
     fn a_wrapped_row_keeps_an_unbounded_height_unbounded() {
-        // The regression: a vertical `Flex` hands its children `INFINITY` on
-        // the main axis, and the wrap has to coerce the *width* to a finite
-        // number to wrap against it. Coercing the height the same way flattens
-        // every pill to zero — which is what the sheet's first frame did.
+        // A vertical `Flex` hands its children `INFINITY` on the main axis, and
+        // the wrap must coerce the *width* to a finite number to wrap against.
         let unbounded = BoxConstraints::loose(Size::new(600.0, f64::INFINITY));
         let child_bc = BoxConstraints::loose(Size::new(
             finite_or_zero(unbounded.max().width),
@@ -1640,13 +1483,11 @@ mod tests {
     }
 
     /// `60ms` into a fresh entrance: mid-flight, inside Glyph's `spatial`
-    /// overshoot band, and never past `1.0` before the final clamp — the
-    /// number the interruption tests below seed from.
+    /// overshoot band, and never past `1.0` before the final clamp.
     fn painted_mid_entrance(theme: &Theme) -> f64 {
         let mut entering = FullscreenStage::start(0.0, 1.0, Some(theme));
         // The first `advance` after `start` only seeds the clock (a fresh
-        // driver's own documented zero-delta rule) — the second is what
-        // actually elapses 60ms.
+        // driver's documented zero-delta rule); the second elapses 60ms.
         entering.driver.advance(FrameTime::from_nanos(0));
         entering.driver.advance(FrameTime::from_nanos(60_000_000));
         entering.value()
@@ -1654,11 +1495,9 @@ mod tests {
 
     #[test]
     fn collapsing_leaves_1_0_well_before_half_the_duration_rather_than_stalling() {
-        // The bug this guards against: curving the *interpolated position*
-        // (`curve.transform(from + (to - from) * t)`) feeds a collapse's
-        // `from = 1.0` into the curve's own `[0.45, 1.0]` overshoot band for
-        // the whole first half of `durations.slow`, clamping flush to `1.0`
-        // there — the card sits motionless before it ever visibly moves.
+        // Guards the curve-the-position bug: feeding a collapse's `from = 1.0`
+        // through the curve's overshoot band clamps it flush at `1.0` for the
+        // first half of the run, so the card sits motionless.
         let theme = Theme::glyph_baseline();
         let mut collapsing = FullscreenStage::start(1.0, 0.0, Some(&theme));
         collapsing.driver.advance(FrameTime::from_nanos(0));
@@ -1674,12 +1513,9 @@ mod tests {
 
     #[test]
     fn an_interrupted_stage_starts_exactly_at_the_painted_value_it_seeds_from() {
-        // The bug this guards against: seeding a fresh stage's `from` with an
-        // already-*eased* value and curving it a second time. Since the
-        // painted value of an in-flight entrance often lands inside Glyph's
-        // `spatial` overshoot band, re-easing it snaps the card straight to
-        // fullscreen the instant a collapse interrupts it — before any time
-        // has passed.
+        // Guards the double-easing bug: an in-flight entrance's painted value
+        // often lands inside the `spatial` overshoot band, so re-easing it snaps
+        // the card to fullscreen the instant a collapse interrupts.
         let theme = Theme::glyph_baseline();
         let seed = painted_mid_entrance(&theme);
         assert!((0.0..1.0).contains(&seed), "60ms in, mid-flight: {seed}");
@@ -1721,8 +1557,7 @@ mod tests {
 
     #[test]
     fn the_stages_geometry_never_overshoots_its_own_screen() {
-        // Glyph's `spatial` easing overshoots past 1.0 — which for a padding
-        // that reaches zero would mean a *negative* one.
+        // `spatial` overshoots past 1.0 — a *negative* wrap padding.
         let theme = Theme::glyph_baseline();
         let stage = FullscreenStage::start(0.0, 1.0, Some(&theme));
         for raw in [0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -1734,8 +1569,7 @@ mod tests {
 
     #[test]
     fn the_unthemed_fallbacks_are_the_glyph_tokens_they_stand_in_for() {
-        // A tripwire on the transcription: a headless frame with no theme
-        // threaded must stage on the same numbers a real device does.
+        // A headless frame with no theme must stage on the device's numbers.
         let motion = Theme::glyph_baseline().motion;
         assert_eq!(FALLBACK_SLOW.as_millis() as f64, motion.durations.slow);
         assert_eq!(FALLBACK_SPATIAL, motion.easing.spatial);
@@ -1764,8 +1598,7 @@ mod tests {
 
     #[test]
     fn the_two_fullscreen_marks_are_distinct_shapes() {
-        // The icon *swap* is the whole feedback the button gives beyond its
-        // tone change — two identical paths would be a silent regression.
+        // The swap is the button's whole feedback beyond its tone change.
         assert_ne!(FULLSCREEN_EXPAND.d, FULLSCREEN_EXIT.d);
     }
 }

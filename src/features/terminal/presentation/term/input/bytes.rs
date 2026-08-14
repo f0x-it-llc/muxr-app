@@ -1,25 +1,19 @@
-//! The byte vocabulary: what each key sends, and the key bar's own keys.
-//!
-//! Constants and total tables, no state. The one rewrite anything here performs
-//! is [`text_bytes`]' `\n` → CR, which is the Return contract rather than a
-//! correction (see the [module docs](super)); [`shifted_sequence`] *selects*
-//! between two of the tables below rather than rewriting either.
+//! The byte vocabulary: what each key sends, and the key bar's own keys. Constants
+//! and total tables, no state. The one rewrite anything here performs is
+//! [`text_bytes`]' `\n` → CR, which is the Return contract rather than a correction
+//! (see the [module docs](super)).
 
 use frust::authoring::NamedKey;
 
 use super::latch::ModifierLatch;
 
-/// The byte a derived Backspace sends: `0x7f` (DEL, `^?`).
-///
-/// **Not** `0x08` (BS): `0x7f` is what xterm and every `stty erase` default
-/// actually send against a real PTY, and it is what the Flutter incumbent this
-/// app replaces sends.
+/// The byte a derived Backspace sends: `0x7f` (DEL, `^?`). **Not** `0x08` (BS):
+/// `0x7f` is what xterm and every `stty erase` default actually send against a real
+/// PTY, and what the Flutter incumbent sends.
 pub const BACKSPACE_BYTE: u8 = 0x7f;
 
-/// The byte a derived Return sends: `0x0d` (CR).
-///
-/// Both platforms' Return paths converge here (see the [module docs](super)): a
-/// terminal expects CR for Return — the line discipline turns it into the
+/// The byte a derived Return sends: `0x0d` (CR). Both platforms' Return paths
+/// converge here: a terminal expects CR — the line discipline turns it into the
 /// newline the program under it reads, and sending LF instead skips that.
 pub const ENTER_BYTE: u8 = 0x0d;
 
@@ -65,17 +59,13 @@ pub const SHIFT_PAGE_DOWN: &[u8] = b"\x1b[6;2~";
 /// Shift+`Del` — see [`SHIFT_PAGE_UP`].
 pub const SHIFT_FORWARD_DELETE: &[u8] = b"\x1b[3;2~";
 
-/// Every sequence that has a Shift variant, as `(plain, shifted)` — the whole
-/// of the modifier arithmetic this module performs on a sequence key.
-///
-/// Keyed on the **bytes** rather than on a key enum so the bar's `↑` and a
-/// hardware `↑` keep sending the same thing as each other shifted as they do
-/// plain ([`named_key_bytes`]' own contract), through one table instead of two.
-///
-/// Deliberately not exhaustive over the vocabulary above: [`ESC`], [`HOME`] and
-/// [`END`] have no row and are therefore sent unmodified with Shift armed, and
-/// **no other modifier is parameterized at all** — an armed `Ctrl`/`Alt` still
-/// leaves a sequence key's bytes exactly as they are (see [`ModifierLatch`]).
+/// Every sequence that has a Shift variant, as `(plain, shifted)` — the whole of
+/// the modifier arithmetic this module performs on a sequence key. Keyed on the
+/// **bytes** rather than a key enum, so the bar's `↑` and a hardware `↑` keep
+/// sending the same thing shifted as they do plain, through one table instead of
+/// two. Deliberately not exhaustive: [`ESC`], [`HOME`] and [`END`] have no row and
+/// are sent unmodified with Shift armed, and **no other modifier is parameterized
+/// at all** (see [`ModifierLatch`]).
 const SHIFTED_SEQUENCES: [(&[u8], &[u8]); 8] = [
     (TAB, BACK_TAB),
     (ARROW_UP, SHIFT_ARROW_UP),
@@ -87,13 +77,10 @@ const SHIFTED_SEQUENCES: [(&[u8], &[u8]); 8] = [
     (FORWARD_DELETE, SHIFT_FORWARD_DELETE),
 ];
 
-/// `sequence`'s Shift variant, or `None` for a sequence that has none (see
-/// [`SHIFTED_SEQUENCES`]).
-///
-/// The selector [`KeystrokeSource`](super::source::KeystrokeSource) runs before
-/// it emits a sequence key: the latch's own transform is structurally blind to
-/// anything longer than one code unit, so a shifted arrow has to be *chosen*
-/// rather than derived.
+/// `sequence`'s Shift variant, or `None` for a sequence that has none. The selector
+/// [`KeystrokeSource`](super::source::KeystrokeSource) runs before it emits a
+/// sequence key: the latch's own transform is structurally blind to anything longer
+/// than one code unit, so a shifted arrow has to be *chosen* rather than derived.
 pub fn shifted_sequence(sequence: &[u8]) -> Option<&'static [u8]> {
     SHIFTED_SEQUENCES
         .iter()
@@ -101,32 +88,28 @@ pub fn shifted_sequence(sequence: &[u8]) -> Option<&'static [u8]> {
         .map(|(_, shifted)| *shifted)
 }
 
-/// The bytes a committed run of text sends: its UTF-8, with every `\n`
-/// translated to [`ENTER_BYTE`].
-///
-/// The **only** rewrite this module performs. A pasted `"\r\n"` therefore sends
-/// two CRs — two Returns — which is what every naive paste into a terminal does.
+/// The bytes a committed run of text sends: its UTF-8, with every `\n` translated
+/// to [`ENTER_BYTE`] — the **only** rewrite this module performs. A pasted `"\r\n"`
+/// therefore sends two CRs, which is what every naive paste into a terminal does.
 pub fn text_bytes(text: &str) -> Vec<u8> {
     text.bytes()
         .map(|b| if b == b'\n' { ENTER_BYTE } else { b })
         .collect()
 }
 
-/// One key of the terminal key bar — the twelve keys a soft keyboard has no
-/// room for, in the order the incumbent draws them (`Shift`, which the
-/// incumbent has no counterpart for, sits with the other two latches).
-///
+/// One key of the terminal key bar — the twelve keys a soft keyboard has no room
+/// for, in the order the incumbent draws them.
 /// [`Ctrl`](Self::Ctrl)/[`Alt`](Self::Alt)/[`Shift`](Self::Shift) send nothing:
-/// they toggle the [`ModifierLatch`] the *next* emission passes through,
-/// wherever that emission comes from (see the [module docs](super)).
+/// they toggle the [`ModifierLatch`] the *next* emission passes through, wherever
+/// that emission comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarKey {
     /// Arms/disarms the one-shot `Ctrl`.
     Ctrl,
     /// Arms/disarms the one-shot `Alt`.
     Alt,
-    /// Arms/disarms the one-shot `Shift` — which, unlike the other two,
-    /// selects a different *sequence* rather than transforming a character
+    /// Arms/disarms the one-shot `Shift` — which, unlike the other two, selects a
+    /// different *sequence* rather than transforming a character
     /// ([`SHIFTED_SEQUENCES`]).
     Shift,
     /// `ESC`.
@@ -205,9 +188,9 @@ impl BarKey {
         }
     }
 
-    /// The bytes this key sends **unmodified**, or `None` for the three latch
-    /// keys. An armed `Shift` picks a different sequence for some of these —
-    /// see [`shifted_sequence`], which the source applies on the way out.
+    /// The bytes this key sends **unmodified**, or `None` for the three latch keys.
+    /// An armed `Shift` picks a different sequence for some — see
+    /// [`shifted_sequence`], which the source applies on the way out.
     pub fn sequence(self) -> Option<&'static [u8]> {
         match self {
             BarKey::Ctrl | BarKey::Alt | BarKey::Shift => None,
@@ -233,9 +216,8 @@ impl BarKey {
         matches!(self, BarKey::Del)
     }
 
-    /// Whether a group separator is drawn immediately **before** this key —
-    /// the three rules of the incumbent's bar (`Ctrl Alt Esc │ Tab ← ↑ ↓ → │
-    /// PgUp PgDn │ Del`).
+    /// Whether a group separator is drawn immediately **before** this key — the
+    /// three rules of the incumbent's bar.
     pub fn separator_before(self) -> bool {
         matches!(self, BarKey::Tab | BarKey::PageUp | BarKey::Del)
     }
@@ -253,12 +235,10 @@ impl BarKey {
 }
 
 /// The bytes a focus-routed [`NamedKey`] sends — the desktop preview's real
-/// keyboard, and Android's `IME_ACTION_DONE`-as-`Enter`.
-///
-/// An exhaustive match, so a new [`NamedKey`] variant is a compile error here
-/// rather than a silently dropped key. Shares its sequences with [`BarKey`]:
-/// the bar's `↑` and a physical `↑` send the same three bytes — and, since the
-/// Shift selector keys on those bytes, the same six shifted ones too.
+/// keyboard, and Android's `IME_ACTION_DONE`-as-`Enter`. An exhaustive match, so a
+/// new [`NamedKey`] variant is a compile error here rather than a silently dropped
+/// key. Shares its sequences with [`BarKey`]: the bar's `↑` and a physical `↑` send
+/// the same three bytes — and the same six shifted ones.
 pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
     match key {
         NamedKey::Enter => &[ENTER_BYTE],

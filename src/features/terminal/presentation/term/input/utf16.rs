@@ -1,15 +1,12 @@
 //! UTF-16 arithmetic — the seam's index unit — and the mirror diff built on it.
-//!
 //! Every index at the IME seam is a UTF-16 code unit (frust's
-//! `docs/CODE_STANDARDS.md`: UTF-16 at the FFI seam, bytes inside), so nothing
-//! here ever measures a `str` in bytes or in `char`s. The rounding direction of
-//! each slice is part of its contract: outward never splits a surrogate pair,
-//! inward never returns half of one.
+//! `docs/CODE_STANDARDS.md`: UTF-16 at the FFI seam, bytes inside). The rounding
+//! direction of each slice is part of its contract: outward never splits a surrogate
+//! pair, inward never returns half of one.
 
-/// `s`'s length in **UTF-16 code units**.
-///
-/// Deliberately never `s.len()`: `"\u{1f600}"` is 4 bytes, 1 char and 2 units,
-/// and a byte-length diff is the first bug this pattern invites.
+/// `s`'s length in **UTF-16 code units**. Deliberately never `s.len()`:
+/// `"\u{1f600}"` is 4 bytes, 1 char and 2 units, and a byte-length diff is the first
+/// bug this pattern invites.
 pub fn len_utf16(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
@@ -33,15 +30,12 @@ pub fn utf16_suffix(s: &str, units: usize) -> &str {
     &s[start..]
 }
 
-/// The first `units` UTF-16 code units of `s`, rounded **inward** to a
-/// character boundary so a surrogate pair is never split (asking for one unit
-/// of a leading emoji yields the empty string).
-///
-/// Inward is the safe direction for its one caller (`KeystrokeSource::is_replay`):
-/// the dropped baseline it is compared against is whole characters, so a prefix
-/// that would have to split a pair is not that baseline — and coming up
-/// **short** makes the caller's own length check reject it, rather than
-/// digesting a slice that is one unit off.
+/// The first `units` UTF-16 code units of `s`, rounded **inward** to a character
+/// boundary so a surrogate pair is never split. Inward is the safe direction for its
+/// one caller (`KeystrokeSource::is_replay`): the dropped baseline it is compared
+/// against is whole characters, so a prefix that would have to split a pair is not
+/// that baseline — and coming up **short** makes the caller's own length check
+/// reject it, rather than digesting a slice that is one unit off.
 pub(super) fn utf16_prefix(s: &str, units: usize) -> &str {
     let mut taken = 0usize;
     let mut end = 0usize;
@@ -55,14 +49,12 @@ pub(super) fn utf16_prefix(s: &str, units: usize) -> &str {
     &s[..end]
 }
 
-/// Drop leading characters from `s` until it is at most `units` UTF-16 code
-/// units long, character-aligned — [`utf16_suffix`] as an in-place truncation.
-///
-/// **In place, deliberately**: the obvious spelling
-/// (`*s = utf16_suffix(s, units).to_string()`) leaves the user's typing in a
-/// freed allocation nobody scrubs. `drain` shifts the tail down inside the same
-/// allocation, so the only copy of the dropped head is the stale bytes past the
-/// new length — which `KeystrokeSource::scrub` and `Zeroizing`'s own drop both
+/// Drop leading characters from `s` until it is at most `units` UTF-16 code units
+/// long, character-aligned — [`utf16_suffix`] as an in-place truncation. **In place,
+/// deliberately**: the obvious spelling (`*s = utf16_suffix(s, units).to_string()`)
+/// leaves the user's typing in a freed allocation nobody scrubs. `drain` shifts the
+/// tail down inside the same allocation, so the only copy of the dropped head is the
+/// stale bytes past the new length — which `scrub` and `Zeroizing`'s own drop both
 /// zero across the buffer's **whole capacity**.
 pub(super) fn clamp_front(s: &mut String, units: usize) {
     if len_utf16(s) <= units {
@@ -79,17 +71,13 @@ pub(super) fn clamp_index(index: i32, len: i32) -> i32 {
     if index < 0 { -1 } else { index.min(len) }
 }
 
-/// The minimal `(removed, added)` edit turning `old` into `new`: the common
-/// prefix and common suffix are cancelled, `removed` counts the UTF-16 units
-/// the middle of `old` held, and `added` is the middle of `new`.
-///
-/// Both boundaries are **character**-aligned (Rust `char`s are whole scalars),
-/// so a surrogate pair can never be split across a diff boundary — the emoji
-/// case a naive UTF-16-indexed diff gets wrong.
-///
-/// The returned `added` is a fresh allocation holding the user's own text:
-/// `KeystrokeSource::on_snapshot` takes ownership of it inside a `Zeroizing` so
-/// its drop scrubs. A caller that keeps it must do the same.
+/// The minimal `(removed, added)` edit turning `old` into `new`: the common prefix
+/// and common suffix are cancelled, `removed` counts the UTF-16 units the middle of
+/// `old` held, and `added` is the middle of `new`. Both boundaries are
+/// **character**-aligned, so a surrogate pair can never be split across a diff
+/// boundary — the emoji case a naive UTF-16-indexed diff gets wrong. The returned
+/// `added` is a fresh allocation holding the user's own text: `on_snapshot` takes
+/// ownership inside a `Zeroizing` so its drop scrubs, and any other caller must too.
 pub fn diff(old: &str, new: &str) -> (usize, String) {
     let mut prefix = 0usize;
     for (a, b) in old.chars().zip(new.chars()) {

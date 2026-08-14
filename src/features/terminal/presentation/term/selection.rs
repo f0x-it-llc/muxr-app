@@ -1,67 +1,38 @@
 //! The **pure** selection model: which cells a long-press-and-drag selects, and
 //! what text those cells copy to. No `Rc`, no signal, no paint, no side effect —
-//! [`super::SelectionSeam`] is the runtime half, exactly the split
-//! [`input`](super::input) and [`InputSeam`](super::InputSeam) already use.
+//! [`super::SelectionSeam`] is the runtime half, the same split
+//! [`input`](super::input) and [`InputSeam`](super::InputSeam) use.
 //!
-//! # Everything here speaks GRID coordinates
+//! **Everything here speaks GRID coordinates.** A [`GridPoint`] is a `(row, col)`
+//! cell address on the **rendered** screen. That is the emulator's *visible*
+//! screen today; when a scrollback view lands it arrives as a **row offset**
+//! applied where pixels become cells ([`cell_at`]) and where cells become text
+//! ([`selected_text`]), and nothing else here changes.
 //!
-//! A [`GridPoint`] is a `(row, col)` cell address on the **rendered** screen —
-//! row 0 is the top row the widget paints. That is the emulator's *visible*
-//! screen today, because that is what the grid renders; a scrollback view is
-//! its own task. When one lands, it arrives as a **row offset** applied where
-//! pixels become cells ([`cell_at`]) and where cells become text
-//! ([`selected_text`]) — nothing else in this module has to change, which is
-//! why the model is expressed in grid rather than pixel coordinates in the
-//! first place.
+//! **The word rule is ported verbatim**: boundaries are **per line** and the
+//! separator set is [`SEPARATORS`], so expansion never crosses a row (though the
+//! *text* those cells copy to still joins without a newline) and landing on a
+//! separator selects nothing while the long-press haptic still fires — the
+//! incumbent's own ordering. A drag **re-resolves BOTH ends** ([`resolve`]), so
+//! reversing direction is symmetric by construction rather than by a special case.
 //!
-//! # The word rule, ported verbatim
-//!
-//! The Flutter incumbent's word boundaries are **per line** and its separator
-//! set is [`SEPARATORS`] — ten characters, everything else is word material.
-//! Two consequences worth stating out loud, because both are behaviour rather
-//! than accident:
-//!
-//! - **Expansion never crosses a row.** A word wrapped across two rows selects
-//!   only the half the finger is on. (The *text* those cells copy to still
-//!   joins without a newline — see [`selected_text`] — so a wrapped path
-//!   pasted back is still one path.)
-//! - **Landing on a separator selects nothing.** [`word_at`] returns `None`
-//!   rather than an empty or one-cell range, and the gesture is a no-op.
-//!   The long-press *haptic* still fires: the incumbent ticks at
-//!   `_onSelectionStart`, before it resolves a word, and this port keeps that
-//!   ordering (see [`SelectionSeam::begin`](super::SelectionSeam::begin)).
-//!
-//! # Streaming output clears a held selection
-//!
-//! Because a [`GridPoint`] addresses the rendered screen and nothing here
-//! buffer-anchors it, new output scrolling the screen underneath a held
-//! selection would silently retarget it — Copy would hand back whatever now
-//! sits at those rows, not what the user actually highlighted. Rather than
-//! try to tell "this repaint scrolled" apart from "this repaint didn't"
-//! (fragile, and not obviously reliable), [`SelectionSeam::observe_generation`]
-//! (in the [parent module](super)) drops a held selection outright the moment
-//! *any* new content generation arrives. That is a real behavior change from
-//! the Flutter incumbent, whose buffer-anchored selection was never cleared
-//! by output — this app has no scrollback buffer to anchor a selection to
-//! yet, so clearing is the honest, safe default until a scrollback view
-//! gives a selection something stable to hold onto.
-//!
-//! # Drag re-resolves BOTH ends
-//!
-//! Every move re-resolves the word at the **fixed anchor cell** and the word at
-//! the **live finger cell**, then merges them in row-major reading order
-//! ([`resolve`]). Nothing is cached between moves, so a drag that reverses
-//! direction — past the anchor and out the other side — is symmetric by
-//! construction rather than by a special case.
+//! **Streaming output clears a held selection.** Because a [`GridPoint`] addresses
+//! the rendered screen and nothing here buffer-anchors it, new output scrolling
+//! the screen underneath a held selection would silently retarget it — Copy would
+//! hand back whatever now sits at those rows. Rather than try to tell "this
+//! repaint scrolled" apart from "this repaint didn't",
+//! [`SelectionSeam::observe_generation`] drops a held selection outright the moment
+//! *any* new content generation arrives: a real behaviour change from the
+//! buffer-anchored Flutter incumbent, and the honest default until a scrollback
+//! view gives a selection something stable to hold onto.
 
 use frust::authoring::Point;
 
 use super::geometry::CellGeometry;
 
-/// The characters that end a word — the incumbent's set, verbatim.
-///
-/// `NUL` is in it because that is what a never-written cell reads back as
-/// ([`char_at`]): blank screen space is a separator, not a very wide word.
+/// The characters that end a word — the incumbent's set, verbatim. `NUL` is in it
+/// because that is what a never-written cell reads back as ([`char_at`]): blank
+/// screen space is a separator, not a very wide word.
 pub const SEPARATORS: [char; 10] = ['\0', ' ', '.', ':', '-', '\\', '"', '*', '+', '/'];
 
 /// Whether `c` ends a word (see [`SEPARATORS`]).
@@ -69,11 +40,9 @@ pub fn is_separator(c: char) -> bool {
     SEPARATORS.contains(&c)
 }
 
-/// One cell on the rendered grid.
-///
-/// `Ord` is derived with `row` **first**, so the natural ordering is row-major
-/// reading order — which is exactly what [`GridRange::merge`] needs, and the
-/// reason the field order here is not an implementation detail.
+/// One cell on the rendered grid. `Ord` is derived with `row` **first**, so the
+/// natural ordering is row-major reading order — what [`GridRange::merge`] needs,
+/// and the reason the field order is not an implementation detail.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GridPoint {
     /// Row on the rendered screen, 0 = top.
@@ -106,10 +75,8 @@ impl GridRange {
     }
 
     /// The smallest range covering both — earlier `begin`, later `end`, in
-    /// row-major reading order.
-    ///
-    /// This is what makes a drag whose finger is **above** its anchor select
-    /// the same cells as the mirror-image drag below it.
+    /// row-major reading order. This is what makes a drag whose finger is
+    /// **above** its anchor select the same cells as the mirror-image drag.
     #[must_use]
     pub fn merge(self, other: Self) -> Self {
         Self {
@@ -123,23 +90,16 @@ impl GridRange {
         at >= self.begin && at <= self.end
     }
 
-    /// Clamp both ends onto a `cols` x `rows` grid.
+    /// Clamp both ends onto a `cols` x `rows` grid — what lets
+    /// [`SelectionSeam::set_metrics`](super::SelectionSeam::set_metrics) keep a
+    /// held selection valid the instant a grid shrinks under it, rather than
+    /// carry a stale, off-screen `begin` into [`selected_text`].
     ///
-    /// This is what lets [`SelectionSeam::set_metrics`](super::SelectionSeam::set_metrics)
-    /// keep a held selection valid the instant a grid shrinks under it — a
-    /// rotation, a font-size bump, a fullscreen collapse — rather than carry a
-    /// stale, off-screen `begin` forward into [`selected_text`] (which clamps
-    /// too, defensively, but the seam is what stops a shrink-then-Copy from
-    /// ever reaching a range this wide again).
-    ///
-    /// Each point clamps **independently** and neither is re-sorted: a range
-    /// that was `begin <= end` stays that way unless a row-only shrink
-    /// collapses both ends onto the same surviving row in an order that reads
-    /// reversed — [`selected_text`]/[`segments`] both already treat a reversed
-    /// range as "nothing selected" rather than a wrap-around, so a rare
-    /// row-shrink like that degrades to no text/no paint instead of a panic,
-    /// which is the same trade a caller handing this an already-reversed
-    /// range (a malformed input, never a real drag result) gets today.
+    /// Each point clamps **independently** and neither is re-sorted: a row-only
+    /// shrink can collapse both ends onto the same surviving row in an order
+    /// that reads reversed, and [`selected_text`]/[`segments`] both already
+    /// treat a reversed range as "nothing selected" — so that degrades to no
+    /// text/no paint rather than a panic.
     #[must_use]
     pub fn clamp_to(self, cols: u16, rows: u16) -> Self {
         let last_col = cols.saturating_sub(1);
@@ -152,13 +112,10 @@ impl GridRange {
     }
 }
 
-/// One painted stripe of a selection: `span` cells starting at `(row, col)`.
-///
-/// A selection is **line-wise**, not a rectangle: the first row runs from the
-/// begin column to the end of the line, every middle row is full width, and the
-/// last row runs from the start of the line to the end column. That is what
-/// makes a multi-line selection look like selected *text* rather than a column
-/// block.
+/// One painted stripe of a selection: `span` cells starting at `(row, col)`. A
+/// selection is **line-wise**, not a rectangle: the first row runs from the begin
+/// column to the end of the line, middle rows are full width, and the last runs to
+/// the end column — which is what makes it look like selected *text*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment {
     /// The row this stripe paints on.
@@ -169,13 +126,10 @@ pub struct Segment {
     pub span: u16,
 }
 
-/// The cell a widget-local pixel `point` lands on, **clamped** into the grid
-/// `geo` describes.
-///
-/// Clamping rather than rejecting is deliberate: a drag routinely leaves the
-/// widget's box (the finger runs off the bottom edge), and the incumbent keeps
-/// extending to the nearest cell instead of freezing. A degenerate/unsolved
-/// geometry collapses to `(0, 0)` rather than dividing by zero.
+/// The cell a widget-local pixel `point` lands on, **clamped** into the grid `geo`
+/// describes. Clamping rather than rejecting is deliberate: a drag routinely
+/// leaves the widget's box, and the incumbent keeps extending to the nearest cell
+/// instead of freezing. A degenerate geometry collapses to `(0, 0)`.
 pub fn cell_at(point: Point, geo: CellGeometry) -> GridPoint {
     GridPoint {
         row: axis(point.y, geo.height, geo.rows),
@@ -186,10 +140,9 @@ pub fn cell_at(point: Point, geo: CellGeometry) -> GridPoint {
 /// One axis of [`cell_at`]: `floor(value / cell)`, clamped to `0..count`.
 fn axis(value: f64, cell: f64, count: u16) -> u16 {
     let last = count.saturating_sub(1);
-    // Finiteness first, exactly as `geometry`'s own `axis_cells` orders it: a
-    // NaN coordinate (a degenerate measurement, a synthetic event) fails
-    // `is_finite` and lands on cell 0 rather than reaching a comparison that
-    // would silently answer `false` either way.
+    // Finiteness first, exactly as `geometry`'s own `axis_cells` orders it: a NaN
+    // coordinate fails `is_finite` and lands on cell 0 rather than reaching a
+    // comparison that would silently answer `false` either way.
     if !value.is_finite() || !cell.is_finite() || value <= 0.0 || cell <= 0.0 {
         return 0;
     }
@@ -200,11 +153,10 @@ fn axis(value: f64, cell: f64, count: u16) -> u16 {
     index.clamp(0.0, f64::from(last)) as u16
 }
 
-/// The character in cell `at`, or `NUL` when the cell is blank or off-screen.
-///
-/// A **wide** character's second half carries no glyph of its own, so it reads
-/// back the first half's character rather than `NUL` — otherwise every CJK word
-/// would split at every other column.
+/// The character in cell `at`, or `NUL` when the cell is blank or off-screen. A
+/// **wide** character's second half carries no glyph of its own, so it reads back
+/// the first half's character rather than `NUL` — otherwise every CJK word would
+/// split at every other column.
 pub fn char_at(screen: &vt100::Screen, at: GridPoint) -> char {
     let Some(cell) = screen.cell(at.row, at.col) else {
         return '\0';
@@ -215,11 +167,8 @@ pub fn char_at(screen: &vt100::Screen, at: GridPoint) -> char {
     cell.contents().chars().next().unwrap_or('\0')
 }
 
-/// The word under `at`, or `None` when `at` is a separator (see the
-/// [module docs](self)).
-///
-/// Expansion stops at the row's own ends — it never continues onto the row
-/// above or below.
+/// The word under `at`, or `None` when `at` is a separator (see the [module
+/// docs](self)). Expansion stops at the row's own ends.
 pub fn word_at(screen: &vt100::Screen, at: GridPoint) -> Option<GridRange> {
     let (_, cols) = screen.size();
     if cols == 0 || at.col >= cols {
@@ -243,12 +192,9 @@ pub fn word_at(screen: &vt100::Screen, at: GridPoint) -> Option<GridRange> {
 }
 
 /// The selection a `(anchor, extent)` cell pair resolves to: the word at each,
-/// merged in reading order.
-///
-/// Both ends are re-resolved on every call — see the [module docs](self). An
-/// end that lands on a separator contributes nothing, so a drag over
-/// whitespace narrows back to the other end's word rather than selecting the
-/// gap; both ends on separators is no selection at all.
+/// merged in reading order. Both ends are re-resolved on every call. An end that
+/// lands on a separator contributes nothing, so a drag over whitespace narrows
+/// back to the other end's word; both ends on separators is no selection at all.
 pub fn resolve(screen: &vt100::Screen, anchor: GridPoint, extent: GridPoint) -> Option<GridRange> {
     match (word_at(screen, anchor), word_at(screen, extent)) {
         (Some(a), Some(b)) => Some(a.merge(b)),
@@ -258,10 +204,8 @@ pub fn resolve(screen: &vt100::Screen, anchor: GridPoint, extent: GridPoint) -> 
 }
 
 /// The line-wise stripes `range` paints as, on a `cols`-wide grid (see
-/// [`Segment`]).
-///
-/// Columns past `cols - 1` are clamped, so a range resolved before a resize
-/// still paints inside the grid it is painted on.
+/// [`Segment`]). Columns past `cols - 1` are clamped, so a range resolved before a
+/// resize still paints inside the grid it is painted on.
 pub fn segments(range: GridRange, cols: u16) -> Vec<Segment> {
     let mut stripes = Vec::new();
     if cols == 0 || range.begin.row > range.end.row {
@@ -292,26 +236,19 @@ pub fn segments(range: GridRange, cols: u16) -> Vec<Segment> {
 
 /// The text `range` selects, as the clipboard should receive it.
 ///
-/// Delegates to `vt100`'s own `Screen::contents_between`, which already
-/// implements **exactly** the incumbent's join rule and is the crate's
-/// documented "determining the contents of a clipboard selection" entry point:
-///
-/// - trailing blanks on a row contribute nothing (a row emits padding only
-///   *before* a cell that has contents);
-/// - a row the emulator marked **wrapped** joins to the next with no newline —
-///   so a wrapped command line or path pastes back as one line;
-/// - a row that ended for real joins with `\n`.
+/// Delegates to `vt100`'s own `Screen::contents_between`, which already implements
+/// **exactly** the incumbent's join rule: trailing blanks on a row contribute
+/// nothing; a row the emulator marked **wrapped** joins to the next with no
+/// newline, so a wrapped command line or path pastes back as one line; a row that
+/// ended for real joins with `\n`.
 ///
 /// The one adaptation is the end bound: `contents_between`'s `end_col` is
-/// **exclusive** while a [`GridRange`] is inclusive, so this passes
-/// `end.col + 1`. Both `begin` and `end` are clamped onto the *current*
-/// screen (`GridRange::clamp_to`) before either reaches `contents_between` —
-/// `begin` used to be left unclamped here, which underflowed
-/// `contents_between`'s multi-row branch (`cols - start_col`, in `u16`) the
-/// moment a held selection outlived a grid shrink; `SelectionSeam::set_metrics`
-/// clamps the *stored* range the instant that happens too, so this is a
-/// backstop, not the only place it happens. A reversed/empty range yields an
-/// empty string rather than a panic.
+/// **exclusive** while a [`GridRange`] is inclusive, so this passes `end.col + 1`.
+/// Both ends are clamped onto the *current* screen before either reaches it — an
+/// unclamped `begin` underflowed `contents_between`'s multi-row branch
+/// (`cols - start_col`, in `u16`) the moment a held selection outlived a grid
+/// shrink. `SelectionSeam::set_metrics` clamps the stored range too, so this is a
+/// backstop. A reversed/empty range yields an empty string rather than a panic.
 pub fn selected_text(screen: &vt100::Screen, range: GridRange) -> String {
     let (rows, cols) = screen.size();
     if rows == 0 || cols == 0 {
@@ -579,12 +516,10 @@ mod tests {
 
     #[test]
     fn clamp_to_never_reorders_a_range_it_leaves_reversed() {
-        // A row-only shrink can collapse both ends onto the last surviving
-        // row in an order that now reads reversed by column — `clamp_to`
-        // leaves it that way rather than re-sorting; `selected_text`/
-        // `segments` both already treat a reversed range as nothing selected,
-        // so this degrades to no text/no paint instead of a panic, the same
-        // trade an already-reversed input gets today.
+        // A row-only shrink can collapse both ends onto the last surviving row
+        // in an order that now reads reversed by column — `clamp_to` leaves it
+        // that way, and `selected_text`/`segments` both read a reversed range
+        // as nothing selected, so it degrades rather than panicking.
         let range = GridRange {
             begin: GridPoint::new(1, 50),
             end: GridPoint::new(3, 2),
@@ -704,16 +639,13 @@ mod tests {
     #[test]
     fn selected_text_clamps_a_stale_begin_after_a_shrink_instead_of_panicking() {
         // 70 'x's — not a full 80-col row, so there is no wrap flag to reason
-        // about — a real newline, then a short second row: a genuine
-        // multi-row selection whose BEGIN column (60) is about to outlive an
-        // 80 -> 40 column shrink while its row does not need to.
+        // about — a real newline, then a short second row: a multi-row selection
+        // whose BEGIN column (60) is about to outlive an 80 -> 40 shrink.
         let bytes = [vec![b'x'; 70], b"\r\nyz".to_vec()].concat();
         let mut parser = vt100::Parser::new(4, 80, 0);
         parser.process(&bytes);
-        // The grid shrinks under the held selection — a rotation, a
-        // font-size bump, a fullscreen collapse
-        // (`TerminalGridWidget::layout` resizes the emulator on any
-        // cell-grid delta).
+        // The grid shrinks under the held selection — a rotation, a font-size
+        // bump, a fullscreen collapse.
         parser.screen_mut().set_size(4, 40);
 
         let range = GridRange {
@@ -721,9 +653,9 @@ mod tests {
             end: GridPoint::new(1, 1),    // the `z` in "yz"
         };
         // Before this fix, `contents_between`'s multi-row branch computed
-        // `cols - start_col` (`40 - 60`) in `u16` and underflowed here — a
-        // real panic under `overflow-checks` (the dev/test profile), reachable
-        // any time a multi-row selection outlives a grid shrink.
+        // `cols - start_col` (`40 - 60`) in `u16` and underflowed — a real panic
+        // under `overflow-checks`, reachable whenever a multi-row selection
+        // outlived a grid shrink.
         let text = selected_text(parser.screen(), range);
         assert_eq!(
             text, "x\nyz",

@@ -2,43 +2,27 @@
 //! widget as an IME client, the last-known-state diff behind it, the one-shot
 //! Ctrl/Alt/Shift latch, and the key bar — no GPU, no window, no device.
 //!
-//! Every test here drives the **real seam**: a `RenderRoot` with the grid
-//! mounted, a tap that claims focus, and then `InputEvent::Ime`/`InputEvent::Key`
-//! events shaped exactly as each platform bridge delivers them
-//! (`ApplyEditingState` snapshots on mobile, `Key::Named(Enter)` for Android's
-//! `IME_ACTION_DONE`, `Commit`/`Compose` on desktop). What it asserts on is the
-//! other end of the pipe: the **bytes that arrived in the session**, read back
-//! out of `DemoFeed`'s PTY-style echo and compared as hex.
+//! Every test drives the **real seam**: a `RenderRoot` with the grid mounted, a tap
+//! that claims focus, then `InputEvent::Ime`/`InputEvent::Key` events shaped exactly
+//! as each platform bridge delivers them (`ApplyEditingState` snapshots on mobile,
+//! `Key::Named(Enter)` for Android's `IME_ACTION_DONE`, `Commit`/`Compose` on
+//! desktop). What it asserts on is the other end of the pipe: the **bytes that
+//! arrived in the session**, read back out of `DemoFeed`'s PTY-style echo and
+//! compared as hex. The pure half is unit-tested next to the code; this suite proves
+//! the wiring.
 //!
-//! The pure half of the model — the diff algebra, the latch table, the rolling
-//! window's publish count — is unit-tested next to the code, in
-//! `presentation::term::input`. This suite exists to prove the wiring: that a
-//! tap really publishes an `ImeContentType::Terminal` surface, that a snapshot
-//! really reaches the source through the focus path, and that the bar and the
-//! soft keyboard really share one latch.
+//! It also pins the buffer **security contracts** where they are wired: a Return
+//! leaves no `\n` in the buffers and the next keystroke diffs against an empty
+//! baseline; a **stale** snapshot arriving into that baseline replays nothing, with
+//! or without the Return, word-shaped or not, and on **every** frame of that window
+//! rather than only the first; a whole-buffer replacement sends nothing and
+//! re-publishes; the buffers scrub on a blur and on unmount but *not* on a key bar
+//! hand-off, which is the same session still being typed into; and read-only is a
+//! property of the session, so a cap over one is inert too.
 //!
-//! It also pins the **security contracts** the keystroke-buffer review added
-//! (`input`'s own "what is retained" and Return/desync docs), at the level
-//! they are actually wired at rather than at the model's:
-//!
-//! - a Return leaves no `\n` anywhere in the buffers, and the next keystroke
-//!   diffs against an empty baseline;
-//! - a **stale** snapshot arriving into that empty baseline — the platform
-//!   still holding the line it was handed a Return for — replays nothing,
-//!   whether or not it carries the Return (Android's submit leaves as an
-//!   editor action, so the line it strands has no newline in it at all),
-//!   whether or not the line is word-shaped (`hunter2` is refused on its
-//!   content, not its shape), and on **every** frame of that window rather
-//!   than only its first;
-//! - a whole-buffer replacement snapshot sends **nothing** and re-publishes;
-//! - the buffers are scrubbed on a blur and on unmount — but *not* on a key
-//!   bar hand-off, which is the same session still being typed into;
-//! - read-only is a property of the session, so a key cap over one is inert
-//!   too.
-//!
-//! One thing here is **geometry** rather than bytes: the bar's row budget
-//! (`keybar`'s own module docs) is only true of a laid-out row, so the twelve
-//! caps are measured at the narrowest phone width they must fit.
+//! One thing here is **geometry** rather than bytes: the bar's row budget is only
+//! true of a laid-out row, so the twelve caps are measured at the narrowest phone
+//! width they must fit.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -88,11 +72,8 @@ const IN_GRID: Point = Point::new(120.0, 120.0);
 // ---------------------------------------------------------------------------
 
 /// The one-screen component under test: the grid over a demo feed, with the key
-/// bar docked under it.
-///
-/// **Two children, always** — the bar collapses to zero height rather than
-/// unmounting, exactly as a real screen must mount it (see `keybar`'s module
-/// docs on positional reconciliation and the focus it would otherwise drop).
+/// bar docked under it. **Two children, always** — the bar collapses to zero
+/// height rather than unmounting, exactly as a real screen must mount it.
 struct TermScreen {
     seam: InputSeam,
     emulator: SharedEmulator,
@@ -100,10 +81,9 @@ struct TermScreen {
     bar_active: RwSignal<bool>,
     read_only: bool,
     /// Mount the bar even over a read-only grid. Not a shape any real screen
-    /// has (a read-only terminal raises no keyboard, so the bar's own
-    /// `active` is false) — it exists to prove the **gate**, which lives on
-    /// the seam rather than on this wiring: a cap that somehow got mounted
-    /// over a read-only session must still be inert.
+    /// has — it exists to prove the **gate**, which lives on the seam rather
+    /// than on this wiring: a cap that somehow got mounted over a read-only
+    /// session must still be inert.
     force_bar: bool,
 }
 
@@ -154,7 +134,7 @@ struct Mounted {
     emulator: SharedEmulator,
     /// The pump's repaint generation — [`pump_wake`] derives its own "next"
     /// from this signal, so no separate published-counter field is needed
-    /// here any more (review M-A1).
+    /// here any more.
     generation: RwSignal<u64>,
     seam: InputSeam,
     bar_active: RwSignal<bool>,
@@ -314,8 +294,8 @@ impl Mounted {
         self.drain().iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// One wake of task 08's real feed pump: drain everything due into the
-    /// mounted grid's emulator and publish at most one generation.
+    /// One wake of the real feed pump: drain everything due into the mounted
+    /// grid's emulator and publish at most one generation.
     fn pump(&mut self) -> bool {
         pump_wake(&self.shared_feed, &self.emulator, self.generation)
     }
@@ -359,13 +339,9 @@ impl Mounted {
     }
 
     /// Tap somewhere that claims no focus, which is what frust reads as a
-    /// **blur** (`RenderRoot::event`: "no widget on the tapped path took
-    /// focus").
-    ///
-    /// The bar's own left padding: on the bar's band, so the tap lands, but
-    /// left of the first cap, so nothing claims. Requires the bar to be up —
-    /// its caps are how the band's `y` is found without recomputing the
-    /// screen's layout here.
+    /// **blur**. The bar's own left padding: on the bar's band, so the tap
+    /// lands, but left of the first cap, so nothing claims. Requires the bar to
+    /// be up — its caps are how the band's `y` is found.
     fn tap_outside_everything(&mut self) {
         let cap = node_center_by_label(&self.root, "Control")
             .expect("the bar must be up to find the band");
@@ -495,7 +471,7 @@ fn a_return_leaves_no_newline_behind_and_the_next_key_starts_clean() {
     mounted.type_text("ls -la\n");
     assert_eq!(mounted.drain_hex(), "6c73202d6c610d", "`ls -la`, then CR");
 
-    // CONTRACT (review M7, guard 1): the submitted line is dropped rather than
+    // CONTRACT (guard 1): the submitted line is dropped rather than
     // kept as the next diff's baseline, so the literal `\n` iOS accumulates
     // can never be replayed to the host by a bulk re-emission.
     assert!(
@@ -528,14 +504,13 @@ fn a_stale_post_return_snapshot_never_replays_the_submitted_line() {
     assert_eq!(mounted.drain_hex(), "6c730d", "`ls`, then CR");
     assert_eq!(mounted.mirror(), "", "the baseline was dropped");
 
-    // CONTRACT (review FC2, guard 1's other half). Dropping OUR baseline does
-    // not drop the platform's: a round trip that errors, answers nil or is a
-    // frame late leaves it holding the pre-Return text. This snapshot is
-    // therefore built RAW — from the platform's stale buffer, not from
-    // `mirror()` — because a snapshot built from our own mirror is exactly
-    // what would hide this. Diffed against nothing it reads as one `added`
-    // run carrying the whole line and its `\n`, which `text_bytes` maps to CR:
-    // emitted, `ls` runs a second time on the remote host.
+    // CONTRACT (guard 1's other half). Dropping OUR baseline does not drop the
+    // platform's: a round trip that errors, answers nil or is a frame late
+    // leaves it holding the pre-Return text. This snapshot is therefore built
+    // RAW — from the platform's stale buffer, not from `mirror()`, which is
+    // exactly what would hide this. Diffed against nothing it reads as one
+    // `added` run carrying the whole line and its `\n`, which `text_bytes` maps
+    // to CR: emitted, `ls` runs a second time on the remote host.
     mounted.apply("ls\n");
     assert!(
         mounted.drain().is_empty(),
@@ -562,7 +537,7 @@ fn a_stale_android_snapshot_carries_no_newline_and_still_replays_nothing() {
     let mut mounted = Mounted::new();
     mounted.tap(IN_GRID);
 
-    // Android's REAL submit shape (review FC3): the Return leaves as an editor
+    // Android's REAL submit shape: the Return leaves as an editor
     // action (`IME_ACTION_DONE` → a focus-routed Key(Enter)), never as text, and
     // `performEditorAction` does not re-poll — so the `Editable` keeps the
     // pre-submit line, with NO newline in it, until a later frame's resync.
@@ -598,7 +573,7 @@ fn a_word_shaped_stale_line_replays_nothing_on_any_frame_of_the_window() {
     let mut mounted = Mounted::new();
     mounted.tap(IN_GRID);
 
-    // The password at a prompt with echo off (review R2-F2): typed, then
+    // The password at a prompt with echo off: typed, then
     // submitted with Android's editor action, so the `Editable` is stranded
     // holding `hunter2` with NO newline — seven alphanumeric units, exactly the
     // shape a gesture commit has.
@@ -609,7 +584,7 @@ fn a_word_shaped_stale_line_replays_nothing_on_any_frame_of_the_window() {
     assert_eq!(mounted.mirror(), "", "leaving an empty baseline");
 
     // RAW, and TWICE: `performEditorAction` only counts down `imeResyncFrames`,
-    // so the same stale buffer can be polled on several frames (review R2-F1).
+    // so the same stale buffer can be polled on several frames.
     for round in 1..=2 {
         mounted.apply("hunter2");
         assert!(
@@ -637,7 +612,7 @@ fn a_blur_scrubs_a_live_composition_too() {
     mounted.set_bar(true);
 
     // A composing snapshot carries the WHOLE platform mirror, so it is
-    // retained typing exactly as the buffers are (review FC2) — and is
+    // retained typing exactly as the buffers are — and is
     // counted, and scrubbed, as such.
     mounted.root.event(
         &mut mounted.state,
@@ -1035,7 +1010,7 @@ fn twelve_caps_and_their_padding_fit_a_narrow_phone_row() {
 }
 
 // ---------------------------------------------------------------------------
-// Keystroke-buffer hygiene (review M6): the scrub boundaries
+// Keystroke-buffer hygiene: the scrub boundaries
 // ---------------------------------------------------------------------------
 
 #[test]
