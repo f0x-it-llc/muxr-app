@@ -2,59 +2,44 @@
 //! success dot, and the rolling latency readout at the other end of the row.
 //!
 //! `pages.rs`'s `Component::init` times one real `GetVersion` round trip
-//! ([`crate::connection::ConnectionController::ping`]) while `/sessions` is on
-//! top, on the **same live-resolved cadence** as the session-list poll —
-//! `settings`' own stored `layout_refresh_secs` preference, the "session
-//! poll" group (`super::controllers`' module docs' "Session poll cadence"
-//! section) — rather than a heartbeat-private constant. Each tick starts the
-//! ring's own clock; the measurement that comes back is **rolled** into the
-//! readout over [`ROLL_MS`] rather than snapping to it. Ported from
-//! `examples/glyph-catalog`'s "connection heartbeat" interaction moment — the
-//! catalog drives that moment off a canned latency cycle, this one off the
-//! wire.
+//! ([`crate::connection::ConnectionController::ping`]) while `/sessions` is
+//! on top, on the **same live-resolved cadence** as the session-list poll
+//! (`settings`' own stored `layout_refresh_secs` preference) rather than a
+//! heartbeat-private constant. Each tick starts the ring's own clock; the
+//! measurement that comes back is **rolled** into the readout over
+//! [`ROLL_MS`] rather than snapping to it.
 //!
-//! # Wall clock, and the frame ticker that keeps it moving
-//!
-//! A signal write wakes exactly one rebuild, so the interval's tick alone
-//! would render a single frame of a 1.6s animation. [`FrameTicker`] — a
-//! zero-size [`View`]/[`Widget`] pair authored through [`frust::authoring`],
-//! the same seam [`super::chrome`] uses, whose only job is an unconditional
+//! **Wall clock, and the frame ticker that keeps it moving.** A signal write
+//! wakes exactly one rebuild, so the interval's tick alone would render a
+//! single frame of a 1.6s animation. [`FrameTicker`] — a zero-size
+//! [`View`]/[`Widget`] pair whose only job is an unconditional
 //! [`PaintCtx::request_frame`] in its own `paint` — is what keeps `build`
 //! re-invoked while an animation is still running, and [`ring_pose`]/
 //! [`rolled`] read `Instant::now()` on each of those passes. **Mount
-//! discipline lives at the call site, not in the widget**: the screen mounts a
-//! ticker only while [`HeartbeatVisual::animating`], so a settled strip asks
-//! for no frames at all and a covered page (which the navigator paint-culls)
-//! self-quiets.
+//! discipline lives at the call site, not in the widget**: the screen mounts
+//! a ticker only while [`HeartbeatVisual::animating`], so a settled strip
+//! asks for no frames at all.
 //!
-//! # The clip lesson [`RING_SLOT`] encodes
+//! **The clip lesson [`RING_SLOT`] encodes.** [`AnimatedOpacity`] composites
+//! its child under `PaintScene::push_layer`, which records **its own
+//! (unscaled) layout rect** as that layer's clip — captured before the
+//! nested [`AnimatedScale`] has pushed its transform. A slot sized to the
+//! ring's own diameter therefore clips the ring away the instant it scales
+//! past `1.0x`; [`RING_SLOT`] is at least the ring's extent at
+//! [`RING_SCALE_MAX`], with the small unscaled ring [`Align`]-centered
+//! inside it.
 //!
-//! [`AnimatedOpacity`] composites its child under `PaintScene::push_layer`,
-//! which records **its own (unscaled) layout rect** as that layer's clip —
-//! captured before the nested [`AnimatedScale`] has pushed its transform,
-//! since the opacity layer paints outermost. A slot sized to the ring's own
-//! diameter therefore clips the ring away the instant it scales past `1.0x`.
-//! So the outer slot is [`RING_SLOT`] — at least the ring's extent at
-//! [`RING_SCALE_MAX`] — with the small unscaled ring [`Align`]-centered inside
-//! it.
+//! **A `success` hairline circle, not `circular_progress`**: that widget
+//! inks itself from the theme's `primary`, which on this screen is the brand
+//! amber — never a health signal here, while a ping from the liveness dot
+//! *is* one — and its stroke is the wrong shape at this size. The ring is
+//! therefore [`super::chrome::panel`]'s hairline rounded-rect border at
+//! [`super::chrome::RADIUS_FULL`].
 //!
-//! # The ring is a `success` hairline circle, not `circular_progress`
-//!
-//! The catalog strokes its ring with `circular_progress(Determinate(1.0))`,
-//! which inks itself from the theme's `primary` with no colour seam of its
-//! own. On this screen that is the brand amber, and amber is never a health
-//! signal here ([`super::widgets`]' colour-role rule) — a ping emanating from
-//! the liveness dot is exactly a health signal. It is also the wrong shape at
-//! this size: that widget's 4px stroke over a dot-sized box leaves no hole to
-//! read as a ring. The ring is therefore [`super::chrome::panel`]'s hairline
-//! rounded-rect border at [`super::chrome::RADIUS_FULL`], taking an
-//! already-resolved ink like every other piece on this screen.
-//!
-//! # Reduced motion
-//!
-//! Collapses the whole moment: no ring, no roll (the readout snaps to whatever
-//! the last ping measured), and no ticker mounted. Pings themselves keep
-//! running — a round-trip measurement is not an animation.
+//! **Reduced motion** collapses the whole moment: no ring, no roll (the
+//! readout snaps to whatever the last ping measured), no ticker mounted.
+//! Pings themselves keep running — a round-trip measurement is not an
+//! animation.
 
 use std::time::{Duration, Instant};
 

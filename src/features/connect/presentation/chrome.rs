@@ -1,53 +1,31 @@
 //! The Connect screen's hand-rolled primitives: a bordered, rounded, filled
 //! **panel** (single-child), a fixed-size **swatch** (leaf, optionally
 //! glowing), a **centered paragraph**, and the **control-semantics** wrapper
-//! behind [`switch_semantics`]/[`radio_semantics`].
-//!
-//! The Connect mock is mostly borders and washes — `.connect-mark`'s tile and
-//! its four grid cells, `.connect-badge`'s box, `.toggle`'s pill and knob,
-//! `.radio-dot`'s ring, `.dot-ok` (glow included), and the page-tone backing
-//! every full-width piece carries so the amber rain can't bleed through its
-//! text while it lands (see [`super::pieces`]'s `Palette::page`). No facade
-//! widget paints an arbitrary filled/bordered rect, so these
-//! [`View`]/[`Widget`] pairs — authored through [`frust::authoring`], the same
-//! seam `examples/huddle`'s `ui::fill_box` uses — fill the gap.
+//! behind [`switch_semantics`]/[`radio_semantics`]. No facade widget paints
+//! an arbitrary filled/bordered rect, so these [`View`]/[`Widget`] pairs —
+//! authored through [`frust::authoring`], the same seam `examples/huddle`'s
+//! `ui::fill_box` uses — fill the gap.
 //!
 //! [`switch_semantics`]/[`radio_semantics`] close an accessibility gap over
 //! whatever art or widget they wrap. [`radio_semantics`] closes a total hole:
-//! a trust row assembled from swatches and a `GestureDetector` paints and
-//! presses correctly but contributes **no** accessibility node at all (a
-//! `GestureDetector` only forwards its child's, and a swatch has none), so a
-//! screen reader would find no control there — delete it the day
-//! `frust::glyph` grows a real radio with a themeable label.
-//! [`switch_semantics`] closes a narrower one now that the remember toggle
-//! wraps the real `frust::switch` (`super::pieces::remember_row`): the widget
-//! contributes its own `Toggled`/`Action::Click` node, just no label
-//! (`SwitchWidget` takes no label parameter, unlike `Checkbox`/`RadioWidget`)
-//! — delete it the day `switch` grows one. Either way, one shared
-//! [`ControlSemanticsView`] body contributes the one `Role::Switch`/
-//! `Role::RadioButton` node the wrapped content is worth.
+//! a trust row assembled from swatches and a `GestureDetector` contributes
+//! **no** accessibility node at all — delete it the day `frust::glyph` grows
+//! a real radio with a themeable label. [`switch_semantics`] closes a
+//! narrower one: the remember toggle wraps the real `frust::switch`, which
+//! contributes its own `Toggled`/`Action::Click` node but no label
+//! (`SwitchWidget` takes none) — delete it the day `switch` grows one.
+//! [`centered_paragraph`] works around a different gap: `TextContext::layout`
+//! hardcodes `parley::Alignment::Start`, so a wrapped run's second line
+//! always hugs the leading edge; this line-breaks and centers each line
+//! itself, and can go the day `text` grows an alignment.
 //!
-//! [`centered_paragraph`] is the multi-line-centering one: `TextView` exposes
-//! no paragraph alignment and `TextContext::layout` hardcodes
-//! `parley::Alignment::Start`, so a wrapped run's second line always hugs the
-//! leading edge no matter what the app wraps it in. It line-breaks and centers
-//! each line itself. Delete it the day `text` grows an alignment.
-//!
-//! **Feature-local on purpose.** They live beside the pieces that need them
-//! rather than in `crate::ui`; `examples/huddle` promoted its own `fill_box`
-//! to the shared layer only once a second feature needed it, and nothing else
-//! in muxr does yet.
-//!
-//! Each takes already-resolved [`Color`]s/[`TextStyle`]s: their callers
+//! **Feature-local on purpose**, knowingly parallel with the other features'
+//! own primitive modules: they live beside the pieces that need them rather
+//! than in `crate::ui`, promoted to the shared layer only once a second
+//! feature needs one, same as `examples/huddle`'s `ui::fill_box` precedent.
+//! Each takes already-resolved [`Color`]s/[`TextStyle`]s — their callers
 //! ([`super::pieces`]) resolve every one from the active [`frust::Theme`]
 //! once per build, so these stay dumb about theming.
-//!
-//! **A fourth primitive, `press_target`, lived here** — the CTA's pressed
-//! visual and `Role::Button` node, for the hand-composed button `ButtonWidget`
-//! couldn't yet render with a centered label (FINDINGS #15). `#15` shipped,
-//! `pieces::connect_button` adopted the real `frust::button`, and
-//! `press_target` had no caller left, so it was deleted with it rather than
-//! kept as an orphaned helper.
 
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{

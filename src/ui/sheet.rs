@@ -1,90 +1,40 @@
 //! A modal bottom sheet: [`show_sheet`] pushes one over the root overlay host.
 //!
-//! # The chrome is `frust::glyph`'s
+//! **The chrome is `frust::glyph`'s.** The panel, its scrim, the drag handle,
+//! the enter/exit staging and every dismissal gesture (scrim tap, handle
+//! drag, `Escape`, Android back) belong to [`frust::glyph::glyph_sheet`] —
+//! this module is the thin app-facing adapter over
+//! [`show_glyph_sheet`](frust::glyph::show_glyph_sheet). What stays here is
+//! genuinely the app's: the panel gutter and bottom safe-area inset a muxr
+//! body is written against ([`sheet_content`], since Glyph lays its content
+//! slot out under **loose** width while every muxr body expects a
+//! full-content-width column), and the dismissal gate below.
 //!
-//! The panel, its scrim, the drag handle, the enter/exit staging and every
-//! dismissal gesture belong to [`frust::glyph::glyph_sheet`] — this module is
-//! the thin app-facing adapter over
-//! [`show_glyph_sheet`](frust::glyph::show_glyph_sheet), which is what a muxr
-//! screen calls. The app hand-composed all of that itself until the Glyph
-//! catalog grew a sheet of its own; adopting it retired ~450 lines of
-//! app-owned modal machinery and brought three behaviours the hand-rolled
-//! version never had: **drag-to-dismiss** from the handle, an Android **back
-//! press** that plays the exit staging rather than vanishing the page, and one
-//! motion spec shared with the Glyph dialogs [`crate::ui::dialogs`] already
-//! rides.
+//! **One sheet, one dismissal — [`SheetHandle`].** A sheet stays interactive
+//! until its pop actually *lands*, a rebuild after it is enqueued — so every
+//! app-driven dismissal path (a second row tap, a close button pressed while
+//! a delayed close is pending, a timer waking after the sheet is already
+//! gone) races every other one, and calling [`NavigatorController::pop`]
+//! directly from more than one of them pops **the page under the sheet**. So
+//! a sheet closes only through [`SheetHandle`] — the identity [`show_sheet`]
+//! mints per instance — whose [`close`](SheetHandle::close)/
+//! [`close_then`](SheetHandle::close_then) close **at most once per
+//! instance** and no-op after that (a duplicate close is a routine race, not
+//! a bug); [`show_sheet`]'s completion callback latches the same handle so a
+//! close still in flight when a user-driven dismissal wins instead cannot
+//! pop anything, and [`SheetHandle::close_after`] is the delayed close with
+//! latest-wins re-timing on the same gate.
 //!
-//! What stays here is what is genuinely the *app's*: the panel gutter and
-//! bottom safe-area inset a muxr body is written against ([`sheet_content`]),
-//! and the dismissal gate below.
-//!
-//! # What the adapter adds around a body
-//!
-//! Glyph lays its content slot out under **loose** width, so a body that
-//! shrink-wraps (a lone button, a centered `Row`) would sit at its natural
-//! width in the middle of the panel. Every muxr sheet body — the picker rows,
-//! the management rows, the panes-and-tabs column — is written against a
-//! full-content-width column, so [`sheet_content`] tightens the width back and
-//! adds the gutter/safe-area padding the Glyph panel deliberately leaves to its
-//! content.
-//!
-//! # One sheet, one dismissal — [`SheetHandle`]
-//!
-//! A sheet stays interactive until its pop actually *lands*, and a pop lands a
-//! rebuild after it is enqueued — so every app-driven dismissal path races
-//! every other one. A second tap on a row, a close button pressed while a
-//! delayed close is already pending, a timer that wakes after the sheet is
-//! already gone: each of them calling [`NavigatorController::pop`] on its own
-//! means the second one through pops **the page under the sheet** — whatever
-//! overlay happens to be there, or (on the route navigator this app's sheets
-//! used to live on) the route itself, which read to the user as the app
-//! silently bouncing back a screen.
-//!
-//! So a sheet is not closed by whoever happens to be holding a navigator; it is
-//! closed through [`SheetHandle`] — the identity [`show_sheet`] mints per sheet
-//! *instance* and hands to its body builder. Every app-driven path goes through
-//! [`SheetHandle::close`] (or [`close_then`](SheetHandle::close_then), for a
-//! close with a follow-on push — see below), which closes **at most once per
-//! instance** and is an ordinary no-op after that: a duplicate close is a
-//! routine user race, not a bug to panic on. [`show_sheet`]'s own completion
-//! callback latches the same handle, so a close still in flight when the page
-//! goes away some other way cannot pop anything either, and
-//! [`SheetHandle::close_after`] is the delayed close ("let the selection
-//! visibly move first") with latest-wins re-timing on top of the same gate.
-//!
-//! **A user-driven dismissal doesn't come through here at all**: a scrim tap,
-//! a handle drag, `Escape` and a back press are the widget's own, and it pops
-//! itself exactly once at the end of its exit staging (its `begin_exit` is
-//! idempotent, and a dismissed sheet stays dismissed). The handle only learns
-//! about it when the page is gone, through the completion latch — which is
-//! what keeps a *later* stale close from popping anything.
-//!
-//! # `close` plays the same staged exit as a user dismissal
-//!
-//! [`SheetHandle::close`] no longer pops the page straight away: it drives the
-//! widget's own staged exit through
-//! [`frust::glyph::GlyphSheetHandle::close`] — the identical scrim-fade +
-//! panel-slide motion a scrim tap, a handle drag, `Escape` or a back press
-//! plays — and the page pops only once that exit completes
-//! (`frust::glyph::sheet`'s own module docs). A bare "close, then push in the
-//! same rebuild" — the shape every dialog-opening row here used to be written
-//! as — would now land the push several frames *ahead* of the sheet's own pop
-//! (which is enqueued only when the exit finishes), so the pop that eventually
-//! lands would take the page the push just put up, not the sheet.
-//! [`close_then`](SheetHandle::close_then) is the fix: it rides frust's own
-//! composed `on_close` (the pop is enqueued first, then the chained callback,
-//! both exactly once, on the exit's completion frame — this app's own "page's
-//! pop-completion callback" idiom, `docs/ARCHITECTURE.md`'s Navigation
-//! section), so a chained push always queues strictly behind the sheet's own
-//! pop. Every close-then-push call site in this app (the sessions management
-//! sheet's Rename/Kill rows) goes through it; a close-then-*persist* site (the
-//! settings pickers, which write a value and touch no navigator at all) has
-//! nothing to chain and stays on plain [`close`](SheetHandle::close).
-//!
-//! Total dismissal timing: an unchained [`close`](SheetHandle::close) is one
-//! `durations.fast` exit (150ms unthemed) from call to pop;
-//! [`close_after`](SheetHandle::close_after) adds its own `delay` ahead of
-//! that same exit — `delay` + 150ms unthemed, end to end.
+//! **`close` plays the same staged exit as a user dismissal**
+//! ([`frust::glyph::GlyphSheetHandle::close`]) and the page pops only once
+//! that exit completes, never immediately — so a close that also needs to
+//! push a follow-on page cannot just push right after calling `close` (that
+//! push would land ahead of the sheet's own delayed pop, and the eventual
+//! pop would take the wrong page). [`close_then`](SheetHandle::close_then)
+//! rides frust's composed `on_close` (pop enqueued first, then the chained
+//! callback, both exactly once, on the exit's completion frame) to queue a
+//! follow-on push strictly behind the sheet's own pop; a close-then-*persist*
+//! site (no navigator touched) stays on plain [`close`](SheetHandle::close).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -161,8 +111,8 @@ pub fn show_sheet<State: 'static>(
     // input, long after this function has returned.
     let glyph_handle: Rc<RefCell<Option<GlyphSheetHandle>>> = Rc::new(RefCell::new(None));
     let close_cell = Rc::clone(&glyph_handle);
-    // The one app-driven close, behind the one gate — now the widget's own
-    // staged exit (task 36's `GlyphSheetHandle::close`), not an immediate
+    // The one app-driven close, behind the one gate — the widget's own
+    // staged exit (`GlyphSheetHandle::close`), not an immediate
     // `NavigatorController::pop` (see the [module docs](self)).
     let sheet = SheetHandle::new(move || {
         if let Some(handle) = close_cell.borrow().as_ref() {
@@ -244,9 +194,9 @@ struct SheetGuard {
     /// delay elapses — "latest wins", so a second selection extends the wait
     /// rather than stacking a second close behind the first.
     pending: Cell<u64>,
-    /// The one staged close (`frust::glyph::GlyphSheetHandle::close`, task
-    /// 36). Boxed (rather than the handle itself) so this type stays free of
-    /// the navigator's `State` parameter — a sheet body passes it around, and
+    /// The one staged close (`frust::glyph::GlyphSheetHandle::close`). Boxed
+    /// (rather than the handle itself) so this type stays free of the
+    /// navigator's `State` parameter — a sheet body passes it around, and
     /// every one of those call sites would otherwise carry the app's state
     /// type for no reason.
     close: Box<dyn Fn()>,
@@ -370,7 +320,7 @@ mod tests {
     use super::*;
 
     /// A handle whose "close" only counts itself — production wires this to
-    /// `frust::glyph::GlyphSheetHandle::close` (the staged exit, task 36), so
+    /// `frust::glyph::GlyphSheetHandle::close` (the staged exit), so
     /// counting invocations here is counting how many times that seam fired,
     /// not literal pops.
     fn counting_handle() -> (SheetHandle, Rc<Cell<usize>>) {

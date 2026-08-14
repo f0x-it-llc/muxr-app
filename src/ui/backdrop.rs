@@ -1,35 +1,22 @@
 //! `page_backdrop` — the app's full-bleed background fill.
 //!
 //! A hand-rolled [`View`]/[`Widget`] pair built against [`frust::authoring`]
-//! (the same shape `examples/huddle`'s `ui::fill_box` and
-//! `examples/glyph-catalog`'s `AppBackground` take), needed for two reasons:
+//! (the same shape `examples/huddle`'s `ui::fill_box` takes), needed because
+//! no facade widget paints an unconditional "fill the available space" rect
+//! (`SizedBox`/`Image` only tighten under an already-tight constraint, and
+//! [`Stack`](frust::Stack) hands every child a LOOSE one — this declares a
+//! larger-than-any-viewport intrinsic size and lets
+//! [`BoxConstraints::constrain`] clamp it down), and because the shell clears
+//! to `ColorScheme::surface` (Glyph's `--bg-surface`, the card/input tone),
+//! while Connect and the splash overlay are authored against the page tone
+//! `--bg-base`.
 //!
-//! 1. **No facade widget paints an unconditional "fill the available space"
-//!    rect.** `SizedBox`/`Image` only tighten when the *incoming* constraint is
-//!    already tight, and [`Stack`](frust::Stack) hands every child a LOOSE
-//!    (min-zero) constraint — a naive background child collapses to zero. The
-//!    trick is to declare a larger-than-any-viewport intrinsic size and let
-//!    [`BoxConstraints::constrain`] clamp it down (the catalog's precedent).
-//! 2. **The shell clears to `ColorScheme::surface`**, which is Glyph's
-//!    `--bg-surface` (`#161a23`) — the card/input tone, not the page tone.
-//!    Both the Connect screen and the splash overlay are authored against
-//!    `--bg-base` (`#10131a`), so the app paints its own page background.
-//!
-//! # Which page tone, and why it moved
-//!
-//! `docs/redesign.html` paints the phone's whole screen `--bg-base`
-//! (`.screen{background:var(--bg-base)}`) and gives the `.connect` column no
-//! backing of its own; the older `docs/splash.html` mock used `--bg-void` for
-//! both. The redesign is the visual ground truth for the screen, so this
-//! backdrop resolves `--bg-base` and `features::connect`'s pieces back
-//! themselves with the *same* role (`Palette::page`) — over the page that reads
-//! as no backing at all, exactly as the redesign draws it, while still giving
-//! the splash's rain something opaque to land on.
-//!
-//! **One function serves both renderings on purpose.** The splash overlay and
-//! the `/` route paint the same tone by construction, so the handoff cannot
-//! develop a one-frame colour step; a second, splash-only backdrop would be
-//! free to drift. See `features::connect::presentation::pieces`' module docs.
+//! **One function serves both renderings on purpose.** `docs/redesign.html`
+//! paints the whole screen `--bg-base`; this backdrop and
+//! `features::connect`'s widgets resolve the same role (`Palette::page`), so
+//! the splash overlay and the `/` route paint identical tone by construction
+//! and the handoff cannot develop a one-frame colour step. See
+//! `features::connect::presentation::widgets`' module docs.
 //!
 //! The splash additionally needs an **opaque, input-blocking** layer: the
 //! navigator (already rendering the finished Connect screen) stays mounted

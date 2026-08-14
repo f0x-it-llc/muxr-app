@@ -146,7 +146,7 @@ pub(in super::super) fn font_picker_sheet(
         // A fixed height rather than a flex share: the sheet body's own
         // constraint is unbounded in height, and a `flexible` child under an
         // unbounded main axis divides zero free space (the tight-constraint
-        // trap `features::terminal::presentation::pieces::sheet_scroll_body`
+        // trap `features::terminal::presentation::widgets::sheet_bits::sheet_scroll_body`
         // documents at length).
         Some(height) => any(SizedBox::<AppState>(None, Some(height)).child(scroller)),
         None => any(scroller),

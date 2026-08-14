@@ -12,45 +12,29 @@
 //!
 //! Thinning is deliberately *per column*: a column whose head leaves the
 //! surface rolls once against the current density and either respawns or
-//! retires for good, so the rain visibly drains instead of switching off (the
-//! design reference's own note).
+//! retires for good, so the rain visibly drains instead of switching off.
 //!
-//! # Why there is no previous-frame fade
+//! **No previous-frame fade.** The HTML source fakes long trails by never
+//! clearing its canvas (each frame paints a translucent rect over the whole
+//! surface, so older glyphs decay over several frames) — `frust` paints an
+//! immediate display list rebuilt from scratch every frame, so there is no
+//! retained framebuffer to fade, and a translucent rect here would instead
+//! dim the app content beneath the rain. This widget repaints the visible
+//! trail window every frame instead — the head plus [`spec::RAIN_TRAIL`]
+//! glyphs above it, with the same alpha falloff the source draws — which is
+//! what the accumulated overlay there is approximating; the only visible
+//! difference is a slightly crisper tail.
 //!
-//! The HTML source fakes long trails by never clearing its canvas: each frame
-//! it paints `rgba(10,12,17,0.16)` over the whole surface, so older glyphs
-//! decay toward the background over several frames. **That has no equivalent
-//! here, and emulating it would be wrong twice over.** `frust` paints an
-//! immediate display list that is rebuilt from scratch every frame — there is
-//! no retained framebuffer holding the previous frame to fade, and the
-//! translucent rectangle that would fade it would instead composite over
-//! *the app content beneath the rain*, dimming the splash background and
-//! anything the orchestrator stacks below.
+//! **Determinism and clocking.** Everything random comes from the widget's
+//! seeded [`SplashRng`], so a given seed replays exactly. The rain self-clocks
+//! from its first paint by default (mounting it *is* the cue);
+//! [`RainView::clock`] overrides that with an orchestrator-supplied rain-local
+//! clock. Fall speed is specified per frame by the source; this widget scales
+//! that by the real frame delta ([`super::frame_factor`]) so the rain falls
+//! at the same speed on a 120Hz device as on a 60Hz one.
 //!
-//! So this widget takes the other option the task allows: it repaints the
-//! visible trail window every frame — the head plus [`spec::RAIN_TRAIL`]
-//! glyphs above it, with the same `(1 - i/trail) * 0.75` alpha falloff the
-//! source draws — which is exactly what the accumulated overlay is
-//! approximating there. The visible difference is a slightly crisper tail
-//! (no multi-frame ghost past the seventh glyph); the trail length, colors
-//! and per-glyph flicker are identical.
-//!
-//! # Determinism and clocking
-//!
-//! Everything random comes from the widget's seeded [`SplashRng`], so a given
-//! seed replays exactly. The rain self-clocks from its first paint by
-//! default (mounting it *is* the cue); [`RainView::clock`] overrides that
-//! with an orchestrator-supplied rain-local clock instead.
-//!
-//! Fall speed is specified per frame by the source (`rand(0.35,0.75)` rows
-//! per `requestAnimationFrame`); this widget scales that by the real frame
-//! delta (see [`super::frame_factor`]) so the rain falls at the same speed on
-//! a 120Hz device as on a 60Hz one.
-//!
-//! # Reduced motion
-//!
-//! Under `MotionScheme::reduce_motion` the rain never starts: nothing
-//! painted, no frames requested, no clock advanced.
+//! **Reduced motion.** Under `MotionScheme::reduce_motion` the rain never
+//! starts: nothing painted, no frames requested, no clock advanced.
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{

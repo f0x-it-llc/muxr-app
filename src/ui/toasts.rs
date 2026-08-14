@@ -5,40 +5,25 @@
 //! A screen never builds a toast itself — it hands [`FailureToasts`] an
 //! [`AppFailure`] and the bridge enqueues that failure's **user-facing**
 //! message ([`clean_signals::Failure::user_message`]), never the internal
-//! detail the variant carries for logs (see `crate::failure`). That one-way
-//! mapping is the whole point of the bridge: there is no path from app code to
-//! a raw `Display` string on screen.
+//! detail the variant carries for logs. That one-way mapping is the whole
+//! point of the bridge: there is no path from app code to a raw `Display`
+//! string on screen.
 //!
-//! # Why the handle is a thread-local, not `provide_context`
-//!
-//! `examples/huddle` creates its `ToastController` in the composition root's
-//! `Component::init` and `provide_context`s it there, so every screen reaches
-//! it with `use_context`. Muxr's composition root (`src/lib.rs`) is not this
-//! task's to edit, and [`crate::shell::root_view`] — the one seam that *is* —
-//! runs inside `Component::build`, re-entered on every single rebuild: a
+//! **Why a thread-local, not `provide_context`**: [`crate::shell::root_view`]
+//! runs inside `Component::build`, re-entered every rebuild, so
 //! `provide_context` there would re-provide the handle per frame under the
-//! build-scope owner rather than once under the root owner. So the handle
-//! lives in a process-`thread_local!` instead, reached by calling
-//! [`app_toasts`] from anywhere on the UI thread — the same self-healing
-//! cached-signal idiom `examples/glyph-catalog`'s `pages/overlays.rs`
-//! (`demo_state`) and `examples/huddle`'s `workspace_drawer::entrance_progress`
-//! use: a cache entry whose reactive `Owner` was disposed (a headless test
-//! re-entering after teardown) is detected and transparently recreated rather
-//! than trusted blindly.
+//! build-scope owner rather than once under the root owner. The handle lives
+//! in a process `thread_local!` instead, reached via [`app_toasts`] — a
+//! self-healing cached-signal: a cache entry whose reactive `Owner` was
+//! disposed (a headless test re-entering after teardown) is detected and
+//! transparently recreated. Per-**thread** also isolates each headless test,
+//! since `cargo test` runs every test on its own thread.
 //!
-//! One consequence worth naming: the queue is per-**thread**, which is exactly
-//! right here (frust is single-UI-threaded) and additionally isolates each
-//! headless test — `cargo test` runs every test on its own thread, so no two
-//! tests can see each other's toasts.
-//!
-//! # Queue policy
-//!
-//! [`frust::glyph::toast_host`] is a controlled component: it takes the app's
-//! whole FIFO request log as a snapshot every rebuild and advances its own
-//! cursor through it, showing exactly one toast at a time. The log therefore
-//! only ever grows — the framework's documented v1 limitation — so
-//! [`FailureToasts::clear`] exists to trim it (see that method's note on when
-//! trimming is safe).
+//! **Queue policy.** [`frust::glyph::toast_host`] is a controlled component:
+//! it takes the app's whole FIFO request log as a snapshot every rebuild and
+//! advances its own cursor through it, showing exactly one toast at a time.
+//! The log therefore only ever grows — the framework's documented v1
+//! limitation — so [`FailureToasts::clear`] exists to trim it.
 
 use std::cell::Cell;
 

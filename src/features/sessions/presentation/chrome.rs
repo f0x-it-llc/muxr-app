@@ -2,37 +2,28 @@
 //! (single-child, with the card's left status accent and the `conn-row`'s
 //! bottom rule as options), a fixed-size **swatch** leaf (the strip's success
 //! dot, glow included), and the **dashed box** the "+ new session" row needs.
-//!
-//! `docs/redesign.html`'s sessions block is mostly boxes and hairlines —
-//! `.sess-card`'s surface + `border-bright` + 2px `border-left`, `.pane-pill`'s
-//! `bg-base` tile, `.conn-row`'s `border-bottom`, `.dot-ok`'s glowing dot, and
-//! `.new-sess-btn`'s dashed outline. No facade widget paints an arbitrary
-//! filled/bordered rect, so these [`View`]/[`Widget`] pairs — authored through
-//! [`frust::authoring`], the same seam `crate::ui::backdrop` uses — fill the
-//! gap.
+//! No facade widget paints an arbitrary filled/bordered rect, so these
+//! [`View`]/[`Widget`] pairs — authored through [`frust::authoring`], the
+//! same seam `crate::ui::backdrop` uses — fill the gap.
 //!
 //! **Feature-local, and knowingly parallel to `features::connect`'s own
-//! `chrome`.** The two screens each own a panel/swatch pair rather than sharing
-//! one, because a feature never imports a sibling's `presentation`
-//! (`docs/ARCHITECTURE.md`'s cross-feature rule) and promoting Connect's copy
-//! into `crate::ui` would mean editing that screen — a separate task's file.
-//! When Connect's own redesign sweep lands, the two should be promoted together
-//! (`examples/huddle` promoted its `fill_box` to the shared layer on exactly
-//! this trigger: the second consumer).
+//! `chrome`.** The two screens each own a panel/swatch pair rather than
+//! sharing one, since a feature never imports a sibling's `presentation`
+//! (`docs/ARCHITECTURE.md`'s cross-feature rule); promotion to `crate::ui` is
+//! deferred until a second consumer forces it, the same trigger
+//! `examples/huddle` promoted its own `fill_box` on.
 //!
-//! Like Connect's, every one of these takes already-resolved [`Color`]s:
-//! [`super::widgets`] resolves each from the active [`frust::Theme`] once per
-//! build, so these stay dumb about theming.
+//! Every one of these takes already-resolved [`Color`]s: [`super::widgets`]
+//! resolves each from the active [`frust::Theme`] once per build, so these
+//! stay dumb about theming.
 //!
-//! # Frust gaps these work around
-//!
-//! - **No dash pattern on `PaintScene`.** `stroke_path`/`stroke_line` take a
-//!   plain width; `kurbo::Stroke`'s dash array never reaches the scene. So
-//!   [`DashedBoxWidget`] walks each edge itself in on/off steps — see its own
-//!   note, and **delete it the day frust grows dash support**.
-//! - **No per-corner radius.** The card's `border-left` accent is therefore
-//!   painted as an accent-colored rounded rect the surface fill sits 2px
-//!   inside of, which reproduces the source's curved accent without one.
+//! **Frust gaps worked around here:** `PaintScene` has no dash pattern
+//! (`stroke_path`/`stroke_line` take a plain width; `kurbo::Stroke`'s dash
+//! array never reaches the scene), so [`DashedBoxWidget`] walks each edge
+//! itself in on/off steps — delete it the day frust grows dash support. And
+//! no per-corner radius: the card's `border-left` accent is painted as an
+//! accent-colored rounded rect the surface fill sits 2px inside of, which
+//! reproduces the source's curved accent without one.
 
 use frust::authoring::{
     AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx,

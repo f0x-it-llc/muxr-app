@@ -1,9 +1,6 @@
-//! The cold-start splash sequence's paint-driven building blocks.
-//!
-//! Three self-contained `View`/`Widget` pairs, authored through
-//! [`frust::authoring`] (the app-tier widget-authoring seam — see
-//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions; this app names
-//! no framework crate but `frust`):
+//! The cold-start splash sequence's paint-driven building blocks — five
+//! beats off one master clock (see [`sequence`]'s own docs for the timeline),
+//! each independently mountable/testable, plays once per process launch:
 //!
 //! | Module | What it paints |
 //! |---|---|
@@ -12,29 +9,23 @@
 //! | [`rain`] | The full-surface amber matrix rain, thinning column by column |
 //! | [`sequence`] | The orchestrator: all three over one clock, ending in the Connect screen's piece-by-piece assembly |
 //!
-//! Each of the first three widgets is independently mountable and
-//! independently testable, and none of them knows about the others —
-//! [`sequence`] owns the sequencing, cueing [`burst`]/[`rain`] at exactly
-//! [`spec::ICON_DELAY_MS`] (the same instant the icon publishes
-//! [`Dissolve`](icon_phase::IconPhase::Dissolve)) and the assembly
-//! [`spec::ASSEMBLY_START_MS`] after that.
+//! None of the first three widgets knows about the others — [`sequence`]
+//! owns the sequencing, cueing [`burst`]/[`rain`] at exactly
+//! [`spec::ICON_DELAY_MS`] and the assembly [`spec::ASSEMBLY_START_MS`] after
+//! that.
 //!
-//! # Source of truth
+//! **Source of truth.** `docs/splash.html` is the design reference; its
+//! `<script>` constants are the timing contract, transcribed exactly once,
+//! here, into [`spec`] — never re-typed at a use site. Colors come from the
+//! active [`frust::Theme`] where a token exists; the two with no token (the
+//! rain's near-white head, the reference amber for an unthemed paint pass)
+//! are named constants in [`spec`] carrying the CSS custom property they
+//! transcribe.
 //!
-//! `docs/splash.html` is the design reference; its `<script>` constants are
-//! the timing contract and are transcribed once, here, into [`spec`] — never
-//! re-typed at a use site. Colors come from the active [`frust::Theme`] where
-//! a token exists (the amber accent is `ColorScheme::primary` on Glyph dark);
-//! the two colors with no token (the rain's near-white head, the reference
-//! amber for an unthemed paint pass) are named constants in [`spec`] carrying
-//! the CSS custom property they transcribe.
-//!
-//! # Determinism
-//!
-//! Every random choice (column start rows, fall speeds, glyph picks, particle
-//! angles/distances) comes from [`SplashRng`], a seeded LCG, never a system
-//! RNG: each widget takes a `seed: u64` so a test can replay an exact
-//! sequence. The app has no `rand` dependency.
+//! **Determinism.** Every random choice comes from [`SplashRng`], a seeded
+//! LCG, never a system RNG: each widget takes a `seed: u64` so a test can
+//! replay an exact sequence. Each widget also independently collapses under
+//! `MotionScheme::reduce_motion` (see its own module docs).
 
 pub mod burst;
 pub mod icon_phase;
