@@ -1,15 +1,13 @@
-//! [`SaveCredential`] — gates and stores one server's auth token (the manual
-//! save offer's accept, and the single prompt a successful QR pairing raises).
+//! [`SaveCredential`] — gates and stores one server's auth token (the manual save
+//! offer's accept, and the single prompt a successful QR pairing raises).
 //!
-//! A thin, injected-service use case with no logic of its own, for the reason
-//! `settings`' own use cases record: the value of the seam is that the
-//! controller drives it through `ControllerCore::run` (activity tracking, one
-//! failure-emission site) rather than touching a service directly, and a real
-//! rule lands here without a call site moving.
+//! A thin, injected-service use case with no logic of its own: the seam's value is
+//! that the controller drives it through `ControllerCore::run` (activity tracking,
+//! one failure-emission site) rather than touching a service directly.
 //!
-//! It never fails: [`CredentialService`]'s own contract is that every gate and
-//! store error *is* a [`CredentialStatus`], so this always answers `Ok` and the
-//! caller branches on the status.
+//! It never fails — [`CredentialService`]'s contract is that every gate and store
+//! error *is* a [`CredentialStatus`], so this always answers `Ok` and the caller
+//! branches on the status.
 
 use std::sync::Arc;
 

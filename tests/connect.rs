@@ -5,9 +5,9 @@
 //! # The harness shape, and why it is not just `MuxrApp`
 //!
 //! `NavigatorWidget` contributes no `Widget::semantics` and forwards none of its
-//! pages' (FINDINGS #23), so **a screen mounted inside a navigator is invisible
-//! to the accessibility tree** — the route-level harness `tests/routes.rs` uses
-//! can only count glyph runs. This suite instead mounts a `Stack` of
+//! pages', so **a screen mounted inside a navigator is invisible to the
+//! accessibility tree** — the route-level harness `tests/routes.rs` uses can only
+//! count glyph runs. This suite instead mounts a `Stack` of
 //!
 //! 1. [`connect_page`] — the real route builder, so the whole
 //!    `Component`/`use_controller`/pieces stack is under test, *outside* the
@@ -30,11 +30,10 @@
 //! **own** navigator (see above), it then calls
 //! [`muxr::routes::install_app_router`] over that controller — as both the
 //! route navigator and the root overlay host, where production has two
-//! (`muxr::AppState::nav` and `AppState::overlays`; the QR sheet is a page of
-//! the latter since FINDINGS #44) — re-pointing the app's one path-pushing
-//! handle at it: the screen therefore pushes through the real route table and
-//! the real session guard, and this harness observes the result as a depth
-//! change.
+//! (`muxr::AppState::nav` and `AppState::overlays`, the QR sheet being a page of
+//! the latter) — re-pointing the app's one path-pushing handle at it: the screen
+//! therefore pushes through the real route table and the real session guard, and
+//! this harness observes the result as a depth change.
 //!
 //! # Surface size
 //!
@@ -57,7 +56,7 @@
 //! [`TextContext`], and reads the per-glyph advances back off the resulting
 //! glyph runs. That is the deliberate reproduction of a device defect
 //! (`zelli.example.com: 5 0 0 5 1`) whose cause is a font stack resolving to
-//! nothing — see `pieces::field_font_family` for the full mechanism.
+//! nothing — see `widgets::fields`' `field_font_family` for the mechanism.
 //!
 //! A bare `TextContext` is exactly what a `TextInputWidget` owns, so this is
 //! the field's own shaping environment and not an approximation of it.
@@ -93,16 +92,21 @@ use muxr::features::connect::domain::entities::{
 use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::{ConnectController, CredentialOffer};
-use muxr::features::connect::presentation::pages::{
-    NO_CAMERA, connect_layout, connect_page, qr_sheet_body,
+use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
+use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
+use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
+use muxr::features::connect::presentation::widgets::fields::{
+    SERVER_URL_PLACEHOLDER, TOKEN_PLACEHOLDER, field_text_style,
 };
-use muxr::features::connect::presentation::pieces::{
-    CONNECT_LABEL, Live, PAIRED_CAPTION, PAIRING_CAPTION, PINNED_CAPTION, PINNED_CONNECT_LABEL,
-    READ_ONLY_CHIP, SERVER_URL_PLACEHOLDER, SUBTITLE, TOKEN_PLACEHOLDER, connect_pieces,
-    connect_pieces_with, field_text_style, heading,
+use muxr::features::connect::presentation::widgets::pairing::{
+    PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
 };
+use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
+use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
+use muxr::features::connect::presentation::widgets::{Live, connect_pieces, connect_pieces_with};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::routes::{app_nav, install_app_router};
+use muxr::ui::palette::Palette;
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
@@ -129,16 +133,16 @@ const INVALID_URL: &str = "not-an-endpoint";
 /// `AppFailure::Network`'s user-facing message — what a rejected form toasts.
 const NETWORK_TOAST: &str = "Connection problem — please try again.";
 
-/// The trust selector's **two** rows (`pieces::trust_option_label`) — the
+/// The trust selector's **two** rows (`widgets::trust`'s `trust_option_label`) — the
 /// mock's own pair. `TrustMode::Pinned` is deliberately not one of them; see
-/// `pieces::trust_selector`.
+/// `widgets::trust::trust_selector`.
 const SYSTEM_TRUST: &str = "Public domain (CA)";
 const INSECURE_TRUST: &str = "Trust anyway";
 /// The chip the insecure row carries (`glyph::badge` → `Role::Status`).
 const INSECURE_CHIP: &str = "insecure";
 
 /// The QR affordance's accessible name. Transcribed rather than imported (the
-/// CTA's is `pieces::CONNECT_LABEL`, which *is* the run it paints and so has to
+/// CTA's is `widgets::cta::CONNECT_LABEL`, which *is* the run it paints and so has to
 /// be the same string): this one is the button's *name*, and a test that
 /// imported it could not catch it changing.
 ///
@@ -157,7 +161,7 @@ const LAYER_PAD_X: f64 = 22.0;
 /// CTA has to clear.
 const MIN_TAP_TARGET: f64 = 44.0;
 /// The content column's max width past `crate::responsive::WIDE_BREAKPOINT_PX`
-/// (FINDINGS #21's width-clamp pass), transcribed (the constant itself is
+/// (the responsive width-clamp pass), transcribed (the constant itself is
 /// private to `presentation::pages`).
 const CONNECT_CLAMP_WIDTH: f64 = 520.0;
 
@@ -187,7 +191,7 @@ fn empty_base_page() -> AnyView<AppState> {
 
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
-/// responsive width-clamp pass (FINDINGS #21). `None` leaves context unset,
+/// responsive width-clamp pass. `None` leaves context unset,
 /// exactly the state every other test in this suite mounts under (no shell
 /// has published yet), so this helper is purely additive.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
@@ -456,7 +460,7 @@ fn typing_a_server_url_survives_the_rebuild_it_wakes() {
 
 #[test]
 fn the_token_field_masks_its_glyphs_but_stays_editable() {
-    // #20 adopted: the login token field obscures now. `TextInputWidget`
+    // The login token field obscures. `TextInputWidget`
     // reports `Role::PasswordInput` (not `TextInput`) and publishes the
     // *masked* mirror as its accessible value — the harness's only window
     // onto rendered text content (`a recording PaintScene sees glyph runs,
@@ -505,7 +509,7 @@ fn the_selector_offers_the_mocks_two_rows_and_flags_the_insecure_one() {
         harness.trust_rows(),
         vec![SYSTEM_TRUST.to_string(), INSECURE_TRUST.to_string()],
         "the selector offers exactly the design's two rows, safest first — \
-         `TrustMode::Pinned` is never hand-picked (see pieces::trust_selector)"
+         `TrustMode::Pinned` is never hand-picked (see widgets::trust::trust_selector)"
     );
     assert!(
         harness.shows_chip(INSECURE_CHIP),
@@ -565,7 +569,7 @@ fn tapping_a_saved_server_refills_the_url_and_its_trust_mode() {
     // The posture it carried is one the selector deliberately does not offer
     // as a row, so the selector must render *honestly* rather than pretend:
     // neither row selected, and the caption naming where the posture came
-    // from (see pieces::trust_selector's pinned-state note).
+    // from (see widgets::trust::trust_selector's pinned-state note).
     assert!(
         !harness.trust_selected(SYSTEM_TRUST) && !harness.trust_selected(INSECURE_TRUST),
         "a pinned posture must not light a phantom selection"
@@ -611,7 +615,7 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
     let harness = Harness::mount();
 
     // `.btn-primary` is block-level: it fills the layer between its two 22px
-    // paddings rather than hugging its label (Ed's round-2 device gate).
+    // paddings rather than hugging its label.
     let cta = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
@@ -636,7 +640,7 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
 }
 
 // ---------------------------------------------------------------------------
-// Responsive width-clamp pass (FINDINGS #21)
+// Responsive width-clamp pass
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1384,7 +1388,7 @@ fn controller_with_tokens(
 #[test]
 fn the_qr_sheet_shows_the_no_camera_state_off_device() {
     // The sheet's own body, mounted directly rather than as a pushed page: a
-    // navigator contributes no semantics for its pages (FINDINGS #23), so the
+    // navigator contributes no semantics for its pages, so the
     // sheet is unreadable while it is one. This is the desktop/headless path —
     // no camera backend, so the sheet says so instead of framing a dead
     // viewfinder.
@@ -3243,7 +3247,7 @@ fn a_manual_connect_at_a_server_with_a_stored_credential_asks_to_replace_it() {
 }
 
 // ---------------------------------------------------------------------------
-// The splash's static mock fields (#16 adopted)
+// The splash's static mock fields
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -3297,7 +3301,7 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
         fields.iter().all(|(_, _, read_only)| *read_only),
         "the splash's static fields must present as read-only — a stray tap \
          during the staggering entrance must not focus or caret a field with \
-         nothing behind it (FINDINGS #16's concern, unchanged): {fields:?}"
+         nothing behind it: {fields:?}"
     );
     assert!(
         fields.iter().all(|(_, disabled, _)| !*disabled),
@@ -3376,7 +3380,8 @@ impl PaintScene for GlyphScene {
 /// its own y.
 fn subtitle_lines() -> (Vec<(f64, f64)>, Rect) {
     let theme = Theme::glyph_baseline();
-    let mut logic = move |_state: &mut ()| heading::<()>(&theme);
+    let colors = Palette::from_theme(&theme);
+    let mut logic = move |_state: &mut ()| heading::<()>(&theme, &colors);
     let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
     let mut state = ();
     let mut tcx = TextContext::new();
@@ -3497,7 +3502,7 @@ fn the_server_url_placeholder_never_advances_its_digits_a_full_em() {
             *advance < em - ADVANCE_EPSILON,
             "a digit advanced {advance:.3}px at a {em}px font size — the \
              placeholder's font stack resolved to nothing and parley fell \
-             back per cluster (see pieces::field_font_family)"
+             back per cluster (see widgets::fields' field_font_family)"
         );
     }
 }

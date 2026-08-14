@@ -2,19 +2,16 @@
 //! headless suite runs on, and the only way to exercise the gate's outcome table
 //! without a device.
 //!
-//! The real service ([`super::secure_credential_service`]) answers whatever the
-//! platform's biometric gate says, which off-device is always "unavailable" and
-//! on-device is whatever a human does to a prompt. Neither is a test. This one
-//! answers a **scripted** [`CredentialStatus`], so a suite can drive every
-//! branch of the outcome table — a cancel, a lockout, an invalidated key — in
-//! order, in one process, with no hardware at all.
+//! The real service answers whatever the platform's biometric gate says, which
+//! off-device is always "unavailable" and on-device is whatever a human does to a
+//! prompt. Neither is a test. This one answers a **scripted**
+//! [`CredentialStatus`], so a suite can drive every branch of the outcome table in
+//! one process with no hardware at all, and records the prompts it was asked to
+//! raise ([`MockCredentialService::prompts`]) — "exactly one biometric prompt per
+//! successful pairing" is a contract this app makes, and a count is the only way
+//! to check it.
 //!
-//! It also records the prompts it was asked to raise ([`Self::prompts`]),
-//! because "exactly one biometric prompt per successful pairing" is a contract
-//! this app makes and a count is the only way to check it.
-//!
-//! Selected by `di`'s own headless-test seam
-//! (`use_mock_credentials_for_tests`), never in a real app run. A poisoned lock
+//! Selected by `di`'s headless-test seam, never in a real app run. A poisoned lock
 //! is recovered rather than propagated, for the reason
 //! [`super::mock_saved_servers`] records.
 

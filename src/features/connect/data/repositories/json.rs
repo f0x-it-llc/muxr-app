@@ -1,37 +1,22 @@
 //! A minimal JSON value, encoder and parser — the saved-server store's wire
 //! format, and nothing else.
 //!
-//! # Why hand-rolled
-//!
-//! The saved-server list is persisted the way the Flutter client persists it: as
-//! **one JSON-encoded array** under a single shared-preferences key, so the
-//! schema (and the field names in it) stay recognisable across the two clients.
-//! This app's manifest carries no JSON dependency, and adding one to spell a
-//! ten-field record is not the trade — so the encode/decode pair lives here,
-//! scoped to `super::prefs_saved_servers`' own needs. It is the same choice the
-//! framework's mobile shells make for their own small fixed payloads
+//! Hand-rolled because this app's manifest carries no JSON dependency and adding
+//! one to spell a ten-field record is not the trade
 //! (`docs/CODE_STANDARDS.md`'s hand-roll-JSON-at-the-FFI-seam rule).
-//!
-//! # Contract
 //!
 //! [`parse`] answers `None` for anything that is not well-formed JSON, and the
 //! store above treats that as an empty list rather than a failure — a corrupt
 //! payload must never take a boot down. [`Json::encode`] emits the subset this
-//! module can read back (`\u`-escaping only what JSON requires: quotes,
-//! backslash and the C0 controls), so a round trip is lossless for every value
-//! the store writes.
-//!
-//! Numbers are `f64`: the largest value this schema stores is an epoch
-//! millisecond stamp (~1.8e12), far inside the 2^53 range a `f64` represents
-//! exactly, and [`Json::as_i64`] refuses anything with a fractional part rather
-//! than rounding it.
+//! module can read back, so a round trip is lossless for every value the store
+//! writes. Numbers are `f64`: the largest value this schema stores is an epoch
+//! millisecond stamp, far inside the 2^53 range an `f64` represents exactly, and
+//! [`Json::as_i64`] refuses a fractional part rather than rounding.
 
 use std::fmt::Write as _;
 
-/// How deep a nested array/object may go before [`parse`] gives up. This
-/// schema is two levels (an array of flat objects); the limit exists so a
-/// hand-edited or hostile payload cannot recurse the parser into a stack
-/// overflow.
+/// How deep a nested array/object may go before [`parse`] gives up — the limit
+/// exists so a hostile payload cannot recurse the parser into a stack overflow.
 const MAX_DEPTH: usize = 32;
 
 /// One JSON value.
@@ -47,10 +32,9 @@ pub(super) enum Json {
     String(String),
     /// An array, in source order.
     Array(Vec<Json>),
-    /// An object, in source order. A `Vec` rather than a map: this schema has
-    /// ten known keys, insertion order is what makes an encoded record
-    /// diffable, and a duplicate key (legal JSON, and what a hand-edit
-    /// produces) resolves last-wins through [`Json::get`] either way.
+    /// An object, in source order. A `Vec` rather than a map: insertion order is
+    /// what makes an encoded record diffable, and a duplicate key resolves
+    /// last-wins through [`Json::get`] either way.
     Object(Vec<(String, Json)>),
 }
 
