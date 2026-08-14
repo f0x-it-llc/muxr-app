@@ -66,11 +66,12 @@
 //!
 //! # Colours
 //!
-//! Resolved from [`super::pieces`]' own `Palette` — the bar is part of the
-//! terminal card's chrome, so it inks from the same `GlyphInk` band tone and
-//! the same Glyph scheme roles the card and its sheet use. An **armed** latch
-//! cap takes the amber trio a selected pill takes; `Del` — the one destructive
-//! key — takes the scheme's `error` ink and a matching edge.
+//! Resolved from the app's shared [`Palette`] plus the terminal card's own
+//! [`CardInk`] — the bar is part of the terminal card's chrome, so it inks
+//! from the same `GlyphInk` band tone and the same Glyph scheme roles the card
+//! and its sheet use. An **armed** latch cap takes the amber trio a selected
+//! pill takes; `Del` — the one destructive key — takes the scheme's `error`
+//! ink and a matching edge.
 
 use std::rc::Rc;
 
@@ -86,9 +87,11 @@ use frust::{
     Padding, SizedBox, Theme, flexible, icon, inflexible, text,
 };
 
-use super::pieces::{Palette, active_theme, palette};
+use crate::ui::palette::{Palette, active_theme};
+
 use super::term::input::BarKey;
 use super::term::{InputSeam, ModifierLatch};
+use super::widgets::card::CardInk;
 
 // ---------------------------------------------------------------------------
 // Geometry (transcribed once; the bar has no mock of its own, so these are
@@ -146,7 +149,8 @@ const PRESS_SCALE: f64 = 0.92;
 /// test, a degenerate parent). Every real frame is width-bounded.
 const FALLBACK_CAP_WIDTH: f64 = 32.0;
 /// `Del`'s edge alpha over the scheme's `error` — the danger-tone counterpart
-/// of `pieces`' own `--amber-border` derivation, at the same strength.
+/// of the shared palette's own `--amber-border` derivation, at the same
+/// strength.
 const DANGER_BORDER_ALPHA: f32 = 0.35;
 
 /// The side length of the square design box the arrow marks are authored
@@ -228,7 +232,8 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
     }
 
     let theme = active_theme();
-    let colors = palette(&theme);
+    let colors = Palette::from_theme(&theme);
+    let ink = CardInk::from_theme(&theme);
     let danger = theme.scheme().error;
     let latch = seam.latch();
     // The keyboard's own inset: the bar docks directly on top of it. Absent in
@@ -257,8 +262,8 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
     // keyboard, so its fill must reach both screen edges (and the keyboard
     // inset below the caps must be filled too, not left as a gap).
     any(BarBackdropView {
-        fill: colors.head,
-        hairline: colors.card_border,
+        fill: ink.head,
+        hairline: ink.card_border,
         child: any(Padding(
             EdgeInsets {
                 left: BAR_PAD_X,

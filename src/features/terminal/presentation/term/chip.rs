@@ -52,8 +52,8 @@ use frust::authoring::{
 };
 use frust::{IconSource, icons};
 
-use super::super::pieces::{active_theme, palette};
 use super::SelectionSeam;
+use crate::ui::palette::{Palette, active_theme};
 use crate::ui::toasts::app_toasts;
 
 // ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ pub struct CopyChipView {
 /// releases.
 pub fn copy_chip(seam: SelectionSeam) -> CopyChipView {
     let theme = active_theme();
-    let colors = palette(&theme);
+    let colors = Palette::from_theme(&theme);
     let mut label = theme.type_scale.label_medium.clone();
     label.size = LABEL_SIZE;
     label.color = colors.fg;
