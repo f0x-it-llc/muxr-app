@@ -1,32 +1,16 @@
 //! `sessions` domain repository contract — the seam this feature's use cases
-//! depend on and `data` implements (framework-free, per
-//! `crate::features::sessions::domain`'s module doc).
+//! depend on and `data` implements.
 //!
 //! [`SessionsRepository`] is the whole contract: list, create, rename, kill —
-//! exactly the four operations `docs/redesign.html`'s sessions block affords,
-//! and nothing speculative.
-//!
-//! # Why it is async
-//!
-//! `data::GrpcSessionsRepository`, the production implementation, genuinely
-//! awaits a `muxrd` gRPC round trip; `data::MockSessionsRepository`, the
-//! in-memory sibling headless suites opt onto, needs no `await` at all but
-//! implements the identical `async` contract, so the controller, its use
-//! cases and the screen drive every call through `ControllerCore::run`'s
-//! async path either way — no code above this trait branches on which
-//! implementation is behind it. The dual `cfg_attr` is the same pair every
-//! async trait in this codebase and `examples/huddle` uses (`wasm32`'s
-//! single-threaded event loop can't require `Send` futures).
-//!
-//! Consumed as `Arc<dyn SessionsRepository + Send + Sync>` (huddle's DI
-//! convention), so neither the use cases nor the controller carry a repository
-//! type parameter.
-//!
-//! # Failure mapping
-//!
-//! Every method fails with the app-wide [`AppFailure`] vocabulary — the data
-//! layer owns the single mapping site into it, so nothing above ever sees a
-//! transport error type.
+//! exactly the four operations `docs/redesign.html`'s sessions block affords.
+//! Async because `data::GrpcSessionsRepository` genuinely awaits a `muxrd`
+//! gRPC round trip; `data::MockSessionsRepository` implements the identical
+//! `async` contract with no real await, so nothing above this trait branches
+//! on which implementation is behind it. Consumed as
+//! `Arc<dyn SessionsRepository + Send + Sync>` (huddle's DI convention), so
+//! neither the use cases nor the controller carry a repository type
+//! parameter. Every method fails with the app-wide [`AppFailure`]
+//! vocabulary — `data` owns the single mapping site into it.
 
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{RenameRequest, Session};

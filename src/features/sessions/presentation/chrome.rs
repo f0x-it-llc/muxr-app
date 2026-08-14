@@ -21,7 +21,7 @@
 //! this trigger: the second consumer).
 //!
 //! Like Connect's, every one of these takes already-resolved [`Color`]s:
-//! [`super::pieces`] resolves each from the active [`frust::Theme`] once per
+//! [`super::widgets`] resolves each from the active [`frust::Theme`] once per
 //! build, so these stay dumb about theming.
 //!
 //! # Frust gaps these work around

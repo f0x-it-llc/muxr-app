@@ -4,72 +4,49 @@
 //!
 //! # The harness, and why the screen is *beside* a navigator rather than in one
 //!
-//! In production `sessions_page` is a navigator page. Mounting it that way here
-//! would make every assertion geometric: `NavigatorWidget` contributes no
-//! `Widget::semantics` and forwards none of its pages' (the framework gap
-//! `tests/ui_substrate.rs` documents), so nothing inside a navigator appears in
-//! the accessibility tree at all.
+//! In production `sessions_page` is a navigator page, but `NavigatorWidget`
+//! contributes no `Widget::semantics` and forwards none of its pages' (the
+//! framework gap `tests/ui_substrate.rs` documents), so nothing inside one
+//! would reach the accessibility tree. [`Harness`] instead mounts the screen
+//! as the **bottom layer of a `Stack`**, with an otherwise-empty navigator —
+//! driven by the *same* `NavigatorController` the screen is handed — stacked
+//! over it: the screen's own chrome stays reachable by semantics label/text
+//! value, while its dialog/sheet/route pushes are still exercised **end to
+//! end** through a real navigator, located by painted geometry.
 //!
-//! So [`Harness`] mounts the screen as the **bottom layer of a `Stack`**, with
-//! an otherwise-empty navigator — driven by the *same* `NavigatorController`
-//! the screen is handed — stacked over it. The screen's own chrome therefore
-//! stays reachable by semantics label (badges, alerts) and by text value (every
-//! run), while the dialogs/sheet/route pushes the screen makes are still
-//! exercised **end to end** through a real navigator — located, like
-//! `ui_substrate.rs`'s, by painted geometry.
+//! **No top bar mounted**: the muxr bar is app shell chrome now (asserted in
+//! `tests/navigation_motion.rs` instead) — what this suite owes the bar is
+//! the *negative*, that the screen grew none of it back. The screen does
+//! reserve the band the bar covers (`ui::topbar::topbar_clearance`), so
+//! everything located geometrically here sits 46px lower than it did when
+//! the shell handed the page a shortened box; every probe is relative
+//! (widths, before/after diffs, tap points), so that shift stays invisible.
 //!
-//! The fixture deliberately mounts **no top bar**: the muxr bar is app shell
-//! chrome now (a fixed-index child of `muxr::shell::root_view`'s root `Stack`,
-//! floating over the navigator), so everything it carries — the host title, the
-//! brand, the `⚙` — is asserted in `tests/navigation_motion.rs` instead. What
-//! this suite still owes the bar is the *negative*: that the screen grew none
-//! of it back.
+//! The navigator's base page is a full-bleed, childless `SizedBox` — paints
+//! and handles nothing, so every tap falls through to the screen, and stays
+//! inside `Stack`'s hit test even empty, which is what lets a pop's
+//! `on_result` flush at all. Locating an overlay's chrome diffs the frame
+//! *before* opening it against the one after ([`support::added`]) and
+//! addresses only what the overlay itself added.
 //!
-//! The screen does, however, reserve the band that bar covers
-//! (`ui::topbar::topbar_clearance`, which every bar-bearing page wraps its body
-//! in now that the bar floats rather than displacing it), so **everything this
-//! suite locates geometrically sits 46px lower than it did when the shell
-//! handed the page a shortened box**. Every probe here is relative — widths,
-//! before/after diffs, semantics-derived tap points — so the shift is invisible
-//! to them; the resting seam itself is asserted in `navigation_motion.rs`,
-//! which mounts the real shell and can see the bar it must line up with.
+//! [`Harness::mount`] also installs the real app router
+//! (`muxr::routes::install_app_router`) over its navigator, so a push carries
+//! the real route table and session guard with it (exercised by
+//! [`a_card_tap_pushes_the_terminal_route_and_the_guard_still_applies`]).
 //!
-//! The navigator's base page is a **full-bleed, childless** `SizedBox`, which
-//! matters twice: it paints nothing and handles nothing, so every tap falls
-//! through the navigator to the screen below (`Stack` routes top-down and only
-//! stops at a child that reports `Handled`) — *and* the navigator stays inside
-//! `Stack`'s hit test even with an empty stack, which is what lets a pop's
-//! `on_result` flush at all (`NavigatorWidget::event` is where pending results
-//! are delivered, so an event that never reaches the navigator never delivers
-//! them).
-//!
-//! Locating an overlay's chrome uses one extra trick over `ui_substrate.rs`'s:
-//! the screen underneath paints plenty of its own rects, so each test diffs the
-//! frame *before* opening an overlay against the one after
-//! (`support::added`) and addresses only what the overlay itself added.
-//!
-//! Because the fixture drives its own navigator, [`Harness::mount`] also calls
-//! [`muxr::routes::install_app_router`] over that controller — the app's one
-//! path-pushing handle, which the screen resolves in its `Component::init`,
-//! then points at *this* navigator, carrying the real route table and the real
-//! session guard with it (that guard is what
-//! [`a_card_tap_pushes_the_terminal_route_and_the_guard_still_applies`]
-//! exercises).
-//!
-//! # The redesigned screen's interaction model, and how it is driven here
+//! # Interaction model
 //!
 //! The cards carry no buttons: **a tap attaches, a long-press opens the
-//! management sheet**. A tap is [`support::tap`] on the card's own name run; a
-//! long-press is [`support::long_press`], which spans the two paints the
-//! framework's paint-clock hold timer needs (see that helper's docs). The
-//! sheet's rows are located geometrically, like every other pushed page.
+//! management sheet**. A tap is [`support::tap`] on the card's own name run;
+//! a long-press is [`support::long_press`], spanning the two paints the
+//! framework's paint-clock hold timer needs.
 //!
 //! # Async
 //!
-//! Every repository call is real async work spawned onto the UI-thread queue
-//! (see `data`'s mock latency), so a mutation is only visible after pumping —
-//! [`Harness::pump_until_values`] is the deadline-bounded wait every test uses
-//! instead of a fixed frame count.
+//! Every repository call is real async work spawned onto the UI-thread queue,
+//! so a mutation is only visible after pumping —
+//! [`Harness::pump_until_values`] is the deadline-bounded wait every test
+//! uses instead of a fixed frame count.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -127,8 +104,8 @@ const ACCENT_WIDTH: f64 = 2.0;
 /// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 /// The scrolling list column's max width past
-/// `crate::responsive::WIDE_BREAKPOINT_PX` (FINDINGS #21's width-clamp pass),
-/// transcribed (the constant itself is private to `presentation::pages`).
+/// `crate::responsive::WIDE_BREAKPOINT_PX` — the responsive width-clamp pass
+/// — transcribed (the constant itself is private to `presentation::pages`).
 const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The seeded session names `data`'s mock repository ships — the redesign's
@@ -163,7 +140,7 @@ fn metrics_at(size: Size) -> WindowMetrics {
 
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
-/// responsive width-clamp pass (FINDINGS #21). `None` leaves context unset,
+/// responsive width-clamp pass. `None` leaves context unset,
 /// exactly the state every other test in this suite mounts under (no shell
 /// has published yet), so this helper is purely additive.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
@@ -801,15 +778,15 @@ fn the_sheets_rename_row_round_trips() {
 
 #[test]
 fn the_rename_row_leaves_the_sheet_mounted_until_its_exit_completes_before_the_dialog_lands() {
-    // The chain pin (G53's own follow-on): `sheet_action`'s Rename/Kill rows
-    // close through `SheetHandle::close_then` precisely because an unchained
-    // close-then-push would land the dialog *before* the sheet's own staged
-    // exit completes — racing its pop. One frame after the tap is where that
-    // race would show up: an unchained push lands synchronously (before any
-    // frame at all), so depth would already read the sheet-plus-dialog's `3`
-    // here; chained, the sheet is still mid-exit and the dialog has not
-    // landed yet, so depth is still the sheet's own `2`. Fail-then-pass
-    // verified by reasoning: reverting `sheet_action`'s Rename arm to a bare
+    // The chain pin: `sheet_action`'s Rename/Kill rows close through
+    // `SheetHandle::close_then` precisely because an unchained close-then-push
+    // would land the dialog *before* the sheet's own staged exit completes —
+    // racing its pop. One frame after the tap is where that race would show
+    // up: an unchained push lands synchronously (before any frame at all), so
+    // depth would already read the sheet-plus-dialog's `3` here; chained, the
+    // sheet is still mid-exit and the dialog has not landed yet, so depth is
+    // still the sheet's own `2`. Fail-then-pass verified by reasoning:
+    // reverting `sheet_action`'s Rename arm to a bare
     // `sheet.close(); actions.open_rename_dialog(&id);` would push the dialog
     // in the same rebuild the tap fires in, failing the assertion below.
     let _g = serial();
@@ -915,9 +892,9 @@ fn the_dashed_row_creates_a_session() {
     );
 }
 
-/// `ui::dialogs::name_input_dialog`'s field now composes through
-/// `glyph_dialog`'s `.content()` slot (gate-r8 task 35), so it gets the
-/// framework's dead-space blur: a `Down` on the dialog's own dead panel space
+/// `ui::dialogs::name_input_dialog`'s field composes through `glyph_dialog`'s
+/// `.content()` slot, so it gets the framework's dead-space blur: a `Down`
+/// on the dialog's own dead panel space
 /// ends the field's IME session without dismissing the dialog, and a second
 /// tap on the field re-engages it. The same pin as `tests/settings.rs`'s own
 /// (New Token dialog), driven against the create-session dialog here since
@@ -1088,7 +1065,7 @@ fn this_screen_never_touches_the_pending_offer() {
 }
 
 // ---------------------------------------------------------------------------
-// 8 — responsive width-clamp pass (FINDINGS #21)
+// 8 — responsive width-clamp pass
 // ---------------------------------------------------------------------------
 
 /// [`card_backs`]'s clamp-aware sibling: a card's surface fill, generalized
@@ -1131,8 +1108,9 @@ fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
     // `SESSIONS_CLAMP_WIDTH`'s doc in `presentation::pages`). The strip's
     // panel itself paints no fill (`Color::TRANSPARENT`, so nothing lands in
     // `scene.rounded` for it directly), but its leading success dot
-    // (`pieces::DOT`-sized, the one 7×7 rounded fill in this frame) is
-    // painted at the strip's own `STRIP_PAD_X` — unaffected by any centering
+    // (`widgets::server_strip::DOT`-sized, the one 7×7 rounded fill in this
+    // frame) is painted at the strip's own `STRIP_PAD_X` — unaffected by any
+    // centering
     // margin — which is exactly the full-bleed proof. The dot sits centered
     // in the heartbeat's own ring slot rather than flush against that
     // padding, so the slot's half-inset comes into it; all three numbers are

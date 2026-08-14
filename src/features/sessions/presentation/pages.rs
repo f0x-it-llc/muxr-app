@@ -1,113 +1,22 @@
-//! The `/sessions` route's page: muxr's session list.
+//! The `/sessions` route: muxr's session list, plus every action a card or
+//! its management sheet can take.
 //!
-//! [`sessions_page`] is what `crate::routes` mounts; everything below it is
-//! the canonical screen shape `docs/ARCHITECTURE.md`'s **Building a Screen**
-//! section mandates — a per-screen [`Component`] ([`SessionsScreen`]) whose
-//! `init` hosts a [`SessionsController`] through
-//! [`use_controller`](clean_signals_frust::use_controller), so the controller
-//! is created on route mount and disposed on unmount (`initState`/`dispose`
-//! parity), and whose `build` is pure arrangement over
-//! [`super::pieces`]' elements.
+//! [`sessions_page`] is what `crate::routes` mounts; [`SessionsScreen`]
+//! follows the canonical screen shape `docs/ARCHITECTURE.md`'s "Building a
+//! Screen" section. Observed state (the session list) lives in the hosted
+//! [`SessionsController`]; app-scoped state (the connection, its read-only
+//! posture) is read from [`crate::connection`]. Every push this screen makes
+//! goes through [`Actions`], which pauses the controller's mock poll first.
 //!
-//! # The screen's two bands (the third is the shell's)
-//!
-//! ```text
-//! ┌─────────────────────────────┐
-//! │ ▪▪ muxr   100.71.31.57   ⚙  │  crate::shell's persistent bar — NOT this
-//! ├─────────────────────────────┤  screen's; it floats over this page
-//! │ ● 100.71.31.57:50051  …     │  .conn-row — FIXED, outside the scroll
-//! ├─────────────────────────────┤
-//! │ ┃ D  dev      running zellij│  the scrolling list: the cards and the
-//! │ ┃ ▣ 9 panes ◧ 4 tabs ◎ 0 …  │  dashed new-session row
-//! │ + new session (dashed)      │
-//! └─────────────────────────────┘
-//! ```
-//!
-//! The bar above the strip belongs to [`crate::shell`], not here: it is
-//! persistent chrome whose title crossfades across route changes, so mounting a
-//! second copy per screen would fight it. It *floats* over this page rather
-//! than displacing it (`crate::shell::root_view`'s reflow note), so the page
-//! runs the full surface and reserves the band the bar covers with
-//! [`topbar_clearance`] — under which the strip sits, exactly where it did when
-//! the shell still handed the page a shortened box. The body keeps
-//! `safe_area(..).top(false)` because that clearance already contributes the
-//! status-bar inset the bar consumes (`crate::ui::topbar`'s own module docs).
-//! The `⚙` that reaches `/settings` moved with the bar — it is `/sessions`'
-//! route metadata now (`crate::routes::BarAction`).
-//!
-//! The strip is deliberately **not** a list item: it describes the connection
-//! the list belongs to, so scrolling the list must not scroll it away
-//! (`docs/redesign.html` puts it outside `.scroll` for the same reason). The
-//! page tone behind both is `--bg-base`, painted by the screen: the shell
-//! clears to `--bg-surface`, which is the *card* tone, so a screen that painted
-//! no background would render cards with no visible edge at all.
-//!
-//! # Interaction model
-//!
-//! There are no per-card buttons. **Tap a card to attach** (`/terminal`);
-//! **long-press it for the management sheet** (Attach / Rename… / Kill…), which
-//! is where the two dialogs are reached from. Create has exactly two entry
-//! points — the dashed row at the end of the list, and the empty state — since
-//! the stock app bar (and the `+` and `Switch` actions it carried) is gone.
-//!
-//! # What lives where
-//!
-//! - **Observed state** (the session list, its loaded flag) is the hosted
-//!   controller's signals; **app-scoped** state (the connection's server info,
-//!   its read-only posture) is [`crate::connection`]'s controller, resolved
-//!   from context. [`SessionsState`] itself holds neither — only [`Actions`]'
-//!   four handles plus the connection. The credential offer that same
-//!   controller carries is **not** read here: it is answered on Connect, before
-//!   the redirect that lands on this screen (see [`crate::connection`]'s
-//!   "Credential offer placement").
-//! - **Every push this screen makes** — the terminal route, the two dialogs,
-//!   the management sheet — goes through [`Actions`], and pauses the
-//!   controller's mock poll first (see [`SessionsController`]'s module docs
-//!   for why that pause has to be explicit).
-//!
-//! # The component state boundary, and what it means for callbacks
-//!
-//! A `Component`'s subtree is bound to its own `State`, so this screen's own
-//! gestures take `&mut SessionsState`. The **overlays** it pushes are a
-//! different story: a dialog/sheet is a page on the *app's* root overlay host
-//! (`crate::AppState::overlays`, above every piece of chrome), so its
-//! callbacks receive `&mut AppState` and can't see [`SessionsState`] at all.
-//! That is exactly why every action lives on [`Actions`] — a small clonable
-//! bundle of handles that a sheet row can capture and act through, with the
-//! same method body serving both sides of the boundary.
-//!
-//! # The Android back press asks before it disconnects
-//!
-//! A back press on this route would pop straight to Connect and abandon the
-//! live connection silently, so `/sessions` is the one route pushed with
-//! `BackPolicy::DismissAnimated` (`crate::routes::Nav::push`): the navigator
-//! **bumps a shared generation cell** instead of popping, and this screen owns
-//! what that means. [`BackConfirm`] is the observer — the cell resolved in
-//! `init` (`crate::routes::sessions_back_signal`), the generation already
-//! answered, and the depth mark that says the confirmation it raised is still
-//! up — and `Component::build` is where it is read, beside the poll's own
-//! depth observation and under the same rule: plain state, never a tracked
-//! write from `build`. Answering opens [`Actions::open_disconnect_confirm`] as
-//! an ordinary queued push on the overlay host, exactly like every other
-//! overlay this screen raises.
-//!
-//! Two properties fall out of the arrangement rather than out of code here: a
-//! second back press while the confirmation is up is claimed by the overlay
-//! host (**R44-back**), so it dismisses the dialog — a cancel — instead of
-//! reaching this navigator at all; and a dismissal of any kind resumes the
-//! polls through the existing `observe_depth` machinery, since the mark this
-//! screen took when it opened the dialog is the one it resumes at.
-//!
-//! # Navigating to `/terminal`
-//!
-//! A `NavigatorController` pushes page *builders*; only a `Router` resolves
-//! *paths* (and runs the guard attached to it), and the app's one `Router`
-//! lives in `AppState` — on the far side of the component boundary above. So
-//! the composition root publishes it as [`crate::routes::Nav`], which this
-//! screen resolves once in [`Component::init`] and keeps in [`Actions`];
-//! [`push_terminal`] is the one place that spells the location. Every push
-//! therefore runs the app's real table and its real (capture-based, owner-free)
-//! session guard.
+//! - **Back press**: `/sessions` is pushed with `BackPolicy::DismissAnimated`,
+//!   so a back press bumps a generation cell instead of popping;
+//!   [`BackConfirm`] answers it at most once per bump and raises the
+//!   disconnect confirmation.
+//! - **Poll cadence**: both cadence loops below re-resolve `settings`' live
+//!   `layout_refresh_secs` pref before every sleep (see
+//!   [`resolve_poll_interval`]) rather than snapshotting it once at mount.
+//! - **Read-only gating**: a read-only credential disables create/Rename/Kill
+//!   — never Attach (see [`Actions::open_manage_sheet`]).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -130,19 +39,20 @@ use crate::features::settings::di::{SharedPreferencesRepository, expect_preferen
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav, sessions_back_signal};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
-use crate::ui::sheet::{SheetHandle, show_sheet};
+use crate::ui::palette::Palette;
+use crate::ui::sheet::show_sheet;
+use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::topbar_clearance;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
 use super::heartbeat::{self, HeartbeatState};
-use super::pieces;
+use super::widgets;
 
-/// The route this screen attaches into. The session id rides as a query param
-/// (`Location::parse` splits it off before matching, so the flat `/terminal`
-/// route and `crate::routes`' own session-guard `loc.path` check are both
-/// unaffected) — the terminal screen ignores it today and will read it from
-/// `RouteParams` when it has a session to attach to.
+/// The route this screen attaches into. The session id rides as a query
+/// param (`Location::parse` splits it off before matching, so the flat
+/// `/terminal` route and `crate::routes`' own session-guard `loc.path` check
+/// are both unaffected).
 const TERMINAL_ROUTE: &str = "/terminal";
 /// The query key [`TERMINAL_ROUTE`] carries the session id under.
 const SESSION_QUERY_KEY: &str = "session";
@@ -152,31 +62,25 @@ const DISCONNECT_TITLE: &str = "Disconnect from server?";
 /// …its destructive action…
 const DISCONNECT_CONFIRM_LABEL: &str = "Disconnect";
 /// …and what its body names when the connection has published no endpoint to
-/// name (unreachable behind the session guard, but the sentence still needs a
-/// subject).
+/// name (unreachable behind the session guard, but the sentence still needs
+/// a subject).
 const DISCONNECT_UNKNOWN_HOST: &str = "this server";
 
 /// `.sessions-list{padding:14px 16px}`.
-const LIST_PAD_X: f64 = 16.0;
-const LIST_PAD_Y: f64 = 14.0;
+const LIST_PAD_X: f64 = spacing::XL;
+const LIST_PAD_Y: f64 = spacing::LG;
 /// `.sessions-list{gap:12px}` — between consecutive list children.
-const LIST_GAP: f64 = 12.0;
-/// The gap between the management sheet's heading and its rows, and between
-/// the rows themselves.
-const SHEET_GAP: f64 = 14.0;
-const SHEET_ROW_GAP: f64 = 4.0;
+const LIST_GAP: f64 = spacing::BASE;
 
-/// The scrolling list column's max width past [`WIDE_BREAKPOINT_PX`]
-/// (FINDINGS #21's conservative width-clamp pass) — a tablet/landscape/desktop
-/// window centers the card list rather than stretching it edge to edge.
+/// The scrolling list column's max width past [`WIDE_BREAKPOINT_PX`] — a
+/// tablet/landscape/desktop window centers the card list rather than
+/// stretching it edge to edge.
 ///
-/// **The conn-row strip (`server_strip`) stays full-bleed on purpose.** It is
-/// the screen's own persistent chrome, not a list item (see the module docs'
-/// "two bands" note) — the strip describing the connection reads more like a
-/// header bar than a content card, so it is left spanning the whole window
-/// while only the scrolling list clamps and centers under it. No design mock
-/// exists for a structural two-pane Sessions, so this is a plain clamp on the
-/// scroller alone, not a layout switch.
+/// **The conn-row strip (`server_strip`) stays full-bleed on purpose**: it
+/// is the screen's own persistent chrome, not a list item, so it reads more
+/// like a header bar than a content card. No design mock exists for a
+/// structural two-pane Sessions, so this is a plain clamp on the scroller
+/// alone, not a layout switch.
 const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The Sessions screen's route entry point: a `Component` under the outer
@@ -210,16 +114,15 @@ pub struct SessionsState {
     /// see [`Actions`].
     pub actions: Actions,
     /// The app-scoped connection handle, for the strip, the top bar's title
-    /// and the read-only posture that gates this screen's mutations (see
-    /// [`crate::connection`]).
+    /// and the read-only posture that gates this screen's mutations.
     pub connection: Arc<ConnectionController>,
     /// The `.conn-row` strip's heartbeat clocks — written by the ping
     /// interval `init` starts, read by every rebuild that renders the strip
     /// (see [`super::heartbeat`]). Screen-internal, unlike the two handles
-    /// above: nothing outside this feature's presentation layer drives it.
+    /// above.
     pub(super) heartbeat: HeartbeatState,
-    /// The Android back press's observer — see [`BackConfirm`] and the module
-    /// docs' back section. Screen-internal like the heartbeat.
+    /// The Android back press's observer — see [`BackConfirm`].
+    /// Screen-internal like the heartbeat.
     pub(super) back: BackConfirm,
 }
 
@@ -227,30 +130,25 @@ pub struct SessionsState {
 /// dismiss-signal cell, the generation already answered, and the depth mark
 /// that says the confirmation it raised is still up.
 ///
-/// **Plain state, not signals**, for exactly the reason
-/// [`SessionsController`]'s poll gate is (see that module's docs): it is read
-/// *and written* from `Component::build`, where a tracked write would re-dirty
-/// the very frame that made it.
+/// **Plain state, not signals**: read *and written* from `Component::build`,
+/// where a tracked write would re-dirty the very frame that made it (the
+/// same reason [`SessionsController`]'s poll gate is).
 pub(super) struct BackConfirm {
     /// The generation counter the navigator bumps in place of popping this
-    /// page — resolved once, in `init`, like every other app-scoped handle
-    /// (`crate::routes::sessions_back_signal`).
+    /// page — resolved once, in `init` (`crate::routes::sessions_back_signal`).
     signal: Rc<Cell<u64>>,
     /// The generation this screen has already answered. Seeded from the cell
-    /// rather than from zero, so a screen that somehow resolved a used cell
+    /// rather than zero, so a screen that resolved an already-used cell
     /// answers only what happens from its own mount onwards.
     answered: u64,
     /// The stack depth this screen's confirmation was raised at, or `None`
     /// while none is up — the same mark-and-resume arithmetic
-    /// [`Actions::pause_for_push`] uses for the polls, against the same
-    /// two-navigator depth.
+    /// [`Actions::pause_for_push`] uses for the polls.
     confirming_at: Option<usize>,
 }
 
 impl BackConfirm {
-    /// Resolve this mount's dismiss cell. Called from `Component::init`, where
-    /// the published cell is exactly the one the push that mounted this screen
-    /// carried (see `crate::routes::sessions_back_signal`'s contract).
+    /// Resolve this mount's dismiss cell.
     fn new() -> Self {
         let signal = sessions_back_signal();
         let answered = signal.get();
@@ -265,17 +163,16 @@ impl BackConfirm {
     /// `depth` — asked once per `build`, and the only reader of the cell.
     ///
     /// Answers `true` **at most once per bump**, because `build` re-runs
-    /// several times per frame: `RenderRoot::rebuild` re-runs the whole app
+    /// several times per frame (`RenderRoot::rebuild` re-runs the whole app
     /// logic after each queued op it flushes, and the push this answer makes
-    /// is itself such an op. So the generation is banked *before* the answer,
-    /// and the pass that follows sees nothing owed.
+    /// is itself such an op) — so the generation is banked *before* the
+    /// answer, and the pass that follows sees nothing owed.
     ///
     /// A bump arriving while a confirmation is still up is banked and
-    /// swallowed rather than queueing a second dialog. That is belt to the
-    /// arrangement's braces: with an overlay open the root host claims the
-    /// back press ahead of the route navigator (**R44-back**), so a second
-    /// press dismisses the confirmation instead of reaching this screen at
-    /// all.
+    /// swallowed rather than queueing a second dialog: with an overlay open
+    /// the root host claims the back press ahead of the route navigator
+    /// (**R44-back**), so a second press dismisses the confirmation instead
+    /// of reaching this screen at all.
     fn take_request(&mut self, depth: usize) -> bool {
         if let Some(mark) = self.confirming_at
             && depth <= mark
@@ -300,9 +197,10 @@ impl BackConfirm {
 /// Every navigation this screen performs, plus the three handles they need.
 ///
 /// Cloneable on purpose: a card's gesture reaches these through
-/// `&mut SessionsState`, while a *sheet row* — a page on the app's navigator,
-/// which only ever sees `&mut AppState` — captures a clone and calls the very
-/// same method. One body, both sides of the component boundary.
+/// `&mut SessionsState`, while a *sheet row* — a page on the app's
+/// navigator, which only ever sees `&mut AppState` — captures a clone and
+/// calls the very same method. One body, both sides of the component
+/// boundary.
 #[derive(Clone)]
 pub struct Actions {
     /// The app's **route** navigator. Nothing is pushed through it — a route
@@ -311,11 +209,10 @@ pub struct Actions {
     pub nav: NavigatorController<AppState>,
     /// The root overlay host's navigator — every page *builder* this screen
     /// pushes (the two dialogs, the management sheet) goes through it, so each
-    /// lands **above** the shell's floating bar rather than under it
-    /// (`crate::AppState::overlays`; FINDINGS #44).
+    /// lands **above** the shell's floating bar rather than under it.
     pub overlays: NavigatorController<AppState>,
-    /// The app's one path-pushing handle — how this screen reaches `/terminal`
-    /// and `/settings` (see the module docs' navigation note).
+    /// The app's one path-pushing handle — how this screen reaches
+    /// `/terminal` and `/settings` (see [`push_terminal`]).
     pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SessionsController>,
@@ -328,17 +225,11 @@ pub struct Actions {
 /// Resolve the live session-poll cadence — `settings`' own stored
 /// `layout_refresh_secs` preference — as a [`Duration`], reading through
 /// `preferences` (the one handle [`Component::init`](SessionsScreen::init)
-/// resolves; never a fresh `settings::di::expect_preferences_repository()`
-/// call). Falls back to [`POLL_PERIOD_SECS`] on a read failure, which never
-/// actually happens in practice (both the mock and the real preferences
-/// repository resolve every field to a default rather than erroring) — a
-/// storage hiccup slows or speeds *one* tick, never kills the loop that
-/// scheduled it.
-///
-/// The **one** seam both [`spawn_cadence_loop`] instances this screen starts
-/// — the session-list poll and the ping heartbeat alike — call before every
-/// sleep, and the same seam `tests/sessions.rs` drives directly (no widget
-/// tree needed) to pin the live-re-read contract.
+/// resolves; never a fresh repository call). Falls back to
+/// [`POLL_PERIOD_SECS`] on a read failure, which never actually happens in
+/// practice. The **one** seam both [`spawn_cadence_loop`] instances this
+/// screen starts call before every sleep, and the same seam
+/// `tests/sessions.rs` drives directly to pin the live-re-read contract.
 pub async fn resolve_poll_interval(preferences: &SharedPreferencesRepository) -> Duration {
     let secs = preferences
         .load_preferences()
@@ -350,19 +241,13 @@ pub async fn resolve_poll_interval(preferences: &SharedPreferencesRepository) ->
 
 /// Start a self-rescheduling loop that runs `tick` forever, re-resolving
 /// [`resolve_poll_interval`] before every sleep rather than baking a period
-/// in at mount time — see [`SessionsController`]'s "Session poll cadence"
-/// module docs. Mirrors `clean_signals_frust::use_interval`'s
+/// in at mount time. Mirrors `clean_signals_frust::use_interval`'s
 /// spawn/sleep/alive-flag shape, but a fixed `Duration` argument won't do
 /// here: the whole point is reading the *live* pref on every iteration, so
 /// this hand-rolls the loop instead of wrapping that helper. Must run where
 /// a reactive `Owner` is ambient — i.e. from
-/// [`Component::init`](SessionsScreen::init), `use_interval`'s own
-/// contract — `on_cleanup` silently no-ops outside one, so a call from
-/// anywhere else never stops.
-///
-/// No per-tick signal write happens here or in `tick`'s scheduling: the
-/// resolved cadence only ever feeds `clean_signals::time::sleep`'s argument
-/// (the idle-heat discipline `docs/CODE_STANDARDS.md` describes).
+/// [`Component::init`](SessionsScreen::init) — `on_cleanup` silently no-ops
+/// outside one, so a call from anywhere else never stops.
 fn spawn_cadence_loop(
     preferences: SharedPreferencesRepository,
     tick: impl Fn() + Send + Sync + 'static,
@@ -393,32 +278,21 @@ impl Component for SessionsScreen {
             SessionsController::new(expect_sessions_repository())
         });
 
-        // Failure → toast, for this screen's lifetime. The handler runs on the
-        // UI thread (every controller call is `spawn_local`ed onto the
-        // UI-thread queue), which is what makes the thread-local `app_toasts`
-        // handle the right one — see `ui::toasts`' module docs.
+        // Failure → toast, for this screen's lifetime — the UI-thread
+        // `app_toasts` handle is the right one since every controller call
+        // is `spawn_local`ed onto the same queue.
         use_failure_listener(controller.core().failures(), |failure: AppFailure| {
             app_toasts().raise(&failure);
         });
 
-        // First load.
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
-        // `settings::di::expect_preferences_repository()` is resolved exactly
-        // once, right here — the same di.rs-is-composition-root-wiring
-        // widening `terminal`'s page already uses for this exact repository
-        // (`docs/ARCHITECTURE.md`'s Feature Slices section) — and resolved
-        // *synchronously, right here in `init`*, never inside a spawned
-        // future's body: `Component::init` runs under this component's real
-        // `Owner`, but the `frust::spawn_local` poller that later polls a
-        // loop's future installs no ambient owner, so a `use_context`-backed
-        // lookup taken from inside a future's first poll would panic on the
-        // first real `/sessions` mount (a headless suite masks this because
-        // its harness keeps an ambient owner live throughout). Only the
-        // resolved `Arc` — never a second `expect_preferences_repository()`
-        // call — crosses into either cadence loop below (see
-        // `SessionsController`'s "Session poll cadence" module docs).
+        // Resolved *synchronously, in `init`*, never inside a spawned
+        // future's body: the `frust::spawn_local` poller that later polls a
+        // loop's future installs no ambient owner, so a `use_context`
+        // lookup from inside a future's first poll would panic. Only the
+        // resolved `Arc` crosses into either cadence loop below.
         let preferences = expect_preferences_repository();
 
         // The session-list poll: `spawn_cadence_loop` re-resolves
@@ -432,18 +306,13 @@ impl Component for SessionsScreen {
             }
         });
 
-        // The app-scoped connection handle, resolved here with every other
-        // app-scoped dependency — never from a press handler, and never from
-        // inside a spawned body.
         let connection = expect_connection_controller();
 
         // The strip's connection heartbeat: one real timed `GetVersion`, on
-        // the **same** live-resolved cadence as the list poll above (see
-        // `SessionsController`'s "Session poll cadence" module docs) — the
-        // 300ms roll `heartbeat::HeartbeatState::settle` animates over is a
-        // separate, untouched display concern. `is_polling()` is the same
-        // covered-screen gate the list poll uses, so a dialog, the management
-        // sheet or the terminal route pauses both; nothing new to pause.
+        // the same live-resolved cadence as the list poll above (the 300ms
+        // roll `heartbeat::HeartbeatState::settle` animates over is a
+        // separate display concern). `is_polling()` is the same
+        // covered-screen gate the list poll uses.
         let heartbeat = HeartbeatState::new();
         let beating = Arc::clone(&controller);
         let pinged = Arc::clone(&connection);
@@ -451,10 +320,8 @@ impl Component for SessionsScreen {
             if !beating.is_polling() {
                 return;
             }
-            // The reading the roll will start from, taken before the round
-            // trip that replaces it — and, being `None` while nothing is
-            // connected, the gate on there being anything to time at all.
-            // Untracked: a callback is not a render.
+            // Untracked: a callback is not a render. `None` while nothing is
+            // connected gates there being anything to time at all.
             let Some(from) = pinged
                 .server_info
                 .get_untracked()
@@ -465,8 +332,8 @@ impl Component for SessionsScreen {
             heartbeat.start_ping();
             let connection = Arc::clone(&pinged);
             spawn_local(async move {
-                // A ping that measured nothing (disconnected, or refused)
-                // rolls nothing — the list poll owns failure surfacing.
+                // A ping that measured nothing rolls nothing — the list poll
+                // owns failure surfacing.
                 if let Some(measured) = connection.ping().await {
                     heartbeat.settle(from, measured);
                 }
@@ -477,32 +344,23 @@ impl Component for SessionsScreen {
             actions: Actions {
                 nav: self.nav.clone(),
                 overlays: self.overlays.clone(),
-                // Resolved here, with every other app-scoped dependency —
-                // never from inside a press handler.
                 app_nav: app_nav(),
                 controller,
             },
             connection,
             heartbeat,
-            // Resolved here, with every other app-scoped handle — and here
-            // *only*: the cell published now is this mount's own (see
-            // `crate::routes::sessions_back_signal`).
+            // The cell published now is this mount's own.
             back: BackConfirm::new(),
         }
     }
 
     fn build(&self, state: &mut SessionsState) -> AnyView<SessionsState> {
-        // Page-driven poll resume (see `SessionsController`'s module docs).
-        // A plain atomic, deliberately not a signal: a tracked write here
-        // would re-dirty the very frame that made it.
+        // Page-driven poll resume. A plain atomic, deliberately not a
+        // signal: a tracked write here would re-dirty the very frame that
+        // made it — same for the back-press answer just below.
         let depth = state.actions.stack_depth();
         state.actions.controller.observe_depth(depth);
 
-        // The Android back press, answered here rather than obeyed by the
-        // navigator (see the module docs' back section). Both halves of this
-        // are the same kind of write the line above makes — plain state and a
-        // queued navigator op, never a tracked signal — which is what makes
-        // `build` a sound place to observe from.
         if state.back.take_request(depth) {
             state.actions.open_disconnect_confirm(&state.connection);
         }
@@ -512,48 +370,44 @@ impl Component for SessionsScreen {
         let sessions = state.actions.controller.sessions.get();
         let loaded = state.actions.controller.loaded.get();
         let info = state.connection.server_info.get();
-        // Gates create/rename/kill (never attach) — see `pieces::new_session_row`'s
-        // doc for the disabled-state pattern this and `open_manage_sheet` share.
+        // Gates create/rename/kill (never attach) — see
+        // `widgets::new_session_row`'s doc for the disabled-state pattern.
         let read_only = state.connection.is_read_only.get();
 
-        let theme = pieces::active_theme();
-        let colors = pieces::palette(&theme);
+        let theme = widgets::active_theme();
+        let colors = Palette::from_theme(&theme);
 
-        // The heartbeat's pose for *this* frame. The interval writes only the
-        // two instants it clocks from; every frame in between is a wall-clock
-        // read taken here, kept coming by the ticker mounted below while
-        // there is still something to animate (see `super::heartbeat`).
+        // The heartbeat's pose for *this* frame — a wall-clock read kept
+        // coming by the ticker mounted below while there is still something
+        // to animate (see `super::heartbeat`).
         let beat = state.heartbeat.visual(
             info.as_ref().map_or(0, |info| info.latency_ms),
             theme.motion.reduce_motion,
         );
 
-        // Responsive width-clamp pass (FINDINGS #21): read metrics once,
-        // branch on one page constant, never touch layout again — the
-        // reference idiom `examples/glyph-catalog/src/pages/responsive.rs`
-        // documents. `None` (no shell has published yet, or a bare test
-        // harness) takes the same branch as a genuinely narrow window.
+        // Responsive width-clamp pass: read metrics once, branch on one page
+        // constant, never touch layout again (`examples/glyph-catalog/src/
+        // pages/responsive.rs`'s reference idiom). `None` takes the same
+        // branch as a genuinely narrow window.
         let metrics = use_context::<WindowMetrics>();
         let is_wide = metrics
             .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
             .unwrap_or(false);
 
-        // The scrolling half: either the empty state, or every card plus the
-        // dashed create row.
+        // Either the empty state, or every card plus the dashed create row.
         let mut list = Vec::new();
         if loaded && sessions.is_empty() {
-            list.push(pieces::empty_view(read_only));
+            list.push(widgets::empty_view(read_only));
         } else {
             list.extend(
                 sessions
                     .iter()
-                    .map(|session| pieces::session_card(session, &colors)),
+                    .map(|session| widgets::session_card(session, &colors)),
             );
-            list.push(pieces::new_session_row(&colors, read_only));
+            list.push(widgets::new_session_row(&colors, read_only));
         }
 
-        // The *shell's* bar consumes the top window inset on this screen's
-        // behalf (`crate::ui::topbar`'s own module docs), so the body's safe
+        // The shell's bar consumes the top window inset, so the body's safe
         // area disables its top edge to avoid double-padding it.
         let scroller = any(safe_area(scroll_view(Padding(
             EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
@@ -571,23 +425,18 @@ impl Component for SessionsScreen {
             scroller
         };
         let mut bands = vec![
-            inflexible(pieces::server_strip(info.as_ref(), beat, &colors)),
+            inflexible(widgets::server_strip(info.as_ref(), beat, &colors)),
             flexible(1, scroller),
         ];
-        // Per-frame rebuilds last exactly as long as the animation does: the
-        // ticker is mounted only while the ping ring or the latency roll still
-        // owes a frame, so a settled strip — and every reduced-motion one —
-        // asks for none. It rides at the end of the band list so the two real
-        // bands keep their positional identity as it comes and goes.
+        // Mounted only while the ping ring or latency roll still owes a
+        // frame, at the end of the list so the two real bands keep their
+        // positional identity as it comes and goes.
         if beat.animating() {
             bands.push(heartbeat::frame_ticker());
         }
-        // The page tone stays **outside** the clearance so it fills the whole
-        // surface, bar band included: the bar slides in over it (see
-        // `crate::shell::root_view`), and a page that stopped at the clearance
-        // would flash the shell's own clear colour through the gap for the
-        // length of that entrance.
-        any(pieces::page_tone(
+        // Outside the clearance so it fills the whole surface, bar band
+        // included — the bar slides in over it.
+        any(widgets::page_tone(
             topbar_clearance(
                 FlexView::new(Axis::Vertical, bands).cross_axis(CrossAxisAlignment::Stretch),
             ),
@@ -596,13 +445,10 @@ impl Component for SessionsScreen {
     }
 }
 
-/// The disconnect confirmation's body, naming the connected `host`.
-///
-/// A function rather than a fourth constant because the host is the whole
-/// point of the sentence: it is what tells the user *which* connection a back
-/// press is about to end. The second sentence is the reassurance that stops
-/// "Disconnect" reading like "Forget server" (which is Settings' own, and does
-/// delete things).
+/// The disconnect confirmation's body, naming the connected `host` — the
+/// whole point of the sentence is *which* connection a back press is about
+/// to end. The second sentence is the reassurance that stops "Disconnect"
+/// reading like Settings' own "Forget server" (which does delete things).
 fn disconnect_message(host: &str) -> String {
     format!(
         "You will be disconnected from {host}. Saved servers and credentials stay on this \
@@ -629,14 +475,10 @@ fn gapped(views: Vec<AnyView<SessionsState>>) -> Vec<FlexChild<SessionsState>> {
 impl Actions {
     /// How deep the app's page stack is, counting **both** navigators — the
     /// one number the mock poll's pause/resume pair is expressed against.
-    ///
-    /// It has to be the sum now that overlays are pages of the root host
-    /// rather than of the route navigator: the route depth alone no longer
-    /// moves when a dialog or the management sheet opens, so a pause marked
-    /// against it would resume on the very next `build`. Both terms are read
-    /// the same way at both ends ([`pause_for_push`](Self::pause_for_push) and
-    /// [`Component::build`]'s `observe_depth`), so the arithmetic is exactly
-    /// the one-navigator arithmetic it replaces, plus a constant.
+    /// It has to be the sum since overlays are pages of the root host rather
+    /// than of the route navigator: the route depth alone no longer moves
+    /// when a dialog or the management sheet opens, so a pause marked
+    /// against it would resume on the very next `build`.
     fn stack_depth(&self) -> usize {
         self.nav.depth() + self.overlays.depth()
     }
@@ -676,8 +518,9 @@ impl Actions {
     /// opened several frames ago can't seed a stale name.
     pub fn open_rename_dialog(&self, id: &str) {
         let Some(session) = self.controller.session(id) else {
-            // The card was built from a list that no longer holds this session
-            // (a poll landed between paint and tap). Nothing to rename.
+            // The card was built from a list that no longer holds this
+            // session (a poll landed between paint and tap). Nothing to
+            // rename.
             return;
         };
         self.pause_for_push();
@@ -714,27 +557,23 @@ impl Actions {
     }
 
     /// Open the back press's disconnect confirmation — the one action this
-    /// screen takes that no gesture on it can reach (see the module docs' back
-    /// section).
+    /// screen takes that no gesture on it can reach.
     ///
     /// Confirming does both halves the connection contract splits: the
-    /// controller closes the connection and clears its signals, and the caller
-    /// navigates — through [`Nav`], so the shell bar's mirror drops this
-    /// route's entry on the same frame rather than a reconcile later. Every
-    /// dismissal route does nothing at all: the polls come back through
-    /// [`Component::build`]'s own depth observation.
-    ///
-    /// `connection` is passed in rather than held on [`Actions`] because this
-    /// is the only action that needs it, and the screen already keeps the
-    /// app-scoped handle beside the bundle.
+    /// controller closes the connection and clears its signals, and the
+    /// caller navigates — through [`Nav`], so the shell bar's mirror drops
+    /// this route's entry on the same frame rather than a reconcile later.
+    /// Every dismissal route does nothing at all: the polls come back
+    /// through [`Component::build`]'s own depth observation.
     pub fn open_disconnect_confirm(&self, connection: &Arc<ConnectionController>) {
         self.pause_for_push();
-        // Untracked: a one-shot read for a sentence, at the moment the dialog
-        // opens — the same shape `open_rename_dialog` re-reads a name with.
+        // Untracked: a one-shot read for a sentence, at the moment the
+        // dialog opens — the same shape `open_rename_dialog` re-reads a name
+        // with.
         let host = connection
             .server_info
             .get_untracked()
-            .map(|info| pieces::host_of(&info.endpoint).to_string())
+            .map(|info| widgets::host_of(&info.endpoint).to_string())
             .unwrap_or_else(|| DISCONNECT_UNKNOWN_HOST.to_string());
         let connection = Arc::clone(connection);
         let app_nav = self.app_nav.clone();
@@ -750,22 +589,10 @@ impl Actions {
         );
     }
 
-    /// Open the per-session management sheet — what a **long-press** on a card
-    /// raises, and the only route to rename/kill now that the card carries no
-    /// buttons.
-    ///
-    /// Rename/Kill close the sheet through
-    /// [`SheetHandle::close_then`](crate::ui::sheet::SheetHandle::close_then),
-    /// so their dialog lands only once the sheet's own staged exit has popped
-    /// it — never in the same rebuild the close fires in, which would race the
-    /// pop (see [`sheet_action`]'s doc). Attach targets the route stack
-    /// instead of this sheet's own overlay host, so it has no such ordering
-    /// hazard and fires straight away. The poll stays paused throughout
-    /// either way, since the mark taken when the sheet opened is shallower
-    /// than either depth.
-    ///
-    /// `read_only` disables the Rename/Kill rows (never Attach) — see
-    /// `pieces::sheet_row`'s doc for the disabled-state pattern.
+    /// Open the per-session management sheet — what a **long-press** on a
+    /// card raises, and the only route to rename/kill now that the card
+    /// carries no buttons. `read_only` disables the Rename/Kill rows, never
+    /// Attach — see [`widgets::sheet_body`] for the sheet's own layout.
     pub fn open_manage_sheet(&self, id: &str, read_only: bool) {
         let Some(session) = self.controller.session(id) else {
             return;
@@ -775,107 +602,13 @@ impl Actions {
         let name = session.name;
         let id = id.to_string();
         show_sheet(&self.overlays, move |sheet| {
-            let heading = pieces::sheet_heading(name.clone());
-            let rows = [
-                sheet_action(&actions, sheet, &id, ManageAction::Attach, false),
-                sheet_action(&actions, sheet, &id, ManageAction::Rename, read_only),
-                sheet_action(&actions, sheet, &id, ManageAction::Kill, read_only),
-            ];
-            let mut children = vec![
-                inflexible(heading),
-                inflexible(SizedBox::<AppState>(None, Some(SHEET_GAP))),
-            ];
-            for (index, row) in rows.into_iter().enumerate() {
-                if index > 0 {
-                    children.push(inflexible(SizedBox::<AppState>(None, Some(SHEET_ROW_GAP))));
-                }
-                children.push(inflexible(row));
-            }
-            any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+            widgets::sheet_body(&actions, sheet, &id, name.clone(), read_only)
         });
     }
 }
 
-/// The three things the management sheet can do to a session.
-#[derive(Clone, Copy)]
-enum ManageAction {
-    Attach,
-    Rename,
-    Kill,
-}
-
-impl ManageAction {
-    /// The row's label. The two that push a dialog carry the platform ellipsis
-    /// convention ("more input needed"); Attach acts immediately.
-    fn label(self) -> &'static str {
-        match self {
-            ManageAction::Attach => "Attach",
-            ManageAction::Rename => "Rename\u{2026}",
-            ManageAction::Kill => "Kill\u{2026}",
-        }
-    }
-
-    /// Whether the row is the destructive one.
-    fn destructive(self) -> bool {
-        matches!(self, ManageAction::Kill)
-    }
-}
-
-/// One management-sheet row, wired to `action` for session `id`. `disabled`
-/// is always `false` for [`ManageAction::Attach`] — only
-/// create/rename/kill are read-only-gated (see [`Actions::open_manage_sheet`]).
-///
-/// Rename/Kill go through [`SheetHandle::close_then`] rather than a plain
-/// `close`: both push a dialog onto the sheet's own overlay host, and a bare
-/// `close` no longer pops immediately (`crate::ui::sheet`'s "`close` plays
-/// the same staged exit") — an unchained push here would land several frames
-/// *ahead* of the sheet's own pop, so the pop that eventually lands would
-/// take the dialog it opened, not the sheet. `close_then` chains the push to
-/// the exit's completion frame instead, strictly behind the pop.
-///
-/// Attach carries no such hazard — [`Actions::attach`] pushes the `/terminal`
-/// **route**, a different navigator than this sheet's overlay host, so
-/// there is nothing for its push to race — and stays on a plain `close`,
-/// same as before.
-fn sheet_action(
-    actions: &Actions,
-    sheet: &SheetHandle,
-    id: &str,
-    action: ManageAction,
-    disabled: bool,
-) -> AnyView<AppState> {
-    let actions = actions.clone();
-    let sheet = sheet.clone();
-    let id = id.to_string();
-    pieces::sheet_row(
-        action.label(),
-        action.destructive(),
-        disabled,
-        move |_app: &mut AppState| match action {
-            ManageAction::Attach => {
-                // Through the sheet's own handle rather than a bare `pop`, so
-                // a second row tap inside the one-rebuild window a queued pop
-                // leaves open cannot pop whatever is under it
-                // (`crate::ui::sheet`'s "One sheet, one dismissal").
-                sheet.close();
-                actions.attach(&id);
-            }
-            ManageAction::Rename => {
-                let actions = actions.clone();
-                let id = id.clone();
-                sheet.close_then(move || actions.open_rename_dialog(&id));
-            }
-            ManageAction::Kill => {
-                let actions = actions.clone();
-                let id = id.clone();
-                sheet.close_then(move || actions.open_kill_dialog(&id));
-            }
-        },
-    )
-}
-
 // ---------------------------------------------------------------------------
-// The screen-state shims the pieces' own callbacks call
+// The screen-state shims the widgets' own callbacks call
 // ---------------------------------------------------------------------------
 
 /// Attach to `id` — a card tap.
@@ -890,22 +623,18 @@ pub(super) fn open_create_dialog(state: &mut SessionsState) {
 
 /// Open the management sheet for `id` — a card long-press. Reads the
 /// connection's current read-only state (untracked: a one-shot decision at
-/// the moment the sheet opens, like `open_rename_dialog`'s own re-read of the
-/// current name).
+/// the moment the sheet opens, like `open_rename_dialog`'s own re-read of
+/// the current name).
 pub(super) fn open_manage_sheet(state: &mut SessionsState, id: &str) {
     let read_only = state.connection.is_read_only.get_untracked();
     state.actions.open_manage_sheet(id, read_only);
 }
 
 /// Push the `/terminal` route for session `id` onto the app's page stack,
-/// through the app's one guarded [`Nav`] handle.
-///
-/// The one place this location is spelled — both attach paths (a card tap and
-/// the management sheet's Attach row) come through here, so the format and the
-/// guarded route they resolve against cannot drift apart. The push runs the
-/// app's real route table with its real session guard applied, so an
-/// unauthenticated attach bounces to `/` exactly as a deep link to `/terminal`
-/// would.
+/// through the app's one guarded [`Nav`] handle. The one place this
+/// location is spelled — both attach paths (a card tap and the management
+/// sheet's Attach row) come through here — so the push runs the app's real
+/// route table with its real session guard applied, same as a deep link.
 fn push_terminal(nav: &Nav, id: &str) {
     nav.push(&format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}"));
 }
@@ -1017,21 +746,5 @@ mod tests {
             disconnect_message(DISCONNECT_UNKNOWN_HOST).contains(DISCONNECT_UNKNOWN_HOST),
             "…and still reads as a sentence with no endpoint published"
         );
-    }
-
-    #[test]
-    fn the_management_sheet_offers_exactly_three_rows_one_of_them_destructive() {
-        let labels: Vec<&str> = [
-            ManageAction::Attach,
-            ManageAction::Rename,
-            ManageAction::Kill,
-        ]
-        .into_iter()
-        .map(ManageAction::label)
-        .collect();
-        assert_eq!(labels, ["Attach", "Rename\u{2026}", "Kill\u{2026}"]);
-        assert!(!ManageAction::Attach.destructive());
-        assert!(!ManageAction::Rename.destructive());
-        assert!(ManageAction::Kill.destructive());
     }
 }

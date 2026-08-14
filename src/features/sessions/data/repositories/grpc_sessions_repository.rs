@@ -1,87 +1,71 @@
 //! [`GrpcSessionsRepository`] — the real, `muxrd`-backed [`SessionsRepository`],
-//! and `sessions::di::provide`'s production choice (see that module's own
-//! docs for the mock/real split and its headless-test seam).
+//! and `sessions::di::provide`'s production choice.
 //!
 //! # The live client
 //!
-//! Every call resolves [`ConnectionController::client`] fresh — the sanctioned
-//! path to the live [`MuxrClient`] `crate::connection`'s own module docs name
-//! — rather than dialing a channel of its own. `None` (disconnected) maps to
+//! Every call resolves [`ConnectionController::client`] fresh rather than
+//! dialing a channel of its own. `None` (disconnected) maps to
 //! [`AppFailure::Network`] rather than panicking: a repository call outliving
-//! its connection (a poll tick racing a teardown) is a reachable state, not a
-//! bug.
+//! its connection (a poll tick racing a teardown) is reachable, not a bug.
 //!
 //! # The one sanctioned reach into `crate::connection`
 //!
-//! `data` stays as framework-free as `domain` everywhere else in this feature
-//! (`data`'s own module doc) — this file's `Arc<ConnectionController>` field
-//! is the one exception, the same shape
-//! [`crate::features::settings::data::repositories::PrefsRepository`]
-//! documents for its own one sanctioned `frust::spawn_blocking` reach.
-//! [`ConnectionController`] is resolved exactly once, in `di::provide`
-//! (composition-root wiring, where a live reactive context is guaranteed),
-//! and held from then on as a plain handle — every call this file makes
-//! against it (`client()`, `on_session_expired()`) is a plain method call,
-//! never a fresh `use_context` lookup.
+//! `data` stays framework-free everywhere else in this feature — this
+//! file's `Arc<ConnectionController>` field is the one exception.
+//! [`ConnectionController`] is resolved exactly once, in `di::provide`, and
+//! held from then on as a plain handle — every call against it (`client()`,
+//! `on_session_expired()`) is a plain method call, never a fresh
+//! `use_context` lookup.
 //!
 //! # Id-routed mutations
 //!
 //! Every mutation addresses a session by [`Session::id`] — the opaque
 //! backend-qualified routing key the wire calls `SessionInfo.id`
 //! (`"zellij:dev"`) — never by display name. `RenameSessionReq`/`SessionRef`'s
-//! own `session` field takes that key despite its name: the field predates
-//! `SessionInfo.id`, but `id` is what every caller here sends.
+//! own `session` field takes that key despite its name.
 //!
 //! # Optimistic create/rename, no follow-up round trip
 //!
 //! `CreateSession`/`RenameSession` answer with a plain `ActionAck` — no
-//! session snapshot — and `SessionsController::create`/`SessionsController::rename`
-//! already discard the [`Session`] these two methods hand back and re-list
-//! immediately after (`SessionsController`'s own "refresh-after-mutation
-//! round trip"), so nothing production-facing ever renders their return
-//! value. Rather than pay a second `ListSessions` round trip just to
-//! populate one, both construct their [`Session`] optimistically from what
-//! the request already establishes: a created session is created zellij
-//! (mirroring [`MockSessionsRepository`](super::MockSessionsRepository)'s
-//! own `new_session` — this app offers no backend picker yet), and a
-//! renamed session's id is *reconciled* — the `<backend>:<name>` convention
-//! [`SessionInfo`] documents lets this file recompute the id from the old
-//! id's own backend prefix plus the new name, with no round trip needed to
-//! learn it. Every other field on the optimistic [`Session`] is a
+//! session snapshot — and the controller already discards the [`Session`]
+//! these two hand back and re-lists immediately after, so nothing
+//! production-facing ever renders their return value. Rather than pay a
+//! second `ListSessions` round trip just to populate one, both construct
+//! their [`Session`] optimistically from what the request already
+//! establishes: a created session is created zellij (mirroring
+//! [`MockSessionsRepository`](super::MockSessionsRepository)'s own
+//! `new_session` — no backend picker yet), and a renamed session's id is
+//! *reconciled* — the `<backend>:<name>` convention lets this file recompute
+//! the id from the old id's own backend prefix plus the new name, no round
+//! trip needed. Every other field on the optimistic [`Session`] is a
 //! placeholder the following refresh overwrites within one rebuild.
 //!
-//! # Pane preview: one `GetLayout` per session, now doing double duty
+//! # Pane preview: one `GetLayout` per session, doing double duty
 //!
-//! `ListSessions` deliberately ships `tab_count`/`pane_count` at their zero
-//! defaults for a *running* session — filling them in there would need a
-//! per-session layout query of its own, whose transient attach can briefly
-//! resize the live session; the contract is that a client wanting real
-//! numbers falls back to `GetLayout`. [`list_sessions`](SessionsRepository::list_sessions)
-//! already dials that per-session `GetLayout`, one per *running* session, to
-//! get pane titles for [`LayoutSummary::preview`] — mirroring what
-//! [`MockSessionsRepository`](super::MockSessionsRepository)'s seed
-//! hand-encodes — so this file derives the counts from that same response
-//! rather than discarding it: [`layout_derived_from`] turns one `Layout`
-//! into a tab count, a summed pane count, and the first tab's first two pane
-//! titles, filtering out empty/whitespace-only titles first (a blank pill is
-//! worse than no pill row). [`map_session`] prefers these layout-derived
-//! counts whenever the call succeeded and the layout has at least one tab,
-//! and otherwise falls back to `SessionInfo`'s own wire counts — the
-//! server's own numbers, and the fallback of record — for a failed
-//! `GetLayout` or a live session whose layout reports zero tabs. A
-//! resurrectible session skips the call entirely (nothing live to query);
-//! its wire counts are its saved counts and pass straight through
+//! `ListSessions` ships `tab_count`/`pane_count` at zero for a *running*
+//! session (a per-session layout query of its own could briefly resize the
+//! live session), so a client wanting real numbers falls back to
+//! `GetLayout`. [`list_sessions`](SessionsRepository::list_sessions) already
+//! dials that per-session `GetLayout` to get pane titles for
+//! [`LayoutSummary::preview`], so this file derives the counts from that
+//! same response rather than discarding it: [`layout_derived_from`] turns
+//! one `Layout` into a tab count, a summed pane count, and the first tab's
+//! first two pane titles, filtering empty/whitespace-only titles first (a
+//! blank pill is worse than no pill row). [`map_session`] prefers these
+//! layout-derived counts whenever the call succeeded and the layout has at
+//! least one tab, and otherwise falls back to `SessionInfo`'s own wire
+//! counts — for a failed `GetLayout` or a zero-tab layout. A resurrectible
+//! session skips the call entirely and passes its saved wire counts through
 //! unmodified.
 //!
 //! # Failure mapping
 //!
 //! Every RPC failure funnels through [`crate::net::error::from_status`]; an
 //! `UNAUTHENTICATED` additionally invokes
-//! [`ConnectionController::on_session_expired`] — its own idempotent contract
-//! absorbs a burst of calls failing at once, so this file does no extra
-//! debouncing of its own. Every `ActionAck`-returning call maps through
-//! [`crate::net::error::ack_result`] instead of trusting the outer `Status`
-//! alone.
+//! [`ConnectionController::on_session_expired`] (its own idempotent contract
+//! absorbs a burst of calls failing at once). Every `ActionAck`-returning
+//! call maps through [`crate::net::error::ack_result`] instead of trusting
+//! the outer `Status` alone.
 
 use std::sync::Arc;
 
@@ -100,10 +84,10 @@ use crate::net::{MuxrClient, error};
 
 /// How many of a session's first tab's pane titles [`LayoutSummary::preview`]
 /// carries — that entity's own doc: "Up to two pane titles the card
-/// previews". Kept as a local constant rather than shared with
-/// `presentation::pieces::MAX_PREVIEW_PILLS` (a `pub(super)` rendering
-/// constant this data-layer file may not import): each names the same fact
-/// from its own layer's own source of truth.
+/// previews". A local constant rather than shared with
+/// `presentation::widgets::session_card`'s own rendering constant (this
+/// data-layer file may not import a presentation one): each layer names the
+/// same fact from its own source of truth.
 const MAX_PREVIEW_PANES: usize = 2;
 
 /// [`GrpcSessionsRepository::client`]'s failure detail when nothing is
@@ -111,17 +95,14 @@ const MAX_PREVIEW_PANES: usize = 2;
 const NOT_CONNECTED: &str = "not connected to a server";
 
 /// The failure detail for a blank create/rename name — this repository's own
-/// enforcement point, the same contract
-/// [`MockSessionsRepository`](super::MockSessionsRepository) documents (the
-/// dialog that collects a name cannot submit a blank one, so this is defence
-/// in depth, not a reachable UI state).
+/// enforcement point (the dialog that collects a name cannot submit a blank
+/// one, so this is defence in depth, not a reachable UI state).
 const BLANK_NAME: &str = "a session name cannot be blank";
 
-/// One running session's `GetLayout`-derived facts, computed from a single
-/// response in one pass — see the module docs' "Pane preview" section.
-/// [`GrpcSessionsRepository::layout_for`] produces this; [`map_session`]
-/// prefers it over `SessionInfo`'s own wire counts whenever `tabs` is
-/// nonzero.
+/// One running session's `GetLayout`-derived facts — see the module docs'
+/// "Pane preview" section. [`GrpcSessionsRepository::layout_for`] produces
+/// this; [`map_session`] prefers it over `SessionInfo`'s own wire counts
+/// whenever `tabs` is nonzero.
 struct LayoutDerived {
     tabs: u32,
     panes: u32,
