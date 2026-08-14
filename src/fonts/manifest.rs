@@ -1,30 +1,22 @@
 //! The downloadable-font catalog's wire format: `muxr-core`'s
 //! `fonts/manifest.json`, parsed into [`FontEntry`] records.
 //!
-//! # The two names, and why they differ
+//! **The two names, and why they differ.** Every entry carries both a
+//! [`FontEntry::display_name`] (what the picker prints) and a
+//! [`FontEntry::family`] (the font's own `name`-table family, the string a
+//! `FontFamily` stack must name) — they differ for 27 of the catalog's 34
+//! entries, since the Nerd Font project renames the patched face.
+//! **The persisted preference is the `family`**; a stack naming the display
+//! name would resolve to nothing and silently shape with the fallback face.
+//! Even the manifest's own claim is not taken on faith: [`super::store`]
+//! records the family fontique *actually* resolved from the downloaded bytes,
+//! preferring that over this field when the two disagree.
 //!
-//! Every entry carries **both** a [`FontEntry::display_name`] (what the picker
-//! prints — "IBM Plex Mono Nerd Font Mono") and a [`FontEntry::family`] (the
-//! family the font's own `name` table declares, and so the string a
-//! `FontFamily` stack must name — "BlexMono Nerd Font Mono"). They differ for
-//! 27 of the catalog's 34 entries, because the Nerd Font project renames the
-//! patched face. **The persisted preference is the `family`**; the display
-//! name never reaches storage. A stack naming a display name would resolve to
-//! nothing and shape with the fallback face instead — silently, with no error
-//! anywhere.
-//!
-//! The manifest's claim is not taken on faith: [`super::store`] registers the
-//! downloaded bytes and records the family fontique *actually* resolved,
-//! preferring that over this field when the two disagree (see
-//! `store::install_downloaded`).
-//!
-//! # Lenient by entry, strict by document
-//!
-//! A malformed *entry* (or file) is skipped rather than failing the catalog —
-//! a manifest gaining a field this app doesn't model, or shipping one broken
-//! row, must not take the whole picker offline. A document that isn't JSON at
-//! all, or that carries no usable entry, is an [`AppFailure::Internal`]: it is
-//! the catalog's own contract that broke, not the user's network.
+//! **Lenient by entry, strict by document.** A malformed *entry* (or file) is
+//! skipped rather than failing the catalog — one broken row must not take the
+//! whole picker offline. A document that isn't JSON at all, or carries no
+//! usable entry, is an [`AppFailure::Internal`]: the catalog's own contract
+//! broke, not the user's network.
 
 use crate::failure::AppFailure;
 

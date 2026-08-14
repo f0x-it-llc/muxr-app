@@ -2,27 +2,22 @@
 //! triple.
 //!
 //! **Why `tls_config_with_verifier` and not a custom connector.** All three
-//! trust modes are hand-built `rustls` verifiers, so the question is how a
-//! verifier reaches tonic's `ClientConfig`. tonic 0.14.6 answers it directly:
-//! `Endpoint::tls_config_with_verifier` takes an `Arc<dyn ServerCertVerifier>`
-//! and installs it in place of the default WebPKI one, on the same connector
-//! that already owns ALPN (`h2`), the handshake timeout and the HTTP/2 knobs
-//! below. The alternative — `connect_with_connector` over a hand-rolled
-//! `tokio-rustls` connector — would have to re-implement all of that, and would
-//! need `hyper-util`/`tower` named directly. One route serves all three modes,
-//! so the simpler one wins. Its documented constraint: a custom verifier
-//! *replaces* the default, so no CA/trust-anchor/root method may be set on the
-//! `ClientTlsConfig` beside it (mixing is an error), which is why the config
+//! trust modes are hand-built `rustls` verifiers; tonic's
+//! `Endpoint::tls_config_with_verifier` installs one in place of the default
+//! WebPKI verifier on the same connector that already owns ALPN, the
+//! handshake timeout and the HTTP/2 knobs below, so one route serves all
+//! three modes without hand-rolling a `tokio-rustls` connector. A custom
+//! verifier *replaces* the default, so no CA/trust-anchor/root method may be
+//! set on the `ClientTlsConfig` beside it (mixing is an error) — the config
 //! here carries nothing but the server name.
 //!
 //! **Server names are set explicitly, not left to the URI's host.** `muxrd`
 //! serves an rcgen self-signed certificate with **IP** SANs and clients dial a
-//! bare address, so the name rustls matches must be a
-//! `ServerName::IpAddress`. Passing the bare host through `domain_name` gets
-//! that for free (`ServerName`'s parser rejects an all-numeric label as a DNS
-//! name and falls through to the IP parser) and is the only way an IPv6 literal
-//! works at all — the URI authority needs its brackets, and `ServerName` refuses
-//! them.
+//! bare address, so the name rustls matches must be a `ServerName::IpAddress`.
+//! Passing the bare host through `domain_name` gets that for free (`ServerName`
+//! falls through to the IP parser on an all-numeric label) and is the only way
+//! an IPv6 literal works at all — the URI authority needs its brackets, and
+//! `ServerName` refuses them.
 //!
 //! Keepalive matches `muxrd`'s own settings; the constants below are the parity
 //! contract, not tuning knobs to drift.

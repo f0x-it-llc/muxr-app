@@ -1,41 +1,28 @@
 //! [`FontCatalog`] — the downloadable catalog's reactive state, and the
 //! download state machine the picker drives.
+//! **A thread-local handle, not a context value.** [`font_catalog`] answers
+//! the one catalog per UI thread, created on first use and self-healing if its
+//! signals were disposed with an owner — the same cached-signal idiom
+//! `crate::ui::toasts::app_toasts` documents at length: the catalog outlives
+//! any one sheet, and a per-thread handle isolates every headless test.
+//! **Where the work runs.** Nothing here does I/O on the UI thread.
+//! [`FontCatalog::load`]/[`FontCatalog::install`] are `async` methods a screen
+//! awaits from `spawn_local`; each hands the fetch to `frust::spawn` (reqwest
+//! needs a live tokio context) and the disk/hash/parse half to
+//! `frust::spawn_blocking`, answering back over a `oneshot` — every signal
+//! write happens on the awaiting UI thread.
 //!
-//! # A thread-local handle, not a context value
+//! **Lifecycle.** The manifest is fetched when the picker **opens**, never at
+//! startup. A parsed document is cached; a failed fetch or parse falls back
+//! to that cache and marks the result [`FontCatalog::is_stale`]. With no
+//! cached copy either, the status becomes [`CatalogStatus::Unavailable`] and
+//! the picker shows a quiet line — **no toast**, since a missing catalog is
+//! not an error the user caused, and the installed fonts still list.
 //!
-//! [`font_catalog`] answers the one catalog per UI thread, created on first
-//! use and self-healing if its signals were disposed with an owner — the same
-//! cached-signal idiom `crate::ui::toasts::app_toasts` documents at length,
-//! and for the same reasons: the catalog outlives any one sheet (a download
-//! keeps running after the picker closes), the composition root is not this
-//! module's to edit, and a per-thread handle isolates every headless test.
-//!
-//! # Where the work runs
-//!
-//! Nothing here does I/O on the UI thread. [`FontCatalog::load`] and
-//! [`FontCatalog::install`] are `async` methods a screen awaits from
-//! `spawn_local`; each hands the actual fetch to `frust::spawn` (the
-//! background runtime — reqwest needs a live tokio context) and the disk/hash/
-//! parse half to `frust::spawn_blocking`, then answers back over a
-//! `oneshot`. Every signal write happens on the awaiting UI thread.
-//!
-//! # The catalog's own lifecycle
-//!
-//! The manifest is fetched when the picker **opens**, never at startup: the
-//! app has no use for a catalog until someone browses one. A fetched document
-//! that parses is cached ([`super::store::write_cached_manifest`]); a fetch —
-//! or a parse — that fails falls back to that cached copy and marks the result
-//! [`FontCatalog::is_stale`]. With no cached copy either, the status becomes
-//! [`CatalogStatus::Unavailable`] and the picker shows a quiet line instead of
-//! a catalog. **No toast**: a missing catalog is not an error the user did
-//! anything to cause, and the installed fonts still list.
-//!
-//! # Per-font states
-//!
-//! `Available → Downloading → Installed | Failed`, single-flight per family: a
-//! second tap while a download is in flight is a no-op, and a tap on a failed
-//! row retries. A download never selects the font — it only makes it
-//! selectable (the picker's own rule).
+//! **Per-font states:** `Available → Downloading → Installed | Failed`,
+//! single-flight per family — a second tap while downloading is a no-op, a
+//! tap on a failed row retries; a download never selects the font, only makes
+//! it selectable.
 
 use std::sync::Arc;
 

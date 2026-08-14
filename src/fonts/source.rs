@@ -1,39 +1,28 @@
 //! [`FontSource`] — where the catalog's bytes come from, and the one seam a
 //! headless suite swaps out.
 //!
-//! # Two implementations, one process-static seam
+//! **Two implementations, one process-static seam.** [`HttpFontSource`] is
+//! production: plain HTTPS `GET`s over `reqwest`. [`OfflineFontSource`]
+//! answers every fetch with a network failure and is what
+//! [`use_offline_font_source_for_tests`] installs — the same process-static
+//! override shape every feature's `di.rs` uses for its own repositories.
+//! `tests/support::setup` installs it for every headless suite, so no test
+//! reaches the network by omission; a suite that wants a catalog installs its
+//! own fixture source over the top.
 //!
-//! [`HttpFontSource`] is production: plain HTTPS `GET`s over `reqwest`
-//! (rustls, the tree's one aws-lc-rs provider — see `Cargo.toml`'s dependency
-//! note). [`OfflineFontSource`] answers every fetch with a network failure and
-//! is what [`use_offline_font_source_for_tests`] installs.
+//! **Fetch policy.** Every fetch is bounded three ways: a request timeout
+//! ([`FETCH_TIMEOUT`]), a response size cap (checked against `Content-Length`
+//! *and* while streaming, since the header is only a claim), and — for a
+//! font — the caller's own mandatory SHA-256 check downstream ([`super::store`]).
 //!
-//! The swap is a **process-static override**, the same shape every feature's
-//! `di.rs` uses for its own repositories (`features::settings::di`'s
-//! `use_mock_preferences_for_tests`): production never branches, a test opts
-//! the whole process out once, and no call site learns that the seam exists.
-//! `tests/support::setup` installs the offline source for every headless
-//! suite, so no test can reach the network by omission — a suite that wants a
-//! catalog installs its own fixture source over the top.
-//!
-//! # Fetch policy
-//!
-//! Every fetch is bounded three ways: a request timeout ([`FETCH_TIMEOUT`]), a
-//! response size cap (checked against `Content-Length` *and* while streaming,
-//! since the header is the server's claim rather than a fact), and — for a
-//! font — the caller's own mandatory SHA-256 check downstream
-//! ([`super::store`]). Redirects follow `reqwest`'s default policy, which the
-//! release-asset URLs need (`github.com/…/releases/download/…` answers a 302
-//! into `objects.githubusercontent.com`).
-//!
-//! The streaming half is [`get_with_progress`]: it reads the body via
-//! `reqwest::Response::chunk()` rather than buffering the whole thing first,
-//! so an oversized response is caught (and discarded) the instant the
-//! running total crosses the cap rather than after every byte has already
-//! been held in memory. [`FontSource::fetch_font_with_progress`] rides the
-//! same read, handing the cumulative received-byte count to an optional
-//! sink after every chunk — a font's own download is the only fetch that
-//! needs it (see [`super::catalog`]'s per-entry fraction).
+//! The streaming half is [`get_with_progress`]: it reads via
+//! `reqwest::Response::chunk()` rather than buffering the body whole, so an
+//! oversized response is caught the instant the running total crosses the
+//! cap. [`FontSource::fetch_font_with_progress`] rides the same read, handing
+//! the cumulative received-byte count to an optional sink after every chunk —
+//! only a font's own download needs it (see [`super::catalog`]'s per-entry
+//! fraction). [`HttpFontSource`]'s client also sends a [`USER_AGENT`] — some
+//! of GitHub's release-asset redirect chain refuses requests with none.
 
 use std::sync::{Arc, Mutex, OnceLock};
 

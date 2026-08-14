@@ -1,10 +1,7 @@
-//! The app's fonts: JetBrains Mono as the app-wide (and terminal-default)
-//! face, Symbols Nerd Font Mono as the always-present nerd-font/powerline
-//! glyph fallback — plus the downloadable Nerd Font catalog on top of them.
-//!
-//! App-level infrastructure beside `crate::net`, not a feature's `data` layer:
-//! Settings browses and installs fonts, and the terminal grid shapes with
-//! them.
+//! The app's fonts: JetBrains Mono as the app-wide (and terminal-default) face,
+//! Symbols Nerd Font Mono as the always-present nerd-font fallback, plus the
+//! downloadable Nerd Font catalog on top. App-level infrastructure beside
+//! `crate::net`: Settings browses/installs fonts, the terminal grid shapes with them.
 //!
 //! | Module | Owns |
 //! |---|---|
@@ -14,45 +11,18 @@
 //! | [`store`] | the on-disk cache, SHA-256 integrity, registration, the installed record |
 //! | [`catalog`] | the picker's reactive state and the download state machine |
 //!
-//! # Registration is a push, and the bundled half is embedded at compile time
+//! **Registration is a push**, into [`frust::register_app_fonts`]'s
+//! process-wide pending slot every shell drains into its `TextContext` — once
+//! before the first frame for [`register_bundled_fonts`]'s bytes, once per
+//! frame thereafter, so a **downloaded** face installs mid-session, no relaunch.
 //!
-//! [`register_bundled_fonts`] pushes every bundled TTF's raw bytes (each
-//! `include_bytes!`d from `assets/fonts/`, see [`BUNDLED_FONTS`]) into
-//! [`frust::register_app_fonts`]'s process-wide pending slot — identical on
-//! Android/iOS/desktop, no Gradle/Xcode asset wiring. Bundled bytes rather
-//! than a loose asset file: the running shell drains the slot into its
-//! `TextContext` at construction (before the first frame), so the face must
-//! already be linked into the binary by then. A **downloaded** face goes
-//! through the same slot, which every shell also drains once per frame — so a
-//! font installed mid-session shapes from the next frame on, with no relaunch.
-//!
-//! # Family names are fontique's, not ours
-//!
-//! fontique resolves a registered font's family by its own name-table
-//! preference (typographic family, name id 16, over family, name id 1) —
-//! [`installed_families`]'s unit test constructs its own `TextContext` and
-//! registers the same bytes [`register_bundled_fonts`] pushes, asserting the
-//! resulting names match [`DEFAULT_TERMINAL_FAMILY`]/
-//! [`SYMBOLS_FALLBACK_FAMILY`] exactly — a tripwire against silent TTF-name
-//! drift (a font update that renames its own family would otherwise leave
-//! every `FontFamily::stack`/`stack_with_generic` call below resolving to
-//! nothing, with no compile error). The same fact is why a *downloaded* font's
-//! family is read back from a real registration rather than taken from the
-//! manifest (see [`store`]).
-//!
-//! # Call order: register, then re-theme
-//!
-//! [`register_bundled_fonts`] must run before [`apply_app_wide_theme`] —
-//! both from the app's `setup` block, alongside `frust::glyph_theme::install`
-//! (the pre-first-frame slot every shell drains at construction; see that
-//! function's own doc for why a later call is too late). [`apply_app_wide_theme`]
-//! itself doesn't touch a font byte, only [`frust_theme::TypeScale`]'s
-//! `family` tokens — the bytes those tokens now name must already be pending
-//! by the time this runs, or the shell falls back to whatever monospace face
-//! the platform has (the `Monospace` generic tail every stack below ends in).
-//! [`register_cached_fonts_at_startup`] joins them there, but is deliberately
-//! **asynchronous**: it reads and hashes megabytes off disk, which the UI
-//! thread must never wait on.
+//! **Family names are fontique's, not ours** — resolved from a registered
+//! font's own name-table preference, not asserted here; see
+//! [`installed_families`]'s unit test for the tripwire against silent
+//! TTF-name drift, and [`store`] for why a downloaded family is read back
+//! from a real registration, never taken from the manifest. **Call order:
+//! register, then re-theme** — [`register_bundled_fonts`] must run before
+//! [`apply_app_wide_theme`] (see that function's own doc for why).
 
 pub mod catalog;
 mod json;

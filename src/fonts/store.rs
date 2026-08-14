@@ -1,57 +1,28 @@
 //! The on-disk font cache and the process-wide record of what is installed.
-//!
 //! Everything here is **blocking** — file reads, hashing, font parsing — and
-//! every caller reaches it through `frust::spawn_blocking` (see
-//! [`super::catalog`]), never from the UI thread.
+//! every caller reaches it through `frust::spawn_blocking`, never the UI thread.
 //!
-//! # Layout
+//! Layout: `<data dir>/fonts/<sanitized family>/` holds each cached file plus
+//! a `meta` sidecar (family / display name / manifest family / file hashes).
+//! Installed *is* the cache's contents: nothing about a downloaded font
+//! touches the preferences store, so clearing app storage clears the fonts
+//! too; the only preference that survives is the family name the terminal
+//! resolves (`super::resolve_terminal_family` degrades to the bundled stack).
 //!
-//! ```text
-//! <data dir>/fonts/
-//!   manifest.json                  the last catalog that parsed (offline copy)
-//!   BlexMono_Nerd_Font_Mono/
-//!     meta                         family / display / manifest family / file hashes
-//!     BlexMonoNerdFontMono-Bold.ttf
-//!     BlexMonoNerdFontMono-Regular.ttf
-//! ```
+//! **Integrity: SHA-256, mandatory, before anything is written.**
+//! [`install_downloaded`] verifies every downloaded file — size cap, sfnt
+//! magic, then the manifest's SHA-256 — while the bytes are still in memory; a
+//! mismatch fails the install with nothing left on disk, as the generic
+//! [`AppFailure::Internal`] "Something went wrong" (not a detail for a user).
+//! [`scan_cache_and_register`] re-verifies the same hashes at startup and
+//! deletes any family that no longer matches, dropped but never fatal.
 //!
-//! The directory name is the **registered** family, sanitized; the `meta`
-//! sidecar is what makes a cold start cheap and honest (see below). Installed
-//! *is* the cache's contents — nothing about a downloaded font is written to
-//! the preferences store, so clearing app storage clears the fonts too, and
-//! the only preference that survives is the family name the terminal resolves
-//! (`super::resolve_terminal_family`, which degrades to the bundled stack for
-//! a family that is no longer installed).
-//!
-//! # Integrity: SHA-256, mandatory, before anything is written
-//!
-//! [`install_downloaded`] verifies **every** downloaded file — size cap, sfnt
-//! magic, then the manifest's SHA-256 — while the bytes are still in memory.
-//! A mismatch fails the install with nothing on disk to clean up; the failure
-//! is [`AppFailure::Internal`], whose user-facing message is the generic
-//! "Something went wrong" (a hash mismatch is not a detail to put in front of
-//! a user). The magic check is a cheap format probe, never an integrity
-//! control — the hash is.
-//!
-//! [`scan_cache_and_register`] re-verifies the same hashes at startup, out of
-//! the `meta` sidecar, and deletes any family whose files no longer match (or
-//! whose sidecar is unreadable). A broken cache entry is dropped, never fatal.
-//!
-//! # The family name is fontique's, not the manifest's
-//!
-//! A manifest entry claims a `family`; the string a `FontFamily` stack must
-//! carry is whatever fontique resolves the bytes into. [`install_downloaded`]
-//! settles that by registering the entry's first file into a throwaway
-//! [`TextContext`] and reading the resolved name back — `frust::register_app_fonts`
-//! (the process-wide push a shell drains into its own context) reports
-//! nothing, so this probe is the only way to *know*. The reported name wins
-//! and is what gets recorded, cached and persisted; a disagreement is logged.
-//!
-//! The probe costs one extra parse of that first file (the same bytes are also
-//! pushed to the shell's registry, which parses them again on its next frame
-//! drain). That is the accepted price of not silently installing a family
-//! nothing can resolve — it is paid once per download, on a background
-//! thread, at the end of a multi-second network fetch.
+//! **The family name is fontique's, not the manifest's.** The string a
+//! `FontFamily` stack must carry is whatever fontique resolves the bytes
+//! into, not a manifest entry's claim. [`install_downloaded`] registers the
+//! entry's first file into a throwaway [`TextContext`] and reads the resolved
+//! name back — that name wins (a disagreement is logged), the price of never
+//! silently installing an unresolvable font.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

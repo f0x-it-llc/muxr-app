@@ -3,32 +3,26 @@
 //!
 //! `tests/splash.rs` covers the three beats in isolation; this file covers
 //! what only the assembled thing can show: that the beats fire in the right
-//! order off one clock, that the pieces stagger in, that the overlay unmounts
-//! itself, and that what is underneath when it does is the same picture.
+//! order off one clock, that the widgets stagger in, that the overlay
+//! unmounts itself, and that what is underneath when it does is the same
+//! picture. Like `tests/splash.rs` these can't use `support::frame` (which
+//! pins `FrameTime::ZERO`): every assertion here is a function of the frame
+//! clock, so each test drives rebuild → layout → paint itself, exactly as a
+//! shell's frame loop does — which is also what lets the overlay's unmount
+//! actually happen mid-run.
 //!
-//! Like `tests/splash.rs` these can't use `support::frame` (which pins
-//! `FrameTime::ZERO`): every assertion here is a function of the frame clock,
-//! so each test drives rebuild → layout → paint itself, exactly as a shell's
-//! frame loop does — which is also what lets the overlay's unmount actually
-//! happen mid-run.
+//! **Frame cadence.** Every helper takes the cadence in nanoseconds
+//! ([`drive_at`], [`frame_at_cadence`]) and the plain [`drive`]/[`frame_at`]
+//! wrappers pin [`FRAME_NS`] (60Hz). The splash is clock-driven, not
+//! frame-driven, so the same wall-clock timeline must come out of a
+//! [`FRAME_NS_120`] run too — see
+//! [`the_timeline_lands_on_the_same_wall_clock_at_120hz`].
 //!
-//! # Frame cadence
-//!
-//! Every helper takes the cadence in nanoseconds ([`drive_at`],
-//! [`frame_at_cadence`]) and the plain [`drive`]/[`frame_at`] wrappers pin
-//! [`FRAME_NS`] (60Hz). The splash is clock-driven, not frame-driven, so the
-//! same wall-clock timeline must come out of a [`FRAME_NS_120`] run —
-//! [`the_timeline_lands_on_the_same_wall_clock_at_120hz`] is the test that
-//! actually holds `spec::REFERENCE_FRAME_MS`'s normalization to that.
-//!
-//! # Reading a piece's text out of a paint pass
-//!
-//! A painted `GlyphRun` carries glyph *ids*, not a string. [`glyph_ids`]
-//! shapes an expected string through the same [`TextContext`] the widgets lay
-//! out against and compares id sequences, so "the heading is on screen" is a
-//! real assertion rather than a glyph-run headcount — and counting
-//! *occurrences* is what distinguishes the splash's assembling copy from the
-//! live route's copy underneath it.
+//! **Reading a widget's text out of a paint pass.** A painted `GlyphRun`
+//! carries glyph *ids*, not a string. [`glyph_ids`] shapes an expected string
+//! through the same [`TextContext`] the widgets lay out against and compares
+//! id sequences — and counting *occurrences* distinguishes the splash's
+//! assembling copy from the live route's copy underneath it.
 
 use std::any::Any;
 
