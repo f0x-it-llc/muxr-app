@@ -12,13 +12,11 @@ use clean_signals::UseCase;
 use crate::failure::AppFailure;
 use crate::features::settings::domain::repositories::AuthTokensRepository;
 
-/// Revokes an auth token via the injected repository.
 pub struct RevokeToken {
     repo: Arc<dyn AuthTokensRepository + Send + Sync>,
 }
 
 impl RevokeToken {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn AuthTokensRepository + Send + Sync>) -> Self {
         Self { repo }
     }

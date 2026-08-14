@@ -12,13 +12,11 @@ use crate::failure::AppFailure;
 use crate::features::settings::domain::entities::PollPrefs;
 use crate::features::settings::domain::repositories::PreferencesRepository;
 
-/// Saves the session-poll preferences via the injected repository.
 pub struct UpdatePollPrefs {
     repo: Arc<dyn PreferencesRepository + Send + Sync>,
 }
 
 impl UpdatePollPrefs {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn PreferencesRepository + Send + Sync>) -> Self {
         Self { repo }
     }

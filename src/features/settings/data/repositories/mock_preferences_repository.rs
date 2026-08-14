@@ -1,31 +1,15 @@
-//! [`MockPreferencesRepository`] — the in-memory [`PreferencesRepository`] the
-//! mock era runs on.
+//! [`MockPreferencesRepository`] — the in-memory [`PreferencesRepository`]
+//! behind `di.rs`'s headless-test seam. Seeds [`Preferences::defaults`] (not
+//! transcribed a second time here, so the screen, the mock and the shipped
+//! defaults cannot drift apart). Nothing survives a process restart, but the
+//! round trip is real — a picker's choice is written and read back here,
+//! exactly the shape [`PrefsRepository`](super::PrefsRepository) preserves.
 //!
-//! Seeds [`Preferences::defaults`] — the seed is not transcribed a second
-//! time here, so the screen, the mock and the shipped defaults cannot drift
-//! apart (see that constructor's own doc for what it holds, including its one
-//! deliberate divergence from `docs/redesign.html`'s settings-screen mock).
-//!
-//! # In-memory, and honestly so
-//!
-//! Nothing survives a process restart: no secure-storage or
-//! shared-preferences plugin is wired yet (`docs/ARCHITECTURE.md`'s Planned
-//! section). What *is* real is the round trip — a picker's choice is written
-//! here and read back out of here, so when a plugin lands it replaces this one
-//! file and nothing above it.
-//!
-//! # Framework-free
-//!
-//! No `frust::` types (the data-layer rule): the store is a plain
-//! [`Mutex<Preferences>`], which is what makes it `Send + Sync` for the
-//! controller's `Arc` under `use_controller`'s bounds.
-//!
-//! # Failure mapping
-//!
-//! The feature's second failure-mapping site into [`AppFailure`]. A value
-//! outside its own domain-declared choice set maps to [`AppFailure::Internal`]
-//! (a bug — every write comes from a picker built out of that same set); a real
-//! store maps an I/O error to [`AppFailure::Storage`] in exactly this spot.
+//! Framework-free, a plain `Mutex<Preferences>` (`Send + Sync` for the
+//! controller's `Arc`). The feature's second failure-mapping site into
+//! [`AppFailure`]: a value outside its own domain-declared choice set maps to
+//! [`AppFailure::Internal`] — a bug, since every write comes from a picker
+//! built out of that same set.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -74,15 +58,10 @@ impl Default for MockPreferencesRepository {
     }
 }
 
-/// Reject an appearance record carrying a value no picker could have produced.
-///
-/// The font family is deliberately **not** checked against a list: the font
-/// picker offers whatever faces are installed on the device, bundled or
-/// downloaded (`crate::fonts`), so the legal set is a runtime fact this
-/// framework-free layer cannot know — the real store
-/// ([`PrefsRepository`](super::PrefsRepository)) makes the same call, and its
-/// module docs carry the full rationale. Only an empty name is refused: it
-/// could never name a face.
+/// Reject an appearance record carrying a value no picker could have
+/// produced. The font family is deliberately **not** checked against a list
+/// (the same call [`PrefsRepository`](super::PrefsRepository) makes) — only
+/// an empty name is refused, since that could never name a face.
 fn validate_appearance(prefs: &AppearancePrefs) -> Result<(), AppFailure> {
     if prefs.font_family.trim().is_empty() {
         return Err(AppFailure::Internal(

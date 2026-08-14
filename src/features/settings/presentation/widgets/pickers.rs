@@ -1,0 +1,164 @@
+//! Screen 6's picker sheet: one title over one `.pick-row` per option, the
+//! selected one filled amber full-bleed with a `✓`. Reused by four rows
+//! (`layout refresh`, `font size`, `cursor style`, and — through
+//! `widgets::font_picker`'s own two-section variant — `font family`), which
+//! is the whole point of the redesign's own note that this pattern is shared.
+//!
+//! Built over `AppState`, not `SettingsState`: a sheet is a pushed navigator
+//! page on the *app's* overlay host, the same component boundary the dialogs
+//! cross.
+
+use std::rc::Rc;
+
+use frust::authoring::Color;
+use frust::icons::CHECK;
+use frust::{
+    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible, text,
+};
+
+use crate::AppState;
+use crate::features::settings::presentation::chrome::panel;
+use crate::ui::palette::{Palette, active_theme, inked};
+use crate::ui::spacing;
+
+use super::rows::{ROW_GAP, column, h_gap, row};
+
+/// `.pick-row{padding:13px 4px}`.
+pub(super) const PICK_PAD_X: f64 = spacing::TIGHT;
+pub(super) const PICK_PAD_Y: f64 = 13.0;
+/// `.pick-row.sel{margin:0 -20px}` — how far the selected row's fill escapes
+/// the sheet's own content gutter (`crate::ui::sheet`'s private `PANEL_PAD`,
+/// which this must equal for the fill to reach the panel's edges).
+pub(super) const PICK_BLEED: f64 = spacing::XXL;
+/// `.sheet-toprow{margin-bottom:18px}` — the picker title to its first row.
+pub(super) const PICK_TITLE_GAP: f64 = 18.0;
+/// The `✓` on the selected picker row.
+pub(super) const CHECK_SIZE: f64 = 13.0;
+
+/// Which picker sheet a row opens. One enum, four sheets, **one** builder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in super::super) enum PickerKind {
+    /// `terminal appearance` → font family.
+    FontFamily,
+    /// `terminal appearance` → font size.
+    FontSize,
+    /// `terminal appearance` → cursor style.
+    CursorStyle,
+    /// `session poll` → layout refresh.
+    LayoutRefresh,
+}
+
+impl PickerKind {
+    /// The sheet's own title — the row's label, verbatim.
+    pub(in super::super) fn title(self) -> &'static str {
+        match self {
+            PickerKind::FontFamily => "font family",
+            PickerKind::FontSize => "font size",
+            PickerKind::CursorStyle => "cursor style",
+            PickerKind::LayoutRefresh => "layout refresh",
+        }
+    }
+}
+
+/// One picker sheet's content: a title, and the options it offers with at
+/// most one already chosen. Built by `pages` from the controller's signals;
+/// [`picker_sheet`] is the pure render.
+pub(in super::super) struct Picker {
+    pub(in super::super) title: &'static str,
+    /// Every option, in the order the domain declares them.
+    pub(in super::super) options: Vec<String>,
+    /// Which one is current, if the stored value is still an offered choice.
+    pub(in super::super) selected: Option<usize>,
+}
+
+/// The pick handler, shared by every row of one sheet.
+type OnPick = Rc<dyn Fn(&mut AppState, usize)>;
+
+pub(in super::super) fn picker_sheet(
+    picker: &Picker,
+    colors: &Palette,
+    on_pick: impl Fn(&mut AppState, usize) + 'static,
+) -> AnyView<AppState> {
+    let theme = active_theme();
+    let on_pick: OnPick = Rc::new(on_pick);
+    let last = picker.options.len().saturating_sub(1);
+    let mut children = vec![
+        any(text(picker.title).style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
+        any(SizedBox::<AppState>(None, Some(PICK_TITLE_GAP))),
+    ];
+    for (index, option) in picker.options.iter().enumerate() {
+        children.push(pick_row(
+            option,
+            picker.selected == Some(index),
+            index < last,
+            colors,
+            {
+                let on_pick = Rc::clone(&on_pick);
+                move |state: &mut AppState| on_pick(state, index)
+            },
+        ));
+    }
+    any(column(children))
+}
+
+/// One `.pick-row`. The selected one fills `--amber-faint` past the sheet's
+/// own gutter (reproduced via [`super::chrome`]'s bleed, since frust has no
+/// negative padding), inks its label amber, and carries the `CHECK` vector;
+/// every row but the last closes with a hairline.
+fn pick_row(
+    option: &str,
+    selected: bool,
+    ruled: bool,
+    colors: &Palette,
+    on_tap: impl Fn(&mut AppState) + 'static,
+) -> AnyView<AppState> {
+    let theme = active_theme();
+    let ink = if selected { colors.amber } else { colors.fg };
+    let mut children = vec![flexible(
+        1,
+        text(option.to_string()).style(inked(&theme.type_scale.label_large, ink)),
+    )];
+    if selected {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(icon(CHECK).size(CHECK_SIZE).color(colors.amber)));
+    }
+    let fill = if selected {
+        colors.amber_faint
+    } else {
+        Color::TRANSPARENT
+    };
+    let mut box_ = panel(
+        Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
+        fill,
+        theme.shape.small,
+    );
+    if selected {
+        box_ = box_.bleed(PICK_BLEED);
+    }
+    if ruled {
+        box_ = box_.bottom_rule(colors.rule);
+    }
+    any(GestureDetector(box_).on_tap(on_tap))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_picker_titles_itself_with_the_row_that_raised_it() {
+        assert_eq!(PickerKind::FontFamily.title(), "font family");
+        assert_eq!(PickerKind::FontSize.title(), "font size");
+        assert_eq!(PickerKind::CursorStyle.title(), "cursor style");
+        assert_eq!(PickerKind::LayoutRefresh.title(), "layout refresh");
+    }
+
+    #[test]
+    fn the_selected_rows_bleed_is_the_sheets_own_gutter() {
+        // Transcribed rather than asserted equal to `ui::sheet`'s private
+        // `PANEL_PAD`: if the two ever diverge the amber fill stops short of
+        // (or runs past) the sheet's edges — `tests/settings.rs` asserts the
+        // measured geometry end to end, which is what actually catches it.
+        assert_eq!(PICK_BLEED, 20.0);
+    }
+}

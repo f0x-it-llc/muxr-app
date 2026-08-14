@@ -15,13 +15,11 @@ use crate::failure::AppFailure;
 use crate::features::settings::domain::entities::AppearancePrefs;
 use crate::features::settings::domain::repositories::PreferencesRepository;
 
-/// Saves the terminal-appearance preferences via the injected repository.
 pub struct UpdateAppearance {
     repo: Arc<dyn PreferencesRepository + Send + Sync>,
 }
 
 impl UpdateAppearance {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn PreferencesRepository + Send + Sync>) -> Self {
         Self { repo }
     }

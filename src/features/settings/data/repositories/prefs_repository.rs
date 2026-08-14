@@ -1,76 +1,35 @@
 //! [`PrefsRepository`] — the real, `frust-shared-preferences`-backed
-//! [`PreferencesRepository`], and `settings::di::provide`'s production
-//! choice once it opts in (see that module's own docs for the mock/real
-//! split, including its headless-test seam).
+//! [`PreferencesRepository`].
 //!
-//! # Storage shape (Flutter `shared_preferences` name parity)
+//! **Storage shape**: five keys matching the Flutter app's own preference
+//! names 1:1 (`pref_layout_refresh_seconds`/`pref_font_size`/
+//! `pref_cursor_style`/`pref_bell_notifications`/`pref_font_family`) — name
+//! parity only, not on-disk compatibility. Every default **is**
+//! [`Preferences::defaults`], read at each call site rather than
+//! re-declared. `pref_option_as_meta` (Flutter's desktop-only "Option as
+//! Meta" toggle) is deliberately not modeled — [`Preferences`] has no field
+//! for it.
 //!
-//! Five keys, matching the Flutter app's own preference names 1:1 — pure
-//! name parity, not on-disk compatibility (`frust_shared_preferences`'s own
-//! module doc: every backend uses its own storage encoding):
+//! **Never fails the load**: a missing key, a wrong-typed value, or an
+//! out-of-range one each fall back to *that field's own* default rather than
+//! failing the whole read — a corrupt `pref_cursor_style` must not blank out
+//! an otherwise-fine font size. Ints are clamped too:
+//! `pref_layout_refresh_seconds` to [`MIN_LAYOUT_REFRESH_SECS`],
+//! `pref_font_size` to [`AppearancePrefs::FONT_SIZES_PX`]'s own range.
 //!
-//! | Key | Type | Default | Domain field |
-//! |---|---|---|---|
-//! | `pref_layout_refresh_seconds` | i64 | `3` | [`PollPrefs::layout_refresh_secs`] |
-//! | `pref_font_size` | i64 | `12` | [`AppearancePrefs::font_size_px`] |
-//! | `pref_cursor_style` | String | `"block"` | [`AppearancePrefs::cursor_style`] |
-//! | `pref_bell_notifications` | bool | `true` | [`PollPrefs::bell_notifications`] |
-//! | `pref_font_family` | String | `"JetBrains Mono"` | [`AppearancePrefs::font_family`] |
+//! **`pref_font_family` is stored as given**, the one field not validated
+//! against a list: the picker offers whatever faces are installed — bundled
+//! *or downloaded* — so the legal set is a runtime fact this framework-free
+//! layer can't know. Only a non-empty string is required; grace for a
+//! family no longer installed lives at the presentation edge instead
+//! (`crate::fonts::resolve_terminal_family`).
 //!
-//! Every default above **is** [`Preferences::defaults`], read at each call
-//! site rather than re-declared here — the app's shipped defaults stay the
-//! one canonical source; this store is a *projection* of them, never a
-//! second definition (this module's own charter, and the persisted-prefs
-//! task's own note). **`pref_option_as_meta` is deliberately not modeled**:
-//! it is the Flutter app's desktop-only "Option as Meta" toggle, and this
-//! app's [`Preferences`] entity has no field for it — nothing to load or
-//! save.
-//!
-//! # Never-fails-the-load, per field
-//!
-//! [`load_preferences`](PreferencesRepository::load_preferences) always
-//! returns `Ok`: a missing key, a wrong-typed value (the plugin's own
-//! `get_*` already turns that into `None`), or an out-of-range/unrecognized
-//! one each fall back to *that one field's* own default rather than failing
-//! the whole read — a corrupt `pref_cursor_style` must not blank out an
-//! otherwise-fine font size. Every stored int is clamped too:
-//! `pref_layout_refresh_seconds` to a minimum of 1s
-//! ([`MIN_LAYOUT_REFRESH_SECS`]), `pref_font_size` to
-//! [`AppearancePrefs::FONT_SIZES_PX`]'s own `10`–`14` range.
-//!
-//! # `pref_font_family` is stored as given
-//!
-//! The font family is the one field this store does **not** validate against a
-//! list, and that is deliberate: the picker offers whatever faces are actually
-//! installed — bundled *or downloaded* (`crate::fonts`) — so the set of legal
-//! values is a runtime fact about this device's font cache, not something a
-//! framework-free `data` layer can know. This store used to clamp it against a
-//! four-name const, which silently reset a user's downloaded font to
-//! `JetBrains Mono` on the next launch. Only a non-empty string is required
-//! now; grace for a family that is no longer installed lives at the
-//! presentation edge instead (`crate::fonts::resolve_terminal_family`, whose
-//! own doc records that split).
-//!
-//! # Saves: synchronous state, fire-and-forget disk
-//!
-//! [`save_appearance`](PreferencesRepository::save_appearance)/
-//! [`save_poll_prefs`](PreferencesRepository::save_poll_prefs) clamp the
-//! caller's value the same way a load does, hand the *clamped* value back
-//! `Ok` synchronously — so the controller's own signal updates on the same
-//! tick a picker fires, exactly like the mock this replaces — and only then
-//! spawn the actual disk write. That write runs off the UI thread via
-//! [`frust::spawn_blocking`]: `docs/PLUGINS_ARCHITECTURE.md`'s Data Flow
-//! section and `docs/CODE_STANDARDS.md`'s Plugin Conventions both pair a
-//! plugin call with `spawn_blocking`, and this is this module's one
-//! sanctioned reach for `frust::` in an otherwise data-layer-framework-free
-//! file — the plugin's own calls are documented cheap, but still I/O against
-//! a disk-backed store. A write failure is logged (`log::warn!`) and
-//! swallowed, never surfaced to the UI — the same best-effort, no-transaction
-//! contract a shared-preferences-style store has always carried.
-//!
-//! Both the loader and the two savers apply the *same* bounds, so a value
-//! already on disk from an older build (or a hand-edited store) is corrected
-//! on the next load, independent of whether anything is ever saved again.
+//! **Saves are synchronous state, fire-and-forget disk**: both savers clamp
+//! like a load, hand the clamped value back `Ok` synchronously — so the
+//! controller's signal updates the same tick a picker fires — then spawn the
+//! actual write via [`frust::spawn_blocking`] (this module's one sanctioned
+//! `frust::` reach in an otherwise framework-free file). A write failure is
+//! logged and swallowed, never surfaced to the UI.
 
 use frust::spawn_blocking;
 use frust_shared_preferences::{PrefsError, SharedPreferences};
@@ -105,14 +64,11 @@ pub struct PrefsRepository {
 
 impl PrefsRepository {
     /// Open the platform's standard preferences store
-    /// ([`SharedPreferences::standard`]'s own backend routing —
-    /// NSUserDefaults/Android `SharedPreferences`/a JSON file) as this
+    /// (NSUserDefaults/Android `SharedPreferences`/a JSON file) as this
     /// feature's real [`PreferencesRepository`].
     ///
     /// # Errors
-    /// See [`SharedPreferences::standard`]'s own contract: an unresolvable
-    /// file-backend data directory, or (Android only) a host shell that
-    /// never installed the platform handles this backend needs.
+    /// See [`SharedPreferences::standard`]'s own contract.
     pub fn standard() -> Result<Self, PrefsError> {
         Ok(Self {
             store: SharedPreferences::standard()?,

@@ -1,57 +1,26 @@
 //! `settings` domain entities — the feature's plain-data types
-//! (framework-free, per `crate::features::settings::domain`'s module doc).
+//! (framework-free). Two aggregates, one per repository contract next door:
+//! [`AuthToken`] (`auth tokens`) and [`Preferences`] (`terminal appearance` +
+//! `session poll`, filled together by one load).
 //!
-//! Two aggregates, one per repository contract next door: [`AuthToken`] (the
-//! `auth tokens` group) and [`Preferences`] (the `terminal appearance` and
-//! `session poll` groups, which one load fills together). Every field exists
-//! because `docs/redesign.html`'s **settings** block paints it — the token's
-//! name, its scope chip and its `created <date>` line; the font family/size,
-//! the cursor style, the layout-refresh interval and the bell switch. Nothing
-//! is modelled speculatively.
-//!
-//! # Where the *choices* live
-//!
-//! Each preference carries the closed set of values a picker sheet may offer
+//! Each preference carries its own closed choice set
 //! ([`AppearancePrefs::FONT_SIZES_PX`], [`CursorStyle::ALL`],
-//! [`PollPrefs::REFRESH_CHOICES_SECS`]) beside the field it constrains, rather
-//! than in the sheet that renders them: which font sizes a terminal supports
-//! is a fact about the domain, not about the picker, and keeping the two
-//! together is what lets the screen's pickers share one builder without any of
-//! them minting its own list. The font family is the one exception, and has no
-//! choice set here at all: which faces resolve is a fact about this device's
-//! bundled *and downloaded* assets (`crate::fonts::installed_families`) —
-//! runtime truth a framework-free module cannot hold, and which `data` must
-//! therefore persist as given rather than clamp against a list (see
-//! `data::repositories::prefs_repository`'s own module docs).
+//! [`PollPrefs::REFRESH_CHOICES_SECS`]) beside the field it constrains, so the
+//! screen's pickers share one builder without any of them minting its own
+//! list. The font family is the exception — which faces resolve is a runtime
+//! fact about this device's bundled/downloaded assets a framework-free module
+//! can't hold, so `data` persists it as given rather than clamping it (see
+//! `data::repositories::prefs_repository`'s own docs). A cursor style prints
+//! two ways — `block` in the row, `Block` in the picker
+//! ([`CursorStyle::label`] vs [`CursorStyle::option_label`]) — the redesign's
+//! own casing, not a rendering choice to re-derive.
 //!
-//! # Two labels for one value
-//!
-//! A cursor style prints as `block` in the row's `.set-value` and as `Block`
-//! in the picker sheet ([`CursorStyle::label`] vs
-//! [`CursorStyle::option_label`]) — that is the redesign's own casing, taken
-//! from screens 5 and 6 respectively, not a rendering choice a screen should
-//! re-derive.
-//!
-//! # Real and mock alike
-//!
-//! These are deliberately plain owned data, so both
-//! [`data::GrpcAuthTokensRepository`](crate::features::settings::data::repositories::GrpcAuthTokensRepository)
-//! (production) and the **mock** repositories
-//! (`crate::features::settings::data`, every headless suite) map their own
-//! source — a `muxrd` proto message, an in-memory seed — onto the same shapes
-//! field by field, with the presentation layer none the wiser which one is
-//! behind it.
-//!
-//! # The two-part token shape
-//!
-//! [`AuthToken`] is what `ListTokens` (and a mint's own stored record) carry —
-//! metadata only, **never** a secret. [`MintedToken`] is `CreateToken`'s own
-//! response shape: everything [`AuthToken`] has, plus the one-time
-//! [`MintedToken::token`] the daemon hands back **only** there (`ListTokens`
-//! reports every token's secret as empty, permanently — the wire's own
-//! contract). Splitting them is what keeps a stray secret out of
-//! [`AuthToken`]'s `Debug`/equality, which every screen row and every test
-//! assertion formats freely.
+//! **The two-part token shape**: [`AuthToken`] is what `ListTokens` (and a
+//! mint's own stored record) carry — metadata only, **never** a secret.
+//! [`MintedToken`] is `CreateToken`'s response shape: everything [`AuthToken`]
+//! has, plus the one-time [`MintedToken::token`] the daemon hands back
+//! **only** there. Splitting them keeps a stray secret out of [`AuthToken`]'s
+//! `Debug`/equality, which every row and test assertion formats freely.
 
 /// One auth token the connected server holds, as the `auth tokens` group
 /// renders it (`.token-item`).
@@ -68,10 +37,8 @@ pub struct AuthToken {
     /// What the token is allowed to do — the `.token-scope` chip.
     pub scope: TokenScope,
     /// The token's creation stamp, printed by [`created_label`](Self::created_label).
-    /// A plain `String` rather than a date type: nothing in this app does date
-    /// *arithmetic*, and the daemon hands the label over already formatted — a
-    /// SQLite `DATETIME` string over the wire (empty if the daemon itself
-    /// doesn't know it), the mock's own `2026-07-02` ISO date locally.
+    /// A plain `String`, not a date type: nothing here does date arithmetic,
+    /// and the daemon hands the label over already formatted.
     pub created: String,
 }
 
@@ -103,23 +70,19 @@ impl TokenScope {
 }
 
 /// A request to mint a new auth token — the create dialog's name plus its
-/// read-only toggle
-/// ([`AuthTokensRepository::create_token`](super::repositories::AuthTokensRepository::create_token)'s
-/// params). Mirrors the Flutter app's own `CreateTokenRequest` shape.
+/// read-only toggle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateTokenRequest {
-    /// The token's name, already trimmed by the dialog that collected it.
+    /// Already trimmed by the dialog that collected it.
     pub name: String,
-    /// Whether the minted token should be read-only (mints read-write when
-    /// unset — the mock era's own only behaviour before this toggle existed).
+    /// Mints read-write when unset.
     pub read_only: bool,
 }
 
 /// A freshly minted token: everything [`AuthToken`] carries, plus the
-/// one-time secret the daemon returns **only** on create. Mirrors the Flutter
-/// app's own `MintedToken` shape — see the [module docs](self)'s "two-part
-/// token shape" section for why this is a separate type from [`AuthToken`]
-/// rather than an optional field on it.
+/// one-time secret the daemon returns **only** on create — see the [module
+/// docs](self)'s "two-part token shape" for why this is a separate type
+/// rather than an optional field on [`AuthToken`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct MintedToken {
     /// The minted token's name.
@@ -144,11 +107,10 @@ impl MintedToken {
 }
 
 impl std::fmt::Debug for MintedToken {
-    /// Hand-written so [`Self::token`] never prints: `Zeroizing`'s own `Debug`
-    /// forwards straight to the wrapped `String` (`crate::connection`'s
-    /// `ConnectTarget` documents the same hazard for its own secret field), so
-    /// a derived impl here would put a live token secret in the clear in any
-    /// log line — or failed test assertion — that formats one.
+    /// Hand-written so [`Self::token`] never prints: `Zeroizing`'s own
+    /// `Debug` forwards straight to the wrapped `String`, so a derived impl
+    /// here would put a live secret in the clear in any log line or failed
+    /// assertion that formats one.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MintedToken")
             .field("name", &self.name)
@@ -172,18 +134,11 @@ pub struct Preferences {
 }
 
 impl Preferences {
-    /// The app's shipped defaults — **and** what `docs/redesign.html`'s
-    /// settings screen draws, with one deliberate divergence: the redesign
-    /// mock draws `Hack Nerd Font Mono`, but the app ships `JetBrains Mono`
-    /// (the app-wide face bundled everywhere, including the terminal grid's
-    /// own default). Every other value is the mock's own: `12px`, `block`,
-    /// `every 3s`, bell on.
-    ///
-    /// One definition, two consumers: the mock repository seeds from it (so
-    /// the screen and the mock are the same picture) and the controller's
-    /// signals hold it until the first load lands (so the screen never paints
-    /// a frame of blank preference values). A real client replaces the *load*,
-    /// not this.
+    /// The app's shipped defaults: `JetBrains Mono` (the app-wide bundled
+    /// face), `12px`, `block`, `every 3s`, bell on. One definition, two
+    /// consumers — the mock repository seeds from it, and the controller's
+    /// signals hold it until the first load lands, so the screen never
+    /// paints a frame of blank values.
     pub fn defaults() -> Self {
         Preferences {
             appearance: AppearancePrefs {
@@ -199,23 +154,16 @@ impl Preferences {
     }
 }
 
-/// The default terminal font family — `JetBrains Mono`, the app-wide
-/// bundled face (the redesign mock itself draws `Hack Nerd Font Mono`; see
-/// [`Preferences::defaults`]'s own doc for this one deliberate divergence).
 const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
-/// The default terminal font size, in px — the redesign's `12px`.
 const DEFAULT_FONT_SIZE_PX: u32 = 12;
-/// The default layout-refresh interval, in seconds — the redesign's
-/// `every 3s`, and the period `sessions`' own mock poll already runs at.
+/// `sessions`' own mock poll already runs at this same period.
 const DEFAULT_REFRESH_SECS: u32 = 3;
 
-/// How the remote terminal should be drawn (`terminal appearance`).
-///
-/// **Mock-persisted only.** Nothing reads these back yet: the Phase-3 terminal
-/// screen is itself a mock and renders a fixed sample, so changing a value here
-/// round-trips through the repository and updates this screen's own rows and
-/// nothing else. Phase 5 (the real terminal grid) is where the renderer starts
-/// reading them.
+/// How the remote terminal should be drawn (`terminal appearance`). The
+/// terminal screen's own controller reads these back through the same
+/// [`PreferencesRepository`](super::repositories::PreferencesRepository) —
+/// `terminal::domain` re-exports it rather than minting a second store — and
+/// maps `cursor_style`/`font_size_px`/`font_family` onto the live grid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppearancePrefs {
     /// The terminal font family, by name.

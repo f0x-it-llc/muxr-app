@@ -10,13 +10,11 @@ use crate::failure::AppFailure;
 use crate::features::settings::domain::entities::Preferences;
 use crate::features::settings::domain::repositories::PreferencesRepository;
 
-/// Loads this device's preferences via the injected repository.
 pub struct LoadPreferences {
     repo: Arc<dyn PreferencesRepository + Send + Sync>,
 }
 
 impl LoadPreferences {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn PreferencesRepository + Send + Sync>) -> Self {
         Self { repo }
     }
