@@ -1,142 +1,40 @@
 //! [`ConnectionController`] — muxr's one app-scoped connection handle — and
-//! the [`ConnectionBackend`] seam it drives.
+//! the [`ConnectionBackend`] seam it drives. See `docs/ARCHITECTURE.md`'s
+//! Connection section for why this lives beside `crate::failure` rather than
+//! in `connect`'s own slice, and the controller/backend split.
 //!
-//! Lives beside [`crate::failure`] rather than inside any one feature's
-//! `{domain, data, presentation}` slice: whether the app is connected gates
-//! *routing* itself (`crate::routes`'s session guard) and is read by at least
-//! two features (Sessions renders [`ConnectionController::server_info`]'s
-//! latency, Settings renders the rest), so it is composition-root state, not
-//! `connect`'s alone.
+//! **`ConnectRun`'s `Ready`/`Pending` sum type** lets one controller serve
+//! both backends: [`MockConnectionBackend`] settles **synchronously** (every
+//! headless suite calls `connect` and asserts on the next line), while a
+//! `tonic` dial cannot be polled outside the runtime that owns its reactor —
+//! the two arms name that difference rather than hide it. A suite opts in
+//! via [`use_mock_connection_for_tests`], from `tests/support::setup()`.
 //!
-//! Constructed exactly once, in `MuxrApp::init`, via
-//! [`provide_connection_controller`] — published under the root owner
-//! (`clean_signals_frust::provide_controller`) so any screen recovers the
-//! *same* handle via [`expect_connection_controller`] (itself a thin
-//! `use_context` wrapper), and so does `crate::routes`'s top-level session
-//! guard, which has no `&mut AppState` to reach a controller through any
-//! other way.
+//! **Single-flight `connecting`** and **`is_read_only`** (mirrored off
+//! `ServerInfo`) are the two signals beyond `connected`; `is_read_only` is
+//! the *primary* defence against a read-only credential's mutations — the
+//! server's own `PERMISSION_DENIED` refusal (collapsed into the retryable
+//! `AppFailure::Network` bucket) is the fallback nobody should reach.
 //!
-//! # The backend seam
+//! **Token hygiene**: the plaintext auth token is zeroized as soon as the
+//! `Login` request is built; the minted session token is scrubbed out of the
+//! response once the client holds it. **Threading**: a real dial runs on the
+//! background runtime ([`frust::spawn`]); a UI-thread coordinator
+//! ([`frust::spawn_local`]) awaits it and is the **sole signal writer** — no
+//! signal is written off the UI thread. **Failures** emit through the
+//! embedded [`ControllerCore`], and `MuxrApp::init` subscribes the app's
+//! toast bridge to it once.
 //!
-//! The controller owns the *state machine* (which signals a connect writes, in
-//! what order, and what a teardown resets); a [`ConnectionBackend`] owns the
-//! *work*. Two implementations live here:
-//!
-//! - [`NetConnectionBackend`] — the real flow over [`crate::net`]: dial under
-//!   the target's [`TrustConfig`], `Login`, install the minted session token,
-//!   `GetVersion` (timed, which is what [`ServerInfo::latency_ms`] reports).
-//! - [`MockConnectionBackend`] — the in-memory facts the app ran on before a
-//!   wire existed, unchanged and **synchronous**.
-//!
-//! That synchrony is a contract, not an accident: every headless suite in
-//! `tests/` calls `connect` and asserts the connected state on the next line,
-//! with no frame pumped in between. [`ConnectRun`] is what lets one controller
-//! serve both — a backend either hands back an outcome that is already
-//! decided, or the future that will decide it. A `tonic` dial cannot be polled
-//! outside the runtime that owns its reactor, so "just make it async and poll
-//! it once" is not an option; the two arms name the difference instead of
-//! hiding it.
-//!
-//! A suite opts the process into the mock through
-//! [`use_mock_connection_for_tests`] — the same seam shape
-//! `crate::features::settings::di::use_mock_preferences_for_tests` uses, and
-//! for the same reason: an integration test binary links the *normal* build of
-//! this crate (never one compiled with `--cfg test`), so there is no
-//! `cfg(test)` for [`provide_connection_controller`] to branch on. The one call
-//! site is `tests/support::setup()`, which every suite already runs before
-//! mounting anything.
-//!
-//! # The connect flow
-//!
-//! [`ConnectTarget::trust_mode`] maps onto a [`TrustConfig`] *before* a socket
-//! is opened, and [`TrustMode::Pinned`] with a missing or malformed fingerprint
-//! fails right there — a pin that cannot be parsed never degrades into a
-//! weaker posture (`crate::net::tls`'s fail-closed contract). Then: dial,
-//! `Login` (the only place [`ConnectTarget::token`] crosses the wire),
-//! `set_session_token`, timed `GetVersion`, publish. Teardown runs the other
-//! way: scrub the session token, drop the client (which is how a `muxrd`
-//! connection closes — see [`crate::net::client`]), then reset the signals,
-//! `connected` last, since that write is what makes the session guard bounce.
-//!
-//! **Token hygiene.** The plaintext auth token is dropped — and so zeroized —
-//! as soon as the `Login` request is built, and the minted session token is
-//! scrubbed out of the response message once the client holds it. What this
-//! cannot reach is the encoded request frame `tonic` owns; that buffer is not
-//! addressable from this layer.
-//!
-//! [`ConnectionController::ping`] re-times that same `GetVersion` on a live
-//! connection — the Sessions strip's heartbeat — and touches no credential at
-//! all: the RPC is unauthenticated, exactly like the connect-time one, so a
-//! ping neither reads nor scrubs a token.
-//!
-//! # Threading
-//!
-//! A real dial runs on the background runtime through [`frust::spawn`], and a
-//! UI-thread coordinator ([`frust::spawn_local`]) awaits its result and is the
-//! **sole signal writer** — the `use_task` split `docs/CODE_STANDARDS.md`
-//! mandates for heavy work, hand-rolled because a connect is imperative (a
-//! press) rather than a component's first load. No signal is written off the UI
-//! thread. Polling socket futures on the UI queue would couple the handshake to
-//! the frame clock and is deliberately not what happens here.
-//!
-//! # Failure seam
-//!
-//! [`ConnectionController`] embeds a [`ControllerCore`] by composition (the
-//! `examples/huddle` controller shape) and exposes it via
-//! [`core`](ConnectionController::core) plus `AsRef`. Every failure this
-//! controller raises — a refused dial, a rejected token, an expired session —
-//! is emitted there, and `MuxrApp::init` subscribes the app's toast bridge to
-//! it once. That is why nothing in this module names `crate::ui`.
-//!
-//! One vocabulary gap rides along, recorded in `crate::net::error`: a
-//! server-side `PERMISSION_DENIED` (a read-only credential refusing a mutating
-//! RPC) collapses into the retryable [`AppFailure::Network`] bucket. Splitting
-//! it would mean a new [`AppFailure`] variant and a new toast string for every
-//! caller; [`ConnectionController::is_read_only`] is the primary defence
-//! instead — the screens disable what a read-only credential cannot do, and the
-//! server's refusal is the fallback nobody should reach.
-//!
-//! # Credential offer placement
-//!
-//! [`ConnectionController::credential_offer`] is hosted here (not on `connect`)
-//! for the reason everything else in this file is: a settled connect writes it,
-//! a teardown clears it, and it has to survive a navigation. What *answers* it
-//! is the **Connect screen**, before the redirect to Sessions — the user who
-//! just typed a server is asked about that server while still looking at the
-//! form they typed it into.
-//!
-//! Sessions used to render it as a banner instead, because the Connect screen
-//! unmounts on the success redirect before its own offer UI could show. The way
-//! out of that lifecycle trap is not a second screen: it is **not redirecting
-//! yet**. `connect`'s completion closure reads this signal and, when it holds an
-//! offer, raises the save dialog on Connect and holds the push to `/sessions`
-//! until the answer resolves — a save that finished either way, a decline, or a
-//! dismissal. Connect therefore stays mounted for exactly as long as the
-//! question is on screen, and the redirect that used to race it is the thing
-//! waiting on it. [`ConnectionController::accept_credential_offer_with`] is that
-//! handshake's completion seam, and it is total by contract: every refusal path
-//! below still runs the callback, so a save that fails — or one no
-//! [`CredentialSaver`] is installed to run at all — can never strand the user on
-//! Connect.
-//!
-//! Eligibility is split deliberately: the **caller** decides whether a target
-//! is offerable at all ([`ConnectTarget::offer_credential`] — a manual,
-//! non-pairing connect the user asked to be remembered, saved endpoint or not,
-//! since a typed token at a known server is exactly how a stored credential
-//! gets replaced), because only the caller has the saved server list, and this
-//! module must not depend on a feature's repository. The controller ANDs that
-//! with the one fact only a completed login knows: a read-only credential is
-//! never offered for saving.
-//!
-//! Accepting the offer has to *do* something, and what it does — mint a token,
-//! raise a biometric prompt, write a secure store, update a saved-server row —
-//! belongs to the `connect` feature, not here. [`CredentialSaver`] is the seam
-//! that keeps it there: this module names a one-method trait and calls it,
-//! `connect` installs an implementation through
-//! [`set_credential_saver`](ConnectionController::set_credential_saver), and no
-//! feature type crosses into this file. With none installed (a headless suite
-//! that never mounts Connect), accepting still clears the offer, saves nothing,
-//! and runs the completion callback described above.
+//! **`CredentialSaver`** is a one-method seam boundary: this module names
+//! the trait and calls it, `connect` installs the implementation that mints
+//! a token, raises a biometric prompt and writes the secure store — no
+//! feature type crosses into this file. **`credential_offer`** lives here
+//! because a settled connect writes it and it must survive the navigation to
+//! the screen that answers it: `connect`'s completion closure holds the push
+//! to `/sessions` until the save dialog resolves rather than racing
+//! Connect's own unmount — total by contract, since every refusal path still
+//! runs the callback so a failed or uninstalled saver can never strand the
+//! user.
 
 use std::collections::BTreeSet;
 use std::fmt;

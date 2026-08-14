@@ -1,10 +1,9 @@
 //! Named spacing tokens on the app's measured de-facto scale — the values
 //! `docs/redesign.html`'s screens repeat over and over once transcribed into
 //! per-screen padding/gap constants (`6`/`8`/`10`/`12`/`16` are the biggest
-//! clusters). Nothing adopts these tokens yet: a later task swaps each
-//! screen's own local constant for the matching tier here, so the values
-//! below must equal today's de-facto ones exactly — no rendered value moves
-//! anywhere in this refactor.
+//! clusters). Adopted by every feature in place of its own local constants,
+//! so the values below equal today's de-facto ones exactly — no rendered
+//! value moved when call sites switched over.
 //!
 //! Eleven tiers cover the eleven values that recur across more than one
 //! screen; an odd one-off (`3`/`5`/`7`/`9`/`11`/`13`/`18`px) stays

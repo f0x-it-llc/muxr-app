@@ -10,39 +10,27 @@
 //!
 //! [`icon_visual`] is the whole state machine as one pure function of elapsed
 //! milliseconds — the widget only accumulates a clock, calls it, and paints
-//! what it returns.
-//!
-//! # Cueing the rest of the sequence
-//!
-//! The phase is published through an optional [`RwSignal`]
+//! what it returns. The phase is published through an optional [`RwSignal`]
 //! ([`IconPhaseView::on_phase`]), written **only when it changes**, so the
 //! orchestrator can start the burst and the rain the instant the icon starts
-//! dissolving — the source's `setTimeout(..., ICON_DELAY)` cue, expressed as
-//! a reactive edge instead of a timer. `IconPhase::Dissolve` is published at
-//! exactly [`spec::ICON_DELAY_MS`].
+//! dissolving — a reactive edge instead of a timer; `IconPhase::Dissolve`
+//! publishes at exactly [`spec::ICON_DELAY_MS`].
 //!
-//! # How the icon is actually drawn
+//! **How the icon is drawn.** The framework has no app-reachable way to hand
+//! a decoded image's pixels to `PaintScene::draw_image`, so this widget
+//! composes rather than blits: it retains `frust`'s own `Image` widget as a
+//! child pod and paints it under a scale transform plus a translucent layer
+//! (both `PaintScene::push_transform`/`push_layer` compose onto the child's
+//! draws). [`IconArt::Vector`] is the decode-failure fallback: a rounded
+//! amber tile with the `▣` brand glyph centered.
 //!
-//! The framework has no app-reachable way to hand a decoded image's pixels to
-//! `PaintScene::draw_image` (`ImageSource`'s inner `ImageData` accessor is
-//! private), so this widget composes rather than blits: it retains `frust`'s
-//! own `Image` widget as a child pod and paints it under a scale transform
-//! plus a translucent layer. Both `PaintScene::push_transform` and
-//! `PaintScene::push_layer` compose onto the child's draws, which is what
-//! makes an app-authored scale/fade wrapper around a framework widget
-//! possible at all. [`IconArt::Vector`] is the decode-failure fallback: a
-//! rounded amber tile with the `▣` brand glyph centered.
-//!
-//! # Reduced motion
-//!
-//! `MotionScheme::reduce_motion` collapses the whole beat: [`icon_visual`]
-//! reports [`IconPhase::Done`] on the first frame with nothing painted and no
-//! continuation frames requested, so an orchestrator that mounts this under
-//! reduced motion is cued straight to the assembled screen. The source's
-//! reduced path keeps a 200ms static icon before jumping ahead; that beat is
-//! deliberately dropped here in favour of the flat "terminal state
-//! immediately" rule, and the orchestrator is expected to skip the splash
-//! entirely rather than flash a frame of nothing.
+//! **Reduced motion** collapses the whole beat: [`icon_visual`] reports
+//! [`IconPhase::Done`] on the first frame with nothing painted and no
+//! continuation frames requested, so an orchestrator mounting this under
+//! reduced motion is cued straight to the assembled screen (the source's
+//! 200ms static-icon reduced path is deliberately dropped in favour of this
+//! flat "terminal state immediately" rule — the orchestrator is expected to
+//! skip the splash entirely rather than flash a frame of nothing).
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{

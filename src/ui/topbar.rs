@@ -1,150 +1,37 @@
 //! `muxr_topbar` — the app's branded top bar (`docs/redesign.html`'s
 //! `.topbar`), mounted **once** by [`crate::shell`] as persistent chrome
-//! **floating over** the navigator rather than by each screen.
+//! floating over the navigator — see `docs/ARCHITECTURE.md`'s Shell and UI
+//! Substrate sections for the chrome-not-layout/hidden-not-unmounted contract
+//! and the "chrome icons are vectors" rule this widget is the reference site
+//! for. Three zones: leading (brand mark + wordmark, or a `‹` back button),
+//! an absolutely centered title, and one optional trailing icon; `/` has no
+//! bar, so the whole widget is [hidden](TopBarView::hidden) there. Modality
+//! is not this widget's job — the root overlay host makes an inert,
+//! unaddressable bar under an open overlay structurally, painting its own
+//! scrim over it. A hand-rolled [`View`]/[`Widget`] pair: `frust::glyph::app_bar`'s
+//! fixed 52px/left-aligned-title shape can't bend into this bar's
+//! 46px/centered-title one.
 //!
-//! ```text
-//! ┌──────────────────────────────────────────────┐
-//! │ ▪▪  muxr        100.71.31.57              ⚙  │  46px, bg-surface
-//! │ ▪▪                                           │  + hairline bottom border
-//! └──────────────────────────────────────────────┘
-//! ```
+//! **Entrance/exit** slides the bar in from above the top edge while fading
+//! (reversed on exit) on the same [`GLYPH_SLIDE_ENTER`]/[`GLYPH_SLIDE_EXIT`]
+//! timings the page transition under it runs, started the same rebuild
+//! rather than reading the navigator's transition progress (not exposed).
+//! `reduce_motion` collapses this to [`REDUCE_MOTION_DURATION`], linear; a
+//! mid-reveal bar takes no input and publishes no semantics until settled.
 //!
-//! Three zones: a **leading** slot (the brand — a 16px 2×2 amber grid plus the
-//! `muxr` wordmark in the display face — or a `‹` back button), an **absolutely
-//! centered title** slot, and one optional **trailing icon** slot. The Connect
-//! screen (`/`) deliberately has **no** bar: there the whole widget is
-//! [hidden](TopBarView::hidden) and lays out to zero height (see below).
+//! **Crossfades** (title + leading-slot swap on a route change) run through
+//! the framework's [`PatternSwitcher`](frust::motion::switcher); the staging
+//! recipes, [`TitleShift`] (±14px x-shift + fade, ~220ms `--ease-out`,
+//! direction flips on back) and [`LeadingSwap`] (±6px y-shift + fade), are
+//! transcribed from `frust-widgets`' `glyph/appbar.rs` module docs since the
+//! framework ships no pattern carrying those numbers. A crossfade staged the
+//! same frame the bar hides never plays (a switcher advances only in
+//! `paint`, which a hidden bar skips) — the frozen child sits retained until
+//! the next swap supersedes it.
 //!
-//! # Chrome icons are vectors. Font glyphs are for content text only.
-//!
-//! The bar's two affordances used to be **text runs** — a `‹` (`U+2039`) and a
-//! `⚙` (`U+2699`) set in the button label's own face. Neither is in the
-//! bundled Glyph faces (IBM Plex Mono / Space Mono), so each platform resolved
-//! them through its own fallback chain and each answered differently: the `⚙`
-//! was simply **absent on iPhone**, and the same string rendered as visibly
-//! different marks on Android and iOS. That is not a tuning problem — a font
-//! fallback chain is not a thing an app can specify — so every icon this bar
-//! paints is now a **vector**: a [`frust::icons`] `IconSource` (or an
-//! app-supplied one, [`CHEVRON_LEFT`]) filled as a path by [`icon_button`],
-//! identical on every platform by construction.
-//!
-//! **The rule this leaves behind, for the whole app:** *chrome* icons — a bar
-//! affordance, a FAB, a row's trailing chevron — are vectors. A **font glyph
-//! is only ever content text**, where the run is the content (the Sessions
-//! meta line's `▣ 9 panes`, the splash's brand rain) and a missing face
-//! degrades to a tofu box in a sentence rather than to an invisible button.
-//!
-//! # Modality is not this widget's job
-//!
-//! The bar floats **over** the route navigator (see
-//! [`crate::shell::root_view`]), so a sheet or dialog pushed *inside* that
-//! navigator could never cover it: it stayed lit and, worse, fully **tappable**
-//! under an open modal — the `⚙` navigated straight out from under a sheet.
-//! This widget used to close that hole itself, with a `overlay` flag that
-//! painted the modal's own scrim over the bar and withdrew its input and
-//! semantics.
-//!
-//! None of that survives the root overlay host (`crate::AppState::overlays`,
-//! FINDINGS #44). Every overlay is now a page of a navigator whose root page is
-//! the *whole app*, this bar included, and a navigator routes input — and
-//! publishes accessibility nodes — for its **top page only**. So an open
-//! overlay makes the bar inert and unaddressable structurally, and the
-//! overlay's own scrim is painted at the root, genuinely over the bar rather
-//! than mirrored onto it. A flag here would be a second, drifting answer to a
-//! question the host already answers.
-//!
-//! # Why a hand-rolled widget rather than `glyph::app_bar`
-//!
-//! `frust::glyph::app_bar` is a 52px bar whose title is *left-aligned* next to
-//! its leading slot, with no brand-mark affordance. The redesign's bar is 46px
-//! with a title centered on the **bar**, not on the space left over between the
-//! slots — a difference no `AppBarView` builder expresses. So this is a
-//! [`View`]/[`Widget`] pair over [`frust::authoring`] (the
-//! `crate::ui::backdrop` precedent).
-//!
-//! # Hidden, never unmounted
-//!
-//! [`TopBarView::hidden`] is the `/` state, and it is a *flag* rather than an
-//! absent child on purpose: the bar is a fixed-index child of the shell's root
-//! `Stack`, and a `Stack` whose child count changed would shift every later
-//! child's positional index and make reconciliation tear the live navigator
-//! down (the bug `crate::shell::root_view`'s stable-`Stack` invariant exists
-//! for). A **fully** hidden bar lays out to [`Size::ZERO`], paints nothing,
-//! routes nothing, and contributes no semantics node.
-//!
-//! # Entrance and exit (why the bar animates itself)
-//!
-//! The bar does **not** displace the page under it — it floats over a
-//! full-height navigator and each bar-bearing page reserves its own top
-//! clearance ([`topbar_clearance`]). So a route change that gains or loses the
-//! bar must not be a discrete 46px reflow of the page: the bar instead slides
-//! in from fully above the top edge (its own inset-extended height) while
-//! fading up, and reverses on the way out.
-//!
-//! Its timings and curves are **GlyphSlide's** — the very pattern the page
-//! transition under it runs ([`GLYPH_SLIDE_ENTER`]/[`GLYPH_SLIDE_EXIT`],
-//! imported rather than transcribed; the curves are transcribed because
-//! `frust-widgets`' own are private) — so bar and page read as one motion.
-//! They are matched, **not** frame-coupled: a `NavigatorController` exposes no
-//! transition progress to read (FINDINGS #40), so nothing app-side can drive
-//! the bar off the page's own driver. Same numbers, two clocks started in the
-//! same rebuild.
-//!
-//! **Reduced motion** collapses the reveal exactly the way every framework
-//! pattern collapses — the theme's `MotionScheme::reduce_motion`, the
-//! framework's own [`REDUCE_MOTION_DURATION`], linear, and no geometric motion
-//! at all (a pure fade). The bar re-derives that collapse rather than calling
-//! it because neither `nav::transition::resolve_spec` nor `PatternSwitcher`'s
-//! internal branch is reachable through the `frust::`/`frust::authoring`
-//! facade an app widget is limited to.
-//!
-//! **A mid-reveal bar takes no input and publishes no semantics.** It paints
-//! (that is the whole point) but a half-shown bar sitting over a page must not
-//! swallow a tap meant for the page under it, and an accessibility node whose
-//! affordances route nowhere is worse than no node. Both come back the frame
-//! the reveal settles.
-//!
-//! # Crossfades (the `glyph::app_bar` behavior, reused not reimplemented)
-//!
-//! A route change swaps two things: the title run and the leading slot. Both
-//! are staged through the framework's own
-//! [`PatternSwitcher`](frust::motion::switcher) — a keyed single-slot switcher
-//! that freezes the outgoing child, builds the incoming one, and stages the
-//! pair under a [`TransitionPattern`]. Only the two staging *recipes* are
-//! app-side, transcribed from `frust-widgets`' `glyph/appbar.rs` module docs
-//! ("Title crossfade"/"Selection mode"), because the framework has no pattern
-//! carrying those numbers:
-//!
-//! - [`TitleShift`] — the new title enters with a `±14px` x-shift + fade over
-//!   `~220ms` on the `--ease-out` cubic; direction flips on a back navigation.
-//! - [`LeadingSwap`] — brand ↔ `‹` crosses over vertically (`±6px` y + fade).
-//!
-//! `reduce_motion` is **not** handled here: `PatternSwitcher` collapses every
-//! pattern to a fast (≤120ms) linear cross-fade with no geometric motion when
-//! the active theme sets it, which is exactly the collapse `glyph::app_bar`
-//! documents.
-//!
-//! **A crossfade staged on the frame the bar hides never plays.** Leaving a
-//! titled route for `/` swaps both slots *and* hides the bar in one rebuild,
-//! and a switcher only advances its driver during `paint` — which a hidden bar
-//! skips. So the frozen outgoing child is retained, unadvanced, until the next
-//! swap (arriving back at a titled route) supersedes it, which
-//! `PatternSwitcher::rebuild` handles by dropping the stale pair outright. The
-//! cost is one retained text pod while sitting on Connect; the alternative
-//! (painting a bar with zero height) buys nothing visible. Hidden ⇒ empty title
-//! ⇒ the very next visible frame is always a real swap, which is what keeps
-//! that supersede guaranteed rather than merely likely.
-//!
-//! # Top-inset consumption (the Flutter-parity point)
-//!
-//! Layout adds [`WindowInsets::padding().top`](frust::authoring::WindowInsets)
-//! to its own height and offsets its content **below** the inset, while the
-//! background paints the full extended height — exactly what `glyph::app_bar`
-//! does (see its module docs' "Top-inset consumption"), and what Flutter's
-//! `AppBar` does. Since the bar floats *over* the page rather than beside it,
-//! that same sum is what a bar-bearing page reserves at its own top:
-//! [`topbar_clearance`] is the one helper the three such screens share, so the
-//! two numbers cannot drift apart.
+//! [`topbar_clearance`] is the one helper a bar-bearing page uses to reserve
+//! its own top clearance (status-bar inset + [`BAR_HEIGHT`]), matching the
+//! extended height this widget's own background paints.
 
 use std::rc::Rc;
 
@@ -553,9 +440,9 @@ impl<State: 'static> TopBarView<State> {
         self
     }
 
-    /// Put a vector `mark` (`icons::SETTINGS`, and Phase 3's
-    /// `icons::MORE_VERT`) in the trailing icon slot under the accessible name
-    /// `label`, firing `on_press` when it is tapped.
+    /// Put a vector `mark` (`icons::SETTINGS`, `icons::MORE_VERT`) in the
+    /// trailing icon slot under the accessible name `label`, firing
+    /// `on_press` when it is tapped.
     ///
     /// The slot is an [`icon_button`] filling the source's 30×30
     /// `.topbar-icon` box: transparent at rest (the source's `.topbar-icon`
@@ -722,23 +609,17 @@ impl Widget for BrandMarkWidget {
 /// This is the app's answer to "chrome icons are vectors" (see the
 /// [module docs](self)): `frust::button` takes a `String` label and nothing
 /// else, so the only way to press a `frust::icon` is to compose the press
-/// around it — and a bare `GestureDetector` contributes no accessibility node
-/// of its own, which would leave every chrome affordance in the app
-/// unreachable to a screen reader. So this is a leaf press target over one
-/// icon pod: it captures the press, tints itself while held, and contributes
-/// the `Role::Button` node a plain `GestureDetector` cannot — differing from
-/// composed-art chrome elsewhere only in that it *owns* the mark it paints
-/// rather than wrapping arbitrary art.
+/// around it, and a bare `GestureDetector` contributes no accessibility node
+/// of its own — so this is a leaf press target over one icon pod that
+/// captures the press, tints itself while held, and contributes the
+/// `Role::Button` node a plain `GestureDetector` cannot.
 ///
-/// **Lives here, beside the bar that needed it first**, and is `pub` because
-/// the Connect FAB is its second caller — `examples/huddle`'s own convention
-/// (promote a hand-rolled primitive only once a second consumer appears).
-/// A third caller is the moment to give it its own `crate::ui` module.
-///
-/// The press treatment is the framework's own [`PRESSED_OPACITY`] wash rather
-/// than `Button`'s scale pivot: scaling needs an `AnimationController` this
-/// leaf has no reason to own, and a 30px chrome mark dipping in tone reads the
-/// same.
+/// `pub` since more than one screen calls it now (the Connect FAB among
+/// them); see `docs/ARCHITECTURE.md`'s Planned section for its
+/// promotion-out-of-`topbar` trigger. The press treatment is the framework's
+/// own [`PRESSED_OPACITY`] wash rather than `Button`'s scale pivot: scaling
+/// needs an `AnimationController` this leaf has no reason to own, and a 30px
+/// chrome mark dipping in tone reads the same.
 pub fn icon_button<State: 'static, F: Fn(&mut State) + 'static>(
     mark: impl Into<IconData>,
     label: impl Into<String>,
@@ -1170,7 +1051,8 @@ impl Widget for TopBarWidget {
         // in it) rather than whatever the button happens to measure. A back-led
         // bar with no action still reserves the box — the mock's
         // `<div style="width:30px">` spacer — so the title's clamp stays
-        // symmetric and a Phase 3 `⋮` slots in without the title jumping.
+        // symmetric and a later trailing icon slots in without the title
+        // jumping.
         let trailing_start = match self.children.get_mut(ACTION_POD) {
             Some(action) => {
                 let size = action.layout_child(ctx, &icon_bc);

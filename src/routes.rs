@@ -1,129 +1,45 @@
 //! Muxr's full route table, its one guard, and the app-wide navigation handle
-//! every screen pushes paths through — a hub file: each page builder lives in
-//! its owning feature's `presentation::pages` module (see each feature's own
-//! module docs for the `{domain, data, presentation}` layering convention
-//! `examples/huddle`'s `src/README-phase-c.md` establishes).
+//! every screen pushes paths through — a hub file; each page builder lives in
+//! its owning feature's `presentation::pages` module. See
+//! `docs/ARCHITECTURE.md`'s Navigation section for the route table shape and
+//! the overlay/back-press contracts this module implements.
 //!
-//! Four routes, one per feature, all flat leaves today: `/` (Connect),
-//! `/sessions`, `/terminal`, `/settings`. [`session_guard_with`] is the one
-//! guard: a top-level [`frust::Router::redirect`] bouncing an unauthenticated
-//! push to `/sessions`/`/terminal` back to `/`.
+//! **Session guard**: [`session_guard_with`] closes over
+//! `Arc<ConnectionController>` **by capture, not context** — it must stay
+//! safe to consult from a press handler's owner-less call stack, and fires
+//! only at navigation time (a connection dropping mid-screen does not
+//! reactively bounce it back).
 //!
-//! # One router, one handle — [`install_app_router`] / [`app_nav`]
+//! **One router, one handle.** [`Router`]/[`NavigatorController`] are
+//! `Rc`-backed (neither `Send` nor `Sync`), so the router cannot be threaded
+//! through `frust::provide_context` (`Send + Sync` bound) — it lives in a
+//! process `thread_local!` instead, reached via [`app_nav`] from a screen's
+//! own `Component::init`, the same handle-in-a-thread-local idiom
+//! `crate::ui::toasts::app_toasts` uses (minus the self-healing: a missing
+//! handle here is a loud panic).
 //!
-//! There is exactly **one** [`Router`] in this app, built here and owned by
-//! `crate::AppState::nav`. Screens navigate by *path*, and only a `Router`
-//! resolves a path against the route table (and runs the guard attached to it)
-//! — a [`NavigatorController`] pushes page *builders*. But a screen cannot be
-//! handed the router through the route table it belongs to: [`build_routes`]
-//! runs **before** `Router::with_controller`, so a page builder closure has
-//! nothing to capture. And it cannot be handed one through its component state
-//! either — a `Component`'s callbacks see their own `State`, never the outer
-//! [`AppState`] where the router lives (`frust_core::component`'s state
-//! boundary).
+//! **The route-meta mirror** the shell's bar reads is depth-*fall* triggered,
+//! not depth-equality triggered, since [`NavigatorController::depth`] is
+//! advisory (stale until the next rebuild drains queued ops): a reconcile
+//! clamps the mirror to the deeper of its own stack and the navigator's
+//! last-published depth, discounted by any pop already queued but not yet
+//! drained ([`NavState::record_push_depth`]) — otherwise a handler that pops
+//! then pushes in the same rebuild would record the landing route one too
+//! deep, permanently. [`Nav::pop`] drops its own mirror entry immediately
+//! rather than waiting for the next reconcile, so the bar retitles the same
+//! frame the pop is recorded.
 //!
-//! So the router is published *after* construction, as a small clonable
-//! [`Nav`], and a screen resolves it in its own `Component::init` (the same
-//! discipline `crate::connection::expect_connection_controller` follows) and
-//! keeps it in its `State`.
+//! **Overlays never touch this stack.** Every menu/sheet/dialog is a page of
+//! the root overlay host (`crate::AppState::overlays`), which routes input
+//! and publishes accessibility nodes for its top page only and outranks this
+//! navigator for the Android back press (R44-back) — this mirror never sees
+//! one open, stack or close.
 //!
-//! ## Why a thread-local and not `provide_context`
-//!
-//! [`frust::provide_context`] is `reactive_graph`'s, whose signature is
-//! `provide_context<T: Send + Sync + 'static>`. [`Router`]/
-//! [`NavigatorController`] are `Rc`-backed and so neither `Send` nor `Sync`
-//! (which is also why `clean_signals_frust::use_controller`, bounded the same
-//! way, can never host one) — a `Nav` simply cannot be put into frust's
-//! context. It therefore lives in a process-`thread_local!`, reached by calling
-//! [`app_nav`] from anywhere on the UI thread: the same handle-in-a-thread-local
-//! idiom `crate::ui::toasts::app_toasts` documents, minus the self-healing
-//! (a router cannot be recreated without the navigator it drives, so a missing
-//! handle is a loud panic instead). Per-**thread** is exactly right here —
-//! frust is single-UI-threaded, and it additionally isolates each headless
-//! test, which `cargo test` runs on its own thread.
-//!
-//! # The route-meta mirror (what the shell's top bar reads)
-//!
-//! [`crate::shell`] renders **one** persistent top bar above the navigator, so
-//! something has to answer "which route is on top, and what does its bar say?".
-//! Only the navigator knows its own page stack, and it exposes just a
-//! [`NavigatorController::depth`] count — no per-page identity. So [`Nav`],
-//! which already fronts *every* path navigation in the app, keeps a small
-//! **mirror** beside it: one `(depth_at_push, `[`Option<RouteMeta>`](RouteMeta)`)`
-//! entry per path navigation it performed, reconciled against that authoritative
-//! depth on every read ([`Nav::bar`]).
-//!
-//! Three properties fall out of that shape, and they are the whole design:
-//!
-//! - **A pop that never passed through `Nav` still corrects the bar.** An
-//!   Android back gesture (or a bare [`NavigatorController::pop`]) drops the
-//!   stack without telling anyone; the next reconcile sees the live depth fall
-//!   and drops every entry recorded deeper than it.
-//! - **A transparent utility push does not retitle the bar.** A sheet/dialog is
-//!   pushed as a *page builder* straight through a [`NavigatorController`],
-//!   never through [`Nav`], so it produces **no** mirror entry — the bar keeps
-//!   showing the covered route's title, which is exactly right. Since the root
-//!   overlay host landed (`crate::AppState::overlays`) it is not even on this
-//!   stack: an overlay adds depth to the *host*, and the route stack under it
-//!   is untouched.
-//! - **A guarded push retitles honestly.** The mirror records the *resolved*
-//!   (post-redirect) path, so an unauthenticated `/sessions` bounced to `/`
-//!   records `/`'s (absent) bar, not `/sessions`'.
-//!
-//! Reconciliation is depth-*fall* triggered, not depth-equality triggered,
-//! because [`NavigatorController::depth`] is advisory — published at the last
-//! rebuild, so it still reads the pre-push value at the moment a press handler
-//! records a push (see [`NavState::reconcile`]).
-//!
-//! ## Consult the queued pop *before* recording a push
-//!
-//! That reconcile is an **erasing** operation gated on a depth which is one
-//! rebuild stale *by construction*: `RenderRoot::rebuild` runs the whole
-//! app-logic closure — the shell's bar with it — **before** the navigator
-//! drains its queued ops, so `depth()` still reports the pre-op value on the
-//! frame a press handler pushes or pops. The one place that *adds* coverage
-//! the eraser could later wipe therefore reads the queue first:
-//! [`NavState::record_push_depth`] discounts the pop already enqueued
-//! ([`NavState::pending_pop`]) before deciding how deep a landing route sits.
-//! A handler that pops and pushes in the same rebuild would otherwise record
-//! the new route one too deep — *permanently*, since a mirror entry is never
-//! re-derived — and the next depth fall past it would evict the route's own
-//! bar entry.
-//!
-//! # Overlays are not on this stack, and the bar needs no flag for them
-//!
-//! Since the root overlay host landed (`crate::AppState::overlays`, FINDINGS
-//! #44) a menu, sheet or dialog is a page of the **host**, which wraps the
-//! whole app — route navigator, bar, toast layer and all. So an overlay never
-//! moves the route depth, never reaches this mirror, and cannot perturb the
-//! arithmetic above.
-//!
-//! It also leaves the bar nothing to mirror. The host routes input — and
-//! publishes accessibility nodes — for its **top page only**, so with an
-//! overlay up the entire app under it is inert and unaddressable for free, and
-//! the overlay's own scrim is painted at the root and so genuinely covers the
-//! floating bar. The app-side bookkeeping that used to fake both — a counted
-//! modality flag driving a scrim the bar painted over itself — was deleted with
-//! the adoption; nothing here counts overlays any more.
-//!
-//! # Back on `/sessions` is a question, not a pop
-//!
-//! Every route here obeys the Android back press by popping — except
-//! [`SESSIONS_ROUTE`], the one route whose page owns something a pop would
-//! silently throw away: the live `muxrd` connection. So that push (and only
-//! that push) carries [`frust::BackPolicy::DismissAnimated`] plus a
-//! dismiss-signal cell, which makes a back press **bump the cell instead of
-//! popping the page**; the Sessions screen observes the bump and raises its own
-//! disconnect confirmation, and only a confirmed answer disconnects and pops.
-//! [`sessions_back_signal`] is where that cell is published for the screen to
-//! resolve, exactly as [`app_nav`] publishes the handle beside it.
-//!
-//! Nothing about the mirror changes: the push still records its depth and
-//! metadata the way [`Nav::push`] always did, so a back press that raises the
-//! confirmation moves neither the route stack nor the bar. And a back press
-//! with any overlay open never reaches this navigator at all (the root host
-//! outranks it — **R44-back**), which is what makes "back again while the
-//! confirmation is up" read as a cancel with no code here at all.
+//! **`/sessions`' back press is a question, not a pop**: it alone carries
+//! [`frust::BackPolicy::DismissAnimated`] plus a dismiss-signal cell
+//! ([`sessions_back_signal`]), so a back press bumps the cell rather than
+//! popping the live `muxrd` connection out from under the screen; the screen
+//! raises its own disconnect confirmation and only a confirmed answer pops.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -185,10 +101,10 @@ pub enum BarLeading {
     /// A `‹` that pops back to the route below.
     ///
     /// **Design deviation, deliberate.** `docs/redesign.html`'s terminal mock
-    /// carries the brand + a `⋮` rather than a back affordance (only its
-    /// settings screen, line 318, shows the `‹`); the product decision is that
-    /// *every pushed route* gets a back button, so `/terminal` takes the `‹`
-    /// too and its `⋮` joins the trailing slot in Phase 3.
+    /// carries the brand + a `⋮` rather than a back affordance; the product
+    /// decision is that *every pushed route* gets a back button, so
+    /// `/terminal` takes the `‹` too, with its `⋮` in the trailing slot
+    /// ([`BarAction::TerminalMenu`]).
     Back,
 }
 
@@ -1052,14 +968,12 @@ mod tests {
 
     #[test]
     fn an_overlay_on_the_host_cannot_perturb_the_mirror_at_all() {
-        // The shape every overlay in the app has since FINDINGS #44: a menu,
-        // sheet or dialog is a page of the root host, so the *route* depth
-        // never moves while one opens, stacks and closes — and this mirror,
-        // which reads nothing else, cannot be perturbed by any of it. (The
-        // bar's modality is the host's own doing now: it routes input and
-        // publishes accessibility nodes for its top page only, and an
-        // overlay's scrim is painted at the root, over the floating bar. See
-        // `tests/navigation_motion.rs`' sections 3b–3d.)
+        // Every overlay in the app is a page of the root host: a menu, sheet
+        // or dialog opening/stacking/closing never moves the *route* depth,
+        // so this mirror — which reads nothing else — cannot be perturbed by
+        // any of it. The bar's modality is the host's own doing: it routes
+        // input and publishes accessibility nodes for its top page only, and
+        // an overlay's scrim paints at the root, over the floating bar.
         let mut state = mirror(&[(2, route_meta("/sessions"))], 2);
         for _ in 0..3 {
             assert!(!state.reconcile(2), "the route depth never moved");

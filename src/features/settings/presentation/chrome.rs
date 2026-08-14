@@ -1,60 +1,35 @@
 //! The Settings screen's hand-rolled primitives: a filled/bordered **panel**
 //! (single-child, with the row's bottom hairline, the dashed create-token
 //! outline and the picker sheet's full-bleed selected row as options), and the
-//! **switch-semantics** wrapper the bell toggle needs.
-//!
-//! `docs/redesign.html`'s settings block is almost entirely boxes and
-//! hairlines — `.set-row`'s `border-bottom`, `.set-ic`'s 28px raised tile,
-//! `.token-scope`'s two pills, `.add-token-btn`'s dashed outline,
-//! `.pick-row`'s separator and `.pick-row.sel`'s amber fill — and no facade
-//! widget paints an arbitrary filled/bordered rect. So this [`View`]/[`Widget`]
-//! pair — authored through [`frust::authoring`], the same seam
-//! `crate::ui::backdrop` uses — fills the gap.
+//! **switch-semantics** wrapper the bell toggle needs. No facade widget paints
+//! an arbitrary filled/bordered rect, so this [`View`]/[`Widget`] pair —
+//! authored through [`frust::authoring`], the same seam `crate::ui::backdrop`
+//! uses — fills the gap.
 //!
 //! **Feature-local, and knowingly the third copy.** `features::connect` and
-//! `features::sessions` each own a panel of their own, because a feature never
-//! imports a sibling's `presentation` (`docs/ARCHITECTURE.md`'s cross-feature
-//! rule). This one is deliberately *narrower* than either — no swatch leaf (a
-//! fixed-size box is a panel around a `SizedBox`), no left accent, no glow —
-//! and it folds their separate dashed-box widget into one `dashed` border flag
-//! rather than adding a second widget. **Three copies is the promotion
-//! trigger**: `examples/huddle` promoted its own `fill_box` to the shared layer
-//! on the second consumer, and the three panels here should be promoted to
-//! `crate::ui` together in a task that owns all three screens' files (this one
-//! owns only `features/settings/**`). Recorded rather than done.
+//! `features::sessions` each own a panel of their own, since a feature never
+//! imports a sibling's `presentation`; **three copies is the promotion
+//! trigger** (`examples/huddle` promoted its own `fill_box` on the second
+//! consumer), and the three panels here should be promoted to `crate::ui`
+//! together in a task that owns all three screens' files — recorded rather
+//! than done.
 //!
 //! [`switch_semantics`] closes the accessibility hole composition opens: a
-//! toggle assembled from filled boxes and a `GestureDetector` paints and
-//! presses correctly but contributes **no** accessibility node at all (a
-//! `GestureDetector` only forwards its child's, and a filled box has none), so
-//! a screen reader would find no control there. It is the same wrapper
-//! `features::connect`'s own chrome carries, narrowed to the switch case (this
-//! screen has no hand-composed radio). Delete it the day `frust::glyph` grows
-//! a real switch — the Material catalog's `Switch` is **not** compiled into
-//! this app (`Cargo.toml`'s `default-features = false, features = ["glyph", …]`).
+//! toggle assembled from filled boxes and a `GestureDetector` contributes
+//! **no** accessibility node at all — delete it the day `frust::glyph` grows
+//! a real switch (the Material catalog's `Switch` is **not** compiled into
+//! this app).
 //!
-//! Like both siblings', every function here takes already-resolved [`Color`]s:
-//! [`super::pieces`] resolves each from the active [`frust::Theme`] once per
-//! build, so these stay dumb about theming.
-//!
-//! # Frust gaps these work around
-//!
-//! - **No dash pattern on `PaintScene`.** `stroke_path`/`stroke_line` take a
-//!   plain width; `kurbo::Stroke`'s dash array never reaches the scene. So a
-//!   dashed panel walks each edge itself in on/off steps — **delete that branch
-//!   the day frust grows dash support** (`frust::glyph::empty_state`'s own
-//!   `stroke_dashed_rect` is the framework's precedent that this is the
-//!   available shape rather than a shortcut).
-//! - **No negative margins.** `.pick-row.sel{margin:0 -20px}` bleeds the
-//!   selected row's fill out past the sheet's content gutter; frust's `Padding`
-//!   takes no negative inset, so [`PanelView::bleed`] widens the *painted* fill
-//!   instead, leaving layout untouched. This is exactly what the CSS does.
-
-//! - **No fixed-size *container*.** `SizedBox` tightens its child's
-//!   constraints rather than centering it in the box, so a 14px vector inside
-//!   a 28px `.set-ic` tile would land in its top-left corner. [`PanelView::fixed`]
-//!   is the centering variant — the same shape `frust::glyph`'s own avatar
-//!   solves internally, with no reusable container exposed for app chrome.
+//! **Frust gaps worked around here:** `PaintScene` has no dash pattern, so a
+//! dashed panel walks each edge itself in on/off steps — delete that branch
+//! the day frust grows dash support. No negative margins: `.pick-row.sel`'s
+//! selected-row fill bleeds out past the sheet's content gutter, and frust's
+//! `Padding` takes no negative inset, so [`PanelView::bleed`] widens the
+//! *painted* fill instead, leaving layout untouched. No fixed-size
+//! *container*: `SizedBox` tightens its child's constraints rather than
+//! centering it in the box, so [`PanelView::fixed`] is the centering variant
+//! (the same shape `frust::glyph`'s own avatar solves internally, with no
+//! reusable container exposed for app chrome).
 
 use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,

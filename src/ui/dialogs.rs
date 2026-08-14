@@ -1,47 +1,28 @@
 //! Flutter-parity dialog helpers over [`frust::glyph::glyph_dialog`]: a
 //! destructive-action confirmation ([`confirm_dialog`]) and a single-field
-//! name prompt ([`name_input_dialog`]).
-//!
-//! Both are one-line call sites — a screen calls one and gets the whole modal
-//! lifecycle. The idiom underneath is the catalog's own
-//! (`examples/glyph-catalog`'s `pages/overlays.rs`), not a new one:
-//! [`show_glyph_dialog`] pushes the dialog as a **transparent navigator page**
-//! (the screen below stays visible under the scrim, and the navigator's modal
-//! contract is what makes it modal), an action button pops the page carrying
-//! its answer (`pop_with_result`), and the pusher's `on_result` callback —
+//! name prompt ([`name_input_dialog`]). Both are one-line call sites —
+//! [`show_glyph_dialog`] pushes the dialog as a **transparent navigator
+//! page** (the screen below stays visible under the scrim); an action button
+//! pops the page carrying its answer, and the pusher's `on_result` callback —
 //! the only place with `&mut State` in scope — applies it. A scrim tap,
-//! `Escape`, or a back press pops with an *empty* result, which reads as
-//! "cancelled" here.
-//!
-//! # Screen-agnostic
+//! `Escape`, or a back press pops with an *empty* result, read as
+//! "cancelled".
 //!
 //! Both helpers are generic over `State` (the `ui::backdrop` precedent), so
-//! Sessions' kill/rename and Settings' logout all reach for the same two
-//! functions with their own callbacks — none of this file knows about
-//! `AppState`. The navigator every screen hands in is the **root overlay
-//! host**'s (`crate::AppState::overlays`), so a dialog's scrim covers the
-//! shell's floating bar (and the host makes that bar inert) instead of the
-//! dialog appearing under it (FINDINGS #44) — which is a caller's choice, not
-//! this file's: `tests/ui_substrate.rs` drives both helpers over a navigator of
-//! its own.
+//! Sessions' kill/rename and Settings' logout reach for the same two
+//! functions with their own callbacks. `nav` is always this app's **root
+//! overlay host** controller, so a dialog's scrim covers the shell's
+//! floating bar (which the host makes inert) rather than the dialog
+//! appearing under it — a caller's choice, not this file's.
 //!
-//! # Framework gaps these helpers work around
-//!
-//! - **No disabled state on `Button`.** `frust::button` offers `.loading(bool)`
-//!   (spinner + suppressed press) but no plain disabled variant, so
-//!   [`name_input_dialog`]'s submit "disables" by rendering
-//!   [`frust::ButtonStyle::Ghost`] and no-op'ing its own `on_press` while the
-//!   field is blank (see [`SUBMIT_ENABLED_STYLE`]).
-//!
-//! [`name_input_dialog`]'s field lives in `glyph_dialog`'s real `.content()`
-//! slot, and Cancel/Save are two real `.action(...)` buttons (the framework
-//! lays the action row out itself, right-aligned in reading order) — not the
-//! single hand-built field-over-buttons action this file used before
-//! `.content()` existed. The content slot matters beyond layout: a dialog's
-//! dead-space-blur contract (tapping the panel's own dead space clears the
-//! field's IME session without dismissing the dialog) reads specifically from
-//! that slot (`crates/frust-widgets/src/glyph/dialog.rs`), so a
-//! content-slotted field gets it and an action-slotted one would not.
+//! **Framework gaps worked around here:** `frust::button` has no plain
+//! disabled variant, so [`name_input_dialog`]'s submit "disables" by
+//! rendering [`frust::ButtonStyle::Ghost`] and no-op'ing `on_press` while the
+//! field is blank ([`SUBMIT_ENABLED_STYLE`]). Its field lives in
+//! `glyph_dialog`'s `.content()` slot rather than beside the action buttons
+//! because a dialog's dead-space-blur contract (tapping the panel's dead
+//! space clears the field's IME session without dismissing the dialog) reads
+//! specifically from that slot.
 
 use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::{

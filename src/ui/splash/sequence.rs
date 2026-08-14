@@ -1,13 +1,9 @@
-//! The splash orchestrator: the icon, the burst, the rain and the Connect
-//! screen's piece-by-piece assembly, sequenced over one clock and shown
-//! exactly once per process launch.
-//!
-//! # The timeline
-//!
-//! Two clocks, as the source has: the **master** clock starts when the
-//! overlay's first frame paints, and the **rain-local** clock
-//! (`t = tOverall - ICON_DELAY`, the source's own line) starts when the icon
-//! dissolves. Every value below is derived from [`spec`], never re-typed.
+//! The splash orchestrator: five beats — the icon, the burst, the rain, the
+//! Connect screen's piece-by-piece assembly, and the unmount — sequenced over
+//! one **master** clock (starting on the overlay's first painted frame) plus
+//! a **rain-local** clock (`t = tOverall - ICON_DELAY`) that starts when the
+//! icon dissolves. Shown exactly once per process launch. Every value below
+//! is derived from [`spec`], never re-typed.
 //!
 //! | Master | Rain-local | Beat |
 //! |---|---|---|
@@ -18,70 +14,51 @@
 //! | 3860 ([`assembly_end_ms`]) | 2860 | The last piece has landed and its flash has faded |
 //! | 4200 ([`sequence_end_ms`]) | 3200 | The rain's own tail ends — the overlay unmounts |
 //!
-//! # Why the end is the rain's, not the assembly's
-//!
-//! [`sequence_end_ms`] is the **later** of the two ends. Unmounting at the
-//! assembly's own end (rain-local 2860) would cut the last ~340ms of the
-//! rain's drain, popping the few columns still falling out of existence. Past
-//! [`rain::rain_finished`](super::rain::rain_finished) the overlay paints
-//! nothing but its backdrop and the landed pieces — a frame already identical
-//! to the route underneath, which is what makes the handoff invisible.
+//! [`sequence_end_ms`] is the **later** of the assembly's and the rain's own
+//! end: unmounting at the assembly's end would cut the rain's drain short,
+//! popping the few columns still falling out of existence.
 //!
 //! # The handoff
 //!
-//! The overlay sits in a [`Stack`] **above** the live navigator, which is
-//! already rendering `/`. Its backdrop is opaque (and input-blocking) so
-//! nothing leaks through or gets tapped mid-sequence; its assembly lays out
-//! the very same [`connect_pieces`](crate::features::connect::presentation::pieces::connect_pieces)
-//! — same saved-server rows, same undimmed fields — through the very same
+//! The overlay sits in a [`Stack`] **above** the live navigator, already
+//! rendering `/`. Its assembly lays out the very same
+//! [`connect_pieces`](crate::features::connect::presentation::widgets::connect_pieces)
+//! through the very same
 //! [`connect_layout`](crate::features::connect::presentation::pages::connect_layout)
-//! the route uses, width clamp included. The only difference is that each piece
-//! is wrapped in [`piece_entry`], which is a **paint-time** transform and
-//! changes no geometry. So when [`Cue`] flips the caller's `done` signal and the
-//! shell drops the overlay, the pixels beneath are the ones that were already
-//! there. That the two pictures actually coincide is the *pieces* module's
-//! contract, not this one's — see its "parity contract" section for the three
-//! divergences it closes.
-//!
-//! Nothing here forwards input to the assembly either: [`DelayedWidget`] has no
-//! `Widget::event` of its own, so no pointer ever reaches a piece, and the
-//! backdrop under it swallows what is left. The assembled fields are
-//! *additionally* read-only in their own right (`pieces`' item 2), so blocking
-//! focus does not depend on this file's structure staying as it is.
+//! the route uses, width clamp included, each piece additionally wrapped in
+//! [`piece_entry`] (a **paint-time** transform, no geometry change) — so when
+//! [`Cue`] flips `done` and the shell drops the overlay, the pixels beneath
+//! are the ones already there. That the two pictures coincide is the
+//! `widgets` module's "parity contract", not this one's. Nothing here
+//! forwards input to the assembly either: [`DelayedWidget`] has no
+//! `Widget::event` of its own, and the assembled fields are additionally
+//! read-only in their own right.
 //!
 //! # Clocking, without a per-frame rebuild
 //!
-//! Nothing here re-times anything from a signal: [`Delayed`] gates its child
-//! by its own accumulated clock and simply doesn't paint it until its window
-//! opens, and every gated child (`rain`, `burst`, each [`piece_entry`])
-//! self-clocks from *its own first paint* — which is the instant the gate
-//! opened. That is why the rain needs no external
-//! [`clock`](super::rain::RainView::clock) plumbing: mounting it is the cue,
-//! and painting it is the mount. The only signal write in the whole sequence
-//! is the one that ends it.
-//!
-//! The icon's own [`IconPhase`](super::icon_phase::IconPhase) publication is
-//! deliberately **not** used as the cue here. Both it and this module's
-//! schedule derive from the same [`spec::ICON_DELAY_MS`], so cueing off the
-//! signal would add a rebuild per phase without changing a single frame's
-//! timing; chain [`on_phase`](super::icon_phase::IconPhaseView::on_phase)
-//! from outside if something ever needs to observe the beat.
+//! [`Delayed`] gates its child by its own accumulated clock and simply
+//! doesn't paint it until its window opens; every gated child (`rain`,
+//! `burst`, each [`piece_entry`]) self-clocks from *its own first paint* —
+//! mounting it is the cue, painting it is the mount. The only signal write in
+//! the whole sequence is the one that ends it. The icon's own
+//! [`IconPhase`](super::icon_phase::IconPhase) publication is deliberately
+//! **not** used as the cue: both it and this module's schedule derive from
+//! the same [`spec::ICON_DELAY_MS`], so cueing off the signal would add a
+//! rebuild per phase without changing a single frame's timing.
 //!
 //! # Reduced motion
 //!
 //! [`splash_plan`] resolves to [`SplashPlan::Reduced`] and the shell mounts
 //! [`reduced_splash`] instead: the static icon for
 //! [`spec::REDUCED_HOLD_MS`], then straight to the finished screen — no rain,
-//! no burst, no assembly (the source's own `if(reduced)` branch). Each widget
-//! here re-checks the theme at paint time anyway, so a theme that turns
-//! `reduce_motion` on *after* the mount decision still collapses to a
-//! terminal state rather than animating.
-//!
-//! The one thing that must **not** collapse is that hold itself: it is only
-//! ever mounted under `reduce_motion`, so a cue short-circuiting on the theme
-//! would end it on its own first frame. [`Cue`] therefore takes the
-//! short-circuit as an opt-out ([`CueView::honor_reduce_motion`]) rather than
-//! applying it unconditionally.
+//! no burst, no assembly. Each widget re-checks the theme at paint time
+//! anyway, so `reduce_motion` turning on *after* the mount decision still
+//! collapses to a terminal state. The one thing that must **not** collapse
+//! is that hold itself — it is only ever mounted under `reduce_motion`, so a
+//! cue short-circuiting on the theme would end it on its own first frame;
+//! [`Cue`] takes the short-circuit as an opt-out
+//! ([`CueView::honor_reduce_motion`]) rather than applying it
+//! unconditionally.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

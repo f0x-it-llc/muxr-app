@@ -1,9 +1,7 @@
-//! [`Palette`] — the app's one theme-derived colour vocabulary, the union of
-//! the four per-feature `Palette` structs `connect`/`sessions`/`terminal`/
-//! `settings` each carry in their own `presentation::pieces`
-//! (`docs/ARCHITECTURE.md`'s UI Substrate section). Nothing adopts this module
-//! yet — each screen still resolves its own local `Palette` until a later
-//! task swaps the call sites over to [`Palette::from_theme`] here.
+//! [`Palette`] — the app's one theme-derived colour vocabulary, adopted by
+//! all four features (`connect`/`sessions`/`terminal`/`settings`) in place of
+//! the per-feature `Palette` struct each used to carry in its own
+//! `presentation::widgets` (`docs/ARCHITECTURE.md`'s UI Substrate section).
 //!
 //! **Excluded on purpose**: `terminal`'s `GlyphInk`-sourced card fields (its
 //! card/head/prompt/out/comment tones) and its hardcoded-RGB hairline pair
