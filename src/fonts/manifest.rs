@@ -30,15 +30,17 @@ use crate::failure::AppFailure;
 
 use super::json::{self, Json};
 
-/// Where the catalog lives — the `muxr-core` repo's raw `main` copy, the same
-/// URL the Flutter client fetches.
-pub const MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/fonts/manifest.json";
+/// Where the catalog lives — served by muxr.app itself (`no-cache`, refreshed
+/// on every site deploy) so font discovery has no GitHub dependency: GitHub's
+/// edge blocking non-browser clients is what broke release-asset downloads and
+/// moved font hosting to muxr.app in the first place.
+pub const MANIFEST_URL: &str = "https://muxr.app/fonts/manifest.json";
 
 /// The base a file's relative `path` is resolved against when its entry
 /// carries no absolute `url` of its own (every current entry does carry one;
-/// this is the schema's documented fallback, not dead weight).
-const RAW_BASE: &str = "https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/fonts";
+/// this is the schema's documented fallback, not dead weight). Same origin as
+/// the manifest — the binaries live right next to it.
+const RAW_BASE: &str = "https://muxr.app/fonts";
 
 /// One downloadable file inside a [`FontEntry`] — one weight/style of the
 /// family.
@@ -225,8 +227,8 @@ mod tests {
           "license": "OFL-1.1",
           "isNerdFont": true,
           "files": [
-            { "weight": 700, "style": "normal", "path": "0xProtoNerdFontMono-Bold.ttf", "bytes": 2411088, "sha256": "aa8bbe93f5dfa90381a80ad90ee3118b36d34c1140575ee1fefca20de00c6689", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/0xProtoNerdFontMono-Bold.ttf" },
-            { "weight": 400, "style": "normal", "path": "0xProtoNerdFontMono-Regular.ttf", "bytes": 2412316, "sha256": "e98bf52027a5895c1cad6101b8ef5905e8acc5309bb264eaff9063bf94d99848", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/0xProtoNerdFontMono-Regular.ttf" }
+            { "weight": 700, "style": "normal", "path": "0xProtoNerdFontMono-Bold.ttf", "bytes": 2411088, "sha256": "aa8bbe93f5dfa90381a80ad90ee3118b36d34c1140575ee1fefca20de00c6689", "url": "https://muxr.app/fonts/0xProtoNerdFontMono-Bold.ttf" },
+            { "weight": 400, "style": "normal", "path": "0xProtoNerdFontMono-Regular.ttf", "bytes": 2412316, "sha256": "e98bf52027a5895c1cad6101b8ef5905e8acc5309bb264eaff9063bf94d99848", "url": "https://muxr.app/fonts/0xProtoNerdFontMono-Regular.ttf" }
           ]
         },
         {
@@ -236,7 +238,7 @@ mod tests {
           "license": "CC-BY-SA-4.0",
           "isNerdFont": true,
           "files": [
-            { "weight": 400, "style": "normal", "path": "BigBlueTerm437NerdFontMono-Regular.ttf", "bytes": 2278376, "sha256": "f89f27225795feba3ee5184052da69532966d950512106a5e859d85765835442", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BigBlueTerm437NerdFontMono-Regular.ttf" }
+            { "weight": 400, "style": "normal", "path": "BigBlueTerm437NerdFontMono-Regular.ttf", "bytes": 2278376, "sha256": "f89f27225795feba3ee5184052da69532966d950512106a5e859d85765835442", "url": "https://muxr.app/fonts/BigBlueTerm437NerdFontMono-Regular.ttf" }
           ]
         },
         {
@@ -246,8 +248,8 @@ mod tests {
           "license": "OFL-1.1",
           "isNerdFont": true,
           "files": [
-            { "weight": 700, "style": "normal", "path": "BlexMonoNerdFontMono-Bold.ttf", "bytes": 2355496, "sha256": "565b42d837b5121627d57cfd57338be32254c58a1b770468c3380b1f78de2aa4", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BlexMonoNerdFontMono-Bold.ttf" },
-            { "weight": 400, "style": "normal", "path": "BlexMonoNerdFontMono-Regular.ttf", "bytes": 2353588, "sha256": "f9892505b7cd6e9d29f9ba0924da73df023714adf6dbe6d8f920d47b8930fcef", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BlexMonoNerdFontMono-Regular.ttf" }
+            { "weight": 700, "style": "normal", "path": "BlexMonoNerdFontMono-Bold.ttf", "bytes": 2355496, "sha256": "565b42d837b5121627d57cfd57338be32254c58a1b770468c3380b1f78de2aa4", "url": "https://muxr.app/fonts/BlexMonoNerdFontMono-Bold.ttf" },
+            { "weight": 400, "style": "normal", "path": "BlexMonoNerdFontMono-Regular.ttf", "bytes": 2353588, "sha256": "f9892505b7cd6e9d29f9ba0924da73df023714adf6dbe6d8f920d47b8930fcef", "url": "https://muxr.app/fonts/BlexMonoNerdFontMono-Regular.ttf" }
           ]
         },
         {
@@ -307,10 +309,7 @@ mod tests {
         let entries = parse_manifest(FIXTURE.as_bytes()).expect("parses");
         let file = &entries[1].files[0];
         assert_eq!(file.name, "BigBlueTerm437NerdFontMono-Regular.ttf");
-        assert!(
-            file.url
-                .starts_with("https://github.com/f0x-it-llc/muxr-core/releases/")
-        );
+        assert!(file.url.starts_with("https://muxr.app/fonts/"));
         assert_eq!(file.sha256.len(), 64);
     }
 
