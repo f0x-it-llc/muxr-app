@@ -42,7 +42,8 @@ use peniko::Color;
 
 use muxr::features::connect::domain::entities::SavedServer;
 use muxr::features::connect::presentation::pages::connect_layout;
-use muxr::features::connect::presentation::pieces::{connect_pieces, splash_saved_servers};
+use muxr::features::connect::presentation::widgets::connect_pieces;
+use muxr::features::connect::presentation::widgets::saved::splash_saved_servers;
 use muxr::ui::backdrop::page_backdrop;
 use muxr::ui::splash::icon_phase::{IconArt, splash_icon_art};
 use muxr::ui::splash::sequence::{
@@ -220,7 +221,7 @@ fn occurrences(haystack: &[u32], needle: &[u32]) -> usize {
 }
 
 /// The heading piece's exact style, so its shaped ids match what
-/// `pieces::heading` paints.
+/// `widgets::badge::heading` paints.
 fn heading_ids() -> Vec<u32> {
     let theme = Theme::glyph_baseline();
     glyph_ids("Connect to server", &theme.type_scale.title_medium)
@@ -245,7 +246,7 @@ fn decoded_icon() -> IconArt {
 /// every draw recorded belongs to the splash.
 ///
 /// `saved` is piece 7's rows: `None` reads them exactly as the app does
-/// (`pieces::splash_saved_servers`, resolved *after* `MuxrApp::init` has
+/// (`widgets::saved::splash_saved_servers`, resolved *after* `MuxrApp::init` has
 /// published the repository — the same ordering `AppState::splash_plan`
 /// relies on), and `Some(..)` pins a list so a test can mount the store state
 /// it wants.

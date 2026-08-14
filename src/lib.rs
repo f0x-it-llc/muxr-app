@@ -59,7 +59,9 @@ use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any,
 
 use features::connect::domain::entities::SavedServer;
 use features::connect::presentation::pages::connect_layout;
-use features::connect::presentation::pieces::{active_theme, connect_pieces, splash_saved_servers};
+use features::connect::presentation::widgets::connect_pieces;
+use features::connect::presentation::widgets::saved::splash_saved_servers;
+use ui::palette::active_theme;
 use ui::splash::icon_phase::{IconArt, splash_icon_art};
 use ui::splash::sequence::{SplashPlan, claim_cold_start, reduced_splash, splash_sequence};
 
@@ -222,7 +224,7 @@ struct SplashCue {
 /// list, through the *same* layout function the `/` route renders — clamp and
 /// all — which is what makes the unmount invisible; see
 /// [`crate::ui::splash::sequence`] and
-/// [`features::connect::presentation::pieces`]' parity contract.
+/// [`features::connect::presentation::widgets`]' parity contract.
 fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
     // Tracked read: the cue's single `set(true)` wakes this rebuild. It happens
     // inside the overlay host's page builder now, which `RenderRoot::rebuild`

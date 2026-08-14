@@ -1,23 +1,14 @@
 //! [`parse_endpoint`] — the `host:port` validation behind the connect CTA.
 //!
-//! # Why a free function rather than a `clean_signals::UseCase`
+//! A plain function rather than a `clean_signals::UseCase`: that trait's `execute`
+//! is `async` so `ControllerCore::run` can own an in-flight lifecycle, and this is
+//! a pure synchronous parse with no I/O, no latency and nothing to cancel —
+//! wrapping it would buy an `await`, a `spawn_local` and a pump-poll in every test,
+//! and no behavior.
 //!
-//! `examples/huddle`'s use cases implement `clean_signals::UseCase`, whose
-//! `execute` is `async` (it exists so `ControllerCore::run` can own the in-flight
-//! /retry/failure lifecycle). This is a **pure, synchronous, infallible-to-run**
-//! parse with no I/O, no latency and nothing to cancel: wrapping it in an async
-//! trait would buy an `await`, a `spawn_local` and a pump-poll in every test, and
-//! no behavior. It stays a plain function in `use_cases/` — same layer, same
-//! `<verb><noun>` file naming, none of the machinery it doesn't need. The first
-//! `connect` operation that actually does I/O (the real `muxrd` dial) is what
-//! earns the `UseCase` shape.
-//!
-//! # Mock-grade
-//!
-//! No DNS, no IDN, no IPv6 bracket syntax, no scheme stripping — the rules are
-//! exactly what the Connect form's placeholder promises
-//! (`zelli.example.com:50051`): a non-empty host, a `:`, and a port in
-//! `1..=65535`.
+//! **Mock-grade**: no DNS, no IDN, no IPv6 bracket syntax, no scheme stripping —
+//! the rules are exactly what the form's placeholder promises
+//! (`zelli.example.com:50051`): a non-empty host, a `:`, and a port in `1..=65535`.
 
 use crate::failure::AppFailure;
 
@@ -35,18 +26,12 @@ pub struct Endpoint {
 
 /// Parse `raw` as `host:port`.
 ///
-/// # Failure vocabulary (a documented gap)
-///
-/// Every rejection maps to [`AppFailure::Network`], whose user message is
-/// "Connection problem — please try again." `AppFailure` (`crate::failure`, one
-/// closed enum for the whole app) has **no validation variant**, and `Internal`
-/// — the only other plausible arm — is documented as "a bug, an invariant
-/// violation", which a typo in a text field is not. `Network` is the closest
-/// honest fit: the user typed something muxr cannot reach. A `Validation` arm on
-/// `AppFailure` is the real fix; it belongs to whoever owns `crate::failure`.
-///
-/// The internal detail (never shown — see `crate::failure`) names the offending
-/// input so a log tells the whole story.
+/// **Failure vocabulary, a documented gap**: every rejection maps to
+/// [`AppFailure::Network`], because `AppFailure` has no validation variant and
+/// `Internal` means "a bug, an invariant violation", which a typo in a text field
+/// is not. `Network` is the closest honest fit — the user typed something muxr
+/// cannot reach. A `Validation` arm on `AppFailure` is the real fix. The internal
+/// detail (never shown) names the offending input so a log tells the whole story.
 pub fn parse_endpoint(raw: &str) -> Result<Endpoint, AppFailure> {
     let raw = raw.trim();
     if raw.is_empty() {

@@ -1,23 +1,10 @@
 //! [`parse_pairing_uri`] — decodes a scanned `muxr://pair` QR code into a
 //! typed [`PairingPayload`].
 //!
-//! A pure, dependency-light port of the Flutter client's
-//! `PairingPayload.tryParse`, verified against both `muxrctl`'s generator and
-//! that Flutter parser. No UI, no camera, no network: this module only turns
-//! a URI string into typed data (or rejects it) — wiring a live camera
-//! stream into it, and mapping [`super::super::entities::PairingTrust`] onto
-//! a connect request, is later, out-of-scope work.
-//!
-//! # `Option`, not `Result<_, AppFailure>`
-//!
-//! Unlike [`super::parse_endpoint`] (whose rejection carries a message a
-//! toast surfaces), a malformed pairing URI has no single-field detail worth
-//! showing the user — the camera screen's retry loop, not a toast, is the
-//! failure UX for "that wasn't a valid pairing code." `PairingPayload::
-//! tryParse`'s own nullable `T?` return is the same call: this stays a
-//! plain, infallible-to-run function returning `Option<PairingPayload>`,
-//! mirroring `parse_endpoint`'s own "why a free function, not a `UseCase`"
-//! reasoning for the same no-I/O, no-latency shape.
+//! A pure parse, verified against both `muxrctl`'s generator and the Flutter
+//! client's own `PairingPayload.tryParse`. Every rejection is `None` rather than a
+//! failure: a malformed code has no single-field detail worth showing, and the
+//! camera screen's retry loop — not a toast — is its failure UX.
 //!
 //! # Grammar
 //!
@@ -27,45 +14,24 @@
 //! ```
 //!
 //! - Scheme `muxr`, authority `pair`, both matched case-sensitively — the
-//!   generator only ever emits this exact casing, so a case-insensitive
-//!   match would just be unexercised surface.
+//!   generator only ever emits this exact casing.
 //! - `v` selects the grammar: `"1"` or `"2"`; anything else rejects.
-//! - `h` (host) must be non-empty; `p` (port) must parse as `1..=65535` —
-//!   `0` is "any port" to the OS, never a dial target (mirrors
-//!   `parse_endpoint::MIN_PORT`).
-//! - `t` is base64url with **no** padding, decoded to raw bytes and then to
-//!   a UTF-8 string — the auth token. [`base64::engine::general_purpose::URL_SAFE_NO_PAD`]'s
-//!   `DecodePaddingMode::RequireNone` config is what actually enforces the
-//!   "no padding" half: a `t` value carrying a trailing `=` is rejected by
-//!   the decode call itself, not tolerated. That is the documented
-//!   padding-tolerance decision this module makes — `muxrctl`'s generator
-//!   never emits one, so this only ever rejects malformed/foreign input.
-//! - `ro` is `true` only for the literal value `"1"`; anything else
-//!   (including an absent key) is `false` — never a reject case.
-//! - `n` is the QR's human label, percent-decoded per RFC 3986 §2.3
-//!   (unreserved characters pass through unchanged, every other byte is a
-//!   `%XX` escape). The grammar lists it unbracketed on both branches, so a
-//!   missing `n` key rejects like `h`/`p`/`t`; decoded bytes that aren't
-//!   valid UTF-8 reject too.
-//! - v1 always requires `fp`, matching `^[0-9a-f]{64}$` (hand-rolled, no
-//!   `regex` dependency — `Cargo.toml` is frozen and carries none for one
-//!   fixed-shape check), and trusts implicitly via
-//!   [`PairingTrust::Pin`].
-//! - v2's `tm` selects the trust posture: `"pin"` requires `fp` under the
-//!   same regex; `"ca"` ignores a present `fp` entirely (fingerprint is
-//!   simply not carried on [`PairingTrust::Ca`]); any other value, or a
-//!   missing `tm`, rejects.
-//! - Query-param order is arbitrary — [`split_query`] indexes by key, never
-//!   position.
-//!
-//! # Hand-rolled query split
-//!
-//! No URL crate — `Cargo.toml` is frozen and none is a dependency.
-//! [`split_query`] splits `query` on `&`, then each pair on its first `=`
-//! (`str::split_once` already searches left-to-right, so this is correct
-//! even for a value that itself contains one, though none in this grammar
-//! do). A key with no `=` is dropped; the grammar has no bare, valueless
-//! keys.
+//! - `h` must be non-empty; `p` must parse as `1..=65535`.
+//! - `t` is base64url with **no** padding, decoded to raw bytes and then to a UTF-8
+//!   string. [`URL_SAFE_NO_PAD`]'s `RequireNone` config enforces that half: a `t`
+//!   carrying a trailing `=` is rejected by the decode itself, so this only ever
+//!   rejects malformed/foreign input.
+//! - `ro` is `true` only for the literal `"1"`; anything else, an absent key
+//!   included, is `false` — never a reject case.
+//! - `n` is the QR's human label, percent-decoded per RFC 3986 §2.3. It is
+//!   required, and decoded bytes that aren't valid UTF-8 reject.
+//! - v1 always requires `fp`, matching `^[0-9a-f]{64}$`, and trusts via
+//!   [`PairingTrust::Pin`]. v2's `tm` selects the posture: `"pin"` requires `fp`
+//!   under the same rule, `"ca"` ignores a present `fp` entirely; any other value,
+//!   or a missing `tm`, rejects.
+//! - Query-param order is arbitrary — [`split_query`] indexes by key. It is
+//!   hand-rolled (no URL crate is a dependency): split on `&`, then each pair on
+//!   its first `=`; a key with no `=` is dropped, and the grammar has no bare keys.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -118,8 +84,8 @@ pub fn parse_pairing_uri(raw: &str) -> Option<PairingPayload> {
     })
 }
 
-/// Split `query` into `(key, value)` pairs — see the [module docs](self)'
-/// "Hand-rolled query split" section for the exact rule.
+/// Split `query` into `(key, value)` pairs — see the [module docs](self)' last
+/// grammar bullet for the exact rule.
 fn split_query(query: &str) -> Vec<(&str, &str)> {
     query
         .split('&')
@@ -127,26 +93,23 @@ fn split_query(query: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// The first value for `key` in `pairs`. Query-param order is arbitrary per
-/// the grammar, so this never depends on it; if a key somehow repeats (the
-/// grammar never does), the first occurrence wins — an unspecified-but-
-/// deterministic default rather than a documented case.
+/// The first value for `key` in `pairs`. Query-param order is arbitrary per the
+/// grammar, so this never depends on it; a repeated key (which the grammar never
+/// has) resolves to its first occurrence.
 fn find_param<'a>(pairs: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
     pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
 
-/// Decode `raw` as base64url with no padding, then as UTF-8 — the auth
-/// token. See the [module docs](self)' padding-tolerance note for why a
-/// padded `raw` rejects rather than decodes.
+/// Decode `raw` as base64url with no padding, then as UTF-8 — the auth token. A
+/// padded `raw` rejects rather than decodes (the grammar's `t` rule).
 fn decode_token(raw: &str) -> Option<Zeroizing<String>> {
     let bytes = URL_SAFE_NO_PAD.decode(raw).ok()?;
     let token = String::from_utf8(bytes).ok()?;
     Some(Zeroizing::new(token))
 }
 
-/// Percent-decode `raw` into the QR's human label. Malformed UTF-8 after
-/// decoding rejects rather than lossily replacing it — every rejection in
-/// this module is `None`, never a best-effort guess.
+/// Percent-decode `raw` into the QR's human label. Malformed UTF-8 rejects rather
+/// than lossily replacing — no rejection here is a best-effort guess.
 fn decode_label(raw: &str) -> Option<String> {
     percent_decode_str(raw)
         .decode_utf8()
@@ -178,7 +141,7 @@ fn pinned_trust(pairs: &[(&str, &str)]) -> Option<PairingTrust> {
 }
 
 /// `^[0-9a-f]{64}$`, hand-rolled — no `regex` dependency for one fixed-shape
-/// check (`Cargo.toml` is frozen and carries none).
+/// check.
 fn valid_fingerprint(fp: &str) -> bool {
     fp.len() == 64
         && fp
@@ -364,27 +327,19 @@ mod tests {
         }
     }
 
-    /// `muxr`'s pairing-QR payload shape (the dense first-consumer case) —
-    /// copied verbatim from `plugins/camera/src/barcode/conformance.rs`
-    /// (`PAYLOAD_DENSE`, lines ~34-35), the frust camera plugin's own QR
-    /// decode-conformance fixture. Its `t` value is a 43-char string of
-    /// plain letters chosen only to stress that plugin's pixel-decode path
-    /// at the protocol's maximum field width — not itself produced by
-    /// base64url-encoding real UTF-8 text.
+    /// `muxr`'s pairing-QR payload shape, copied verbatim from the frust camera
+    /// plugin's own QR decode-conformance fixture. Its `t` value
+    /// is a 43-char string of plain letters chosen only to stress that plugin's
+    /// pixel-decode path at the protocol's maximum field width — not itself
+    /// produced by base64url-encoding real UTF-8 text.
     const PAYLOAD_DENSE: &str = "muxr://pair?v=2&h=192.168.1.100&p=50051&t=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ&fp=\
 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&tm=pin&n=Test%20Server";
 
     #[test]
     fn the_camera_plugins_dense_conformance_fixture_is_rejected_on_its_non_utf8_token() {
-        // Every other field is well-formed (host/port/fp/tm/n all pass this
-        // module's own rules); decoding `t`'s 43-char base64url span,
-        // though, yields raw bytes that are not valid UTF-8 — the fixture
-        // was never meant to carry a real base64-of-UTF8 token, only to
-        // exercise the camera plugin's own pixel decode at this field's
-        // maximum width. This module's `t` rule (base64url bytes → UTF-8
-        // string) rejects it, exactly as it would reject any other
-        // non-UTF8 token — a real finding about the shared fixture, not a
-        // defect in either module.
+        // Every other field is well-formed; `t`'s 43-char span decodes to bytes
+        // that are not valid UTF-8, so this module's `t` rule rejects it — a fact
+        // about the shared fixture, not a defect in either module.
         assert!(parse_pairing_uri(PAYLOAD_DENSE).is_none());
     }
 }

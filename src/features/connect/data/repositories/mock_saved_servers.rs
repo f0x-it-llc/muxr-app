@@ -3,32 +3,20 @@
 //! real, preferences-backed [`super::prefs_saved_servers`] store (whose own
 //! module docs explain the split, and `di`'s the seam that chooses).
 //!
-//! No `frust::` signals/widgets here (the same framework-free rule as `domain`);
-//! the store is a plain [`Mutex`]-guarded [`Vec`], not an `RwSignal` — the
+//! The store is a plain [`Mutex`]-guarded [`Vec`], not an `RwSignal` — the
 //! controller owns the reactive copy and re-reads this one, so the data layer
-//! never has to know a UI exists.
+//! never has to know a UI exists. The lock is a `Send + Sync` obligation (the
+//! handle is an `Arc<dyn .. + Send + Sync>`, since `use_controller` requires its
+//! controller to be both), not a concurrency design: muxr is single-UI-threaded
+//! and it is never contended. A poisoned lock is recovered rather than propagated
+//! — a panic on the UI thread has already failed the frame, and handing back a
+//! usable guard keeps a later frame renderable.
 //!
-//! # Why a `Mutex` and not a `RefCell`
-//!
-//! `SavedServersRepository` is consumed as
-//! `Arc<dyn SavedServersRepository + Send + Sync>` (that trait's docs explain
-//! why: `clean_signals_frust::use_controller` requires its controller to be
-//! `Send + Sync`, and the controller holds this). muxr is single-UI-threaded, so
-//! the lock is never contended — it is a `Send + Sync` obligation, not a
-//! concurrency design.
-//!
-//! # Seed data
-//!
-//! Three plausible rigs, most-recently-used first, transcribed from
-//! `docs/redesign.html`'s `.saved-row` (`100.71.31.57:50051`, "insecure-dev TLS ·
-//! port 50051") plus two the same mock's copy implies — a CA-verified public
-//! host and a read-only rig, so the row's badge/trust rendering has something to
-//! show. Their recency stamps are relative to the seeding call, so the rows
-//! read "2 hours ago"/"yesterday"/"last week" whenever a suite runs rather than
-//! drifting to a fixed date. A poisoned lock is recovered
-//! (`unwrap_or_else(PoisonError::into_inner)`) rather than propagated: a panic
-//! on the UI thread has already failed the frame, and handing back a usable
-//! guard keeps a later frame renderable.
+//! **Seed data**: three plausible rigs, most-recently-used first — the mock's own
+//! `100.71.31.57:50051` plus a CA-verified public host and a read-only rig, so the
+//! row's badge/trust rendering has something to show. Their recency stamps are
+//! relative to the seeding call, so the rows read "2 hours ago"/"yesterday"/"last
+//! week" whenever a suite runs rather than drifting to a fixed date.
 //!
 //! Ordering is not this store's own rule: [`super::prefs_saved_servers::upsert`]
 //! is what both implementations sort through, so a `list()` answers in the same

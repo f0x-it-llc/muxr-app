@@ -1,41 +1,19 @@
-//! `connect` domain entities — the feature's plain-data types (framework-free,
-//! per [`crate::features::connect::domain`]'s module doc).
+//! `connect` domain entities — the feature's plain-data types, framework-free.
 //!
-//! [`SavedServer`] is a `muxrd` endpoint the user has connected to before,
-//! rendered by the Connect screen's saved-servers list
-//! (`docs/redesign.html`'s `.saved-hdr`/`.saved-row` block) and tapped either to
-//! refill the form or — when it carries a stored credential — to unlock and
-//! reconnect in one gesture. [`PairingPayload`]/[`PairingTrust`] are the typed
-//! result of scanning a `muxr://pair` QR code (`use_cases::parse_pairing`), the
-//! shape `muxrctl`'s generator and the Flutter client's `PairingPayload.tryParse`
-//! agree on. [`CredentialStatus`]/[`UnlockedCredential`]/[`StoreRequest`]/
-//! [`UnlockRequest`] are the vocabulary of
-//! [`super::repositories::CredentialService`], the biometric-gated secret store.
+//! **Two stores, one key.** A saved server's *metadata* ([`SavedServer`]) and its
+//! *secret* live in two stores sharing nothing but [`SavedServer::endpoint`]'s
+//! `host:port` key. [`SavedServer::has_credential`]/[`SavedServer::token_name`] are
+//! the only trace the metadata keeps of the secret — whether one exists and what
+//! the server calls its token, never the token itself.
 //!
-//! # Two stores, one key
-//!
-//! A saved server's *metadata* (this type) and its *secret* live in two
-//! different stores that share nothing but [`SavedServer::endpoint`]'s
-//! `host:port` key: the list is plain device storage, the token is behind the
-//! biometric gate. [`SavedServer::has_credential`]/[`SavedServer::token_name`]
-//! are the only trace the metadata keeps of the secret — whether one exists and
-//! what the server calls the token it belongs to, never the token itself.
-//!
-//! # Trust-mode reuse (a documented layering tension)
-//!
-//! [`TrustMode`] is **not** re-minted here: it is
-//! [`crate::connection::TrustMode`], the same enum
+//! **Trust-mode reuse, a documented layering tension.** [`TrustMode`] is not
+//! re-minted here: it is [`crate::connection::TrustMode`], the same enum
 //! [`crate::connection::ConnectTarget`] carries, so a saved row's posture flows
 //! into a connect request with no mapping layer. `crate::connection` is an
-//! app-level module beside `crate::failure` (the composition root's own
-//! vocabulary), *not* a sibling feature — but it is also not on
-//! `docs/ARCHITECTURE.md`'s literal allow-list for `domain` (which names only
-//! "this feature's own `domain` + `crate::failure`"), and the module hosting the
-//! enum does import `frust::` for its controller half. The enum itself is a
-//! `Copy`, three-variant, dependency-free data type; duplicating it here plus a
-//! `From` mapping would buy a stricter reading of the rule at the cost of two
-//! ways to spell one concept. Reuse wins; the allow-list is the thing that
-//! wants widening.
+//! app-level module rather than a sibling feature, but it is not on
+//! `docs/ARCHITECTURE.md`'s literal `domain` allow-list either; duplicating a
+//! `Copy`, three-variant, dependency-free enum plus a `From` mapping would buy a
+//! stricter reading of the rule at the cost of two ways to spell one concept.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,14 +21,10 @@ use zeroize::Zeroizing;
 
 pub use crate::connection::TrustMode;
 
-/// A `muxrd` endpoint the user has connected to before.
-///
-/// Persisted as one entry of the saved-server list (see
-/// [`crate::features::connect::data::repositories::prefs_saved_servers`] for the
-/// on-disk schema). [`Self::last_used_ms`] is an epoch timestamp rather than a
-/// pre-formatted label: the store is the same list across restarts, so "2 hours
-/// ago" is a fact about *now* and is derived at the presentation edge through
-/// [`Self::last_used_label`].
+/// A `muxrd` endpoint the user has connected to before, one entry of the
+/// saved-server list. [`Self::last_used_ms`] is an epoch timestamp rather than a
+/// label: the store outlives restarts, so "2 hours ago" is a fact about *now* and
+/// is derived at the presentation edge.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedServer {
     /// The host to dial (no scheme, no port).
@@ -59,51 +33,39 @@ pub struct SavedServer {
     pub port: u16,
     /// The TLS posture this endpoint was last trusted under.
     pub trust_mode: TrustMode,
-    /// A human label for the rig ([`crate::connection::ConnectTarget::label`]'s
-    /// source).
+    /// A human label for the rig.
     pub label: String,
-    /// When this endpoint was last connected to, in milliseconds since the Unix
-    /// epoch ([`epoch_millis`]). Also the list's sort key — most recent first.
-    /// `0` for a row restored from a store that predates the field, which
-    /// [`Self::last_used_label`] prints as never-used rather than as 1970.
+    /// When this endpoint was last connected to ([`epoch_millis`]), and the list's
+    /// sort key — most recent first. `0` for a row from a store that predates the
+    /// field, which prints as never-used rather than as 1970.
     pub last_used_ms: i64,
-    /// Whether the credential this endpoint last logged in with only grants
-    /// read-only access — rendered as a badge on the row, and re-applied
-    /// without a fresh login when reconnecting through a stored credential.
+    /// Whether the credential this endpoint last logged in with is read-only —
+    /// rendered as a badge, and re-applied when reconnecting through a stored one.
     pub read_only: bool,
-    /// Whether a biometric-gated credential is stored for this endpoint. The
-    /// metadata half of the two-store split (see the [module docs](self)): the
-    /// secret itself never appears here.
+    /// Whether a gated credential is stored for this endpoint — the metadata half
+    /// of the two-store split; the secret itself never appears here.
     pub has_credential: bool,
-    /// The name of the server-side token the stored credential holds, so
-    /// deleting or rotating the credential can revoke it. `None` when no
-    /// credential is stored, and also for a QR-paired one — `muxrctl` mints
-    /// that token itself and this device never learns its name.
+    /// The server-side token's name, so deleting or rotating the credential can
+    /// revoke it. `None` with no credential stored, and for a QR-paired one —
+    /// `muxrctl` mints that token and this device never learns its name.
     pub token_name: Option<String>,
-    /// The pinned certificate's SHA-256 as 64 lowercase hex characters, for an
-    /// endpoint paired by QR. Required by (and only meaningful for)
-    /// [`TrustMode::Pinned`]; `None` otherwise, so a weaker posture can never
-    /// carry a stale pin.
+    /// The pinned certificate's SHA-256 as 64 lowercase hex characters. Only
+    /// meaningful for [`TrustMode::Pinned`]; `None` otherwise, so a weaker posture
+    /// can never carry a stale pin.
     pub fingerprint: Option<String>,
 }
 
 impl SavedServer {
-    /// `host:port`, the way both the row and
-    /// [`crate::connection::ServerInfo::endpoint`] spell it. Also this row's
-    /// identity for [`super::repositories::SavedServersRepository::remove`] and
-    /// the key its secret is stored under
-    /// ([`super::repositories::CredentialService`]) — a host/port pair is
-    /// unique per saved server.
+    /// `host:port` — this row's identity for
+    /// [`SavedServersRepository::remove`](super::repositories::SavedServersRepository::remove)
+    /// and the key its secret is stored under.
     pub fn endpoint(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// [`Self::last_used_ms`] as the row's meta line prints it, relative to
-    /// `now_ms` — "just now", "2 hours ago", "yesterday", "last week".
-    ///
-    /// Deliberately coarse: the row is a recency cue, not a log. A stamp in the
-    /// future (a device clock that moved backwards) reads as "just now" rather
-    /// than as a negative age.
+    /// [`Self::last_used_ms`] as the row's meta line prints it, relative to `now_ms`
+    /// — deliberately coarse, since the row is a recency cue rather than a log. A
+    /// stamp in the future reads as "just now", never as a negative age.
     pub fn last_used_label(&self, now_ms: i64) -> String {
         if self.last_used_ms <= 0 {
             return NEVER_USED.to_string();
@@ -135,8 +97,8 @@ impl SavedServer {
     }
 }
 
-/// What [`SavedServer::last_used_label`] prints for a row that has never
-/// recorded a login (a legacy entry stored before the stamp existed).
+/// What [`SavedServer::last_used_label`] prints for a row that has never recorded
+/// a login (a legacy entry stored before the stamp existed).
 const NEVER_USED: &str = "not used yet";
 
 /// Milliseconds in a minute — [`SavedServer::last_used_label`]'s coarsest unit.
@@ -151,13 +113,8 @@ fn plural(count: i64, unit: &str) -> String {
     }
 }
 
-/// Milliseconds since the Unix epoch — what [`SavedServer::last_used_ms`]
-/// records, and the one clock read this feature makes.
-///
-/// `std::time` rather than a date crate: muxr does no date arithmetic beyond
-/// [`SavedServer::last_used_label`]'s subtraction, and the app's manifest
-/// carries no date dependency. A clock before the epoch (unset device time)
-/// yields `0`, which reads as never-used rather than as a negative stamp.
+/// Milliseconds since the Unix epoch — the one clock read this feature makes. An
+/// unset device clock yields `0`, which reads as never-used.
 pub fn epoch_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -170,18 +127,10 @@ pub fn epoch_millis() -> i64 {
 // The credential vocabulary
 // ---------------------------------------------------------------------------
 
-/// How a biometric-gated credential operation ended.
-///
-/// One closed enum for both directions of
-/// [`super::repositories::CredentialService`]: every plugin error the gate or
-/// the store can raise maps onto exactly one of these, so nothing above this
-/// layer ever matches on a `frust_secure_storage` type. The Flutter client's
-/// `UnlockStatus` is the same table plus this app's own
-/// [`Self::KeyInvalidated`] arm, which its `local_auth` gate had no counterpart
-/// for.
-///
-/// [`Self::NotFound`] is **unlock-only** by construction: a store is what
-/// produces "the gate passed but there is nothing there", and a save cannot.
+/// How a biometric-gated credential operation ended — one closed enum for both
+/// directions of [`super::repositories::CredentialService`], so nothing above this
+/// layer ever matches on a `frust_secure_storage` type. [`Self::NotFound`] is
+/// **unlock-only** by construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialStatus {
     /// The gate passed and the store answered.
@@ -191,16 +140,15 @@ pub enum CredentialStatus {
     Canceled,
     /// The device has biometric hardware but nothing enrolled.
     NotEnrolled,
-    /// The device has no PIN/pattern/passcode set at all, so neither the
-    /// biometric nor its device-credential fallback can run.
+    /// No PIN/pattern/passcode is set at all, so neither the biometric nor its
+    /// device-credential fallback can run.
     NoDeviceCredential,
     /// Too many failed attempts — biometrics are locked out for now.
     LockedOut,
     /// No usable biometric on this device or this build (desktop included).
     Unavailable,
-    /// A biometric re-enrollment invalidated the store's key: whatever was
-    /// stored can never be read again, so the caller clears the metadata that
-    /// claims a credential exists.
+    /// A re-enrollment invalidated the store's key: what was stored can never be
+    /// read again, so the caller clears the metadata claiming it exists.
     KeyInvalidated,
     /// The gate passed but the store held nothing for this server.
     NotFound,
@@ -209,22 +157,15 @@ pub enum CredentialStatus {
 }
 
 impl CredentialStatus {
-    /// Whether this is the one outcome that leaves the caller nothing to say.
-    ///
-    /// A cancel is deliberately silent — the user dismissed a prompt they
-    /// raised, and answering it with a message would be scolding them.
+    /// Whether this outcome leaves the caller nothing to say — a cancel is silent,
+    /// since the user dismissed a prompt they raised.
     pub fn is_silent(self) -> bool {
         matches!(self, CredentialStatus::Canceled)
     }
 
-    /// The user-facing sentence this outcome is reported with, or `None` for
-    /// the two that report nothing ([`Self::Success`] and [`Self::Canceled`]).
-    ///
-    /// Transcribed from the Flutter client's own eight-branch table
-    /// (`connect_controller.dart`'s `recoverAndConnect`), plus this app's
-    /// [`Self::KeyInvalidated`] arm. Every one of them ends by pointing at the
-    /// manual form, because that is the only path left once the gate refuses:
-    /// there is no plain-storage fallback anywhere in this feature.
+    /// The user-facing sentence this outcome is reported with, or `None` for the two
+    /// that report nothing. Every message points at the manual form, the only path
+    /// left once the gate refuses.
     pub fn message(self) -> Option<&'static str> {
         match self {
             CredentialStatus::Success | CredentialStatus::Canceled => None,
@@ -254,12 +195,9 @@ impl CredentialStatus {
     }
 }
 
-/// What an unlock produced: its [`CredentialStatus`] and, on
-/// [`CredentialStatus::Success`], the recovered auth token.
-///
-/// The token is [`Zeroizing`] and this type's [`std::fmt::Debug`] redacts it,
-/// for the reason [`PairingPayload`]'s own does: a derived impl forwards
-/// straight through `Zeroizing` and prints the secret in the clear.
+/// What an unlock produced: its [`CredentialStatus`] and, on success, the recovered
+/// token. The token is [`Zeroizing`] and this type's [`std::fmt::Debug`] redacts it
+/// — a derived impl would print the secret in the clear.
 #[derive(Clone, PartialEq, Eq)]
 pub struct UnlockedCredential {
     /// How the unlock ended.
@@ -301,8 +239,8 @@ impl std::fmt::Debug for UnlockedCredential {
 pub struct StoreRequest {
     /// The server this secret belongs to — [`SavedServer::endpoint`].
     pub server_key: String,
-    /// The raw auth token to store, and the only secret this feature ever
-    /// writes to disk.
+    /// The raw auth token to store, and the only secret this feature ever writes
+    /// to disk.
     pub token: Zeroizing<String>,
     /// The rationale the system prompt shows. **Never** carries credential
     /// material — the platform renders this to the user.
@@ -329,33 +267,24 @@ pub struct UnlockRequest {
 }
 
 /// A `muxr://pair` QR payload, decoded and validated by
-/// [`super::use_cases::parse_pairing::parse_pairing_uri`].
-///
-/// Not constructed directly outside that parser or tests — every field here
-/// already passed the wire grammar's own validation (non-empty host, a legal
-/// port, a decodable token, a well-formed trust posture), so a caller
-/// downstream of the parser never re-checks them.
+/// [`super::use_cases::parse_pairing::parse_pairing_uri`]. Not constructed outside
+/// that parser or tests: every field here already passed the wire grammar's own
+/// validation, so a caller downstream never re-checks it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairingPayload {
     /// The `muxrd` host to dial.
     pub host: String,
     /// The port to dial.
     pub port: u16,
-    /// The bearer auth token the QR encodes, base64url-decoded to its raw
-    /// UTF-8 form. [`Zeroizing`]-wrapped for the same reason the Connect
-    /// form's own login-token field is (`presentation::controller`'s
-    /// `ConnectController::token` doc): a drop or overwrite scrubs the
-    /// buffer instead of leaving stale plaintext parked in a freed
-    /// allocation. This type's own [`Debug`] impl (below) is the other half
-    /// of that hygiene — a derived one would forward straight through
-    /// `Zeroizing`'s own `Debug` and print the token in the clear.
+    /// The bearer auth token the QR encodes, base64url-decoded. [`Zeroizing`]-
+    /// wrapped, with this type's redacting [`Debug`] as the other half.
     pub token: Zeroizing<String>,
     /// Whether the credential the token names only grants read-only access.
     pub read_only: bool,
     /// The rig's human label — the QR's `n` field, percent-decoded.
     pub label: String,
-    /// The TLS posture this payload asks the receiving client to trust the
-    /// server under.
+    /// The TLS posture this payload asks the receiving client to trust the server
+    /// under.
     pub trust: PairingTrust,
 }
 
@@ -372,29 +301,20 @@ impl std::fmt::Debug for PairingPayload {
     }
 }
 
-/// The TLS posture a [`PairingPayload`] asks the receiving client to trust
-/// the server under.
-///
-/// A separate type from [`TrustMode`] rather than a reuse of it (contrast the
-/// module docs' Trust-mode-reuse note, above): `TrustMode` is the connect
-/// *form*'s three-way posture, including `System`, which the wire grammar
-/// never emits, and it is `Copy` with no payload — a QR-encoded pin carries
-/// its fingerprint **as data**, which `TrustMode::Pinned` has nowhere to
-/// hold. Whoever maps a scanned payload onto a connect request (a later,
-/// out-of-scope task) picks the matching `TrustMode` arm and threads `Pin`'s
-/// `fp_hex` into the actual certificate-pinning path directly.
+/// The TLS posture a [`PairingPayload`] asks the client to trust the server under.
+/// A separate type from [`TrustMode`], which is the *form*'s three-way posture and
+/// is `Copy` with no payload — a QR-encoded pin carries its fingerprint **as
+/// data**, which `TrustMode::Pinned` has nowhere to hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PairingTrust {
-    /// Pin the server's certificate to this SHA-256 fingerprint — 64
-    /// lowercase hex characters, the DER-encoded leaf's digest (see
-    /// `Cargo.toml`'s `sha2` dependency comment).
+    /// Pin the server's certificate to this SHA-256 fingerprint — the DER-encoded
+    /// leaf's digest, 64 lowercase hex characters.
     Pin {
-        /// The pinned fingerprint. Already validated against
-        /// `^[0-9a-f]{64}$` by the parser that produced it.
+        /// The pinned fingerprint. Already validated against `^[0-9a-f]{64}$` by
+        /// the parser that produced it.
         fp_hex: String,
     },
-    /// Trust the server's certificate through the platform's system CA
-    /// store — no fingerprint carried or checked.
+    /// Trust the platform's system CA store — no fingerprint carried or checked.
     Ca,
 }
 
@@ -498,8 +418,8 @@ mod tests {
 
     #[test]
     fn the_epoch_clock_reads_a_plausible_present() {
-        // Sanity, not precision: the app's own recency labels are meaningless
-        // if this returns 0 (an unset clock) on a normal machine.
+        // Sanity, not precision: the app's own recency labels are meaningless if
+        // this returns 0 (an unset clock) on a normal machine.
         assert!(epoch_millis() > 1_700_000_000_000, "{}", epoch_millis());
     }
 
