@@ -1006,7 +1006,7 @@ mod tests {
         assert_eq!(request.session, "zellij:dev");
         assert_eq!(
             request.tab_name, "",
-            "a blank confirm is this create's own valid default (G39), not a \
+            "a blank confirm is this create's own valid default, not a \
              disabled state — NewTabReq has no connection_id field either way"
         );
     }
