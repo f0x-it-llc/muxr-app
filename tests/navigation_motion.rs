@@ -3,76 +3,26 @@
 //! it (`src/routes.rs`), and the GlyphSlide page transition every path
 //! navigation carries.
 //!
-//! # Why this suite mounts the *whole* app
-//!
-//! Every other screen suite deliberately mounts its screen *beside* a
-//! navigator, because `NavigatorWidget` contributes no `Widget::semantics` and
-//! forwards none of its pages' — so a page inside a navigator is invisible to
-//! the accessibility tree. The bar under test here has the opposite problem
-//! solved for it: it is **shell** chrome, a fixed-index sibling of the
+//! **Why this suite mounts the *whole* app.** Every other screen suite mounts
+//! its screen *beside* a navigator, because `NavigatorWidget` contributes no
+//! `Widget::semantics` and forwards none of its pages' — a page inside a
+//! navigator is invisible to the accessibility tree. The bar has the opposite
+//! problem solved for it: it is **shell** chrome, a fixed-index sibling of the
 //! navigator in `shell::root_view`'s root `Stack`, so mounting the real
-//! `MuxrApp` leaves it fully addressable by role/label/value while the routes
-//! underneath stay opaque. That is exactly the split this suite wants — it
-//! asserts on what the *bar* says, never on what a route renders.
+//! `MuxrApp` leaves it fully addressable while the routes underneath stay
+//! opaque — exactly the split this suite wants.
 //!
-//! # Two observables, and why each is the honest one
+//! **Two observables:** semantics for everything the bar *is* (a bar
+//! **mid-reveal** publishes nothing, so every semantics assertion settles
+//! first), and recorded geometry for the page transition, since a
+//! `TransitionSpec` isn't readable back off a `NavigatorController` — the
+//! leaving page displaces along x mid-flight, zero under `reduce_motion`.
 //!
-//! - **Semantics** ([`support::node_roles`]/[`node_labels`]/[`node_values`]) for
-//!   everything the bar *is*: present or hidden (`Role::TitleBar`), what it
-//!   titles, whether it wears the brand or the `‹`, whether it carries the `⚙`.
-//!   A bar **mid-reveal** publishes nothing either (it routes nothing, so a
-//!   node would lie), which is why every semantics assertion here settles first.
-//! - **Recorded geometry** for the page transition. A `TransitionSpec` is not
-//!   readable back off a `NavigatorController`, so "the Glyph slide was
-//!   applied" is asserted where it is actually visible: mid-flight, the leaving
-//!   page is still painting **and** displaced along x by the preset's 16dp
-//!   travel. `resolve_spec`'s `reduce_motion` collapse is the same assertion
-//!   with the displacement required to be *zero* — a pure cross-fade, the Glyph
-//!   design system's hard accessibility rule. (The spec's identity —
-//!   `PageTransition::Glyph` under `Timing::ThemeDefault` — is pinned by
-//!   `routes.rs`' own unit tests, which can name the types directly.)
-//!
-//! # …and what the geometry proves about the bar *floating*
-//!
-//! Section 7 is the payoff of the shell restructure: the bar no longer shares a
-//! band with the navigator, so a route gaining or losing it must not reflow the
-//! page. Two rects carry that:
-//!
-//! - **The Sessions page tone** ([`page_tone`]) — `pieces::page_tone`'s
-//!   full-bleed fill, and so the biggest rect that screen paints, which makes
-//!   it a direct read on the *box the navigator laid the page out in*. It must
-//!   be the whole surface, mid-transition and settled alike.
-//! - **The brand-mark cells** ([`brand_mark_top`]) — `.brand-mark span`'s four
-//!   7×7 tiles, the highest chrome on a barred screen, and so a direct read on
-//!   where the *bar* is painting while it slides in or out. (The strip's
-//!   `.dot-ok` is 7×7 too, which is why this reads the topmost one: the bar is
-//!   above the strip at rest and only travels further up.)
-//!
-//! # Two navigators, and which depth an assertion means
-//!
-//! The app has **two** page stacks since the root overlay host landed
-//! (`muxr::AppState::overlays`, FINDINGS #44): the *route* navigator
-//! (`AppState::nav`'s controller, [`Harness::depth`]) and the *host* above all
-//! the chrome, where every menu, sheet and dialog is a page
-//! ([`Harness::overlay_depth`], `1` at rest). The pair is what the sections
-//! below assert against, and the split is itself an assertion: **an overlay
-//! never perturbs the route stack**, which is why every overlay test here reads
-//! both numbers rather than the one it used to.
-//!
-//! It is also why an overlay makes the bar unaddressable at all: the host
-//! forwards accessibility nodes (and routes input) for its top page only, so
-//! the whole app under an open overlay — the bar included — is omitted from the
-//! tree, and inert. That is the *only* mechanism now; the bar's own modality
-//! mirroring (a counted flag, a scrim it painted over itself) was deleted with
-//! the adoption, and sections 3b–3d are what prove nothing went with it.
-//!
-//! # The cold-start splash, spent up front
-//!
-//! `MuxrApp`'s first *build* in a process claims the one cold-start splash, so
-//! whichever test ran first would otherwise mount an overlay the others don't —
-//! and its Connect copy would land in the recorded geometry. [`spend_cold_start`]
-//! burns that claim on a throwaway app before any fixture mounts, so every test
-//! here runs a warm start.
+//! **Two navigators:** the *route* navigator ([`Harness::depth`]) and the
+//! *host* above all the chrome, where every menu/sheet/dialog is a page
+//! ([`Harness::overlay_depth`]) — an overlay never perturbs the route stack,
+//! and an open overlay makes the app underneath, bar included, omitted and
+//! inert. [`spend_cold_start`] burns the one-per-process splash claim first.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -121,7 +71,7 @@ const GEAR: &str = "Settings";
 /// The two glyphs that used to stand in for those affordances. **Nothing in
 /// the bar may carry either again**: neither is in the bundled Glyph faces, so
 /// each platform's font-fallback chain answered differently (the `⚙` was
-/// simply absent on iPhone) — the round-4 device finding this suite pins shut.
+/// simply absent on iPhone) — a device-verified regression this suite pins shut.
 const BANNED_GLYPHS: [&str; 2] = ["\u{2039}", "\u{2699}"];
 
 /// How far into a transition the geometry probes paint. Early enough that the
@@ -646,7 +596,8 @@ fn a_sheets_own_scrim_is_painted_over_the_bar_and_lifts_with_it() {
     assert_eq!(scrims.len(), 1, "exactly one scrim: {scrims:?}");
 
     // THE assertion: it is painted *after* the bar's own surface, so it covers
-    // the bar rather than sliding up under it (FINDINGS #44's whole point).
+    // the bar rather than sliding up under it — the whole point of painting
+    // the scrim at the root instead of mirroring a tint onto the bar itself.
     let bar_band = dimmed
         .fills
         .iter()
@@ -1643,7 +1594,7 @@ fn a_title_change_paints_both_runs_while_it_crosses_over() {
 }
 
 // ---------------------------------------------------------------------------
-// 6 — the stable-container invariant, at the seam this task moved
+// 6 — the stable-container invariant, at the seam the bar floats over
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1722,7 +1673,7 @@ fn a_hidden_bar_routes_no_events_and_reserves_no_box() {
 // 7 — the bar floats: no page reflow, and a real entrance/exit
 // ---------------------------------------------------------------------------
 
-/// The Sessions page's own full-bleed tone rect (`pieces::page_tone`) — the
+/// The Sessions page's own full-bleed tone rect (`widgets::page_tone`) — the
 /// biggest thing that screen paints, and so a direct read on the box the
 /// navigator laid the page out in.
 fn page_tone(scene: &RecScene) -> (Point, Size) {
@@ -1789,10 +1740,11 @@ fn a_page_pushed_under_the_bar_lays_out_at_full_height_from_its_first_frame() {
     let _g = serial();
     let _ambient = setup();
 
-    // The round-3 glitch, as an assertion. When the bar shared a band with the
-    // navigator, arriving at `/sessions` shrank every page by the bar's height
-    // — so the incoming page laid out short and its content sat 46px lower than
-    // where it settles. Floating the bar makes the page's box a constant.
+    // A once-live layout glitch, as an assertion. When the bar shared a band
+    // with the navigator, arriving at `/sessions` shrank every page by the
+    // bar's height — so the incoming page laid out short and its content sat
+    // 46px lower than where it settles. Floating the bar makes the page's box
+    // a constant.
     let (mut h, mid) = mid_push_to_sessions(false);
     let mid_tone = page_tone(&mid);
     let mid_strip = strip_dot_top(&mid);

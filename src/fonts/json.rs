@@ -1,30 +1,20 @@
 //! A minimal, read-only JSON value and parser — the font manifest's wire
 //! format, and nothing else.
 //!
-//! # Why hand-rolled (again)
+//! **Why hand-rolled (again).** The app already hand-rolls JSON once, for the
+//! saved-server store (`features::connect::data::repositories::json`); that
+//! copy is `pub(super)` inside a *feature's* `data` layer, and an app-level
+//! module reaching into it would be the layering violation
+//! `docs/ARCHITECTURE.md` forbids — so this is a second, narrower copy rather
+//! than a shared import. It is **parse-only**: nothing here re-encodes a
+//! manifest (the cached copy is the fetched bytes, verbatim), so it has no
+//! encoder half. Promoting one shared `crate::json` beside `failure.rs` is the
+//! obvious follow-up once a third consumer appears.
 //!
-//! The app already hand-rolls JSON once, for the saved-server store
-//! (`features::connect::data::repositories::json`, whose module docs carry the
-//! full rationale: this manifest declares no JSON dependency, and the
-//! framework's own shells hand-roll their fixed payloads the same way —
-//! `docs/CODE_STANDARDS.md`'s hand-roll-JSON rule). That copy is `pub(super)`
-//! inside a *feature's* `data` layer, and an app-level module reaching across
-//! into a feature's data layer is exactly the layering violation
-//! `docs/ARCHITECTURE.md` forbids — so this is a second, deliberately
-//! narrower copy rather than a shared import. It is **parse-only**: nothing
-//! here re-encodes a manifest (the cached copy is the fetched bytes,
-//! verbatim), so the encoder half of the saved-server copy has no counterpart.
-//!
-//! Promoting one shared `crate::json` beside `failure.rs` is the obvious
-//! follow-up once a third consumer appears; it would touch `connect`'s data
-//! layer, which is out of this module's remit.
-//!
-//! # Contract
-//!
-//! [`parse`] answers `None` for anything that is not well-formed JSON — the
-//! catalog above treats that as "no catalog", never a panic. Numbers are
-//! `f64`: the largest value this schema carries is a font file's byte count
-//! (~3e6), far inside the range `f64` represents exactly.
+//! **Contract.** [`parse`] answers `None` for anything that is not
+//! well-formed JSON — the catalog above treats that as "no catalog", never a
+//! panic. Numbers are `f64`: the largest value this schema carries is a font
+//! file's byte count (~3e6), far inside `f64`'s exact range.
 
 /// How deep a nested array/object may go before [`parse`] gives up. The
 /// manifest is three levels (an object holding an array of objects holding an

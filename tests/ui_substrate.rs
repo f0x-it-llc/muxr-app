@@ -6,25 +6,23 @@
 //! the same three beats: push it, [`support::settle`] it past the navigator's
 //! input-blocking transition, then tap/type.
 //!
-//! # Why taps are addressed by painted geometry
-//!
-//! `NavigatorWidget` contributes no `Widget::semantics` and forwards none of
-//! its pages', so **nothing inside a pushed page appears in the accessibility
-//! tree** — a label-addressed tap can't find a dialog button. The overlay
-//! tests therefore locate their targets in the recorded paint output instead
+//! **Why taps are addressed by painted geometry.** `NavigatorWidget`
+//! contributes no `Widget::semantics` and forwards none of its pages', so
+//! **nothing inside a pushed page appears in the accessibility tree** — a
+//! label-addressed tap can't find a dialog button. The overlay tests
+//! therefore locate their targets in the recorded paint output instead
 //! (`support`'s [`largest`]/[`smallest`]/[`by_width`]), addressing each by the
 //! one geometric property the widget's own layout fixes: the panel is the
-//! biggest thing an overlay paints, a dialog's field spans the panel's full
-//! content width, and the danger action is the smallest stroked outline. The
-//! toast tests, mounting the host without a navigator, use semantics directly
-//! (and are the ones that assert message *text*).
+//! biggest thing an overlay paints, a dialog's field spans its full content
+//! width, and the danger action is the smallest stroked outline. The toast
+//! tests, mounting the host without a navigator, use semantics directly (and
+//! are the ones that assert message *text*).
 //!
 //! `State` is a small test-local struct, not `muxr::AppState`: all three
-//! helpers are generic over the app state precisely so a screen (or a test)
-//! brings its own, and each takes nothing but the navigator to push its page
-//! onto. In the app that navigator is the root overlay host
-//! (`muxr::AppState::overlays`); here it is this harness's own controller,
-//! which is what keeps the overlay under test addressable.
+//! helpers are generic over the app state so a screen (or a test) brings its
+//! own, each taking nothing but the navigator to push its page onto. In the
+//! app that navigator is the root overlay host (`muxr::AppState::overlays`);
+//! here it is this harness's own controller.
 
 use frust::{
     AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator, text,

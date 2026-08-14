@@ -1,48 +1,28 @@
 //! An in-process `muxrd` stand-in: a real TLS gRPC server on a loopback port,
-//! serving the real generated stubs, so the client stack can be exercised
-//! without the docker rig.
+//! serving the real generated stubs, so the client stack is exercised without
+//! the docker rig.
 //!
 //! **`#[cfg(test)]`, not a feature flag.** The fixture needs `rcgen` and
-//! tonic's `server`/`router`/`transport` features, all of which are
-//! `[dev-dependencies]` — reachable from the crate's own unit tests and from
-//! nothing else. A `tests/*.rs` integration suite links the *library* build,
-//! which Cargo compiles without dev-dependencies, so a fixture-driven test
-//! belongs in a `#[cfg(test)] mod tests` inside `src/net`, and that is where
-//! the client's handshake/credential coverage lives. Promoting this to a
-//! `tests/support/` module is the move if an integration suite ever needs it;
-//! `Cargo.toml` is single-owner and gains no feature for it.
+//! tonic's `server`/`router`/`transport` features, all `[dev-dependencies]` —
+//! reachable from the crate's own unit tests, never from a `tests/*.rs`
+//! integration suite (Cargo links those against the dev-dependency-free
+//! *library* build). The handshake/credential coverage has nowhere else to go.
 //!
-//! **Auth mirrors `muxrd`, checked per method rather than in a layer.** Only
-//! `GetVersion` and `Login` are public; every other RPC calls
-//! [`require_bearer`] first and answers `Status::unauthenticated` on a missing,
-//! malformed or unknown credential. A tonic interceptor cannot express that
-//! allowlist — it is handed a `Request<()>` with the metadata and extensions
-//! only, never the URI, so it cannot tell `Login` from `ListSessions`.
+//! **Auth mirrors `muxrd`, checked per method.** Only `GetVersion`/`Login` are
+//! public; every other RPC calls [`require_bearer`] first — a tonic
+//! interceptor can't express that allowlist (it sees only a `Request<()>`'s
+//! metadata, never the URI). Unanswered RPCs return `UNIMPLEMENTED`, not a
+//! plausible canned value.
 //!
-//! Only the RPCs a test needs are answered; every other method returns
-//! `UNIMPLEMENTED` rather than a plausible-looking canned value, so a future
-//! test that reaches one fails loudly instead of asserting against fiction.
+//! **`AttachTerminal` is scripted, not canned.** [`TerminalScript`] records
+//! what the client sent and pushes back a render frame, a clean
+//! [`exit`](crate::net::control::CONTROL_EXIT), or a mid-flight drop (for a
+//! reconnect test); every stream announces a
+//! [`connection_id`](crate::net::control::CONTROL_CONNECTION_ID) and echoes
+//! input as render frames.
 //!
-//! **`AttachTerminal` is scripted, not canned.** The one streaming RPC needs a
-//! server side a test can *drive* — [`TerminalScript`] records what the client
-//! sent (attach handshakes, input, resizes) and pushes what the server should
-//! say back (a render frame, a clean
-//! [`exit`](crate::net::control::CONTROL_EXIT), or a mid-flight drop for a
-//! reconnect test). Every other behavior is fixed: a stream must open with an
-//! `attach` frame, it answers with a
-//! [`connection_id`](crate::net::control::CONTROL_CONNECTION_ID) control event,
-//! and it echoes received input back as render frames, which is the smallest
-//! stand-in for a PTY that makes "what I typed came back, in order" assertable.
-//! Both kinds are `net`'s own ([`control`](crate::net::control)), never the
-//! consuming feature's: this fixture and that feed have to agree, and nothing
-//! under `src/net` imports a feature. [`TerminalScript`] also records every
-//! `mouse` frame a stream sends ([`MouseObservation`]).
-//!
-//! **The one-shot workspace-verb RPCs are recorded, not scripted.** Unlike
-//! `AttachTerminal`, `CreateSpace`/`RenameSpace`/`NewTab`/`RenameTab`/
-//! `NewPane`/`RenamePane`/`FocusPane`/`ScrollPane` each answer once, so
-//! [`ActionLog`] is a plain typed record of every request seen plus an
-//! unconditional `ActionAck { ok: true, .. }` — there is nothing to *drive*.
+//! **The one-shot workspace-verb RPCs are recorded, not scripted** — each
+//! answers once, so [`ActionLog`] just records the request and acks.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

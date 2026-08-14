@@ -1,50 +1,28 @@
 //! Shared headless-test harness for muxr's integration tests: a GPU-free
-//! paint target, a one-frame helper, a recording waker, an ambient-owner
-//! setup, and an async pump-poll loop — lifted (same shape, adapted doc
-//! header) from `examples/huddle`'s own `tests/support/mod.rs` (itself
-//! lifted from `clean-signals-frust`'s own support module, the Frust
-//! `examples/inbox` recipe), factored so every `tests/*.rs` file (each its
-//! own crate root) can share it. Carries [`RecScene`] recording rounded-rect
-//! geometry (field/button chrome) so a test can locate and tap a button,
-//! plus generic [`pointer`]/[`tap`]/[`center`] pointer-event helpers and
-//! [`char_key`]/[`named_key`] keyboard-event helpers, ready for Phase 2's
-//! interactive screens even though today's route-smoke tests only need
-//! [`frame`]/[`setup`]/[`serial`].
+//! recording paint target ([`RecScene`], rounded-rect/stroke chrome so a test
+//! can locate and tap a button), a one-frame helper, a recording waker, the
+//! [`setup`] ambient-owner + mock-opt-in seam (see its own doc for the full
+//! seven-seam contract every suite runs through before `MuxrApp::init`), an
+//! async pump-poll loop, and generic pointer/keyboard-event helpers — factored
+//! so every `tests/*.rs` file (each its own crate root) can share it. Not
+//! every test uses every helper.
 //!
-//! # Overlay helpers (dialogs / sheets / toasts)
+//! **Overlay helpers.** [`frame`] always paints at `FrameTime::ZERO`, fine for
+//! static screens but frozen for anything driven off the frame clock —
+//! including the navigator's own push/pop transition, which **blocks all
+//! input** mid-flight. [`frame_at`] paints at an explicit time and [`settle`]
+//! drives a pushed overlay past its transition so a test can then tap it;
+//! [`long_press`] spans two paints so the paint-clock hold timer crosses its
+//! threshold. Each lays out at the default [`surface`] (800×600); the
+//! `*_sized` variants take it explicitly for a taller screen.
 //!
-//! [`frame`] always paints at `FrameTime::ZERO`, which is fine for static
-//! screens but freezes anything driven off the frame clock — including the
-//! navigator's own push/pop transition, during which it **blocks all input**.
-//! [`frame_at`] paints at an explicit time and [`settle`] drives a pushed
-//! overlay past its transition so a test can then tap it.
-//!
-//! [`long_press`] is the gesture counterpart: a press that spans two paints so
-//! the framework's paint-clock hold timer actually crosses its threshold.
-//!
-//! Each of those three lays out at the default [`surface`] (800×600); the
-//! `*_sized` variants take the surface explicitly, for a suite whose screen is
-//! taller than 600px and would otherwise lay its last row out below the fold,
-//! untappable.
-//!
-//! Locating what to tap has two routes, and which one works depends on where
-//! the target sits:
-//!
-//! - **Semantics** ([`node_labels`]/[`node_values`]/[`node_center_by_label`]/
-//!   [`node_centers_by_label`]/[`node_centers_by_value`]/[`node_center_by_role`])
-//!   — reads labels, values
-//!   and bounds straight off the accessibility tree, and is the only way to
-//!   assert *what a toast said* (a recording `PaintScene` sees glyph runs, not
-//!   strings). It does **not** see anything inside a `Navigator`:
-//!   `NavigatorWidget` contributes no `Widget::semantics` and forwards none of
-//!   its pages' (a framework gap — every pushed page is invisible to
-//!   accessibility).
-//! - **Recorded geometry** ([`largest`]/[`smallest`]/[`by_width`] over
-//!   [`RecScene::rounded`]/[`RecScene::strokes`], plus [`added`] to diff an
-//!   overlay's own chrome out of a busy frame) — what a test must use for a
-//!   pushed page (dialog/sheet) until that gap closes.
-//!
-//! Not every test uses every helper.
+//! **Locating what to tap** has two routes: semantics
+//! ([`node_labels`]/[`node_values`]/[`node_center_by_label`]/etc.) reads
+//! labels/values/bounds off the accessibility tree and is the only way to
+//! assert *what a toast said*, but sees nothing inside a `Navigator`
+//! (`NavigatorWidget` forwards no child semantics); recorded geometry
+//! ([`largest`]/[`smallest`]/[`by_width`]/[`added`]) is what a test must use
+//! for a pushed page instead.
 #![allow(dead_code)]
 
 use std::any::Any;

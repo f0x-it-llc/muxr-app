@@ -1,91 +1,28 @@
-//! Layering conformance scan for context/owner lookups.
-//!
-//! The bug in one sentence: `GrpcAuthTokensRepository` used to resolve the
-//! app's `ConnectionController` via a fresh `use_context` lookup on every RPC,
+//! Layering conformance scan for context/owner lookups. The bug in one
+//! sentence: `GrpcAuthTokensRepository` used to resolve the app's
+//! `ConnectionController` via a fresh `use_context` lookup on every RPC,
 //! which panicked the instant a real call ran inside a `frust::spawn_local`
-//! future — the only poller for that future installs no ambient reactive
-//! owner, so the lookup's `.expect()` had nothing to find; the fix resolves
-//! the controller exactly once, at DI time, and holds it as a plain field
-//! (see `GrpcAuthTokensRepository`'s own module docs).
+//! future (its poller installs no ambient reactive owner, so the lookup had
+//! nothing to find); the fix resolves the controller once, at DI time.
 //!
-//! This scan pins that fix in place: `expect_connection_controller`,
-//! `expect_controller`, and `use_context` may only appear in code that is
-//! already known to run under a guaranteed-live reactive owner — a `di.rs`
-//! composition-root wiring module, `connection.rs` itself (which defines
-//! `expect_connection_controller`), or a `presentation`/`ui` file (every
-//! screen resolves its app-scoped handles once in `Component::init`, and
-//! reads context again only from `Component::build` — both owner-carrying
-//! sites per `docs/ARCHITECTURE.md`'s "Building a Screen" section, though a
-//! presentation file can still smuggle a lookup into a spawned future body,
-//! which is why the second scan below exists and checks every directory).
-//! A `data`/`domain` file reaching for any of the three —
-//! the exact shape of the original bug — is not on that list and fails this
-//! scan.
+//! **Two scans enforce it, together.** The first
+//! ([`is_sanctioned_lookup_site`]) trusts a file's *directory*:
+//! `expect_connection_controller`/`expect_controller`/`use_context` may only
+//! appear in a `di.rs`, `connection.rs` itself, or a `presentation`/`ui` file
+//! — every other directory (`data`/`domain` included, the original bug's own
+//! shape) fails. That heuristic has a blind spot: a `presentation/` file can
+//! still smuggle a lookup into a spawned future's *body*, since
+//! `spawn_local`'s poller installs no ambient owner regardless of directory.
+//! The second scan ([`banned_lookups_in_spawn_blocks`], design/limits on its
+//! own doc) closes that gap directly: a line-based `{`/`}` brace tracker flags
+//! `use_context` or any `expect_*` accessor inside a tracked
+//! `spawn_local(async`/`spawn(async` span, wherever it lives — its one named-
+//! future blind spot is pinned separately by
+//! [`the_named_future_spawned_by_the_terminal_pump_stays_lookup_free`].
 //!
-//! # The directory heuristic's blind spot
-//!
-//! That first scan trusts a file's *directory* to prove its lookups run
-//! under a live owner — true for `Component::init`/`build` themselves, but
-//! not for the *body* of a future a `presentation/` file spawns:
-//! `spawn_local`'s poller installs no ambient owner no matter which directory
-//! the spawning file lives in. The sessions screen's poll-cadence loader hit
-//! exactly this: `expect_preferences_repository()` was called from inside a
-//! `spawn_local(async move { .. })` body in `presentation/pages.rs`, which
-//! the directory allowlist above waves straight through, and the lookup
-//! panicked on the future's first real poll for the identical reason the
-//! repository lookup above did (a headless suite's own ambient owner masked
-//! it, so no test caught it). The fix moved the lookup to before the
-//! `spawn_local` call, resolving it under `Component::init`'s real owner and
-//! carrying only the resolved value into the future. The second scan below
-//! closes the directory heuristic's blind spot directly, independent of
-//! which directory the spawning file lives in.
-//!
-//! # Spawned-async-block scan: design and known limits
-//!
-//! [`banned_lookups_in_spawn_blocks`] is a line-based textual scan, not a
-//! parser, so its notion of "inside a spawned async block" is an
-//! approximation:
-//!
-//! - A line opens a tracked block when it contains `spawn_local(async` or
-//!   `spawn(async` ([`opens_spawn_block`]) — this covers both `async {}` and
-//!   `async move {}`, and both a bare `spawn`/`spawn_local` call and a
-//!   `frust::`-qualified one.
-//! - From that line on, the scan sums a plain `{`/`}` character count per
-//!   line ([`brace_delta`]) until the running total returns to zero, and
-//!   flags an [`is_owner_dependent_lookup`] token found on any non-comment
-//!   line in that span — the opening and closing lines included. That
-//!   matcher is deliberately *wider* than [`BANNED_NEEDLES`] above: rather
-//!   than the three names the directory-based scan already knows to
-//!   enumerate, it flags `use_context` plus **any** `expect_`-prefixed call
-//!   (`expect_preferences_repository`, `expect_saved_servers`, …), since a
-//!   lookup deferred into a spawned future body is the same bug no matter
-//!   which feature's `di.rs` minted the accessor — with one exclusion,
-//!   `expect_err(` (a `Result`/`Option` assertion, unrelated and common in
-//!   test code).
-//! - **Known limits**, accepted for a tripwire rather than a compiler pass:
-//!   an *unbalanced* `{`/`}` inside a string or byte literal on one line
-//!   would throw the running count off (a *balanced* pair —
-//!   `format!("{}", x)`, `"{name}"` — nets zero and is harmless); a spawn
-//!   call whose argument is a named future rather than an inline `async`
-//!   block (e.g. `spawn_local(run_feed_watched(..))`) is not tracked at all,
-//!   since there is no literal `async` on its opening line to key off of;
-//!   and a count that never returns to zero would leave the rest of the file
-//!   flagged as "inside" the block. The named-future shape EXISTS today —
-//!   `term/mod.rs` spawns `run_feed_watched(..)` exactly that way — so its
-//!   target's body is pinned lookup-free by
-//!   [`the_named_future_spawned_by_the_terminal_pump_stays_lookup_free`]
-//!   below rather than left to this scan's blind spot; any OTHER future call
-//!   site using one of these shapes needs a human eye, not just this test,
-//!   to review.
-//!
-//! Plain `std::fs` source scan, no dependency beyond std (this repo has no
-//! lint-plugin tooling — see `docs/CODE_STANDARDS.md`; precedent:
-//! `frust-drive/tests/print_free_cores.rs`'s own scan). Comment-only lines
-//! (anything whose trimmed text starts with `//`, which covers `///`/`//!`
-//! doc comments too) are stripped before matching, so a module doc that
-//! *names* one of the three functions in prose — this file's own header
-//! above included — never trips either scan; only an actual reference in
-//! code does.
+//! Plain `std::fs` scan, no dependency beyond std; comment-only lines are
+//! stripped before matching, so a module doc naming these functions in prose
+//! never trips either scan.
 
 use std::fs;
 use std::path::{Path, PathBuf};
