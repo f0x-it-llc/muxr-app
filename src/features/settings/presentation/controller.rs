@@ -1,73 +1,44 @@
-//! [`SettingsController`] — the `/settings` screen's view model.
+//! [`SettingsController`] — the `/settings` screen's view model. A
+//! [`ControllerCore`] embedded by composition, the feature's six use cases
+//! over its two injected repositories, and the signals the screen renders.
+//! Hosted through `clean_signals_frust::use_controller`, created on route
+//! mount and disposed on unmount.
 //!
-//! Mirrors `examples/huddle`'s controller shape (and this app's own
-//! `SessionsController`): a [`ControllerCore`] embedded by composition, the
-//! feature's six use cases constructed over its two injected repositories, and
-//! the signals the screen renders. Hosted by the screen through
-//! `clean_signals_frust::use_controller`, so it is created on route mount and
-//! disposed on unmount.
+//! [`tokens`](Self::tokens)/[`appearance`](Self::appearance)/
+//! [`poll`](Self::poll)/[`loaded`](Self::loaded) are `RwSignal`s; the
+//! connection facts the first group prints are **not** here at all — they
+//! live on [`crate::connection::ConnectionController`], since more than one
+//! feature reads them. Both preference signals start seeded with
+//! [`Preferences::defaults`] rather than an `Option`, so the first frame
+//! paints the same rows the loaded frame does rather than blank values that
+//! fill in a beat later; [`loaded`](Self::loaded) still records whether the
+//! real read has landed.
 //!
-//! # What is a signal here, and what is not
+//! **Every mutation re-reads**: a create/revoke ends with a fresh
+//! [`refresh_tokens`](Self::refresh_tokens) rather than a local patch, so the
+//! screen always renders what the store actually holds. A preference save is
+//! the exception — the repository *returns* the stored record, so the signal
+//! takes that value directly.
 //!
-//! [`tokens`](Self::tokens), [`appearance`](Self::appearance),
-//! [`poll`](Self::poll) and [`loaded`](Self::loaded) are `RwSignal`s — they are
-//! observed state, and writing one is what wakes the screen's rebuild. The
-//! connection facts the screen's first group prints are **not** here at all:
-//! they live on [`crate::connection::ConnectionController`], because whether
-//! the app is connected gates routing itself and more than one feature reads
-//! it (see that module's docs).
+//! **`saved`** is the `saved servers` group's rows, over `connect`'s own two
+//! stores (the saved-server list and its credential service), resolved
+//! through that feature's own `di::expect_*` — the same cross-feature
+//! widening the terminal screen makes. It lives here because deleting a
+//! credential is *also* a token revocation, which this feature owns.
+//! Deleting is deliberately **ungated** (forgetting a secret is not a use of
+//! it, so no biometric prompt); the token revoke that rides along is
+//! best-effort — attempted, its failure unshown, the local credential removed
+//! either way, since a token that can't be reached must not leave a
+//! credential the user asked to be rid of on the device.
 //!
-//! # The preference signals start populated, and that is deliberate
-//!
-//! Both preference signals are seeded with
-//! [`Preferences::defaults`] rather than an `Option`: those defaults *are* what
-//! the mock repository holds, so the screen's first frame paints the same rows
-//! the loaded frame does instead of four blank values that fill in a beat
-//! later. [`loaded`](Self::loaded) still records whether the real read has
-//! landed, for a test (or a later skeleton state) that needs to know.
-//!
-//! # Why every mutation re-reads
-//!
-//! A create/revoke ends with a fresh [`refresh_tokens`](Self::refresh_tokens)
-//! rather than a local patch, so the screen always renders what the store
-//! actually holds — the same discipline `SessionsController` follows. A
-//! preference save is the exception: the repository *returns* the stored
-//! record, so the signal takes that value directly and no second round trip is
-//! needed.
-//!
-//! # The saved-server group, and why it reaches into `connect`
-//!
-//! [`saved`](Self::saved) is the `saved servers` group's rows, over the
-//! **`connect` feature's** two stores — the saved-server list and the
-//! biometric-gated credential service — resolved through that feature's own
-//! `di::expect_*` functions by the screen. This is the same cross-feature
-//! widening the terminal screen already makes (`docs/ARCHITECTURE.md`'s note: a
-//! page resolves a sibling's `di::expect_*` directly rather than re-routing a
-//! copy through its own), and it is here because deleting a credential is *also*
-//! a token revocation, which this feature owns — putting the row anywhere else
-//! would mean two features touching one server-side token.
-//!
-//! Deleting is deliberately **ungated**: forgetting a secret is not a use of it
-//! (the credential service's own contract), so no biometric prompt is raised
-//! here at all. The server-side revoke that goes with it is best-effort — it is
-//! attempted, its failure is not shown, and the local credential is removed
-//! either way, because a token that cannot be reached must not leave a
-//! credential the user asked to be rid of sitting on the device.
-//!
-//! # The one-time secret
-//!
-//! [`pending_token_secret`](Self::pending_token_secret) is the seam the
-//! presentation layer's secret-reveal sheet reads from: a landed
-//! [`create_token`](Self::create_token) parks the daemon's one-time
-//! [`MintedToken`] there (nothing else in this controller writes it), and
+//! **The one-time secret**: [`pending_token_secret`](Self::pending_token_secret)
+//! is what the reveal sheet reads — a landed [`create_token`](Self::create_token)
+//! parks the daemon's one-time [`MintedToken`] there, and
 //! [`clear_pending_secret`](Self::clear_pending_secret) is the reveal's own
-//! "dismissed, gone forever" — the cleared `Option`'s dropped `Zeroizing`
-//! secret scrubs its buffer right there. There is deliberately no
-//! auto-clearing tied to a *scrim* dismissal of that sheet (`ui::sheet` hands
-//! its caller no dismissal hook to hang one off):
-//! the value simply sits until the next mint overwrites it or an explicit
-//! dismissal clears it, never logged and never read anywhere but that one
-//! sheet.
+//! "dismissed, gone forever" (the cleared `Option`'s dropped `Zeroizing`
+//! secret scrubs its buffer right there). No auto-clear on a scrim dismissal
+//! (`ui::sheet` hands no such hook): the value sits until the next mint
+//! overwrites it or an explicit dismissal clears it.
 
 use std::sync::Arc;
 

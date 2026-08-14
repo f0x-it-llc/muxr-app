@@ -101,12 +101,12 @@ const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 const PANEL_PADDING: f64 = 20.0;
 /// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
-/// The groups column's max width past
-/// `crate::responsive::WIDE_BREAKPOINT_PX` (FINDINGS #21's width-clamp pass),
-/// transcribed (the constant itself is private to `presentation::pages`).
+/// The groups column's max width past `crate::responsive::WIDE_BREAKPOINT_PX`
+/// (the screen's own width-clamp pass), transcribed (private to
+/// `presentation::pages`).
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 /// `.disconnect-btn`'s own horizontal margin, transcribed (private to
-/// `presentation::pieces`) — what the Disconnect button spans the width
+/// `presentation::widgets`) — what the Disconnect button spans the width
 /// *between*, inside whatever box the scroller itself is laid out at.
 const ROW_PAD_X: f64 = 16.0;
 
@@ -159,9 +159,9 @@ fn metrics_at(size: Size) -> WindowMetrics {
 
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
-/// responsive width-clamp pass (FINDINGS #21). `None` leaves context unset,
-/// exactly the state every other test in this suite mounts under (no shell
-/// has published yet), so this helper is purely additive.
+/// responsive width-clamp pass. `None` leaves context unset, exactly the
+/// state every other test in this suite mounts under (no shell has published
+/// yet), so this helper is purely additive.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     if let Some(metrics) = metrics {
         provide_context(metrics);
@@ -230,10 +230,10 @@ impl Harness {
         // the screen resolves in its own `init`) at this fixture's navigator,
         // real route table and real session guard included — which is what
         // makes Disconnect's `go("/")` the app's real navigation. The one
-        // controller plays both of production's navigators (`AppState::nav` and
-        // the root overlay host `AppState::overlays`, where the dialogs and
-        // picker sheets are pages since FINDINGS #44), which is what keeps every
-        // overlay a page of the *mounted* navigator and so drivable here.
+        // controller plays both of production's navigators (`AppState::nav`
+        // and the root overlay host `AppState::overlays`, where the dialogs
+        // and picker sheets are pages), which is what keeps every overlay a
+        // page of the *mounted* navigator and so drivable here.
         let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
@@ -392,7 +392,7 @@ impl Harness {
     }
 
     /// The bell switch's announced state — the `Role::Switch` node
-    /// `pieces`' own `switch_semantics` wrapper contributes.
+    /// `widgets::misc::bell_notifications_row`'s own `switch_semantics` wrapper contributes.
     fn bell_state(&self) -> Option<Toggled> {
         self.root
             .semantics()
@@ -425,7 +425,7 @@ impl Harness {
 
     /// Whether the screen currently paints a `Role::ProgressIndicator` node —
     /// the Downloading font row's determinate glyph progress bar
-    /// (`pieces::font_row_progress`; `frust_widgets::glyph::progress` is the
+    /// (`widgets::font_picker::font_row_progress`; `frust_widgets::glyph::progress` is the
     /// only widget in this app's tree that contributes this role).
     fn font_progress_bar_visible(&self) -> bool {
         self.root
@@ -1148,19 +1148,12 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
 /// read-only toggle when `read_only`, and submit.
 ///
 /// The two submit paths differ on purpose: with no toggle tap the field still
-/// holds focus, so Enter submits it exactly like
-/// `ui::dialogs::name_input_dialog`'s own field, reading the just-typed value
-/// the framework hands its `on_submit` directly. Tapping the switch first
-/// blurs that focus (`docs/CODE_STANDARDS.md`'s "a `Down` that doesn't
-/// (re)claim focus … blurs the chain") — the switch owns its own tap target
-/// and claims no focus of its own, exactly like the `GestureDetector` it
-/// replaced — so Enter would route nowhere; the Save button submits instead.
-/// Save's own "disabled" gate
-/// (`open_create_token_dialog`'s own doc) is a `can_submit` bool captured at
-/// the dialog body's *last rebuild*, so an explicit [`Harness::frame`] after
-/// typing is what lets it see the typed name before either submit path fires
-/// — Save's read of the toggle itself needs no such rebuild, since
-/// `get_untracked()` always reads the signal's live value.
+/// holds focus, so Enter submits it. Tapping the switch first blurs that
+/// focus (it owns its own tap target and claims none of its own), so Enter
+/// would route nowhere — the Save button submits instead. Save's own
+/// `can_submit` bool is captured at the dialog body's *last rebuild*, so an
+/// explicit [`Harness::frame`] after typing is what lets it see the typed
+/// name before either submit path fires.
 fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
     let dialog = open_dialog_by_value(h, "create new token");
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
@@ -1294,14 +1287,12 @@ fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
     );
     assert_eq!(state, Toggled::False, "unchecked by default");
 
-    // No outer row-wide `GestureDetector` wraps the switch any more (removed
-    // for the pointer-capture conflict `pieces::dialog_read_only_row`'s own
-    // doc explains), so the switch's own semantics bounds are what a tap must
-    // land inside for this to flip. The dialog body is re-invoked on every
-    // navigator rebuild (`open_create_token_dialog`'s own doc), so one
-    // `Harness::frame` after the tap is what lets the switch's `checked`
-    // reflect the signal the tap just moved — `RwSignal::set` itself is
-    // synchronous, unlike the bell row's own async-preferences round trip.
+    // No outer row-wide `GestureDetector` wraps the switch (see
+    // `widgets::tokens::dialog_read_only_row`'s own doc), so the switch's own
+    // semantics bounds are what a tap must land inside. One `Harness::frame`
+    // after the tap is what lets `checked` reflect the signal the tap just
+    // moved — `RwSignal::set` is synchronous, unlike the bell row's own
+    // async-preferences round trip.
     h.tap_label("read-only");
     h.frame();
     let (_, state) = h
@@ -1392,25 +1383,23 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
     }
 }
 
-// -- Keyboard-aware dialogs (frust PR #43, G51) ------------------------------
+// -- Keyboard-aware dialogs ---------------------------------------------------
 //
-// App-level pin for the keyboard-avoidance half of
-// `crates/frust-widgets/src/glyph/dialog.rs`'s fix: the panel now centers in
-// the keyboard-free band instead of the full window. Exercised against the
-// New Token dialog (`pieces::open_create_token_dialog`) — title + field +
-// toggle + a two-button action row, the tallest content any dialog in this
-// app pushes, and the shape the device report named as the worst case. No app
-// production code changed — `Cargo.toml`'s path dep onto frust delivers it,
-// so this pin is the app-level proof, not a behavior change of its own.
+// App-level pin for `crates/frust-widgets/src/glyph/dialog.rs`'s
+// keyboard-avoidance behavior: the panel centers in the keyboard-free band
+// instead of the full window. Exercised against the New Token dialog
+// (`widgets::tokens::open_create_token_dialog`) — title + field + toggle + a
+// two-button action row, the tallest content any dialog in this app pushes.
+// No app production code changed here — `Cargo.toml`'s path dep onto frust
+// delivers it, so this pin is the app-level proof, not a behavior change of
+// its own.
 //
-// The fix's OTHER half — a `Down` on dead panel space blurs the focused field
-// without dismissing the dialog — **is** pinned below now
+// The other half — a `Down` on dead panel space blurs the focused field
+// without dismissing the dialog — is pinned below
 // (`a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog`).
-// It reads from `GlyphDialogWidget::body` (the `.content()` slot), and this
-// dialog's field (plus its read-only toggle) now composes through
-// `.content(...)` rather than `.action(...)` — the workaround
-// `ui/dialogs.rs`'s module docs used to describe, retired now that
-// `.content()` exists (gate-r8 task 35, `19-dialog-content-slot`).
+// It reads from `GlyphDialogWidget::body` (the `.content()` slot); this
+// dialog's field and read-only toggle compose through `.content(...)` rather
+// than `.action(...)` accordingly.
 
 #[test]
 fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
@@ -2050,20 +2039,14 @@ fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family(
 
 #[test]
 fn selecting_a_font_row_plays_the_staged_exit_rather_than_vanishing_the_sheet() {
-    // G53 — the anti-vanish pin. Before frust's `GlyphSheetHandle` seam
-    // (task 36) `SheetHandle::close` rode, a picked row's `sheet.close()`
-    // enqueued the page's pop straight away: one frame later — enough for
-    // `NavigatorController`'s queued op to land (`a_second_tap_on_a_picker_row_
-    // closes_the_sheet_once_and_keeps_the_route`'s own "a pop only *lands* at
-    // the next rebuild") — the sheet was already gone, with no animation at
-    // all (the device symptom task 36 was filed for). `close` now rides the
-    // widget's own staged exit instead (`crate::ui::sheet`'s "`close` plays
-    // the same staged exit"), so that same one frame still finds it mounted,
-    // mid-exit. Fail-then-pass verified by reasoning rather than a temporary
-    // revert: reverting `SheetHandle`'s `close` closure to a bare
-    // `NavigatorController::pop` would apply that pop on this test's very
-    // first `h.frame()` below, failing the `depth() == 2` assertion — exactly
-    // the shape this pin exists to catch.
+    // The anti-vanish pin. `SheetHandle::close` rides `GlyphSheetHandle`'s own
+    // staged exit (`crate::ui::sheet`'s "`close` plays the same staged exit"),
+    // not a bare `NavigatorController::pop` that would enqueue the page's pop
+    // immediately: one frame later — enough for the queued op to land (see
+    // `a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route`'s
+    // own "a pop only *lands* at the next rebuild") — a bare pop would leave
+    // the sheet already gone, with no animation played at all, failing the
+    // `depth() == 2` assertion below.
     let _g = serial();
     let _ambient = setup();
     let cache = fresh_font_cache("anti-vanish");
@@ -2133,7 +2116,7 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
     // Download the first entry. The rows carry no semantics of their own (a
     // sheet is a navigator page — see the module docs) and the catalog
     // section's offset is not derivable from painted evidence, so this drives
-    // the body of the very closure `pieces::font_picker_sheet`'s `on_download`
+    // the body of the very closure `widgets::font_picker::font_picker_sheet`'s `on_download`
     // hands each available row.
     let catalog = muxr::fonts::catalog::font_catalog();
     let entry = catalog
@@ -2274,7 +2257,7 @@ fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// 4b — live download progress (G55)
+// 4b — live download progress
 // ---------------------------------------------------------------------------
 
 /// How long [`StagedFontSource::fetch_font_with_progress`] sleeps between
@@ -2484,7 +2467,7 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
     // The sheet's body closure re-runs on every navigator rebuild
     // (`open_font_picker`'s own doc), so a rendered `ProgressIndicator` node
     // is proof the row actually swapped its trailing affordance for
-    // `pieces::font_row_progress`'s bar rather than the plain text every
+    // `widgets::font_picker::font_row_progress`'s bar rather than the plain text every
     // other state prints.
     let deadline = Instant::now() + PUMP_DEADLINE;
     loop {
@@ -2590,12 +2573,9 @@ fn the_bell_switch_is_a_real_switch_role_whose_own_tap_flips_it() {
         "the mock seeds the bell on, and bell_state() finds a Switch role"
     );
 
-    // No outer row-wide `GestureDetector` wraps the switch (removed for the
-    // pointer-capture conflict `pieces::bell_notifications_row`'s own doc
-    // explains), so the switch's own semantics bounds are what a tap must land
-    // inside to flip it. The settings screen doesn't rebuild on preference
-    // change (unlike the dialog, which rebuilds on navigator mount), so the
-    // preference signal update flows back through the async round trip.
+    // No outer row-wide `GestureDetector` wraps the switch (see
+    // `widgets::misc::bell_notifications_row`'s own doc), so the switch's own
+    // semantics bounds are what a tap must land inside to flip it.
     h.tap_label("bell notifications");
     let deadline = Instant::now() + PUMP_DEADLINE;
     while h.bell_state() != Some(Toggled::False) {
@@ -2651,7 +2631,7 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
 }
 
 // ---------------------------------------------------------------------------
-// 7 — responsive width-clamp pass (FINDINGS #21)
+// 7 — responsive width-clamp pass
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -2701,7 +2681,7 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
 }
 
 // ---------------------------------------------------------------------------
-// 8 — saved-server card clip regression at the phone-narrow width (G47)
+// 8 — saved-server card clip regression at the phone-narrow width
 // ---------------------------------------------------------------------------
 
 /// A frame width matching the device's own narrow branch — the Xiaomi's 1080

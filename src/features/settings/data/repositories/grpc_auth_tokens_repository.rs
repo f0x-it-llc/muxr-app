@@ -1,83 +1,44 @@
 //! [`GrpcAuthTokensRepository`] — the real [`AuthTokensRepository`] over the
 //! connected `muxrd` client.
 //!
-//! # Where the client comes from — resolved once, at DI time
-//!
-//! Unlike a per-call lookup, this repository holds the app's one
-//! [`ConnectionController`](crate::connection::ConnectionController) as a
-//! plain `Arc` field, resolved **exactly once**, in `settings::di::provide`
-//! (composition-root wiring, run from `MuxrApp::init` under its ambient
-//! reactive owner) — the same shape
-//! [`GrpcSessionsRepository`](crate::features::sessions::data::repositories::GrpcSessionsRepository)
-//! and
-//! [`GrpcTerminalRepository`](crate::features::terminal::data::repositories::GrpcTerminalRepository)
-//! already use.
-//!
-//! That is a deliberate correction, not a style choice: every real call site
-//! on this repository runs inside a raw `frust::spawn_local` future body (a
-//! settings-page load/create/revoke handler), and the only thing polling
-//! that future — `ReactiveRuntime::pump_local` — installs **no** ambient
-//! reactive `Owner`. A per-call
-//! [`expect_connection_controller`](crate::connection::expect_connection_controller)/
-//! `use_context` lookup from inside that poller sees `Owner::current() ==
-//! None` and `.expect()`-panics
-//! (`clean_signals_frust::expect_controller`'s own contract) on the very
-//! first RPC this repository makes against a real connection — masked in
-//! every test because `tests/support::setup` installs a permanent ambient
-//! `Owner` no real app process ever has. Resolving the controller once, at
-//! DI time, under the one context that *is* guaranteed a live owner, closes
-//! that gap for good.
-//!
-//! [`client`](GrpcAuthTokensRepository::client) still asks the held
-//! controller for the live [`MuxrClient`](crate::net::MuxrClient) fresh on
-//! every call — that part alone stays per-call, and correctly so: the
-//! connection can drop and reconnect between two calls on the same
-//! repository instance. `None` (nothing connected, or a teardown raced this
-//! call) maps to a retryable [`AppFailure::Network`] rather than panicking:
-//! `/settings` is one of the two routes this app never guards, so every
-//! token-repository call site can run while disconnected.
+//! **The client is resolved once, at DI time** — this repository holds the
+//! app's one `ConnectionController` as a plain `Arc` field, set in
+//! `settings::di::provide` under its ambient reactive owner (the same shape
+//! `sessions`/`terminal`'s own real repositories use), never per-call.
+//! Deliberate: every real call here runs inside a raw `frust::spawn_local`
+//! future, whose poller installs **no** ambient `Owner` — a per-call
+//! `use_context` lookup from inside it would `.expect()`-panic on the very
+//! first RPC (masked in every test, since `tests/support::setup` installs a
+//! permanent owner no real app process has). [`client`](Self::client) still
+//! asks the held controller for the live `MuxrClient` fresh on every call —
+//! that part stays per-call, since the connection can drop and reconnect
+//! between two calls on one repository instance; `None` maps to a retryable
+//! [`AppFailure::Network`] rather than panicking, since `/settings` is never
+//! route-guarded and every call site here can run while disconnected.
 //!
 //! This is the one place in `data` that reaches past its own feature into
-//! `crate::connection` — a deliberate, narrow widening of the layer table's
-//! `data` row (own domain + external I/O crates), the identical widening
-//! `sessions`/`terminal`'s own real repositories document: `crate::connection`
-//! is composition-root state beside `crate::failure`, not a sibling feature's
-//! layer, and every call here stays at its plain, non-reactive surface
-//! (`client()`, `on_session_expired()`) — nothing here reads or writes an
-//! `RwSignal`, so this stays as framework-free in spirit as the rest of
-//! `data`.
+//! `crate::connection` — the same narrow widening `sessions`/`terminal`'s own
+//! real repositories document (composition-root state, not a sibling
+//! feature's layer); every call here stays at its plain, non-reactive
+//! surface, so this file stays framework-free in spirit.
 //!
-//! # Failure mapping
+//! **Failure mapping**: every `tonic::Status` crosses through
+//! [`crate::net::error::from_status`], with one addition: an
+//! `UNAUTHENTICATED` status also fires `ConnectionController::on_session_expired`
+//! (itself idempotent, so this module adds no debouncing of its own).
+//! `RevokeToken`'s `ActionAck` maps through [`crate::net::error::ack_result`]
+//! instead — a refused revoke is a successful RPC carrying a refusal, not a
+//! transport error.
 //!
-//! Every `tonic::Status` this module sees crosses through
-//! [`crate::net::error::from_status`], the app's one gRPC→[`AppFailure`]
-//! mapping site — with one addition local to this repository: an
-//! `UNAUTHENTICATED` status also fires
-//! [`ConnectionController::on_session_expired`](crate::connection::ConnectionController::on_session_expired),
-//! the one hook every rejected-session repository call funnels into. That
-//! hook is itself idempotent (several calls failing at once still tear the
-//! connection down exactly once), so this module adds no debouncing of its
-//! own. `RevokeToken`'s `ActionAck` is mapped through
-//! [`crate::net::error::ack_result`] instead — a refused revoke is a
-//! successful RPC carrying a refusal, not a transport error.
+//! **The one-time secret**: `ListTokens` never carries one (`TokenInfo.token`
+//! is empty on every list entry); only `CreateToken`'s response does, lifted
+//! out with the same `mem::take` hygiene `crate::connection`'s `Login` flow
+//! uses, so the scrubbed wire copy never lingers a moment longer than it has
+//! to.
 //!
-//! # The one-time secret
-//!
-//! `ListTokens` never carries a token's secret (`TokenInfo.token` is empty on
-//! every list entry — the proto's own doc comment); only a `CreateToken`
-//! response does, exactly once. [`MintedToken::token`] is where that secret
-//! lives on this side, lifted out of the wire response with the same
-//! `mem::take` hygiene `crate::connection`'s `Login` flow uses for its own
-//! session token, so the scrubbed wire copy never lingers in the decoded
-//! response struct a moment longer than it has to.
-//!
-//! # Tests
-//!
-//! Mapping-only, over directly constructed proto messages — no fixture round
-//! trip. `src/net/testing.rs`'s in-process fixture answers `ListTokens`/
-//! `CreateToken`/`RevokeToken` with `UNIMPLEMENTED` today (that file's own
-//! module docs), so an end-to-end test of the three RPCs themselves is a
-//! later task's addition, not this one's.
+//! Tests here are mapping-only, over directly constructed proto messages —
+//! `src/net/testing.rs`'s in-process fixture answers these three RPCs with
+//! `UNIMPLEMENTED` today, so a fixture round trip is future work.
 
 use std::sync::Arc;
 
@@ -112,8 +73,7 @@ impl GrpcAuthTokensRepository {
         Self { connection }
     }
 
-    /// The live client, or [`NOT_CONNECTED`] when nothing is connected. See
-    /// the [module docs](self)' "Where the client comes from" section.
+    /// The live client, or [`NOT_CONNECTED`] when nothing is connected.
     fn client(&self) -> Result<crate::net::MuxrClient, AppFailure> {
         self.connection
             .client()

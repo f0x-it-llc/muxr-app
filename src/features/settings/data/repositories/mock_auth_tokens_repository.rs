@@ -1,40 +1,23 @@
-//! [`MockAuthTokensRepository`] — the in-memory [`AuthTokensRepository`] the
-//! mock era runs on.
+//! [`MockAuthTokensRepository`] — the in-memory [`AuthTokensRepository`]
+//! behind `di.rs`'s headless-test seam.
 //!
-//! Seeds **exactly** the two tokens `docs/redesign.html`'s `auth tokens` group
-//! draws — `zelli-mobile-100-71-31-57-mr3g6w5g` (read-write, created
-//! 2026-07-02) and `token_2` (read-only, created 2026-07-10) — so the screen
-//! and the mock are the same picture, and both scope chips are reachable from
-//! the seed. It mutates that set in place on create/revoke, so the screen
-//! proves a real round trip rather than patching its own signal.
+//! Seeds **exactly** the two tokens `docs/redesign.html`'s `auth tokens`
+//! group draws — `zelli-mobile-100-71-31-57-mr3g6w5g` (read-write) and
+//! `token_2` (read-only) — so the screen and the mock are the same picture,
+//! and both scope chips are reachable from the seed. Mutates that set in
+//! place on create/revoke, so a test proves a real round trip rather than a
+//! patched signal.
 //!
-//! # Framework-free, and deliberately not `frust`-aware
+//! Framework-free like the rest of `data`: the store is a plain
+//! `Mutex<Vec<AuthToken>>` (`Send + Sync`, which the controller needs to hold
+//! it behind an `Arc`). One of the feature's two failure-mapping sites into
+//! [`AppFailure`]: an unknown/blank/duplicate name each map to
+//! [`AppFailure::Internal`] (a bug — the screen never submits one).
 //!
-//! No `frust::` types here (the data-layer rule): the store is a plain
-//! [`Mutex<Vec<AuthToken>>`]. The mutex — not a `RefCell` — is what makes this
-//! `Send + Sync`, which
-//! [`SettingsController`](crate::features::settings::presentation::controller::SettingsController)
-//! needs to hold it behind an `Arc` under `use_controller`'s bounds.
-//!
-//! # Failure mapping
-//!
-//! This is one of the feature's two failure-mapping sites into [`AppFailure`]:
-//! an unknown token name maps to [`AppFailure::Internal`] (a bug — the screen
-//! only ever revokes a name it just rendered), a blank name to the same (the
-//! dialog that collects one cannot submit blank text), and a duplicate name to
-//! the same again. A real gRPC client maps transport errors to
-//! [`AppFailure::Network`] and a rejected credential to [`AppFailure::Auth`] in
-//! exactly this spot.
-//!
-//! # The minted creation date and secret
-//!
-//! A token created at runtime is stamped [`MOCK_TODAY`] rather than a real
-//! clock reading: this store is headless-test-only (`di`'s own seam), and a
-//! fixed date keeps every suite asserting on one exact string. Its one-time
-//! secret is deterministic too — [`MOCK_MINTED_SECRET_PREFIX`] plus the
-//! (already-trimmed) name — for the same reason: a suite exercising the
-//! reveal sheet needs an exact string to assert on, not a random one. The
-//! real client reads both off the daemon's own `CreateToken` response.
+//! A runtime-minted token is stamped [`MOCK_TODAY`] and a deterministic
+//! secret ([`MOCK_MINTED_SECRET_PREFIX`] + name), not a real clock/random
+//! value — a suite exercising the reveal sheet needs an exact string to
+//! assert on.
 
 use std::sync::Mutex;
 use std::time::Duration;

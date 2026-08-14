@@ -1,24 +1,15 @@
-//! `settings` use cases — one file per `<verb><noun>` action (see
-//! `examples/huddle`'s `domain/use_cases/` convention).
-//!
-//! Six, one per method across this feature's two repository contracts:
-//! [`ListTokens`]/[`CreateToken`]/[`RevokeToken`] over
-//! [`AuthTokensRepository`](super::repositories::AuthTokensRepository), and
-//! [`LoadPreferences`]/[`UpdateAppearance`]/[`UpdatePollPrefs`] over
-//! [`PreferencesRepository`](super::repositories::PreferencesRepository).
-//! Each is a thin, injected-repository [`UseCase`](clean_signals::UseCase)
-//! with no logic of its own beyond delegation — deliberately: the mock era has
-//! no business rule to encode yet, and the value of the seam is that
+//! `settings` use cases — one file per `<verb><noun>` action, one per
+//! repository method: [`ListTokens`]/[`CreateToken`]/[`RevokeToken`] over
+//! `AuthTokensRepository`, [`LoadPreferences`]/[`UpdateAppearance`]/
+//! [`UpdatePollPrefs`] over `PreferencesRepository`. Each is a thin,
+//! injected-repository [`UseCase`](clean_signals::UseCase) with no logic
+//! beyond delegation today — the value of the seam is that
 //! [`SettingsController`](crate::features::settings::presentation::controller::SettingsController)
 //! drives every call through `ControllerCore::run` (activity tracking, retry
-//! policy, one failure-emission site) instead of touching a repository
-//! directly. A real rule (a name-collision check on mint, a "cannot revoke the
-//! token you are connected with" guard) lands in the matching file here without
-//! any call site moving.
-//!
-//! Never call [`UseCase::execute`](clean_signals::UseCase::execute) directly
-//! from a controller — always drive it through
-//! `ControllerCore::run`/`run_into` (huddle's rule, restated).
+//! policy, one failure-emission site) rather than touching a repository
+//! directly; a future business rule lands in the matching file here without
+//! any call site moving. Never call `execute` directly from a controller —
+//! always through `ControllerCore::run`/`run_into`.
 
 pub mod create_token;
 pub mod list_tokens;

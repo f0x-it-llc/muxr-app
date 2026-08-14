@@ -1,40 +1,17 @@
-//! `settings` domain repository contracts — the seam this feature's use cases
-//! depend on and `data` implements (framework-free, per
-//! `crate::features::settings::domain`'s module doc).
+//! `settings` domain repository contracts, implemented by `data`.
 //!
-//! **Two** traits, not one, because the two halves of this screen have
-//! genuinely different owners: [`AuthTokensRepository`] is *server* state
-//! reached over `muxrd` (list, mint, revoke — exactly what
-//! `docs/redesign.html`'s `auth tokens` group affords), while
-//! [`PreferencesRepository`] is *device-local* state a
-//! secure-storage/shared-preferences plugin backs. Splitting them is what
-//! lets one be a gRPC client and the other a plugin without either
-//! implementation growing methods it has no business owning.
+//! Two traits, not one: [`AuthTokensRepository`] is *server* state over
+//! `muxrd` (list, mint, revoke); [`PreferencesRepository`] is *device-local*
+//! state over a storage plugin. Splitting them lets one be a gRPC client and
+//! the other a plugin without either growing methods it has no business
+//! owning.
 //!
-//! # Why they are already async
-//!
-//! Both traits are `async` so a real, IO-bound implementation and an
-//! in-memory mock can sit behind the same seam **additively** — the
-//! controller, its use cases and the screen already drive every call through
-//! `ControllerCore::run`'s async path, so swapping one out for the other
-//! changes one `impl` block and nothing above it. Every headless suite in
-//! `tests/` runs the in-memory mocks (`data`'s own, needing no real `await`);
-//! a real app run wires
-//! [`data::GrpcAuthTokensRepository`](crate::features::settings::data::repositories::GrpcAuthTokensRepository)/
-//! [`data::PrefsRepository`](crate::features::settings::data::repositories::PrefsRepository)
-//! instead — `di.rs`'s own doc names the seam each swap runs through. The
-//! dual `cfg_attr` is the same pair every async trait in this codebase and
-//! `examples/huddle` uses (`wasm32`'s single-threaded event loop can't require
-//! `Send` futures).
-//!
-//! Consumed as `Arc<dyn … + Send + Sync>` (huddle's DI convention), so neither
-//! the use cases nor the controller carry a repository type parameter.
-//!
-//! # Failure mapping
-//!
-//! Every method fails with the app-wide [`AppFailure`] vocabulary — the data
-//! layer owns the single mapping site into it, so nothing above ever sees a
-//! transport or storage error type.
+//! Both are `async` (dual `cfg_attr`, since `wasm32`'s single-threaded event
+//! loop can't require `Send` futures) and consumed as `Arc<dyn … + Send +
+//! Sync>`, so a real implementation and an in-memory test mock sit behind the
+//! same seam additively — `di.rs` chooses per repository which one `provide`
+//! constructs. Every method fails with the app-wide [`AppFailure`]
+//! vocabulary; `data` owns the one mapping site into it.
 
 use crate::failure::AppFailure;
 use crate::features::settings::domain::entities::{

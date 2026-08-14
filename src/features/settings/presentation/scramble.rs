@@ -1,47 +1,34 @@
 //! The `auth tokens` group's revoke animation: a token's name locks
 //! left-to-right through deterministic noise, then the whole two-line row
-//! collapses away.
-//!
-//! Transcribed from `examples/glyph-catalog`'s "token revoke — scramble"
-//! interaction moment, which was designed for exactly this flow. That crate is
-//! a standalone workspace and unreachable as a dependency, so the noise source
+//! collapses away. Transcribed from `examples/glyph-catalog`'s "token revoke
+//! — scramble" interaction moment; that crate is a standalone workspace and
+//! unreachable as a dependency, so the noise source
 //! ([`lcg_next`]/[`scramble_char`]/[`scramble_text`]), the four timing
-//! constants and the [`FrameTicker`] escape hatch are **copied** rather than
-//! imported — the same route `features::sessions::presentation::heartbeat`
-//! took for the catalog's heartbeat moment.
+//! constants and the [`FrameTicker`] escape hatch are **copied**, not
+//! imported.
 //!
-//! # What this module owns, and what it doesn't
-//!
-//! Mechanism only: the clock, the noise, the per-token timeline state
+//! **Mechanism only**: the clock, the noise, the per-token timeline state
 //! ([`RevokeAnimations`]) and the two custom widgets. The row itself is
-//! `super::pieces`' (`scrambling_token_item`, sharing one row builder with the
-//! live `token_item` so the two cannot drift a pixel apart), and the decision
-//! to start one is `super::pages`'.
+//! `widgets::tokens`' (`scrambling_token_item`, sharing one row builder with
+//! the live `token_item` so the two cannot drift a pixel apart); the decision
+//! to start one is `pages`'.
 //!
-//! # The clock, and why the collapse needs a widget of its own
+//! **The clock**: elapsed time reads off a wall clock ([`now_ms`]) behind a
+//! [`set_animation_clock_for_tests`] override, so a headless suite drives the
+//! timeline deterministically. A signal write wakes exactly one rebuild, so
+//! [`FrameTicker`] (an unconditional `PaintCtx::request_frame` in its own
+//! `paint`) is what keeps `build` re-invoked while a timeline runs — mounted
+//! **inside the collapsing row**, so it is visible exactly when the row it
+//! drives is: scroll the row out of view and the scroller's paint culling
+//! stops both together.
 //!
-//! Elapsed time is read off a wall clock ([`now_ms`]) — permitted at this tier
-//! (`docs/CODE_STANDARDS.md`'s no-wall-clock rule binds the framework crates,
-//! not an app), and the same source the heartbeat reads — behind a
-//! [`set_animation_clock_for_tests`] override so a headless suite drives the
-//! timeline deterministically instead of racing a real one. A signal write
-//! wakes exactly one rebuild, so [`FrameTicker`] (an unconditional
-//! `PaintCtx::request_frame` in its own `paint`) is what keeps `build`
-//! re-invoked while a timeline is still running; it is mounted **inside the
-//! collapsing row**, so it is visible exactly when the row it drives is —
-//! scroll the row out of the viewport and the scroller's paint culling stops
-//! both together, and scrolling back repaints the ticker, which asks for the
-//! frame that rebuilds the row at whatever the clock now reads.
-//!
-//! The collapse cannot be a `SizedBox(None, Some(row_h * ratio))` the way the
-//! catalog's fixed-height demo row is: a real `.token-item` is two lines plus a
-//! button, whose measured height depends on the resolved type scale and the
-//! platform's own font metrics, so any transcribed number would be a guess that
-//! makes the row jump the moment the animation starts. [`CollapseView`] lays the
-//! row out at its **natural** height and reports `height * ratio` as its own —
-//! no constant, no jump — and the [`AnimatedOpacity`] wrapped around it is what
-//! clips the overflow (it composites its child under a layer whose clip is its
-//! own layout rect, the same behaviour the heartbeat's ring slot documents).
+//! **The collapse** can't be a fixed-height `SizedBox(row_h * ratio)`: a real
+//! `.token-item`'s height depends on the resolved type scale and the
+//! platform's own font metrics, so any transcribed number would jump the row
+//! the moment the animation starts. [`CollapseView`] lays the row out at its
+//! **natural** height and reports `height * ratio` as its own — no constant,
+//! no jump — and the [`AnimatedOpacity`] wrapped around it clips the
+//! overflow.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -146,16 +133,11 @@ thread_local! {
     static CLOCK_EPOCH: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Pin the animation clock at `now_ms` for a headless test, so a suite can step
-/// the revoke timeline frame by frame instead of racing a real one; `None`
-/// restores the wall clock.
-///
-/// A published setter rather than a `#[cfg(test)]` item for the same reason
-/// `features::terminal::presentation::controller::set_create_settle_for_tests`
-/// is one: `tests/*.rs` are integration binaries linking the normal build of
-/// this crate, where a `cfg(test)` seam is invisible. Thread-local, since the
-/// clock is only ever read from the UI thread that builds the screen. Never
-/// called by production code.
+/// Pin the animation clock at `now_ms` for a headless test, so a suite can
+/// step the revoke timeline frame by frame instead of racing a real one;
+/// `None` restores the wall clock. A published setter rather than
+/// `#[cfg(test)]`, since a `tests/*.rs` integration binary links the normal
+/// build. Never called by production code.
 pub fn set_animation_clock_for_tests(now_ms: Option<f64>) {
     PINNED_CLOCK_MS.with(|pinned| pinned.set(now_ms));
 }
@@ -275,19 +257,17 @@ impl RevokeScramble {
 
 /// The screen's live revoke timelines, keyed by token name.
 ///
-/// A signal rather than plain retained state: it is written from *outside* the
-/// screen's own `build` — a confirmation dialog's action, which is a page on
-/// the app's overlay navigator and never sees `SettingsState`, and the revoke
-/// future's completion — and each of those writes is what wakes the rebuild
-/// that renders it. It stays screen-scoped (created in `Component::init`,
-/// disposed with the component) rather than moving onto the controller: nothing
-/// here is repository state, and the controller is the async/data view model.
+/// A signal rather than plain retained state: it is written from *outside*
+/// the screen's own `build` (a confirmation dialog's action, which never
+/// sees `SettingsState`; the revoke future's completion) and each of those
+/// writes wakes the rebuild that renders it. Screen-scoped rather than
+/// controller-owned, since nothing here is repository state.
 ///
-/// Every write below reads through `try_get_untracked`, never `get_untracked`:
-/// two of the three run from a future that can outlive the screen — leave
+/// Every write reads through `try_get_untracked`, never `get_untracked`: two
+/// of the three run from a future that can outlive the screen (leave
 /// `/settings` mid-revoke and the component's owner disposes this signal out
-/// from under it — and reading a disposed signal panics where writing one
-/// merely does nothing. Only [`live`](Self::live) reads outright, since a build
+/// from under it), and reading a disposed signal panics where writing one
+/// merely no-ops. Only [`live`](Self::live) reads outright, since a build
 /// cannot run after the component that owns it is gone.
 #[derive(Clone, Copy)]
 pub(super) struct RevokeAnimations {
