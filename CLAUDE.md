@@ -12,7 +12,9 @@ has no desktop backend (camera, biometrics).
 
 | Topic | Doc |
 |-------|-----|
-| Architecture — composition root, routes, feature slices, splash sequence | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Architecture (hub) — composition root, shell, navigation, UI substrate, tests | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| NET — gRPC transport, connection state | [docs/NET_ARCHITECTURE.md](docs/NET_ARCHITECTURE.md) |
+| FEATURES — feature slices, canonical screen pattern | [docs/FEATURES_ARCHITECTURE.md](docs/FEATURES_ARCHITECTURE.md) |
 | Build, run, test, flavors, signing | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 
 Frust's own coding conventions apply here; see the frust checkout's `docs/CODE_STANDARDS.md`.
@@ -31,12 +33,16 @@ full command set, flavor identifiers, and signing setup.
 
 ## Agent Guardrails
 
-- Every screen follows the canonical pattern in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)'s
-  "Building a Screen" section (per-screen `Component`, `use_controller` lifecycle, container-free
-  DI via `provide_context`/`di.rs`) — do not invent a different composition or DI shape.
+- Every screen follows the canonical pattern in
+  [docs/FEATURES_ARCHITECTURE.md](docs/FEATURES_ARCHITECTURE.md)'s "Building a Screen" section
+  (per-screen `Component`, `use_controller` lifecycle, container-free DI via
+  `provide_context`/`di.rs`) — do not invent a different composition or DI shape.
 - Feature code follows strict inward-only layering (`domain` framework-free, `data` implements
   `domain` repositories, `presentation` is the only layer touching `frust` widgets/signals) —
-  see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full rule.
+  see [docs/FEATURES_ARCHITECTURE.md](docs/FEATURES_ARCHITECTURE.md) for the full rule.
+- Colors come from `ui::palette` (theme-derived: `Palette::from_theme`/`active_theme()`); spacing
+  from `ui::spacing`'s named tokens — no per-feature `Palette` struct, no bare spacing literals
+  for generic paddings/gaps.
 - `workflow/` is never committed here (gitignored) — private planning material lives outside
   this repo.
 - Android keystores and `android/app/keystores/key.properties` are never committed (gitignored);
