@@ -1,187 +1,29 @@
 //! The engine: [`KeystrokeSource`], the rolling mirror window it diffs against,
 //! and the guards that tell typing apart from a bridge that has fallen out of
-//! step.
+//! step. The [module docs](super) hold the diff contract this implements.
 //!
-//! The [module docs](super) hold the diff contract this implements; what
-//! follows is what only this file can state.
+//! **The mirror is a rolling window, re-anchored only on demand** — publishing per
+//! keystroke would be a platform `restartInput` per keystroke. It re-anchors to
+//! the last [`MIRROR_TAIL`] units when it grows past [`MIRROR_CAP`] or shrinks
+//! below [`MIRROR_FLOOR`] (refilling from [`HISTORY_CAP`] units of history), and
+//! never to *empty*: a deletion is only observable as a **shortening**, so a tail
+//! of the user's own recent typing is what keeps held-down backspace emitting.
+//! Sound only because **both bridges apply the republished state synchronously,
+//! inside the round trip that delivered the keystroke** — the one premise here
+//! that lives outside this app.
 //!
-//! # The mirror is a rolling window, re-anchored only on demand
-//!
-//! Re-publishing after every keystroke would be a `restartInput` per keystroke
-//! on Android (`FrustSurfaceView.FrustInputConnection.reconcileTo` restarts
-//! whenever the published text differs from the live `Editable`) — visible IME
-//! churn. So the source publishes only when it **re-anchors** its window:
-//!
-//! | Trigger | Window becomes | Rate |
-//! |---|---|---|
-//! | grew past [`MIRROR_CAP`] | the last [`MIRROR_TAIL`] units | once per `CAP - TAIL` typed units |
-//! | shrank below [`MIRROR_FLOOR`] | the last [`MIRROR_TAIL`] units of history | once per `TAIL - FLOOR` deletes |
-//!
-//! A re-anchor is only sound because **both bridges apply the republished state
-//! synchronously, inside the same round trip that delivered the keystroke**:
-//! Android's `FrustInputConnection.sync()` calls `nativeImeApply` and then
-//! immediately re-reads `nativeImeState` and reconciles its `Editable`, and
-//! iOS's `syncToRust()` folds the returned state back into its `NSMutableString`
-//! before returning. So the snapshot *after* a trim is already built on the
-//! trimmed buffer — a bridge that applied it a frame later would hand this
-//! engine a stale snapshot, which it would read as a large edit. That premise is
-//! the one thing here that lives outside this app.
-//!
-//! The window is never re-anchored to *empty*: a deletion is only observable as
-//! a **shortening**, so a platform mirror with nothing left in it silently
-//! swallows every further backspace (Android's `deleteSurroundingText` on an
-//! empty `Editable` is a no-op whose `sync()` then short-circuits; iOS's
-//! `deleteBackward` returns without touching the mirror). Keeping a tail of the
-//! user's own recent typing — drawn from [`HISTORY_CAP`] units of history, so a
-//! *trim* does not cost the user their backspace — is what makes held-down
-//! backspace keep emitting. Once history itself is exhausted further backspaces
-//! are genuinely invisible: a documented residual, not a papered-over one.
-//!
-//! # A submitted line is dropped, not kept as a baseline
-//!
-//! Every emission carrying a Return re-anchors the window to **empty**: the
-//! mirror and the history both go, so no `\n` is ever left in either. iOS
-//! accumulates the literal `\n` in its mirror and `text_bytes` maps `\n` to CR,
-//! so any bulk re-emission of a buffer holding one would re-execute previously
-//! typed commands on the remote host — and a submitted line needs no baseline
-//! anyway, the shell having taken it. Dropping ours makes that replay impossible
-//! **from this module's own buffers**, precisely and not "structurally
-//! impossible" full stop: the *platform's* buffer is a second one, and closing it
-//! is the next section.
-//!
-//! The cost is one platform `restartInput` per Return — the rarest keystroke —
-//! and one accepted regression: a Backspace pressed **immediately** after a
-//! Return has no shortening to be observed as (the mirror is empty), so it emits
-//! nothing until one character has been typed. Harmless *here*, where the shell
-//! prompt really is empty at that instant — but that is a fact about **this**
-//! scrub's trigger, not a general excuse. A scrub firing while the line is still
-//! mid-command (any other boundary — see
-//! [`InputSeam`](super::super::InputSeam)'s scrub call sites) drops a real,
-//! non-empty residual, and the next Backspace emits nothing even though the
-//! remote line is not empty. `TerminalGridWidget::note_focus_edge` keeps a
-//! same-widget hand-off (a selection-dismissing tap the grid itself consumed)
-//! from reaching that scrub at all; a genuine departure still takes the hit.
-//!
-//! ## The frames the platform may still be holding the old line
-//!
-//! Dropping *our* baseline does not drop the *platform's*. An ordinary edit round
-//! trip is applied synchronously (above), but a **submit** is not: Android's
-//! `FrustInputConnection.performEditorAction` forwards `IME_ACTION_DONE` through
-//! `nativeImeAction` and then only counts down `imeResyncFrames`, its own comment
-//! recording that "a submit clears the field on the next-frame rebuild". For
-//! those frames the `Editable` still holds the pre-submit text; on iOS a round
-//! trip that errors, answers nil or is a frame late leaves the same window open.
-//!
-//! Diffed against the empty baseline the scrub left, **that** snapshot reads as
-//! one `added` run holding the whole submitted line. Emitted, it re-executes the
-//! command on a remote host that is back at a prompt — or re-transmits the
-//! password typed at a prompt with echo *off* into a shell with echo *on*. The
-//! oversized-*delete* guard below cannot see it: nothing was removed. Nor does
-//! the stale line necessarily carry a Return — **on Android a submitted line
-//! never has a newline in the platform buffer at all**, Return having left as an
-//! editor action rather than as text, so the stale `added` is the bare command
-//! line (`"hunter2"`, not `"hunter2\n"`) and a guard keyed on the Return would
-//! spend its shot without ever firing.
-//!
-//! So every scrub arms a **one shot**, and while it is armed a snapshot has to
-//! pass **two** tests — one on content, one on shape — to be let through:
-//!
-//! 1. **It must not be our own dropped line coming back**
-//!    ([`KeystrokeSource::is_replay`]). The scrub records a keyed digest of the
-//!    baseline it drops plus that baseline's length in UTF-16 units, and **no
-//!    plaintext**; an `added` whose first *length* units digest to that value
-//!    **is** the line the platform never let go of, whatever it looks like.
-//!    `"hunter2"` is refused because it is the string this module just
-//!    scrubbed — not because of its shape, which is an ordinary gesture
-//!    commit's. Matching a *prefix* also catches the stale line plus whatever
-//!    was typed during the window (`"hunter2x"`, iOS's `"hunter2\n"`); such a
-//!    snapshot is refused **whole** rather than having its genuine suffix
-//!    emitted, because a prefix match cannot tell `"hunter2"`-then-`x` from a
-//!    first commit that merely begins the same way, and a *fragment* of a
-//!    keystroke run in a shell is worse than a dropped one.
-//! 2. **It must still be at most one commit's worth of input**
-//!    ([`is_one_commit`]). While the shot is armed the baseline is provably
-//!    empty, so `added` is everything typed *since* the Return: at most one
-//!    keystroke or one gesture-typed word, where a shell line is many commits.
-//!    This stays as the second line of defense because the digest only knows the
-//!    line *this module* dropped — a platform still holding text a re-anchor had
-//!    already trimmed away, or a dictation partial, is a bulk add the digest
-//!    cannot recognize and the bound still rejects.
-//!
-//! A snapshot failing either test emits nothing, re-publishes the (empty) mirror
-//! to pull the platform back into step, and leaves the shot **armed**
-//! ([`KeystrokeSource::desync`]): a refusal moves neither buffer, so the empty
-//! baseline is still empty and the platform still behind, and the stale window
-//! is several frames long. Spending the shot there would leave the guard one
-//! snapshot deep, with the window's second frame falling through it *and*
-//! through the delete guard (nothing was removed) to the host.
-//!
-//! Four deliberate narrowings, each pinned by a test:
-//!
-//! - a Return **and nothing else** is let through: it carries no command text to
-//!   replay, and suppressing it would swallow every Return the user pressed
-//!   twice in a row. Being a submit of its own, it re-arms the shot;
-//! - the shot is spent by the first snapshot that **actually adds something**
-//!   *and is let through*, and by nothing else: a snapshot that adds nothing
-//!   (Gboard's `finishComposingText()` → `sync()`) closes no window, so
-//!   retiring the guard on it would retire it while its precondition still
-//!   held — and a refused one closes no window either;
-//! - a composing snapshot returns before all of this, so a composition does not
-//!   spend the shot either;
-//! - a dropped baseline of at most **one keystroke's worth**
-//!   ([`MIN_REPLAY_DIGEST_UNITS`]) records no digest, so only the shape test
-//!   applies to it: refusing it would make that key permanently untypeable as
-//!   the first commit after the submit, since a refusal re-arms and the digest
-//!   would match every retry (`y` at a `[y/n]` prompt).
-//!
-//! The trades, accepted: a paste or a dictated phrase made as the *very first*
-//! action after a Return is dropped, and — since a refusal re-arms — dropped
-//! again until one admitted keystroke lands; re-entering the just-submitted line
-//! as a single gesture commit is indistinguishable from its replay by content
-//! and is refused the same way. Both are far rarer than the desync, and a
-//! dropped paste is an annoyance where a re-executed command is an incident.
-//! Typing the same line character by character is unaffected: the first
-//! character alone does not match the digest, and it spends the shot.
-//!
-//! **What this closes**: the exact replay, that replay with anything typed after
-//! it, either platform's shape of it, any add past the one-commit bound, and
-//! every *later* frame of the same stale window rather than only the first.
-//! **What it does not**, recorded rather than claimed: a submitted line of at
-//! most one keystroke's worth (`ls`, one emoji), for which no digest is recorded
-//! and whose replay costs one keystroke of bytes — which nothing here can tell
-//! from the same key pressed again. A frust-side bridge fix making the submit
-//! path re-poll synchronously narrows the window from the other end, and this
-//! guard is deliberately not conditional on one: an app cannot assume the bridge
-//! version it runs against, and the emit choke point is where defense in depth
-//! belongs.
-//!
-//! # An oversized single edit is a desync, not intent
-//!
-//! Dictation rewrites the whole field per partial, a replace-span rewrites a
-//! word, and a bridge that applied a re-anchor one frame late reports a
-//! wholesale replacement — all three arrive as one snapshot whose `removed`
-//! covers most of the buffer. Emitting that many backspaces is how a re-emission
-//! bug reaches the remote host, so a `removed` above [`MAX_SNAPSHOT_DELETE`]
-//! emits **nothing** and re-publishes the mirror the source still believes in,
-//! which is what pulls the platform back into step.
-//!
-//! # The residuals, recorded rather than chased
-//!
-//! - the platform's own mirror is plaintext in the platform's own process —
-//!   nothing here can reach it (the app-side half of what
-//!   `docs/ARCHITECTURE.md` records for the login field);
-//! - [`published`](KeystrokeSource::published) hands the framework a plain
-//!   [`EditingState`], so the units currently being typed are copied once per
-//!   focused frame into a buffer this module does not own; the scrub boundaries
-//!   are what keep that window short;
-//! - the emitted bytes themselves — `text_bytes` → the latch →
-//!   [`Emission::bytes`] → `send_input` — are a plain `Vec<u8>` of the user's own
-//!   keystrokes, which is inherent to *sending* them and ends where the feed's
-//!   own write does;
-//! - a key cap holding the focus path when the keyboard is dismissed keeps the
-//!   buffers until the pane's teardown (already recorded on the grid widget's
-//!   `note_focus_edge`; closing it needs a key-cap teardown scrub, a separate
-//!   item and not this module's).
+//! **A submitted line is dropped, not kept as a baseline**: every emission
+//! carrying a Return re-anchors to empty, mirror and history both, so no `\n`
+//! survives to be bulk re-emitted into the remote host. But **the platform may
+//! still hold that line for a few frames** (a submit is not applied synchronously
+//! the way an edit is), and diffed against the empty baseline it reads as one
+//! `added` run carrying the whole line — which, emitted, re-executes a command or
+//! re-transmits a password. So every scrub arms a **one shot**
+//! ([`KeystrokeSource::scrub`]), whose two tests
+//! ([`KeystrokeSource::is_replay`], [`is_one_commit`]), narrowings and accepted
+//! trades are documented where they are enforced. An **oversized single edit is a
+//! desync, not intent**: a `removed` above [`MAX_SNAPSHOT_DELETE`] emits nothing
+//! and re-publishes the mirror the source still believes in.
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
@@ -193,124 +35,77 @@ use super::bytes::{BACKSPACE_BYTE, BarKey, named_key_bytes, shifted_sequence, te
 use super::latch::{ModifierLatch, apply_latch, single_unit};
 use super::utf16::{clamp_front, clamp_index, diff, len_utf16, utf16_prefix, utf16_suffix};
 
-// ---------------------------------------------------------------------------
-// The rolling window
-// ---------------------------------------------------------------------------
+// The rolling window.
 
-/// How many UTF-16 code units the published mirror may reach before the source
-/// re-anchors it (see this file's own docs, above).
+/// How many UTF-16 code units the published mirror may reach before a re-anchor.
 pub const MIRROR_CAP: usize = 96;
 
-/// The most units a snapshot may ever be **stored** as — one past
-/// [`MIRROR_CAP`], and the reason `set_mirror` clamps: a pasted token arrives as
-/// one snapshot far longer than the cap, and storing it whole (even for the one
-/// statement until the re-anchor trims it) would grow the buffer past the
-/// capacity [`KeystrokeSource::new`] pre-reserved, where a `String` reallocation
-/// frees the user's plaintext no scrub can reach.
-///
-/// **One past the cap, not at it**: `reanchor_if_needed` fires on
-/// `len > MIRROR_CAP`, so clamping to the cap itself would silently disable the
-/// re-anchor and let this baseline drift away from the platform's buffer forever.
+/// The most units a snapshot may ever be **stored** as, and the reason
+/// `set_mirror` clamps: a pasted token arrives far longer than the cap, and
+/// storing it whole would grow the buffer past the capacity
+/// [`KeystrokeSource::new`] pre-reserved — a `String` reallocation frees plaintext
+/// no scrub can reach. **One past the cap, not at it**: `reanchor_if_needed` fires
+/// on `len > MIRROR_CAP`, so clamping to the cap would disable the re-anchor.
 const MIRROR_STORE_CAP: usize = MIRROR_CAP + 1;
 
-/// How many units a re-anchor leaves in the mirror. The gap to [`MIRROR_CAP`]
-/// is how many characters may be typed between two re-anchors, and therefore
-/// how rare a platform `restartInput` is.
+/// How many units a re-anchor leaves in the mirror. The gap to [`MIRROR_CAP`] is
+/// how many characters may be typed between two platform `restartInput`s.
 pub const MIRROR_TAIL: usize = 24;
 
 /// How short the mirror may get before a re-anchor refills it from history —
-/// never zero, because a delete is only observable as a *shortening* (see the
-/// docs above).
+/// never zero, because a delete is only observable as a *shortening*.
 pub const MIRROR_FLOOR: usize = 4;
 
 /// How many units of the user's own recent typing the source retains to refill
-/// the mirror from. Bounds the source's memory; past it, the oldest typing is
-/// forgotten and can no longer be backspaced into.
+/// the mirror from. Past it, the oldest typing can no longer be backspaced into.
 pub const HISTORY_CAP: usize = 256;
 
-/// How many un-echoed `Key::Named(Backspace)`s may be armed at once (the dedupe
-/// rule in the [module docs](super)). A ceiling, not a queue: it bounds what a
-/// platform that only ever sends the key event (and never the echo) could
-/// suppress.
+/// How many un-echoed `Key::Named(Backspace)`s may be armed at once — the dedupe
+/// rule [`on_key`](KeystrokeSource::on_key) arms and
+/// [`on_snapshot`](KeystrokeSource::on_snapshot) consumes. A ceiling, not a queue.
 pub const MAX_PENDING_BACKSPACES: usize = 4;
 
 /// How many UTF-16 code units one snapshot may delete before the source reads it
-/// as a **desync** rather than as typing, emits nothing and re-publishes (see
-/// the docs above).
+/// as a **desync** rather than typing, emits nothing and re-publishes.
 ///
-/// **8**, derived rather than picked round: both bridges deliver a snapshot per
-/// IME round trip, a held Backspace repeats at roughly the platform's key-repeat
-/// rate (~50 ms after its initial delay), and a deleted surrogate pair costs two
-/// units — so two or three collapsed deletes, ≤6 units, is the ceiling for
-/// genuine input. 8 keeps a unit of headroom while staying far below
-/// [`MIRROR_TAIL`] (24), the smallest buffer a whole-buffer rewrite could ever be
-/// reported against.
-///
-/// The trade, deliberate: a *genuine* delete run longer than this (a
-/// select-all-then-delete inside the IME's own mirror, which is a window onto the
-/// last few typed characters and not onto the remote line) is suppressed and the
-/// mirror restored, so the user's next backspace still works. A dropped delete is
-/// an annoyance; a re-executed command is an incident.
+/// **8**, derived: both bridges deliver a snapshot per IME round trip, a held
+/// Backspace repeats at the platform key-repeat rate, and a deleted surrogate pair
+/// costs two units — so two or three collapsed deletes (≤6) is the ceiling for
+/// genuine input, and 8 keeps headroom while staying far below [`MIRROR_TAIL`].
+/// The trade: a genuine longer delete run is suppressed and the mirror restored.
 pub const MAX_SNAPSHOT_DELETE: usize = 8;
 
-/// How many UTF-16 code units **one keystroke** can be, and therefore the
-/// shortest add the post-scrub guard admits without looking at its shape at all
-/// (see [`is_one_commit`]).
-///
-/// **2**, because a keyboard's own emoji panel commits a surrogate pair — two
-/// units for one tap — and nothing a single key press produces is longer. Every
-/// character a shell line is built out of (a space, a `-`, a `|`, a quote) is one
-/// unit, so this is what keeps the guard from swallowing the first keystroke
-/// after a Return whatever character it happens to be.
+/// How many UTF-16 code units **one keystroke** can be, and so the shortest add
+/// the post-scrub guard admits without looking at its shape ([`is_one_commit`]).
+/// **2**, because an emoji panel commits a surrogate pair for one tap.
 const SINGLE_KEYSTROKE_UNITS: usize = 2;
 
-/// The longest single IME **commit** the post-scrub guard admits as genuine
-/// first input (see [`is_one_commit`] and the docs above).
+/// The longest single IME **commit** the post-scrub guard admits as genuine first
+/// input ([`is_one_commit`]).
 ///
-/// **16**, derived rather than picked round. The only multi-unit add a soft
-/// keyboard produces in one go is a gesture-typed word: frust's Android bridge
-/// deliberately keeps swipe typing working on an
-/// [`ImeContentType::Terminal`](frust::authoring::ImeContentType) field (it sets
-/// `TYPE_TEXT_FLAG_NO_SUGGESTIONS` but **not**
-/// `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`, which a device check found some IMEs
-/// read as "no gestures"), so a whole word in one snapshot is expected traffic.
-/// Fifteen letters is the far tail of English word length, plus the one trailing
-/// space a gesture commit appends: 16. Anything longer is more than one commit,
-/// and on this seam that means a line.
-///
-/// The reason it is not smaller: a bound tight enough to reject every short stale
-/// line would also reject the gesture commits this field is set up to receive. A
-/// stale line inside the bound — one bare word, `htop` or a word-shaped password
-/// — is caught by the **content** half of the guard instead
-/// ([`KeystrokeSource::is_replay`]), which knows the exact line the scrub dropped
-/// and does not have to guess from a shape.
+/// **16**, derived: the only multi-unit add a soft keyboard produces in one go is
+/// a gesture-typed word, which frust's Android bridge deliberately keeps working
+/// on an [`ImeContentType::Terminal`](frust::authoring::ImeContentType) field —
+/// fifteen letters plus a gesture commit's trailing space. Not smaller because a
+/// bound tight enough to reject every short stale line would reject those commits
+/// too; a word-shaped stale line is caught by the **content** half of the guard.
 pub const MAX_POST_SCRUB_ADD: usize = 16;
 
-/// The shortest dropped baseline the post-scrub guard records a replay digest
-/// for (see [`KeystrokeSource::scrub`] and the docs above).
-///
-/// **One unit past [`SINGLE_KEYSTROKE_UNITS`]**, i.e. the first length that is
-/// more than one keystroke. Below it the content test buys nothing and costs the
-/// user a key: such a replay is worth one keystroke of bytes, which no rule here
-/// can tell from the same key pressed again, while refusing it would make that
-/// key **permanently** untypeable as the first commit after the submit — a
-/// refusal re-arms the shot, and the digest would match every retry. `y` at a
-/// `[y/n]` prompt is the case that costs.
+/// The shortest dropped baseline the post-scrub guard records a replay digest for
+/// ([`KeystrokeSource::scrub`]). **One unit past [`SINGLE_KEYSTROKE_UNITS`]**:
+/// below it the content test buys nothing and costs a key, since such a replay is
+/// one keystroke of bytes that no rule can tell from the same key pressed again,
+/// while refusing it would make that key **permanently** untypeable.
 const MIN_REPLAY_DIGEST_UNITS: usize = SINGLE_KEYSTROKE_UNITS + 1;
 
-// ---------------------------------------------------------------------------
-// Snapshot predicates
-// ---------------------------------------------------------------------------
+// Snapshot predicates.
 
 /// `state`'s composing range, **validated** against its own text, or `None` when
-/// it is not composing.
-///
-/// The platform's indices are taken on trust nowhere else in this module, and
-/// this is the one place they are echoed straight back out
-/// ([`KeystrokeSource::published`] republishes a composing snapshot verbatim on
-/// every focused frame). A base past the end, an inverted range or a half-set
-/// pair therefore resolves to "not composing" rather than being handed back to
-/// the other bridge as a range into text that cannot hold it.
+/// it is not composing. The platform's indices are taken on trust nowhere else in
+/// this module, and this is the one place they are echoed straight back out — so a
+/// base past the end, an inverted range or a half-set pair resolves to "not
+/// composing" rather than being handed back as a range into text that cannot hold
+/// it.
 fn composing_range(state: &EditingState) -> Option<(i32, i32)> {
     if state.composing_base < 0 || state.composing_extent <= state.composing_base {
         return None;
@@ -321,41 +116,31 @@ fn composing_range(state: &EditingState) -> Option<(i32, i32)> {
     (extent > base).then_some((base, extent))
 }
 
-/// Whether `text` carries a Return — the trigger for dropping the baseline (see
-/// the docs above). Both spellings, because a pasted `"\r\n"` is two
-/// Returns on the way out and must not leave either byte behind.
+/// Whether `text` carries a Return — the trigger for dropping the baseline. Both
+/// spellings, because a pasted `"\r\n"` is two Returns on the way out.
 fn carries_return(text: &str) -> bool {
     text.contains(['\n', '\r'])
 }
 
 /// Whether `text` is a Return and **nothing else** — the one Return-carrying add
-/// the stale-snapshot guard lets through: it has no command text to replay, and a
-/// blank line at a shell prompt is ordinary typing.
+/// the stale-snapshot guard lets through: it has no command text to replay.
 fn is_bare_return(text: &str) -> bool {
     matches!(text, "\n" | "\r" | "\r\n")
 }
 
 /// Whether `added` is at most **one commit's worth** of input — the post-scrub
-/// replay guard's shape test (see the docs above).
-///
-/// The three rules, in order:
+/// replay guard's shape test, in three rules:
 ///
 /// 1. **A Return is admitted only bare.** A Return *with* text is the submitted
-///    line and its newline, which `text_bytes` would map to CR and re-execute.
-/// 2. **Any single keystroke passes**, whatever character it is
-///    ([`SINGLE_KEYSTROKE_UNITS`]) — a space, a `-` or a `|` is as ordinary at a
-///    shell prompt as a letter, and an emoji is one tap for two units.
+///    line and its newline, which `text_bytes` maps to CR and re-executes.
+/// 2. **Any single keystroke passes** ([`SINGLE_KEYSTROKE_UNITS`]).
 /// 3. **Longer, and it has to look like one word**: at most
-///    [`MAX_POST_SCRUB_ADD`] units of alphanumerics, plus the single trailing
-///    space a gesture commit appends. `"status"` and `"status "` are one commit;
-///    `"sudo -i"`, `"ls -la"` and `"cd /tmp"` are not — a shell line's whitespace
-///    and punctuation is what makes it more than one. (Alphanumeric is
-///    Unicode-wide, so a kana→kanji conversion commit is one word here too.)
+///    [`MAX_POST_SCRUB_ADD`] units of alphanumerics plus the one trailing space a
+///    gesture commit appends. `"status "` is one commit; `"sudo -i"` is not.
 ///
 /// A **shape** test, not a proof, and deliberately only half the guard: a stale
-/// line that is itself one bare word inside the bound (`htop`, a word-shaped
-/// password) is admitted here and refused by the **content** test the caller runs
-/// first ([`KeystrokeSource::is_replay`]).
+/// line that is itself one bare word is refused by the **content** test the caller
+/// runs first ([`KeystrokeSource::is_replay`]).
 fn is_one_commit(added: &str) -> bool {
     if carries_return(added) {
         return is_bare_return(added);
@@ -374,12 +159,10 @@ fn is_one_commit(added: &str) -> bool {
         .all(char::is_alphanumeric)
 }
 
-// ---------------------------------------------------------------------------
-// What one input event derived
-// ---------------------------------------------------------------------------
+// What one input event derived.
 
-/// What the source concluded about one event — diagnostics, and what the tests
-/// assert the classification on.
+/// What the source concluded about one event — diagnostics, and the classification
+/// the tests assert on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputClass {
     /// Nothing derivable: an unchanged snapshot (our own echo), a composition
@@ -398,22 +181,18 @@ pub enum InputClass {
     Sequence,
     /// A latch key was toggled.
     Latch,
-    /// A snapshot read as a bridge/dictation **desync** rather than as typing:
-    /// one deleting more than [`MAX_SNAPSHOT_DELETE`] units, or — into the empty
-    /// baseline a scrub left — a just-submitted line replayed
-    /// ([`KeystrokeSource::is_replay`], [`is_one_commit`]). Nothing is emitted,
-    /// the mirror is re-published, and the guard stays armed for the next frame
-    /// of the same window (see this file's own docs, above).
+    /// A snapshot read as a bridge/dictation **desync** rather than as typing: one
+    /// deleting more than [`MAX_SNAPSHOT_DELETE`] units, or — into the empty
+    /// baseline a scrub left — a just-submitted line replayed. Nothing is emitted,
+    /// the mirror is re-published, and the guard stays armed for the next frame.
     Desync,
 }
 
-/// One event's outcome: the bytes to send, and whether the platform mirror has
-/// to be re-published.
+/// One event's outcome: the bytes to send, and whether to re-publish the mirror.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Emission {
     /// The bytes to hand to
     /// [`TerminalFeed::send_input`](crate::features::terminal::domain::feed::TerminalFeed::send_input).
-    /// Empty is the common case for a bracket or an echo.
     pub bytes: Vec<u8>,
     /// The source re-anchored its window: the caller must publish
     /// [`KeystrokeSource::published`] so the platform mirror follows.
@@ -432,31 +211,22 @@ impl Emission {
         }
     }
 
-    /// Whether anything at all happened (bytes, a re-anchor, or a latch
-    /// change) — what the caller gates its redraw/wake on.
+    /// Whether anything at all happened — what the caller gates its wake on.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty() && !self.reconciled && self.class == InputClass::None
     }
 }
 
-// ---------------------------------------------------------------------------
-// The source itself
-// ---------------------------------------------------------------------------
+// The source itself.
 
 /// The live composing snapshot, held the way every other buffer here is: the
-/// platform's own text in a [`Zeroizing`] `String`, plus the **already
-/// validated** indices ([`composing_range`], [`clamp_index`]) that arrived with
-/// it.
-///
-/// Not an [`EditingState`]: a composing snapshot carries the whole mobile mirror,
-/// the password mid-composition included, so parking it as one would leave an
-/// unscrubbed plaintext copy per composing keystroke.
-/// [`KeystrokeSource::published`] rebuilds an `EditingState` from this on demand
-/// instead.
+/// platform's text in a [`Zeroizing`] `String` plus the **already validated**
+/// indices that arrived with it. Not an [`EditingState`]: a composing snapshot
+/// carries the whole mobile mirror, a password mid-composition included, so
+/// parking it as one would leave an unscrubbed plaintext copy per keystroke.
 struct ComposingEcho {
     /// The platform's text, verbatim. Never clamped the way the mirror is: a
-    /// composition's indices are indices into *this*, so trimming it would hand
-    /// the bridge a range into text that cannot hold it.
+    /// composition's indices are indices into *this*.
     text: Zeroizing<String>,
     /// The caret/selection, clamped into [`text`](Self::text).
     selection_base: i32,
@@ -482,8 +252,7 @@ impl ComposingEcho {
     }
 
     /// The state to publish — rebuilt per call rather than stored, so the plain
-    /// copy lives only as long as the platform's own round trip (the
-    /// [`published`](KeystrokeSource::published) residual, and no more).
+    /// copy lives only as long as the platform's own round trip.
     fn state(&self) -> EditingState {
         EditingState {
             text: self.text.as_str().to_owned(),
@@ -494,32 +263,24 @@ impl ComposingEcho {
         }
     }
 
-    /// How many UTF-16 units of the user's own text this is holding — what
-    /// [`buffered_units`](KeystrokeSource::buffered_units) counts it as.
+    /// How many UTF-16 units of the user's own text this is holding.
     fn units(&self) -> usize {
         len_utf16(&self.text)
     }
 }
 
-/// The keystroke source: the platform-mirror baseline, the modifier latch, and
-/// the counters the tests read.
+/// The keystroke source: the platform-mirror baseline, the modifier latch, and the
+/// counters the tests read. One instance is shared (behind an `Rc<RefCell<_>>`)
+/// between the grid widget and the key bar, so an emission from either passes
+/// through the same latch.
 ///
-/// One instance is shared (behind an `Rc<RefCell<_>>` — see
-/// [`SharedKeystrokeSource`](super::super::SharedKeystrokeSource)) between the
-/// grid widget and the key bar, so an emission from either passes through the
-/// same latch.
-///
-/// **Every buffer below holds the user's own typing, secrets included** (see the
-/// [module docs](super)): each is [`Zeroizing`], each is rewritten in place, and
-/// nothing oversized is ever *stored* — [`set_mirror`](Self::set_mirror) keeps
-/// only the clamped suffix of a snapshot, so a pasted token cannot grow either
-/// diff buffer past the capacity [`new`](Self::new) pre-reserved (a reallocation
-/// frees plaintext no scrub can reach, `zeroize`'s own documented caveat). The
-/// **composing echo is deliberately unbounded**, and is the one buffer that is:
-/// a composition's indices are indices into it, so clamping it would hand the
-/// bridge a range into text that cannot hold it — safe because it too is only
-/// ever written `zeroize()`-then-`push_str`, so the allocation a growth frees
-/// holds zeros.
+/// **Every buffer below holds the user's own typing, secrets included**: each is
+/// [`Zeroizing`], each is rewritten in place, and nothing oversized is ever
+/// *stored* — [`set_mirror`](Self::set_mirror) keeps only the clamped suffix, so a
+/// pasted token cannot grow either diff buffer past the capacity
+/// [`new`](Self::new) pre-reserved. The **composing echo is deliberately
+/// unbounded**, since a composition's indices are indices into it — safe because
+/// it too is only ever written `zeroize()`-then-`push_str`.
 pub struct KeystrokeSource {
     /// What the platform mirror is believed to hold — the diff baseline. Always
     /// a suffix of [`history`](Self::history).
@@ -532,23 +293,19 @@ pub struct KeystrokeSource {
     /// the platform's composition.
     composing: Option<ComposingEcho>,
     /// **One shot, armed by every [`scrub`](Self::scrub)**: the baseline was just
-    /// dropped to empty, so the platform may still be holding the line that was
-    /// submitted. Spent by the next snapshot that actually **adds** something
-    /// *and is let through*, and by nothing else; [`desync`](Self::desync) re-arms
-    /// it, which widens its meaning to "…or the last snapshot was refused". The
-    /// docs above hold why each of those is the closing condition.
+    /// dropped to empty, so the platform may still hold the submitted line. Spent
+    /// by the next snapshot that actually **adds** something *and is let through*,
+    /// and by nothing else; [`desync`](Self::desync) re-arms it.
     baseline_dropped: bool,
     /// A **keyed digest and UTF-16 length** of the baseline the last
     /// [`scrub`](Self::scrub) dropped — the content half of the post-scrub guard,
-    /// and the only thing about a dropped line that survives it. **No
-    /// plaintext**: a `u64` from [`replay_seed`](Self::replay_seed) plus a count.
+    /// and the only thing about a dropped line that survives it. **No plaintext.**
     /// `None` when the dropped baseline was at most one keystroke's worth
     /// ([`MIN_REPLAY_DIGEST_UNITS`]) and when the shot has been spent.
     dropped: Option<(u64, usize)>,
     /// This instance's own hash seed, so [`dropped`](Self::dropped)'s digest is
-    /// meaningless anywhere else: not comparable between two sources, not
-    /// comparable across two processes, and not a value that says anything about
-    /// the line without the in-process key.
+    /// meaningless anywhere else: not comparable between two sources or processes,
+    /// and says nothing about the line without the in-process key.
     replay_seed: RandomState,
     /// Armed by a `Key::Named(Backspace)`, consumed by the matching snapshot
     /// shortening (the dedupe rule).
@@ -575,20 +332,14 @@ impl KeystrokeSource {
     /// A source with an empty mirror and nothing armed.
     ///
     /// Both buffers are allocated at their steady-state capacity up front: a
-    /// `String` that grows reallocates, and a reallocation frees the old
-    /// plaintext where no scrub can reach it. Three bytes per UTF-16 unit is an
-    /// upper bound for any text at all (every character below the surrogate range
-    /// is at most 3 bytes for 1 unit, and a pair is 4 bytes for 2). The mirror's
-    /// bound is [`MIRROR_STORE_CAP`] because that is what `set_mirror` clamps to.
-    ///
-    /// The history reserves **one unit more** than [`HISTORY_CAP`], because
-    /// `clamp_front` rounds *outward* ([`utf16_suffix`]): a clamp landing
-    /// mid-surrogate-pair legitimately leaves `HISTORY_CAP + 1` units, one byte
-    /// past a `HISTORY_CAP * 3` reserve and therefore one reallocation. That
-    /// matters here and nowhere else — `set_mirror` **appends** to the live
-    /// history, so a growth would free the user's own plaintext, where the mirror
-    /// and the composing echo are rewritten `zeroize()`-then-`push_str` and can
-    /// only ever free zeros.
+    /// `String` that grows reallocates, and a reallocation frees the old plaintext
+    /// where no scrub can reach it. Three bytes per UTF-16 unit is an upper bound
+    /// for any text at all. The history reserves **one unit more** than
+    /// [`HISTORY_CAP`], because `clamp_front` rounds *outward* ([`utf16_suffix`]):
+    /// a clamp landing mid-surrogate-pair legitimately leaves `HISTORY_CAP + 1`
+    /// units, one reallocation past a `HISTORY_CAP * 3` reserve. That matters here
+    /// and nowhere else — `set_mirror` **appends** to the live history, where the
+    /// mirror and echo are rewritten zeroize-then-push and can only free zeros.
     pub fn new() -> Self {
         Self {
             mirror: Zeroizing::new(String::with_capacity(MIRROR_STORE_CAP * 3)),
@@ -605,13 +356,10 @@ impl KeystrokeSource {
         }
     }
 
-    /// The editing state to publish right now.
-    ///
-    /// The mirror with the caret collapsed at its end — **except** while a
-    /// composition is live, where it is the platform's own snapshot echoed back
-    /// (rebuilt from the scrubbed [`ComposingEcho`]), so re-publishing it is a
-    /// no-op on both bridges instead of a composition-destroying wholesale
-    /// replace.
+    /// The editing state to publish right now: the mirror with the caret collapsed
+    /// at its end — **except** while a composition is live, where it is the
+    /// platform's own snapshot echoed back, so re-publishing it is a no-op on both
+    /// bridges instead of a composition-destroying wholesale replace.
     pub fn published(&self) -> EditingState {
         if let Some(echo) = &self.composing {
             return echo.state();
@@ -631,34 +379,27 @@ impl KeystrokeSource {
         self.latch
     }
 
-    /// The mirror's current text — a **test-only** accessor, and the one thing
-    /// here that hands out the user's own plaintext, so it is compiled out of
-    /// every non-test build. Production reads the mirror through
-    /// [`published`](Self::published) (which the platform needs anyway) and
-    /// asserts on [`buffered_units`](Self::buffered_units) instead.
+    /// The mirror's current text — a **test-only** accessor, and the one thing here
+    /// that hands out the user's own plaintext, so it is compiled out of every
+    /// non-test build. Production reads it through [`published`](Self::published).
     #[cfg(test)]
     pub fn mirror(&self) -> &str {
         &self.mirror
     }
 
-    /// How many UTF-16 code units of the user's own typing the source is holding
-    /// — the **content-free** counterpart of [`mirror`](Self::mirror), and what a
+    /// How many UTF-16 code units of the user's own typing the source is holding —
+    /// the **content-free** counterpart of [`mirror`](Self::mirror), and what a
     /// scrub boundary is asserted on (`0` is the only value that means "nothing
-    /// retained").
-    ///
-    /// An upper bound rather than an exact count: the mirror is a suffix of the
-    /// history by invariant, so a non-zero answer counts those units twice, and a
-    /// live composition is counted on top of both — the safe direction for the one
-    /// question this exists to answer, and the echo belongs in the answer because
-    /// it holds the user's own text exactly as the other two do.
+    /// retained"). An upper bound rather than an exact count: the mirror is a
+    /// suffix of the history by invariant, so a non-zero answer counts those units
+    /// twice — the safe direction for the question this exists to answer.
     pub fn buffered_units(&self) -> usize {
         len_utf16(&self.mirror)
             + len_utf16(&self.history)
             + self.composing.as_ref().map_or(0, ComposingEcho::units)
     }
 
-    /// How many times the window has been re-anchored — the publish counter the
-    /// trim test caps.
+    /// How many times the window has been re-anchored (and therefore published).
     pub fn reconciles(&self) -> u64 {
         self.reconciles
     }
@@ -673,7 +414,7 @@ impl KeystrokeSource {
         self.emitted
     }
 
-    /// Whether a composition is live (report-only, see the [module docs](super)).
+    /// Whether a composition is live (report-only — see `on_snapshot`'s step 1).
     pub fn is_composing(&self) -> bool {
         self.composing.is_some()
     }
@@ -685,23 +426,15 @@ impl KeystrokeSource {
     ///
     /// Zeroing rather than clearing — `zeroize` writes across each buffer's whole
     /// capacity, so the stale tail an in-place truncation leaves behind goes too;
-    /// capacity survives, so a scrub never reallocates.
+    /// capacity survives, so a scrub never reallocates. After this the diff
+    /// baseline is **empty**, which is right at every boundary this is called from
+    /// (a submitted line, a blur, `read_only`, teardown). The **latch** is
+    /// deliberately left alone: an armed `Ctrl` is not a secret, and clearing it
+    /// would owe the key bar a signal write from paths (a paint-pass blur) that
+    /// must not make one.
     ///
-    /// After this the diff baseline is **empty**, which is exactly right at every
-    /// boundary this is called from — a submitted line, a blur, `read_only`,
-    /// teardown (see [`InputSeam`](super::super::InputSeam) for the wiring). The
-    /// **latch** is deliberately left alone: an armed `Ctrl` is not a secret, and
-    /// clearing it would owe the key bar a signal write from paths (a paint-pass
-    /// blur) that must not make one.
-    ///
-    /// Dropping the baseline is also what arms
-    /// [`baseline_dropped`](Self::baseline_dropped) — the one shot covering the
-    /// frames the *platform* may still be holding the old line for — and what
-    /// records [`dropped`](Self::dropped), that shot's content test: a keyed
-    /// digest of the baseline about to be zeroed plus its length in UTF-16 units,
-    /// which is **not** plaintext and is not retained past the shot it belongs
-    /// to. A baseline of at most one keystroke's worth records none at all
-    /// ([`MIN_REPLAY_DIGEST_UNITS`]).
+    /// Dropping the baseline also arms [`baseline_dropped`](Self::baseline_dropped)
+    /// and records [`dropped`](Self::dropped), that shot's content test.
     pub fn scrub(&mut self) {
         let units = len_utf16(&self.mirror);
         self.dropped = if units >= MIN_REPLAY_DIGEST_UNITS {
@@ -718,10 +451,8 @@ impl KeystrokeSource {
         self.revision += 1;
     }
 
-    /// A line has been submitted: drop the baseline and report that the caller
-    /// must re-publish (see the Return rule in the docs above).
-    ///
-    /// Counted as a re-anchor because that is exactly what it costs — one
+    /// A line has been submitted: drop the baseline and report that the caller must
+    /// re-publish. Counted as a re-anchor because that is what it costs — one
     /// platform `restartInput`, on the rarest keystroke there is.
     fn submit_line(&mut self) -> bool {
         self.scrub();
@@ -732,20 +463,14 @@ impl KeystrokeSource {
     /// The answer to a snapshot the source reads as a **desync** rather than as
     /// typing: emit nothing, move nothing, and re-publish the state the source
     /// still believes in — which is what pulls the platform back into step. Both
-    /// guards end here (see the docs above): the oversized `removed`, and
-    /// the stale post-scrub replay. The backspace arm goes too — the echo it was
-    /// waiting for is not in a snapshot like this one.
+    /// guards end here. The backspace arm goes too — the echo it was waiting for is
+    /// not in a snapshot like this one.
     ///
     /// **Refusing a snapshot re-arms the one shot.** This is the one place that
     /// both refuses a snapshot *and* provably leaves the baseline it was diffed
-    /// against exactly as it was, so the guard's own precondition still holds when
-    /// this returns and the flag has to say so — the same argument that puts the
-    /// *arm* inside [`scrub`](Self::scrub) rather than at its call sites.
-    ///
-    /// It cannot livelock: emitting nothing, moving neither buffer and
-    /// re-publishing what the source already believed in is idempotent, so a
-    /// genuinely oversized commit is simply dropped frame after frame until one
-    /// snapshot the guard admits retires the arm.
+    /// against exactly as it was, so the guard's precondition still holds on
+    /// return. It cannot livelock: emitting nothing, moving neither buffer and
+    /// re-publishing what was already believed is idempotent.
     fn desync(&mut self) -> Emission {
         self.pending_backspaces = 0;
         self.baseline_dropped = true;
@@ -759,20 +484,17 @@ impl KeystrokeSource {
     }
 
     /// A keyed digest of `text` under this instance's own seed — the only form a
-    /// dropped baseline is ever kept in (see [`dropped`](Self::dropped)).
+    /// dropped baseline is ever kept in.
     fn digest(&self, text: &str) -> u64 {
         self.replay_seed.hash_one(text)
     }
 
     /// Whether `added` **begins with the baseline the last scrub dropped** — the
-    /// content half of the post-scrub guard (see the docs above).
-    ///
-    /// A *prefix* rather than the whole add, so the stale line plus whatever the
-    /// user typed during the window (`"hunter2x"`, and iOS's `"hunter2\n"`) is
-    /// caught as well as the exact replay. The length check is what makes the
-    /// comparison sound: [`utf16_prefix`] rounds inward, so an add too short to
-    /// hold the baseline — or one whose boundary would split a surrogate pair —
-    /// comes up short and is not a match.
+    /// content half of the post-scrub guard. A *prefix* rather than the whole add,
+    /// so the stale line plus whatever the user typed during the window
+    /// (`"hunter2x"`, iOS's `"hunter2\n"`) is caught as well as the exact replay.
+    /// The length check makes the comparison sound: [`utf16_prefix`] rounds inward,
+    /// so an add too short to hold the baseline comes up short and is not a match.
     fn is_replay(&self, added: &str) -> bool {
         let Some((digest, units)) = self.dropped else {
             return false;
@@ -781,12 +503,9 @@ impl KeystrokeSource {
         len_utf16(head) == units && self.digest(head) == digest
     }
 
-    /// Record one composing snapshot, rewriting the echo's buffer **in place** so
-    /// a composing keystroke leaves no unscrubbed plaintext copy behind (the same
-    /// rule the mirror follows).
-    ///
-    /// `selection`/`composing` are `(base, extent)` pairs the caller has already
-    /// validated against `text`.
+    /// Record one composing snapshot, rewriting the echo's buffer **in place** so a
+    /// composing keystroke leaves no unscrubbed plaintext copy behind.
+    /// `selection`/`composing` are `(base, extent)` pairs already validated.
     fn set_composing(&mut self, text: &str, selection: (i32, i32), composing: (i32, i32)) {
         let echo = self.composing.get_or_insert_with(ComposingEcho::new);
         echo.text.zeroize();
@@ -799,13 +518,10 @@ impl KeystrokeSource {
 
     // -- the emission choke point -------------------------------------------
 
-    /// **The one place bytes are produced.** Applies the latch (plus any
-    /// transient hardware modifiers) and, on a single-code-unit emission,
-    /// disarms *both* flags together.
-    ///
-    /// A longer emission — an arrow sequence, a swipe-typed word, a run of
-    /// backspaces — passes through untransformed and leaves the latch armed, so
-    /// `Ctrl` then `↑` then `c` still sends `0x03`.
+    /// **The one place bytes are produced.** Applies the latch (plus any transient
+    /// hardware modifiers) and, on a single-code-unit emission, disarms *both*
+    /// flags together. A longer emission — an arrow sequence, a swipe-typed word, a
+    /// run of backspaces — passes through untransformed and leaves the latch armed.
     fn emit(&mut self, data: &[u8], transient: ModifierLatch) -> Vec<u8> {
         if data.is_empty() {
             return Vec::new();
@@ -820,20 +536,14 @@ impl KeystrokeSource {
         out
     }
 
-    /// Emit one **sequence** key — a bar cap's or a hardware
-    /// [`NamedKey`]'s — choosing its Shift variant where an armed `Shift` has
-    /// one to choose ([`shifted_sequence`]).
-    ///
-    /// The selection is a separate step from [`emit`](Self::emit)'s transform
-    /// because that transform is structurally blind here: it only ever rewrites
-    /// a **single code unit**, where most of these are longer than one — and
-    /// even `Tab`, which is one, answers Shift with a whole other sequence
-    /// rather than a modified byte. So the variant is picked, never derived.
-    ///
-    /// Choosing one consumes the latch's `shift` — the one-shot rule, applied to
-    /// the emission that actually spent it. `Ctrl`/`Alt` are deliberately *not*
-    /// consumed here and do not reach the bytes at all: that asymmetry, and what
-    /// it costs, is [`ModifierLatch`]'s own doc.
+    /// Emit one **sequence** key — a bar cap's or a hardware [`NamedKey`]'s —
+    /// choosing its Shift variant where an armed `Shift` has one
+    /// ([`shifted_sequence`]). A separate step from [`emit`](Self::emit)'s
+    /// transform because that transform only ever rewrites a **single code unit**,
+    /// where most of these are longer — and even `Tab` answers Shift with a whole
+    /// other sequence rather than a modified byte. Choosing one consumes the
+    /// latch's `shift`; `Ctrl`/`Alt` are deliberately *not* consumed here and do
+    /// not reach the bytes at all (see [`ModifierLatch`]).
     fn emit_sequence(&mut self, sequence: &'static [u8], transient: ModifierLatch) -> Vec<u8> {
         let shifted = (self.latch.shift || transient.shift)
             .then(|| shifted_sequence(sequence))
@@ -851,22 +561,15 @@ impl KeystrokeSource {
     /// *is* the old mirror, by invariant).
     ///
     /// Takes a `&str` and rewrites both buffers **in place** rather than taking a
-    /// `String` it could park: a per-keystroke `state.text.clone()` handed over
-    /// here would be one unscrubbed plaintext allocation per keystroke.
-    ///
-    /// Only the **clamped suffix** is stored. A pasted token arrives as one
-    /// oversized snapshot whose bytes were already emitted from the diff, so what
-    /// is kept here is only the next diff's baseline: storing it whole would grow
-    /// the buffers past the capacity [`new`](Self::new) pre-reserved (a
-    /// reallocation frees plaintext no scrub can reach) and leave the whole secret
-    /// resident until the re-anchor trimmed it. [`MIRROR_STORE_CAP`] is one unit
-    /// past the cap precisely so
+    /// `String` it could park: a per-keystroke `state.text.clone()` would be one
+    /// unscrubbed plaintext allocation per keystroke. Only the **clamped suffix**
+    /// is stored — the bytes of an oversized paste were already emitted from the
+    /// diff, so what is kept is only the next diff's baseline, and storing it whole
+    /// would grow the buffers past the capacity [`new`](Self::new) pre-reserved.
+    /// [`MIRROR_STORE_CAP`] is one unit past the cap precisely so
     /// [`reanchor_if_needed`](Self::reanchor_if_needed) still sees the overflow.
-    ///
-    /// The history is clamped **before** the push rather than after it: same
-    /// result, without the oversized intermediate — and it is what keeps `head`
-    /// from underflowing, since the mirror can then never be longer than the
-    /// history it is a suffix of.
+    /// The history is clamped **before** the push: same result without the
+    /// oversized intermediate, and it keeps `head` from underflowing.
     fn set_mirror(&mut self, next: &str) {
         let kept = utf16_suffix(next, MIRROR_STORE_CAP);
         let head = self.history.len() - self.mirror.len();
@@ -881,11 +584,9 @@ impl KeystrokeSource {
     }
 
     /// Re-anchor the window if it has grown past [`MIRROR_CAP`] or shrunk below
-    /// [`MIRROR_FLOOR`], reporting whether the caller must re-publish.
-    ///
-    /// The shrink case only fires when history actually has more to give: with
-    /// nothing left to refill from, re-anchoring every snapshot would publish
-    /// forever and still not make a delete observable.
+    /// [`MIRROR_FLOOR`], reporting whether the caller must re-publish. The shrink
+    /// case only fires when history actually has more to give: with nothing left to
+    /// refill from, re-anchoring every snapshot would publish forever.
     fn reanchor_if_needed(&mut self) -> bool {
         let len = len_utf16(&self.mirror);
         let over = len > MIRROR_CAP;
@@ -893,9 +594,8 @@ impl KeystrokeSource {
         if !over && !under {
             return false;
         }
-        // The tail as a byte range into history, so the refill below copies
-        // straight between the two scrubbed buffers instead of through a
-        // plaintext temporary.
+        // The tail as a byte range into history, so the refill copies straight
+        // between the two scrubbed buffers rather than through a temporary.
         let start = self.history.len() - utf16_suffix(&self.history, MIRROR_TAIL).len();
         if !over && len_utf16(&self.history[start..]) <= len {
             return false;
@@ -910,28 +610,22 @@ impl KeystrokeSource {
     // -- the platform paths --------------------------------------------------
 
     /// Reconcile one mobile snapshot ([`ImeEvent::ApplyEditingState`](frust::authoring::ImeEvent))
-    /// against the mirror — **the diff engine**.
+    /// against the mirror — **the diff engine**. Order matters, and this is it:
     ///
-    /// Order matters, and this is the order:
-    ///
-    /// 1. **A live composing range wins**: report, emit nothing, move nothing.
-    ///    Its indices are validated first ([`composing_range`]) — this is the one
-    ///    thing the source echoes back to the platform verbatim. The post-scrub
-    ///    one shot is deliberately **not** spent here: a composition emits
-    ///    nothing, so the stale window it guards is still open behind it.
-    /// 2. Diff against the mirror, then the desync guards, which all emit
-    ///    nothing, move nothing, re-publish and leave the one shot armed (see the
-    ///    docs above): into an armed shot, an `added` that begins with
-    ///    the baseline the last scrub dropped ([`is_replay`](Self::is_replay)) or
-    ///    that is bigger than one commit's worth ([`is_one_commit`]); and, on any
-    ///    snapshot, an oversized `removed`.
+    /// 1. **A live composing range wins**: report, emit nothing, move nothing. Its
+    ///    indices are validated first ([`composing_range`]). The post-scrub one shot
+    ///    is deliberately **not** spent here: a composition emits nothing, so the
+    ///    stale window it guards is still open behind it.
+    /// 2. Diff against the mirror, then the desync guards, which all emit nothing,
+    ///    move nothing, re-publish and leave the one shot armed: into an armed shot,
+    ///    an `added` beginning with the baseline the last scrub dropped
+    ///    ([`is_replay`](Self::is_replay)) or bigger than one commit's worth
+    ///    ([`is_one_commit`]); and, on any snapshot, an oversized `removed`.
     /// 3. Otherwise a shortening consumes any armed `Key::Named(Backspace)` echo
-    ///    first (the dedupe rule), and any snapshot that does not shorten retires
-    ///    the arm.
+    ///    first (the dedupe rule), and a snapshot that does not shorten retires it.
     /// 4. Emit the backspaces, then the added text — each through the latch.
     /// 5. A Return in what was added **drops the baseline**; otherwise accept the
-    ///    snapshot as the new mirror and re-anchor if the window has drifted out
-    ///    of `FLOOR..=CAP`.
+    ///    snapshot as the new mirror and re-anchor if the window drifted.
     pub fn on_snapshot(&mut self, state: &EditingState) -> Emission {
         if let Some((base, extent)) = composing_range(state) {
             // Report-only: re-publishing mid-composition would destroy the
@@ -951,36 +645,29 @@ impl KeystrokeSource {
         self.composing = None;
 
         let (removed, added) = diff(&self.mirror, &state.text);
-        // The one plaintext temporary on this path: owned here so its drop
-        // scrubs it.
+        // The one plaintext temporary on this path: owned here so its drop scrubs it.
         let added = Zeroizing::new(added);
 
         if !added.is_empty() {
-            // Into an armed shot the platform may still be holding the line the
-            // last scrub dropped, which diffed against nothing reads as one
-            // `added` run carrying that whole line — with its Return on iOS,
-            // WITHOUT one on Android — and which the oversized-delete guard
-            // below cannot catch, since nothing was removed. So it has to pass
-            // both tests (module docs): not BE that line (`is_replay`), and
-            // still be at most one commit's worth (`is_one_commit`).
-            //
-            // The shot is spent here and only here, by a snapshot that both adds
-            // something and is let through; a REFUSED one re-arms inside
-            // `desync`.
+            // Into an armed shot the platform may still be holding the line the last
+            // scrub dropped, which diffed against nothing reads as one `added` run
+            // carrying that whole line — with its Return on iOS, WITHOUT one on
+            // Android — and which the oversized-delete guard below cannot catch,
+            // since nothing was removed. So it must pass both tests: not BE that
+            // line (`is_replay`), and still be at most one commit's worth. The shot
+            // is spent here and only here; a REFUSED one re-arms inside `desync`.
             let armed = std::mem::take(&mut self.baseline_dropped);
             if armed {
                 if self.is_replay(&added) || !is_one_commit(&added) {
                     return self.desync();
                 }
-                // Let through: the window is closed, so the fingerprint of the
-                // submitted line goes with the shot it belonged to.
+                // Let through: the window is closed, so the fingerprint goes too.
                 self.dropped = None;
             }
         }
 
         if removed > MAX_SNAPSHOT_DELETE {
-            // A whole-buffer replacement, not typing: emit NOTHING and re-publish
-            // the mirror the source still believes in.
+            // A whole-buffer replacement, not typing: emit NOTHING and re-publish.
             return self.desync();
         }
 
@@ -990,8 +677,7 @@ impl KeystrokeSource {
             backspaces -= consumed;
             self.pending_backspaces -= consumed;
         } else {
-            // The echo never came (or this was an append): retire the arm so it
-            // cannot swallow a later real delete.
+            // The echo never came (or this was an append): retire the arm.
             self.pending_backspaces = 0;
         }
 
@@ -1010,9 +696,8 @@ impl KeystrokeSource {
             _ => InputClass::Text,
         };
 
-        // A submitted line is dropped rather than kept as a baseline, so no `\n`
-        // can live in the mirror to be re-emitted later — including inside a
-        // multi-line paste, which is several Returns and one of these.
+        // A submitted line is dropped rather than kept as a baseline, so no `\n` can
+        // live in the mirror to be re-emitted later — a multi-line paste included.
         let reconciled = if carries_return(&added) {
             self.submit_line()
         } else {
@@ -1026,12 +711,10 @@ impl KeystrokeSource {
         }
     }
 
-    /// A desktop (winit) commit — the composed text the platform finished.
-    ///
-    /// Emitted straight through: there is no platform mirror to diff against on
-    /// desktop, so the mirror is left alone — unless the commit carried a Return,
-    /// which drops the baseline on every path alike, keeping that rule one rule
-    /// rather than a mobile special case.
+    /// A desktop (winit) commit — the composed text the platform finished. Emitted
+    /// straight through: there is no platform mirror to diff against on desktop, so
+    /// the mirror is left alone — unless the commit carried a Return, which drops
+    /// the baseline on every path alike.
     pub fn on_commit(&mut self, text: &str) -> Emission {
         self.composing = None;
         if text.is_empty() {
@@ -1073,14 +756,11 @@ impl KeystrokeSource {
         Emission::inert(InputClass::None)
     }
 
-    /// A focus-routed key event: Android's `IME_ACTION_DONE`-as-`Enter`, and
-    /// every real key on the desktop preview.
-    ///
-    /// The two asymmetric rules land here (see the [module docs](super)): a
+    /// A focus-routed key event: Android's `IME_ACTION_DONE`-as-`Enter`, and every
+    /// real key on the desktop preview. The two asymmetric rules land here: a
     /// `Key::Named(Backspace)` emits its byte and **arms the dedupe** so the
     /// reconciler swallows the platform's echo of the same delete, and Android's
-    /// Return — arriving here rather than in a snapshot — drops the baseline
-    /// exactly as iOS's literal `"\n"` does, taking the secret typed before it.
+    /// Return drops the baseline as iOS's literal `"\n"` does.
     pub fn on_key(&mut self, key: &Key, mods: Modifiers) -> Emission {
         let transient = ModifierLatch::from_modifiers(mods);
         match key {
@@ -1156,9 +836,7 @@ mod tests {
     use super::super::harness::{hex, snapshot, type_text};
     use super::*;
 
-    // -----------------------------------------------------------------
-    // The diff engine
-    // -----------------------------------------------------------------
+    // The diff engine.
 
     #[test]
     fn one_appended_character_emits_one_byte() {
@@ -1214,10 +892,8 @@ mod tests {
         assert_eq!(hex(&emission.bytes), "0d", "CR, never LF");
         assert_eq!(emission.class, InputClass::Enter);
 
-        // A submitted line is dropped rather than kept as the next diff's
-        // baseline, so the literal `\n` iOS accumulates can never be part of a
-        // later bulk re-emission — which, because `text_bytes` maps `\n` to CR,
-        // would re-execute `ls` on the remote host.
+        // A submitted line is dropped rather than kept as the next diff's baseline,
+        // so iOS's accumulated `\n` can never be part of a later bulk re-emission.
         assert!(emission.reconciled, "the window re-anchors, to empty");
         assert_eq!(source.mirror(), "", "no `\\n` is left in the mirror");
         assert_eq!(source.buffered_units(), 0, "…and none in history either");
@@ -1229,9 +905,8 @@ mod tests {
         type_text(&mut source, "ls");
         source.on_snapshot(&snapshot("ls\n"));
 
-        // The platform reconciled to the republished (empty) mirror inside the
-        // same round trip, so its next snapshot is built on nothing — which is
-        // exactly what `type_text` models.
+        // The platform reconciled to the republished (empty) mirror inside the same
+        // round trip, so its next snapshot is built on nothing.
         assert_eq!(
             hex(&type_text(&mut source, "x")),
             "78",
@@ -1271,10 +946,8 @@ mod tests {
         assert_eq!(hex(&type_text(&mut source, "x")), "78");
     }
 
-    // -----------------------------------------------------------------
-    // The stale-snapshot guard: the frames the PLATFORM may still be
-    // holding the submitted line for
-    // -----------------------------------------------------------------
+    // The stale-snapshot guard: the frames the PLATFORM may still be holding
+    // the submitted line for.
 
     #[test]
     fn a_stale_snapshot_after_a_return_replays_nothing_to_the_host() {
@@ -1286,10 +959,9 @@ mod tests {
         assert_eq!(source.mirror(), "", "…and guard 1 dropped the baseline");
         let sent = source.emitted();
 
-        // THE window. This snapshot is built from the PLATFORM's own stale
-        // buffer — deliberately not from `source.mirror()`, which is what
-        // `type_text` would do and what would hide the bug entirely. Diffed
-        // against the empty baseline it reads `added = "ls\n"`, whose `\n`
+        // THE window. This snapshot is built from the PLATFORM's own stale buffer —
+        // deliberately not from `source.mirror()`, which is what would hide the bug.
+        // Diffed against the empty baseline it reads `added = "ls\n"`, whose `\n`
         // `text_bytes` maps to CR: emitted, `ls` runs again on the remote host.
         let stale = source.on_snapshot(&snapshot("ls\n"));
         assert!(
@@ -1309,12 +981,10 @@ mod tests {
 
     #[test]
     fn the_stale_android_shape_carries_no_newline_and_is_still_caught() {
-        // THE Android case, and the reason the guard cannot be keyed on the
-        // Return: `IME_ACTION_DONE` leaves as an editor action,
-        // never as text, and `performEditorAction` does not re-poll — it counts
-        // down `imeResyncFrames`, its own comment recording that the field is
-        // cleared on the next-frame REBUILD. So the `Editable` keeps the
-        // pre-submit line, WITHOUT a newline, for those frames.
+        // THE Android case, and the reason the guard cannot be keyed on the Return:
+        // `IME_ACTION_DONE` leaves as an editor action, never as text, and
+        // `performEditorAction` does not re-poll — so the `Editable` keeps the
+        // pre-submit line, WITHOUT a newline, for several frames.
         let mut source = KeystrokeSource::new();
         // Positive preconditions: the line really was typed, and the Return
         // really went out, before there is any stale window to speak of.
@@ -1328,9 +998,8 @@ mod tests {
         assert_eq!(source.mirror(), "", "…leaving an empty baseline, armed");
         let sent = source.emitted();
 
-        // RAW: built from the PLATFORM's own stale buffer, deliberately not
-        // from `source.mirror()` — a snapshot built from our own mirror is
-        // what hid this shape in the first place.
+        // RAW: built from the PLATFORM's own stale buffer — a snapshot built from
+        // our own mirror is what hid this shape in the first place.
         let stale = source.on_snapshot(&snapshot("sudo -i"));
         assert!(
             stale.bytes.is_empty(),
@@ -1349,10 +1018,8 @@ mod tests {
 
     #[test]
     fn the_stale_ios_shape_carries_the_return_and_is_caught_separately() {
-        // The other platform's shape of the same window, kept as its own case:
-        // iOS accumulates the literal Return in its mirror, so the stale buffer
-        // arrives WITH it — the shape the Android case above proves is only
-        // half of what the guard must catch.
+        // The other platform's shape of the same window: iOS accumulates the literal
+        // Return in its mirror, so the stale buffer arrives WITH it.
         let mut source = KeystrokeSource::new();
         assert_eq!(hex(&type_text(&mut source, "sudo -i")), "7375646f202d69");
         assert_eq!(
@@ -1375,11 +1042,9 @@ mod tests {
 
     #[test]
     fn genuine_first_input_after_a_return_still_lands() {
-        // The guard admits one commit's worth, so every shape a real first
-        // keystroke has survives it: one character, one emoji tap (two units
-        // for one commit), and one gesture-typed word — which the Android
-        // bridge deliberately keeps working on a terminal field — with or
-        // without the trailing space a gesture commit appends.
+        // The guard admits one commit's worth, so every shape a real first keystroke
+        // has survives it: one character, one emoji tap (two units, one commit), and
+        // one gesture-typed word with or without its trailing space.
         let cases: [(&str, &str); 4] = [
             ("x", "78"),
             ("\u{1f600}", "f09f9880"),
@@ -1392,8 +1057,7 @@ mod tests {
             assert_eq!(hex(&source.on_snapshot(&snapshot("ls\n")).bytes), "0d");
             assert_eq!(source.mirror(), "", "armed, on an empty baseline");
 
-            // RAW again: the platform reconciled to that empty state inside the
-            // same round trip, so this snapshot is the first commit on it.
+            // RAW again: the platform reconciled inside the same round trip.
             let emission = source.on_snapshot(&snapshot(first));
             assert_eq!(hex(&emission.bytes), expected, "{first:?} must land");
             assert_eq!(emission.class, InputClass::Text);
@@ -1403,11 +1067,9 @@ mod tests {
 
     #[test]
     fn a_no_op_snapshot_does_not_spend_the_stale_shot() {
-        // Gboard's `finishComposingText()` goes straight to `sync()`, which
-        // pushes the mirror unchanged: a snapshot that adds nothing, emits
-        // nothing and closes no window. Spending the one shot on it would
-        // retire the guard while its precondition — the empty baseline — still
-        // held, and the stale replay behind it would fall through both guards.
+        // Gboard's `finishComposingText()` pushes the mirror unchanged: a snapshot
+        // that adds nothing and closes no window. Spending the shot on it would
+        // retire the guard while its precondition — the empty baseline — still held.
         let mut source = KeystrokeSource::new();
         assert_eq!(hex(&type_text(&mut source, "ls")), "6c73");
         assert_eq!(hex(&source.on_snapshot(&snapshot("ls\n")).bytes), "0d");
@@ -1486,10 +1148,8 @@ mod tests {
 
     #[test]
     fn a_return_and_nothing_else_is_let_through_after_a_return() {
-        // A blank line at a shell prompt: Return pressed twice. The second one
-        // carries no command text to replay, so the guard's narrowing lets it
-        // through rather than swallowing every other Enter (see the module
-        // docs' Return rule).
+        // A blank line at a shell prompt: Return pressed twice. The second carries no
+        // command text to replay, so the guard's narrowing lets it through.
         let mut source = KeystrokeSource::new();
         type_text(&mut source, "ls");
         assert_eq!(hex(&source.on_snapshot(&snapshot("ls\n")).bytes), "0d");
@@ -1500,19 +1160,14 @@ mod tests {
         assert_eq!(source.buffered_units(), 0, "and still keeps nothing");
     }
 
-    // -----------------------------------------------------------------
-    // The guard is more than one snapshot deep, and it compares CONTENT,
-    // not just shape
-    // -----------------------------------------------------------------
+    // The guard is more than one snapshot deep, and compares CONTENT, not shape.
 
     #[test]
     fn a_second_stale_snapshot_in_the_same_window_replays_nothing_either() {
-        // THE multi-frame case. `performEditorAction` does not re-poll: it
-        // counts down `imeResyncFrames`, so the SAME stale `Editable` can be
-        // polled on several frames. A guard that spent its shot on the first of
-        // them leaves the second with `armed == false` and `removed == 0` — no
-        // guard, and no delete for the other guard to see — so the whole
-        // previous command line reaches the host.
+        // THE multi-frame case. `performEditorAction` does not re-poll, so the SAME
+        // stale `Editable` can be polled on several frames. A guard that spent its
+        // shot on the first leaves the second unguarded — `armed == false` and
+        // `removed == 0` — and the whole previous command line reaches the host.
         let mut source = KeystrokeSource::new();
         // Positive preconditions: the line was typed, and the Return went out.
         assert_eq!(hex(&type_text(&mut source, "sudo -i")), "7375646f202d69");
@@ -1553,10 +1208,9 @@ mod tests {
 
     #[test]
     fn an_oversized_delete_desync_leaves_the_guard_armed_for_the_frame_after_it() {
-        // The other branch of the same rule: a refusal arms the shot wherever
-        // it fires, so a platform that has just proved itself out of step gets
-        // one commit's worth at a time until one snapshot the source can
-        // reconcile arrives.
+        // The other branch of the same rule: a refusal arms the shot wherever it
+        // fires, so a platform that has just proved itself out of step gets one
+        // commit's worth at a time until a snapshot the source can reconcile arrives.
         let mut source = KeystrokeSource::new();
         let typed = "a".repeat(MIRROR_CAP / 2);
         type_text(&mut source, &typed);
@@ -1592,12 +1246,9 @@ mod tests {
 
     #[test]
     fn a_word_shaped_stale_line_is_refused_on_its_content_not_its_shape() {
-        // THE content-test case, and the example the module docs are written
-        // around. On Android the stale buffer is the pre-submit line WITHOUT a
-        // newline,
-        // so `"hunter2"` — seven alphanumeric units — is exactly the shape
-        // `is_one_commit` exists to admit. What refuses it is that it IS the
-        // line the scrub just dropped.
+        // THE content-test case. On Android the stale buffer is the pre-submit line
+        // WITHOUT a newline, so `"hunter2"` is exactly the shape `is_one_commit`
+        // exists to admit. What refuses it is that it IS the line the scrub dropped.
         let mut source = KeystrokeSource::new();
         assert_eq!(hex(&type_text(&mut source, "hunter2")), "68756e74657232");
         assert_eq!(
@@ -1629,13 +1280,10 @@ mod tests {
 
     #[test]
     fn a_stale_line_plus_a_character_typed_during_the_window_is_refused_whole() {
-        // The platform is behind AND the user kept typing, so the stale buffer
-        // is the dropped line with a genuine keystroke on the end. The prefix
-        // digest sees it; the DECISION (module docs, guard test 1) is to refuse
-        // the whole snapshot rather than emit the `x` on its own — a prefix
-        // match cannot tell this from a first commit that merely begins the
-        // same way, and a fragment of a keystroke run in a shell is worse than
-        // a dropped one.
+        // The platform is behind AND the user kept typing, so the stale buffer is the
+        // dropped line with a genuine keystroke on the end. The prefix digest sees
+        // it; the decision is to refuse the whole snapshot rather than emit the `x`
+        // alone — a fragment of a keystroke run in a shell is worse than a dropped one.
         let mut source = KeystrokeSource::new();
         assert_eq!(hex(&type_text(&mut source, "hunter2")), "68756e74657232");
         assert_eq!(
@@ -1659,9 +1307,8 @@ mod tests {
         assert_eq!(stale.class, InputClass::Desync);
         assert_eq!(source.emitted(), sent, "not one byte reached the session");
 
-        // The cost of that decision, and its recovery: the user's `x` was
-        // dropped with the replay, and retyping it onto the re-published
-        // baseline lands.
+        // The cost of that decision, and its recovery: the `x` was dropped with the
+        // replay, and retyping it onto the re-published baseline lands.
         assert_eq!(hex(&type_text(&mut source, "x")), "78");
     }
 
@@ -1698,10 +1345,9 @@ mod tests {
 
     #[test]
     fn the_replay_digest_is_seeded_per_instance_and_keeps_no_plaintext() {
-        // Two sources, the same submitted line: the recorded lengths match
-        // (that part IS the line's length), and the digests do not, because the
-        // seed is this instance's own `RandomState` rather than a fixed
-        // constant that would be comparable across sources — and processes.
+        // Two sources, the same submitted line: the recorded lengths match (that part
+        // IS the line's length), and the digests do not, because the seed is this
+        // instance's own `RandomState` rather than a fixed constant.
         let line = "hunter2";
         let mut first = KeystrokeSource::new();
         let mut second = KeystrokeSource::new();
@@ -1739,8 +1385,7 @@ mod tests {
 
     #[test]
     fn a_one_keystroke_baseline_records_no_digest_and_stays_typeable() {
-        // The bound on the content test (`MIN_REPLAY_DIGEST_UNITS`) and the
-        // residual it leaves, both in one place.
+        // The bound on the content test, and the residual it leaves.
         let mut source = KeystrokeSource::new();
         type_text(&mut source, "ls");
         source.on_key(&Key::Named(NamedKey::Enter), Modifiers::default());
@@ -1769,10 +1414,9 @@ mod tests {
         assert!(stale.bytes.is_empty(), "got {}", hex(&stale.bytes));
         assert_eq!(stale.class, InputClass::Desync);
 
-        // And the reason the bound is where it is: the identical NEXT
-        // keystroke. A digest at this length would refuse it — every time,
-        // since a refusal re-arms — so `y` at a `[y/n]` prompt would be
-        // untypeable.
+        // And the reason the bound is where it is: the identical NEXT keystroke. A
+        // digest at this length would refuse it every time, since a refusal re-arms,
+        // so `y` at a `[y/n]` prompt would be untypeable.
         let mut source = KeystrokeSource::new();
         type_text(&mut source, "y");
         source.on_key(&Key::Named(NamedKey::Enter), Modifiers::default());
@@ -1792,16 +1436,13 @@ mod tests {
         assert_eq!(stale.class, InputClass::Desync);
     }
 
-    // -----------------------------------------------------------------
-    // The desync guard, and the scrub
-    // -----------------------------------------------------------------
+    // The desync guard, and the scrub.
 
     #[test]
     fn a_whole_buffer_replacement_emits_nothing_and_re_publishes() {
-        // Dictation rewriting the field per partial, a replace-span rewrite, or
-        // a bridge one frame behind: all three arrive as one snapshot that
-        // deletes the buffer. Emitting that is how previously typed commands
-        // get replayed to the remote host.
+        // Dictation rewriting the field per partial, a replace-span rewrite, or a
+        // bridge one frame behind all arrive as one snapshot that deletes the buffer.
+        // Emitting that is how previously typed commands reach the remote host.
         let mut source = KeystrokeSource::new();
         let typed = "rm -rf /tmp/x";
         type_text(&mut source, typed);
@@ -1860,9 +1501,8 @@ mod tests {
 
     #[test]
     fn the_composing_echo_is_retained_typing_and_is_scrubbed_as_such() {
-        // A composition ALONE, so what is asserted is the echo's own retention
-        // rather than the mirror's: the echo holds the whole platform mirror,
-        // password mid-composition included.
+        // A composition ALONE, so what is asserted is the echo's own retention: it
+        // holds the whole platform mirror, a password mid-composition included.
         let mut source = KeystrokeSource::new();
         source.on_compose("hunter");
         assert!(source.is_composing(), "a positive precondition: it is live");
@@ -1886,9 +1526,8 @@ mod tests {
 
     #[test]
     fn a_composing_snapshot_replaces_the_previous_one_leaving_no_tail() {
-        // The echo's buffer is rewritten in place (zeroize + push) rather than
-        // reallocated per composing keystroke, so a shrinking composition must
-        // not leave the longer one's tail behind.
+        // The echo's buffer is rewritten in place rather than reallocated, so a
+        // shrinking composition must not leave the longer one's tail behind.
         let mut source = KeystrokeSource::new();
         source.on_compose("nih");
         assert_eq!(source.published().text, "nih");
@@ -1987,9 +1626,8 @@ mod tests {
 
     #[test]
     fn a_composing_range_is_validated_before_it_is_echoed_back() {
-        // The one thing this module hands the platform verbatim, so the
-        // indices are checked against the text that arrived with them rather
-        // than taken on trust.
+        // The one thing this module hands the platform verbatim, so the indices are
+        // checked against the text that arrived with them rather than trusted.
         let out_of_range = EditingState {
             text: "ab".to_string(),
             selection_base: 99,
@@ -2005,9 +1643,8 @@ mod tests {
         assert_eq!(published.selection_base, 2, "…and so is the caret");
         assert_eq!(published.selection_extent, 2);
 
-        // An inverted/unusable range is not a composition at all: the snapshot
-        // takes the ordinary diff path instead of being echoed back as one.
-        // Nothing is invented either way — the text is still the platform's.
+        // An inverted/unusable range is not a composition at all: the snapshot takes
+        // the ordinary diff path. Nothing is invented either way.
         let inverted = EditingState {
             text: "ab".to_string(),
             selection_base: -1,
@@ -2031,9 +1668,7 @@ mod tests {
         assert!(emission.is_empty());
     }
 
-    // -----------------------------------------------------------------
-    // The rolling window
-    // -----------------------------------------------------------------
+    // The rolling window.
 
     #[test]
     fn the_published_state_collapses_the_caret_at_the_mirror_end() {
@@ -2100,11 +1735,9 @@ mod tests {
 
     #[test]
     fn an_oversized_snapshot_is_never_stored_whole() {
-        // `set_mirror` is called directly because the re-anchor immediately
-        // after it would otherwise hide exactly what is under test: the
-        // TRANSIENT. A snapshot bigger than the pre-reserved capacity, stored
-        // whole, reallocates — and a reallocation frees the user's plaintext
-        // where no scrub can reach it.
+        // `set_mirror` is called directly because the re-anchor immediately after it
+        // would hide what is under test: a snapshot bigger than the pre-reserved
+        // capacity, stored whole, reallocates — freeing plaintext no scrub reaches.
         let mut source = KeystrokeSource::new();
         type_text(&mut source, "abc");
         assert_eq!(source.mirror(), "abc", "a positive precondition");
@@ -2204,9 +1837,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Desktop paths
-    // -----------------------------------------------------------------
+    // Desktop paths.
 
     #[test]
     fn a_desktop_commit_emits_straight_through() {

@@ -1,67 +1,29 @@
 //! [`GrpcTerminalRepository`] — the real, `muxrd`-backed [`TerminalRepository`],
-//! and `terminal::di::provide`'s production choice (see that module's own docs
-//! for the mock/real split and its headless-test seam).
-//!
-//! # The live client, and the one sanctioned reach into `crate::connection`
+//! and `terminal::di::provide`'s production choice.
 //!
 //! Every call resolves [`ConnectionController::client`] fresh — the sanctioned
-//! path to the live [`MuxrClient`] `crate::connection`'s own module docs name —
-//! rather than dialing a channel of its own; `None` (disconnected) maps to
-//! [`AppFailure::Network`] rather than panicking, since a call outliving its
-//! connection is a reachable state, not a bug. The `Arc<ConnectionController>`
-//! field is this feature's one `data` → `crate::connection` edge, the identical
-//! shape [`GrpcSessionsRepository`](crate::features::sessions::data::repositories::GrpcSessionsRepository)
-//! documents: resolved exactly once, in `di::provide` (composition-root wiring,
-//! where a live reactive context is guaranteed), and held from then on as a
-//! plain handle.
+//! path to the live [`MuxrClient`] — rather than dialing a channel of its own;
+//! `None` (disconnected) maps to [`AppFailure::Network`] rather than panicking.
+//! The `Arc<ConnectionController>` field is this feature's one `data` →
+//! `crate::connection` edge, resolved once in `di::provide`.
 //!
-//! # What it addresses, and how it learns it
+//! **What it addresses, and how it learns it.** The read/detach methods take no
+//! session id, so this repository is [`bind`](TerminalRepository::bind)-ed: the
+//! screen hands it the attached session on mount and the *connection id* the
+//! `AttachTerminal` stream minted as soon as one exists (and again on every
+//! re-attach). Both ride on every request with a field for them, which is what
+//! makes a space/tab switch land on **this** client's view; an unbound session is
+//! not an error, and a bare `/terminal` answers empty. Two calls never reach the
+//! wire: `tab_lines` (on a live session a tab's content is the emulator's) and
+//! `detach_session` (detaching *is* dropping the stream, which
+//! `GrpcTerminalFeed`'s own [`Drop`] does on unmount).
 //!
-//! The four read/detach methods this trait was minted with take no session id
-//! ([`TerminalRepository`]'s own "Which session, and over which connection"),
-//! so this repository is [`bind`](TerminalRepository::bind)-ed instead: the
-//! screen hands it the attached session's id on mount, and the *connection id*
-//! the `AttachTerminal` stream minted as soon as one exists (and again on every
-//! re-attach, which mints a fresh one). Both ride on every request that has a
-//! field for them, which is what makes a space/tab switch land on **this**
-//! client's view rather than on whichever one the relay saw last. An unbound
-//! session is not an error: a bare `/terminal` has nothing to list, so the two
-//! reads answer empty rather than failing a screen the user reached
-//! legitimately.
-//!
-//! # Two calls that never reach the wire
-//!
-//! - **`tab_lines`** — on a live session a tab's content is the emulator's, fed
-//!   by the attached stream; there is no RPC that returns scrollback, and the
-//!   grid owns what is on screen. So it answers **empty**: the card's mock
-//!   transcript is what those lines drive, and a live session renders the grid
-//!   instead (`presentation::pages`' pane-content switch).
-//! - **`detach_session`** — there is no `Detach` RPC, because detaching is
-//!   client-side: it *is* dropping the `AttachTerminal` stream, which
-//!   `GrpcTerminalFeed`'s own [`Drop`] does forcefully when the screen unmounts.
-//!   So this validates its id (the same defence-in-depth the mock keeps) and
-//!   answers `Ok`; the pop that follows is what actually detaches.
-//!
-//! # Tab keys are derived, not carried
-//!
-//! [`TabEntry`] separates three identifiers on purpose (its own docs): the
-//! display `index`, the backend's `tab_id`, and `key` — the screen's own lookup
-//! handle, which the sheet also *prints* (`panes — devbox`). The wire carries
-//! no such handle, so [`map_tabs`] derives one per tab from its name, falling
-//! back to a positional stand-in for an unnamed tab and disambiguating a
-//! repeated name by its position. Uniqueness is the load-bearing half: the
-//! sheet resolves the active tab by `key`, so two tabs sharing one would make
-//! a pill switch to the wrong card.
-//!
-//! # Failure mapping
-//!
-//! Every RPC failure funnels through [`crate::net::error::from_status`]; an
-//! `UNAUTHENTICATED` additionally invokes
-//! [`ConnectionController::on_session_expired`] — its own idempotent contract
-//! absorbs a burst of calls failing at once, so this file does no extra
-//! debouncing of its own. Every `ActionAck`-returning call maps through
-//! [`crate::net::error::ack_result`] instead of trusting the outer `Status`
-//! alone.
+//! **Tab keys are derived, not carried**, and **uniqueness is load-bearing** —
+//! [`map_tabs`]/[`unique_key`] state that contract. Failure mapping funnels
+//! through [`crate::net::error::from_status`], with `UNAUTHENTICATED`
+//! additionally invoking [`ConnectionController::on_session_expired`]; every
+//! `ActionAck`-returning call maps through [`crate::net::error::ack_result`]
+//! rather than trusting the outer `Status`.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -84,8 +46,8 @@ use crate::net::{MuxrClient, error};
 /// connected.
 const NOT_CONNECTED: &str = "not connected to a server";
 
-/// The failure detail for a switch attempted with no session bound — a bug
-/// (the sheet only ever switches on a screen that carries a session), so it is
+/// The failure detail for a switch attempted with no session bound — a bug (the
+/// sheet only switches on a screen that carries a session), so
 /// [`AppFailure::Internal`] rather than a retryable network one.
 const NO_SESSION: &str = "no session is bound to this terminal repository";
 
@@ -101,9 +63,8 @@ const UNNAMED_TAB: &str = "tab";
 /// [module docs](self).
 pub struct GrpcTerminalRepository {
     connection: Arc<ConnectionController>,
-    /// What every request addresses — see the [module docs](self)' "What it
-    /// addresses". A `Mutex` (not a `RefCell`) because this travels behind an
-    /// `Arc<dyn TerminalRepository + Send + Sync>`.
+    /// What every request addresses. A `Mutex` (not a `RefCell`) because this
+    /// travels behind an `Arc<dyn TerminalRepository + Send + Sync>`.
     binding: Mutex<Binding>,
 }
 
@@ -115,15 +76,13 @@ struct Binding {
     /// `/terminal`.
     session: Option<String>,
     /// The `AttachTerminal` stream's minted id, echoed back for per-connection
-    /// routing. Empty is the wire's own "legacy/fallback routing", which is
-    /// exactly the right answer before a stream has minted one.
+    /// routing. Empty is the wire's own "legacy/fallback routing".
     connection_id: String,
 }
 
 impl GrpcTerminalRepository {
-    /// A repository over the app's one [`ConnectionController`] — resolved
-    /// once by the caller (`di::provide`) and held from then on. Unbound until
-    /// the screen calls [`TerminalRepository::bind`].
+    /// A repository over the app's one [`ConnectionController`] — resolved once by
+    /// `di::provide`. Unbound until the screen calls [`TerminalRepository::bind`].
     pub fn new(connection: Arc<ConnectionController>) -> Self {
         Self {
             connection,
@@ -138,16 +97,15 @@ impl GrpcTerminalRepository {
             .ok_or_else(|| AppFailure::Network(NOT_CONNECTED.to_string()))
     }
 
-    /// The current binding. Poisoning is recovered from rather than propagated
-    /// — a panic elsewhere must not make a live terminal permanently
-    /// unaddressable.
+    /// The current binding. Poisoning is recovered from rather than propagated — a
+    /// panic elsewhere must not make a live terminal permanently unaddressable.
     fn binding(&self) -> MutexGuard<'_, Binding> {
         self.binding.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The bound session id and routing token, or [`AppFailure::Internal`]
-    /// when no session is bound — the shape every *switch* needs, as opposed
-    /// to the reads, which answer empty instead.
+    /// The bound session id and routing token, or [`AppFailure::Internal`] when no
+    /// session is bound — the shape every *switch* needs, as opposed to the reads,
+    /// which answer empty instead.
     fn addressed(&self) -> Result<(String, String), AppFailure> {
         let binding = self.binding();
         match &binding.session {
@@ -165,10 +123,9 @@ impl GrpcTerminalRepository {
         })
     }
 
-    /// Map a gRPC status through [`crate::net::error::from_status`], and —
-    /// for `UNAUTHENTICATED` specifically — additionally invoke the shared
-    /// session-expired hook (see the [module docs](self)' failure-mapping
-    /// section).
+    /// Map a gRPC status through [`crate::net::error::from_status`], and — for
+    /// `UNAUTHENTICATED` specifically — additionally invoke the shared
+    /// session-expired hook.
     fn map_status(&self, status: Status) -> AppFailure {
         let failure = error::from_status(&status);
         if matches!(failure, AppFailure::Auth(_)) {
@@ -383,16 +340,12 @@ impl TerminalRepository for GrpcTerminalRepository {
     }
 }
 
-// ---------------------------------------------------------------------------
 // proto → entity mapping (pure; unit-tested against directly constructed
-// messages, no server fixture — see the module docs)
-// ---------------------------------------------------------------------------
+// messages, no server fixture).
 
-/// A `GetSpaces` answer as the sheet's `spaces` pill row.
-///
-/// The wire's `active` is the *per-connection* answer (the relay overrides it
-/// for the connection that last switched), which is why the sheet can show one
-/// selection per client rather than one per session.
+/// A `GetSpaces` answer as the sheet's `spaces` pill row. The wire's `active` is
+/// the *per-connection* answer (the relay overrides it for the connection that
+/// last switched), which is why the sheet shows one selection per client.
 fn map_spaces(list: SpaceList) -> Vec<Space> {
     list.spaces
         .into_iter()
@@ -404,13 +357,11 @@ fn map_spaces(list: SpaceList) -> Vec<Space> {
         .collect()
 }
 
-/// A `GetLayout` answer as the sheet's `tabs` pill row and the card's status
-/// row.
-///
-/// One [`TabEntry`] per tab, in wire order. `position` is 0-indexed on the wire
-/// and 1-based on the pill, and every pane fact comes from the tab's *focused*
-/// pane (falling back to its first), since that is the one the card's status
-/// row is describing and the one the attached stream is carrying.
+/// A `GetLayout` answer as the sheet's `tabs` pill row and the card's status row:
+/// one [`TabEntry`] per tab, in wire order. `position` is 0-indexed on the wire and
+/// 1-based on the pill, and every pane fact comes from the tab's *focused* pane
+/// (falling back to its first) — the one the status row describes and the attached
+/// stream is carrying.
 fn map_tabs(layout: Layout) -> Vec<TabEntry> {
     let mut taken: Vec<String> = Vec::with_capacity(layout.tabs.len());
     layout
@@ -425,9 +376,9 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
                 tab_id: u64::from(tab.tab_id),
                 key,
                 label: display_name(&tab.name, index),
-                // A live pane carries a title and a working directory, and
-                // nothing that corresponds to the mock's separate "name": the
-                // title *is* the name a real session shows.
+                // A live pane carries a title and a working directory, and nothing
+                // that corresponds to the mock's separate "name": the title *is*
+                // the name a real session shows.
                 pane_title: pane.map(|pane| pane.title.clone()).unwrap_or_default(),
                 pane_name: pane.map(|pane| pane.title.clone()).unwrap_or_default(),
                 pane_path: pane.map(|pane| pane.cwd.clone()).unwrap_or_default(),
@@ -438,11 +389,9 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
         .collect()
 }
 
-/// One `PaneMsg` as [`PaneEntry`] — a field-for-field carry, in wire order
-/// (see the [module docs](self)' "Tab keys are derived" for why the tab
-/// around it derives extra identifiers but a pane does not need to: the
-/// wire's own `PaneMsg.id` is already what [`TerminalRepository`]'s
-/// pane-targeted verbs address by).
+/// One `PaneMsg` as [`PaneEntry`] — a field-for-field carry, in wire order. The
+/// tab around it derives extra identifiers but a pane does not need to: the wire's
+/// own `PaneMsg.id` is already what the pane-targeted verbs address by.
 fn map_pane(pane: &PaneMsg) -> PaneEntry {
     PaneEntry {
         id: pane.id,
@@ -460,9 +409,9 @@ fn map_pane(pane: &PaneMsg) -> PaneEntry {
     }
 }
 
-/// [`ScrollStep`] onto the wire's `ScrollDirection` — only the two notch
-/// values this round sends; see `domain::entities::ScrollStep`'s own docs for
-/// why the wire's other five directions are not reachable from here yet.
+/// [`ScrollStep`] onto the wire's `ScrollDirection` — only the two notch values
+/// this screen sends; `domain::entities::ScrollStep` records why the wire's other
+/// five directions are not reachable yet.
 fn map_scroll_step(step: ScrollStep) -> ScrollDirection {
     match step {
         ScrollStep::Up => ScrollDirection::Up,
@@ -470,11 +419,8 @@ fn map_scroll_step(step: ScrollStep) -> ScrollDirection {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Workspace-verb request construction (pure; unit-tested directly against the
-// values they carry — the same "no server fixture needed" shape the mapping
-// functions above take)
-// ---------------------------------------------------------------------------
+// values they carry).
 
 /// A [`PaneTarget`] addressing `pane_id` over `session`/`connection_id`.
 fn pane_target(
@@ -530,9 +476,8 @@ fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabRe
     }
 }
 
-/// `NewPane`'s request — always unnamed (the sheet's new-pane row has no
-/// naming dialog in front of it, unlike [`new_tab_request`]'s own);
-/// `NewPaneReq` carries no `connection_id`.
+/// `NewPane`'s request — always unnamed (the sheet's new-pane row has no naming
+/// dialog, unlike [`new_tab_request`]'s); `NewPaneReq` carries no `connection_id`.
 fn new_pane_request(session: String, floating: bool) -> NewPaneReq {
     NewPaneReq {
         session,
@@ -590,13 +535,10 @@ fn display_name(name: &str, index: u32) -> String {
 }
 
 /// A [`TabEntry::key`] that no earlier tab in the same layout already took,
-/// recording it in `taken` — see the [module docs](self)' "Tab keys are
-/// derived".
-///
-/// A repeated name is completed with its own 1-based position rather than
-/// renumbered from scratch, so the *first* `zsh` keeps the plain key and the
-/// second reads `zsh 4` — which is also what the sheet's `panes — <key>`
-/// section label then prints.
+/// recording it in `taken`. A repeated name is completed with its own 1-based
+/// position rather than renumbered from scratch, so the *first* `zsh` keeps the
+/// plain key and the second reads `zsh 4` — which is also what the sheet's
+/// `panes — <key>` section label then prints.
 fn unique_key(name: &str, index: u32, taken: &mut Vec<String>) -> String {
     let base = display_name(name, index);
     let key = if taken.contains(&base) {

@@ -41,36 +41,26 @@ pub(crate) const NEW_PANE_PAD: f64 = 11.0;
 /// two runs, it needs a real one.
 const NEW_PANE_GAP: f64 = spacing::XS;
 
-/// The pane row's own edit tap box — a comfortable 44px thumb target outright:
-/// a pane row's own height (53px, same measurement basis as
-/// `pills`' own `PILL_EDIT_TAP_BOX` doc — `PANE_PAD_Y * 2` plus the taller of
-/// the mark box and the title/cwd column) leaves headroom under it, and every
-/// pane row carries an edit icon (there is no "add pane row" counterpart the
-/// way a pill section has an add pill), so there is no second height class
-/// this could split.
+/// The pane row's own edit tap box — a comfortable 44px thumb target outright: a
+/// pane row is 53px tall (`PANE_PAD_Y * 2` plus the taller of the mark box and the
+/// title/cwd column), and every pane row carries an edit icon, so there is no second
+/// height class this could split.
 pub(crate) const PANE_EDIT_TAP_BOX: f64 = 44.0;
 
-/// `.pane-item` — one pane's mark box, its title/cwd pair, and the `focused`
-/// chip when it is the one the session is on.
+/// `.pane-item` — one pane's mark box, its title/cwd pair, and the `focused` chip
+/// when it is the one the session is on. The mark is [`PANE_MARK`], an app-supplied
+/// vector: the mock sets `▤` as text, which is not in the bundled Glyph faces.
 ///
-/// The mark is [`PANE_MARK`], an app-supplied vector: the mock sets `▤` as
-/// text, which is not in the bundled Glyph faces (see
-/// `super::super::chrome::PANE_MARK`).
+/// **`focused` is the caller's answer, not the pane's own flag.** A pane in a tab
+/// the sheet is merely *browsing* carries whatever the last load recorded, which is
+/// not where the session is now — so the sheet only passes `true` for the tab it is
+/// actually on, and a browsed tab's rows all read unfocused rather than claiming a
+/// stale badge. An **exited** pane's title takes the dim ink.
 ///
-/// **`focused` is the caller's answer, not the pane's own flag.** A pane in a
-/// tab the sheet is merely *browsing* carries whatever the last load recorded,
-/// which is not where the session is now — so the sheet only passes `true` for
-/// the tab it is actually on ([`super::panes_sheet::sheet_body`]), and a
-/// browsed tab's rows all read unfocused rather than claiming a stale badge.
-///
-/// An **exited** pane's title takes the dim ink instead of the bright one — the
-/// same muted tier every other "this is no longer live" run in the app uses.
-///
-/// `on_edit`, when `Some`, adds a trailing edit vector as its own independent
-/// tap region — never wired for a read-only credential (the caller's job). See
-/// [`super::pills::pill`]'s own doc for why this is a row *sibling* rather than
-/// a detector nested inside the row's main-tap one: the same "transparent
-/// wrapper still fires its own callback" hazard applies here.
+/// `on_edit`, when `Some`, adds a trailing edit vector as its own independent tap
+/// region — never wired for a read-only credential (the caller's job). See
+/// [`super::pills::pill`] for why this is a row *sibling* rather than a detector
+/// nested inside the row's main-tap one.
 pub(crate) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
     pane: &PaneEntry,
     focused: bool,
@@ -171,13 +161,10 @@ pub(crate) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
     any(term_box(tile, colors.base, theme.shape.small).border(border))
 }
 
-/// `.new-pane-btn` — the dashed, centred row that closes the sheet's pane
-/// section. The `+` is amber because it is the call to action.
-///
-/// Two gestures, both wired straight through: a tap fires `on_tap` (a tiled
-/// pane), a long-press fires `on_long_press` (a floating one) — the row's own
-/// label already says which is which (`new pane · long-press for floating`).
-/// [`GestureDetector`] fires exactly one of the two per press, never both.
+/// `.new-pane-btn` — the dashed, centred row that closes the sheet's pane section.
+/// The `+` is amber because it is the call to action. Two gestures, both wired
+/// straight through: a tap fires `on_tap` (a tiled pane), a long-press fires
+/// `on_long_press` (a floating one). [`GestureDetector`] fires exactly one per press.
 pub(crate) fn new_pane_row<
     State: 'static,
     T: Fn(&mut State) + 'static,

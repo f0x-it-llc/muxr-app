@@ -1,19 +1,16 @@
 //! The one-shot Ctrl/Alt/Shift latch, and the transform every outgoing emission
-//! passes through.
-//!
-//! The latch transforms **soft-keyboard characters too** — the incumbent's
-//! semantic, and the reason it is applied at the emission choke point
-//! (`KeystrokeSource::emit`) rather than in the key bar: arming `Ctrl` on the
-//! bar and then typing `c` on the OS keyboard must send `0x03`.
+//! passes through. The latch transforms **soft-keyboard characters too** — the
+//! incumbent's semantic, and the reason it is applied at the emission choke point
+//! (`KeystrokeSource::emit`) rather than in the key bar: arming `Ctrl` on the bar
+//! and then typing `c` on the OS keyboard must send `0x03`.
 
 use frust::authoring::Modifiers;
 
 use super::bytes::ESC;
 
-/// The armed one-shot modifiers, as toggled from the key bar (and as carried by
-/// a desktop hardware key event).
-///
-/// # The three flags are not symmetric, and the asymmetry is the design
+/// The armed one-shot modifiers, as toggled from the key bar (and as carried by a
+/// desktop hardware key event). **The three flags are not symmetric, and the
+/// asymmetry is the design**:
 ///
 /// | Flag | On a **character** | On a **sequence key** (arrow, `PgUp`, `Tab`, …) |
 /// |---|---|---|
@@ -21,17 +18,15 @@ use super::bytes::ESC;
 /// | `shift` | never touches it, but is consumed | selects the shifted sequence ([`shifted_sequence`](super::bytes::shifted_sequence)) and is consumed by that |
 ///
 /// `shift` leaves characters alone because the IME's own Shift has **already**
-/// delivered the case: the app is handed `"A"`, and rewriting a byte it was
-/// handed is precisely what this module does not do (the [module docs](super)).
-/// What a terminal is missing without it is the *sequences* — back-tab, a
-/// shifted arrow — so that is the whole of what it selects.
+/// delivered the case: the app is handed `"A"`, and rewriting a byte it was handed
+/// is precisely what this module does not do. What a terminal is missing without it
+/// is the *sequences* — back-tab, a shifted arrow.
 ///
 /// `ctrl`/`alt` staying armed across a sequence key is the incumbent's pinned
-/// behaviour (`Ctrl` then `↑` then `c` still sends `0x03`), kept verbatim. The
-/// consequence, recorded rather than papered over: **there is no combination
-/// arithmetic**. xterm encodes a chord as one parameter (`1` + Shift `1` + Alt
-/// `2` + Ctrl `4`), so a real Ctrl+Shift+`↑` is `\x1b[1;6A` — this module sends
-/// `\x1b[1;2A` and leaves the `Ctrl` armed for the next character instead.
+/// behaviour (`Ctrl` then `↑` then `c` still sends `0x03`). The consequence,
+/// recorded rather than papered over: **there is no combination arithmetic**. xterm
+/// encodes a chord as one parameter, so a real Ctrl+Shift+`↑` is `\x1b[1;6A` — this
+/// module sends `\x1b[1;2A` and leaves the `Ctrl` armed for the next character.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModifierLatch {
     /// `Ctrl` is armed for the next single-code-unit emission.
@@ -77,11 +72,9 @@ impl ModifierLatch {
     }
 }
 
-/// Whether `data` is exactly **one UTF-16 code unit**, and if so its value.
-///
-/// The latch's eligibility test: `'a'` (1 byte) and `'é'` (2 bytes) are both one
-/// unit and both transformable; an emoji (2 units) and `\x1b[A` (3 units) are
-/// not. Invalid UTF-8 is never eligible.
+/// Whether `data` is exactly **one UTF-16 code unit**, and if so its value — the
+/// latch's eligibility test: `'a'` and `'é'` are both one unit and transformable; an
+/// emoji (2 units) and `\x1b[A` (3 units) are not. Invalid UTF-8 is never eligible.
 pub fn single_unit(data: &[u8]) -> Option<u32> {
     let text = std::str::from_utf8(data).ok()?;
     let mut chars = text.chars();
@@ -92,22 +85,17 @@ pub fn single_unit(data: &[u8]) -> Option<u32> {
     Some(ch as u32)
 }
 
-/// Apply `latch` to one outgoing emission.
+/// Apply `latch` to one outgoing emission. The rules, verbatim from the incumbent:
 ///
-/// The rules, verbatim from the incumbent:
-///
-/// 1. **Only a single-code-unit emission is transformed.** Anything longer (an
-///    arrow sequence, a swipe-typed word, a backspace run) passes through
-///    **unmodified** — and, at the call site, leaves the latch armed.
-/// 2. **Ctrl** uppercases a lowercase ASCII letter (`0x61..=0x7a` → `−0x20`)
-///    and then masks `& 0x1f` **only if** the (uppercased) code lands in
-///    `0x40..=0x5f`. Outside that window there is no Ctrl transform at all —
-///    `Ctrl+2` sends `'2'` — though Alt may still apply.
-/// 3. **Alt** prefixes [`ESC`], the `ESC`-prefix convention every mainstream
-///    terminal uses for Meta.
-/// 4. **Shift is not in this transform at all** — see [`ModifierLatch`]. It
-///    selects a different *sequence* upstream, so an emission with only `shift`
-///    armed passes through byte for byte, exactly as an unarmed one does.
+/// 1. **Only a single-code-unit emission is transformed.** Anything longer (an arrow
+///    sequence, a swipe-typed word, a backspace run) passes through **unmodified** —
+///    and, at the call site, leaves the latch armed.
+/// 2. **Ctrl** uppercases a lowercase ASCII letter and then masks `& 0x1f` **only
+///    if** the uppercased code lands in `0x40..=0x5f`. Outside that window there is
+///    no Ctrl transform at all — `Ctrl+2` sends `'2'` — though Alt may still apply.
+/// 3. **Alt** prefixes [`ESC`], the convention every mainstream terminal uses.
+/// 4. **Shift is not in this transform at all** — see [`ModifierLatch`]. It selects
+///    a different *sequence* upstream.
 pub fn apply_latch(latch: ModifierLatch, data: &[u8]) -> Vec<u8> {
     let Some(unit) = single_unit(data) else {
         return data.to_vec();

@@ -34,31 +34,24 @@ const SECTION_SPACES: &str = "spaces";
 const SECTION_TABS: &str = "tabs";
 const SECTION_PANES: &str = "panes \u{2014} ";
 
-/// The space/tab sections' own create rows: full-size, dashed rows
-/// dimensionally consistent with [`new_pane_row`], not the small `.pill.add`
-/// they replaced — see [`add_row`]. Content text, not chrome (the "+" is
-/// content the way `new_pane_row`'s own is), so these stay runs rather than
-/// becoming vectors.
+/// The space/tab sections' own create rows: full-size, dashed rows dimensionally
+/// consistent with [`new_pane_row`], not the small `.pill.add` they replaced.
+/// Content text, not chrome, so these stay runs rather than becoming vectors.
 const ADD_ROW_PLUS: &str = "+";
 const ADD_SPACE_LABEL: &str = "new space";
 const ADD_TAB_LABEL: &str = "new tab";
-/// [`new_pane_row`]'s own padding and text size, taken from that row's own
-/// constants rather than re-spelled, so [`add_row`] cannot drift out of
-/// dimensional step with it; the gap between the two runs is the shared
-/// scale's own tier, the same value that row uses.
+/// [`new_pane_row`]'s own padding and text size, taken from that row's constants
+/// rather than re-spelled, so [`add_row`] cannot drift out of dimensional step.
 const ADD_ROW_PAD: f64 = super::panes::NEW_PANE_PAD;
 const ADD_ROW_GAP: f64 = spacing::XS;
 const ADD_ROW_TEXT_SIZE: f32 = super::pills::PILL_SIZE;
 
-/// [`sheet_scroll_body`]'s height cap: the window's own height minus this
-/// estimate of everything that sits *outside* the scrollable region —
-/// `ui/sheet.rs`'s own handle zone, panel padding and safe-area inset on one
-/// side, this sheet's fixed top row and the gap under it on the other. A
-/// generous, community-approximate constant rather than an exact figure
-/// imported from `ui/sheet.rs`'s own private geometry: keeping this in the
-/// screen's own body beats widening the shared substrate's surface, and the
-/// cost of a generous estimate is a slightly shorter scroll band than the
-/// sheet could technically spare, not a broken one.
+/// [`sheet_scroll_body`]'s height cap: the window's own height minus this estimate
+/// of everything outside the scrollable region — `ui/sheet.rs`'s handle zone, panel
+/// padding and safe-area inset on one side, this sheet's fixed top row and the gap
+/// under it on the other. A generous approximation rather than an exact figure
+/// imported from `ui/sheet.rs`'s private geometry: the cost of over-estimating is a
+/// slightly shorter scroll band, not a broken one.
 const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
 /// The scrollable region's floor, so a short window still leaves a usable,
 /// clearly-scrollable band rather than the reserve above collapsing it
@@ -68,27 +61,20 @@ const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
 /// The "panes & tabs" sheet's body.
 ///
 /// **Browse, then commit.** A tab pill points the sheet at another tab and
-/// re-slices the pane list below it (no RPC, no dismissal); a space pill
-/// switches this connection's view and reloads behind it (still no
-/// dismissal); only a pane row moves the session and closes the sheet. See
-/// [`Actions::browse_tab`]/[`Actions::select_space`]/[`Actions::commit_pane`].
+/// re-slices the pane list below it (no RPC, no dismissal); a space pill switches
+/// this connection's view and reloads behind it (still no dismissal); only a pane
+/// row moves the session and closes the sheet.
 ///
-/// **The spaces section is herdr's alone** — zellij has no spaces at all
-/// (see `TerminalController::has_spaces`), so the section is *absent*
-/// rather than empty: no label, and no gap where one would have been.
+/// **The spaces section is herdr's alone** — zellij has no spaces at all, so the
+/// section is *absent* rather than empty: no label, and no gap where one would be.
 ///
-/// **The top row stays fixed; everything under it scrolls.** Split into two
-/// pieces of the outer column this fn returns: [`top_row`] (the `panes & tabs`
-/// label and the close button) painted once, outside the scroll region, and
-/// every section below it handed to [`sheet_scroll_body`] — so a session with
-/// many tabs/panes stays fully reachable instead of the lower rows running off
-/// the sheet's own bottom edge. See that fn's own doc for why the region's
-/// height cap only ever engages on a real device.
+/// **The top row stays fixed; everything under it scrolls**: [`top_row`] is painted
+/// outside the scroll region and every section below it handed to
+/// [`sheet_scroll_body`], so a session with many tabs/panes stays fully reachable.
 ///
-/// The builder is re-invoked on every rebuild while the sheet is up (the
-/// navigator's page-builder contract), so its reads are tracked and a browse is
-/// reflected in the pills, in the section label *and* in the pane list without
-/// the sheet being rebuilt by hand.
+/// The builder is re-invoked on every rebuild while the sheet is up, so its reads
+/// are tracked and a browse is reflected in the pills, the section label *and* the
+/// pane list without the sheet being rebuilt by hand.
 pub(crate) fn sheet_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
@@ -232,11 +218,9 @@ pub(crate) fn sheet_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppS
         ));
     }
 
-    // The window's own height, read once per build like every other
-    // responsive value this app reads (`crate::responsive`) — `None` in
-    // every headless suite (no shell has published metrics), which is
-    // exactly what keeps the scroll cap from touching any existing test's
-    // own geometry (see `sheet_scroll_body`'s own doc).
+    // The window's own height, read once per build like every other responsive
+    // value (`crate::responsive`) — `None` in every headless suite, which is what
+    // keeps the scroll cap from touching any existing test's geometry.
     let scroll_max_h = use_context::<WindowMetrics>()
         .map(|metrics| (metrics.size.height - SHEET_SCROLL_RESERVE_PX).max(SHEET_SCROLL_FLOOR_PX));
     let scroll_body = sheet_scroll_body(children, scroll_max_h);
@@ -254,18 +238,12 @@ fn top_row(sheet: &SheetHandle, colors: &Palette) -> AnyView<AppState> {
     })
 }
 
-/// The spaces/tabs sections' own create row: full-size and dashed,
-/// dimensionally consistent with [`new_pane_row`] — the small `.pill.add` it
-/// replaced (wrapped in among the section's other pills) read as an
-/// afterthought beside the pane section's own full-width row right below it.
-/// `label` is the dim run following the amber "+" (mirroring `new_pane_row`'s
-/// own two-tone treatment); it never carries an edit icon, the same "creates
-/// something, does not name it yet" reasoning the pill it replaces already
-/// documented — naming happens in the dialog the add-tab row opens, not on
-/// this row itself.
-///
-/// Declared here rather than beside `new_pane_row`, since only this sheet
-/// calls it.
+/// The spaces/tabs sections' own create row: full-size and dashed, dimensionally
+/// consistent with [`new_pane_row`] — the small `.pill.add` it replaced read as an
+/// afterthought beside the pane section's full-width row below it. `label` is the
+/// dim run following the amber "+"; it never carries an edit icon, since naming
+/// happens in the dialog the add-tab row opens. Declared here rather than beside
+/// `new_pane_row`, since only this sheet calls it.
 fn add_row<F: Fn(&mut AppState) + 'static>(
     label: &'static str,
     colors: &Palette,

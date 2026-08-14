@@ -11,15 +11,11 @@
 //! | [`keybar`] | the IME-active-only key bar (`Esc`/`Tab`/arrows/`PgUp`/`PgDn`/`Del` + the one-shot `Ctrl`/`Alt`/`Shift` latch) — mounted the same way, live-mode only |
 //!
 //! [`pages::open_terminal_menu`] is the one item outside this feature's own
-//! call graph: `crate::shell` forwards the app bar's `⋮` press to it (the bar
-//! is app chrome, the menu on it is this feature's).
+//! call graph: `crate::shell` forwards the app bar's `⋮` press to it.
 //!
-//! [`widgets`] and [`term`] are the two halves of the screen's card body: the
-//! mock transcript renders by default (every existing route/navigation), and
-//! [`pages::TerminalScreen::build`] switches to [`term::terminal_surface`]
-//! once the live pane has been entered for that mount — see `pages`' own
-//! docs on the pane-content switch for the full wiring and why the mock stays
-//! the untouched default.
+//! [`widgets`] and [`term`] are the two halves of the card body — the mock
+//! transcript by default, [`term::terminal_surface`] once the live pane has
+//! been entered (`pages`' pane-content switch).
 
 pub mod chrome;
 pub mod controller;

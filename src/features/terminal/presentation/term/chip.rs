@@ -7,39 +7,26 @@
 //! └───────────────────────────────┘
 //! ```
 //!
-//! # Why this is a full-bleed overlay and not a child of the grid
-//!
-//! The chip is a **sibling above** the gesture-wrapped grid (see
+//! **A full-bleed overlay, not a child of the grid.** The chip is a **sibling
+//! above** the gesture-wrapped grid (see
 //! [`terminal_surface`](super::terminal_surface)), laid out over the whole
-//! terminal rect and painting one pill inside it. Two things fall out of that,
-//! both wanted:
+//! terminal rect and painting one pill inside it. Two things fall out, both
+//! wanted: a press on the chip never reaches the grid or the gesture detector, so
+//! tapping `Copy` cannot clear the selection it is about to copy; and the pill's
+//! clamp box is the *terminal rect* the spec names, not the grid's own
+//! sub-cell-rounded box. It reads its state straight off the shared
+//! [`SelectionSeam`] on every pass — no signal, no rebuild: a paint pass walks the
+//! whole tree, so the `request_redraw` the grid already issues is the mechanism.
 //!
-//! - a press on the chip **never reaches the grid or the gesture detector**, so
-//!   tapping `Copy` cannot also clear the selection it is about to copy, and
-//!   cannot start a fresh long-press;
-//! - the pill's clamp box is the *terminal rect* the spec names, not the grid's
-//!   own sub-cell-rounded box.
+//! Both marks are filled vector paths (the "chrome icons are vectors" rule):
+//! [`CLOSE`](frust::icons::CLOSE) from the vendored set, and [`COPY_MARK`]
+//! authored here because the set carries no copy glyph.
 //!
-//! It reads its state straight off the shared [`SelectionSeam`] on every pass —
-//! there is no signal and no rebuild involved in the chip appearing. A frust
-//! paint pass walks the whole tree, so the `request_redraw` the grid already
-//! issues when a drag releases is the entire mechanism.
-//!
-//! # Chrome is vectors
-//!
-//! Both marks are filled vector paths (`docs/ARCHITECTURE.md`'s "chrome icons
-//! are vectors" rule): [`CLOSE`](frust::icons::CLOSE) from the vendored set, and
-//! [`COPY_MARK`] authored here because the set carries no copy glyph — the same
-//! seam [`chrome::PANE_MARK`](super::super::chrome::PANE_MARK) and the key bar's
-//! arrows use.
-//!
-//! # The clipboard write is injected
-//!
-//! [`CopySink`] is the seam a test substitutes: the default
-//! ([`system_clipboard_sink`]) is `frust_clipboard::Clipboard::set_text_sensitive`
-//! — **never** plain `set_text`, because terminal output is token-bearing (see
-//! that plugin's own security notes) — and a headless test injects a recorder
-//! instead, since the desktop backend would otherwise clobber the developer's
+//! **The clipboard write is injected.** [`CopySink`] is the seam a test
+//! substitutes: the default ([`system_clipboard_sink`]) is
+//! `frust_clipboard::Clipboard::set_text_sensitive` — **never** plain `set_text`,
+//! because terminal output is token-bearing — and a headless test injects a
+//! recorder, since the desktop backend would otherwise clobber the developer's
 //! real clipboard on every `cargo test`.
 
 use std::rc::Rc;
@@ -56,15 +43,12 @@ use super::SelectionSeam;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::toasts::app_toasts;
 
-// ---------------------------------------------------------------------------
-// Geometry — transcribed from the incumbent, exactly
-// ---------------------------------------------------------------------------
+// Geometry — transcribed from the incumbent, exactly.
 
-/// The pill's width, in logical px.
-///
-/// Derived from the clamp the incumbent applies rather than guessed: the chip's
-/// x is clamped to `width - 140` and its y to `height - 48`, which is exactly
-/// "keep a [`CHIP_MARGIN`] gutter past a [`CHIP_W`] x [`CHIP_H`] pill".
+/// The pill's width, in logical px. Derived from the clamp the incumbent applies
+/// rather than guessed: its x is clamped to `width - 140` and its y to
+/// `height - 48`, i.e. "keep a [`CHIP_MARGIN`] gutter past a [`CHIP_W`] x
+/// [`CHIP_H`] pill".
 pub const CHIP_W: f64 = 132.0;
 /// The pill's height — see [`CHIP_W`].
 pub const CHIP_H: f64 = 40.0;
@@ -107,11 +91,9 @@ const SHADOW_ALPHA: f32 = 0.45;
 const ICON_DESIGN_BOX: f64 = 24.0;
 
 /// The copy mark: a filled sheet with a second sheet's L-shaped edge behind it.
-///
-/// Authored here — the vendored `frust::icons` set carries no copy glyph. The
-/// two subpaths are **disjoint** (the back sheet's arms clear the front sheet's
-/// box entirely), so the mark reads as two sheets in a single ink rather than
-/// merging into one blob, without needing a second fill colour.
+/// Authored here — the vendored `frust::icons` set carries no copy glyph. The two
+/// subpaths are **disjoint**, so the mark reads as two sheets in a single ink
+/// rather than merging into one blob.
 pub const COPY_MARK: IconSource = IconSource {
     d: "M 3 7 h 3 v 11 h 11 v 3 H 3 Z M 9 3 h 12 v 13 H 9 Z",
     design: ICON_DESIGN_BOX,
@@ -119,28 +101,22 @@ pub const COPY_MARK: IconSource = IconSource {
 
 /// What a successful copy says.
 pub const COPIED_TOAST: &str = "Copied to clipboard";
-/// …and what a refused one says. A clipboard write can fail (an Android host
-/// that never initialized its platform handles, a Wayland session with no
-/// data-control protocol), and claiming a copy that did not happen is worse
-/// than saying so.
+/// …and what a refused one says. A clipboard write can fail (an Android host that
+/// never initialized its platform handles, a Wayland session with no data-control
+/// protocol), and claiming a copy that did not happen is worse than saying so.
 pub const COPY_FAILED_TOAST: &str = "Couldn't copy to clipboard";
 
-// ---------------------------------------------------------------------------
-// The copy sink
-// ---------------------------------------------------------------------------
+// The copy sink.
 
-/// Where `Copy` hands the selected text. Returns whether the write landed.
-///
-/// **The injection point** — see the [module docs](self).
+/// Where `Copy` hands the selected text; answers whether the write landed. **The
+/// injection point** — see the [module docs](self).
 pub type CopySink = Rc<dyn Fn(&str) -> bool>;
 
 /// The production sink: the system clipboard's **sensitive** write.
-///
 /// `set_text_sensitive`, never `set_text`: a terminal selection is exactly the
-/// token-bearing content that plugin's security section names, and the
-/// sensitive variant is what suppresses Android 13+'s copied-text preview and
-/// blocks iOS Universal Clipboard from replicating it to the user's other
-/// devices.
+/// token-bearing content that plugin's security section names, and the sensitive
+/// variant suppresses Android 13+'s copied-text preview and blocks iOS Universal
+/// Clipboard from replicating it to the user's other devices.
 pub fn system_clipboard_sink() -> CopySink {
     Rc::new(
         |text: &str| match frust_clipboard::Clipboard::set_text_sensitive(text) {
@@ -162,13 +138,11 @@ enum ChipTarget {
     Dismiss,
 }
 
-/// The pill's rect inside a `bounds`-sized terminal rect, for a drag that
-/// released at `anchor` (widget-local px).
-///
-/// Offset up and to the left of the finger, then clamped to keep a
-/// [`CHIP_MARGIN`] gutter on every side. The clamp is written low-bound-last
-/// (`max` after `min`) so a terminal rect too small to hold the pill pins it to
-/// the top-left corner instead of panicking on an inverted range.
+/// The pill's rect inside a `bounds`-sized terminal rect, for a drag that released
+/// at `anchor` (widget-local px): offset up and to the left of the finger, then
+/// clamped to keep a [`CHIP_MARGIN`] gutter on every side. Written low-bound-last
+/// (`max` after `min`) so a rect too small to hold the pill pins it to the
+/// top-left corner instead of panicking on an inverted range.
 pub fn chip_rect(anchor: Point, bounds: Size) -> Rect {
     let x = (anchor.x - CHIP_OFFSET_X)
         .min(bounds.width - CHIP_MARGIN - CHIP_W)
@@ -179,9 +153,7 @@ pub fn chip_rect(anchor: Point, bounds: Size) -> Rect {
     Rect::new(x, y, x + CHIP_W, y + CHIP_H)
 }
 
-// ---------------------------------------------------------------------------
-// The view
-// ---------------------------------------------------------------------------
+// The view.
 
 /// The declarative chip overlay — see [`copy_chip`].
 pub struct CopyChipView {
@@ -195,11 +167,9 @@ pub struct CopyChipView {
 }
 
 /// The Copy chip over `seam`'s selection, inked from this screen's own token
-/// palette and writing to the system clipboard.
-///
-/// Mount it as the **top** child of [`terminal_surface`](super::terminal_surface)
-/// — it is inert (paints nothing, consumes nothing) until a selection drag
-/// releases.
+/// palette and writing to the system clipboard. Mount it as the **top** child of
+/// [`terminal_surface`](super::terminal_surface) — it is inert until a selection
+/// drag releases.
 pub fn copy_chip(seam: SelectionSeam) -> CopyChipView {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
@@ -247,11 +217,9 @@ pub struct CopyChipWidget {
     copies: u32,
 }
 
-/// Parse `source`'s SVG data and scale it out of its design box to `size`.
-///
-/// A parse failure is a wiring bug in a constant in this file, not a runtime
-/// condition — the same call and the same reasoning as `frust_widgets::icon`'s
-/// own parse (`docs/CODE_STANDARDS.md`).
+/// Parse `source`'s SVG data and scale it out of its design box to `size`. A parse
+/// failure is a wiring bug in a constant in this file, not a runtime condition —
+/// the same call and reasoning as `frust_widgets::icon`'s own parse.
 fn mark(source: IconSource, size: f64) -> BezPath {
     let path = BezPath::from_svg(source.d)
         .unwrap_or_else(|e| panic!("chip icon path failed to parse (wiring bug): {e}"));
@@ -285,8 +253,7 @@ impl<State: 'static> View<State> for CopyChipView {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // The seam is `Rc`-backed and the sink is a closure: neither is usefully
-        // comparable, so both are reinstalled every rebuild (the rule the key
-        // bar's own caps apply to their seam).
+        // comparable, so both are reinstalled every rebuild.
         element.seam = self.seam.clone();
         element.sink = Rc::clone(&self.sink);
         let mut flags = ChangeFlags::NONE;
@@ -314,10 +281,8 @@ impl<State: 'static> View<State> for CopyChipView {
 
 impl Widget for CopyChipWidget {
     /// Take the whole offered box: this is the terminal rect the pill clamps
-    /// inside, not a box around the pill (see the [module docs](self)).
-    ///
-    /// An unbounded axis collapses to zero — there is no terminal rect to clamp
-    /// into, so there is nothing honest to place.
+    /// inside, not a box around the pill. An unbounded axis collapses to zero —
+    /// there is no rect to clamp into, so nothing honest to place.
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         if self.label.is_none() {
             let text_ctx = ctx.text_context::<TextContext>();
@@ -455,8 +420,7 @@ impl Widget for CopyChipWidget {
                 }
                 EventResult::Handled
             }
-            // Flags only — a `Cancel` arm never touches app state
-            // (`docs/CODE_STANDARDS.md`'s Interaction Semantics), so the
+            // Flags only — a `Cancel` arm never touches app state, so the
             // selection survives a stolen gesture and the chip stays up.
             PointerPhase::Cancel => {
                 if self.pressed.take().is_some() {
@@ -472,8 +436,8 @@ impl Widget for CopyChipWidget {
             return;
         };
         // Bounds are overridden per node: this widget is full-bleed, but its two
-        // press targets are the pill's halves, and a screen reader that was told
-        // "Copy" covers the whole terminal would be told a lie.
+        // press targets are the pill's halves, and a screen reader told "Copy"
+        // covers the whole terminal would be told a lie.
         let origin = ctx.origin();
         let pill = chip_rect(anchor, ctx.size()) + Vec2::new(origin.x, origin.y);
         for (role, label, rect) in [
@@ -503,10 +467,9 @@ impl Widget for CopyChipWidget {
 }
 
 impl CopyChipWidget {
-    /// Copy the live selection, dismiss the chip, and say so.
-    ///
-    /// The clear happens **whether or not** the write landed: the chip is gone
-    /// either way, and a toast is what tells the two apart.
+    /// Copy the live selection, dismiss the chip, and say so. The clear happens
+    /// **whether or not** the write landed: the chip is gone either way, and a
+    /// toast is what tells the two apart.
     fn copy(&mut self) {
         let text = self.seam.text();
         let copied = (self.sink)(&text);
@@ -564,9 +527,8 @@ mod tests {
         let top_left = chip_rect(Point::new(4.0, 4.0), BOX);
         assert_eq!((top_left.x0, top_left.y0), (CHIP_MARGIN, CHIP_MARGIN));
         // Bottom-right: the incumbent's `[8, width-140] x [8, height-48]`. The
-        // release is *past* the rect's own corner (a drag that ran off the
-        // edge), so both axes really do hit the clamp rather than the offset
-        // happening to land inside it.
+        // release is *past* the rect's own corner, so both axes really do hit
+        // the clamp rather than the offset happening to land inside it.
         let bottom_right = chip_rect(Point::new(BOX.width + 40.0, BOX.height + 40.0), BOX);
         assert_eq!(bottom_right.x0, BOX.width - 140.0);
         assert_eq!(bottom_right.y0, BOX.height - 48.0);
@@ -619,10 +581,9 @@ mod tests {
 
     #[test]
     fn the_copy_marks_two_sheets_do_not_merge_into_one_blob() {
-        // The back sheet's L-shaped arms must clear the front sheet's box, or
-        // the mark reads as a single filled rectangle at 16px. Sampled by
-        // winding rather than by bounding box — the two boxes *do* overlap; the
-        // filled regions must not.
+        // The back sheet's L-shaped arms must clear the front sheet's box, or the
+        // mark reads as a single filled rectangle at 16px. Sampled by winding
+        // rather than by bounding box — the boxes overlap; the fills must not.
         let path = BezPath::from_svg(COPY_MARK.d).expect("parses");
         let filled = |x: f64, y: f64| path.winding(Point::new(x, y)) != 0;
         assert!(filled(4.5, 12.0), "the back sheet's vertical arm is inked");

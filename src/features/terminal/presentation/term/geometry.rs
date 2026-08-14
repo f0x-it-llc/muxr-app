@@ -1,93 +1,73 @@
-//! Width-derived cell geometry: how many cells fit the box the grid was given,
-//! and how big each one is.
+//! Width-derived cell geometry: how many cells fit the box the grid was given, and
+//! how big each one is.
 //!
-//! # The inversion against S9
+//! **The inversion against S9.** The benchmark this renderer was measured in
+//! (`benchmarks/frust_bench`'s `s9_terminal`) fixed the grid at 80x45 and *solved
+//! for the font size*, because the point there was that frust and the Flutter
+//! incumbent rasterize the same cell count over the same pixels. An app is the
+//! other way round: the user picks a font size (Settings owns it) and the **grid**
+//! resizes, so [`solve_cell_geometry`] measures the face's real cell box at that
+//! size and divides the available content box by it.
 //!
-//! The benchmark this renderer was measured in
-//! (`benchmarks/frust_bench`'s `s9_terminal`) fixed the grid at 80x45 — the
-//! fixture's own shape — and *solved for the font size* that made 80 columns
-//! fit the screen, because the whole point there was that frust and the Flutter
-//! incumbent rasterize the same cell count over the same pixels.
-//!
-//! An app is the other way round. The user picks a font size (Settings' own
-//! terminal-appearance group owns it); the **grid** is what resizes. So
-//! [`solve_cell_geometry`] takes a font size, measures the face's real cell box
-//! at it, and divides the available content box by that — the terminal resizes,
-//! never the type.
-//!
-//! What survives from S9 unchanged, because it was right there and is right
-//! here:
-//!
-//! - **Measure, never assume.** The cell advance comes from shaping a probe
-//!   string ([`CELL_PROBE`]) through the engine's own monospace face, not from
-//!   an assumed 0.6em ratio — the measurement is *injected* as a closure, so
-//!   every line of arithmetic below is unit-testable with no font, no
-//!   `TextContext` and no window.
-//! - **Bounded shrink iterations.** They serve the one case the app inherits:
-//!   a box too small to show a usable grid at the requested size (see
-//!   [`MIN_COLS`]/[`MIN_ROWS`]). The solver then shrinks the type, up to
-//!   [`FIT_ITERATIONS`] times with a geometric [`FIT_BACKOFF`], instead of
-//!   handing back a 3-column terminal.
-//! - **A float-jitter tolerance.** A shaper returns advances through `f32`, so
-//!   a grid that divides *exactly* can measure back a hundred-thousandth of a
-//!   pixel over — see [`FIT_TOLERANCE`].
+//! What survives from S9 unchanged: **measure, never assume** (the cell advance
+//! comes from shaping a probe string, [`CELL_PROBE`], through the engine's own
+//! monospace face — injected as a closure, so every line of arithmetic below is
+//! unit-testable with no font, no `TextContext` and no window); **bounded shrink
+//! iterations** for the one case the app inherits, a box too small to show a usable
+//! grid ([`MIN_COLS`]/[`MIN_ROWS`]), where the solver shrinks the type up to
+//! [`FIT_ITERATIONS`] times with a geometric [`FIT_BACKOFF`]; and **a float-jitter
+//! tolerance**, since a shaper returns advances through `f32` and a grid that
+//! divides exactly can measure back a hundred-thousandth of a pixel over
+//! ([`FIT_TOLERANCE`]).
 
 use frust::authoring::text::{FontFamily, TextContext, TextStyle};
 use frust::authoring::{Color, LayoutCtx, Size};
 
 use super::style::{CellStyle, LINE_HEIGHT};
 
-/// Probe string whose shaped width, divided by its length, is the monospace
-/// cell advance. Ten ASCII digits: one cell wide in every monospace face, and
-/// long enough that a per-glyph quantization shows up in the average.
+/// Probe string whose shaped width, divided by its length, is the monospace cell
+/// advance. Ten ASCII digits: one cell wide in every monospace face, and long
+/// enough that a per-glyph quantization shows up in the average.
 pub const CELL_PROBE: &str = "0123456789";
 
-/// The grid used when an axis is unbounded (no box to derive from — a
-/// degenerate parent, or a unit test with unbounded constraints): the classic
-/// VT default, 80x24.
+/// The grid used when an axis is unbounded (a degenerate parent, or a unit test
+/// with unbounded constraints): the classic VT default, 80x24.
 pub const FALLBACK_COLS: u16 = 80;
 /// See [`FALLBACK_COLS`].
 pub const FALLBACK_ROWS: u16 = 24;
 
 /// The narrowest grid the solver will hand back before it starts shrinking the
-/// type instead.
-///
-/// **App-chosen, not a published minimum.** Below ~20 columns a terminal stops
-/// being one: shell prompts, `ls` columns and every TUI's own layout wrap into
-/// noise, and the honest response to a box that small is smaller type (or, one
-/// day, a horizontally scrollable grid), not a narrower grid.
+/// type instead. **App-chosen, not a published minimum**: below ~20 columns a
+/// terminal stops being one, and the honest response to a box that small is
+/// smaller type, not a narrower grid.
 pub const MIN_COLS: u16 = 20;
 /// The shortest grid, for the same reason as [`MIN_COLS`]. Four rows is a
 /// prompt, its command, one line of output and the next prompt.
 pub const MIN_ROWS: u16 = 4;
 
-/// Floor on the shrunk font size. Reaching it means even [`MIN_COLS`] columns
-/// no longer fit at a size any text engine renders sanely; the grid then
-/// knowingly overflows its box (and the clip trims it) rather than shipping a
-/// 2px font nobody can read.
+/// Floor on the shrunk font size. Reaching it means even [`MIN_COLS`] columns no
+/// longer fit at a size any text engine renders sanely; the grid then knowingly
+/// overflows its box (and the clip trims it) rather than shipping a 2px font.
 pub const MIN_FONT_SIZE: f32 = 4.0;
 
-/// Ceiling on cells per axis.
-///
-/// A guard, not a design limit: 512 columns is already twice the widest
-/// realistic desktop terminal, and the cap is what stops a degenerate
-/// measurement (a face reporting a near-zero advance) from asking the emulator
-/// for a multi-million-cell allocation on the layout pass.
+/// Ceiling on cells per axis. A guard, not a design limit: 512 columns is twice the
+/// widest realistic desktop terminal, and the cap stops a degenerate measurement (a
+/// face reporting a near-zero advance) from asking the emulator for a
+/// multi-million-cell allocation on the layout pass.
 pub const MAX_CELLS_PER_AXIS: u16 = 512;
 
 /// Measure/shrink iterations [`solve_cell_geometry`] may run before accepting
 /// whatever it has.
 const FIT_ITERATIONS: usize = 8;
 
-/// Multiplicative backoff applied from the second shrink pass onward. A face
-/// that quantizes its advance (say, to whole pixels) reports the *same* cell
-/// width across a band of sizes, so a ratio-derived step lands on a fixed point
-/// it can never escape; a geometric step always makes progress.
+/// Multiplicative backoff applied from the second shrink pass onward. A face that
+/// quantizes its advance reports the *same* cell width across a band of sizes, so a
+/// ratio-derived step lands on a fixed point it can never escape.
 const FIT_BACKOFF: f64 = 0.9;
 
-/// Overflow, in logical px per axis, treated as a fit. One hundredth of a
-/// logical pixel is sub-pixel rounding on the last column's right edge, not a
-/// clipped column — and chasing it would cost a whole column.
+/// Overflow, in logical px per axis, treated as a fit. One hundredth of a logical
+/// pixel is sub-pixel rounding on the last column's right edge, not a clipped
+/// column — and chasing it would cost a whole column.
 const FIT_TOLERANCE: f64 = 0.01;
 
 /// The cell box the grid paints on, the font size it was measured at, and the
@@ -124,13 +104,10 @@ impl CellGeometry {
     }
 }
 
-/// Solve the cell box and grid that `font_size` yields inside `available`,
-/// from a `measure(font_size) -> (cell_advance, line_height)` probe of the
-/// engine's own monospace face.
-///
-/// Pure — the measurement is injected — so the arithmetic is unit-testable
-/// without a font, a `TextContext` or a window. See the [module docs](self) for
-/// the shape of the problem and why it is inverted against S9's.
+/// Solve the cell box and grid that `font_size` yields inside `available`, from a
+/// `measure(font_size) -> (cell_advance, line_height)` probe of the engine's own
+/// monospace face. Pure — the measurement is injected — so the arithmetic is
+/// unit-testable without a font, a `TextContext` or a window.
 pub fn solve_cell_geometry(
     available: Size,
     font_size: f32,
@@ -176,9 +153,8 @@ pub fn solve_cell_geometry(
     }
 }
 
-/// How much the current cell box must shrink for [`MIN_COLS`] x [`MIN_ROWS`] to
-/// fit `available` (`>= 1.0` means it already does). An unbounded axis never
-/// constrains.
+/// How much the current cell box must shrink for [`MIN_COLS`] x [`MIN_ROWS`] to fit
+/// `available` (`>= 1.0` means it already does). An unbounded axis never constrains.
 fn shrink_factor(available: Size, (cell_width, cell_height): (f64, f64)) -> f64 {
     let mut factor = f64::INFINITY;
     if available.width.is_finite() && available.width > 0.0 && cell_width > 0.0 {
@@ -202,9 +178,9 @@ fn grid_for(available: Size, (cell_width, cell_height): (f64, f64)) -> (u16, u16
 /// Cells along one axis: `floor(available / cell)`, at least one, capped at
 /// [`MAX_CELLS_PER_AXIS`], falling back on an unbounded/degenerate axis.
 fn axis_cells(available: f64, cell: f64, fallback: u16) -> u16 {
-    // `cell` is compared positively (never `!(cell > 0.0)`): a NaN advance from
-    // a degenerate measurement must take the fallback, not slip through a
-    // negated partial comparison.
+    // `cell` is compared positively (never `!(cell > 0.0)`): a NaN advance from a
+    // degenerate measurement must take the fallback, not slip through a negated
+    // partial comparison.
     if !available.is_finite() || available <= 0.0 || !cell.is_finite() || cell <= 0.0 {
         return fallback;
     }
@@ -212,16 +188,11 @@ fn axis_cells(available: f64, cell: f64, fallback: u16) -> u16 {
     count.clamp(1.0, f64::from(MAX_CELLS_PER_AXIS)) as u16
 }
 
-/// Measure the monospace cell box at `font_size` in `family`: shape
-/// [`CELL_PROBE`] and divide its advance by its length (its height is the
-/// shaped line box, [`LINE_HEIGHT`] x `font_size`). The probe
-/// [`solve_cell_geometry`] solves against — never an assumed advance ratio.
-///
-/// `family` matters here, not just at paint time: two monospace faces can
-/// measure a different cell advance at the same size, so the grid must
-/// re-solve its geometry whenever the resolved family changes, exactly as it
-/// already does for a font-size change (`TerminalGridWidget::layout`'s own
-/// geometry cache key covers both).
+/// Measure the monospace cell box at `font_size` in `family`: shape [`CELL_PROBE`]
+/// and divide its advance by its length (its height is the shaped line box,
+/// [`LINE_HEIGHT`] x `font_size`). `family` matters here, not just at paint time:
+/// two monospace faces can measure a different cell advance at the same size, so
+/// the grid re-solves its geometry whenever the resolved family changes.
 pub fn measure_cell(ctx: &mut LayoutCtx, font_size: f32, family: &FontFamily) -> (f64, f64) {
     // The ink is irrelevant to a measurement; the family/line-height are not,
     // which is why this goes through the same `CellStyle` every run shapes with.
@@ -343,9 +314,9 @@ mod tests {
 
     #[test]
     fn a_face_whose_advance_quantizes_upward_still_converges() {
-        // A hypothetical face rounding every advance up to a whole pixel
-        // reports the same cell width across a band of sizes — the geometric
-        // backoff is what stops the shrink loop spinning on that fixed point.
+        // A face rounding every advance up to a whole pixel reports the same
+        // cell width across a band of sizes — the geometric backoff is what
+        // stops the shrink loop spinning on that fixed point.
         let geometry = solve_cell_geometry(Size::new(90.0, 400.0), 12.0, |size| {
             (
                 (f64::from(size) * 0.6).ceil(),

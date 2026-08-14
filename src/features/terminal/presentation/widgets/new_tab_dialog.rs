@@ -17,29 +17,25 @@ const NEW_TAB_TITLE: &str = "New tab";
 /// `crate::ui::dialogs`' private ones.
 const NEW_TAB_CANCEL_LABEL: &str = "Cancel";
 const NEW_TAB_SUBMIT_LABEL: &str = "Create";
-/// Vertical gap between the field and its button row, and the horizontal gap
-/// between Cancel and Create — the shared scale's own tiers, matching
-/// `crate::ui::dialogs::name_input_dialog`'s `FIELD_ACTIONS_GAP`/`ACTION_GAP`
-/// (both private there) so the two dialogs sit identically.
+/// Vertical gap between the field and its button row, and the horizontal gap between
+/// Cancel and Create — the shared scale's own tiers, matching
+/// `crate::ui::dialogs::name_input_dialog`'s own (both private there).
 const NEW_TAB_FIELD_GAP: f64 = spacing::XL;
 const NEW_TAB_ACTION_GAP: f64 = spacing::MD;
 
 /// The tab-naming dialog's page body: a field over a Cancel/Create row.
 ///
-/// A hand-rolled dialog rather than
-/// [`name_input_dialog`](crate::ui::dialogs::name_input_dialog): that helper's
-/// whole contract is "a blank field cannot submit", which is exactly right for
-/// every other name prompt in this app (a rename/create-space needs a real
-/// label) and exactly wrong for this one, where blank is this create's own
-/// valid default — the server's own naming — rather than a disabled state.
-/// Mirrors that helper's own construction otherwise, so `tests/terminal.rs`'s
-/// existing dialog-panel idiom (`by_width` against the panel's own content
-/// width) still finds the field the identical way.
+/// Hand-rolled rather than
+/// [`name_input_dialog`](crate::ui::dialogs::name_input_dialog): that helper's whole
+/// contract is "a blank field cannot submit", which is right for every other name
+/// prompt in this app and exactly wrong for this one, where blank is this create's
+/// own valid default — the server's own naming — rather than a disabled state.
+/// Mirrors that helper's construction otherwise, so `tests/terminal.rs`'s existing
+/// dialog-panel idiom still finds the field the identical way.
 ///
-/// `value` is the page's own live buffer: a keystroke's `value.set` is what
-/// rebuilds this body, and the trimmed string is what both `Enter` and
-/// **Create** pop with. `nav` is the overlay host this page was pushed onto —
-/// every one of the three exits pops through it.
+/// `value` is the page's own live buffer: a keystroke's `value.set` rebuilds this
+/// body, and the trimmed string is what both `Enter` and **Create** pop with. `nav`
+/// is the overlay host this page was pushed onto.
 pub(crate) fn new_tab_dialog(
     value: RwSignal<String>,
     nav: &NavigatorController<AppState>,
