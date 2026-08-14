@@ -1,46 +1,36 @@
-//! `sessions` domain entities — the feature's plain-data types
-//! (framework-free, per `crate::features::sessions::domain`'s module doc).
+//! `sessions` domain entities — the feature's plain-data types.
 //!
 //! One aggregate ([`Session`]) plus the value objects the `/sessions` screen
-//! renders from it. Every field here exists because `docs/redesign.html`'s
-//! **sessions** block paints it: the card's name and avatar initial
-//! ([`Session::name`]/[`Session::initial`]), its two chips
-//! ([`Session::status`]/[`Session::backend`]), and the `.sess-meta` counts row
-//! plus the `.pane-pill` previews ([`LayoutSummary`]). Nothing is modelled
-//! speculatively — a field with no pixel behind it isn't here, which is why
-//! there is no creation timestamp: the redesigned card prints no `created`
-//! line.
+//! renders from it. Every field exists because `docs/redesign.html`'s
+//! **sessions** block paints it: the card's name and avatar initial, its two
+//! chips ([`Session::status`]/[`Session::backend`]), and the `.sess-meta`
+//! counts row plus the `.pane-pill` previews ([`LayoutSummary`]). Nothing is
+//! modelled speculatively — there is no creation timestamp, since the
+//! redesigned card prints no `created` line.
 //!
 //! # The varying third metric
 //!
-//! The `.sess-meta` row's first two spans are always panes and tabs; the third
-//! **varies by what the session actually is** — `◎ N clients` for a running
-//! zellij session, `◆ N spaces` for a herdr one, `N tabs saved` for an idle
-//! resurrectible one. That is a difference in the *facts a daemon reports*, not
-//! a rendering choice, so it is modelled here as [`ThirdMetric`] — one enum on
-//! [`LayoutSummary`] rather than three mostly-zero count fields.
+//! The `.sess-meta` row's first two spans are always panes and tabs; the
+//! third **varies by what the session actually is** — `◎ N clients` for a
+//! running zellij session, `◆ N spaces` for a herdr one, `N tabs saved` for
+//! an idle resurrectible one. That is a difference in the *facts a daemon
+//! reports*, not a rendering choice, so it is modelled as [`ThirdMetric`] —
+//! one enum on [`LayoutSummary`] rather than three mostly-zero count fields.
 //!
-//! # Mock era
-//!
-//! There is no `muxrd` gRPC round trip yet (see `crate::connection`'s module
-//! docs), so these are the shapes the **mock** repository
-//! (`crate::features::sessions::data`) produces. They are deliberately plain
-//! owned data, so the real client can map a session proto onto them field by
-//! field without the presentation layer changing at all.
+//! These shapes are plain owned data — real repository or mock alike map a
+//! session proto onto them field by field, with no presentation-layer change.
 
 /// One remote multiplexer session, as the sessions list renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
-    /// The daemon's stable key for this session. Distinct from
-    /// [`name`](Self::name) because a rename changes the name, not the key —
-    /// every mutation on
-    /// [`SessionsRepository`](super::repositories::SessionsRepository)
+    /// The daemon's stable key for this session, distinct from
+    /// [`name`](Self::name) (a rename changes the name, not the key) — every
+    /// mutation on [`SessionsRepository`](super::repositories::SessionsRepository)
     /// addresses a session by this.
     pub id: String,
     /// The session's user-facing name (`.sess-name`), the one a rename edits.
     pub name: String,
-    /// Whether the session is live or merely resurrectible (`.sess-card.running`
-    /// vs `.sess-card.idle`).
+    /// Live or merely resurrectible (`.sess-card.running` vs `.idle`).
     pub status: SessionStatus,
     /// Which multiplexer is behind it (the `.chip-neutral` "zellij"/"herdr").
     pub backend: SessionBackend,
@@ -138,8 +128,7 @@ impl LayoutSummary {
         format!("\u{25e7} {} tabs", self.tabs)
     }
 
-    /// All three `.sess-meta` spans on one line — what a *single-line* row
-    /// (the picker sheet's `sub` line) prints, as against the card's own
+    /// All three `.sess-meta` spans on one line, as against the card's own
     /// three-span row, which lays each label out separately with the
     /// redesign's 12px gap.
     pub fn counts_line(&self) -> String {
@@ -238,9 +227,8 @@ mod tests {
 
     #[test]
     fn the_meta_spans_are_addressable_one_by_one() {
-        // The card lays the three spans out separately (12px gap), so each has
-        // to be printable on its own — `counts_line` is the joined form the
-        // picker sheet's single-line row uses.
+        // The card lays the three spans out separately (12px gap), so each
+        // has to be printable on its own — `counts_line` is the joined form.
         let layout = session("dev").layout;
         assert_eq!(layout.panes_label(), "\u{25a3} 9 panes");
         assert_eq!(layout.tabs_label(), "\u{25e7} 4 tabs");

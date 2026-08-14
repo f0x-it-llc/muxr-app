@@ -138,7 +138,7 @@ use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::connect::presentation::pages::connect_page;
 use crate::features::sessions::presentation::pages::sessions_page;
-use crate::features::sessions::presentation::pieces::host_of;
+use crate::features::sessions::presentation::widgets::host_of;
 use crate::features::settings::presentation::pages::settings_page;
 use crate::features::terminal::presentation::pages::terminal_page;
 

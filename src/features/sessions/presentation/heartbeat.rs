@@ -43,7 +43,7 @@
 //! The catalog strokes its ring with `circular_progress(Determinate(1.0))`,
 //! which inks itself from the theme's `primary` with no colour seam of its
 //! own. On this screen that is the brand amber, and amber is never a health
-//! signal here ([`super::pieces`]' colour-role rule) — a ping emanating from
+//! signal here ([`super::widgets`]' colour-role rule) — a ping emanating from
 //! the liveness dot is exactly a health signal. It is also the wrong shape at
 //! this size: that widget's 4px stroke over a dot-sized box leaves no hole to
 //! read as a ring. The ring is therefore [`super::chrome::panel`]'s hairline
@@ -70,7 +70,7 @@ use frust::{
 
 use super::chrome::{RADIUS_FULL, panel, swatch};
 use super::pages::SessionsState;
-use super::pieces::DOT;
+use super::widgets::DOT;
 
 /// How long one ping ring takes to expand and fade out.
 const RING_MS: f64 = 1600.0;
