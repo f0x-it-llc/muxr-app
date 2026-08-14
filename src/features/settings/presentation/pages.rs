@@ -784,6 +784,7 @@ impl Actions {
                     display,
                     meta: meta.to_string(),
                     state: crate::fonts::catalog::FontState::Installed,
+                    download_progress: None,
                 }
             })
             .collect();
@@ -797,11 +798,23 @@ impl Actions {
                 if state == crate::fonts::catalog::FontState::Installed {
                     return None;
                 }
+                // Only a Downloading row with a known size hint gets a
+                // determinate fraction — a size-less entry (`total_bytes() ==
+                // 0`) stays `None`, which `pieces::font_row_progress` renders
+                // as the indeterminate dots loader.
+                let download_progress = if state == crate::fonts::catalog::FontState::Downloading
+                    && entry.total_bytes() > 0
+                {
+                    Some(catalog.progress_of_entry(entry).unwrap_or(0.0))
+                } else {
+                    None
+                };
                 Some(pieces::FontRow {
                     family: entry.family.clone(),
                     display: entry.display_name.clone(),
                     meta: format!("{} \u{b7} {}", entry.license, entry.size_label()),
                     state,
+                    download_progress,
                 })
             })
             .collect();

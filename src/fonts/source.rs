@@ -25,6 +25,15 @@
 //! ([`super::store`]). Redirects follow `reqwest`'s default policy, which the
 //! release-asset URLs need (`github.com/…/releases/download/…` answers a 302
 //! into `objects.githubusercontent.com`).
+//!
+//! The streaming half is [`get_with_progress`]: it reads the body via
+//! `reqwest::Response::chunk()` rather than buffering the whole thing first,
+//! so an oversized response is caught (and discarded) the instant the
+//! running total crosses the cap rather than after every byte has already
+//! been held in memory. [`FontSource::fetch_font_with_progress`] rides the
+//! same read, handing the cumulative received-byte count to an optional
+//! sink after every chunk — a font's own download is the only fetch that
+//! needs it (see [`super::catalog`]'s per-entry fraction).
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -44,10 +53,19 @@ pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// client's own cap. The catalog's biggest entry is ~3 MB.
 pub const MAX_FONT_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Where the catalog's bytes come from. Both methods answer whole bodies:
-/// a manifest is tens of kilobytes and a font a few megabytes, so nothing here
-/// needs a streaming API — and the SHA-256 check downstream needs the whole
-/// body in hand anyway.
+/// A [`FontSource::fetch_font_with_progress`] progress sink: called after
+/// every chunk with the cumulative bytes received for that one file's fetch
+/// so far (never above the download cap — a chunk that would cross it aborts
+/// the read before the sink runs). `Send` because the future carrying it
+/// crosses onto the background runtime (`frust::spawn`, see
+/// `super::catalog`'s module docs).
+pub type ProgressSink<'a> = &'a mut (dyn FnMut(u64) + Send);
+
+/// Where the catalog's bytes come from. The manifest fetch answers a whole
+/// body — tens of kilobytes, no streaming API needed — and the SHA-256 check
+/// downstream needs a font's whole body in hand anyway; streaming only buys
+/// the font path early cap enforcement and live progress (see the
+/// [module docs](self)).
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 pub trait FontSource: Send + Sync {
@@ -56,6 +74,21 @@ pub trait FontSource: Send + Sync {
 
     /// One font file, by its manifest URL.
     async fn fetch_font(&self, url: &str) -> Result<Vec<u8>, AppFailure>;
+
+    /// [`Self::fetch_font`], reporting the cumulative bytes received to
+    /// `progress` as the body streams in.
+    ///
+    /// Default: no progress at all — a single opaque [`Self::fetch_font`]
+    /// call — so [`OfflineFontSource`] and every test double implementing
+    /// only [`Self::fetch_font`]/[`Self::fetch_manifest`] keep compiling
+    /// untouched; only [`HttpFontSource`] overrides it.
+    async fn fetch_font_with_progress(
+        &self,
+        url: &str,
+        _progress: ProgressSink<'_>,
+    ) -> Result<Vec<u8>, AppFailure> {
+        self.fetch_font(url).await
+    }
 }
 
 /// The shared handle every caller holds — a type alias so the install/resolve
@@ -131,9 +164,24 @@ fn client() -> Result<&'static reqwest::Client, AppFailure> {
         .map_err(|err| AppFailure::Network(format!("font http client: {err}")))
 }
 
-/// `GET url`, bounded by `max_bytes`.
+/// `GET url`, bounded by `max_bytes`. [`get_with_progress`] with no progress
+/// sink.
 async fn get(url: &str, max_bytes: u64) -> Result<Vec<u8>, AppFailure> {
-    let response = client()?
+    get_with_progress(url, max_bytes, None).await
+}
+
+/// `GET url`, bounded by `max_bytes`, read one chunk at a time
+/// (`reqwest::Response::chunk()`) so the cap is enforced **while the body
+/// arrives** rather than only after it is fully buffered — the module docs'
+/// "and while streaming" clause. `progress`, when given, is called after
+/// every chunk that keeps the running total under the cap with that
+/// cumulative total.
+async fn get_with_progress(
+    url: &str,
+    max_bytes: u64,
+    mut progress: Option<ProgressSink<'_>>,
+) -> Result<Vec<u8>, AppFailure> {
+    let mut response = client()?
         .get(url)
         .send()
         .await
@@ -142,23 +190,64 @@ async fn get(url: &str, max_bytes: u64) -> Result<Vec<u8>, AppFailure> {
     if !status.is_success() {
         return Err(AppFailure::Network(format!("HTTP {status} for {url}")));
     }
-    // The advertised length first (cheap refusal), then the real one — a
-    // server's `Content-Length` is a claim, not a fact.
+    // The advertised length first (cheap refusal), then the stream itself —
+    // a server's `Content-Length` is a claim, not a fact.
     if response.content_length().is_some_and(|len| len > max_bytes) {
         return Err(AppFailure::Network(format!(
             "{url} advertises more than the {max_bytes}-byte cap"
         )));
     }
-    let bytes = response
-        .bytes()
+    let mut accumulator = CappedAccumulator::new(url, max_bytes);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|err| AppFailure::Network(format!("reading {url}: {err}")))?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(AppFailure::Network(format!(
-            "{url} exceeded the {max_bytes}-byte cap"
-        )));
+        .map_err(|err| AppFailure::Network(format!("reading {url}: {err}")))?
+    {
+        let received = accumulator.push(&chunk)?;
+        if let Some(sink) = progress.as_mut() {
+            sink(received);
+        }
     }
-    Ok(bytes.to_vec())
+    Ok(accumulator.into_bytes())
+}
+
+/// Enforces a byte cap against a body arriving one chunk at a time — the
+/// pure core of [`get_with_progress`]'s streaming read, network-free and so
+/// exercised directly by a unit test.
+struct CappedAccumulator<'a> {
+    url: &'a str,
+    max_bytes: u64,
+    bytes: Vec<u8>,
+}
+
+impl<'a> CappedAccumulator<'a> {
+    fn new(url: &'a str, max_bytes: u64) -> Self {
+        Self {
+            url,
+            max_bytes,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Append one chunk. `Err` the instant the running total exceeds the
+    /// cap — the caller must stop reading; nothing already pushed is ever
+    /// handed back once this returns an error. `Ok` answers the cumulative
+    /// byte count so far.
+    fn push(&mut self, chunk: &[u8]) -> Result<u64, AppFailure> {
+        self.bytes.extend_from_slice(chunk);
+        let total = self.bytes.len() as u64;
+        if total > self.max_bytes {
+            return Err(AppFailure::Network(format!(
+                "{} exceeded the {}-byte cap",
+                self.url, self.max_bytes
+            )));
+        }
+        Ok(total)
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -170,6 +259,14 @@ impl FontSource for HttpFontSource {
 
     async fn fetch_font(&self, url: &str) -> Result<Vec<u8>, AppFailure> {
         get(url, MAX_FONT_BYTES).await
+    }
+
+    async fn fetch_font_with_progress(
+        &self,
+        url: &str,
+        progress: ProgressSink<'_>,
+    ) -> Result<Vec<u8>, AppFailure> {
+        get_with_progress(url, MAX_FONT_BYTES, Some(progress)).await
     }
 }
 
@@ -205,6 +302,23 @@ mod tests {
         assert!(matches!(font, Err(AppFailure::Network(_))));
     }
 
+    #[test]
+    fn the_default_progress_method_never_touches_the_sink() {
+        // OfflineFontSource implements neither override — its
+        // `fetch_font_with_progress` is the trait's default, which must
+        // answer through `fetch_font` alone and call the sink zero times.
+        let source = OfflineFontSource;
+        let calls = std::sync::atomic::AtomicU64::new(0);
+        let mut sink: Box<dyn FnMut(u64) + Send> = Box::new(|_| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        let result = futures_block_on(
+            source.fetch_font_with_progress("https://example.invalid/a.ttf", &mut *sink),
+        );
+        assert!(matches!(result, Err(AppFailure::Network(_))));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
     /// Drives a future to completion on this thread — these two futures never
     /// yield, so no runtime is involved.
     fn futures_block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -212,5 +326,32 @@ mod tests {
             .build()
             .expect("a current-thread runtime")
             .block_on(future)
+    }
+
+    // -- CappedAccumulator: the streaming read's pure core, no network -----
+
+    #[test]
+    fn the_accumulator_aborts_mid_stream_once_the_cap_is_exceeded() {
+        let mut acc = CappedAccumulator::new("https://example.invalid/x", 10);
+        assert_eq!(acc.push(&[0u8; 6]).expect("under the cap"), 6);
+        let err = acc.push(&[0u8; 6]).expect_err("6 + 6 > 10 must abort");
+        assert!(
+            matches!(err, AppFailure::Network(_)),
+            "an oversized body is a network refusal, not an internal one"
+        );
+    }
+
+    #[test]
+    fn the_accumulator_reports_a_monotonically_growing_running_total() {
+        let mut acc = CappedAccumulator::new("https://example.invalid/x", 100);
+        let totals: Vec<u64> = [10usize, 20, 5]
+            .into_iter()
+            .map(|n| acc.push(&vec![0u8; n]).expect("under the cap"))
+            .collect();
+        assert_eq!(totals, vec![10, 30, 35]);
+        assert!(
+            totals.windows(2).all(|pair| pair[1] >= pair[0]),
+            "the running total must never regress: {totals:?}"
+        );
     }
 }

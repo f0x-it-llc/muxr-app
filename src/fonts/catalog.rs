@@ -91,6 +91,11 @@ pub struct FontCatalog {
     /// has just installed, or has failed. A family absent from this list falls
     /// back to what the store knows (see [`FontCatalog::state_of`]).
     states: RwSignal<Arc<[(String, FontState)]>>,
+    /// The live download fraction (`0.0..=1.0`) for every family currently
+    /// [`FontState::Downloading`] with a known total size — see
+    /// [`FontCatalog::progress_of_entry`]. A family absent here is either not
+    /// downloading or downloading with no size hint (indeterminate).
+    progress: RwSignal<Arc<[(String, f64)]>>,
 }
 
 thread_local! {
@@ -116,6 +121,7 @@ pub fn font_catalog() -> FontCatalog {
             entries: RwSignal::new(Arc::from(Vec::new())),
             stale: RwSignal::new(false),
             states: RwSignal::new(Arc::from(Vec::new())),
+            progress: RwSignal::new(Arc::from(Vec::new())),
         };
         cell.set(Some(catalog));
         catalog
@@ -165,6 +171,26 @@ impl FontCatalog {
         }
     }
 
+    /// The live download fraction for `family` (tracked) — `None` when
+    /// nothing is downloading under that name, or when the family's entry
+    /// carries no size hint (see [`Self::progress_of_entry`]).
+    fn progress_of(&self, family: &str) -> Option<f64> {
+        self.progress
+            .get()
+            .iter()
+            .find(|(known, _)| known == family)
+            .map(|(_, fraction)| *fraction)
+    }
+
+    /// [`Self::progress_of`], resolved through `entry`'s effective family —
+    /// the same key [`Self::state_of`] and [`Self::install`] use, so a row
+    /// asking about its own entry never misses an alias. The picker's one
+    /// call site: `None` means render the indeterminate dots loader, `Some`
+    /// the determinate progress bar.
+    pub fn progress_of_entry(&self, entry: &FontEntry) -> Option<f64> {
+        self.progress_of(&effective_family(entry))
+    }
+
     /// Fetch the catalog, unless a fetch is already in flight or one has
     /// already landed. The picker calls this when it opens.
     ///
@@ -200,6 +226,13 @@ impl FontCatalog {
     /// already installed — answers `Ok(())` without starting a second one. The
     /// row's state carries the outcome; the returned failure is for the
     /// caller's own toast (this module raises none itself).
+    ///
+    /// While the download is in flight, a progress fraction
+    /// (`received / entry.total_bytes()`, accumulated across every one of
+    /// `entry`'s files) is published for [`Self::progress_of_entry`] to read
+    /// — see [`Self::spawn_progress_pump`]. An entry with no size hint
+    /// (`total_bytes() == 0`) never gets one, which is what leaves it
+    /// indeterminate.
     pub async fn install(&self, entry: FontEntry) -> Result<(), AppFailure> {
         let family = effective_family(&entry);
         match self.state_of_untracked(&family) {
@@ -207,8 +240,19 @@ impl FontCatalog {
             FontState::Available | FontState::Failed => {}
         }
         self.set_state(&family, FontState::Downloading);
+        // A stale fraction from a previous failed attempt must not flash
+        // before this one's first real chunk lands.
+        self.clear_progress(&family);
 
-        match run_off_thread(download(entry)).await {
+        let total = entry.total_bytes();
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        if total > 0 {
+            self.spawn_progress_pump(family.clone(), total, progress_rx);
+        }
+
+        let outcome = run_off_thread(download(entry, progress_tx)).await;
+        self.clear_progress(&family);
+        match outcome {
             Ok(registered) => {
                 // The family it registered as may differ from the manifest's
                 // claim; record the state under both so the row flips either
@@ -255,6 +299,70 @@ impl FontCatalog {
             .collect();
         states.push((family.to_string(), state));
         self.states.set(Arc::from(states));
+    }
+
+    /// Drain `receiver` on the UI thread, publishing a throttled fraction for
+    /// `family` as chunks arrive — whole-percent steps only, so a fast
+    /// download doesn't storm the signal graph (`Self::publish_progress`
+    /// itself refuses a value that isn't actually new). Ends on its own once
+    /// the sender side (`download`'s per-file callback) drops, which happens
+    /// as soon as the whole entry's fetch finishes or fails — a spawned task
+    /// of its own, not a child of [`Self::install`]'s future, so it keeps
+    /// draining even if the caller that started the install is torn down.
+    fn spawn_progress_pump(
+        self,
+        family: String,
+        total: u64,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<u64>,
+    ) {
+        frust::spawn_local(async move {
+            let mut last_percent: Option<u64> = None;
+            while let Some(received) = receiver.recv().await {
+                let fraction = (received as f64 / total as f64).clamp(0.0, 1.0);
+                let percent = (fraction * 100.0) as u64;
+                if last_percent == Some(percent) {
+                    continue;
+                }
+                last_percent = Some(percent);
+                self.publish_progress(&family, fraction);
+            }
+        });
+    }
+
+    /// Publish `fraction` (clamped to `0.0..=1.0`) for `family` — read,
+    /// compare, then write, and never backward: the manifest's size hint is
+    /// advisory, so a fraction no higher than what's already published is
+    /// dropped rather than overwriting it.
+    fn publish_progress(&self, family: &str, fraction: f64) {
+        let fraction = fraction.clamp(0.0, 1.0);
+        let current = self.progress.get_untracked();
+        if current
+            .iter()
+            .any(|(known, prev)| known == family && *prev >= fraction)
+        {
+            return;
+        }
+        let mut next: Vec<(String, f64)> = current
+            .iter()
+            .filter(|(known, _)| known != family)
+            .cloned()
+            .collect();
+        next.push((family.to_string(), fraction));
+        self.progress.set(Arc::from(next));
+    }
+
+    /// Drop `family`'s published fraction, if any.
+    fn clear_progress(&self, family: &str) {
+        let current = self.progress.get_untracked();
+        if !current.iter().any(|(known, _)| known == family) {
+            return;
+        }
+        let next: Vec<(String, f64)> = current
+            .iter()
+            .filter(|(known, _)| known != family)
+            .cloned()
+            .collect();
+        self.progress.set(Arc::from(next));
     }
 }
 
@@ -321,11 +429,29 @@ fn cached_catalog_or(failure: AppFailure) -> Result<(Vec<FontEntry>, bool), AppF
 
 /// Download every file of `entry`, then verify/cache/register the lot;
 /// answers the family it registered as.
-async fn download(entry: FontEntry) -> Result<String, AppFailure> {
+///
+/// `progress` receives the cumulative bytes received **across every file**
+/// of the entry, in manifest order, as each one streams in — the
+/// denominator [`FontCatalog::install`]'s progress pump divides this by is
+/// `entry.total_bytes()`, so a later file's own bytes pick up where the
+/// previous one left off rather than resetting toward `0`.
+async fn download(
+    entry: FontEntry,
+    progress: tokio::sync::mpsc::UnboundedSender<u64>,
+) -> Result<String, AppFailure> {
     let source = source::font_source();
     let mut files = Vec::with_capacity(entry.files.len());
+    let mut completed_bytes: u64 = 0;
     for file in &entry.files {
-        let bytes = source.fetch_font(&file.url).await?;
+        let base = completed_bytes;
+        let tx = progress.clone();
+        let mut report = move |received: u64| {
+            let _ = tx.send(base + received);
+        };
+        let bytes = source
+            .fetch_font_with_progress(&file.url, &mut report)
+            .await?;
+        completed_bytes += bytes.len() as u64;
         files.push((file.clone(), bytes));
     }
     frust::spawn_blocking(move || store::install_downloaded(&entry, files))
@@ -354,16 +480,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_untouched_entry_reads_as_available() {
-        // No signals involved — `state_of_untracked`'s store-backed fallback,
-        // which is what a fresh catalog row resolves through.
-        let catalog = FontCatalog {
+    /// A catalog with fresh, empty signals — every unit test below's starting
+    /// point.
+    fn test_catalog() -> FontCatalog {
+        FontCatalog {
             status: RwSignal::new(CatalogStatus::Idle),
             entries: RwSignal::new(Arc::from(Vec::new())),
             stale: RwSignal::new(false),
             states: RwSignal::new(Arc::from(Vec::new())),
-        };
+            progress: RwSignal::new(Arc::from(Vec::new())),
+        }
+    }
+
+    #[test]
+    fn an_untouched_entry_reads_as_available() {
+        // No signals involved — `state_of_untracked`'s store-backed fallback,
+        // which is what a fresh catalog row resolves through.
+        let catalog = test_catalog();
         assert_eq!(
             catalog.state_of_untracked("Nothing Installed Mono"),
             FontState::Available
@@ -372,12 +505,7 @@ mod tests {
 
     #[test]
     fn a_published_state_wins_over_the_store_fallback() {
-        let catalog = FontCatalog {
-            status: RwSignal::new(CatalogStatus::Idle),
-            entries: RwSignal::new(Arc::from(Vec::new())),
-            stale: RwSignal::new(false),
-            states: RwSignal::new(Arc::from(Vec::new())),
-        };
+        let catalog = test_catalog();
         catalog.set_state("Fixture Mono", FontState::Downloading);
         assert_eq!(
             catalog.state_of_untracked("Fixture Mono"),
@@ -395,5 +523,43 @@ mod tests {
     #[test]
     fn an_entry_with_no_alias_resolves_to_its_own_manifest_family() {
         assert_eq!(effective_family(&entry("Unaliased Mono")), "Unaliased Mono");
+    }
+
+    // -- progress: publish/clear, independent of the async download path ---
+
+    #[test]
+    fn progress_publishes_monotonically_clamped_and_never_regresses() {
+        let catalog = test_catalog();
+        assert_eq!(catalog.progress_of("Fixture Mono"), None);
+
+        catalog.publish_progress("Fixture Mono", 0.25);
+        assert_eq!(catalog.progress_of("Fixture Mono"), Some(0.25));
+
+        // A lower fraction than what's already published is dropped — the
+        // manifest's size hint is advisory, so this must never read as a
+        // regression.
+        catalog.publish_progress("Fixture Mono", 0.10);
+        assert_eq!(catalog.progress_of("Fixture Mono"), Some(0.25));
+
+        catalog.publish_progress("Fixture Mono", 0.9);
+        assert_eq!(catalog.progress_of("Fixture Mono"), Some(0.9));
+
+        // Clamped to 1.0 even if a caller (an over-counted total) hands in
+        // more.
+        catalog.publish_progress("Fixture Mono", 1.5);
+        assert_eq!(catalog.progress_of("Fixture Mono"), Some(1.0));
+
+        catalog.clear_progress("Fixture Mono");
+        assert_eq!(catalog.progress_of("Fixture Mono"), None);
+    }
+
+    #[test]
+    fn progress_of_entry_resolves_through_the_effective_family() {
+        let catalog = test_catalog();
+        let entry = entry("Claimed Mono");
+        // Nothing published yet, under either name.
+        assert_eq!(catalog.progress_of_entry(&entry), None);
+        catalog.publish_progress("Claimed Mono", 0.4);
+        assert_eq!(catalog.progress_of_entry(&entry), Some(0.4));
     }
 }
