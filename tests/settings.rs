@@ -423,6 +423,18 @@ impl Harness {
             })
     }
 
+    /// Whether the screen currently paints a `Role::ProgressIndicator` node —
+    /// the Downloading font row's determinate glyph progress bar
+    /// (`pieces::font_row_progress`; `frust_widgets::glyph::progress` is the
+    /// only widget in this app's tree that contributes this role).
+    fn font_progress_bar_visible(&self) -> bool {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.role() == Role::ProgressIndicator)
+    }
+
     /// The navigator's page-stack depth (1 = only the harness's base page).
     fn depth(&self) -> usize {
         self.nav.depth()
@@ -2234,6 +2246,11 @@ fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
         FontState::Failed,
         "the row stays retryable rather than claiming to be installed"
     );
+    assert_eq!(
+        catalog.progress_of_entry(&entry),
+        None,
+        "a failed download leaves no stale progress fraction behind for a retry to inherit"
+    );
     assert!(
         !muxr::fonts::installed_families().contains(&FIXTURE_A_FAMILY.to_string()),
         "nothing was registered: {:?}",
@@ -2253,6 +2270,255 @@ fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
     assert!(
         !toasts[0].contains("sha256") && !toasts[0].contains(FIXTURE_A_FAMILY),
         "the toast never leaks the integrity detail: {toasts:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4b — live download progress (G55)
+// ---------------------------------------------------------------------------
+
+/// How long [`StagedFontSource::fetch_font_with_progress`] sleeps between
+/// each of its four staged reports — long enough that a test's own poll loop
+/// (which re-checks every ~1ms, see `Harness::pump_once`) reliably observes
+/// an intermediate fraction before the download lands, short enough that
+/// four of them stay far under [`PUMP_DEADLINE`].
+const STAGED_STEP_DELAY: Duration = Duration::from_millis(15);
+
+/// A [`FontSource`] whose font fetch reports progress in four staged steps
+/// (25/50/75/100%), each separated by a real sleep on the background thread
+/// `download` actually runs on — so a test driving `Harness::pump_once` on
+/// the UI thread can observe the fraction mid-flight rather than only ever
+/// seeing it jump straight to done.
+struct StagedFontSource {
+    manifest: Vec<u8>,
+}
+
+#[clean_signals::async_trait]
+impl FontSource for StagedFontSource {
+    async fn fetch_manifest(&self) -> Result<Vec<u8>, AppFailure> {
+        Ok(self.manifest.clone())
+    }
+
+    async fn fetch_font(&self, _url: &str) -> Result<Vec<u8>, AppFailure> {
+        Ok(FIXTURE_FONT.to_vec())
+    }
+
+    async fn fetch_font_with_progress(
+        &self,
+        _url: &str,
+        progress: muxr::fonts::source::ProgressSink<'_>,
+    ) -> Result<Vec<u8>, AppFailure> {
+        let bytes = FIXTURE_FONT.to_vec();
+        let total = bytes.len() as u64;
+        for step in 1..=4u64 {
+            std::thread::sleep(STAGED_STEP_DELAY);
+            progress(total * step / 4);
+        }
+        Ok(bytes)
+    }
+}
+
+/// A one-entry manifest carrying `family`, whose file's size hint is
+/// [`FIXTURE_FONT`]'s real length when `sized`, or `0` (the indeterminate
+/// case) otherwise.
+fn staged_manifest(family: &str, sized: bool) -> String {
+    let digest = sha256_hex(FIXTURE_FONT);
+    let bytes = if sized { FIXTURE_FONT.len() } else { 0 };
+    format!(
+        r#"{{ "version": 1, "fonts": [
+          {{ "id": "staged", "displayName": "{family} Display",
+             "family": "{family}", "license": "OFL-1.1", "isNerdFont": true,
+             "files": [ {{ "weight": 400, "style": "normal", "path": "Staged-Regular.ttf",
+                          "bytes": {bytes}, "sha256": "{digest}",
+                          "url": "https://example.invalid/Staged-Regular.ttf" }} ] }}
+        ] }}"#
+    )
+}
+
+#[test]
+fn downloading_a_font_drives_its_progress_fraction_from_zero_toward_one_with_throttled_writes() {
+    let _g = serial();
+    let _ambient = setup();
+    let _cache = fresh_font_cache("progress-sized");
+    const FAMILY: &str = "Staged Sized Nerd Font Mono";
+    muxr::fonts::use_font_source_for_tests(Arc::new(StagedFontSource {
+        manifest: staged_manifest(FAMILY, true).into_bytes(),
+    }));
+    let mut h = Harness::connected();
+
+    open_font_picker(&mut h);
+    await_catalog(&mut h, CatalogStatus::Ready);
+    close_sheet(&mut h);
+
+    let catalog = muxr::fonts::catalog::font_catalog();
+    let entry = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.family == FAMILY)
+        .cloned()
+        .expect("the staged catalog carries it");
+    assert!(entry.total_bytes() > 0, "the fixture carries a size hint");
+
+    let installing = entry.clone();
+    frust::spawn_local(async move {
+        catalog
+            .install(installing)
+            .await
+            .expect("the staged download verifies");
+    });
+
+    // Sample the tracked fraction on every pump, deduplicating consecutive
+    // repeats, until the row lands — the throttled-write contract means
+    // most pumps see no *new* value, which is the point.
+    let mut observed: Vec<f64> = Vec::new();
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while catalog.state_of(&entry) != FontState::Installed {
+        assert!(
+            Instant::now() < deadline,
+            "the staged download never landed"
+        );
+        if let Some(fraction) = catalog.progress_of_entry(&entry)
+            && observed.last() != Some(&fraction)
+        {
+            observed.push(fraction);
+        }
+        h.pump_once();
+    }
+
+    assert!(
+        observed.iter().any(|f| *f > 0.0 && *f < 1.0),
+        "at least one intermediate fraction must have been observed: {observed:?}"
+    );
+    assert!(
+        observed.windows(2).all(|pair| pair[1] >= pair[0]),
+        "progress must never regress: {observed:?}"
+    );
+    assert!(
+        observed.iter().all(|f| (0.0..=1.0).contains(f)),
+        "progress must stay clamped to 0..=1: {observed:?}"
+    );
+    assert_eq!(
+        catalog.progress_of_entry(&entry),
+        None,
+        "a landed download leaves no stale progress fraction behind"
+    );
+}
+
+#[test]
+fn an_entry_with_no_size_hint_stays_indeterminate_while_downloading() {
+    let _g = serial();
+    let _ambient = setup();
+    let _cache = fresh_font_cache("progress-unsized");
+    const FAMILY: &str = "Staged Unsized Nerd Font Mono";
+    muxr::fonts::use_font_source_for_tests(Arc::new(StagedFontSource {
+        manifest: staged_manifest(FAMILY, false).into_bytes(),
+    }));
+    let mut h = Harness::connected();
+
+    open_font_picker(&mut h);
+    await_catalog(&mut h, CatalogStatus::Ready);
+    close_sheet(&mut h);
+
+    let catalog = muxr::fonts::catalog::font_catalog();
+    let entry = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.family == FAMILY)
+        .cloned()
+        .expect("the staged catalog carries it");
+    assert_eq!(entry.total_bytes(), 0, "the fixture carries no size hint");
+
+    let installing = entry.clone();
+    frust::spawn_local(async move {
+        catalog
+            .install(installing)
+            .await
+            .expect("the staged download verifies");
+    });
+
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while catalog.state_of(&entry) != FontState::Installed {
+        assert!(
+            Instant::now() < deadline,
+            "the staged download never landed"
+        );
+        assert_eq!(
+            catalog.progress_of_entry(&entry),
+            None,
+            "an unknown-size entry never reports a determinate fraction"
+        );
+        h.pump_once();
+    }
+}
+
+#[test]
+fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_installed() {
+    let _g = serial();
+    let _ambient = setup();
+    let _cache = fresh_font_cache("progress-row");
+    const FAMILY: &str = "Staged Row Nerd Font Mono";
+    muxr::fonts::use_font_source_for_tests(Arc::new(StagedFontSource {
+        manifest: staged_manifest(FAMILY, true).into_bytes(),
+    }));
+    let mut h = Harness::connected();
+
+    open_font_picker(&mut h);
+    await_catalog(&mut h, CatalogStatus::Ready);
+
+    let catalog = muxr::fonts::catalog::font_catalog();
+    let entry = catalog
+        .entries()
+        .iter()
+        .find(|entry| entry.family == FAMILY)
+        .cloned()
+        .expect("the staged catalog carries it");
+
+    let installing = entry.clone();
+    frust::spawn_local(async move {
+        catalog
+            .install(installing)
+            .await
+            .expect("the staged download verifies");
+    });
+
+    // The sheet's body closure re-runs on every navigator rebuild
+    // (`open_font_picker`'s own doc), so a rendered `ProgressIndicator` node
+    // is proof the row actually swapped its trailing affordance for
+    // `pieces::font_row_progress`'s bar rather than the plain text every
+    // other state prints.
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    loop {
+        h.pump_once();
+        if h.font_progress_bar_visible() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the downloading row never painted a progress bar"
+        );
+    }
+
+    while catalog.state_of(&entry) != FontState::Installed {
+        assert!(
+            Instant::now() < deadline,
+            "the staged download never landed"
+        );
+        h.pump_once();
+    }
+    assert!(
+        !h.font_progress_bar_visible(),
+        "an installed row carries no progress bar"
+    );
+    close_sheet(&mut h);
+
+    // …and the reopened sheet lists it under installed, selectable like any
+    // other row — the same post-install contract the plain download test
+    // above already pins.
+    let reopened = open_font_picker(&mut h);
+    assert!(reopened.runs > 0);
+    assert!(
+        !h.font_progress_bar_visible(),
+        "a re-opened, already-installed row still carries no progress bar"
     );
 }
 

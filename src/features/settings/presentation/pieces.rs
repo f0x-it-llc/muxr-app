@@ -74,7 +74,7 @@ use std::rc::Rc;
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{Color, Size};
-use frust::glyph::{glyph_dialog, show_glyph_dialog};
+use frust::glyph::{dots_loader, glyph_dialog, progress, show_glyph_dialog};
 use frust::icons::{CHECK, CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH};
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
@@ -1213,6 +1213,12 @@ pub(super) struct FontRow {
     /// [`FontState::Installed`]; an available-section row carries its own
     /// download state.
     pub(super) state: FontState,
+    /// While [`Self::state`] is [`FontState::Downloading`]: the live
+    /// received-fraction (`0.0..=1.0`) when the entry's total size is known,
+    /// or `None` for an indeterminate download (no size hint) — see
+    /// [`font_row_progress`]. Unused, and always `None`, for every other
+    /// state.
+    pub(super) download_progress: Option<f64>,
 }
 
 /// Everything the font sheet renders — assembled by [`pages`](super::pages)
@@ -1246,10 +1252,14 @@ const FONT_SECTION_AVAILABLE: &str = "available";
 pub(super) const FONT_META_BUILT_IN: &str = "built-in";
 /// …and a downloaded one's, once it is installed.
 pub(super) const FONT_META_DOWNLOADED: &str = "downloaded";
-/// The trailing affordance an available row carries, per state.
+/// The trailing affordance an available row carries, per state — Downloading
+/// swaps this text for [`font_row_progress`]'s bar/dots loader instead.
 pub(super) const FONT_ACTION_DOWNLOAD: &str = "download";
-pub(super) const FONT_ACTION_DOWNLOADING: &str = "downloading\u{2026}";
 pub(super) const FONT_ACTION_RETRY: &str = "retry";
+/// The Downloading row's determinate progress bar width — narrow enough to
+/// sit in the same trailing slot the text affordance used, wide enough to
+/// read as a bar rather than a sliver. An original, hand-picked value.
+const FONT_ROW_PROGRESS_WIDTH: f64 = 56.0;
 /// What the `available` section says with no catalog behind it. Quiet, and
 /// **never a toast**: a catalog nobody can reach is not something the user
 /// did (see `crate::fonts::catalog`'s own note).
@@ -1394,6 +1404,9 @@ fn font_pick_row(
     if selected {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(icon(CHECK).size(CHECK_SIZE).color(colors.amber)));
+    } else if entry.state == FontState::Downloading {
+        children.push(h_gap(ROW_GAP));
+        children.push(font_row_progress(entry.download_progress));
     } else if let Some((action, tone)) = font_row_action(entry.state, colors) {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(
@@ -1422,17 +1435,34 @@ fn font_pick_row(
 
 /// The trailing affordance a non-selected row carries, and its ink — `None`
 /// for an installed row the user simply hasn't chosen (its own name is the
-/// whole affordance).
+/// whole affordance) and for a downloading one, which [`font_pick_row`]
+/// renders through [`font_row_progress`] instead of calling this at all.
 ///
 /// Deliberately **text**, not a vector: the app has no download glyph in
 /// `frust::icons`, and a font glyph is never chrome here
 /// (`docs/ARCHITECTURE.md`'s UI Substrate rule).
 fn font_row_action(state: FontState, colors: &Palette) -> Option<(&'static str, Color)> {
     match state {
-        FontState::Installed => None,
+        FontState::Installed | FontState::Downloading => None,
         FontState::Available => Some((FONT_ACTION_DOWNLOAD, colors.amber)),
-        FontState::Downloading => Some((FONT_ACTION_DOWNLOADING, colors.fg_dim)),
         FontState::Failed => Some((FONT_ACTION_RETRY, colors.error)),
+    }
+}
+
+/// The Downloading row's trailing affordance: a real Glyph component in
+/// place of the plain text every other state prints (Ed's standing
+/// directive — see this file's own header) — a determinate
+/// [`progress`] bar sized to [`FONT_ROW_PROGRESS_WIDTH`] when the entry's
+/// total size is known, else the indeterminate [`dots_loader`]. Either way
+/// the row's height is unchanged: both components are shorter than the
+/// two-line body beside them, and `font_pick_row`'s own `row` centers the
+/// trailing slot on the cross axis.
+fn font_row_progress(fraction: Option<f64>) -> FlexChild<AppState> {
+    match fraction {
+        Some(fraction) => inflexible(
+            SizedBox::<AppState>(Some(FONT_ROW_PROGRESS_WIDTH), None).child(progress(fraction)),
+        ),
+        None => inflexible(dots_loader()),
     }
 }
 
