@@ -1774,6 +1774,38 @@ fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
 }
 
 #[test]
+fn a_read_only_credential_refuses_a_herdr_commit_inside_the_active_tab_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    app_toasts().clear();
+    make_read_only(&mut h);
+
+    let (_before, after) = h.open_sheet();
+
+    // Inside the browsed tab, so the wire call is `FocusPane` alone — which a
+    // herdr relay drops for a read-only client without a word. The refusal is
+    // the client's, ahead of that silence: the row stays up and says why.
+    h.tap(center(pane_rows(&after)[1]));
+    h.pump_for(2 * CLOSE_DELAY);
+
+    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
+    assert_eq!(
+        focused_row(&h.frame()),
+        Some(0),
+        "…and the focused pane never moved"
+    );
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == READ_ONLY_TOAST),
+        "the row says why: {:?}",
+        app_toasts().pending_untracked()
+    );
+}
+
+#[test]
 fn a_read_only_credential_refuses_the_rename_dialog_and_says_why() {
     let _g = serial();
     let _ambient = setup();

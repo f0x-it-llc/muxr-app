@@ -59,10 +59,10 @@ pub trait TerminalRepository {
     /// The scrollback the tab keyed `key` currently shows.
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure>;
 
-    /// Make the space with [`Space::id`] `space_id` the active one. A **view**
-    /// switch rather than a mutation: which space this connection is looking at is
-    /// per-connection state the backend tracks against the routing token
-    /// [`bind`](Self::bind) recorded, so it stays available to a read-only credential.
+    /// Make the space with [`Space::id`] `space_id` the active one. Which space this
+    /// connection is looking at is per-connection state the backend tracks against
+    /// the routing token [`bind`](Self::bind) recorded — but the wire still marks
+    /// `SwitchSpace` **MUTATING**, and a read-only credential is refused it.
     async fn switch_space(&self, space_id: String) -> Result<(), AppFailure>;
 
     /// Move the session's focus to the tab with [`TabEntry::tab_id`] `tab_id`.
@@ -120,9 +120,10 @@ pub trait TerminalRepository {
 
     /// Focus the pane `pane_id` (`is_plugin` as in
     /// [`rename_pane`](Self::rename_pane)). A **view** switch rather than a
-    /// mutation, like [`switch_space`](Self::switch_space) — allowed for a
-    /// read-only credential, the wire's own `FocusPane` being the one pane action
-    /// that is not MUTATING.
+    /// mutation — the wire's own `FocusPane` is the one pane action that is not
+    /// MUTATING, so a read-only credential may send it. A backend whose relay is
+    /// per-connection (herdr) still drops it silently for such a credential, which
+    /// is why `presentation` refuses that combination before it goes out.
     async fn focus_pane(&self, _pane_id: u32, _is_plugin: bool) -> Result<(), AppFailure> {
         Err(unsupported("focus_pane"))
     }
