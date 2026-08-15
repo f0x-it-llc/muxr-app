@@ -409,10 +409,17 @@ impl TerminalController {
     /// never race their `focus_pane` calls (or their resume writes) to an order
     /// neither the badge nor the hint could reconstruct.
     ///
-    /// Nothing is re-read behind the move on either backend. Accepted residual: the
-    /// [`LAYOUT_POLL_INTERVAL`] poll answers with the focus the server holds *now*,
-    /// so a tick landing inside the relay's own apply window can briefly show the
-    /// badge back on the pane being left, until the next tick converges.
+    /// Nothing is re-read behind the move on either backend. Accepted residuals,
+    /// both transient (≤ one [`LAYOUT_POLL_INTERVAL`] tick, self-correcting): a
+    /// tick landing inside the relay's own apply window answers with the focus
+    /// the server holds *now*; and a poll whose fetch was already in flight when
+    /// the tap landed passes the staleness guard and heals the pre-commit focus
+    /// back over the badge (the old post-commit reload's generation bump used to
+    /// discard exactly that answer). The known remedy for the second — bump
+    /// [`begin_layout_fetch`](Self::begin_layout_fetch) when the badge is
+    /// written, so the commit outdates every older fetch — is deliberately not
+    /// taken here: this counter's coupling has bitten before, and the change
+    /// belongs with its own test round.
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
         let Some(_claim) = self.claim_commit() else {
             return false;
