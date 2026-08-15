@@ -815,11 +815,14 @@ impl Actions {
     /// `tab_key`, then close the sheet a beat later so the selection visibly moves
     /// first (`setTimeout(closeSheet, 260)`).
     ///
-    /// The sheet's **one** navigating gesture and its one dismissal: it stays live
-    /// for the whole close beat, so the tap can be repeated, and
-    /// [`SheetHandle::close_after`] is what makes repeating it safe — **latest tap
-    /// wins**, a second row re-times the one pending close rather than stacking a
-    /// second behind it, and the superseded wait cannot pop the `/terminal` route.
+    /// The sheet's **one** navigating gesture and its one dismissal, in two
+    /// phases. While a commit is **in flight**, a second row is dropped at the
+    /// controller's single-flight claim — **first tap wins**, and the dropped tap
+    /// schedules nothing. Once the commit has landed and the close beat is
+    /// pending, the sheet stays live and a repeat tap commits again —
+    /// [`SheetHandle::close_after`] re-times the one pending close rather than
+    /// stacking a second behind it (**latest tap wins**, only inside the beat),
+    /// and the superseded wait cannot pop the `/terminal` route.
     ///
     /// Two commits are refused client-side for a **read-only** credential, each
     /// because the server would otherwise answer with silence: one that has to move
@@ -843,8 +846,10 @@ impl Actions {
         let tab_key = tab_key.to_string();
         spawn_local(async move {
             if !controller.commit_pane(tab_key, pane_id, is_plugin).await {
-                // A refused commit leaves the sheet up: nothing moved, and the
-                // failure toast is already on its way.
+                // False covers two cases, both leaving the sheet up with no close
+                // scheduled: a refused verb (its failure toast is already on its
+                // way) and a tap dropped by the single-flight claim (silent — the
+                // first tap's commit still owns the close).
                 return;
             }
             sheet.close_after(SHEET_CLOSE_DELAY).await;

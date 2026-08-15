@@ -80,7 +80,9 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   `SwitchSpace` as unary RPCs carrying the attached stream's connection_id, never a client
   reattach: the server routes each call server-side into that connection's own relay, wire-swapping
   it onto the target pane in place, and a `GetLayout` sent with the same connection_id echoes that
-  per-connection focus back (the card's existing poll confirms rather than reverts). The feed also
+  per-connection focus back — so the card's poll confirms the optimistic badge once the relay has
+  applied the verb (a tick answering from before that point can revert it for ≤ one tick; the
+  accepted residuals live on `commit_pane`'s doc). The feed also
   carries a controller-owned `ResumeSlot` hint — the last user-driven space/tab/pane, written only by
   a landed herdr commit or space switch, never by the layout poll — on every `AttachTerminal`,
   including the feed's own backoff reconnects, so a reconnect restores the user's view instead of
