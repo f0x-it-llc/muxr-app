@@ -6,15 +6,12 @@
   `apps/muxr-app` — `Cargo.toml`'s `frust`/`clean-signals-frust` dependencies are **path**
   dependencies into that checkout (`../../crates/frust`, `../../plugins/clean-signals-frust`),
   a temporary pre-publication arrangement documented verbatim in `Cargo.toml`'s comments. Once
-  Frust crates are published this app will depend on versions instead. The terminal screen adds two
-  of the checkout's OS-capability plugins the same temporary way: `frust-clipboard`
-  (`../../plugins/clipboard`, the Copy chip's clipboard write) and `frust-haptics`
-  (`../../plugins/haptics`, the selection-click tick) — the latter needs Android's
-  `android.permission.VIBRATE`, already checked into `AndroidManifest.xml` (a normal permission,
-  granted at install with no runtime prompt). The `muxrd` network layer path-depends on three more
-  (`../../plugins/shared-preferences`, `../../plugins/secure-storage`, `../../plugins/camera`) plus
-  `../../crates/frust-plugin` for its Android JNI accessor — all in the same checkout; each
-  plugin's own manifest/plist entries land with the code that consumes it.
+  Frust crates are published this app will depend on versions instead. The terminal screen and the
+  `muxrd` network layer add five more OS-capability plugins the same temporary way —
+  `frust-clipboard`, `frust-haptics` (needs Android's `android.permission.VIBRATE`, already checked
+  into `AndroidManifest.xml`), `frust-shared-preferences`, `frust-secure-storage`, `frust-camera` —
+  plus `../../crates/frust-plugin` for the Android JNI accessor, all under `../../plugins/<name>` in
+  the same checkout.
 - No `clean-signals-rs` sibling checkout is required: `clean-signals` itself isn't published
   yet, so `Cargo.toml` git+rev-pins it directly (`rev = "910f626"` on `master`) to its public
   repo — the identical spec `clean-signals-frust`'s own `clean-signals` dependency uses, so
@@ -53,9 +50,13 @@ cp <muxr-core>/muxrd/proto/muxr.proto proto/muxr.proto   # then re-add the heade
 # update the rev recorded in that header, and rebuild
 ```
 
-Re-copy the file wholesale and never hand-patch a message: wire drift then
-shows up as a codegen or type error at the call sites that consumed the old
-shape, instead of a silent decode mismatch against a live server.
+Re-copy the file wholesale and never hand-patch a message: wire drift then shows up as a codegen
+or type error at the call sites that consumed the old shape, instead of a silent decode mismatch
+against a live server. **One recorded exception:** `AttachReq`'s three `resume_*` fields (4/5/6)
+are hand-patched ahead of rev `ec6b032`, sourced from muxr-core's unmerged
+`fix/herdr-resumable-attach` (`cf2154e`) — no merged rev exists yet to re-copy from (the vendored
+file's own header carries this as a tripwire). Retires at the next wholesale re-copy, once that
+branch merges or releases.
 
 Because the gRPC stack brings TLS with a C-built crypto provider (**aws-lc-rs**,
 rustls' default and tonic's `tls-aws-lc` feature — the one provider in the tree,
