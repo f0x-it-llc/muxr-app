@@ -1357,6 +1357,36 @@ fn a_pane_row_commits_the_browse_and_then_closes_the_sheet() {
 }
 
 #[test]
+fn a_landed_herdr_commit_closes_the_sheet_on_the_documented_beat() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    let (_before, after) = h.open_sheet();
+    // The second pane of the tab the session is on: `FocusPane` alone, which on
+    // herdr is the whole move (the server re-points this connection's relay).
+    h.tap(center(pane_rows(&after)[1]));
+    assert_eq!(
+        h.depth(),
+        REST_DEPTH + 1,
+        "the beat starts with the sheet still up"
+    );
+
+    // `pump_until_closed` rides out exactly two `CLOSE_DELAY` beats, so a
+    // commit that waited on anything behind the verb would time out here.
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert_eq!(h.depth(), REST_DEPTH, "…and the beat is the documented one");
+
+    let (_, reopened) = h.open_sheet();
+    assert_eq!(
+        focused_row(&reopened),
+        Some(1),
+        "the optimistic badge stands, and the layout read behind the reopen \
+         confirms it rather than reverting it"
+    );
+}
+
+#[test]
 fn the_focused_badge_follows_a_commit_the_next_time_the_sheet_opens() {
     let _g = serial();
     let _ambient = setup();
@@ -1503,24 +1533,26 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     h.settle();
     h.tap_pane_row(0);
 
-    // Latest tap wins: the second commit is the one that lands…
-    h.pump_until_values("the minefit tab", |values| {
-        values.iter().any(|v| v == MINEFIT_TITLE)
+    // The commit is single-flight, so the second row is *dropped* rather than
+    // raced against the first: the first selection is the one that lands…
+    h.pump_until_values("the btop tab", |values| {
+        values.iter().any(|v| v == BTOP_TITLE)
     });
     // …one close fires (`<=`, not `==`: two stacked closes can land in the
     // same rebuild, and this test must report *that* rather than time out)…
     h.pump_until_closed("the sheet to close", |h| h.depth() <= floor);
-    // …and the superseded one, given every chance to wake, lands on nothing.
+    // …and the dropped row, given every chance to wake, lands on nothing: it
+    // never reached the controller, so it never took a close ticket either.
     h.pump_for(2 * CLOSE_DELAY);
 
     assert_eq!(
         h.depth(),
         floor,
-        "the second close never popped the route under the sheet"
+        "no second close popped the route under the sheet"
     );
     assert!(
-        h.shows(MINEFIT_TITLE) && !h.shows(BTOP_TITLE),
-        "the second selection is the one applied: {:?}",
+        h.shows(BTOP_TITLE) && !h.shows(MINEFIT_TITLE),
+        "the dropped row moved neither the card nor the session: {:?}",
         h.values()
     );
 }
@@ -1722,11 +1754,52 @@ fn a_read_only_credential_withdraws_the_sheets_three_create_affordances() {
         3 + 4,
         "a read-only session is offered no create: {sheet:?}"
     );
-    // The pills stay tappable — browsing a tab reads what is already loaded,
-    // and switching a space is a per-connection *view* change.
+    // The tab pills stay tappable — browsing one reads what is already loaded
+    // and moves nothing. A space pill paints too, but its switch is refused:
+    // see `a_read_only_credential_refuses_a_space_switch_and_says_why`.
     h.tap(center(pills(&sheet)[3]));
     h.settle();
     assert!(h.shows(&format!("{SECTION_PANES}btop")), "the browse moved");
+}
+
+#[test]
+fn a_read_only_credential_refuses_a_space_switch_and_says_why() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    app_toasts().clear();
+    make_read_only(&mut h);
+
+    let (before, after) = h.open_sheet();
+    let sheet = added(&before.rounded, &after.rounded);
+
+    // "cupline" is the first space pill and, per the seed, not the selected one
+    // (`forgekit` is) — so a switch that went through would be visible.
+    h.tap(center(pills(&sheet)[0]));
+    h.pump_for(2 * CLOSE_DELAY);
+
+    let selected: Vec<String> = debug_controller()
+        .expect("mounted")
+        .spaces
+        .get_untracked()
+        .into_iter()
+        .filter(|space| space.selected)
+        .map(|space| space.name)
+        .collect();
+    assert_eq!(
+        selected,
+        ["forgekit"],
+        "`SwitchSpace` is MUTATING, so the pill is turned back here rather \
+         than at the server"
+    );
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == READ_ONLY_TOAST),
+        "…and the pill says why: {:?}",
+        app_toasts().pending_untracked()
+    );
 }
 
 #[test]

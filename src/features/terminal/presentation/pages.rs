@@ -852,10 +852,19 @@ impl Actions {
     }
 
     /// Switch this connection's view to the space with id `id`, reloading the tab
-    /// world behind it. The sheet stays up, and the pill stays tappable for a
-    /// read-only credential: `SwitchSpace` is MUTATING on the wire, but it refuses
-    /// explicitly, so the refusal reaches the toast bridge rather than vanishing.
+    /// world behind it. The sheet stays up.
+    ///
+    /// `SwitchSpace` is **MUTATING** on the wire, so a read-only credential is
+    /// refused here rather than at the server — the same pre-emption the rename
+    /// dialog and a herdr commit make, and for the same reason: the pill stays on
+    /// screen and says why. Every *other* refusal is still the server's, and
+    /// reaches the toast bridge through the controller's own failure sink.
     pub fn select_space(&self, id: &str) {
+        // Untracked: a press handler has no reactive owner on desktop.
+        if self.connection.is_read_only.get_untracked() {
+            app_toasts().show(READ_ONLY_TOAST);
+            return;
+        }
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
         spawn_local(async move { controller.select_space(id).await });
