@@ -24,7 +24,7 @@
 //! than in `crate::ui`, promoted to the shared layer only once a second
 //! feature needs one, same as `examples/huddle`'s `ui::fill_box` precedent.
 //! Each takes already-resolved [`Color`]s/[`TextStyle`]s — their callers
-//! ([`super::pieces`]) resolve every one from the active [`frust::Theme`]
+//! ([`super::widgets`]) resolve every one from the active [`frust::Theme`]
 //! once per build, so these stay dumb about theming.
 
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
@@ -346,7 +346,7 @@ enum ControlKind {
 }
 
 /// Give `child` — today, the real `frust::switch` the remember toggle wraps
-/// (`super::pieces::remember_row`) — the one accessibility detail it cannot
+/// (`super::widgets::trust::remember_row`) — the one accessibility detail it cannot
 /// grow itself: a **labelled**, toggled [`Role::Switch`] advertising the
 /// [`Action::Click`] it fires.
 ///

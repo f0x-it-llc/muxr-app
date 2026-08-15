@@ -18,7 +18,12 @@
 //!
 //! **Token hygiene**: the plaintext auth token is zeroized as soon as the
 //! `Login` request is built; the minted session token is scrubbed out of the
-//! response once the client holds it. **Threading**: a real dial runs on the
+//! response once the client holds it, and the controller zeroizes its own
+//! buffer both on a successful connect **and** on disconnect. Carve-out:
+//! transient plaintext copies the render pass paints (a password field's
+//! glyphs) and the platform IME surface holds while typing are **not**
+//! covered — they persist until platform-level input masking lands.
+//! **Threading**: a real dial runs on the
 //! background runtime ([`frust::spawn`]); a UI-thread coordinator
 //! ([`frust::spawn_local`]) awaits it and is the **sole signal writer** — no
 //! signal is written off the UI thread. **Failures** emit through the

@@ -20,6 +20,9 @@ use crate::ui::sheet::SheetHandle;
 use crate::ui::spacing;
 
 use super::super::chrome::{term_box, wrap_row};
+// A sanctioned pages -> widgets back-edge (see `widgets`' own module docs and
+// `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph) — this module is not
+// independently composable from `pages` the way most of its siblings are.
 use super::super::pages::Actions;
 use super::panes::{PANE_ROW_GAP, new_pane_row, pane_item};
 use super::pills::{PILL_GAP, PillState, pill};

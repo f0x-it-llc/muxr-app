@@ -1417,7 +1417,7 @@ fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
 // feed down, and the spaces section must follow the attached session's backend.
 
 /// The sheet's pane rows, top to bottom — the `--bg-base` tiles
-/// (`presentation::pieces`' `Palette::base`, the scheme's
+/// (`ui::palette::Palette::base`, the scheme's
 /// `surface_container_low`), which nothing else on this screen paints.
 fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
     let base = Theme::glyph_baseline().scheme().surface_container_low;

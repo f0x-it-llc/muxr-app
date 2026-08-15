@@ -28,7 +28,8 @@
 //! mounts it at all** any more. It is app chrome `crate::shell` owns, titled
 //! per route from `crate::routes::route_meta`, so its title crossfades across a
 //! navigation instead of being torn down and rebuilt with each screen (the
-//! terminal screen's `⋮` joins that one bar's trailing slot in Phase 3).
+//! terminal screen's `⋮` joins that one bar's trailing slot as
+//! [`crate::routes::BarAction::TerminalMenu`]).
 
 pub mod backdrop;
 pub mod dialogs;
