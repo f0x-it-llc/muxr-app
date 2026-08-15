@@ -363,6 +363,12 @@ pub struct AttachObservation {
     /// `rows`-first; the app counts `cols` x `rows`).
     pub cols: u16,
     pub rows: u16,
+    /// The resume hints the frame carried, **verbatim** — proto3 defaults
+    /// (`""`/`0`) are what "no hint" looks like on the wire, so a test asserting
+    /// a hint-less attach asserts exactly these.
+    pub resume_space_id: String,
+    pub resume_tab_id: u64,
+    pub resume_pane_id: u32,
 }
 
 /// One observed `mouse` frame on an `AttachTerminal` stream.
@@ -640,6 +646,9 @@ impl Muxr for FixtureService {
                 session: attach.session,
                 cols: cells(attach.cols),
                 rows: cells(attach.rows),
+                resume_space_id: attach.resume_space_id,
+                resume_tab_id: attach.resume_tab_id,
+                resume_pane_id: attach.resume_pane_id,
             },
             commands_tx,
         );
@@ -1071,6 +1080,7 @@ mod tests {
                     session: "alpha".to_string(),
                     rows: 24,
                     cols: 80,
+                    ..Default::default()
                 })),
             })
             .await

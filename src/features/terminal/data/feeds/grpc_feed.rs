@@ -6,8 +6,9 @@
 //! replayed for anything else.
 //!
 //! **Wire contract** (`proto/muxr.proto`): `attach: AttachReq{session, rows,
-//! cols}` is the **mandatory first frame** of every stream, reconnects included,
-//! then `input`/`resize`/`mouse` out and `render`/`control` back. Input goes **on
+//! cols}` — plus the [`ResumeTarget`] hints, when one is set — is the
+//! **mandatory first frame** of every stream, reconnects included, then
+//! `input`/`resize`/`mouse` out and `render`/`control` back. Input goes **on
 //! the stream**, never through `WriteToPane`, so a keystroke keeps its order
 //! relative to the resizes around it; the attach frame replays the **current**
 //! grid, since [`TerminalFeed::resize`] caches `cols`/`rows`. Two control kinds
@@ -112,6 +113,75 @@ pub enum FeedStatus {
     Closed,
 }
 
+/// Where a **fresh** attach should land, as far as this client knows: the
+/// space/tab/pane the user last moved to themselves.
+///
+/// Sent on every `AttachReq` — see [`ResumeSlot`] for why only user-driven moves
+/// write it. Every field is best-effort and independent: the server resolves them
+/// pane → tab → space and falls through on anything stale, so an unset field
+/// (`None`, the wire's proto3 default) is simply no hint, and a hint the server
+/// cannot resolve is not an error. herdr sessions only; a zellij attach is the
+/// whole composited session and follows the server's own focus.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResumeTarget {
+    /// The opaque herdr workspace id (`Space::id`).
+    pub space_id: Option<String>,
+    /// The tab id `GetLayout` emits (`TabEntry::tab_id`).
+    pub tab_id: Option<u64>,
+    /// The pane id `GetLayout` emits (`PaneEntry::id`).
+    pub pane_id: Option<u32>,
+}
+
+/// The shared, updatable [`ResumeTarget`] a feed attaches with: the screen writes
+/// it, the pump reads it on **every** attach — the first one and each backoff
+/// reconnect alike, since both go through one code path.
+///
+/// Held behind an `Arc` rather than reached through the feed handle, because the
+/// two ends live on different sides of the screen's `Rc`/`Arc` split: the feed is
+/// owned by the live session (`Rc`, UI thread), the writer is the controller
+/// (`Arc`, `Send + Sync`).
+///
+/// **Only user-driven moves write it** (the controller's own contract): a layout
+/// poll answers with whatever focus the *server* currently reports, which after a
+/// reconnect is the daemon-global one — recording that would overwrite the very
+/// intent this slot exists to replay.
+#[derive(Debug, Default)]
+pub struct ResumeSlot {
+    target: Mutex<ResumeTarget>,
+}
+
+impl ResumeSlot {
+    /// The hint as it stands. Poisoning is recovered from rather than propagated:
+    /// a panic elsewhere must not wedge every later attach.
+    pub fn target(&self) -> ResumeTarget {
+        self.target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Remember the pane a user just committed to, in the tab it lives in
+    /// (`None` when the tab is no longer listed — the pane rung of the server's
+    /// ladder still resolves on its own). The space is **kept**: it is the axis
+    /// that survives a restart the numeric ids do not.
+    pub fn remember_pane(&self, tab_id: Option<u64>, pane_id: u32) {
+        let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+        target.tab_id = tab_id;
+        target.pane_id = Some(pane_id);
+    }
+
+    /// Remember the space a user just switched to, clearing the tab and pane
+    /// hints — those named a tab and a pane of the space being left.
+    pub fn remember_space(&self, space_id: String) {
+        let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+        *target = ResumeTarget {
+            space_id: Some(space_id),
+            tab_id: None,
+            pane_id: None,
+        };
+    }
+}
+
 /// A live `muxrd` terminal session behind the
 /// [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed) port.
 /// See the [module docs](self). Dropping it stops the pump and closes the request
@@ -130,6 +200,8 @@ impl GrpcTerminalFeed {
     ///
     /// `on_auth_expired` fires at most once, on the first `UNAUTHENTICATED` this
     /// session sees; the caller wires it to whatever owns the app's credential.
+    /// `resume` is the shared hint every attach this feed makes carries — see
+    /// [`ResumeSlot`]; a caller with nothing to resume hands over a default one.
     /// The pump runs on the background reactive runtime, so this must be called
     /// with that runtime up — i.e. from app code, never a bare `#[tokio::test]`.
     pub fn attach(
@@ -138,6 +210,7 @@ impl GrpcTerminalFeed {
         cols: u16,
         rows: u16,
         on_auth_expired: Box<dyn Fn() + Send + Sync>,
+        resume: Arc<ResumeSlot>,
     ) -> Self {
         let (feed, pump) = Self::build(Pump {
             client,
@@ -145,7 +218,7 @@ impl GrpcTerminalFeed {
             backoff: RECONNECT_BACKOFF.to_vec(),
             waiter: Waiter::Frust,
             on_auth_expired,
-            shared: Arc::new(Shared::new(cols, rows)),
+            shared: Arc::new(Shared::new(cols, rows, resume)),
         });
         frust::spawn(pump);
         feed
@@ -212,6 +285,12 @@ impl GrpcTerminalFeed {
         self.shared.state().read_pauses
     }
 
+    /// The hint the **next** attach this feed makes will carry — the slot's
+    /// current value, read through the feed for a caller holding only the feed.
+    pub fn resume_target(&self) -> ResumeTarget {
+        self.shared.resume.target()
+    }
+
     /// The feed and its pump future, unspawned. The one construction path.
     fn build(pump: Pump) -> (Self, impl Future<Output = ()> + Send + use<>) {
         let feed = Self {
@@ -231,6 +310,7 @@ impl GrpcTerminalFeed {
         rows: u16,
         on_auth_expired: Box<dyn Fn() + Send + Sync>,
         backoff: &[Duration],
+        resume: Arc<ResumeSlot>,
     ) -> (Self, impl Future<Output = ()> + Send + use<>) {
         Self::build(Pump {
             client,
@@ -238,7 +318,7 @@ impl GrpcTerminalFeed {
             backoff: backoff.to_vec(),
             waiter: Waiter::Tokio,
             on_auth_expired,
-            shared: Arc::new(Shared::new(cols, rows)),
+            shared: Arc::new(Shared::new(cols, rows, resume)),
         })
     }
 }
@@ -366,6 +446,10 @@ struct Shared {
     drained: Notify,
     shutdown: AtomicBool,
     retry: AtomicBool,
+    /// Where the next attach should land — its own lock, not a [`State`] field,
+    /// since the screen writes it from the UI thread while the pump holds `state`
+    /// across a whole attempt's bookkeeping.
+    resume: Arc<ResumeSlot>,
 }
 
 struct State {
@@ -438,7 +522,7 @@ impl Waiter {
 }
 
 impl Shared {
-    fn new(cols: u16, rows: u16) -> Self {
+    fn new(cols: u16, rows: u16, resume: Arc<ResumeSlot>) -> Self {
         Self {
             state: Mutex::new(State {
                 inbound: VecDeque::new(),
@@ -457,6 +541,7 @@ impl Shared {
             drained: Notify::new(),
             shutdown: AtomicBool::new(false),
             retry: AtomicBool::new(false),
+            resume,
         }
     }
 
@@ -610,15 +695,26 @@ async fn run_pump(pump: Pump) {
 
 /// One attach attempt: open the stream with its mandatory first frame, then pump
 /// it until it ends.
+///
+/// The **one** place an `AttachReq` is built, which is what makes the resume hint
+/// ride the backoff reconnect as well as the first attach: the loop above calls
+/// this for both. The hint is read here rather than captured with the pump, so a
+/// move the user made while the link was down is the one that lands.
 async fn attach(client: &MuxrClient, session: &str, shared: &Shared) -> Attempt {
     let (outbound, requests) = mpsc::channel(OUTBOUND_CAPACITY);
     let (cols, rows) = shared.dims();
+    let resume = shared.resume.target();
     if outbound
         .try_send(ClientFrame {
             kind: Some(client_frame::Kind::Attach(AttachReq {
                 session: session.to_string(),
                 rows: u32::from(rows),
                 cols: u32::from(cols),
+                // Unset spells itself as the wire's proto3 default, which is the
+                // hint-less shape the server reads as "today's behavior".
+                resume_space_id: resume.space_id.unwrap_or_default(),
+                resume_tab_id: resume.tab_id.unwrap_or_default(),
+                resume_pane_id: resume.pane_id.unwrap_or_default(),
             })),
         })
         .is_err()
@@ -843,6 +939,19 @@ mod tests {
             rows: u16,
             backoff: &[Duration],
         ) -> (GrpcTerminalFeed, Arc<AtomicU64>) {
+            self.feed_resuming(cols, rows, backoff, Arc::new(ResumeSlot::default()))
+        }
+
+        /// [`feed_with`](Self::feed_with) over a caller-held [`ResumeSlot`] — the
+        /// screen's own handle onto the hint, which a test writes *between* two
+        /// attaches the way a user's move does.
+        fn feed_resuming(
+            &self,
+            cols: u16,
+            rows: u16,
+            backoff: &[Duration],
+            resume: Arc<ResumeSlot>,
+        ) -> (GrpcTerminalFeed, Arc<AtomicU64>) {
             let expiries = Arc::new(AtomicU64::new(0));
             let bump = Arc::clone(&expiries);
             let (feed, pump) = GrpcTerminalFeed::detached(
@@ -854,6 +963,7 @@ mod tests {
                     bump.fetch_add(1, Ordering::Relaxed);
                 }),
                 backoff,
+                resume,
             );
             tokio::spawn(pump);
             (feed, expiries)
@@ -909,7 +1019,7 @@ mod tests {
     }
 
     /// The mandatory first frame carries the session and the grid the feed was
-    /// built at.
+    /// built at — and, with nothing to resume, nothing else.
     #[tokio::test]
     async fn attach_carries_the_session_and_the_grid() {
         let rig = Rig::start().await;
@@ -923,12 +1033,128 @@ mod tests {
         let attach = script.attaches().remove(0);
         assert_eq!(attach.session, SESSION);
         assert_eq!((attach.cols, attach.rows), (80, 24));
+        assert_eq!(
+            (
+                attach.resume_space_id.as_str(),
+                attach.resume_tab_id,
+                attach.resume_pane_id
+            ),
+            ("", 0, 0),
+            "a session with no history behind it attaches exactly as it always \
+             did: the resume fields sit at their proto3 defaults"
+        );
 
         wait_until("the feed reports itself connected", || {
             feed.status() == FeedStatus::Connected
         })
         .await;
         assert!(feed.is_open());
+    }
+
+    /// The hint the screen recorded rides the **reconnect's** own attach frame —
+    /// the whole point of the slot: the first stream carried nothing, the move
+    /// happened while it was up, and the fresh attach asks for it back.
+    #[tokio::test]
+    async fn a_reconnect_attaches_with_the_resume_target_the_screen_recorded() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let resume = Arc::new(ResumeSlot::default());
+        let (feed, _) = rig.feed_resuming(80, 24, &TEST_BACKOFF, Arc::clone(&resume));
+        wait_until("the stream is up", || {
+            feed.status() == FeedStatus::Connected
+        })
+        .await;
+        assert_eq!(
+            script.attaches().remove(0).resume_pane_id,
+            0,
+            "the first attach had nothing to resume"
+        );
+
+        // What the sheet's two user-driven moves write, in the order a user makes
+        // them: a space switch, then a pane commit inside it.
+        resume.remember_space("ws-7".to_string());
+        resume.remember_pane(Some(42), 7);
+        script.kill();
+
+        wait_until("the feed re-attaches", || script.attach_count() == 2).await;
+        let reattach = script.attaches().remove(1);
+        assert_eq!(
+            (
+                reattach.resume_space_id.as_str(),
+                reattach.resume_tab_id,
+                reattach.resume_pane_id
+            ),
+            ("ws-7", 42, 7),
+            "the reconnect names the space, tab and pane the user last chose \
+             instead of taking the daemon's global focus"
+        );
+        assert_eq!(
+            reattach.session, SESSION,
+            "…and everything else about the frame is unchanged"
+        );
+        assert_eq!(
+            feed.resume_target(),
+            ResumeTarget {
+                space_id: Some("ws-7".to_string()),
+                tab_id: Some(42),
+                pane_id: Some(7),
+            },
+            "the feed reads the screen's live slot, not a copy taken at attach"
+        );
+    }
+
+    /// The slot's own rules, the ones the controller's two user-driven paths lean
+    /// on: a pane move keeps the space (the rung that survives a muxrd restart),
+    /// a space move drops the tab/pane that belonged to the space being left, and
+    /// a pane move with no known tab clears the stale tab rather than keeping it.
+    #[test]
+    fn a_pane_move_keeps_the_space_and_a_space_move_clears_the_tab_and_pane() {
+        let slot = ResumeSlot::default();
+        assert_eq!(slot.target(), ResumeTarget::default(), "no hint to start");
+
+        slot.remember_space("ws-1".to_string());
+        assert_eq!(
+            slot.target(),
+            ResumeTarget {
+                space_id: Some("ws-1".to_string()),
+                tab_id: None,
+                pane_id: None,
+            }
+        );
+
+        slot.remember_pane(Some(3), 31);
+        assert_eq!(
+            slot.target(),
+            ResumeTarget {
+                space_id: Some("ws-1".to_string()),
+                tab_id: Some(3),
+                pane_id: Some(31),
+            },
+            "a pane move refines the hint rather than replacing it"
+        );
+
+        slot.remember_space("ws-2".to_string());
+        assert_eq!(
+            slot.target(),
+            ResumeTarget {
+                space_id: Some("ws-2".to_string()),
+                tab_id: None,
+                pane_id: None,
+            },
+            "a tab and a pane of the space just left would resume the wrong view"
+        );
+
+        slot.remember_pane(None, 12);
+        assert_eq!(
+            slot.target(),
+            ResumeTarget {
+                space_id: Some("ws-2".to_string()),
+                tab_id: None,
+                pane_id: Some(12),
+            },
+            "an unlisted tab leaves the tab rung unset — never a stale id the \
+             server would resolve to some other tab"
+        );
     }
 
     /// Keystrokes reach the server as `input` frames, and what the server sends back

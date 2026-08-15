@@ -22,8 +22,10 @@
 //! [`publish_tabs`](TerminalController::publish_tabs), self-healing
 //! active/browsed keys, and single-flight claims on the poll and on creates.
 //! [`is_herdr`] is the one backend discriminator: only herdr has spaces, only
-//! herdr settles a landed focus move before re-reading the layout, and the
-//! grid's content-tap hook is never wired there.
+//! herdr settles a landed focus move before re-reading the layout, only herdr
+//! records a move as the stream's resume hint
+//! ([`ResumeSlot`](crate::features::terminal::data::feeds::grpc_feed::ResumeSlot)),
+//! and the grid's content-tap hook is never wired there.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -40,7 +42,7 @@ use frust::{GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
-use crate::features::terminal::data::feeds::grpc_feed::{FeedStatus, GrpcTerminalFeed};
+use crate::features::terminal::data::feeds::grpc_feed::{FeedStatus, GrpcTerminalFeed, ResumeSlot};
 use crate::features::terminal::domain::entities::{
     PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
 };
@@ -137,6 +139,11 @@ pub struct TerminalController {
     /// Test/diagnostic-only counterpart of
     /// [`appearance_writes`](Self::appearance_writes), for layout fetches.
     layout_writes: AtomicU64,
+    /// Where a **fresh** attach should land: the space/tab/pane this user last
+    /// moved to. Handed to every feed this screen opens
+    /// ([`resume_slot`](Self::resume_slot)) and written by the two user-driven
+    /// moves alone — see [`remember_resume_pane`](Self::remember_resume_pane).
+    resume: Arc<ResumeSlot>,
 }
 
 /// The shipped default font size, px — settings' own `Preferences::defaults()`,
@@ -291,6 +298,7 @@ impl TerminalController {
             create_in_flight: AtomicBool::new(false),
             attach_settled: AtomicBool::new(false),
             layout_writes: AtomicU64::new(0),
+            resume: Arc::new(ResumeSlot::default()),
         }
     }
 
@@ -303,6 +311,13 @@ impl TerminalController {
     /// The attached session's id, if this screen was reached with one.
     pub fn session_id(&self) -> Option<String> {
         self.session_id.clone()
+    }
+
+    /// The resume hint every feed this screen opens attaches with — a second
+    /// handle onto the same slot, not a copy, so a move recorded after the feed
+    /// was built still rides its next reconnect. See [`ResumeSlot`].
+    pub fn resume_slot(&self) -> Arc<ResumeSlot> {
+        Arc::clone(&self.resume)
     }
 
     /// Load the whole screen (spaces, tabs, the active tab's lines, the attached
@@ -401,15 +416,18 @@ impl TerminalController {
     /// 2. then the pane focus itself, on **every** backend: the verb is what moves a
     ///    herdr session too, where the server wire-swaps *this connection's* relay
     ///    onto the target pane's terminal in place. The attached stream must stay
-    ///    open across it — a fresh attach carries no pane target, so re-opening one
-    ///    lands back on whatever the daemon has globally focused;
+    ///    open across it — a fresh attach can only *ask* for the same pane (the
+    ///    resume hint a reconnect replays), and an older server ignores that field
+    ///    and lands on whatever the daemon has globally focused;
     /// 3. then the focused flag moves in this screen's own tab state, optimistically:
     ///    the layout reads that follow are answered against this connection's own
     ///    focus, so they confirm the badge rather than reverting it.
     ///
     /// A refused step stops the sequence, emits on the usual failure sink, and writes
-    /// **no** optimistic state. A landed herdr commit then waits out
-    /// [`SWITCH_SETTLE`] and re-reads the layout, since the relay acked it on enqueue.
+    /// **no** optimistic state. A landed herdr commit then records the move as the
+    /// stream's resume hint ([`remember_resume_pane`](Self::remember_resume_pane)),
+    /// waits out [`SWITCH_SETTLE`] and re-reads the layout, since the relay acked it
+    /// on enqueue.
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
         if tab_key != self.active_tab.get_untracked() && !self.switch_tab(tab_key.clone()).await {
             return false;
@@ -422,6 +440,9 @@ impl TerminalController {
         }
         self.focus_pane_locally(&tab_key, pane_id, is_plugin);
         if self.is_herdr_session() {
+            // Before the settle, not after: a reload that fails must not cost the
+            // hint a reconnect would replay.
+            self.remember_resume_pane(&tab_key, pane_id);
             self.settle_switch().await;
             self.reload_tabs().await;
         }
@@ -474,14 +495,35 @@ impl TerminalController {
         self.tabs.set(tabs);
     }
 
+    /// Record the pane of the tab keyed `tab_key` as where a **fresh** attach should
+    /// land — the resume half of a landed herdr commit, written from this
+    /// user-driven path and no other.
+    ///
+    /// The rule this obeys ([`ResumeSlot`]'s own contract): a layout read reports the
+    /// focus the *server* currently holds, which right after a reconnect is the
+    /// daemon-global one — so [`publish_tabs`](Self::publish_tabs) and the poll behind
+    /// it must never write here, or the hint would be overwritten by exactly the
+    /// focus it exists to correct. The space is left standing: it survives a muxrd
+    /// restart the numeric tab/pane ids do not, so it stays the durable rung.
+    fn remember_resume_pane(&self, tab_key: &str, pane_id: u32) {
+        self.resume.remember_pane(self.tab_id_for(tab_key), pane_id);
+    }
+
     /// Make the space with [`Space::id`] `id` the active one and reload the tab world
     /// behind it — the reload is the point: a space *is* a different set of tabs. The
     /// wire marks `SwitchSpace` MUTATING (see [`TerminalRepository::switch_space`]),
     /// and this client does not pre-empt that: a read-only credential's switch is
     /// refused by the server, and the refusal reaches the usual failure sink.
+    ///
+    /// A landed switch also becomes the stream's resume hint — spaces are herdr's
+    /// alone, and the space is the rung of that hint a muxrd restart cannot stale
+    /// (see [`remember_resume_pane`](Self::remember_resume_pane)).
     pub async fn select_space(&self, id: String) {
-        if !self.tell(self.terminal.switch_space(id)).await {
+        if !self.tell(self.terminal.switch_space(id.clone())).await {
             return;
+        }
+        if self.is_herdr_session() {
+            self.resume.remember_space(id);
         }
         self.load().await;
     }
@@ -937,9 +979,11 @@ const HERDR_BACKEND: &str = "herdr:";
 
 /// Drop the current `AttachTerminal` stream and open a fresh one at the grid's current
 /// size — [`LiveSession::reattach`]'s shareable form, and **recovery only** (the link
-/// strip's Retry): a fresh attach carries no pane target, so re-opening a stream is
-/// how a herdr session lands back on the daemon's globally focused pane. A boxed
-/// closure rather than a method because it owns the [`AttachSpec`] the reopen needs.
+/// strip's Retry): a fresh attach carries the resume hint as a *best-effort* request,
+/// never the in-place retarget a live stream's focus verbs are, so re-opening a stream
+/// is still how a herdr session risks landing on the daemon's globally focused pane.
+/// A boxed closure rather than a method because it owns the [`AttachSpec`] the reopen
+/// needs.
 pub type Reattach = Rc<dyn Fn()>;
 
 /// Whether the session with id `session` runs on the **herdr** backend — this screen's
@@ -1040,6 +1084,10 @@ struct AttachSpec {
     /// writing a signal is forbidden (`crate::connection`'s threading note), so it can
     /// only raise a flag; the UI-thread poll tick turns that flag into the teardown.
     auth_expired: Arc<AtomicBool>,
+    /// The controller's resume slot ([`TerminalController::resume_slot`]), handed to
+    /// every feed this spec opens — the screen's half of the hint every `AttachReq`
+    /// carries.
+    resume: Arc<ResumeSlot>,
 }
 
 impl LiveSession {
@@ -1065,6 +1113,7 @@ impl LiveSession {
                 connection: Arc::clone(connection),
                 session,
                 auth_expired: Arc::new(AtomicBool::new(false)),
+                resume: controller.resume_slot(),
             };
             let (cols, rows) = emulator.borrow().size();
             let feed = spec.attach(cols, rows)?;
@@ -1210,6 +1259,7 @@ impl AttachSpec {
             cols,
             rows,
             Box::new(move || flag.store(true, Ordering::Release)),
+            Arc::clone(&self.resume),
         ))
     }
 
@@ -1269,6 +1319,7 @@ mod tests {
     use crate::features::sessions::data::repositories::MockSessionsRepository;
     use crate::features::settings::data::repositories::MockPreferencesRepository;
     use crate::features::settings::domain::entities::AppearancePrefs;
+    use crate::features::terminal::data::feeds::grpc_feed::ResumeTarget;
     use crate::features::terminal::data::repositories::MockTerminalRepository;
 
     /// The test-wiring composition root: all three mocks behind their domain traits.
@@ -1668,6 +1719,13 @@ mod tests {
         /// Stamp every later `list_tabs` answer with its own call number.
         fn stamp_lists(&self) {
             self.stamp.store(true, Ordering::Relaxed);
+        }
+
+        /// Answer `focus` on every later `list_tabs`, whatever this client asked
+        /// for — how a layout read reporting the *daemon's* own focus (what a
+        /// fresh herdr attach lands on) is staged.
+        fn report_focus(&self, focus: (u32, bool)) {
+            *self.focused.lock().unwrap_or_else(PoisonError::into_inner) = Some(focus);
         }
 
         /// Park this call for whatever [`delay_calls`](Self::delay_calls) queued.
@@ -2181,6 +2239,121 @@ mod tests {
             "the refused switch, and no reload behind it"
         );
         assert!(c.loaded.get_untracked());
+    }
+
+    // The reconnect resume hint: which paths write it, and which must not.
+
+    #[test]
+    fn a_herdr_commit_records_the_move_as_the_reconnects_resume_hint() {
+        let _override = SwitchSettleOverride::install(Duration::ZERO);
+        let (c, _repository) = recorded("herdr:work");
+        c.attach_live();
+        c.browse_tab("beta".to_string());
+
+        assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
+
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: None,
+                tab_id: Some(2),
+                pane_id: Some(21),
+            },
+            "a reconnect must ask for the pane the user chose, not the one the \
+             daemon has globally focused"
+        );
+    }
+
+    #[test]
+    fn a_space_switch_records_the_space_and_a_commit_after_it_keeps_it() {
+        let _override = SwitchSettleOverride::install(Duration::ZERO);
+        let (c, _repository) = recorded("herdr:work");
+        c.attach_live();
+
+        block_on(c.select_space("ws-2".to_string()));
+
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: Some("ws-2".to_string()),
+                tab_id: None,
+                pane_id: None,
+            },
+            "the tab and pane hints named the space just left"
+        );
+
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: Some("ws-2".to_string()),
+                tab_id: Some(1),
+                pane_id: Some(11),
+            },
+            "the space rides along with every later move — it is the rung a \
+             muxrd restart cannot stale"
+        );
+    }
+
+    #[test]
+    fn a_refused_move_records_no_resume_hint_at_all() {
+        let _override = SwitchSettleOverride::install(Duration::ZERO);
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.refuse("switch_space");
+        block_on(c.select_space("ws-2".to_string()));
+
+        repository.refuse("focus_pane");
+        assert!(!block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget::default(),
+            "a move the server refused never happened, so there is nothing to \
+             resume onto"
+        );
+    }
+
+    #[test]
+    fn a_zellij_commit_records_no_resume_hint() {
+        let (c, _repository) = recorded("zellij:dev");
+
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget::default(),
+            "a zellij stream is the whole composited session and follows the \
+             server's own focus: its attach carries no resume fields, ever"
+        );
+    }
+
+    #[test]
+    fn a_layout_read_never_writes_the_resume_hint() {
+        let _override = SwitchSettleOverride::install(Duration::ZERO);
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+        let recorded_move = c.resume_slot().target();
+
+        // What a poll answers with after a reconnect the hint has not fixed yet:
+        // the daemon's own focused pane, not this client's.
+        repository.report_focus((10, false));
+        block_on(c.reload_tabs());
+        block_on(c.refresh_layout_from_poll());
+
+        assert_eq!(
+            focused_pane(&c, "alpha"),
+            Some(10),
+            "the poll really did answer with a different pane"
+        );
+        assert_eq!(
+            c.resume_slot().target(),
+            recorded_move,
+            "…and the hint still names the pane the USER chose — recording a \
+             poll's answer would overwrite the very intent it exists to replay"
+        );
     }
 
     #[test]
