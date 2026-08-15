@@ -36,4 +36,4 @@ parent Frust checkout's `docs/CODE_STANDARDS.md` until one is warranted.
 ## Recorded Overrides
 
 - `docs/DEVELOPMENT.md` → cap raised **130 → 180**, carried over unchanged this pass. Sits at
-  175/180. **Re-check trigger:** next edit of any size — compact Prerequisites/Signing or split.
+  178/180. **Re-check trigger:** next edit of any size — compact Prerequisites/Signing or split.

@@ -7,11 +7,13 @@
   dependencies into that checkout (`../../crates/frust`, `../../plugins/clean-signals-frust`),
   a temporary pre-publication arrangement documented verbatim in `Cargo.toml`'s comments. Once
   Frust crates are published this app will depend on versions instead. The terminal screen and the
-  `muxrd` network layer add five more OS-capability plugins the same temporary way —
-  `frust-clipboard`, `frust-haptics` (needs Android's `android.permission.VIBRATE`, already checked
-  into `AndroidManifest.xml`), `frust-shared-preferences`, `frust-secure-storage`, `frust-camera` —
-  plus `../../crates/frust-plugin` for the Android JNI accessor, all under `../../plugins/<name>` in
-  the same checkout.
+  `muxrd` network layer add five more OS-capability plugins the same temporary way, each crate's
+  directory dropping its `frust-` prefix: `frust-clipboard` (`../../plugins/clipboard`),
+  `frust-haptics` (`../../plugins/haptics`; needs Android's `android.permission.VIBRATE`, already
+  checked into `AndroidManifest.xml`), `frust-shared-preferences`
+  (`../../plugins/shared-preferences`), `frust-secure-storage` (`../../plugins/secure-storage`),
+  `frust-camera` (`../../plugins/camera`) — plus `../../crates/frust-plugin` for the Android JNI
+  accessor, in the same checkout.
 - No `clean-signals-rs` sibling checkout is required: `clean-signals` itself isn't published
   yet, so `Cargo.toml` git+rev-pins it directly (`rev = "910f626"` on `master`) to its public
   repo — the identical spec `clean-signals-frust`'s own `clean-signals` dependency uses, so
