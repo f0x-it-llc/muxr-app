@@ -35,7 +35,7 @@ mod manage_sheet;
 mod server_strip;
 mod session_card;
 
-use frust::{AnyView, Theme};
+use frust::AnyView;
 use frust::{Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, any, inflexible};
 
 use crate::ui::palette::Palette;
@@ -45,17 +45,11 @@ use super::pages::SessionsState;
 
 pub(crate) use server_strip::host_of;
 
+pub(in crate::features::sessions::presentation) use crate::ui::palette::active_theme;
 pub(in crate::features::sessions::presentation) use list::{empty_view, new_session_row};
 pub(in crate::features::sessions::presentation) use manage_sheet::sheet_body;
 pub(in crate::features::sessions::presentation) use server_strip::{DOT, server_strip};
 pub(in crate::features::sessions::presentation) use session_card::session_card;
-
-/// The active theme, or the Glyph baseline when none is threaded (headless
-/// tests, a shell with no design system installed). **Never**
-/// `Theme::neutral`/`m3_baseline` — see `lib.rs`'s design-system note.
-pub(in crate::features::sessions::presentation) fn active_theme() -> Theme {
-    frust::use_context::<Theme>().unwrap_or_else(Theme::glyph_baseline)
-}
 
 /// The screen's page tone behind `body` — `--bg-base`, which the shell's own
 /// clear colour (`--bg-surface`, the *card* tone) is not, so a screen that

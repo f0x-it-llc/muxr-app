@@ -20,6 +20,11 @@
 //! tree: named semantic rules (`` R44-back ``, cited from `src/lib.rs`) and external-repo rev
 //! pins (`clean-signals`' `` rev `910f626` ``, per `Cargo.toml`'s dependency comment).
 //!
+//! **Known limitation**: this scan is comment-only by design — it never inspects a line with no
+//! `//` at all — so a stale reference sitting inside a string literal with no comment on the same
+//! line (e.g. an `assert!`/`panic!` message) is invisible to it, not just the in-comment
+//! string-literal case the heuristic above already excludes.
+//!
 //! # Gate/G-ledger precision ([`gate_hits`])
 //!
 //! `gate-rN` is unambiguous — no legitimate word starts `gate-r` followed by digits — and is

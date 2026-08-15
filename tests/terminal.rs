@@ -77,13 +77,13 @@ const BTOP_TITLE: &str = "ed@precision: ~";
 const LINES_PER_TAB: usize = 4;
 
 /// The expand button's two accessible names, transcribed from
-/// `presentation::pieces` (the implementation's constants; a test that imported
-/// them could not catch one of them changing).
+/// `presentation::widgets::status` (the implementation's constants; a test that
+/// imported them could not catch one of them changing).
 const EXPAND: &str = "Fullscreen";
 const COLLAPSE: &str = "Exit fullscreen";
 /// …and the sheet's close button's.
 const CLOSE: &str = "Close";
-/// `presentation::pieces`' own `EDIT_LABEL` (private there) — every chip's
+/// `presentation::widgets::pills`' own `EDIT_LABEL` (private there) — every chip's
 /// trailing edit icon shares this one accessible name.
 const EDIT_LABEL: &str = "Rename";
 
@@ -100,8 +100,8 @@ const WIDE_WRAP_PAD: f64 = 22.0;
 /// (private to `presentation::pages`) — the same step-up the wide branch
 /// already applied on all four sides.
 const PORTRAIT_TOP_GAP: f64 = WIDE_WRAP_PAD - WRAP_PAD;
-/// `presentation::pieces`' own status-row height, transcribed: the 28px expand
-/// button plus its tightened 6px padding either side.
+/// `presentation::widgets::status`' own status-row height, transcribed: the 28px
+/// expand button plus its tightened 6px padding either side.
 const STATUS_ROW_H: f64 = 40.0;
 /// `.cur{width:7px;height:13px}` — the caret's own box, which is how a frame
 /// is asked whether the caret is lit.
@@ -138,7 +138,7 @@ const READ_ONLY_TOAST: &str = "read-only session";
 /// the repository.
 const INTERNAL_FAILURE_TOAST: &str = "Something went wrong — please try again.";
 
-/// `presentation::pieces`' own `NEW_PANE_LABEL` (private there) — the new-pane
+/// `presentation::widgets::panes`' own `NEW_PANE_LABEL` (private there) — the new-pane
 /// row's label, and the only way this suite locates it: the row paints a
 /// **transparent**-filled, dashed-bordered box, so it shows up in neither
 /// [`RecScene::rounded`] nor [`RecScene::strokes`], and is found by its accessible
@@ -162,7 +162,7 @@ const SECTION_SPACES: &str = "spaces";
 const SECTION_TABS: &str = "tabs";
 const SECTION_PANES: &str = "panes \u{2014} ";
 
-/// `presentation::pieces`' own `--amber-faint` alpha, transcribed — the wash a
+/// `ui::palette`'s own `AMBER_FAINT_ALPHA` (private there) — the wash a
 /// selected pill and the `focused` chip share (see [`focused_chip`]).
 const AMBER_FAINT: f32 = 0.12;
 
@@ -687,7 +687,7 @@ fn panel(added: &[(Point, Size)]) -> (Point, Size) {
 }
 
 /// The sheet's pane rows, top to bottom — the `--bg-base` tiles
-/// (`presentation::pieces`' own `Palette::base`, the scheme's
+/// (`ui::palette::Palette::base`, the scheme's
 /// `surface_container_low`), which nothing else on this screen paints.
 fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
     let base = Theme::glyph_baseline().scheme().surface_container_low;
@@ -734,7 +734,7 @@ fn edit_icon_in(root: &RenderRoot<AppState, AnyView<AppState>>, rect: (Point, Si
 }
 
 /// A point inside `rect`'s own leading edge — reliably inside a chip's *main* tap
-/// region regardless of label width: `pieces::pill`'s icon sits at the trailing
+/// region regardless of label width: `presentation::widgets::pills::pill`'s icon sits at the trailing
 /// edge, so `rect`'s own [`center`] can land on it for a short enough label.
 fn leading_point((origin, size): (Point, Size)) -> Point {
     Point::new(origin.x + 8.0, origin.y + size.height / 2.0)

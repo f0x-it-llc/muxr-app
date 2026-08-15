@@ -127,18 +127,6 @@ impl LayoutSummary {
     pub fn tabs_label(&self) -> String {
         format!("\u{25e7} {} tabs", self.tabs)
     }
-
-    /// All three `.sess-meta` spans on one line, as against the card's own
-    /// three-span row, which lays each label out separately with the
-    /// redesign's 12px gap.
-    pub fn counts_line(&self) -> String {
-        format!(
-            "{}   {}   {}",
-            self.panes_label(),
-            self.tabs_label(),
-            self.third.label()
-        )
-    }
 }
 
 /// The `.sess-meta` row's third span: **which** fact it carries depends on the
@@ -210,14 +198,6 @@ mod tests {
     }
 
     #[test]
-    fn the_counts_line_prints_every_count_the_redesign_shows() {
-        let line = session("dev").layout.counts_line();
-        assert!(line.contains("9 panes"), "{line}");
-        assert!(line.contains("4 tabs"), "{line}");
-        assert!(line.contains("0 clients"), "{line}");
-    }
-
-    #[test]
     fn each_third_metric_prints_its_own_span() {
         // The three shapes `docs/redesign.html`'s three cards draw, in order.
         assert_eq!(ThirdMetric::Clients(0).label(), "\u{25ce} 0 clients");
@@ -228,13 +208,10 @@ mod tests {
     #[test]
     fn the_meta_spans_are_addressable_one_by_one() {
         // The card lays the three spans out separately (12px gap), so each
-        // has to be printable on its own — `counts_line` is the joined form.
+        // has to be printable on its own.
         let layout = session("dev").layout;
         assert_eq!(layout.panes_label(), "\u{25a3} 9 panes");
         assert_eq!(layout.tabs_label(), "\u{25e7} 4 tabs");
-        let line = layout.counts_line();
-        assert!(line.starts_with(&layout.panes_label()), "{line}");
-        assert!(line.ends_with(&layout.third.label()), "{line}");
     }
 
     #[test]

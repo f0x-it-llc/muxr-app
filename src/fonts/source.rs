@@ -14,6 +14,11 @@
 //! ([`FETCH_TIMEOUT`]), a response size cap (checked against `Content-Length`
 //! *and* while streaming, since the header is only a claim), and — for a
 //! font — the caller's own mandatory SHA-256 check downstream ([`super::store`]).
+//! Redirects are followed (`reqwest`'s default) — acceptable only because the
+//! SHA-256 is re-verified after the fetch completes, regardless of how many
+//! hops the bytes traveled through. `reqwest` here runs the `rustls`
+//! (not platform-native-TLS) backend — see `Cargo.toml`'s dependency comment
+//! for why that pin is load-bearing, not taste.
 //!
 //! The streaming half is [`get_with_progress`]: it reads via
 //! `reqwest::Response::chunk()` rather than buffering the body whole, so an

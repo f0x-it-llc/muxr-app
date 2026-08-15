@@ -11,8 +11,11 @@
 //!
 //! **Integrity: SHA-256, mandatory, before anything is written.**
 //! [`install_downloaded`] verifies every downloaded file — size cap, sfnt
-//! magic, then the manifest's SHA-256 — while the bytes are still in memory; a
-//! mismatch fails the install with nothing left on disk, as the generic
+//! magic, then the manifest's SHA-256 — while the bytes are still in memory
+//! (the sfnt magic check is a cheap format sanity check that rejects garbage
+//! early; it is **not** the integrity mechanism and must never be treated as
+//! one — the SHA-256 is what actually proves the bytes are what the manifest
+//! promised); a mismatch fails the install with nothing left on disk, as the generic
 //! [`AppFailure::Internal`] "Something went wrong" (not a detail for a user).
 //! [`scan_cache_and_register`] re-verifies the same hashes at startup and
 //! deletes any family that no longer matches, dropped but never fatal.

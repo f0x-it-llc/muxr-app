@@ -11,8 +11,14 @@
 //! **One divergence resolved here**: `connect`'s `amber` used to read
 //! `scheme.primary_container`, while the other three read `scheme.primary`.
 //! This module unifies on `scheme.primary` — byte-identical to
-//! `primary_container` under the app's canonical dark brightness
-//! (`Theme::glyph_baseline`'s `Brightness::Dark`), so no rendered pixel moves.
+//! `primary_container` under the Glyph **dark** `ColorScheme`
+//! (`crates/frust-theme`'s `glyph_dark`: both resolve to the same bright-fill
+//! amber). The Glyph **light** scheme diverges — `primary` is the darker
+//! text-appropriate amber, `primary_container` the bright fill — so this
+//! unification is currently a no-op pixel-wise only because
+//! `Theme::glyph_baseline()` starts (and this app never leaves)
+//! `Brightness::Dark`; a future light-mode adoption would need to re-audit
+//! every `connect` call site this changed.
 //!
 //! **Two fields, one role**: `sessions`/`settings`/`terminal` name the page
 //! tone `base`, `connect` names the same `--bg-base` role `page`. Both
@@ -187,6 +193,36 @@ mod tests {
         let theme = Theme::glyph_baseline();
         let palette = Palette::from_theme(&theme);
         assert_eq!(palette.amber, theme.scheme().primary);
+    }
+
+    /// The unification the module docs describe: `Theme::glyph_baseline()`'s
+    /// **dark** `ColorScheme` resolves `primary`/`primary_container` to the
+    /// same amber. Pinned directly (not derived from the scheme at test time)
+    /// so a future `frust-theme` change that splits the accent/container pair
+    /// apart under Dark — quietly reintroducing the divergence this module's
+    /// `amber` unification assumes is a no-op — fails loudly here rather than
+    /// only showing up as a pixel diff in a screen's device gate.
+    #[test]
+    fn glyph_baseline_dark_scheme_keeps_primary_and_primary_container_equal() {
+        let theme = Theme::glyph_baseline();
+        assert_eq!(theme.brightness, frust::Brightness::Dark);
+        let scheme = theme.scheme();
+        assert_eq!(scheme.primary, scheme.primary_container);
+    }
+
+    /// A handful of concrete, hand-verified field values against
+    /// `Theme::glyph_baseline()` — the derivations above prove the *shape* of
+    /// each field's source, but not that the source itself still resolves to
+    /// what `docs/glyph-design-system.html` actually specifies. Pinned to the
+    /// literal hex the design system's dark `:root` block carries
+    /// (`crates/frust-theme`'s `glyph_dark`/`StatusPalette::glyph` sources).
+    #[test]
+    fn canonical_field_values_match_the_glyph_dark_source() {
+        let theme = Theme::glyph_baseline();
+        let palette = Palette::from_theme(&theme);
+        assert_eq!(palette.page, Color::from_rgb8(0x10, 0x13, 0x1a)); // --bg-base
+        assert_eq!(palette.success, Color::from_rgb8(0x5f, 0xd8, 0x8f)); // --success
+        assert_eq!(palette.amber, Color::from_rgb8(0xff, 0xb6, 0x27)); // --amber
     }
 
     #[test]

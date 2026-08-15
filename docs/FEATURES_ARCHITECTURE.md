@@ -37,11 +37,18 @@ entirely: each feature's `di.rs` is composition-root wiring, so a page may resol
 `connect`'s page resolves `settings::di::expect_auth_tokens_repository()`.
 
 Every feature's `presentation/` also carries a `widgets/` folder — one file per widget cluster
-(`connect`: 11 modules, including `qr_sheet`/`qr_affordance`/`credential_dialogs`; `sessions`:
+(`connect`: 10 modules, including `qr_sheet`/`qr_affordance`/`credential_dialogs`; `sessions`:
 including `manage_sheet`; `settings`: including `groups`; `terminal`: including
 `panes_sheet`/`new_tab_dialog`/`link_strip`) — while `pages.rs` stays scaffold-only (route builder,
 `Screen`/`State`, the `Component` impl, and action wiring). `pieces.rs` no longer exists in any
 feature.
+
+Most `widgets/` modules take only already-resolved colours/callbacks and know nothing of `pages`,
+but a `widgets` file that owns a **page** of the root overlay host — a sheet or dialog body pushed
+outside this screen's own component tree — is a sanctioned exception: it imports its page's
+`Actions`/state type directly (`sessions`' `manage_sheet::sheet_action` was the first; `terminal`'s
+`panes_sheet`/`link_strip` follow the same shape) rather than threading that state through a plain
+fn argument.
 
 - **`connect`** — the `/` route: the manual connect form, the saved-server list, and the QR-pairing
   sheet (camera scan → prefilled form → a pinned CTA the user still presses; a scan never dials by

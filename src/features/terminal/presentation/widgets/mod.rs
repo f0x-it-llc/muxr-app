@@ -1,5 +1,5 @@
-//! The `/terminal` screen's independently-composable widgets, transcribed from
-//! `docs/terminal.html` v2. One module per cluster, one fn per visual element, so
+//! The `/terminal` screen's widgets, transcribed from `docs/terminal.html` v2.
+//! One module per cluster, one fn per visual element, so
 //! [`pages`](super::pages)' `Component::build` and the sheet builder read as
 //! arrangements rather than walls of nesting: [`card`] owns the card's own
 //! `GlyphInk` ink and `.term-body`, [`status`] the `.term-statusrow`,
@@ -8,6 +8,15 @@
 //! [`sheet_bits`] the sheet's top row, section labels and scroll region,
 //! [`panes_sheet`] `#pickerSheet` itself, [`new_tab_dialog`] the add-tab row's
 //! hand-rolled prompt, and [`util`] the row/column/gap/`TextStyle` helpers.
+//!
+//! **Not every module here is independently composable.** Most take only
+//! already-resolved colours/callbacks and know nothing of `pages`, but
+//! [`panes_sheet`] and [`link_strip`] are the sheet/status-strip's own
+//! **page-coupled** exceptions: both import `super::super::pages::Actions`/
+//! `TerminalState` directly (a sanctioned pages↔widgets back-edge, the
+//! `features::sessions` `sheet_action` precedent — see
+//! `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph) rather than taking
+//! that state through a plain fn argument.
 //!
 //! **Two colour vocabularies**: the **card** inks from the framework's
 //! brightness-invariant terminal palette ([`card::CardInk`], over `GlyphInk`) plus
