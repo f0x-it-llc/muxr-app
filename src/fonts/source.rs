@@ -14,6 +14,9 @@
 //! ([`FETCH_TIMEOUT`]), a response size cap (checked against `Content-Length`
 //! *and* while streaming, since the header is only a claim), and — for a
 //! font — the caller's own mandatory SHA-256 check downstream ([`super::store`]).
+//! Transport failures (connect, stall, mid-stream read) retry up to
+//! [`FETCH_ATTEMPTS`] times with [`RETRY_BACKOFF`]; deterministic refusals
+//! (HTTP error status, cap violation) never do.
 //! Redirects are followed (`reqwest`'s default) because a font download's
 //! release-asset URL answers with a 302 chain; that is acceptable for the
 //! *font* path only because its SHA-256 is re-verified after the fetch,
@@ -41,6 +44,22 @@ use super::manifest::MANIFEST_URL;
 /// How long one request may take end to end before it is abandoned. A stalled
 /// connection must not leave a picker row spinning forever.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Total attempts per fetch (1 + retries). Transport failures are retried —
+/// the CDN's origin path intermittently stalls whole requests (~1 in 5
+/// origin-bound fetches at the worst measured burst, 2026-08-15), and mobile
+/// networks add their own blips; without a retry, one stalled file failed the
+/// whole multi-file family install. Deterministic refusals (an HTTP error
+/// status, a size-cap violation) never retry — re-fetching a refused or
+/// oversized body can't succeed and, for the cap, would re-stream megabytes.
+const FETCH_ATTEMPTS: u32 = 3;
+
+/// Delay before retry N (1-indexed); the last entry repeats if attempts ever
+/// exceed the table.
+const RETRY_BACKOFF: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_millis(1500),
+];
 
 /// The largest manifest this app will read (1 MiB). The real one is ~40 KB;
 /// this is the "a compromised host serves a gigabyte" bound.
@@ -167,45 +186,101 @@ async fn get(url: &str, max_bytes: u64) -> Result<Vec<u8>, AppFailure> {
     get_with_progress(url, max_bytes, None).await
 }
 
+/// A single attempt's failure, split by whether trying again could help:
+/// `Transient` is the transport (connect/stall/read) class the retry loop
+/// re-attempts; `Fatal` is a deterministic refusal (HTTP error status,
+/// size-cap violation) answered as-is.
+enum FetchError {
+    Transient(AppFailure),
+    Fatal(AppFailure),
+}
+
+/// The sleep before retry `n` (1-indexed), `None` once `n` exhausts
+/// [`FETCH_ATTEMPTS`]. Pure, for the unit tests; the table's last entry
+/// repeats for any attempt beyond its length.
+fn retry_delay(failed_attempt: u32) -> Option<std::time::Duration> {
+    if failed_attempt >= FETCH_ATTEMPTS {
+        return None;
+    }
+    let index = (failed_attempt as usize - 1).min(RETRY_BACKOFF.len() - 1);
+    Some(RETRY_BACKOFF[index])
+}
+
 /// `GET url`, bounded by `max_bytes`, read one chunk at a time
 /// (`reqwest::Response::chunk()`) so the cap is enforced **while the body
 /// arrives** rather than only after it is fully buffered — the module docs'
 /// "and while streaming" clause. `progress`, when given, is called after
 /// every chunk that keeps the running total under the cap with that
 /// cumulative total.
+///
+/// Transport failures retry per [`FETCH_ATTEMPTS`]/[`RETRY_BACKOFF`]; each
+/// new attempt reports `0` to the sink first, so a picker bar honestly drops
+/// back to the file's base instead of freezing at the stall point.
 async fn get_with_progress(
     url: &str,
     max_bytes: u64,
     mut progress: Option<ProgressSink<'_>>,
 ) -> Result<Vec<u8>, AppFailure> {
-    let mut response = client()?
+    let mut attempt = 1u32;
+    loop {
+        match get_once(url, max_bytes, &mut progress).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(FetchError::Fatal(failure)) => return Err(failure),
+            Err(FetchError::Transient(failure)) => match retry_delay(attempt) {
+                None => return Err(failure),
+                Some(delay) => {
+                    log::warn!("fonts: retrying {url} after attempt {attempt}: {failure}");
+                    tokio::time::sleep(delay).await;
+                    if let Some(sink) = progress.as_mut() {
+                        sink(0);
+                    }
+                    attempt += 1;
+                }
+            },
+        }
+    }
+}
+
+/// One attempt of [`get_with_progress`]'s request/stream cycle.
+async fn get_once(
+    url: &str,
+    max_bytes: u64,
+    progress: &mut Option<ProgressSink<'_>>,
+) -> Result<Vec<u8>, FetchError> {
+    let mut response = client()
+        .map_err(FetchError::Fatal)?
         .get(url)
         .send()
         .await
-        .map_err(|err| AppFailure::Network(format!("fetching {url}: {err}")))?;
+        .map_err(|err| {
+            FetchError::Transient(AppFailure::Network(format!("fetching {url}: {err}")))
+        })?;
     let status = response.status();
     if !status.is_success() {
-        return Err(AppFailure::Network(format!("HTTP {status} for {url}")));
+        return Err(FetchError::Fatal(AppFailure::Network(format!(
+            "HTTP {status} for {url}"
+        ))));
     }
     // The advertised length first (cheap refusal), then the stream itself —
     // a server's `Content-Length` is a claim, not a fact.
     if response.content_length().is_some_and(|len| len > max_bytes) {
-        return Err(AppFailure::Network(format!(
+        return Err(FetchError::Fatal(AppFailure::Network(format!(
             "{url} advertises more than the {max_bytes}-byte cap"
-        )));
+        ))));
     }
     let mut accumulator = CappedAccumulator::new(url, max_bytes);
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| AppFailure::Network(format!("reading {url}: {err}")))?
-    {
-        let received = accumulator.push(&chunk)?;
+    loop {
+        let chunk = response.chunk().await.map_err(|err| {
+            FetchError::Transient(AppFailure::Network(format!("reading {url}: {err}")))
+        })?;
+        let Some(chunk) = chunk else {
+            return Ok(accumulator.into_bytes());
+        };
+        let received = accumulator.push(&chunk).map_err(FetchError::Fatal)?;
         if let Some(sink) = progress.as_mut() {
             sink(received);
         }
     }
-    Ok(accumulator.into_bytes())
 }
 
 /// Enforces a byte cap against a body arriving one chunk at a time — the
@@ -323,6 +398,27 @@ mod tests {
             .build()
             .expect("a current-thread runtime")
             .block_on(future)
+    }
+
+    // -- retry_delay: the retry loop's pure schedule, no network -----------
+
+    #[test]
+    fn the_retry_schedule_backs_off_then_gives_up() {
+        assert_eq!(retry_delay(1), Some(RETRY_BACKOFF[0]));
+        assert_eq!(retry_delay(2), Some(RETRY_BACKOFF[1]));
+        assert_eq!(
+            retry_delay(FETCH_ATTEMPTS),
+            None,
+            "the final attempt's failure is the answer — no further sleep"
+        );
+    }
+
+    #[test]
+    fn every_scheduled_retry_has_a_positive_delay() {
+        for failed in 1..FETCH_ATTEMPTS {
+            let delay = retry_delay(failed).expect("attempts under the cap retry");
+            assert!(delay > std::time::Duration::ZERO);
+        }
     }
 
     // -- CappedAccumulator: the streaming read's pure core, no network -----
