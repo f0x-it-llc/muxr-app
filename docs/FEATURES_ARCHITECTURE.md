@@ -43,12 +43,16 @@ including `manage_sheet`; `settings`: including `groups`; `terminal`: including
 `Screen`/`State`, the `Component` impl, and action wiring). `pieces.rs` no longer exists in any
 feature.
 
-Most `widgets/` modules take only already-resolved colours/callbacks and know nothing of `pages`,
-but a `widgets` file that owns a **page** of the root overlay host — a sheet or dialog body pushed
-outside this screen's own component tree — is a sanctioned exception: it imports its page's
-`Actions`/state type directly (`sessions`' `manage_sheet::sheet_action` was the first; `terminal`'s
-`panes_sheet`/`link_strip` follow the same shape) rather than threading that state through a plain
-fn argument.
+A `widgets/` file importing its own page's `Actions`/state type is a sanctioned same-layer,
+same-feature back-edge, not a violation, and it happens in two forms. **Overlay-host bodies** — a
+sheet or dialog widget pushed as a page of the root overlay host, outside the screen's own
+component tree — import `Actions` because their callbacks run over `&mut AppState` (`sessions`'
+`manage_sheet::sheet_action` was the first; `terminal`'s `panes_sheet` is the same shape).
+**Screen-state widgets** couple for direct state access instead: this is the *norm* in `sessions`
+and `settings` (their widget files read the page's state type or call its `pages::open_*`/`attach`
+shims directly), and `terminal`'s one instance is `link_strip` — an ordinary inline card child
+whose Retry callback needs `&mut TerminalState`, nothing to do with overlay hosting. Only
+`connect`'s widgets are fully page-agnostic, taking resolved colours and callbacks alone.
 
 - **`connect`** — the `/` route: the manual connect form, the saved-server list, and the QR-pairing
   sheet (camera scan → prefilled form → a pinned CTA the user still presses; a scan never dials by

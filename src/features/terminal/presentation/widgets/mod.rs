@@ -10,13 +10,14 @@
 //! hand-rolled prompt, and [`util`] the row/column/gap/`TextStyle` helpers.
 //!
 //! **Not every module here is independently composable.** Most take only
-//! already-resolved colours/callbacks and know nothing of `pages`, but
-//! [`panes_sheet`] and [`link_strip`] are the sheet/status-strip's own
-//! **page-coupled** exceptions: both import `super::super::pages::Actions`/
-//! `TerminalState` directly (a sanctioned pages↔widgets back-edge, the
-//! `features::sessions` `sheet_action` precedent — see
-//! `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph) rather than taking
-//! that state through a plain fn argument.
+//! already-resolved colours/callbacks and know nothing of `pages`; two are
+//! **page-coupled**, for two different reasons: [`panes_sheet`] imports
+//! `super::super::pages::Actions` because the sheet is a page of the root
+//! overlay host whose callbacks run over `&mut AppState` (the
+//! `features::sessions` `sheet_action` precedent), while [`link_strip`] is
+//! an inline card child importing `pages::TerminalState` because its Retry
+//! callback needs direct screen-state access. Both forms are sanctioned —
+//! see `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph.
 //!
 //! **Two colour vocabularies**: the **card** inks from the framework's
 //! brightness-invariant terminal palette ([`card::CardInk`], over `GlyphInk`) plus

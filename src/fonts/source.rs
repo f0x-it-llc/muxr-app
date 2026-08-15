@@ -14,9 +14,12 @@
 //! ([`FETCH_TIMEOUT`]), a response size cap (checked against `Content-Length`
 //! *and* while streaming, since the header is only a claim), and — for a
 //! font — the caller's own mandatory SHA-256 check downstream ([`super::store`]).
-//! Redirects are followed (`reqwest`'s default) — acceptable only because the
-//! SHA-256 is re-verified after the fetch completes, regardless of how many
-//! hops the bytes traveled through. `reqwest` here runs the `rustls`
+//! Redirects are followed (`reqwest`'s default) because a font download's
+//! release-asset URL answers with a 302 chain; that is acceptable for the
+//! *font* path only because its SHA-256 is re-verified after the fetch,
+//! regardless of how many hops the bytes traveled. The *manifest* fetch has
+//! no hash — its anchors are TLS to the pinned manifest URL plus the size
+//! cap. `reqwest` here runs the `rustls`
 //! (not platform-native-TLS) backend — see `Cargo.toml`'s dependency comment
 //! for why that pin is load-bearing, not taste.
 //!

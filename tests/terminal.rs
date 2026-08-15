@@ -733,9 +733,10 @@ fn edit_icon_in(root: &RenderRoot<AppState, AnyView<AppState>>, rect: (Point, Si
         .unwrap_or_else(|| panic!("no {EDIT_LABEL:?} icon inside {rect:?}"))
 }
 
-/// A point inside `rect`'s own leading edge — reliably inside a chip's *main* tap
-/// region regardless of label width: `presentation::widgets::pills::pill`'s icon sits at the trailing
-/// edge, so `rect`'s own [`center`] can land on it for a short enough label.
+/// A point inside `rect`'s own leading edge — reliably inside a chip's *main*
+/// tap region regardless of label width: `presentation::widgets::pills::pill`
+/// puts its icon at the trailing edge, so `rect`'s own [`center`] can land on
+/// it for a short enough label.
 fn leading_point((origin, size): (Point, Size)) -> Point {
     Point::new(origin.x + 8.0, origin.y + size.height / 2.0)
 }

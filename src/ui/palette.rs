@@ -195,13 +195,13 @@ mod tests {
         assert_eq!(palette.amber, theme.scheme().primary);
     }
 
-    /// The unification the module docs describe: `Theme::glyph_baseline()`'s
-    /// **dark** `ColorScheme` resolves `primary`/`primary_container` to the
-    /// same amber. Pinned directly (not derived from the scheme at test time)
-    /// so a future `frust-theme` change that splits the accent/container pair
-    /// apart under Dark — quietly reintroducing the divergence this module's
-    /// `amber` unification assumes is a no-op — fails loudly here rather than
-    /// only showing up as a pixel diff in a screen's device gate.
+    /// The unification the module docs describe: asserts the equality
+    /// relation (`primary == primary_container` under `Theme::glyph_baseline()`'s
+    /// **dark** scheme) that this module's `amber` unification depends on, so
+    /// a future `frust-theme` change that splits the accent/container pair
+    /// apart under Dark fails loudly here rather than only showing up as a
+    /// pixel diff in a screen's device gate. (The literal hex is pinned by
+    /// `canonical_field_values_match_the_glyph_dark_source`, below.)
     #[test]
     fn glyph_baseline_dark_scheme_keeps_primary_and_primary_container_equal() {
         let theme = Theme::glyph_baseline();
