@@ -45,7 +45,7 @@ use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
 use super::chrome::{WRAP_PAD, term_box};
-use super::controller::{LiveSession, Reattach, TerminalController};
+use super::controller::{LiveSession, TerminalController};
 use super::keybar;
 use super::term;
 use super::widgets::card::{CardInk, card_body};
@@ -164,10 +164,6 @@ pub struct Actions {
     /// The app's one connection handle — read for the live client the feed
     /// attaches with, and for the read-only posture gating this screen's controls.
     pub connection: Arc<ConnectionController>,
-    /// The mounted live session's re-attach hook, once one exists. Filled by
-    /// `build` and read from the **sheet**, whose pages see `&mut AppState`; a
-    /// shared cell, so every clone of this bundle sees the same fill.
-    reattach: Rc<RefCell<Option<Reattach>>>,
     /// Where the app bar's trailing `⋮` slot is painting, in window coordinates —
     /// written by `super::chrome::terminal_stage` on every layout.
     pub anchor: Rc<Cell<Rect>>,
@@ -175,8 +171,7 @@ pub struct Actions {
     /// every clone, so one mount leaves `/terminal` at most once.
     detaching: Rc<Cell<bool>>,
     /// A test/diagnostic mirror of the live pane's emulator + feed, if one has
-    /// been entered. A shared cell for the same reason
-    /// [`reattach`](Self::reattach) is one: `Actions` is cloned into
+    /// been entered. A shared cell because `Actions` is cloned into
     /// [`TERMINAL_CHROME`] at `init`, before any `LiveSession` exists.
     live_probe: Rc<RefCell<Option<LiveProbe>>>,
     /// The live grid's content-tap/wheel hooks, once a live session exists — see
@@ -323,7 +318,6 @@ impl Component for TerminalScreen {
             app_nav,
             controller,
             connection,
-            reattach: Rc::new(RefCell::new(None)),
             anchor: Rc::new(Cell::new(Rect::ZERO)),
             detaching: Rc::new(Cell::new(false)),
             live_probe: Rc::new(RefCell::new(None)),
@@ -388,9 +382,6 @@ impl Component for TerminalScreen {
                 emulator: Rc::clone(&session.emulator),
                 feed: session.feed.demo().map(Rc::clone),
             });
-            // Published for the sheet, which switches tabs from the other side of
-            // the component boundary — see `Actions::reattach`.
-            *state.actions.reattach.borrow_mut() = session.reattach.clone();
 
             // The grid's gesture hooks (`resolve_tap_action`/`resolve_wheel_route`
             // document the routing), built once beside this session's other seams
@@ -830,24 +821,24 @@ impl Actions {
     /// wins**, a second row re-times the one pending close rather than stacking a
     /// second behind it, and the superseded wait cannot pop the `/terminal` route.
     ///
-    /// A commit that has to move **tabs** first is refused client-side for a
-    /// read-only credential (the wire's `GoToTab` is mutating); committing a pane
-    /// inside the current tab is `FocusPane` alone, which the wire allows.
+    /// Two commits are refused client-side for a **read-only** credential, each
+    /// because the server would otherwise answer with silence: one that has to move
+    /// **tabs** first (the wire's `GoToTab` is mutating, so the sequence would stop
+    /// there anyway), and any commit on **herdr**, whose relay drops an inbound
+    /// `FocusPane` from a read-only client without a word. Zellij's same-tab commit
+    /// is `FocusPane` alone, which that backend honours as the read it is.
     ///
-    /// On a backend whose stream carries only the focused pane the RPCs landing is
-    /// not the move: the session must be attached again.
-    /// [`TerminalController::reattaches_on_switch`] answers whether that applies,
-    /// and [`reattach`](Self::reattach) is how this side of the component boundary
-    /// reaches a session it cannot see.
+    /// The stream is never touched here: the verbs [`TerminalController::commit_pane`]
+    /// sends are what move the session, on either backend.
     pub fn commit_pane(&self, sheet: &SheetHandle, tab_key: &str, pane_id: u32, is_plugin: bool) {
         // Untracked: a press handler has no reactive owner on desktop.
         let cross_tab = tab_key != self.controller.active_tab.get_untracked();
-        if cross_tab && self.connection.is_read_only.get_untracked() {
+        let herdr = self.controller.is_herdr_session();
+        if (cross_tab || herdr) && self.connection.is_read_only.get_untracked() {
             app_toasts().show(READ_ONLY_TOAST);
             return;
         }
         let controller = Arc::clone(&self.controller);
-        let reattach = Rc::clone(&self.reattach);
         let sheet = sheet.clone();
         let tab_key = tab_key.to_string();
         spawn_local(async move {
@@ -856,21 +847,14 @@ impl Actions {
                 // failure toast is already on its way.
                 return;
             }
-            if controller.reattaches_on_switch() {
-                // Cloned out of the cell first: the hook re-enters this screen's
-                // state, so a borrow held across it would be a second one.
-                let hook = reattach.borrow().clone();
-                if let Some(hook) = hook {
-                    hook();
-                }
-            }
             sheet.close_after(SHEET_CLOSE_DELAY).await;
         });
     }
 
     /// Switch this connection's view to the space with id `id`, reloading the tab
-    /// world behind it. Stays available to a read-only credential (which space a
-    /// client looks at is per-connection state), and the sheet stays up.
+    /// world behind it. The sheet stays up, and the pill stays tappable for a
+    /// read-only credential: `SwitchSpace` is MUTATING on the wire, but it refuses
+    /// explicitly, so the refusal reaches the toast bridge rather than vanishing.
     pub fn select_space(&self, id: &str) {
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();

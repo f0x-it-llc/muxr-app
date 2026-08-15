@@ -22,8 +22,8 @@
 //! [`publish_tabs`](TerminalController::publish_tabs), self-healing
 //! active/browsed keys, and single-flight claims on the poll and on creates.
 //! [`is_herdr`] is the one backend discriminator: only herdr has spaces, only
-//! herdr's stream re-opens on a focus move, and the grid's content-tap hook is
-//! never wired there.
+//! herdr settles a landed focus move before re-reading the layout, and the
+//! grid's content-tap hook is never wired there.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -162,24 +162,56 @@ const LAYOUT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// own settle for exactly this.
 const CREATE_SETTLE: Duration = Duration::from_millis(350);
 
-/// The sentinel [`CREATE_SETTLE_OVERRIDE_MS`] holds when no override is installed.
+/// How long a landed **herdr** focus move waits before re-reading the layout, for
+/// [`CREATE_SETTLE`]'s own reason: a relay acks a control verb when it is enqueued,
+/// not when it is applied, so a reload sent the instant the ack lands still reads the
+/// pane the move is leaving. Same 350ms; zellij needs none (its stream follows the
+/// server's own focus, and the layout poll carries the rest).
+const SWITCH_SETTLE: Duration = Duration::from_millis(350);
+
+/// The sentinel the two settle-override cells hold when no override is installed.
 const NO_SETTLE_OVERRIDE: u64 = u64::MAX;
 
 /// The settle a test installed with [`set_create_settle_for_tests`], in milliseconds.
 static CREATE_SETTLE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(NO_SETTLE_OVERRIDE);
 
+/// [`CREATE_SETTLE_OVERRIDE_MS`]' counterpart for [`SWITCH_SETTLE`].
+static SWITCH_SETTLE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(NO_SETTLE_OVERRIDE);
+
 /// Override [`CREATE_SETTLE`] for a headless test, so a suite can pin the post-create
 /// reload's *ordering* without spending 350ms per create; `None` restores the shipped
 /// value. `pub` rather than `#[cfg(test)]`: `tests/*.rs` link the normal build.
 pub fn set_create_settle_for_tests(settle: Option<Duration>) {
+    store_settle_override(&CREATE_SETTLE_OVERRIDE_MS, settle);
+}
+
+/// [`set_create_settle_for_tests`]' counterpart for [`SWITCH_SETTLE`], with the same
+/// contract — a herdr commit's own reload is what it paces.
+pub fn set_switch_settle_for_tests(settle: Option<Duration>) {
+    store_settle_override(&SWITCH_SETTLE_OVERRIDE_MS, settle);
+}
+
+/// Write `settle` into `cell`, spelling `None` as [`NO_SETTLE_OVERRIDE`].
+fn store_settle_override(cell: &AtomicU64, settle: Option<Duration>) {
     let value = settle.map_or(NO_SETTLE_OVERRIDE, |settle| settle.as_millis() as u64);
-    CREATE_SETTLE_OVERRIDE_MS.store(value, Ordering::Relaxed);
+    cell.store(value, Ordering::Relaxed);
 }
 
 /// The settle a create actually waits — [`CREATE_SETTLE`] unless a test overrode it.
 fn create_settle() -> Duration {
-    match CREATE_SETTLE_OVERRIDE_MS.load(Ordering::Relaxed) {
-        NO_SETTLE_OVERRIDE => CREATE_SETTLE,
+    resolve_settle(&CREATE_SETTLE_OVERRIDE_MS, CREATE_SETTLE)
+}
+
+/// The settle a herdr focus move actually waits — [`SWITCH_SETTLE`] unless a test
+/// overrode it.
+fn switch_settle() -> Duration {
+    resolve_settle(&SWITCH_SETTLE_OVERRIDE_MS, SWITCH_SETTLE)
+}
+
+/// Whatever `cell` holds, or `shipped` when no override is installed.
+fn resolve_settle(cell: &AtomicU64, shipped: Duration) -> Duration {
+    match cell.load(Ordering::Relaxed) {
+        NO_SETTLE_OVERRIDE => shipped,
         millis => Duration::from_millis(millis),
     }
 }
@@ -333,8 +365,9 @@ impl TerminalController {
     /// Move the session to the tab keyed `key`: focus that tab, replace the body's
     /// lines, replay the reveal. The **tab step of a cross-tab pane commit**
     /// ([`commit_pane`](Self::commit_pane)), its one caller. Answers whether the move
-    /// landed; whether the *stream* must be re-opened on top of it is
-    /// [`reattaches_on_switch`](Self::reattaches_on_switch)'s answer.
+    /// landed. An attached stream stays open across it on either backend — herdr's
+    /// server re-points *this connection's* relay in place, so dropping the stream
+    /// would throw that retarget away.
     pub async fn switch_tab(&self, key: String) -> bool {
         let Some(tab_id) = self.tab_id_for(&key) else {
             return false;
@@ -365,24 +398,33 @@ impl TerminalController {
     ///
     /// 1. a tab move first, when the browsed tab is not the one the session is on — a
     ///    pane can only be focused inside the focused tab;
-    /// 2. then the pane focus itself, **except on herdr**, where focus *is* the attach
-    ///    (its relay carries only the focused pane) and the RPC is a no-op;
-    /// 3. then the focused flag moves in this screen's own tab state.
+    /// 2. then the pane focus itself, on **every** backend: the verb is what moves a
+    ///    herdr session too, where the server wire-swaps *this connection's* relay
+    ///    onto the target pane's terminal in place. The attached stream must stay
+    ///    open across it — a fresh attach carries no pane target, so re-opening one
+    ///    lands back on whatever the daemon has globally focused;
+    /// 3. then the focused flag moves in this screen's own tab state, optimistically:
+    ///    the layout reads that follow are answered against this connection's own
+    ///    focus, so they confirm the badge rather than reverting it.
     ///
     /// A refused step stops the sequence, emits on the usual failure sink, and writes
-    /// **no** optimistic state.
+    /// **no** optimistic state. A landed herdr commit then waits out
+    /// [`SWITCH_SETTLE`] and re-reads the layout, since the relay acked it on enqueue.
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
         if tab_key != self.active_tab.get_untracked() && !self.switch_tab(tab_key.clone()).await {
             return false;
         }
-        if !self.is_herdr_session()
-            && !self
-                .tell(self.terminal.focus_pane(pane_id, is_plugin))
-                .await
+        if !self
+            .tell(self.terminal.focus_pane(pane_id, is_plugin))
+            .await
         {
             return false;
         }
         self.focus_pane_locally(&tab_key, pane_id, is_plugin);
+        if self.is_herdr_session() {
+            self.settle_switch().await;
+            self.reload_tabs().await;
+        }
         true
     }
 
@@ -433,9 +475,10 @@ impl TerminalController {
     }
 
     /// Make the space with [`Space::id`] `id` the active one and reload the tab world
-    /// behind it. A **view** switch, not a mutation (see
-    /// [`TerminalRepository::switch_space`]), so it stays available to a read-only
-    /// credential; the reload is the point — a space *is* a different set of tabs.
+    /// behind it — the reload is the point: a space *is* a different set of tabs. The
+    /// wire marks `SwitchSpace` MUTATING (see [`TerminalRepository::switch_space`]),
+    /// and this client does not pre-empt that: a read-only credential's switch is
+    /// refused by the server, and the refusal reaches the usual failure sink.
     pub async fn select_space(&self, id: String) {
         if !self.tell(self.terminal.switch_space(id)).await {
             return;
@@ -672,6 +715,12 @@ impl TerminalController {
         clean_signals::time::sleep(create_settle()).await;
     }
 
+    /// Wait out [`SWITCH_SETTLE`] between a herdr focus move's ack and the reload
+    /// behind it — [`settle_create`](Self::settle_create)'s counterpart.
+    async fn settle_switch(&self) {
+        clean_signals::time::sleep(switch_settle()).await;
+    }
+
     /// Test/diagnostic-only accessor for [`layout_writes`](Self::layout_writes).
     pub fn layout_writes(&self) -> u64 {
         self.layout_writes.load(Ordering::Relaxed)
@@ -824,15 +873,6 @@ impl TerminalController {
                 .is_ok()
     }
 
-    /// Whether a tab or pane switch has to be followed by a fresh attach: herdr's relay
-    /// carries **only the focused pane**, so the client must attach again to be handed
-    /// the new pane's output, while zellij's carries the session and follows a switch
-    /// on its own. Reads [`attached_session`](Self::attached_session), not merely the
-    /// backend: a screen with no stream open has nothing to re-open.
-    pub fn reattaches_on_switch(&self) -> bool {
-        self.attached_session().as_deref().is_some_and(is_herdr)
-    }
-
     /// Re-read the terminal-appearance prefs and update
     /// [`cursor_style`](Self::cursor_style)/[`font_size`](Self::font_size)/
     /// [`font_family`](Self::font_family) — once on entering the live pane, then on
@@ -896,8 +936,10 @@ impl Drop for CreateClaim<'_> {
 const HERDR_BACKEND: &str = "herdr:";
 
 /// Drop the current `AttachTerminal` stream and open a fresh one at the grid's current
-/// size — [`LiveSession::reattach`]'s shareable form. An `Rc<dyn Fn()>` rather than a
-/// method because the *sheet*, a page of the root overlay host's navigator, calls it.
+/// size — [`LiveSession::reattach`]'s shareable form, and **recovery only** (the link
+/// strip's Retry): a fresh attach carries no pane target, so re-opening a stream is
+/// how a herdr session lands back on the daemon's globally focused pane. A boxed
+/// closure rather than a method because it owns the [`AttachSpec`] the reopen needs.
 pub type Reattach = Rc<dyn Fn()>;
 
 /// Whether the session with id `session` runs on the **herdr** backend — this screen's
@@ -986,8 +1028,7 @@ pub struct LiveSession {
     /// `presentation::term`'s ~30 Hz coalescing contract).
     pub generation: RwSignal<u64>,
     /// Drop this session's stream and open a fresh one at the grid's current size —
-    /// `None` for the demo replay. An `Rc<dyn Fn()>` because the sheet, a page of a
-    /// *different* navigator, has to be able to call it too.
+    /// `None` for the demo replay. See [`Reattach`] for why this is recovery alone.
     pub reattach: Option<Reattach>,
 }
 
@@ -1460,20 +1501,22 @@ mod tests {
     }
 
     #[test]
-    fn only_a_herdr_session_re_attaches_on_a_switch() {
-        // The stream carries the whole session on zellij and only the focused
-        // pane on herdr, so only one of the two has to attach again.
+    fn the_backend_discriminator_reads_the_sessions_own_id_prefix() {
+        // Spaces, the settle behind a landed commit and the grid's tap hook all
+        // branch on this one answer.
         assert!(is_herdr("herdr:work"));
         assert!(!is_herdr("zellij:dev"));
         assert!(!is_herdr("dev"));
 
         let c = controller(Some("herdr:work"));
         assert!(
-            !c.reattaches_on_switch(),
-            "a screen that never attached has no stream to re-open"
+            c.is_herdr_session(),
+            "which backend a session runs on is a fact about the session, not \
+             about whether a stream is open onto it"
         );
-        c.attach_live();
-        assert!(c.reattaches_on_switch());
+        assert!(c.has_spaces());
+        assert!(!controller(Some("zellij:dev")).is_herdr_session());
+        assert!(!controller(None).is_herdr_session());
     }
 
     #[test]
@@ -1567,6 +1610,11 @@ mod tests {
         stamp: AtomicBool,
         /// Whether a create has landed — it then shows up in every later `list_tabs`.
         created: AtomicBool,
+        /// The pane a landed [`focus_pane`](TerminalRepository::focus_pane) moved the
+        /// focus onto, re-applied to every later `list_tabs` answer: a server hands a
+        /// client back the focus that client itself asked for, which is what makes an
+        /// optimistic badge survive the reload behind a commit.
+        focused: Mutex<Option<(u32, bool)>>,
     }
 
     impl RecordingRepository {
@@ -1725,6 +1773,18 @@ mod tests {
             if self.created.load(Ordering::SeqCst) {
                 tabs.push(recorded_tab(3, "gamma", false));
             }
+            let focused = *self.focused.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((pane_id, is_plugin)) = focused {
+                // Only inside the tab carrying that pane: focus is flagged per
+                // tab, so the tabs left behind keep their own.
+                let addressed =
+                    |pane: &PaneEntry| pane.id == pane_id && pane.is_plugin == is_plugin;
+                if let Some(tab) = tabs.iter_mut().find(|tab| tab.panes.iter().any(&addressed)) {
+                    for pane in &mut tab.panes {
+                        pane.focused = addressed(pane);
+                    }
+                }
+            }
             if self.stamp.load(Ordering::Relaxed) {
                 for tab in &mut tabs {
                     tab.label = format!("{}#{call}", tab.key);
@@ -1752,7 +1812,10 @@ mod tests {
         }
 
         async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
-            self.record(format!("focus_pane({pane_id},{is_plugin})"))
+            self.record(format!("focus_pane({pane_id},{is_plugin})"))?;
+            *self.focused.lock().unwrap_or_else(PoisonError::into_inner) =
+                Some((pane_id, is_plugin));
+            Ok(())
         }
 
         async fn scroll_pane(
@@ -1892,7 +1955,25 @@ mod tests {
     }
 
     #[test]
-    fn a_herdr_commit_re_attaches_instead_of_calling_focus_pane() {
+    fn a_herdr_commit_inside_the_active_tab_focuses_the_pane_on_the_live_stream() {
+        let _override = SwitchSettleOverride::install(Duration::ZERO);
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        assert_eq!(
+            repository.actions(),
+            ["focus_pane(11,false)"],
+            "the verb IS the move on herdr: the server re-points this \
+             connection's relay onto that pane, over the open stream"
+        );
+        assert_eq!(focused_pane(&c, "alpha"), Some(11));
+    }
+
+    #[test]
+    fn a_herdr_commit_across_tabs_moves_the_tab_first_then_the_pane_too() {
+        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
         c.browse_tab("beta".to_string());
@@ -1901,24 +1982,61 @@ mod tests {
 
         assert_eq!(
             repository.actions(),
-            ["go_to_tab(2)"],
-            "on herdr the re-attach is the focus, so the RPC is a no-op"
+            ["go_to_tab(2)", "focus_pane(21,false)"],
+            "the same two verbs zellij takes, in the same order"
         );
-        assert!(
-            c.reattaches_on_switch(),
-            "…and the caller is told to re-open the stream"
+        assert_eq!(c.active_tab.get_untracked(), "beta");
+        assert_eq!(
+            focused_pane(&c, "beta"),
+            Some(21),
+            "the badge the commit wrote survives the reload behind it — the \
+             layout read is answered against this connection's own focus"
         );
-        assert_eq!(focused_pane(&c, "beta"), Some(21));
     }
 
     #[test]
-    fn a_zellij_commit_never_re_attaches() {
-        let (c, _repository) = recorded("zellij:dev");
+    fn a_landed_herdr_commit_settles_before_re_reading_the_layout() {
+        /// Unmistakable against instant mock calls, short enough not to pad.
+        const SETTLE: Duration = Duration::from_millis(80);
+        let _override = SwitchSettleOverride::install(SETTLE);
+        let (c, repository) = recorded("herdr:work");
         c.attach_live();
+        let after_load = repository.calls().len();
+
+        let started = std::time::Instant::now();
         assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
         assert!(
-            !c.reattaches_on_switch(),
-            "zellij's stream follows the server's own focus"
+            started.elapsed() >= SETTLE,
+            "the relay acks the focus move on enqueue, so the reload behind it \
+             waits for the move to be applied"
+        );
+        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+        assert_eq!(
+            since_load,
+            ["focus_pane(11,false)", "list_tabs"],
+            "…and then re-reads the layout the move produced"
+        );
+        assert_eq!(
+            SWITCH_SETTLE.as_millis(),
+            350,
+            "the shipped settle is the create settle's own"
+        );
+    }
+
+    #[test]
+    fn a_zellij_commit_re_reads_nothing_behind_it() {
+        let (c, repository) = recorded("zellij:dev");
+        let after_load = repository.calls().len();
+
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+
+        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+        assert_eq!(
+            since_load,
+            ["focus_pane(11,false)"],
+            "zellij's stream follows the server's own focus, and the layout \
+             poll carries the badge — no settle, no reload"
         );
     }
 
@@ -2304,6 +2422,30 @@ mod tests {
     impl Drop for SettleOverride {
         fn drop(&mut self) {
             set_create_settle_for_tests(None);
+        }
+    }
+
+    /// [`SETTLE_OVERRIDE`]'s counterpart for the herdr switch settle — its own
+    /// lock, since the two overrides pace unrelated flows.
+    static SWITCH_SETTLE_OVERRIDE: Mutex<()> = Mutex::new(());
+
+    /// An installed switch-settle override, restored to the shipped
+    /// [`SWITCH_SETTLE`] when it drops.
+    struct SwitchSettleOverride(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl SwitchSettleOverride {
+        fn install(settle: Duration) -> Self {
+            let guard = SWITCH_SETTLE_OVERRIDE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            set_switch_settle_for_tests(Some(settle));
+            Self(guard)
+        }
+    }
+
+    impl Drop for SwitchSettleOverride {
+        fn drop(&mut self) {
+            set_switch_settle_for_tests(None);
         }
     }
 
