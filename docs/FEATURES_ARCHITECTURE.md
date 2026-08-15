@@ -76,9 +76,17 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   implementations: `data::feeds::DemoFeed` (an embedded fixture replay) and
   `data::feeds::GrpcTerminalFeed` (the real `AttachTerminal` stream, a fixed 1/2/4/8/16s reconnect
   backoff, and a link-status signal the card's own link strip renders when reconnecting, disconnected
-  or closed). `presentation::term` is the real grid: a `vt100` emulator held off the signal graph, a
-  ~30 Hz pump coalescing every wake into one signal write, same-style run batching, cell geometry, and
-  a `LAYOUT | PAINT` generation contract (the cursor blink is its one paced, paint-only exception).
+  or closed). Switching panes, tabs, or space on a herdr backend sends `FocusPane`/`GoToTab`/
+  `SwitchSpace` on the live stream — never a client reattach: the server wire-swaps this connection
+  to the target pane in place, and a `GetLayout` sent with the same connection_id echoes that
+  per-connection focus back (the card's existing poll confirms rather than reverts). The feed also
+  carries a controller-owned `ResumeSlot` hint — the last user-driven space/tab/pane, written only by
+  a landed herdr commit or space switch, never by the layout poll — on every `AttachTerminal`,
+  including the feed's own backoff reconnects, so a reconnect restores the user's view instead of
+  snapping to daemon-global focus. `presentation::term` is the real grid: a `vt100` emulator held
+  off the signal graph, a ~30 Hz pump coalescing every wake into one signal write, same-style run
+  batching, cell geometry, and a `LAYOUT | PAINT` generation contract (the cursor blink is its one
+  paced, paint-only exception).
   `term::input` turns platform IME snapshots into keystrokes; `term::selection`/`chip` add word-wise
   long-press selection, a re-render loupe and a sensitive-clipboard Copy chip; `presentation::keybar`
   is the IME-active-only key bar, whose caps claim (and must re-claim, on every tap) focus. Three
