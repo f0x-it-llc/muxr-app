@@ -18,11 +18,13 @@
 //!
 //! **Token hygiene**: the plaintext auth token is zeroized as soon as the
 //! `Login` request is built; the minted session token is scrubbed out of the
-//! response once the client holds it, and the controller zeroizes its own
-//! buffer both on a successful connect **and** on disconnect. Carve-out:
-//! transient plaintext copies the render pass paints (a password field's
-//! glyphs) and the platform IME surface holds while typing are **not**
-//! covered — they persist until platform-level input masking lands.
+//! response once the client holds it (the login *field*'s own buffer belongs
+//! to `connect`'s `ConnectController`, which clears it on connect and
+//! disconnect — not to this module). Residuals this layer cannot reach:
+//! `LoginRequest`'s own `String` copy and the encoded request frame `tonic`
+//! owns are not addressable from here and are never zeroized, and the
+//! platform IME surface holds plaintext while typing until platform-level
+//! input masking lands.
 //! **Threading**: a real dial runs on the
 //! background runtime ([`frust::spawn`]); a UI-thread coordinator
 //! ([`frust::spawn_local`]) awaits it and is the **sole signal writer** — no

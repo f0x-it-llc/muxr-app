@@ -1,7 +1,10 @@
-//! The `/settings` screen's individually-composable pieces, transcribed from
+//! The `/settings` screen's widget clusters, transcribed from
 //! `docs/redesign.html`'s **settings** block (screen 5) and its **picker
 //! sheet** (screen 6) — arranged, not resolved, by
-//! [`pages`](super::pages)'s `Component::build`.
+//! [`pages`](super::pages)'s `Component::build`. Page-coupled by design:
+//! these modules read the page's state type and call its `pages::open_*`
+//! shims directly (the screen-state form of the sanctioned pages↔widgets
+//! back-edge — see `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph).
 //!
 //! One file per cluster, re-exported flat here so `pages` reads
 //! `widgets::foo(..)` exactly as it used to read the single-file `pieces`

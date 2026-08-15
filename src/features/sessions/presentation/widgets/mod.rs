@@ -1,8 +1,11 @@
-//! The `/sessions` screen's individually-composable pieces, transcribed from
+//! The `/sessions` screen's widget clusters, transcribed from
 //! `docs/redesign.html`'s **sessions** block (CSS lines 92-113, markup lines
 //! 227-257) — one submodule per visual cluster, so
 //! [`pages`](super::pages)'s `Component::build` reads as an arrangement
-//! rather than a wall of nesting (the `features::connect` screen precedent):
+//! rather than a wall of nesting. These modules are page-coupled by design:
+//! each reads the page's state type or calls its `pages::*` action shims
+//! directly (the screen-state form of the sanctioned pages↔widgets back-edge
+//! — see `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph):
 //!
 //! - [`server_strip`] — `.conn-row`: the heartbeat dot, version meta,
 //!   latency, the `insecure` chip.
