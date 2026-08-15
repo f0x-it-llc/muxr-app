@@ -286,8 +286,11 @@ impl GrpcTerminalFeed {
     }
 
     /// The hint the **next** attach this feed makes will carry — the slot's
-    /// current value, read through the feed for a caller holding only the feed.
-    pub fn resume_target(&self) -> ResumeTarget {
+    /// current value, read *through* the feed rather than off the caller's own
+    /// handle, which is what pins that the pump holds the live slot and not a
+    /// copy taken at attach. Test-only: production reads the slot it owns.
+    #[cfg(test)]
+    fn resume_target(&self) -> ResumeTarget {
         self.shared.resume.target()
     }
 
@@ -698,8 +701,11 @@ async fn run_pump(pump: Pump) {
 ///
 /// The **one** place an `AttachReq` is built, which is what makes the resume hint
 /// ride the backoff reconnect as well as the first attach: the loop above calls
-/// this for both. The hint is read here rather than captured with the pump, so a
-/// move the user made while the link was down is the one that lands.
+/// this for both. The hint is read here rather than captured with the pump, so
+/// every attempt carries the last move the screen recorded *before* the drop —
+/// which is the whole of what the slot can offer, since a move made while the
+/// link is down never lands at all (its RPC fails, and a refused move records
+/// nothing).
 async fn attach(client: &MuxrClient, session: &str, shared: &Shared) -> Attempt {
     let (outbound, requests) = mpsc::channel(OUTBOUND_CAPACITY);
     let (cols, rows) = shared.dims();

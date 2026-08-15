@@ -20,10 +20,10 @@
 //! them: a generation counter committing only the newest fetch,
 //! read-compare-then-write in
 //! [`publish_tabs`](TerminalController::publish_tabs), self-healing
-//! active/browsed keys, and single-flight claims on the poll and on creates.
+//! active/browsed keys, and single-flight claims on the poll, on creates and on
+//! the sheet's own commit.
 //! [`is_herdr`] is the one backend discriminator: only herdr has spaces, only
-//! herdr settles a landed focus move before re-reading the layout, only herdr
-//! records a move as the stream's resume hint
+//! herdr records a move as the stream's resume hint
 //! ([`ResumeSlot`](crate::features::terminal::data::feeds::grpc_feed::ResumeSlot)),
 //! and the grid's content-tap hook is never wired there.
 
@@ -133,6 +133,11 @@ pub struct TerminalController {
     /// Whether a create verb is in flight — the coalescing claim
     /// [`claim_create`](Self::claim_create) takes. A dropped press stays dropped.
     create_in_flight: AtomicBool,
+    /// [`create_in_flight`](Self::create_in_flight)'s counterpart for the sheet's
+    /// commit ([`claim_commit`](Self::claim_commit)), and its own claim rather than
+    /// a shared one: a commit and a create move unrelated things, and coalescing
+    /// them together would drop a pane tap because a tab is being made.
+    commit_in_flight: AtomicBool,
     /// Whether the attached stream's handshake has settled —
     /// [`mirror_link`](Self::mirror_link) answers `true` on the wake that flips this.
     attach_settled: AtomicBool,
@@ -169,56 +174,24 @@ const LAYOUT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// own settle for exactly this.
 const CREATE_SETTLE: Duration = Duration::from_millis(350);
 
-/// How long a landed **herdr** focus move waits before re-reading the layout, for
-/// [`CREATE_SETTLE`]'s own reason: a relay acks a control verb when it is enqueued,
-/// not when it is applied, so a reload sent the instant the ack lands still reads the
-/// pane the move is leaving. Same 350ms; zellij needs none (its stream follows the
-/// server's own focus, and the layout poll carries the rest).
-const SWITCH_SETTLE: Duration = Duration::from_millis(350);
-
-/// The sentinel the two settle-override cells hold when no override is installed.
+/// The sentinel [`CREATE_SETTLE_OVERRIDE_MS`] holds when no override is installed.
 const NO_SETTLE_OVERRIDE: u64 = u64::MAX;
 
 /// The settle a test installed with [`set_create_settle_for_tests`], in milliseconds.
 static CREATE_SETTLE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(NO_SETTLE_OVERRIDE);
 
-/// [`CREATE_SETTLE_OVERRIDE_MS`]' counterpart for [`SWITCH_SETTLE`].
-static SWITCH_SETTLE_OVERRIDE_MS: AtomicU64 = AtomicU64::new(NO_SETTLE_OVERRIDE);
-
 /// Override [`CREATE_SETTLE`] for a headless test, so a suite can pin the post-create
 /// reload's *ordering* without spending 350ms per create; `None` restores the shipped
 /// value. `pub` rather than `#[cfg(test)]`: `tests/*.rs` link the normal build.
 pub fn set_create_settle_for_tests(settle: Option<Duration>) {
-    store_settle_override(&CREATE_SETTLE_OVERRIDE_MS, settle);
-}
-
-/// [`set_create_settle_for_tests`]' counterpart for [`SWITCH_SETTLE`], with the same
-/// contract — a herdr commit's own reload is what it paces.
-pub fn set_switch_settle_for_tests(settle: Option<Duration>) {
-    store_settle_override(&SWITCH_SETTLE_OVERRIDE_MS, settle);
-}
-
-/// Write `settle` into `cell`, spelling `None` as [`NO_SETTLE_OVERRIDE`].
-fn store_settle_override(cell: &AtomicU64, settle: Option<Duration>) {
     let value = settle.map_or(NO_SETTLE_OVERRIDE, |settle| settle.as_millis() as u64);
-    cell.store(value, Ordering::Relaxed);
+    CREATE_SETTLE_OVERRIDE_MS.store(value, Ordering::Relaxed);
 }
 
 /// The settle a create actually waits — [`CREATE_SETTLE`] unless a test overrode it.
 fn create_settle() -> Duration {
-    resolve_settle(&CREATE_SETTLE_OVERRIDE_MS, CREATE_SETTLE)
-}
-
-/// The settle a herdr focus move actually waits — [`SWITCH_SETTLE`] unless a test
-/// overrode it.
-fn switch_settle() -> Duration {
-    resolve_settle(&SWITCH_SETTLE_OVERRIDE_MS, SWITCH_SETTLE)
-}
-
-/// Whatever `cell` holds, or `shipped` when no override is installed.
-fn resolve_settle(cell: &AtomicU64, shipped: Duration) -> Duration {
-    match cell.load(Ordering::Relaxed) {
-        NO_SETTLE_OVERRIDE => shipped,
+    match CREATE_SETTLE_OVERRIDE_MS.load(Ordering::Relaxed) {
+        NO_SETTLE_OVERRIDE => CREATE_SETTLE,
         millis => Duration::from_millis(millis),
     }
 }
@@ -296,6 +269,7 @@ impl TerminalController {
             layout_generation: AtomicU64::new(0),
             layout_poll_in_flight: AtomicBool::new(false),
             create_in_flight: AtomicBool::new(false),
+            commit_in_flight: AtomicBool::new(false),
             attach_settled: AtomicBool::new(false),
             layout_writes: AtomicU64::new(0),
             resume: Arc::new(ResumeSlot::default()),
@@ -423,12 +397,26 @@ impl TerminalController {
     ///    the layout reads that follow are answered against this connection's own
     ///    focus, so they confirm the badge rather than reverting it.
     ///
-    /// A refused step stops the sequence, emits on the usual failure sink, and writes
-    /// **no** optimistic state. A landed herdr commit then records the move as the
-    /// stream's resume hint ([`remember_resume_pane`](Self::remember_resume_pane)),
-    /// waits out [`SWITCH_SETTLE`] and re-reads the layout, since the relay acked it
-    /// on enqueue.
+    /// A refused step stops the sequence and emits on the usual failure sink. It
+    /// writes no optimistic state **of its own** — but a cross-tab commit whose tab
+    /// step landed and whose pane focus was then refused keeps that tab move: the
+    /// session really is on the new tab, and the card must say so. What only a
+    /// *fully* landed commit writes is the pane badge and, on herdr, the stream's
+    /// resume hint ([`remember_resume_pane`](Self::remember_resume_pane)).
+    ///
+    /// **Single-flight** ([`claim_commit`](Self::claim_commit)): a pane tap arriving
+    /// while a commit is in flight is dropped rather than queued, so two taps can
+    /// never race their `focus_pane` calls (or their resume writes) to an order
+    /// neither the badge nor the hint could reconstruct.
+    ///
+    /// Nothing is re-read behind the move on either backend. Accepted residual: the
+    /// [`LAYOUT_POLL_INTERVAL`] poll answers with the focus the server holds *now*,
+    /// so a tick landing inside the relay's own apply window can briefly show the
+    /// badge back on the pane being left, until the next tick converges.
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
+        let Some(_claim) = self.claim_commit() else {
+            return false;
+        };
         if tab_key != self.active_tab.get_untracked() && !self.switch_tab(tab_key.clone()).await {
             return false;
         }
@@ -440,12 +428,13 @@ impl TerminalController {
         }
         self.focus_pane_locally(&tab_key, pane_id, is_plugin);
         if self.is_herdr_session() {
-            // Before the settle, not after: a reload that fails must not cost the
-            // hint a reconnect would replay.
             self.remember_resume_pane(&tab_key, pane_id);
-            self.settle_switch().await;
-            self.reload_tabs().await;
         }
+        // …and no reload behind any of it. The optimistic badge above IS the
+        // immediate feedback, and the layout poll converges on the server's own
+        // per-connection focus. A reload here would add nothing in the good case
+        // and, landing before the relay applies the verb it only acked on enqueue,
+        // would revert the badge it just wrote.
         true
     }
 
@@ -512,8 +501,9 @@ impl TerminalController {
     /// Make the space with [`Space::id`] `id` the active one and reload the tab world
     /// behind it — the reload is the point: a space *is* a different set of tabs. The
     /// wire marks `SwitchSpace` MUTATING (see [`TerminalRepository::switch_space`]),
-    /// and this client does not pre-empt that: a read-only credential's switch is
-    /// refused by the server, and the refusal reaches the usual failure sink.
+    /// so a read-only credential is turned back at the pill itself
+    /// (`presentation::pages`' `Actions::select_space`) rather than here; any other
+    /// refusal is the server's, and reaches the usual failure sink.
     ///
     /// A landed switch also becomes the stream's resume hint — spaces are herdr's
     /// alone, and the space is the rung of that hint a muxrd restart cannot stale
@@ -747,20 +737,22 @@ impl TerminalController {
 
     /// Claim the one in-flight create slot, or `None` when a create is already running.
     /// The claim releases on drop, so a refused create re-arms the affordance.
-    fn claim_create(&self) -> Option<CreateClaim<'_>> {
+    fn claim_create(&self) -> Option<FlightClaim<'_>> {
         (!self.create_in_flight.swap(true, Ordering::SeqCst))
-            .then(|| CreateClaim(&self.create_in_flight))
+            .then(|| FlightClaim(&self.create_in_flight))
+    }
+
+    /// [`claim_create`](Self::claim_create)'s counterpart for
+    /// [`commit_pane`](Self::commit_pane) — the same drop-not-queue idiom over the
+    /// commit's own slot.
+    fn claim_commit(&self) -> Option<FlightClaim<'_>> {
+        (!self.commit_in_flight.swap(true, Ordering::SeqCst))
+            .then(|| FlightClaim(&self.commit_in_flight))
     }
 
     /// Wait out [`CREATE_SETTLE`] between a create's ack and the reload behind it.
     async fn settle_create(&self) {
         clean_signals::time::sleep(create_settle()).await;
-    }
-
-    /// Wait out [`SWITCH_SETTLE`] between a herdr focus move's ack and the reload
-    /// behind it — [`settle_create`](Self::settle_create)'s counterpart.
-    async fn settle_switch(&self) {
-        clean_signals::time::sleep(switch_settle()).await;
     }
 
     /// Test/diagnostic-only accessor for [`layout_writes`](Self::layout_writes).
@@ -964,11 +956,13 @@ impl TerminalController {
     }
 }
 
-/// The in-flight create claim [`TerminalController::claim_create`] hands out —
-/// released on drop, so it covers the whole verb (ack, settle and reload).
-struct CreateClaim<'a>(&'a AtomicBool);
+/// The in-flight claim [`TerminalController::claim_create`] and
+/// [`TerminalController::claim_commit`] hand out — released on drop, so it covers
+/// the whole verb (for a create: its ack, settle and reload) however that verb
+/// returns.
+struct FlightClaim<'a>(&'a AtomicBool);
 
-impl Drop for CreateClaim<'_> {
+impl Drop for FlightClaim<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
@@ -1553,8 +1547,8 @@ mod tests {
 
     #[test]
     fn the_backend_discriminator_reads_the_sessions_own_id_prefix() {
-        // Spaces, the settle behind a landed commit and the grid's tap hook all
-        // branch on this one answer.
+        // Spaces, the resume hint a landed commit records and the grid's tap
+        // hook all branch on this one answer.
         assert!(is_herdr("herdr:work"));
         assert!(!is_herdr("zellij:dev"));
         assert!(!is_herdr("dev"));
@@ -2014,7 +2008,6 @@ mod tests {
 
     #[test]
     fn a_herdr_commit_inside_the_active_tab_focuses_the_pane_on_the_live_stream() {
-        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
 
@@ -2031,7 +2024,6 @@ mod tests {
 
     #[test]
     fn a_herdr_commit_across_tabs_moves_the_tab_first_then_the_pane_too() {
-        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
         c.browse_tab("beta".to_string());
@@ -2044,58 +2036,27 @@ mod tests {
             "the same two verbs zellij takes, in the same order"
         );
         assert_eq!(c.active_tab.get_untracked(), "beta");
-        assert_eq!(
-            focused_pane(&c, "beta"),
-            Some(21),
-            "the badge the commit wrote survives the reload behind it — the \
-             layout read is answered against this connection's own focus"
-        );
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
     }
 
     #[test]
-    fn a_landed_herdr_commit_settles_before_re_reading_the_layout() {
-        /// Unmistakable against instant mock calls, short enough not to pad.
-        const SETTLE: Duration = Duration::from_millis(80);
-        let _override = SwitchSettleOverride::install(SETTLE);
-        let (c, repository) = recorded("herdr:work");
-        c.attach_live();
-        let after_load = repository.calls().len();
+    fn a_commit_re_reads_nothing_behind_it_on_either_backend() {
+        for session in ["zellij:dev", "herdr:work"] {
+            let (c, repository) = recorded(session);
+            c.attach_live();
+            let after_load = repository.calls().len();
 
-        let started = std::time::Instant::now();
-        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+            assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
 
-        assert!(
-            started.elapsed() >= SETTLE,
-            "the relay acks the focus move on enqueue, so the reload behind it \
-             waits for the move to be applied"
-        );
-        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
-        assert_eq!(
-            since_load,
-            ["focus_pane(11,false)", "list_tabs"],
-            "…and then re-reads the layout the move produced"
-        );
-        assert_eq!(
-            SWITCH_SETTLE.as_millis(),
-            350,
-            "the shipped settle is the create settle's own"
-        );
-    }
-
-    #[test]
-    fn a_zellij_commit_re_reads_nothing_behind_it() {
-        let (c, repository) = recorded("zellij:dev");
-        let after_load = repository.calls().len();
-
-        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
-
-        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
-        assert_eq!(
-            since_load,
-            ["focus_pane(11,false)"],
-            "zellij's stream follows the server's own focus, and the layout \
-             poll carries the badge — no settle, no reload"
-        );
+            let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+            assert_eq!(
+                since_load,
+                ["focus_pane(11,false)"],
+                "the optimistic badge is the feedback and the layout poll is the \
+                 truth — a reload here could only land inside the relay's own \
+                 apply window and revert what the commit just wrote ({session})"
+            );
+        }
     }
 
     #[test]
@@ -2132,6 +2093,52 @@ mod tests {
             Some(10),
             "the badge stays on the pane the session is actually on"
         );
+    }
+
+    #[test]
+    fn a_second_pane_tap_while_a_commit_is_in_flight_is_dropped_not_queued() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        // The first commit's tab step parks, so the second tap arrives while it
+        // is genuinely in flight — the rapid double-tap this drops.
+        repository.delay_calls([Duration::from_millis(60)]);
+        let after_load = repository.calls().len();
+
+        let (first, second) = block_on(async {
+            tokio::join!(
+                c.commit_pane("beta".to_string(), 21, false),
+                c.commit_pane("alpha".to_string(), 11, false),
+            )
+        });
+
+        assert!(first, "the tap holding the claim commits");
+        assert!(!second, "…and the one that found it taken is dropped");
+        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+        assert_eq!(
+            since_load,
+            ["go_to_tab(2)", "tab_lines(beta)", "focus_pane(21,false)"],
+            "one focus_pane went out, not two racing to an order the badge \
+             could not reconstruct"
+        );
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+        assert_eq!(
+            focused_pane(&c, "alpha"),
+            Some(10),
+            "the dropped tap wrote nothing at all"
+        );
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: None,
+                tab_id: Some(2),
+                pane_id: Some(21),
+            },
+            "…so the reconnect hint names the move that actually landed"
+        );
+
+        // …and the claim released with it, so the sheet still commits.
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+        assert_eq!(focused_pane(&c, "alpha"), Some(11));
     }
 
     // The live grid's content-tap hook (`presentation::pages`' own wiring).
@@ -2245,7 +2252,6 @@ mod tests {
 
     #[test]
     fn a_herdr_commit_records_the_move_as_the_reconnects_resume_hint() {
-        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, _repository) = recorded("herdr:work");
         c.attach_live();
         c.browse_tab("beta".to_string());
@@ -2266,7 +2272,6 @@ mod tests {
 
     #[test]
     fn a_space_switch_records_the_space_and_a_commit_after_it_keeps_it() {
-        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, _repository) = recorded("herdr:work");
         c.attach_live();
 
@@ -2298,7 +2303,6 @@ mod tests {
 
     #[test]
     fn a_refused_move_records_no_resume_hint_at_all() {
-        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
         repository.refuse("switch_space");
@@ -2331,7 +2335,6 @@ mod tests {
 
     #[test]
     fn a_layout_read_never_writes_the_resume_hint() {
-        let _override = SwitchSettleOverride::install(Duration::ZERO);
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
         assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
@@ -2574,7 +2577,7 @@ mod tests {
     // The layout-refresh mechanism: staleness guard, poll claim, create settle
     // and its coalescing, attach-settled edge.
 
-    /// Serializes the two tests installing a process-global
+    /// Serializes the tests installing a process-global
     /// [`set_create_settle_for_tests`] override across parallel test threads.
     static SETTLE_OVERRIDE: Mutex<()> = Mutex::new(());
 
@@ -2595,30 +2598,6 @@ mod tests {
     impl Drop for SettleOverride {
         fn drop(&mut self) {
             set_create_settle_for_tests(None);
-        }
-    }
-
-    /// [`SETTLE_OVERRIDE`]'s counterpart for the herdr switch settle — its own
-    /// lock, since the two overrides pace unrelated flows.
-    static SWITCH_SETTLE_OVERRIDE: Mutex<()> = Mutex::new(());
-
-    /// An installed switch-settle override, restored to the shipped
-    /// [`SWITCH_SETTLE`] when it drops.
-    struct SwitchSettleOverride(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
-
-    impl SwitchSettleOverride {
-        fn install(settle: Duration) -> Self {
-            let guard = SWITCH_SETTLE_OVERRIDE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            set_switch_settle_for_tests(Some(settle));
-            Self(guard)
-        }
-    }
-
-    impl Drop for SwitchSettleOverride {
-        fn drop(&mut self) {
-            set_switch_settle_for_tests(None);
         }
     }
 

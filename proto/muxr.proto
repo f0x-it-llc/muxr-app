@@ -1,4 +1,5 @@
-// VENDORED COPY — the body below this block is byte-for-byte upstream.
+// VENDORED COPY — the body below this block is byte-for-byte upstream, save for
+// the one sanctioned exception recorded at the end of this block.
 //
 // Source: `muxrd/proto/muxr.proto` in the `f0x-it-llc/muxr-core` repo, rev
 // `ec6b032`. `build.rs` compiles this file (protox -> tonic-prost-build) into
