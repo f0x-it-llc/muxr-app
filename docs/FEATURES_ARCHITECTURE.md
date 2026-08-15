@@ -77,8 +77,9 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   `data::feeds::GrpcTerminalFeed` (the real `AttachTerminal` stream, a fixed 1/2/4/8/16s reconnect
   backoff, and a link-status signal the card's own link strip renders when reconnecting, disconnected
   or closed). Switching panes, tabs, or space on a herdr backend sends `FocusPane`/`GoToTab`/
-  `SwitchSpace` on the live stream — never a client reattach: the server wire-swaps this connection
-  to the target pane in place, and a `GetLayout` sent with the same connection_id echoes that
+  `SwitchSpace` as unary RPCs carrying the attached stream's connection_id, never a client
+  reattach: the server routes each call server-side into that connection's own relay, wire-swapping
+  it onto the target pane in place, and a `GetLayout` sent with the same connection_id echoes that
   per-connection focus back (the card's existing poll confirms rather than reverts). The feed also
   carries a controller-owned `ResumeSlot` hint — the last user-driven space/tab/pane, written only by
   a landed herdr commit or space switch, never by the layout poll — on every `AttachTerminal`,
@@ -93,8 +94,9 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   things can occupy the card: a real attached session (route carries `?session=<id>` and the app holds
   a live client), the overflow menu's "Demo session" row (the fixture replay), or — a bare `/terminal`,
   and every headless suite — the seeded mock transcript `widgets::card::card_body` renders. A
-  read-only credential mounts the grid in its own read-only mode and withdraws the panes sheet's
-  mutating rows.
+  read-only credential mounts the grid in its own read-only mode, withdraws the panes sheet's
+  mutating rows, and refuses a space pill's switch client-side with a read-only toast, before any
+  RPC is sent.
 - **`settings`** — the connected server's settings screen: five groups (connection, auth tokens,
   saved servers, terminal appearance, session poll). `GrpcAuthTokensRepository` and `PrefsRepository`
   (the `frust-shared-preferences`-backed store) back the real run; token rows support create (with a
