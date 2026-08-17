@@ -1,107 +1,39 @@
 //! `muxr_topbar` — the app's branded top bar (`docs/redesign.html`'s
 //! `.topbar`), mounted **once** by [`crate::shell`] as persistent chrome
-//! floating over the navigator — see `docs/ARCHITECTURE.md`'s Shell and UI
-//! Substrate sections for the chrome-not-layout/hidden-not-unmounted contract
-//! and the "chrome icons are vectors" rule this widget is the reference site
-//! for. Three zones: leading (brand mark + wordmark, or a `‹` back button),
-//! an absolutely centered title, and one optional trailing icon; `/` has no
-//! bar, so the whole widget is [hidden](TopBarView::hidden) there. Modality
-//! is not this widget's job — the root overlay host makes an inert,
-//! unaddressable bar under an open overlay structurally, painting its own
-//! scrim over it. A hand-rolled [`View`]/[`Widget`] pair: `frust_glyph::app_bar`'s
-//! fixed 52px/left-aligned-title shape can't bend into this bar's
-//! 46px/centered-title one.
-//!
-//! **Entrance/exit** slides the bar in from above the top edge while fading
-//! (reversed on exit) on the same [`GLYPH_SLIDE_ENTER`]/[`GLYPH_SLIDE_EXIT`]
-//! timings the page transition under it runs, started the same rebuild
-//! rather than reading the navigator's transition progress (not exposed).
-//! `reduce_motion` collapses this to [`REDUCE_MOTION_DURATION`], linear; a
-//! mid-reveal bar takes no input and publishes no semantics until settled.
-//!
-//! **Crossfades** (title + leading-slot swap on a route change) run through
-//! the framework's [`PatternSwitcher`](frust::motion::switcher); the staging
-//! recipes, [`TitleShift`] (±14px x-shift + fade, ~220ms `--ease-out`,
-//! direction flips on back) and [`LeadingSwap`] (±6px y-shift + fade), are
-//! transcribed from `frust-widgets`' `glyph/appbar.rs` module docs since the
-//! framework ships no pattern carrying those numbers. A crossfade staged the
-//! same frame the bar hides never plays (a switcher advances only in
-//! `paint`, which a hidden bar skips) — the frozen child sits retained until
-//! the next swap supersedes it.
-//!
-//! [`topbar_clearance`] is the one helper a bar-bearing page uses to reserve
-//! its own top clearance (status-bar inset + [`BAR_HEIGHT`]), matching the
-//! extended height this widget's own background paints.
-
+//! floating over the navigator
 use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point,
-    PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
-    rebuild_child, route_event, teardown_child,
+    any, build_child, erase_callback, rebuild_child, route_event, teardown_child, Action, AnyView,
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role, SemanticsCtx, Size,
+    View, Widget, PRESSED_OPACITY,
 };
 use frust::motion::patterns::{PatternLayer, TransitionPattern};
-use frust::motion::switcher::{REDUCE_MOTION_DURATION, pattern_switcher};
+use frust::motion::switcher::{pattern_switcher, REDUCE_MOTION_DURATION};
 use frust::{
-    AnimationController, Axis, ChildKey, CrossAxisAlignment, Curve, EdgeInsets, FlexView, IconData,
-    IconSource, Padding, SizedBox, Theme, Timing, icon, inflexible, safe_area, text,
+    icon, inflexible, safe_area, text, AnimationController, Axis, ChildKey, CrossAxisAlignment,
+    Curve, EdgeInsets, FlexView, IconData, IconSource, Padding, SizedBox, Theme, Timing,
 };
 use frust_glyph::motion::{GLYPH_SLIDE_ENTER, GLYPH_SLIDE_EXIT};
 
-/// `.topbar{height:46px}` — the content band, below the status-bar inset.
-///
-/// `pub` because a page under the bar has to reserve exactly this much (plus
-/// the status-bar inset the bar also consumes) at its own top — see
-/// [`topbar_clearance`], the wrapper every such page uses instead of spelling
-/// the sum itself.
 pub const BAR_HEIGHT: f64 = 46.0;
-/// `.topbar{padding:0 16px}`.
 const PAD_X: f64 = 16.0;
-/// `.brand-mark{width:16px;height:16px}`.
 const MARK_SIZE: f64 = 16.0;
-/// `.brand-mark{gap:2px}` — so each of the four cells is 7×7.
 const MARK_GAP: f64 = 2.0;
-/// One `.brand-mark span`.
 const MARK_CELL: f64 = (MARK_SIZE - MARK_GAP) / 2.0;
-/// `.brand-mark span{border-radius:1px}`.
 const MARK_RADIUS: f64 = 1.0;
-/// `.brand{gap:7px}` — mark to wordmark.
 const BRAND_GAP: f64 = 7.0;
-/// `.brand{font-size:13px}` — the wordmark is a fixed-size logotype, not a
-/// type-scale role, so it overrides the display role's size (and only that;
-/// family/weight stay Space Mono 700, which *is* what the role carries).
 const BRAND_SIZE: f32 = 13.0;
-/// …and its line box, tightened to match. The display role carries a 36px
-/// line height for a 32px face; left alone it would give the wordmark a
-/// 36px-tall box inside a 46px bar, so what "centered" means would depend on
-/// where the shaper puts a baseline inside that box rather than on the bar.
 const BRAND_LINE_HEIGHT: f32 = 18.0;
-/// `.topbar-icon{width:30px;height:30px}` — the leading/trailing icon box.
 const ICON_SLOT: f64 = 30.0;
-/// The drawn size of the vector inside that box, in logical px. An original
-/// value: `.topbar-icon` sets its glyph at 15px, and a Material Symbols
-/// outline at 15px reads thinner than a 15px glyph does, so the mark is drawn
-/// a step up — still comfortably inside the 30px box, with the box itself
-/// staying the tap target.
 const ICON_SIZE: f64 = 20.0;
-/// Minimum clear space between the centered title and either side zone, in
-/// logical px. An original value (the source's absolutely-positioned title can
-/// overlap; a real title has to be clamped instead).
 const TITLE_GUTTER: f64 = 8.0;
-/// `.topbar{border-bottom:1px solid var(--border)}`.
 const HAIRLINE: f64 = 1.0;
 
-/// The brand wordmark, and the accessibility name of the bar itself.
 const BRAND: &str = "muxr";
 
-/// The back affordance's accessible name — what a screen reader announces, and
-/// what a test addresses the button by.
-///
-/// A **word**, not the mark it draws: the slot used to carry the literal `‹`
-/// as its label (it *was* the label, since the affordance was a text run), and
-/// "single left-pointing angle quotation mark" is not a thing to read out.
 pub const BACK_LABEL: &str = "Back";
 
 /// The back affordance's mark: a chevron pointing at the leading edge, mirrored
@@ -122,28 +54,13 @@ pub const CHEVRON_LEFT: IconSource = IconSource {
     design: ICON_DESIGN_BOX,
 };
 
-/// The side length of the square design box every icon here is authored
-/// against — Material Symbols' own 24, which [`frust::icons`]' generated
-/// entries all carry.
 const ICON_DESIGN_BOX: f64 = 24.0;
 
-/// Title-crossfade x-shift, logical px — `glyph/appbar.rs`'s `TITLE_SHIFT`
-/// (`.bn-title-a{translateX(-14px)}`), transcribed.
 const TITLE_SHIFT: f64 = 14.0;
-/// Leading-swap y-shift, logical px — `glyph/appbar.rs`'s `SELECTION_SHIFT`
-/// (`.sel-normal{translateY(-6px)}`), the vertical cross-over it uses for the
-/// leading↔close swap.
 const LEADING_SHIFT: f64 = 6.0;
-/// Crossfade duration — `glyph/appbar.rs`'s `TITLE_DURATION` (the design
-/// system's `durations.base`).
 const CROSSFADE_MS: u64 = 220;
-/// Crossfade easing — `glyph/appbar.rs`'s `TITLE_CURVE` (the HTML's
-/// `--ease-out` cubic).
 const CROSSFADE_CURVE: Curve = Curve::Cubic(0.16, 1.0, 0.3, 1.0);
 
-/// The crossfade [`Timing`] both slots stage under. `PatternSwitcher`
-/// substitutes its own ≤120ms linear cross-fade under `reduce_motion`, so this
-/// is only ever the full-motion timing.
 fn crossfade_timing() -> Timing {
     Timing::Duration(
         std::time::Duration::from_millis(CROSSFADE_MS),
@@ -152,32 +69,13 @@ fn crossfade_timing() -> Timing {
 }
 
 // ---------------------------------------------------------------------------
-// The bar's own entrance/exit (see the module docs)
+// The bar's own entrance/exit
 // ---------------------------------------------------------------------------
 
-/// The reveal's slide-in easing — `motion::patterns`' `GLYPH_SLIDE_SPATIAL`
-/// (the Glyph `spatial` curve, `Cubic(0.05,0.7,0.1,1)`), transcribed: the
-/// durations beside it are `pub` in `frust-widgets`, the curves are not.
 const REVEAL_SPATIAL_CURVE: Curve = Curve::Cubic(0.05, 0.7, 0.1, 1.0);
-/// The reveal's fade-in easing — `GLYPH_SLIDE_EFFECTS` (the Glyph `effects`
-/// curve, `Cubic(0.2,0,0,1)`), transcribed for the same reason.
 const REVEAL_EFFECTS_CURVE: Curve = Curve::Cubic(0.2, 0.0, 0.0, 1.0);
-/// The reveal's exit easing — `GLYPH_SLIDE_EXIT_CURVE` (the Glyph `exit`
-/// curve, `Cubic(0.3,0,1,1)`), driving both the slide-out and the exit fade.
 const REVEAL_EXIT_CURVE: Curve = Curve::Cubic(0.3, 0.0, 1.0, 1.0);
 
-/// Where the bar paints at reveal progress `p` — `0.0` fully above the top
-/// edge and transparent, `1.0` at rest — travelling `extent` (its own
-/// inset-extended height, so a hidden bar is *entirely* off the top of the
-/// screen rather than merely displaced).
-///
-/// `showing` picks the direction's easing family, exactly as `GlyphSlide`
-/// splits its slower spatial entrance from its faster exit: an entrance eases
-/// `p` on the spatial curve for the offset and the effects curve for the fade;
-/// an exit eases the *remaining* progress on the exit curve for both.
-///
-/// `reduce_motion` collapses it to a pure linear fade with **no** geometric
-/// motion — the framework's own rule (see the [module docs](self)).
 fn reveal_layer(p: f64, showing: bool, extent: f64, reduce_motion: bool) -> PatternLayer {
     let p = p.clamp(0.0, 1.0);
     if reduce_motion {
@@ -208,27 +106,15 @@ fn reveal_layer(p: f64, showing: bool, extent: f64, reduce_motion: bool) -> Patt
 }
 
 /// One in-flight reveal: a `0→1` driver plus the visual range it maps onto.
-///
-/// The range is what makes an *interrupted* reveal value-continuous — a flip
-/// mid-flight starts a fresh driver from wherever the bar was actually
-/// painting, the same "value continuity, not velocity continuity" contract
-/// `frust::motion`'s own implicit animations document.
+
 struct Reveal {
-    /// The `0→1` progress driver (linear: the easing lives in
-    /// [`reveal_layer`], which needs the raw progress to split its two
-    /// channels the way `GlyphSlide` does).
     driver: AnimationController,
-    /// The painted reveal this transition started from.
     from: f64,
-    /// The reveal it is heading to (`1.0` showing, `0.0` hiding).
     to: f64,
-    /// Whether it collapsed to the reduced-motion fade — resolved once at the
-    /// start, stable for the whole transition (`PatternSwitcher`'s rule).
     reduced: bool,
 }
 
 impl Reveal {
-    /// Stage a reveal from `from` to `to`, at the theme's motion policy.
     fn start(from: f64, to: f64, reduce_motion: bool) -> Self {
         let showing = to > from;
         let duration = if reduce_motion {
@@ -248,19 +134,11 @@ impl Reveal {
         }
     }
 
-    /// Whether this reveal is bringing the bar on screen.
     fn showing(&self) -> bool {
         self.to > self.from
     }
 }
 
-/// The title crossfade's staging: the incoming run slides in from `±14px`
-/// while fading up, the outgoing run slides the opposite way while fading out
-/// — `glyph/appbar.rs`'s `title_shift`, as a [`TransitionPattern`] so
-/// `PatternSwitcher` can drive it (and collapse it under `reduce_motion`).
-///
-/// `reverse` is the back-navigation flip: forward, the new title enters from
-/// the trailing edge.
 #[derive(Clone, Copy)]
 struct TitleShift;
 
@@ -284,8 +162,6 @@ impl TransitionPattern for TitleShift {
     }
 }
 
-/// The leading slot's brand ↔ `‹` swap: a vertical `±6px` cross-over + fade,
-/// `glyph/appbar.rs`'s leading↔close treatment.
 #[derive(Clone, Copy)]
 struct LeadingSwap;
 
@@ -309,17 +185,6 @@ impl TransitionPattern for LeadingSwap {
     }
 }
 
-/// The app's branded top bar carrying `title` in its centered slot, with the
-/// brand mark leading. Swap the leading slot with [`TopBarView::back`], attach
-/// the trailing icon with [`TopBarView::action`], hide it with
-/// [`TopBarView::hidden`].
-///
-/// ```ignore
-/// muxr_topbar::<AppState>("100.71.31.57")
-///     .action(icons::SETTINGS, "Settings", |state: &mut AppState| {
-///         state.push_settings()
-///     })
-/// ```
 pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State> {
     let theme = active_theme();
     let scheme = theme.scheme();
@@ -356,9 +221,6 @@ pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State
     }
 }
 
-/// The active theme, or the Glyph baseline when none is threaded (headless
-/// tests, a shell with no design system installed). **Never**
-/// `Theme::neutral`/`m3_baseline` — see `lib.rs`'s design-system note.
 fn active_theme() -> Theme {
     frust::use_context::<Theme>().unwrap_or_else(frust_glyph::baseline)
 }
@@ -374,19 +236,7 @@ fn content_y(top_inset: f64, height: f64) -> f64 {
 /// `body` with the top clearance a bar-bearing page owes reserved above it:
 /// the status-bar inset **plus** [`BAR_HEIGHT`], which is exactly the box the
 /// floating bar occupies.
-///
-/// The one place that sum is spelled. The bar no longer displaces the page
-/// (see [`crate::shell::root_view`]), so each of the three bar-bearing screens
-/// pads its own top instead — and three screens computing "46 plus the inset"
-/// independently is three chances to drift, most of them invisible until a
-/// device with a different status bar shows up. `/` (Connect) is bar-less and
-/// wraps nothing.
-///
-/// Composed out of framework widgets rather than hand-rolled: an outer
-/// [`safe_area`] restricted to its top edge contributes the inset, an inner
-/// [`Padding`] the band. `body` may keep its own `safe_area(..).top(false)`
-/// for the other three edges — nesting is harmless, since a `SafeArea` deflates
-/// constraints without consuming the window insets its descendants read.
+
 pub fn topbar_clearance<State: 'static, V: View<State>>(body: V) -> AnyView<State> {
     any(safe_area(Padding(
         EdgeInsets {
@@ -402,36 +252,22 @@ pub fn topbar_clearance<State: 'static, V: View<State>>(body: V) -> AnyView<Stat
     .bottom(false))
 }
 
-/// The declarative half of the top bar. See [`muxr_topbar`].
 pub struct TopBarView<State: 'static> {
-    /// The leading slot's current face, staged through a [`LeadingSwap`].
     leading: Rc<AnyView<State>>,
-    /// …and its identity, which is what a swap is detected by.
     leading_key: ChildKey,
-    /// Whether the leading face is the `‹` (a 30×30 icon box) rather than the
-    /// brand (natural width) — a layout input, not a paint one.
     back: bool,
     title: Rc<AnyView<State>>,
     title_key: ChildKey,
     action: Option<AnyView<State>>,
-    /// Whether both crossfades run backwards (a pop).
     direction_reverse: bool,
-    /// Whether this bar renders at all — see the [module docs](self).
     hidden: bool,
-    /// `--bg-surface`: the bar's own background.
     surface: Color,
-    /// `--border`: the hairline under it.
     rule: Color,
-    /// The ink every slot icon inherits (`--fg`).
     on_surface: Color,
-    /// The corner radius a slot's pressed wash is drawn at.
     slot_radius: f64,
 }
 
 impl<State: 'static> TopBarView<State> {
-    /// Replace the brand with a back chevron firing `on_press` — every route
-    /// pushed over the stack's first titled one (see
-    /// `crate::routes::BarLeading::Back`).
     pub fn back<F: Fn(&mut State) + 'static>(mut self, on_press: F) -> Self {
         self.leading = Rc::new(any(self.slot_icon(CHEVRON_LEFT, BACK_LABEL, on_press)));
         self.leading_key = ChildKey::new(BACK_LABEL);
@@ -442,12 +278,7 @@ impl<State: 'static> TopBarView<State> {
     /// Put a vector `mark` (`icons::SETTINGS`, `icons::MORE_VERT`) in the
     /// trailing icon slot under the accessible name `label`, firing
     /// `on_press` when it is tapped.
-    ///
-    /// The slot is an [`icon_button`] filling the source's 30×30
-    /// `.topbar-icon` box: transparent at rest (the source's `.topbar-icon`
-    /// only fills on hover, which a touch screen has no notion of), a pressed
-    /// wash on tap, and one real `Role::Button` node in the accessibility tree
-    /// — which is also how a test addresses it.
+
     pub fn action<F: Fn(&mut State) + 'static>(
         mut self,
         mark: impl Into<IconData>,
@@ -458,8 +289,6 @@ impl<State: 'static> TopBarView<State> {
         self
     }
 
-    /// One `.topbar-icon` slot: `mark` inked in the bar's own on-surface tone,
-    /// in the 30×30 box the layout hands it.
     fn slot_icon<F: Fn(&mut State) + 'static>(
         &self,
         mark: impl Into<IconData>,
@@ -472,14 +301,11 @@ impl<State: 'static> TopBarView<State> {
             .radius(self.slot_radius)
     }
 
-    /// Run both crossfades backwards (the pop direction).
     pub fn reverse(mut self, reverse: bool) -> Self {
         self.direction_reverse = reverse;
         self
     }
 
-    /// Collapse the bar to nothing — `/`'s state. See the [module docs](self)
-    /// for why this is a flag rather than an unmounted child.
     pub fn hidden(mut self, hidden: bool) -> Self {
         self.hidden = hidden;
         self
@@ -507,13 +333,7 @@ impl<State: 'static> TopBarView<State> {
 }
 
 /// A `'static`, cheaply clonable handle to one slot's [`AnyView`].
-///
-/// [`pattern_switcher`] takes its child `V: View<State>` **by value** while
-/// `View::build`/`rebuild` only ever hold `&self`, so the staged slots are
-/// re-wrapped out of the stored view on every pass rather than moved into the
-/// switcher once. A borrow can't be: `any()` needs `'static`. An `Rc` bump can.
-/// Delegation is the whole implementation — `AnyView`'s own dyn-dispatch does
-/// the work, so this adds a pointer hop and nothing else.
+
 struct Slot<State: 'static>(Rc<AnyView<State>>);
 
 impl<State: 'static> View<State> for Slot<State> {
@@ -542,11 +362,6 @@ impl<State: 'static> View<State> for Slot<State> {
 // ---------------------------------------------------------------------------
 
 /// `.brand-mark`: four amber cells on a 2×2 grid in a 16×16 box.
-///
-/// A leaf widget rather than four nested swatches *and* rather than something
-/// the bar paints itself: the leading slot crossfades as one unit, and the
-/// switcher can only stage a child it owns — a mark painted by
-/// [`TopBarWidget::paint`] would sit outside the fade and pop.
 struct BrandMark {
     color: Color,
 }
@@ -604,21 +419,7 @@ impl Widget for BrandMarkWidget {
 
 /// A pressable **vector** icon: `mark` centred in a box, labelled `label` for
 /// accessibility, firing `on_press` on a release inside its bounds.
-///
-/// This is the app's answer to "chrome icons are vectors" (see the
-/// [module docs](self)): `frust::button` takes a `String` label and nothing
-/// else, so the only way to press a `frust::icon` is to compose the press
-/// around it, and a bare `GestureDetector` contributes no accessibility node
-/// of its own — so this is a leaf press target over one icon pod that
-/// captures the press, tints itself while held, and contributes the
-/// `Role::Button` node a plain `GestureDetector` cannot.
-///
-/// `pub` since more than one screen calls it now (the Connect FAB among
-/// them); see `docs/ARCHITECTURE.md`'s Planned section for its
-/// promotion-out-of-`topbar` trigger. The press treatment is the framework's
-/// own [`PRESSED_OPACITY`] wash rather than `Button`'s scale pivot: scaling
-/// needs an `AnimationController` this leaf has no reason to own, and a 30px
-/// chrome mark dipping in tone reads the same.
+
 pub fn icon_button<State: 'static, F: Fn(&mut State) + 'static>(
     mark: impl Into<IconData>,
     label: impl Into<String>,
@@ -643,11 +444,8 @@ pub struct IconButtonView<State: 'static> {
     /// The mark's ink; `None` lets [`frust::icon`] resolve `on_surface` from
     /// the threaded theme (its own documented default).
     ink: Option<Color>,
-    /// A resting background fill — [`Color::TRANSPARENT`] for bar chrome, an
-    /// accent for a FAB.
     fill: Color,
     icon_size: f64,
-    /// The tap target; `None` shrink-wraps to the mark.
     box_size: Option<Size>,
     radius: f64,
     on_press: Rc<dyn Fn(&mut State)>,
@@ -865,31 +663,15 @@ impl Widget for IconButtonWidget {
 
 /// The retained half of the top bar. See [`muxr_topbar`].
 pub struct TopBarWidget {
-    /// `[leading, title]`, plus the action when one is attached — one flat pod
-    /// list so [`route_event`]/semantics can walk it.
     children: Vec<ChildPod>,
-    /// Each pod's at-rest origin, recorded by `layout` so `paint` can slide the
-    /// whole bar by the reveal offset without a relayout per frame. Parallel to
-    /// [`Self::children`]; empty while the bar is fully hidden (nothing is laid
-    /// out then).
     rest_origins: Vec<Point>,
-    /// Whether the leading slot is the 30×30 chevron box rather than the brand.
     back: bool,
     hidden: bool,
     surface: Color,
     rule: Color,
-    /// The painted reveal: `0.0` fully above the top edge, `1.0` at rest.
     reveal: f64,
-    /// The in-flight reveal, `None` at rest. Created on the first **paint**
-    /// after a visibility flip, not on the rebuild that staged it: a
-    /// `BuildCtx` carries no theme to resolve `reduce_motion` from (the
-    /// deferred-driver idiom `frust::motion`'s switcher and the navigator both
-    /// use).
     reveal_anim: Option<Reveal>,
-    /// A visibility flip the last rebuild staged, awaiting that first paint.
     reveal_pending: bool,
-    /// The bar's own inset-extended height, recorded by `layout` — the
-    /// distance a reveal travels.
     extent: f64,
 }
 
