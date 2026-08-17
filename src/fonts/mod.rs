@@ -246,11 +246,11 @@ fn jetbrains_type_scale(scale: TypeScale) -> TypeScale {
     }
 }
 
-/// Force the app-wide theme to [`Theme::glyph_baseline`] with every
+/// Force the app-wide theme to [`frust_glyph::baseline`] with every
 /// type-scale slot's family swapped to JetBrains Mono (see
 /// [`jetbrains_type_scale`]). Call once, from the app's setup block, after
 /// [`register_bundled_fonts`] (see the [module docs](self) for the ordering
-/// contract). `Theme::glyph_baseline()` — the canonical no-theme-installed
+/// contract). `frust_glyph::baseline()` — the canonical no-theme-installed
 /// fallback — is deliberately untouched everywhere else; this only ever
 /// forces the *active* theme via `frust::set_app_theme`.
 ///
@@ -259,7 +259,7 @@ fn jetbrains_type_scale(scale: TypeScale) -> TypeScale {
 /// and re-theming the whole app onto one would re-shape every screen from a
 /// picker row.
 pub fn apply_app_wide_theme() {
-    let theme = Theme::builder(Theme::glyph_baseline())
+    let theme = Theme::builder(frust_glyph::baseline())
         .map_type_scale(jetbrains_type_scale)
         .build();
     set_app_theme(theme);
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn the_app_wide_theme_maps_every_type_scale_slot_to_the_bundled_family() {
-        let theme = Theme::builder(Theme::glyph_baseline())
+        let theme = Theme::builder(frust_glyph::baseline())
             .map_type_scale(jetbrains_type_scale)
             .build();
         let expected = app_wide_family();
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn the_app_wide_theme_keeps_every_non_family_token_from_the_glyph_baseline() {
-        let baseline = Theme::glyph_baseline();
+        let baseline = frust_glyph::baseline();
         let themed = Theme::builder(baseline.clone())
             .map_type_scale(jetbrains_type_scale)
             .build();

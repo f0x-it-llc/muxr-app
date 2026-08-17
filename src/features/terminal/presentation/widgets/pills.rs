@@ -161,8 +161,6 @@ pub(crate) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use frust::Theme;
-
     use super::*;
 
     #[test]
@@ -170,7 +168,7 @@ mod tests {
         // The sheet can show a browsed tab *and* the tab the session is on at
         // once, so no two states may resolve to the same trio — an `Active`
         // pill that painted like an `Idle` one would hide where the session is.
-        let colors = Palette::from_theme(&Theme::glyph_baseline());
+        let colors = Palette::from_theme(&frust_glyph::baseline());
         let tones: Vec<(Color, Color, Color)> = [
             PillState::Idle,
             PillState::Selected,
@@ -198,7 +196,7 @@ mod tests {
     fn a_selected_pill_wears_the_themes_own_accent() {
         // The sheet's selection ink is the theme's accent, not a hex out of
         // the mock — the shared palette's `amber` family, resolved once.
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let colors = Palette::from_theme(&theme);
         let (fill, border, ink) = pill_tones(PillState::Selected, &colors);
         assert_eq!(ink, theme.scheme().primary);

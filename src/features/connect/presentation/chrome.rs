@@ -9,9 +9,9 @@
 //! [`switch_semantics`]/[`radio_semantics`] close an accessibility gap over
 //! whatever art or widget they wrap. [`radio_semantics`] closes a total hole:
 //! a trust row assembled from swatches and a `GestureDetector` contributes
-//! **no** accessibility node at all — delete it the day `frust::glyph` grows
+//! **no** accessibility node at all — delete it the day `frust_glyph` grows
 //! a real radio with a themeable label. [`switch_semantics`] closes a
-//! narrower one: the remember toggle wraps the real `frust::switch`, which
+//! narrower one: the remember toggle wraps the real `frust_material::switch`, which
 //! contributes its own `Toggled`/`Action::Click` node but no label
 //! (`SwitchWidget` takes none) — delete it the day `switch` grows one.
 //! [`centered_paragraph`] works around a different gap: `TextContext::layout`
@@ -345,7 +345,7 @@ enum ControlKind {
     Radio(bool),
 }
 
-/// Give `child` — today, the real `frust::switch` the remember toggle wraps
+/// Give `child` — today, the real `frust_material::switch` the remember toggle wraps
 /// (`super::widgets::trust::remember_row`) — the one accessibility detail it cannot
 /// grow itself: a **labelled**, toggled [`Role::Switch`] advertising the
 /// [`Action::Click`] it fires.

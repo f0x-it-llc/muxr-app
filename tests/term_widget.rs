@@ -678,7 +678,7 @@ fn a_focused_caret_blinks_across_paced_frames_and_never_asks_for_layout() {
 
 #[test]
 fn reduce_motion_freezes_the_caret_lit_rather_than_hiding_it_half_the_time() {
-    let mut theme = frust::Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = true;
     let mut grid = Grid::new(b"ab", CursorStyle::Block, true);
     grid.layout(PHONE);
@@ -811,7 +811,7 @@ impl Mounted {
         });
 
         let mut root = RenderRoot::new();
-        root.set_theme(Box::new(frust::Theme::glyph_baseline()));
+        root.set_theme(Box::new(frust_glyph::baseline()));
         Mounted {
             root,
             logic,

@@ -1,8 +1,8 @@
 //! The stashed-pairing chrome piece 6's CTA and the trust selector share: what
 //! a scanned QR contributes to the form while it waits for an explicit connect.
 
-use frust::glyph::{BadgeVariant, badge};
 use frust::{AnyView, Theme, With, any, flexible, inflexible, text};
+use frust_glyph::{BadgeVariant, badge};
 
 use super::{Live, h_gap, row};
 use crate::features::connect::domain::entities::PairingTrust;

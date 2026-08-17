@@ -1,12 +1,12 @@
 //! `.new-sess-btn` and the empty state — the screen's only two create entry
 //! points now that the stock app bar's own `+` is gone.
 
-use frust::glyph::empty_state;
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, ButtonStyle, EdgeInsets, GestureDetector, Padding, any, button,
     inflexible, text,
 };
+use frust_glyph::empty_state;
 
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;

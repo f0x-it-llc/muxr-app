@@ -8,7 +8,7 @@
 //! bar, so the whole widget is [hidden](TopBarView::hidden) there. Modality
 //! is not this widget's job — the root overlay host makes an inert,
 //! unaddressable bar under an open overlay structurally, painting its own
-//! scrim over it. A hand-rolled [`View`]/[`Widget`] pair: `frust::glyph::app_bar`'s
+//! scrim over it. A hand-rolled [`View`]/[`Widget`] pair: `frust_glyph::app_bar`'s
 //! fixed 52px/left-aligned-title shape can't bend into this bar's
 //! 46px/centered-title one.
 //!
@@ -42,14 +42,13 @@ use frust::authoring::{
     PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
     rebuild_child, route_event, teardown_child,
 };
-use frust::motion::patterns::{
-    GLYPH_SLIDE_ENTER, GLYPH_SLIDE_EXIT, PatternLayer, TransitionPattern,
-};
+use frust::motion::patterns::{PatternLayer, TransitionPattern};
 use frust::motion::switcher::{REDUCE_MOTION_DURATION, pattern_switcher};
 use frust::{
     AnimationController, Axis, ChildKey, CrossAxisAlignment, Curve, EdgeInsets, FlexView, IconData,
     IconSource, Padding, SizedBox, Theme, Timing, icon, inflexible, safe_area, text,
 };
+use frust_glyph::motion::{GLYPH_SLIDE_ENTER, GLYPH_SLIDE_EXIT};
 
 /// `.topbar{height:46px}` — the content band, below the status-bar inset.
 ///
@@ -361,7 +360,7 @@ pub fn muxr_topbar<State: 'static>(title: impl Into<String>) -> TopBarView<State
 /// tests, a shell with no design system installed). **Never**
 /// `Theme::neutral`/`m3_baseline` — see `lib.rs`'s design-system note.
 fn active_theme() -> Theme {
-    frust::use_context::<Theme>().unwrap_or_else(Theme::glyph_baseline)
+    frust::use_context::<Theme>().unwrap_or_else(frust_glyph::baseline)
 }
 
 /// The y a slot `height` tall takes to sit centered in the content band —

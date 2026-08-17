@@ -100,7 +100,7 @@ fn effective_radius(radius: f64, size: Size) -> f64 {
 }
 
 /// Coerce a possibly-infinite constraint dimension to a finite value (mirrors
-/// the helper of the same name `frust::glyph`'s own modal widgets carry).
+/// the helper of the same name `frust_glyph`'s own modal widgets carry).
 fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }
@@ -837,7 +837,7 @@ const SHADOW_ALPHA: f32 = 0.4;
 
 /// `.topbar{padding:0 16px}`/`.topbar-icon{width:30px}`, transcribed from
 /// `crate::ui::topbar` (whose own constants are private) so this screen can hand
-/// `frust::glyph::show_glyph_menu` the window-coordinate rect of the bar slot its
+/// `frust_glyph::show_glyph_menu` the window-coordinate rect of the bar slot its
 /// `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is imported.
 const BAR_PAD_X: f64 = 16.0;
 const BAR_SLOT: f64 = 30.0;
@@ -1210,7 +1210,7 @@ pub(super) struct TermBodyWidget {
     styles: LineStyles,
     cursor: Color,
     /// Drives the whole stagger — one linear `0→1` controller sized to the last
-    /// line's finish, the shape `frust::glyph::term_block` uses.
+    /// line's finish, the shape `frust_glyph::term_block` uses.
     reveal: Option<AnimationController>,
     /// Set by a rebuild that changed the lines or the epoch; the next paint
     /// arms a fresh driver (or, under `reduce_motion`, none at all).
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn the_fullscreen_stage_ends_flush_at_both_ends() {
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let entering = FullscreenStage::start(0.0, 1.0, Some(&theme));
         // A fresh driver has not advanced, so it is still where it started.
         assert_eq!(entering.value(), 0.0);
@@ -1498,7 +1498,7 @@ mod tests {
         // Guards the curve-the-position bug: feeding a collapse's `from = 1.0`
         // through the curve's overshoot band clamps it flush at `1.0` for the
         // first half of the run, so the card sits motionless.
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let mut collapsing = FullscreenStage::start(1.0, 0.0, Some(&theme));
         collapsing.driver.advance(FrameTime::from_nanos(0));
         // 80ms of the 340ms `durations.slow` — comfortably inside the band
@@ -1516,7 +1516,7 @@ mod tests {
         // Guards the double-easing bug: an in-flight entrance's painted value
         // often lands inside the `spatial` overshoot band, so re-easing it snaps
         // the card to fullscreen the instant a collapse interrupts.
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let seed = painted_mid_entrance(&theme);
         assert!((0.0..1.0).contains(&seed), "60ms in, mid-flight: {seed}");
 
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[test]
     fn an_interrupted_collapse_never_lets_its_value_climb_back_toward_the_seed() {
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let seed = painted_mid_entrance(&theme);
         let mut collapsing = FullscreenStage::start(seed, 0.0, Some(&theme));
         assert_eq!(collapsing.value(), seed);
@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn the_stages_geometry_never_overshoots_its_own_screen() {
         // `spatial` overshoots past 1.0 — a *negative* wrap padding.
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let stage = FullscreenStage::start(0.0, 1.0, Some(&theme));
         for raw in [0.0, 0.25, 0.5, 0.75, 1.0] {
             let eased = stage.curve.transform(raw).clamp(0.0, 1.0);
@@ -1570,7 +1570,7 @@ mod tests {
     #[test]
     fn the_unthemed_fallbacks_are_the_glyph_tokens_they_stand_in_for() {
         // A headless frame with no theme must stage on the device's numbers.
-        let motion = Theme::glyph_baseline().motion;
+        let motion = frust_glyph::baseline().motion;
         assert_eq!(FALLBACK_SLOW.as_millis() as f64, motion.durations.slow);
         assert_eq!(FALLBACK_SPATIAL, motion.easing.spatial);
         assert_eq!(FALLBACK_EFFECTS, motion.easing.effects);

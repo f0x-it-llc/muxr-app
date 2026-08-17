@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::{Rect, WindowInsets};
-use frust::glyph::{MenuEntry, menu_item, show_glyph_dialog, show_glyph_menu};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
     NavigatorController, Padding, PopResult, RwSignal, SystemUiMode, WindowMetrics, any, component,
     flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
 };
+use frust_glyph::{MenuEntry, menu_item, show_glyph_dialog, show_glyph_menu};
 
 use crate::AppState;
 use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};

@@ -111,7 +111,7 @@ impl PaintScene for Recorder {
 
 /// A Glyph theme with `reduce_motion` forced on/off.
 fn theme(reduce_motion: bool) -> Theme {
-    let mut theme = Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = reduce_motion;
     theme
 }
@@ -217,7 +217,7 @@ fn occurrences(haystack: &[u32], needle: &[u32]) -> usize {
 /// The heading piece's exact style, so its shaped ids match what
 /// `widgets::badge::heading` paints.
 fn heading_ids() -> Vec<u32> {
-    let theme = Theme::glyph_baseline();
+    let theme = frust_glyph::baseline();
     glyph_ids("Connect to server", &theme.type_scale.title_medium)
 }
 
@@ -258,7 +258,7 @@ fn mount_sequence_at(
         splash_sequence(
             art.clone(),
             7,
-            connect_pieces(&Theme::glyph_baseline(), &saved),
+            connect_pieces(&frust_glyph::baseline(), &saved),
             connect_layout,
             done,
         )

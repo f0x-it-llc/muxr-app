@@ -211,7 +211,7 @@ impl Harness {
     /// Mount the screen (see the [module docs](self) for the shape), attached
     /// to [`SESSION_ID`] and with the first load already landed.
     fn mount() -> Self {
-        Self::themed(Theme::glyph_baseline())
+        Self::themed(frust_glyph::baseline())
     }
 
     /// [`Harness::mount`], first publishing `metrics` into context when `Some`
@@ -229,7 +229,7 @@ impl Harness {
     /// how the suite reaches a **herdr** session, whose id prefix is the one
     /// thing the sheet's spaces section is gated on.
     fn mount_session(session: &str) -> Self {
-        Self::themed_session(Theme::glyph_baseline(), session)
+        Self::themed_session(frust_glyph::baseline(), session)
     }
 
     /// [`mount`](Self::mount) under an explicit theme — how the suite drives
@@ -642,8 +642,8 @@ impl Harness {
 /// The terminal card — the biggest rounded fill on screen, which is the card's
 /// own body — as `(origin, size, radius)`.
 fn card(scene: &RecScene) -> (Point, Size, f64) {
-    let ink = Theme::glyph_baseline()
-        .extension::<frust::GlyphInk>()
+    let ink = frust_glyph::baseline()
+        .extension::<frust_glyph::GlyphInk>()
         .copied()
         .expect("the Glyph baseline carries GlyphInk");
     let mut cards = rounded_in(scene, ink.terminal_bg);
@@ -657,8 +657,8 @@ fn card(scene: &RecScene) -> (Point, Size, f64) {
 /// The card's status row — the band `GlyphInk::terminal_head` fills, at the
 /// top of the card — as `(origin, size)`.
 fn status_band(scene: &RecScene) -> (Point, Size) {
-    let ink = Theme::glyph_baseline()
-        .extension::<frust::GlyphInk>()
+    let ink = frust_glyph::baseline()
+        .extension::<frust_glyph::GlyphInk>()
         .copied()
         .expect("the Glyph baseline carries GlyphInk");
     let bands = rounded_in(scene, ink.terminal_head);
@@ -690,7 +690,7 @@ fn panel(added: &[(Point, Size)]) -> (Point, Size) {
 /// (`ui::palette::Palette::base`, the scheme's
 /// `surface_container_low`), which nothing else on this screen paints.
 fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
-    let base = Theme::glyph_baseline().scheme().surface_container_low;
+    let base = frust_glyph::baseline().scheme().surface_container_low;
     let mut rows: Vec<(Point, Size)> = rounded_in(scene, base)
         .into_iter()
         .map(|(origin, size, _)| (origin, size))
@@ -704,7 +704,7 @@ fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
 /// wash, so the row is found by *containment*: the chip and the mark box are the
 /// only amber-faint tiles that sit inside a [`pane_rows`] rect.
 fn focused_row(scene: &RecScene) -> Option<usize> {
-    let theme = Theme::glyph_baseline();
+    let theme = frust_glyph::baseline();
     let faint = theme.scheme().primary.with_alpha(AMBER_FAINT);
     let rows = pane_rows(scene);
     rounded_in(scene, faint)
@@ -788,7 +788,7 @@ fn pills(added: &[(Point, Size)]) -> Vec<(Point, Size)> {
 
 /// A theme with `reduce_motion` forced on.
 fn reduced() -> Theme {
-    let mut theme = Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = true;
     theme
 }
@@ -827,8 +827,8 @@ fn the_card_paints_glyphs_terminal_ink_and_not_the_mocks_hexes() {
     let mut h = Harness::mount();
     let scene = h.frame();
 
-    let ink = Theme::glyph_baseline()
-        .extension::<frust::GlyphInk>()
+    let ink = frust_glyph::baseline()
+        .extension::<frust_glyph::GlyphInk>()
         .copied()
         .expect("the Glyph baseline carries GlyphInk");
     assert!(
@@ -1998,15 +1998,15 @@ fn a_frame_needs_no_settling_before_the_first_load_lands() {
     let record_only: NavigatorController<AppState> = NavigatorController::new();
     let _router = install_app_router(&record_only, &nav, expect_connection_controller());
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
-    root.set_theme(Box::new(Theme::glyph_baseline()));
+    root.set_theme(Box::new(frust_glyph::baseline()));
     let logic_nav = nav.clone();
     let mut logic: Logic = Box::new(move |_state: &mut AppState| terminal_page(logic_nav.clone()));
     let mut tcx = TextContext::new();
     let mut state = state;
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
-    let ink = Theme::glyph_baseline()
-        .extension::<frust::GlyphInk>()
+    let ink = frust_glyph::baseline()
+        .extension::<frust_glyph::GlyphInk>()
         .copied()
         .expect("GlyphInk");
     assert!(

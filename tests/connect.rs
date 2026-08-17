@@ -67,7 +67,6 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::Theme;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
     Align, Alignment, AnyView, Component, Get, GetUntracked, NavigatorController, Set, SizedBox,
@@ -702,7 +701,7 @@ fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
 /// `pages::CLAMP_ALIGNMENT` exists for. Laid out at [`SURFACE`], under whatever
 /// `WindowMetrics` the caller has already provided.
 fn splash_cta_bounds(saved: &[SavedServer]) -> Rect {
-    let theme = Theme::glyph_baseline();
+    let theme = frust_glyph::baseline();
     let saved = saved.to_vec();
     let mut logic = move |_state: &mut ()| {
         any(Stack(vec![connect_layout(connect_pieces::<()>(
@@ -1235,7 +1234,7 @@ impl Form {
     /// Mount the pieces over `controller`, wiring the pinned CTA to
     /// `on_connect_pinned`.
     fn mount(controller: &Arc<ConnectController>, on_connect_pinned: Rc<dyn Fn()>) -> Self {
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let live = Live {
             controller: Arc::clone(controller),
             on_connect: Rc::new(|| {}),
@@ -3282,7 +3281,7 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
     let _g = serial();
     let _ambient = setup();
 
-    let theme = Theme::glyph_baseline();
+    let theme = frust_glyph::baseline();
     let mut logic = move |_state: &mut ()| connect_layout(connect_pieces::<()>(&theme, &[]));
     let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
     let mut state = ();
@@ -3379,7 +3378,7 @@ impl PaintScene for GlyphScene {
 /// Lines are grouped by baseline: the paragraph draws one run per line, each at
 /// its own y.
 fn subtitle_lines() -> (Vec<(f64, f64)>, Rect) {
-    let theme = Theme::glyph_baseline();
+    let theme = frust_glyph::baseline();
     let colors = Palette::from_theme(&theme);
     let mut logic = move |_state: &mut ()| heading::<()>(&theme, &colors);
     let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
@@ -3481,7 +3480,7 @@ fn advances_where(text: &str, style: &TextStyle, pick: impl Fn(char) -> bool) ->
 
 /// The style both fields actually shape with.
 fn field_style() -> TextStyle {
-    field_text_style(&Theme::glyph_baseline(), Color::WHITE)
+    field_text_style(&frust_glyph::baseline(), Color::WHITE)
 }
 
 #[test]

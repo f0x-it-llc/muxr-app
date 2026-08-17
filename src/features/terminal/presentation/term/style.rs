@@ -22,7 +22,8 @@
 
 use frust::authoring::Color;
 use frust::authoring::text::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
-use frust::{Brightness, GlyphInk, StatusPalette, Theme, Tween};
+use frust::{Brightness, StatusPalette, Theme, Tween};
+use frust_glyph::GlyphInk;
 
 /// Cell height as a multiple of the font size (CSS unitless `line-height`). 1.2 —
 /// what kterm's `TerminalStyle.height` defaults to and what the S9 measurement ran
@@ -101,7 +102,7 @@ impl TerminalPalette {
     /// The palette for an app with no theme installed at all — Glyph's own
     /// baseline tokens, so the grid still paints its intended colours.
     pub fn fallback() -> Self {
-        terminal_palette(&Theme::glyph_baseline())
+        terminal_palette(&frust_glyph::baseline())
     }
 }
 
@@ -116,7 +117,7 @@ pub fn terminal_palette(theme: &Theme) -> TerminalPalette {
     let status = theme
         .extension::<StatusPalette>()
         .copied()
-        .unwrap_or_else(StatusPalette::glyph);
+        .unwrap_or_else(frust_glyph::tokens::color::status);
     let status = *status.colors(Brightness::Dark);
 
     let normal = [
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn the_palette_resolves_from_glyph_ink_not_from_literals() {
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let ink = theme
             .extension::<GlyphInk>()
             .copied()
@@ -295,9 +296,9 @@ mod tests {
     fn the_palette_is_brightness_invariant_like_the_ink_it_sits_on() {
         // The same theme in both brightnesses must yield the identical grid
         // palette: the grid's surface never follows the platform.
-        let mut dark = Theme::glyph_baseline();
+        let mut dark = frust_glyph::baseline();
         dark.brightness = Brightness::Dark;
-        let mut light = Theme::glyph_baseline();
+        let mut light = frust_glyph::baseline();
         light.brightness = Brightness::Light;
         assert_eq!(terminal_palette(&dark), terminal_palette(&light));
     }

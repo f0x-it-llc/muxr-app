@@ -139,7 +139,7 @@ pub enum TermLineKind {
 
 /// One line of the terminal card's body. The mock writes each line's prompt marker
 /// into the text itself (`ed@devbox:~$ systemctl status muxrd`), so there is no
-/// separate marker field — unlike `frust::glyph::term_block`, which prepends `$ `.
+/// separate marker field — unlike `frust_glyph::term_block`, which prepends `$ `.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermLine {
     /// Which ink this line prints in.

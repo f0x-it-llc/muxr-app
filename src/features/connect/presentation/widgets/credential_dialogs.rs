@@ -29,8 +29,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::{ButtonStyle, PopResult, any, button};
+use frust_glyph::{glyph_dialog, show_glyph_dialog};
 
 use super::super::controller::{ConnectController, CredentialOffer, OfferPrompt};
 use crate::AppState;

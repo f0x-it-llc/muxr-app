@@ -12,12 +12,12 @@
 //! [`IDLE_OPACITY`] plus no `.sess-panes` row at all.
 
 use frust::authoring::Color;
-use frust::glyph::{BadgeVariant, avatar, badge};
 use frust::motion::AnimatedOpacity;
 use frust::{
     AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector, Padding,
     SizedBox, any, flexible, inflexible, text,
 };
+use frust_glyph::{BadgeVariant, avatar, badge};
 
 use crate::features::sessions::domain::entities::{Session, SessionStatus};
 use crate::ui::palette::{Palette, inked};

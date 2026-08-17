@@ -227,7 +227,7 @@ impl Mounted {
         });
 
         let mut root = RenderRoot::new();
-        root.set_theme(Box::new(frust::Theme::glyph_baseline()));
+        root.set_theme(Box::new(frust_glyph::baseline()));
         let mut mounted = Mounted {
             root,
             logic,

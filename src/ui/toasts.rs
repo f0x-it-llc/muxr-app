@@ -1,5 +1,5 @@
 //! The app-wide failure→toast substrate: a small queue handle plus the
-//! [`frust::glyph::toast_host`] layer [`crate::shell::root_view`] mounts over
+//! [`frust_glyph::toast_host`] layer [`crate::shell::root_view`] mounts over
 //! the navigator.
 //!
 //! A screen never builds a toast itself — it hands [`FailureToasts`] an
@@ -19,7 +19,7 @@
 //! transparently recreated. Per-**thread** also isolates each headless test,
 //! since `cargo test` runs every test on its own thread.
 //!
-//! **Queue policy.** [`frust::glyph::toast_host`] is a controlled component:
+//! **Queue policy.** [`frust_glyph::toast_host`] is a controlled component:
 //! it takes the app's whole FIFO request log as a snapshot every rebuild and
 //! advances its own cursor through it, showing exactly one toast at a time.
 //! The log therefore only ever grows — the framework's documented v1
@@ -28,8 +28,8 @@
 use std::cell::Cell;
 
 use clean_signals::Failure;
-use frust::glyph::toast_host;
 use frust::{AnyView, Get, GetUntracked, RwSignal, Update, any};
+use frust_glyph::toast_host;
 
 use crate::failure::AppFailure;
 

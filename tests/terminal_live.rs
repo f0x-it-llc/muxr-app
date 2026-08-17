@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use frust::input::TOUCH_SLOP;
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, RwSignal, Set, SizedBox, Stack, Theme,
-    any, navigator, provide_context,
+    AnyView, Component, GetUntracked, NavigatorController, RwSignal, Set, SizedBox, Stack, any,
+    navigator, provide_context,
 };
 use frust_core::accesskit::Role;
 use frust_core::{RenderRoot, WindowEdgeInsets, WindowInsets};
@@ -154,7 +154,7 @@ impl Harness {
             ]))
         });
         let mut root = RenderRoot::new();
-        root.set_theme(Box::new(Theme::glyph_baseline()));
+        root.set_theme(Box::new(frust_glyph::baseline()));
         let mut harness = Harness {
             root,
             logic,
@@ -308,8 +308,8 @@ fn demo_feed() -> Rc<RefCell<DemoFeed>> {
 
 /// The live grid's own plain background fill — see the [module docs](self).
 fn grid_rect(scene: &RecScene) -> (Point, Size) {
-    let ink = Theme::glyph_baseline()
-        .extension::<frust::GlyphInk>()
+    let ink = frust_glyph::baseline()
+        .extension::<frust_glyph::GlyphInk>()
         .copied()
         .expect("the Glyph baseline carries GlyphInk");
     scene
@@ -382,8 +382,8 @@ fn drag_scroll(h: &mut Harness, from: Point) {
 /// The terminal card — the stage's own rounded fill — as `(origin, size,
 /// radius)`, exactly `tests/terminal.rs::card`'s helper.
 fn card(scene: &RecScene) -> (Point, Size, f64) {
-    let ink = Theme::glyph_baseline()
-        .extension::<frust::GlyphInk>()
+    let ink = frust_glyph::baseline()
+        .extension::<frust_glyph::GlyphInk>()
         .copied()
         .expect("the Glyph baseline carries GlyphInk");
     let mut cards = rounded_in(scene, ink.terminal_bg);
@@ -392,7 +392,7 @@ fn card(scene: &RecScene) -> (Point, Size, f64) {
 }
 
 /// The overflow menu's **panel**, diffed out of the screen painting underneath it:
-/// an open `frust::glyph` menu adds exactly one rounded fill to the frame (its drop
+/// an open `frust_glyph` menu adds exactly one rounded fill to the frame (its drop
 /// shadow is a blurred path and its border a stroke).
 fn menu_panel(before: &RecScene, after: &RecScene) -> (Point, Size) {
     let new = added(&before.rounded, &after.rounded);
@@ -400,7 +400,7 @@ fn menu_panel(before: &RecScene, after: &RecScene) -> (Point, Size) {
     largest(&new).expect("the menu panel painted itself")
 }
 
-/// `frust::glyph::menu`'s own row metrics, transcribed rather than imported — they
+/// `frust_glyph::menu`'s own row metrics, transcribed rather than imported — they
 /// are private to that crate, and a test that could import them could not catch one
 /// changing. Rows start [`MENU_PANEL_PAD`] below the panel's top edge and then run
 /// one [`MENU_ITEM_ROW_H`] apiece, with no separator between any of them.
@@ -1368,7 +1368,7 @@ fn herdr_keeps_tap_to_keyboard_while_its_scroll_raises_nothing() {
 /// no focus/IME session behind once the menu is gone, and leaves the live pane
 /// under it inert.
 ///
-/// This is the app-side end of a framework-side gap: `frust::glyph::menu`'s widget
+/// This is the app-side end of a framework-side gap: `frust_glyph::menu`'s widget
 /// claims root focus on **any** pointer `Down` (so a subsequent Escape has a chain
 /// to travel), seeding `focus_active = true` with no IME surface behind it for as
 /// long as the menu's exit and pop take, with no seam to opt out. What this app
@@ -1420,7 +1420,7 @@ fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
 /// (`ui::palette::Palette::base`, the scheme's
 /// `surface_container_low`), which nothing else on this screen paints.
 fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
-    let base = Theme::glyph_baseline().scheme().surface_container_low;
+    let base = frust_glyph::baseline().scheme().surface_container_low;
     let mut rows: Vec<(Point, Size)> = scene
         .rounded_fills
         .iter()

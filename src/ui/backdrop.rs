@@ -41,11 +41,11 @@ const INTRINSIC: f64 = 1.0e7;
 ///
 /// Resolves the theme at **build** time through `use_context::<Theme>()` (the
 /// app-code delivery path, mirroring `examples/glyph-catalog`'s own root
-/// background), falling back to [`Theme::glyph_baseline`] — never
+/// background), falling back to [`frust_glyph::baseline`] — never
 /// `Theme::neutral`/`m3_baseline` — per `lib.rs`'s design-system note.
 pub fn page_backdrop<State: 'static>() -> BackdropView<State> {
     let color = frust::use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .surface_container_low;
     BackdropView {
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(view.color, Color::from_rgb8(0x10, 0x13, 0x1a));
         assert_ne!(
             view.color,
-            Theme::glyph_baseline().scheme().surface_container_lowest,
+            frust_glyph::baseline().scheme().surface_container_lowest,
             "the page tone is `--bg-base`, not the darker `--bg-void`"
         );
     }

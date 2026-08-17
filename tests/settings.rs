@@ -52,7 +52,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack, Theme,
+    AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
@@ -922,7 +922,7 @@ impl AuthTokensRepository for RefusingRevoke {
 /// this screen reads through `use_context::<Theme>()`, published before the
 /// app's own `init` exactly as [`mount_with_metrics`] publishes window metrics.
 fn mount_with_reduced_motion() -> Harness {
-    let mut theme = Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = true;
     provide_context(theme);
     let mut harness = Harness::mount();

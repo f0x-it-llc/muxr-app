@@ -6,7 +6,7 @@
 //! body, `terminal_head` for the status band, `terminal_prompt` for the prompt runs,
 //! the caret and the pane title, `terminal_out`/`terminal_comment` for the two
 //! dimmer tiers. That is the framework's own brightness-invariant terminal palette,
-//! so this screen matches `frust::glyph::term_block` wherever the two share a page.
+//! so this screen matches `frust_glyph::term_block` wherever the two share a page.
 //! (`GlyphInk::terminal_fg`, the *untyped* body tone, is the one field [`CardInk`]
 //! does not resolve: v2 types every line it prints.)
 //!
@@ -21,7 +21,8 @@
 //! [`crate::ui::palette::Palette`] instead — see the [directory docs](super).
 
 use frust::authoring::Color;
-use frust::{AnyView, EdgeInsets, GlyphInk, Padding, Theme, any, scroll_view};
+use frust::{AnyView, EdgeInsets, Padding, Theme, any, scroll_view};
+use frust_glyph::GlyphInk;
 
 use crate::features::terminal::domain::entities::TermLine;
 use crate::ui::palette::active_theme;
@@ -71,7 +72,7 @@ impl CardInk {
     /// Resolve [`CardInk`] from `theme`.
     pub(crate) fn from_theme(theme: &Theme) -> CardInk {
         // The terminal's own ink is brightness-invariant and lives in a theme
-        // *extension*, exactly as `frust::glyph::term_block` resolves it.
+        // *extension*, exactly as `frust_glyph::term_block` resolves it.
         let ink = theme
             .extension::<GlyphInk>()
             .copied()
@@ -115,7 +116,7 @@ mod tests {
         // The canonical-token rule, as a tripwire: every card tone is the
         // theme extension's, never `terminal.html`'s `--term-body`/`--term-out`
         // literals (which differ from Glyph's by a shade).
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let ink = theme
             .extension::<GlyphInk>()
             .copied()
@@ -136,7 +137,7 @@ mod tests {
     fn the_cards_hairline_is_the_mocks_own_since_no_token_carries_it() {
         // The documented gap: `GlyphInk` has no border field, so this one tone
         // stays a local constant — and stays *exactly* the mock's rgba.
-        let colors = CardInk::from_theme(&Theme::glyph_baseline());
+        let colors = CardInk::from_theme(&frust_glyph::baseline());
         let (r, g, b) = TERMINAL_BORDER_RGB;
         assert_eq!((r, g, b), (0xff, 0xee, 0xd2));
         assert_eq!(colors.card_border.components[3], TERMINAL_BORDER_ALPHA);

@@ -276,13 +276,13 @@ impl Component for MuxrApp {
 // Muxr's sole entry point: binds `MuxrApp` to all three platforms (Android
 // JNI, iOS C-ABI, desktop's `main.rs`). Never edit this line or `main.rs` —
 // add screens/state to `routes.rs`/`features` above instead. `setup` runs
-// once, on the UI thread, before `Component::init`; `glyph_theme::install()`
+// once, on the UI thread, before `Component::init`; `frust_glyph::install()`
 // makes Glyph this app's one design system — a theme read that ever runs
 // before it (or after it's skipped) must fall back to
-// `Theme::glyph_baseline()`, never `Theme::neutral()`/`Theme::m3_baseline()`.
+// `frust_glyph::baseline()`, never `Theme::neutral()`/`frust_material::baseline()`.
 // `fonts::register_bundled_fonts` pushes the bundled JetBrains Mono + Symbols
 // Nerd Font Mono faces into the same pre-first-frame registry
-// `glyph_theme::install` uses; `fonts::apply_app_wide_theme` then forces the
+// `frust_glyph::install` uses; `fonts::apply_app_wide_theme` then forces the
 // active theme's type-scale families onto JetBrains Mono (registration must
 // run first — see `fonts`' own module docs). `register_cached_fonts_at_startup`
 // re-registers this device's downloaded families off the blocking pool
@@ -291,7 +291,7 @@ impl Component for MuxrApp {
 frust::app!(
     MuxrApp,
     setup = {
-        frust::glyph_theme::install();
+        frust_glyph::install();
         fonts::register_bundled_fonts();
         fonts::apply_app_wide_theme();
         fonts::register_cached_fonts_at_startup();
