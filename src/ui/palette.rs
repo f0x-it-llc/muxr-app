@@ -1,122 +1,45 @@
-//! [`Palette`] — the app's one theme-derived colour vocabulary, adopted by
-//! all four features (`connect`/`sessions`/`terminal`/`settings`) in place of
-//! the per-feature `Palette` struct each used to carry in its own
-//! `presentation::widgets` (`docs/ARCHITECTURE.md`'s UI Substrate section).
-//!
-//! **Excluded on purpose**: `terminal`'s `GlyphInk`-sourced card fields (its
-//! card/head/prompt/out/comment tones) and its hardcoded-RGB hairline pair
-//! (a card border and an expand-button wash) stay terminal-local — they tint
-//! one screen's fixed-tone card, not a role any other screen shares.
-//!
-//! **One divergence resolved here**: `connect`'s `amber` used to read
-//! `scheme.primary_container`, while the other three read `scheme.primary`.
-//! This module unifies on `scheme.primary` — byte-identical to
-//! `primary_container` under the Glyph **dark** `ColorScheme`
-//! (`crates/frust-theme`'s `glyph_dark`: both resolve to the same bright-fill
-//! amber). The Glyph **light** scheme diverges — `primary` is the darker
-//! text-appropriate amber, `primary_container` the bright fill — so this
-//! unification is currently a no-op pixel-wise only because
-//! `frust_glyph::baseline()` starts (and this app never leaves)
-//! `Brightness::Dark`; a future light-mode adoption would need to re-audit
-//! every `connect` call site this changed.
-//!
-//! **Two fields, one role**: `sessions`/`settings`/`terminal` name the page
-//! tone `base`, `connect` names the same `--bg-base` role `page`. Both
-//! survive here, identically derived, so an adopting call site keeps reading
-//! under its own existing name.
-
-use frust::authoring::Color;
 use frust::authoring::text::TextStyle;
+use frust::authoring::Color;
 use frust::{StatusPalette, Theme};
 
-/// `--amber-faint: rgba(255,182,39,0.12)` — the accent at 12% over whatever
-/// is behind it. No `ColorScheme` role carries a translucent accent wash, so
-/// every screen derives it from `primary` by alpha instead.
 const AMBER_FAINT_ALPHA: f32 = 0.12;
-/// `--amber-border: rgba(255,182,39,0.35)` — same derivation, hairline
-/// weight.
 const AMBER_BORDER_ALPHA: f32 = 0.35;
-/// `--fg-dim` has no `ColorScheme` role of its own (frust-theme records it as
-/// a documented leftover), so it derives from `on_surface_variant` by alpha —
-/// the constant every screen already shared.
 const FG_DIM_ALPHA: f32 = 0.62;
-/// `--fg-faintest`, derived the same way as [`FG_DIM_ALPHA`] and for the same
-/// reason — `settings`' own constant, the only screen that used this role.
 const FG_FAINTEST_ALPHA: f32 = 0.22;
 
-/// The active theme, or the Glyph baseline when none is threaded (headless
-/// tests, a shell with no design system installed). **Never**
-/// `Theme::neutral`/`m3_baseline` — see `lib.rs`'s design-system note.
 pub fn active_theme() -> Theme {
     frust::use_context::<Theme>().unwrap_or_else(frust_glyph::baseline)
 }
 
-/// Every scheme-/[`StatusPalette`]-derived colour role a muxr screen paints,
-/// resolved once per build from the active theme. See the [module
-/// docs](self) for what stays out of this union.
 #[derive(Clone, Copy)]
 pub struct Palette {
-    /// `--bg-base`: the screen's page tone (`sessions`/`settings`/
-    /// `terminal`'s name for the role — see [`Palette::page`]).
     pub base: Color,
-    /// `--bg-base`, `connect`'s own name for the same role as
-    /// [`Palette::base`] — see the [module docs](self).
     pub page: Color,
-    /// `--bg-surface`: the card fill (`sessions`).
     pub surface: Color,
-    /// `--bg-raised`: a mark tile, pill or chip fill.
     pub raised: Color,
-    /// `--bg-void`: the tone behind a card that sits over the page
-    /// (`terminal`).
     pub void: Color,
-    /// `--border-bright`: every hairline border.
     pub outline: Color,
-    /// `--border`: a fainter separator rule.
     pub rule: Color,
-    /// `--amber`: brand/CTA/selection ink only, never a health signal.
     pub amber: Color,
-    /// `--amber-dim`: `terminal`'s brightness-invariant `primary_fixed_dim`.
     pub amber_dim: Color,
-    /// `--amber-faint`, derived (see [`AMBER_FAINT_ALPHA`]).
     pub amber_faint: Color,
-    /// `--amber-border`, derived (see [`AMBER_BORDER_ALPHA`]).
     pub amber_border: Color,
-    /// `--fg`: primary text.
     pub fg: Color,
-    /// `--fg-muted`: secondary text.
     pub fg_muted: Color,
-    /// `--fg-dim`, derived (see [`FG_DIM_ALPHA`]).
     pub fg_dim: Color,
-    /// `--fg-faintest`, derived (see [`FG_FAINTEST_ALPHA`]) (`settings`).
     pub fg_faintest: Color,
-    /// `--error`.
     pub error: Color,
-    /// `--success`, [`StatusPalette`]-first with a `scheme.primary` fallback.
     pub success: Color,
-    /// `--success-faint`, [`StatusPalette`]-first with a
-    /// `scheme.surface_container_high` fallback (`sessions`).
     pub success_faint: Color,
-    /// `--warning`, [`StatusPalette`]-first with a `scheme.primary` fallback
-    /// (`settings`).
     pub warning: Color,
-    /// `--cyan`/info, [`StatusPalette`]-first with a `scheme.tertiary`
-    /// fallback (`settings`).
     pub cyan: Color,
-    /// `--cyan-faint`, [`StatusPalette`]-first with a
-    /// `scheme.tertiary_container` fallback (`settings`).
     pub cyan_faint: Color,
 }
 
 impl Palette {
-    /// Resolve every field above from `theme`, extending [`StatusPalette`]
-    /// (see the [module docs](self)) exactly once — the lookup all four
-    /// screens used to duplicate.
+    /// Resolve every field above from
     pub fn from_theme(theme: &Theme) -> Palette {
         let scheme = theme.scheme();
-        // Per `docs/CODE_STANDARDS.md`'s Glyph precedent: a per-status colour
-        // with no `ColorScheme` field resolves `StatusPalette` first. A Glyph
-        // theme always carries it; the listed scheme roles are the
-        // last-resort inks if some other theme is ever installed.
         let status = theme.extension::<StatusPalette>();
         Palette {
             base: scheme.surface_container_low,
@@ -140,9 +63,7 @@ impl Palette {
                 s.colors(theme.brightness).success_container
             }),
             warning: status.map_or(scheme.primary, |s| s.colors(theme.brightness).warning),
-            // The Glyph scheme's `tertiary` family *is* the cyan info hue
-            // (its only spare), so it is the honest fallback for a theme
-            // with no status palette rather than a second amber.
+
             cyan: status.map_or(scheme.tertiary, |s| s.colors(theme.brightness).info),
             cyan_faint: status.map_or(scheme.tertiary_container, |s| {
                 s.colors(theme.brightness).info_container
@@ -151,9 +72,6 @@ impl Palette {
     }
 }
 
-/// `style` re-inked with `color` — every run picks a Glyph type role for
-/// size/family/weight and an explicit role-resolved ink, so nothing falls
-/// back to `TextStyle::default()`'s 16px black.
 pub fn inked(style: &TextStyle, color: Color) -> TextStyle {
     let mut style = style.clone();
     style.color = color;
