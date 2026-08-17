@@ -185,7 +185,7 @@ impl Mounted {
         });
 
         let mut root = RenderRoot::new();
-        root.set_theme(Box::new(frust::Theme::glyph_baseline()));
+        root.set_theme(Box::new(frust_glyph::baseline()));
         let mut mounted = Mounted {
             root,
             logic,
@@ -986,7 +986,7 @@ fn twelve_caps_and_their_padding_fit_a_narrow_phone_row() {
     // Every cap holds what it draws with CAP_PAD_X to spare on each side — the
     // whole point of the budget, asserted against the **shaped** label rather
     // than against the estimate the flex weights are derived from.
-    let theme = frust::Theme::glyph_baseline();
+    let theme = frust_glyph::baseline();
     let mut style = theme.type_scale.label_small.clone();
     style.size = LABEL_SIZE;
     let mut tcx = TextContext::new();

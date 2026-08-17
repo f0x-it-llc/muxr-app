@@ -257,8 +257,8 @@ fn font_row_progress(fraction: Option<f64>) -> frust::FlexChild<AppState> {
     match fraction {
         Some(fraction) => inflexible(
             SizedBox::<AppState>(Some(FONT_ROW_PROGRESS_WIDTH), None)
-                .child(frust::glyph::progress(fraction)),
+                .child(frust_glyph::progress(fraction)),
         ),
-        None => inflexible(frust::glyph::dots_loader()),
+        None => inflexible(frust_glyph::dots_loader()),
     }
 }

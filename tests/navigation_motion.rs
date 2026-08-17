@@ -118,7 +118,7 @@ fn mock_target() -> ConnectTarget {
 /// `nav::transition::resolve_spec` reads to decide whether to collapse the
 /// route transition.
 fn theme(reduce_motion: bool) -> Theme {
-    let mut theme = Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = reduce_motion;
     theme
 }
@@ -1025,7 +1025,7 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
 /// The terminal route's overflow affordance, by its accessible name —
 /// transcribed from `crate::shell`, like [`BACK`]/[`GEAR`] above.
 const TERMINAL_MENU: &str = "Terminal menu";
-/// `frust::glyph::menu`'s own panel gutter and item-row height, transcribed
+/// `frust_glyph::menu`'s own panel gutter and item-row height, transcribed
 /// (both are private to that module, and a test that imported them could not
 /// catch one of them changing).
 ///
@@ -1055,7 +1055,7 @@ fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
     let before = h.park();
     assert_titled(&h, "terminal");
 
-    // The real ⋮, opening the real `frust::glyph` menu — the one overlay in
+    // The real ⋮, opening the real `frust_glyph` menu — the one overlay in
     // the app the app itself never gets to observe closing: a menu dismissal
     // is popped from inside the widget's own paint, with no app seam in
     // between. Nothing app-side has to hear about it any more, which is the

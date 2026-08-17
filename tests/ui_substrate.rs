@@ -47,7 +47,7 @@ use support::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// The panel gutter both overlays use, transcribed: `frust::glyph::dialog`'s
+/// The panel gutter both overlays use, transcribed: `frust_glyph::dialog`'s
 /// `DIALOG_PADDING` and `ui::sheet`'s `PANEL_PAD` are both 20px, so a
 /// full-bleed child of either (the name field, the sheet body) is laid out at
 /// the panel width minus twice this — the property [`content_child`] addresses
@@ -644,7 +644,7 @@ fn the_panel_rises_while_the_scrim_fades_in_place() {
     let _g = serial();
     let _ambient = setup();
 
-    let (mut h, mid) = mid_entrance(Theme::glyph_baseline());
+    let (mut h, mid) = mid_entrance(frust_glyph::baseline());
     let mid_offset = panel_offset(&mid);
     let mid_scrim = scrim_alpha(&mid);
 
@@ -686,7 +686,7 @@ fn the_scrims_rect_never_moves() {
     // size the full surface — and only its alpha differs. `scrim_alpha`
     // panics unless exactly one full-bleed fill exists, so every probe below
     // is an assertion.
-    let mut h = Harness::themed(Some(Theme::glyph_baseline()));
+    let mut h = Harness::themed(Some(frust_glyph::baseline()));
     show_sheet(&h.controller, |_sheet| any(text("pair a host")));
     h.frame_at(0.0);
 
@@ -706,7 +706,7 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
     let _g = serial();
     let _ambient = setup();
 
-    let mut h = Harness::themed(Some(Theme::glyph_baseline()));
+    let mut h = Harness::themed(Some(frust_glyph::baseline()));
     show_sheet(&h.controller, |_sheet| any(text("pair a host")));
     let settled = h.settle();
     assert!(panel_offset(&settled).abs() < EPSILON);
@@ -742,7 +742,7 @@ fn reduce_motion_collapses_the_sheet_to_the_frameworks_linear_staging() {
     let _g = serial();
     let _ambient = setup();
 
-    let mut theme = Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = true;
     let (mut h, mid) = mid_entrance(theme);
 

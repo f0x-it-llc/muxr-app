@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use frust::authoring::{Color, Size};
-use frust::glyph::{BadgeVariant, badge};
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Get, Padding, Theme, any, flexible, inflexible, switch,
-    text,
+    AnyView, EdgeInsets, GestureDetector, Get, Padding, Theme, any, flexible, inflexible, text,
 };
+use frust_glyph::{BadgeVariant, badge};
+use frust_material::switch;
 
 use super::super::chrome::{radio_semantics, swatch, switch_semantics};
 use super::pairing::pairing_chrome;

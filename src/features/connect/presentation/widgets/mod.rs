@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn there_is_one_piece_per_source_stagger() {
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         assert_eq!(
             connect_pieces::<AppState>(&theme, &[]).len(),
             spec::PIECE_DELAYS_MS.len(),

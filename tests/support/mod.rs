@@ -96,7 +96,7 @@ pub fn ime_bottom_inset(bottom: f64) -> WindowInsets {
 /// - [`RecScene::transforms`] — every pushed `Affine`. Each other channel
 ///   records the geometry a widget *hands* the scene, which is its resting
 ///   geometry when the widget animates by pushing a transform around its paint
-///   instead of by moving pod origins (`frust::glyph`'s sheet slides its panel
+///   instead of by moving pod origins (`frust_glyph`'s sheet slides its panel
 ///   that way). Recording the transform itself is the only way such a slide is
 ///   observable at all here — this recorder deliberately does not compose it
 ///   into the coordinates it stores, so every pre-existing suite reads

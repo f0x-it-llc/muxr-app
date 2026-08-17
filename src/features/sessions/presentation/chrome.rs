@@ -368,7 +368,7 @@ impl Widget for SwatchWidget {
 /// **Hand-drawn, and meant to be deleted.** `PaintScene` carries no dash
 /// pattern (a known, already-filed frust gap), so this walks the four straight
 /// edges in [`DASH_ON`]/[`DASH_OFF`] steps with [`PaintScene::stroke_line`] —
-/// the same workaround `frust::glyph::empty_state` makes for its own dashed
+/// the same workaround `frust_glyph::empty_state` makes for its own dashed
 /// panel (`stroke_dashed_rect`), which is the framework's own precedent that
 /// this is the available shape rather than a shortcut. The four corners are
 /// dashed the same way: [`dash_arc`] walks each quarter-circle's own

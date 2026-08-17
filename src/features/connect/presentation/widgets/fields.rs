@@ -176,7 +176,7 @@ mod tests {
         // A stack that resolves to nothing sends parley per-cluster and the digits
         // come back a full em wide; a generic that resolves everywhere is the floor
         // that cannot happen under.
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let style = field_text_style(&theme, Color::WHITE);
         let FontFamily::NamedWithGeneric(names) = &style.family else {
             panic!("a field's family must be a stack ending in a generic slot");

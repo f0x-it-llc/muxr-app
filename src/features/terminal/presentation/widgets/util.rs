@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn a_comment_line_is_the_only_italic_one() {
-        let theme = Theme::glyph_baseline();
+        let theme = frust_glyph::baseline();
         let styles = line_styles(&theme, &CardInk::from_theme(&theme));
         assert_eq!(styles.comment.style, FontStyle::Italic);
         assert_eq!(styles.prompt.style, FontStyle::Normal);

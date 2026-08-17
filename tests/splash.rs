@@ -104,7 +104,7 @@ impl PaintScene for SplashScene {
 /// A Glyph theme with `reduce_motion` forced on/off — the token every splash
 /// widget gates its motion on.
 fn theme(reduce_motion: bool) -> Theme {
-    let mut theme = Theme::glyph_baseline();
+    let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = reduce_motion;
     theme
 }

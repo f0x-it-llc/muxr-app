@@ -1,11 +1,11 @@
 //! The add-tab row's own name dialog — the one prompt in this app where a
 //! **blank** field is a valid submit.
 
-use frust::glyph::{GlyphDialogView, glyph_dialog};
 use frust::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, Get, NavigatorController, PopResult, RwSignal,
     Set, SizedBox, any, button, flexible, inflexible, text_input,
 };
+use frust_glyph::{GlyphDialogView, glyph_dialog};
 
 use crate::AppState;
 use crate::ui::spacing;

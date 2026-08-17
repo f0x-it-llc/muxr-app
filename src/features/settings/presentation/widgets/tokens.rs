@@ -14,12 +14,13 @@
 //! honest toast.
 
 use frust::authoring::Color;
-use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexView,
     GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult, RwSignal, Set,
-    SizedBox, any, button, flexible, inflexible, switch, text, text_input,
+    SizedBox, any, button, flexible, inflexible, text, text_input,
 };
+use frust_glyph::{glyph_dialog, show_glyph_dialog};
+use frust_material::switch;
 
 use crate::AppState;
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
@@ -334,7 +335,7 @@ fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_on
 }
 
 /// The create dialog's read-only toggle: a flexible label plus the real,
-/// themed `frust::switch` (the same shape `features::connect`'s own
+/// themed `frust_material::switch` (the same shape `features::connect`'s own
 /// `remember_row` draws) — **no outer `GestureDetector`**, since both
 /// `SwitchWidget` and `GestureDetectorWidget` capture the pointer on `Down`,
 /// and nesting the real switch inside a row-wide detector would race the same

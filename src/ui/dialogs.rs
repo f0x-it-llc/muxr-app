@@ -1,4 +1,4 @@
-//! Flutter-parity dialog helpers over [`frust::glyph::glyph_dialog`]: a
+//! Flutter-parity dialog helpers over [`frust_glyph::glyph_dialog`]: a
 //! destructive-action confirmation ([`confirm_dialog`]) and a single-field
 //! name prompt ([`name_input_dialog`]). Both are one-line call sites —
 //! [`show_glyph_dialog`] pushes the dialog as a **transparent navigator
@@ -24,10 +24,10 @@
 //! space clears the field's IME session without dismissing the dialog) reads
 //! specifically from that slot.
 
-use frust::glyph::{glyph_dialog, show_glyph_dialog};
 use frust::{
     ButtonStyle, Get, NavigatorController, PopResult, RwSignal, Set, any, button, text_input,
 };
+use frust_glyph::{glyph_dialog, show_glyph_dialog};
 
 /// The shared cancel affordance's label — one spelling for every dialog here.
 const CANCEL_LABEL: &str = "Cancel";

@@ -31,7 +31,7 @@
 //! accent, the pane pills, the `.conn-row` rule, the dashed new-session
 //! outline.
 //!
-//! `Theme::glyph_baseline()` is canonical where it and the HTML disagree.
+//! `frust_glyph::baseline()` is canonical where it and the HTML disagree.
 
 mod list;
 mod manage_sheet;

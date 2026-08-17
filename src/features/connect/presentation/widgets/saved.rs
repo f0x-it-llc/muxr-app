@@ -4,11 +4,11 @@
 use std::rc::Rc;
 
 use frust::authoring::Size;
-use frust::glyph::{BadgeVariant, badge};
 use frust::{
     Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Theme, any,
     flexible, icon, icons, inflexible, text,
 };
+use frust_glyph::{BadgeVariant, badge};
 
 use super::super::chrome::swatch;
 use super::pairing::READ_ONLY_CHIP;

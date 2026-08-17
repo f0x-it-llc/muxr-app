@@ -1444,6 +1444,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-glyph"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-haptics"
 version = "0.1.0"
 dependencies = [
@@ -1453,6 +1462,15 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-ui-kit 0.3.2",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-material"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
 ]
 
 [[package]]
@@ -3029,7 +3047,9 @@ dependencies = [
  "frust-camera",
  "frust-clipboard",
  "frust-core",
+ "frust-glyph",
  "frust-haptics",
+ "frust-material",
  "frust-paths",
  "frust-plugin",
  "frust-reactive",

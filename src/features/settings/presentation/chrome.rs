@@ -16,7 +16,7 @@
 //!
 //! [`switch_semantics`] closes the accessibility hole composition opens: a
 //! toggle assembled from filled boxes and a `GestureDetector` contributes
-//! **no** accessibility node at all — delete it the day `frust::glyph` grows
+//! **no** accessibility node at all — delete it the day `frust_glyph` grows
 //! a real switch (the Material catalog's `Switch` is **not** compiled into
 //! this app).
 //!
@@ -28,7 +28,7 @@
 //! *painted* fill instead, leaving layout untouched. No fixed-size
 //! *container*: `SizedBox` tightens its child's constraints rather than
 //! centering it in the box, so [`PanelView::fixed`] is the centering variant
-//! (the same shape `frust::glyph`'s own avatar solves internally, with no
+//! (the same shape `frust_glyph`'s own avatar solves internally, with no
 //! reusable container exposed for app chrome).
 
 use frust::authoring::{

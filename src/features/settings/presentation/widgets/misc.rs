@@ -3,9 +3,9 @@
 //! closing `Disconnect` action.
 
 use frust::{
-    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, flexible, inflexible, switch,
-    text,
+    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, flexible, inflexible, text,
 };
+use frust_material::switch;
 
 use crate::features::settings::presentation::chrome::{panel, switch_semantics};
 use crate::features::settings::presentation::pages::{self, SettingsState};
@@ -26,7 +26,7 @@ const BELL_VALUE: &str = "haptic + badge";
 const DISCONNECT_LABEL: &str = "Disconnect";
 
 /// A complete row with mark tile, flexible label/subtitle column, and the
-/// real, themed `frust::switch` — structured like [`super::rows::settings_row`]
+/// real, themed `frust_material::switch` — structured like [`super::rows::settings_row`]
 /// but with the switch owning its own tap target (no outer
 /// `GestureDetector`, the same pointer-capture constraint
 /// `widgets::tokens::dialog_read_only_row` documents).

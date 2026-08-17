@@ -16,8 +16,8 @@
 //! the worse failure if it ever were.
 
 use frust::authoring::Color;
-use frust::glyph::{BadgeVariant, badge};
 use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, any, flexible, inflexible, text};
+use frust_glyph::{BadgeVariant, badge};
 
 use crate::connection::{ServerInfo, TrustMode};
 use crate::ui::palette::{Palette, inked};

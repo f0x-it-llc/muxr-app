@@ -1,10 +1,10 @@
 //! A modal bottom sheet: [`show_sheet`] pushes one over the root overlay host.
 //!
-//! **The chrome is `frust::glyph`'s.** The panel, its scrim, the drag handle,
+//! **The chrome is `frust_glyph`'s.** The panel, its scrim, the drag handle,
 //! the enter/exit staging and every dismissal gesture (scrim tap, handle
-//! drag, `Escape`, Android back) belong to [`frust::glyph::glyph_sheet`] —
+//! drag, `Escape`, Android back) belong to [`frust_glyph::glyph_sheet`] —
 //! this module is the thin app-facing adapter over
-//! [`show_glyph_sheet`](frust::glyph::show_glyph_sheet). What stays here is
+//! [`show_glyph_sheet`](frust_glyph::show_glyph_sheet). What stays here is
 //! genuinely the app's: the panel gutter and bottom safe-area inset a muxr
 //! body is written against ([`sheet_content`], since Glyph lays its content
 //! slot out under **loose** width while every muxr body expects a
@@ -26,7 +26,7 @@
 //! latest-wins re-timing on the same gate.
 //!
 //! **`close` plays the same staged exit as a user dismissal**
-//! ([`frust::glyph::GlyphSheetHandle::close`]) and the page pops only once
+//! ([`frust_glyph::GlyphSheetHandle::close`]) and the page pops only once
 //! that exit completes, never immediately — so a close that also needs to
 //! push a follow-on page cannot just push right after calling `close` (that
 //! push would land ahead of the sheet's own delayed pop, and the eventual
@@ -40,14 +40,14 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use frust::glyph::{GlyphSheetHandle, glyph_sheet, show_glyph_sheet};
 use frust::{
     AnyView, Column, CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, PopResult, any,
     safe_area,
 };
+use frust_glyph::{GlyphSheetHandle, glyph_sheet, show_glyph_sheet};
 
 /// Scrim opacity behind a modal, transcribed from the Glyph catalog's own
-/// barrier constant (private to `frust::glyph`'s dialog and sheet, which pick
+/// barrier constant (private to `frust_glyph`'s dialog and sheet, which pick
 /// the same value so the two surfaces dim the app identically).
 ///
 /// `pub` because it is the number the modal suites assert the painted scrim
@@ -194,7 +194,7 @@ struct SheetGuard {
     /// delay elapses — "latest wins", so a second selection extends the wait
     /// rather than stacking a second close behind the first.
     pending: Cell<u64>,
-    /// The one staged close (`frust::glyph::GlyphSheetHandle::close`). Boxed
+    /// The one staged close (`frust_glyph::GlyphSheetHandle::close`). Boxed
     /// (rather than the handle itself) so this type stays free of the
     /// navigator's `State` parameter — a sheet body passes it around, and
     /// every one of those call sites would otherwise carry the app's state
@@ -320,7 +320,7 @@ mod tests {
     use super::*;
 
     /// A handle whose "close" only counts itself — production wires this to
-    /// `frust::glyph::GlyphSheetHandle::close` (the staged exit), so
+    /// `frust_glyph::GlyphSheetHandle::close` (the staged exit), so
     /// counting invocations here is counting how many times that seam fired,
     /// not literal pops.
     fn counting_handle() -> (SheetHandle, Rc<Cell<usize>>) {

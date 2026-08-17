@@ -84,7 +84,7 @@ const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 /// *always* mounted and merely
 /// [hidden](crate::ui::topbar::TopBarView::hidden) — zero height, no paint,
 /// no events, no semantics — on a route with no bar, and the toast layer is
-/// likewise always present (an idle [`frust::glyph::toast_host`] paints
+/// likewise always present (an idle [`frust_glyph::toast_host`] paints
 /// nothing and passes every pointer event straight through) rather than a
 /// second growable slot. It sits above the bar so a toast floats over
 /// whatever chrome is on top, and below the splash overlay so a toast raised
