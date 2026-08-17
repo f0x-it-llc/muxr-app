@@ -50,101 +50,55 @@ use frust::{
     Route, RouteParams, Router, RwSignal, Set, TransitionSpec,
 };
 
-use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::connect::presentation::pages::connect_page;
 use crate::features::sessions::presentation::pages::sessions_page;
 use crate::features::sessions::presentation::widgets::host_of;
 use crate::features::settings::presentation::pages::settings_page;
 use crate::features::terminal::presentation::pages::terminal_page;
+use crate::AppState;
 
-/// Where the session guard bounces an unauthenticated push to.
+/// Routes
 const CONNECT_LOCATION: &str = "/";
-
-/// The `/sessions` route — the one route whose back press is a *question*
-/// rather than a pop (see the module docs' back section, and
-/// [`sessions_back_signal`]).
 const SESSIONS_ROUTE: &str = "/sessions";
+const TERMINAL_ROUTE: &str = "/terminal";
+pub const SETTINGS_ROUTE: &str = "/settings";
 
-/// The `/` route (and the navigator's initial page): Connect. Takes the
-/// **overlay host's** [`NavigatorController`] so this function fits both
-/// [`build_routes`]'s `"/"` closure and the navigator's `initial` closure
-/// identically (see `examples/huddle`'s `home_page` for the same dual-use
-/// shape); forwarded straight through to [`connect_page`], which uses it for
-/// the QR sheet it pushes (a sheet is a page builder, not a path — see [`Nav`]
-/// for the other half, and `crate::AppState::overlays` for why every overlay
-/// is a page of the host rather than of the route stack).
+/// The `/` route (and the navigator's initial page): Connect.
 pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
     connect_page(overlays)
 }
 
-// ---------------------------------------------------------------------------
-// Route metadata — what the shell's persistent top bar shows per route
-// ---------------------------------------------------------------------------
-
 /// Where a route's bar title comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarTitle {
-    /// The connected server's host — `/sessions`' title, resolved per frame
-    /// from [`ConnectionController::server_info`] (the strip below it prints the
-    /// whole `host:port`; the bar prints only the host).
     ConnectedHost,
-    /// A literal title (`terminal`, `server settings`).
     Fixed(&'static str),
 }
 
 /// What sits in the bar's leading slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarLeading {
-    /// The `muxr` brand mark + wordmark — the stack's first titled route.
     Brand,
-    /// A `‹` that pops back to the route below.
-    ///
-    /// **Design deviation, deliberate.** `docs/redesign.html`'s terminal mock
-    /// carries the brand + a `⋮` rather than a back affordance; the product
-    /// decision is that *every pushed route* gets a back button, so
-    /// `/terminal` takes the `‹` too, with its `⋮` in the trailing slot
-    /// ([`BarAction::TerminalMenu`]).
     Back,
 }
 
 /// The bar's optional trailing action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarAction {
-    /// `⚙` — pushes [`SETTINGS_ROUTE`]. The app's one entry point to
-    /// `/settings`, which is why it lives in route metadata rather than on the
-    /// Sessions screen (which no longer owns a bar at all).
     Settings,
-    /// `⋮` — opens the terminal screen's overflow menu (Panes & tabs / Rename
-    /// session / Detach session).
-    ///
-    /// `docs/terminal.html` v2 moved that menu off the terminal's own head row
-    /// and onto the **app** bar, which is why it is route metadata; the menu
-    /// itself still belongs to the feature, so `crate::shell` only forwards the
-    /// press to
-    /// [`open_terminal_menu`](crate::features::terminal::presentation::pages::open_terminal_menu)
-    /// (the same shell-forwards/feature-owns split the `⚙` follows in the
-    /// other direction).
     TerminalMenu,
 }
 
 /// Everything the shell's persistent top bar needs to render one route.
-///
-/// `Copy` on purpose: it rides inside an [`RwSignal`], which is `Send + Sync`
-/// bounded, and every field is a plain enum over `'static` data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteMeta {
-    /// Where the centered title comes from.
     pub title: BarTitle,
-    /// What the leading slot shows.
     pub leading: BarLeading,
-    /// The trailing icon slot, if this route carries one.
     pub action: Option<BarAction>,
 }
 
 impl RouteMeta {
-    /// This route's bar title for the current frame — a [`BarTitle::Fixed`]
-    /// verbatim, or the connected host read (tracked) off `connection`.
     pub fn resolve_title(&self, connection: &ConnectionController) -> String {
         match self.title {
             BarTitle::Fixed(title) => title.to_string(),
@@ -157,17 +111,9 @@ impl RouteMeta {
     }
 }
 
-/// The `/settings` route — the bar's `⚙` destination.
-pub const SETTINGS_ROUTE: &str = "/settings";
-/// The bar's title while no connection is up: unreachable behind the session
-/// guard, but [`BarTitle::ConnectedHost`] always has a slot to fill.
 const DISCONNECTED_TITLE: &str = "muxrd";
 
 /// The bar metadata for `path`, or `None` for a route that carries **no** bar.
-///
-/// `/` is the only such route today: the Connect screen is a full-bleed design
-/// with no chrome above it (and the cold-start splash overlays exactly that
-/// route), so the shell's bar collapses to zero height there.
 pub fn route_meta(path: &str) -> Option<RouteMeta> {
     match path {
         SESSIONS_ROUTE => Some(RouteMeta {
@@ -175,7 +121,7 @@ pub fn route_meta(path: &str) -> Option<RouteMeta> {
             leading: BarLeading::Brand,
             action: Some(BarAction::Settings),
         }),
-        "/terminal" => Some(RouteMeta {
+        TERMINAL_ROUTE => Some(RouteMeta {
             title: BarTitle::Fixed("terminal"),
             leading: BarLeading::Back,
             action: Some(BarAction::TerminalMenu),
@@ -192,10 +138,8 @@ pub fn route_meta(path: &str) -> Option<RouteMeta> {
 /// Which way the bar's title/leading crossfade travels on the next change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BarDirection {
-    /// Forward navigation: the new title enters from the trailing edge.
     #[default]
     Forward,
-    /// Back navigation: the new title enters from the leading edge.
     Back,
 }
 
@@ -210,31 +154,9 @@ pub struct BarState {
     /// Whether the route on top has asked the bar to get out of the way
     /// entirely — the terminal screen's **fullscreen** state, published
     /// through [`Nav::set_fullscreen`].
-    ///
-    /// A *second input to the bar's existing hidden flag*, not a second hide
-    /// mechanism: `crate::shell` ORs this with "this route has no bar at all"
-    /// and hands the sum to [`crate::ui::topbar::TopBarView::hidden`], so the
-    /// bar plays exactly the reveal it already plays when leaving a titled
-    /// route for `/`. It rides here rather than in [`RouteMeta`] because it is
-    /// per-*screen-state*, not per-route: the same `/terminal` is both
-    /// fullscreen and not over its lifetime.
-    ///
-    /// The screen clears it on unmount (its `Component`'s `on_cleanup`), which
-    /// is what stops a back-nav out of fullscreen from stranding a hidden bar
-    /// on the route below.
     pub fullscreen: bool,
 }
 
-/// The page transition **every** path navigation through [`Nav`] carries: the
-/// Glyph screen transition (a 16dp directional slide + cross-fade, 340ms
-/// spatial enter / 150ms exit, Glyph `spatial`/`exit` easings), theme-timed so
-/// `frust`'s own `resolve_spec` collapses it to a ≤120ms linear cross-fade
-/// under `reduce_motion`.
-///
-/// Wired here, at the one seam every route push funnels through, rather than
-/// per-screen — and deliberately **not** as the navigator's default transition,
-/// which would also catch the sheet (which owns its `SlideUp`), the dialogs,
-/// and the start-location `replace` the splash hands off over.
 pub const fn route_transition() -> TransitionSpec {
     TransitionSpec::glyph()
 }
@@ -243,7 +165,6 @@ pub const fn route_transition() -> TransitionSpec {
 // The app's navigation handle
 // ---------------------------------------------------------------------------
 
-/// The route-meta mirror behind [`Nav`] — see the [module docs](self).
 struct NavState {
     /// One entry per path navigation, in stack order: the page-stack depth the
     /// navigation lands at, and the bar metadata for the route it landed on
@@ -373,16 +294,7 @@ pub struct Nav {
 
 /// A `Send + Sync` handle to just the bar's fullscreen flag — see
 /// [`BarState::fullscreen`].
-///
-/// [`Nav`] itself is `Rc`-backed and so can be captured by neither
-/// [`frust::on_cleanup`] nor anything else `Send + Sync`-bounded, and clearing
-/// this flag on unmount is exactly a cleanup's job (a screen that left
-/// fullscreen set would strand a hidden bar on the route it popped back to).
-/// An [`RwSignal`] *is* `Send + Sync + Copy`, so the flag lives in one and this
-/// hands out a named, single-purpose face of it rather than the raw signal.
-///
-/// Writing it wakes the shell's rebuild on its own: [`Nav::bar`] reads it
-/// **tracked** every frame, which is the whole subscription.
+
 #[derive(Clone, Copy)]
 pub struct BarFullscreen(RwSignal<bool>);
 
