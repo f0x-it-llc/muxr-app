@@ -6,10 +6,9 @@ use frust::authoring::{Color, Size};
 use frust::{
     AnyView, EdgeInsets, GestureDetector, Get, Padding, Theme, any, flexible, inflexible, text,
 };
-use frust_glyph::{BadgeVariant, badge};
-use frust_material::switch;
+use frust_glyph::{BadgeVariant, badge, toggle};
 
-use super::super::chrome::{radio_semantics, swatch, switch_semantics};
+use super::super::chrome::{radio_semantics, swatch};
 use super::pairing::pairing_chrome;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
@@ -55,20 +54,18 @@ pub fn remember_row<S: 'static>(
 ) -> AnyView<S> {
     let remembered = live.is_none_or(|live| live.controller.remember.get());
     let controller = live.map(|live| Arc::clone(&live.controller));
-    // A controlled component: the switch reports the *requested* value it never
+    // A controlled component: the toggle reports the *requested* value it never
     // self-applies, and the callback drives `toggle_remember`, so the controller's
     // flip (and the persistence it triggers) stays the single source of truth.
-    // `SwitchWidget` carries no label of its own, so `switch_semantics` keeps
-    // `REMEMBER_LABEL` on the announced node.
-    let toggle = any(switch_semantics(
-        switch::<S, _>(remembered, move |_state: &mut S, _requested: bool| {
+    // `.label(REMEMBER_LABEL)` is the toggle's own accessibility label.
+    let toggle_view = any(
+        toggle::<S, _>(remembered, move |_state: &mut S, _requested: bool| {
             if let Some(controller) = &controller {
                 controller.toggle_remember();
             }
-        }),
-        REMEMBER_LABEL,
-        remembered,
-    ));
+        })
+        .label(REMEMBER_LABEL),
+    );
     backed(
         column::<S>(vec![
             any(row::<S>(vec![
@@ -80,7 +77,7 @@ pub fn remember_row<S: 'static>(
                     any(text(REMEMBER_LABEL)
                         .style(inked(&theme.type_scale.body_small, colors.fg_muted))),
                 ),
-                inflexible(toggle),
+                inflexible(toggle_view),
             ])),
             v_gap::<S>(spacing::SHEET),
             trust_selector(theme, colors, live),

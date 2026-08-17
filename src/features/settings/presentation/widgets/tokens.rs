@@ -19,12 +19,11 @@ use frust::{
     GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult, RwSignal, Set,
     SizedBox, any, button, flexible, inflexible, text, text_input,
 };
-use frust_glyph::{glyph_dialog, show_glyph_dialog};
-use frust_material::switch;
+use frust_glyph::{glyph_dialog, show_glyph_dialog, toggle};
 
 use crate::AppState;
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
-use crate::features::settings::presentation::chrome::{RADIUS_FULL, panel, switch_semantics};
+use crate::features::settings::presentation::chrome::{RADIUS_FULL, panel};
 use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::features::settings::presentation::scramble::{self, ScramblePose};
 use crate::ui::palette::{Palette, active_theme, inked};
@@ -335,14 +334,14 @@ fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_on
 }
 
 /// The create dialog's read-only toggle: a flexible label plus the real,
-/// themed `frust_material::switch` (the same shape `features::connect`'s own
+/// themed `frust_glyph::toggle` (the same shape `features::connect`'s own
 /// `remember_row` draws) — **no outer `GestureDetector`**, since both
-/// `SwitchWidget` and `GestureDetectorWidget` capture the pointer on `Down`,
-/// and nesting the real switch inside a row-wide detector would race the same
+/// `ToggleWidget` and `GestureDetectorWidget` capture the pointer on `Down`,
+/// and nesting the real toggle inside a row-wide detector would race the same
 /// gesture twice.
 ///
 /// Built over `AppState` — a dialog is a page on the *app's* navigator — with
-/// a controlled-component callback: the switch reports the *requested* value
+/// a controlled-component callback: the toggle reports the *requested* value
 /// and the caller flips its own `read_only` signal, whose re-run reflects
 /// back into `on`.
 fn dialog_read_only_row(
@@ -351,19 +350,17 @@ fn dialog_read_only_row(
     on_toggle: impl Fn(&mut AppState) + 'static,
 ) -> AnyView<AppState> {
     let theme = active_theme();
-    let toggle = any(switch_semantics(
-        switch::<AppState, _>(on, move |state: &mut AppState, _requested: bool| {
-            on_toggle(state)
-        }),
-        READ_ONLY_TOGGLE_LABEL,
+    let toggle_view = any(toggle::<AppState, _>(
         on,
-    ));
+        move |state: &mut AppState, _requested: bool| on_toggle(state),
+    )
+    .label(READ_ONLY_TOGGLE_LABEL));
     any(row(vec![
         flexible(
             1,
             any(text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg))),
         ),
-        inflexible(toggle),
+        inflexible(toggle_view),
     ]))
 }
 

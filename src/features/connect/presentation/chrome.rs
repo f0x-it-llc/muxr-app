@@ -1,19 +1,18 @@
 //! The Connect screen's hand-rolled primitives: a bordered, rounded, filled
 //! **panel** (single-child), a fixed-size **swatch** (leaf, optionally
-//! glowing), a **centered paragraph**, and the **control-semantics** wrapper
-//! behind [`switch_semantics`]/[`radio_semantics`]. No facade widget paints
-//! an arbitrary filled/bordered rect, so these [`View`]/[`Widget`] pairs —
-//! authored through [`frust::authoring`], the same seam `examples/huddle`'s
+//! glowing), a **centered paragraph**, and the **radio-semantics** wrapper
+//! behind [`radio_semantics`]. No facade widget paints an arbitrary
+//! filled/bordered rect, so these [`View`]/[`Widget`] pairs — authored
+//! through [`frust::authoring`], the same seam `examples/huddle`'s
 //! `ui::fill_box` uses — fill the gap.
 //!
-//! [`switch_semantics`]/[`radio_semantics`] close an accessibility gap over
-//! whatever art or widget they wrap. [`radio_semantics`] closes a total hole:
-//! a trust row assembled from swatches and a `GestureDetector` contributes
+//! [`radio_semantics`] closes an accessibility gap composition opens: a
+//! trust row assembled from swatches and a `GestureDetector` contributes
 //! **no** accessibility node at all — delete it the day `frust_glyph` grows
-//! a real radio with a themeable label. [`switch_semantics`] closes a
-//! narrower one: the remember toggle wraps the real `frust_material::switch`, which
-//! contributes its own `Toggled`/`Action::Click` node but no label
-//! (`SwitchWidget` takes none) — delete it the day `switch` grows one.
+//! a real radio with a themeable label. The remember toggle needs no such
+//! wrapper: `frust_glyph::toggle` is a real widget with its own labelled
+//! `Role::Switch` node built in (`super::widgets::trust::remember_row`'s
+//! `.label(...)` call).
 //! [`centered_paragraph`] works around a different gap: `TextContext::layout`
 //! hardcodes `parley::Alignment::Start`, so a wrapped run's second line
 //! always hugs the leading edge; this line-breaks and centers each line
@@ -31,8 +30,8 @@ use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect,
-    SemanticsCtx, Shape, Size, Toggled, View, Widget, any, build_child, rebuild_child,
-    route_event_single, teardown_child,
+    SemanticsCtx, Shape, Size, View, Widget, any, build_child, rebuild_child, route_event_single,
+    teardown_child,
 };
 
 /// Hairline border width in logical px (`1px solid` on every bordered rule in
@@ -329,99 +328,70 @@ impl Widget for SwatchWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Control semantics — an accessibility node over hand-composed control art
+// Radio semantics — an accessibility node over hand-composed radio art
 // ---------------------------------------------------------------------------
 
-/// Which control a [`ControlSemanticsView`] stands in for, plus that control's
-/// own state. One wrapper serves both because the switch and the trust rows
-/// differ *only* in the role/state pair they announce — everything else
-/// (labelled leaf node, `Click` action, pass-through layout/paint/events) is
-/// identical.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ControlKind {
-    /// A `Role::Switch` reading on/off — the remember toggle.
-    Switch(bool),
-    /// A `Role::RadioButton` reading selected/unselected — a trust row.
-    Radio(bool),
-}
-
-/// Give `child` — today, the real `frust_material::switch` the remember toggle wraps
-/// (`super::widgets::trust::remember_row`) — the one accessibility detail it cannot
-/// grow itself: a **labelled**, toggled [`Role::Switch`] advertising the
-/// [`Action::Click`] it fires.
-///
-/// Layout, paint and event routing are pure pass-through; only
-/// [`Widget::semantics`] does anything, and it fully replaces whatever node
-/// `child` would have contributed on its own (never both) — see the
-/// [module docs](self).
-pub fn switch_semantics<State: 'static, V: View<State>>(
-    child: V,
-    label: impl Into<String>,
-    on: bool,
-) -> ControlSemanticsView<State> {
-    ControlSemanticsView {
-        child: any(child),
-        label: label.into(),
-        kind: ControlKind::Switch(on),
-    }
-}
-
-/// [`switch_semantics`]' sibling for a hand-composed radio row: a labelled
-/// [`Role::RadioButton`] carrying `selected` and the [`Action::Click`] the
-/// row's own recognizer fires.
+/// Give `child` — a hand-composed trust row's ring, dot and label — the one
+/// accessibility detail it cannot grow itself: a **labelled**
+/// [`Role::RadioButton`] carrying `selected` and advertising the
+/// [`Action::Click`] the row's own recognizer fires.
 ///
 /// The trust selector hand-composes its rows (the stock `frust::radio` styles
 /// its label with `TextStyle::default()` — 16px, no theme role — which the
 /// design's 12px `--fg` row cannot be reached from), so the rows would
 /// otherwise contribute no accessibility node at all. See the
 /// [module docs](self).
+///
+/// Layout, paint and event routing are pure pass-through; only
+/// [`Widget::semantics`] does anything, and it fully replaces whatever node
+/// `child` would have contributed on its own (never both).
 pub fn radio_semantics<State: 'static, V: View<State>>(
     child: V,
     label: impl Into<String>,
     selected: bool,
-) -> ControlSemanticsView<State> {
-    ControlSemanticsView {
+) -> RadioSemanticsView<State> {
+    RadioSemanticsView {
         child: any(child),
         label: label.into(),
-        kind: ControlKind::Radio(selected),
+        selected,
     }
 }
 
-/// The declarative half of [`switch_semantics`]/[`radio_semantics`].
-pub struct ControlSemanticsView<State: 'static> {
+/// The declarative half of [`radio_semantics`].
+pub struct RadioSemanticsView<State: 'static> {
     child: AnyView<State>,
     label: String,
-    kind: ControlKind,
+    selected: bool,
 }
 
-/// The retained half of [`switch_semantics`]/[`radio_semantics`].
-pub struct ControlSemanticsWidget {
+/// The retained half of [`radio_semantics`].
+pub struct RadioSemanticsWidget {
     child: ChildPod,
     label: String,
-    kind: ControlKind,
+    selected: bool,
 }
 
-impl<State: 'static> View<State> for ControlSemanticsView<State> {
-    type Element = ControlSemanticsWidget;
+impl<State: 'static> View<State> for RadioSemanticsView<State> {
+    type Element = RadioSemanticsWidget;
 
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> ControlSemanticsWidget {
-        ControlSemanticsWidget {
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> RadioSemanticsWidget {
+        RadioSemanticsWidget {
             child: build_child(&self.child, ctx),
             label: self.label.clone(),
-            kind: self.kind,
+            selected: self.selected,
         }
     }
 
     fn rebuild(
         &self,
         prev: &Self,
-        element: &mut ControlSemanticsWidget,
+        element: &mut RadioSemanticsWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
-        if prev.label != self.label || prev.kind != self.kind {
+        if prev.label != self.label || prev.selected != self.selected {
             element.label = self.label.clone();
-            element.kind = self.kind;
+            element.selected = self.selected;
             // Semantics-only: the accessibility tree is rebuilt off a paint
             // pass, so PAINT is what republishes the node.
             flags |= ChangeFlags::PAINT;
@@ -429,12 +399,12 @@ impl<State: 'static> View<State> for ControlSemanticsView<State> {
         flags
     }
 
-    fn teardown(&self, element: &mut ControlSemanticsWidget, ctx: &mut BuildCtx<'_>) {
+    fn teardown(&self, element: &mut RadioSemanticsWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
-impl Widget for ControlSemanticsWidget {
+impl Widget for RadioSemanticsWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let size = self.child.layout_child(ctx, bc);
         self.child.set_origin(Point::ZERO);
@@ -451,29 +421,14 @@ impl Widget for ControlSemanticsWidget {
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // A leaf node, deliberately: the composed art underneath has nothing to
-        // announce, and exposing four unlabelled swatches inside a switch (or a
-        // ring + a label run inside a radio) would be noise rather than detail.
-        let (role, label) = (self.kind.role(), self.label.as_str());
-        ctx.push_node(role, |node| {
+        // announce, and exposing a ring + a label run inside a radio would be
+        // noise rather than detail.
+        let label = self.label.as_str();
+        ctx.push_node(Role::RadioButton, |node| {
             node.set_label(label);
-            match self.kind {
-                ControlKind::Switch(on) => {
-                    node.set_toggled(if on { Toggled::True } else { Toggled::False })
-                }
-                ControlKind::Radio(selected) => node.set_selected(selected),
-            }
+            node.set_selected(self.selected);
             node.add_action(Action::Click);
         });
-    }
-}
-
-impl ControlKind {
-    /// The accessibility role this control announces.
-    fn role(self) -> Role {
-        match self {
-            ControlKind::Switch(_) => Role::Switch,
-            ControlKind::Radio(_) => Role::RadioButton,
-        }
     }
 }
 

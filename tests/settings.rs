@@ -391,8 +391,8 @@ impl Harness {
         self.root.event(&mut self.state, &named_key(key));
     }
 
-    /// The bell switch's announced state — the `Role::Switch` node
-    /// `widgets::misc::bell_notifications_row`'s own `switch_semantics` wrapper contributes.
+    /// The bell switch's announced state — the `Role::Switch` node the real
+    /// `frust_glyph::toggle` in `widgets::misc::bell_notifications_row` contributes itself.
     fn bell_state(&self) -> Option<Toggled> {
         self.root
             .semantics()
