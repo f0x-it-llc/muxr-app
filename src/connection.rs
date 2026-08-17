@@ -1,47 +1,5 @@
 //! [`ConnectionController`] — muxr's one app-scoped connection handle — and
-//! the [`ConnectionBackend`] seam it drives. See `docs/ARCHITECTURE.md`'s
-//! Connection section for why this lives beside `crate::failure` rather than
-//! in `connect`'s own slice, and the controller/backend split.
-//!
-//! **`ConnectRun`'s `Ready`/`Pending` sum type** lets one controller serve
-//! both backends: [`MockConnectionBackend`] settles **synchronously** (every
-//! headless suite calls `connect` and asserts on the next line), while a
-//! `tonic` dial cannot be polled outside the runtime that owns its reactor —
-//! the two arms name that difference rather than hide it. A suite opts in
-//! via [`use_mock_connection_for_tests`], from `tests/support::setup()`.
-//!
-//! **Single-flight `connecting`** and **`is_read_only`** (mirrored off
-//! `ServerInfo`) are the two signals beyond `connected`; `is_read_only` is
-//! the *primary* defence against a read-only credential's mutations — the
-//! server's own `PERMISSION_DENIED` refusal (collapsed into the retryable
-//! `AppFailure::Network` bucket) is the fallback nobody should reach.
-//!
-//! **Token hygiene**: the plaintext auth token is zeroized as soon as the
-//! `Login` request is built; the minted session token is scrubbed out of the
-//! response once the client holds it (the login *field*'s own buffer belongs
-//! to `connect`'s `ConnectController`, which clears it on connect and
-//! disconnect — not to this module). Residuals this layer cannot reach:
-//! `LoginRequest`'s own `String` copy and the encoded request frame `tonic`
-//! owns are not addressable from here and are never zeroized, and the
-//! platform IME surface holds plaintext while typing until platform-level
-//! input masking lands.
-//! **Threading**: a real dial runs on the
-//! background runtime ([`frust::spawn`]); a UI-thread coordinator
-//! ([`frust::spawn_local`]) awaits it and is the **sole signal writer** — no
-//! signal is written off the UI thread. **Failures** emit through the
-//! embedded [`ControllerCore`], and `MuxrApp::init` subscribes the app's
-//! toast bridge to it once.
-//!
-//! **`CredentialSaver`** is a one-method seam boundary: this module names
-//! the trait and calls it, `connect` installs the implementation that mints
-//! a token, raises a biometric prompt and writes the secure store — no
-//! feature type crosses into this file. **`credential_offer`** lives here
-//! because a settled connect writes it and it must survive the navigation to
-//! the screen that answers it: `connect`'s completion closure holds the push
-//! to `/sessions` until the save dialog resolves rather than racing
-//! Connect's own unmount — total by contract, since every refusal path still
-//! runs the callback so a failed or uninstalled saver can never strand the
-//! user.
+//! the [`ConnectionBackend`] seam it drives.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -61,17 +19,9 @@ use crate::failure::AppFailure;
 use crate::net::proto::{Backend, Empty, LoginRequest, VersionInfo};
 use crate::net::{MuxrClient, TrustConfig, error};
 
-/// Mock round-trip latency [`MockConnectionBackend`] reports — Sessions'
-/// `conn-row` renders it, and a mock connection times nothing.
-/// `docs/redesign.html`'s sessions strip prints `36ms`, so the mock says 36.
+
 const MOCK_LATENCY_MS: u32 = 36;
-/// Mock multiplexer version string [`MockConnectionBackend`] reports — the
-/// value `docs/redesign.html`'s sessions strip prints (`zellij 0.44.3 · 36ms`).
-/// It names the **multiplexer** the daemon fronts rather than the daemon build,
-/// because that is what the strip's meta text says.
 const MOCK_SERVER_VERSION: &str = "zellij 0.44.3";
-/// The version [`MockConnectionBackend`] reports for its one backend — the
-/// numeric half of [`MOCK_SERVER_VERSION`].
 const MOCK_ZELLIJ_VERSION: &str = "0.44.3";
 
 /// The capability flag a server sets when `AttachTerminal` understands mouse
@@ -79,59 +29,25 @@ const MOCK_ZELLIJ_VERSION: &str = "0.44.3";
 /// unknown flags are carried verbatim and ignored, as the wire requires.
 pub const CAP_MOUSE_INPUT: &str = "mouse-input";
 
-/// What [`ServerInfo::version`] reads when a server reported neither a backend
-/// nor the back-compat `zellij_version` field.
+
 const UNKNOWN_VERSION: &str = "unknown";
 
-/// The failure a [`TrustMode::Pinned`] target with no fingerprint fails closed
-/// with — before any socket is opened.
+/// Failures
 const MISSING_PIN: &str = "a pinned connection needs a certificate fingerprint";
-/// The failure a connect settles with when its background task vanished
-/// without answering (an aborted runtime — never a server behaviour).
 const DIAL_ABANDONED: &str = "the connect task ended without an answer";
-/// The detail [`ConnectionController::on_session_expired`] logs. The user sees
-/// [`AppFailure::user_message`](clean_signals::Failure::user_message), never
-/// this.
 const SESSION_EXPIRED: &str = "the server rejected the session token";
 
-/// A connected server's facts — Sessions' `conn-row` strip renders
-/// [`Self::endpoint`], [`Self::version`], [`Self::latency_ms`] and (for the one
-/// posture that skips certificate validation) [`Self::trust_mode`]; Settings
-/// renders the TLS posture and the version again.
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerInfo {
-    /// `host:port`, as dialed.
     pub endpoint: String,
-    /// The connection's TLS verification posture, carried through from
-    /// [`ConnectTarget::trust_mode`]. **This** is what a screen branches on
-    /// (a warning-hued badge for the posture that skips validation);
-    /// [`Self::tls_label`] is display text only — never match on it.
     pub trust_mode: TrustMode,
-    /// A human label for [`Self::trust_mode`] (e.g. "System trust"), derived
-    /// once here so every screen prints the same words.
     pub tls_label: String,
-    /// The multiplexer version behind the connection (`"zellij 0.44.3"`) —
-    /// the first half of the sessions strip's dim meta text
-    /// (`zellij 0.44.3 · 36ms`; [`Self::latency_ms`] is the other half).
-    /// Derived from the first detected backend, falling back to the wire's
-    /// back-compat zellij field and then to [`UNKNOWN_VERSION`].
     pub version: String,
-    /// The measured `GetVersion` round trip, milliseconds.
     pub latency_ms: u32,
-    /// A version per detected backend — [`Self::version`] is the first of
-    /// these, formatted for the strip.
     pub backend_versions: Vec<BackendVersion>,
-    /// The backends this server can actually front. A wire value this build
-    /// does not know is dropped rather than guessed at.
     pub available_backends: Vec<ServerBackend>,
-    /// The server's capability flags, e.g. [`CAP_MOUSE_INPUT`]. Additive on the
-    /// wire and unknown values are kept, so this is a set of raw strings rather
-    /// than a closed enum — ask through [`Self::supports`].
     pub capabilities: BTreeSet<String>,
-    /// Whether the credential this connection logged in with is read-only.
-    /// Mirrored onto [`ConnectionController::is_read_only`], which is what a
-    /// screen reads to disable the controls a read-only token would be refused
-    /// for.
     pub is_read_only: bool,
 }
 
@@ -143,21 +59,13 @@ impl ServerInfo {
 }
 
 /// A multiplexer a `muxrd` server can front.
-///
-/// The app's own closed enum over the wire's `Backend`: the generated type is
-/// an `i32` with an `UNSPECIFIED` arm and room for values this build has never
-/// heard of, neither of which a screen should have to match on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ServerBackend {
-    /// zellij.
     Zellij,
-    /// herdr.
     Herdr,
 }
 
 impl ServerBackend {
-    /// This backend's lowercase name, as the sessions strip and the settings
-    /// rows print it.
     pub fn label(self) -> &'static str {
         match self {
             ServerBackend::Zellij => "zellij",
@@ -165,8 +73,6 @@ impl ServerBackend {
         }
     }
 
-    /// The backend a wire enum value names, or `None` for `UNSPECIFIED` and for
-    /// any value this build does not know.
     fn from_wire(value: i32) -> Option<Self> {
         match Backend::try_from(value) {
             Ok(Backend::Zellij) => Some(ServerBackend::Zellij),
@@ -176,35 +82,21 @@ impl ServerBackend {
     }
 }
 
-/// One backend's version, as the handshake reported it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendVersion {
-    /// Which backend.
     pub backend: ServerBackend,
-    /// Its version string, verbatim from the server.
     pub version: String,
 }
 
-/// A connection's TLS verification posture — carried on [`ConnectTarget`],
-/// mapped onto a [`TrustConfig`] at dial time, and rendered back as
-/// [`ServerInfo::tls_label`].
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrustMode {
-    /// The platform's system trust store validates the certificate normally.
     System,
-    /// No certificate verification at all: any certificate the server
-    /// presents is accepted. Named for what actually happens rather than for
-    /// the trust-on-first-use scheme this variant used to promise — nothing
-    /// ever records a first-seen fingerprint, so this posture authenticates
-    /// the server on no connection, first or otherwise.
     NoVerification,
-    /// A certificate pinned ahead of time (the QR-pairing flow), whose
-    /// fingerprint rides on [`ConnectTarget::fingerprint`].
     Pinned,
 }
 
 impl TrustMode {
-    /// The label [`ServerInfo::tls_label`] renders for this mode.
     fn label(self) -> &'static str {
         match self {
             TrustMode::System => "System trust",
@@ -215,34 +107,20 @@ impl TrustMode {
 }
 
 /// A connect request's target, credential and options.
-///
-/// Built by whoever starts a connect — the Connect form
-/// (`features::connect`'s `ConnectController::validated_target`), and later a
-/// scanned pairing payload.
+
 #[derive(Clone, PartialEq)]
 pub struct ConnectTarget {
-    /// The host to dial.
     pub host: String,
-    /// The port to dial.
     pub port: u16,
-    /// This target's TLS verification posture.
     pub trust_mode: TrustMode,
-    /// A user-facing label for this server (e.g. "Home rig") — carried
-    /// through to [`ConnectionController::credential_offer`] when
-    /// [`Self::offer_credential`] is set.
     pub label: String,
     /// Whether a successful connect is *eligible* to offer saving this
-    /// target's credential. The caller's half of the split the module docs'
-    /// credential-offer section describes: a read-only login is refused the
-    /// offer regardless.
+    /// target's credential.
     pub offer_credential: bool,
     /// The login token this connect authenticates with — the one secret that
     /// crosses the wire, [`Zeroizing`]-wrapped so dropping this target scrubs
     /// it rather than leaving plaintext in a freed allocation.
     pub token: Zeroizing<String>,
-    /// The `remember_me` flag `Login` carries: a remembered session token lives
-    /// 28 days, an unremembered one about five minutes. Either way the login
-    /// happens — this is the token's lifetime, not whether to log in.
     pub remember: bool,
     /// The pinned certificate's SHA-256 as 64 lowercase hex characters —
     /// [`TrustMode::Pinned`]'s input, and required by it: a pinned target
@@ -251,9 +129,6 @@ pub struct ConnectTarget {
 }
 
 impl fmt::Debug for ConnectTarget {
-    /// Hand-written so [`Self::token`] never prints: `Zeroizing`'s own `Debug`
-    /// forwards straight to the wrapped `String`, so a derived impl would put
-    /// the login token in the clear in any log line that formats a target.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectTarget")
             .field("host", &self.host)
@@ -268,9 +143,6 @@ impl fmt::Debug for ConnectTarget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The backend seam
-// ---------------------------------------------------------------------------
 
 /// What a completed connect produces: the connected server's facts, or why the
 /// connection did not open.
@@ -279,28 +151,16 @@ pub type ConnectOutcome = Result<ServerInfo, AppFailure>;
 /// The work a [`ConnectRun::Pending`] still has to do.
 pub type ConnectFuture = Pin<Box<dyn Future<Output = ConnectOutcome> + Send>>;
 
-/// How far a [`ConnectionBackend::begin_connect`] got before it had to hand
-/// control back. See the module docs' backend-seam section for why this is a
-/// sum type rather than a single future.
+
 pub enum ConnectRun {
-    /// Already decided, with no IO left to drive — the mock backend's every
-    /// connect, and any real connect rejected before a socket was opened (a
-    /// pin that fails to parse).
     Ready(ConnectOutcome),
-    /// A dial in progress. Must be driven on the background runtime, never on
-    /// the UI thread's frame-coupled queue.
     Pending(ConnectFuture),
 }
 
 /// The work behind [`ConnectionController`]: opening a connection, tearing one
 /// down, and holding the live client in between.
-///
-/// Deliberately narrow. Everything observable — which signals a connect writes,
-/// what a teardown resets, whether a credential offer is raised — belongs to
-/// the controller, so both implementations of this trait produce the same
-/// behaviour from the same state machine.
+
 pub trait ConnectionBackend: Send + Sync + 'static {
-    /// Begin connecting to `target`. See [`ConnectRun`].
     fn begin_connect(&self, target: ConnectTarget) -> ConnectRun;
 
     /// Tear the live connection down. Idempotent: a backend with nothing open
@@ -315,44 +175,21 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The credential-save seam
-// ---------------------------------------------------------------------------
-
 /// The work behind an accepted credential offer — installed by the `connect`
 /// feature, called by [`ConnectionController::accept_credential_offer`].
-///
-/// One method, and only plain data crosses it, so this module stays free of any
-/// feature's repositories (see the module docs' credential-offer section). The
-/// implementor owns everything the save actually involves: minting the token,
-/// raising the biometric prompt, writing the secure store, and updating the
-/// saved-server row.
+
 pub trait CredentialSaver: Send + Sync {
     /// Save a credential for the connected server at `endpoint` (`host:port`),
     /// which the offer showed the user as `label`, and run `on_done` once that
     /// save has settled — **however** it settled.
-    ///
-    /// Called on the UI thread, from the press that accepted the offer, and
-    /// expected to return immediately — the prompt and the stores behind it are
-    /// the implementor's own asynchronous work. `on_done` is what the caller
-    /// resumes on (the Connect screen's held navigation, see the module docs'
-    /// credential-offer section), so an implementation that drops it strands
-    /// that caller: it must run on the success path, on every failure path, and
-    /// on any early return of its own. It is boxed rather than generic to keep
-    /// this trait object-safe, and carries no `Send` bound because it is
-    /// consumed on the same UI thread the call arrived on.
+
     fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>);
 }
 
-// ---------------------------------------------------------------------------
-// The mock backend
-// ---------------------------------------------------------------------------
 
 /// The in-memory backend: derives a [`ServerInfo`] from the target and answers
 /// on the spot. Never fails, and never touches a socket.
-///
-/// Its facts are the ones `docs/redesign.html` prints, and every headless suite
-/// asserts against them — see the module docs' backend-seam section.
+
 pub struct MockConnectionBackend;
 
 impl ConnectionBackend for MockConnectionBackend {
@@ -376,30 +213,19 @@ impl ConnectionBackend for MockConnectionBackend {
     fn disconnect(&self) {}
 }
 
-// ---------------------------------------------------------------------------
-// The real backend
-// ---------------------------------------------------------------------------
-
 /// The `muxrd` backend: a real dial + `Login` + `GetVersion` over
 /// [`crate::net`], holding the connected [`MuxrClient`] until a teardown drops
 /// it.
 pub struct NetConnectionBackend {
-    /// The live client. Shared with the in-flight dial (which installs it on
-    /// success) rather than held behind `&self`, since that future outlives the
-    /// `begin_connect` call that built it.
     live: Arc<Mutex<Option<MuxrClient>>>,
 }
 
 impl NetConnectionBackend {
-    /// A backend with nothing open.
     pub fn new() -> Self {
         Self {
             live: Arc::new(Mutex::new(None)),
         }
     }
-
-    /// The live-client slot. Poisoning is recovered from rather than propagated
-    /// — a panic elsewhere must not make the app permanently unable to connect.
     fn slot(&self) -> MutexGuard<'_, Option<MuxrClient>> {
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -415,7 +241,6 @@ impl ConnectionBackend for NetConnectionBackend {
     fn begin_connect(&self, target: ConnectTarget) -> ConnectRun {
         let trust = match trust_config_for(&target) {
             Ok(trust) => trust,
-            // Fail-closed: a pin that cannot be parsed never dials at all.
             Err(failure) => return ConnectRun::Ready(Err(failure)),
         };
         ConnectRun::Pending(Box::pin(open_session(
@@ -442,10 +267,7 @@ impl ConnectionBackend for NetConnectionBackend {
 }
 
 /// The TLS posture `target` dials under.
-///
-/// [`TrustMode::NoVerification`] maps onto the accept-any verifier: it
-/// authenticates nothing — which is exactly why it is the one the sessions
-/// strip flags with a warning chip.
+
 fn trust_config_for(target: &ConnectTarget) -> Result<TrustConfig, AppFailure> {
     match target.trust_mode {
         TrustMode::System => Ok(TrustConfig::SystemCa),
@@ -561,7 +383,6 @@ fn endpoint_of(target: &ConnectTarget) -> String {
 // The controller
 // ---------------------------------------------------------------------------
 
-/// Muxr's one app-scoped connection handle. See the [module docs](self).
 pub struct ConnectionController {
     core: ControllerCore<AppFailure>,
     backend: Arc<dyn ConnectionBackend>,
@@ -569,17 +390,12 @@ pub struct ConnectionController {
     /// value no longer matches is holding the result of a connection nobody
     /// asked for any more, and drops it instead of publishing it.
     generation: AtomicU64,
-    /// Whether the app currently holds a live connection. Read by
-    /// `crate::routes`'s session guard and by any screen.
+
     pub connected: RwSignal<bool>,
     /// Whether a connect is in flight — the Connect screen's busy state, and
     /// the single-flight guard: a second connect while this is set is ignored.
     pub connecting: RwSignal<bool>,
-    /// The connected server's facts, or `None` while disconnected.
     pub server_info: RwSignal<Option<ServerInfo>>,
-    /// Whether the credential this connection logged in with is read-only —
-    /// [`ServerInfo::is_read_only`], hoisted into its own signal because it
-    /// gates controls on screens that never render the rest of the facts.
     pub is_read_only: RwSignal<bool>,
     /// Whether a [`ping`](Self::ping) is in flight — its single-flight claim.
     /// A heartbeat tick arriving while the previous round trip is still open is
@@ -599,8 +415,6 @@ pub struct ConnectionController {
 }
 
 impl ConnectionController {
-    /// A controller over `backend`. Private: [`provide_connection_controller`]
-    /// is the one production construction site.
     fn new(backend: Arc<dyn ConnectionBackend>) -> Self {
         Self {
             core: ControllerCore::new(),
@@ -717,8 +531,7 @@ impl ConnectionController {
                 self.is_read_only.set(read_only);
                 self.server_info.set(Some(info));
                 self.connected.set(true);
-                // A read-only credential is never offered for saving — see the
-                // module docs' credential-offer section.
+                // A read-only credential is never offered for saving
                 if let Some(label) = offer
                     && !read_only
                 {
@@ -778,10 +591,7 @@ impl ConnectionController {
 
     /// Close the connection and clear every connection-scoped signal. Callers
     /// navigate away themselves — this never touches the router.
-    ///
-    /// Order is the contract: the generation bump abandons any dial still in
-    /// flight, the backend scrubs and drops the client, and `connected` is
-    /// written **last**, since that write is what the session guard bounces on.
+
     pub fn disconnect(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.backend.disconnect();
