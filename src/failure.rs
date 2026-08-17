@@ -8,21 +8,11 @@ use std::fmt;
 
 use clean_signals::Failure;
 
-/// Every failure mode this app's use cases can produce.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppFailure {
-    /// A transient transport error reaching a remote host (a session's
-    /// server, a directory/discovery service, …). Safe to retry.
     Network(String),
-    /// A rejected or expired credential/session token. Not retryable without
-    /// the user re-authenticating first.
     Auth(String),
-    /// A local read/write failure (session list persistence, cached
-    /// settings, …). Not retryable — the same write would fail again
-    /// immediately.
     Storage(String),
-    /// An unexpected, non-domain failure (a bug, an invariant violation) —
-    /// never shown verbatim to the user. Not retryable.
     Internal(String),
 }
 
