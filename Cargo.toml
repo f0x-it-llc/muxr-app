@@ -1,7 +1,4 @@
-# Empty workspace table: pins this crate as its own workspace root so Cargo
-# doesn't walk up into the frust repo's root workspace (this app lives at
-# `apps/muxr-app`, nested inside the frust checkout) — same shape as
-# `examples/huddle/Cargo.toml`'s `[workspace]` table.
+
 [workspace]
 
 [package]
@@ -10,316 +7,53 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
-# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary.
+
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project ("frust_path" is explicitly a temporary
-# mechanism). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead.
-#
-# Design systems are no longer `frust` cargo features — the catalogs were
-# extracted into sibling plugin crates under `plugins/`, so `frust` itself
-# carries no catalog and stays `default-features = false` with an empty
-# feature list.
-#
-# `frust-glyph`: this app's one and only design system, and its one and only
-# design-system dependency. `src/lib.rs`'s
-# `frust::app!(..., setup = { frust_glyph::install(); })` is the runtime call
-# that makes it the active theme; drop the dependency and that call to opt
-# out (still builds, neutral-themed), or depend on one of the sibling catalog
-# plugin crates plus the matching `frust::set_default_theme(...)` call to use
-# one of the other built-in design systems instead. Every control this app
-# draws — including the Connect screen's remember toggle and the Settings
-# screen's bell/read-only toggles, which once reached past this catalog for a
-# baseline switch from another catalog crate — now comes from Glyph alone
-# (`frust_glyph::toggle`), so no second design-system crate is a dependency
-# here.
 frust = { path = "../../crates/frust", default-features = false }
 frust-glyph = { path = "../../plugins/glyph" }
-
-# `--arch clean-signals` demo: the Frust
-# bridge for `clean-signals` (component-scoped controller lifecycle,
-# `async_view`, etc.) — an in-repo plugin, added like any other Frust
-# plugin (`frust_path` resolves to `crates/frust`, so
-# `../../plugins/clean-signals-frust` walks back up to the repo root and
-# down into the plugin's own directory — mirrors `frust-shared-preferences`'s
-# dependency line in the default `Cargo.toml.tmpl`).
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
-
-# The terminal screen's two OS-capability plugins, added the pubspec way — a
-# platform plugin is a dependency of the *app*, never something the `frust`
-# facade re-exports. Same temporary-path arrangement as `frust` above (see that
-# comment): these become version dependencies once the plugins are published.
-#
-# `frust-clipboard`: the Copy chip's clipboard write
-# (`features::terminal::presentation::term::chip`). Always
-# `Clipboard::set_text_sensitive`, never plain `set_text` — a terminal
-# selection is exactly the token-bearing content that plugin's security
-# section names, and the sensitive variant is what suppresses Android 13+'s
-# copied-text preview and blocks iOS Universal Clipboard from replicating it
-# to the user's other signed-in devices. No manifest, plist or permission is
-# needed for either platform's plain-text write.
 frust-clipboard = { path = "../../plugins/clipboard" }
-
-# `frust-haptics`: the selection-click tick a long-press fires
-# (`term::SelectionSeam::begin`). Fire-and-forget — the `Result` is ignored at
-# the one call site, and desktop reports `NotAvailable` by design. NOTE this
-# one *does* need an Android manifest addition, `android.permission.VIBRATE`
-# (a normal permission, granted at install with no runtime prompt), which the
-# `frust` TUI's Add Plugin dialog inserts into `android/app/src/main/
-# AndroidManifest.xml`.
 frust-haptics = { path = "../../plugins/haptics" }
-
-# `clean-signals` itself is not yet published (see `docs/DEVELOPMENT.md`'s
-# Version-Pin Policy), so it is **git+rev-pinned to the public repo** — the
-# exact same spec `clean-signals-frust`'s own `clean-signals` dependency uses,
-# so Cargo unifies both into one crate identity. That identity rule is
-# load-bearing, not cosmetic: two sources for `clean-signals` give
-# `ControllerCore`/`Failure` two distinct types and `use_controller` stops
-# accepting this app's controllers (the exact error a mismatch produces). The
-# framework moved all four of its own consumers off the `../clean-signals-rs`
-# sibling-checkout path onto this pin (frust `4a6a484`); this app is the fifth
-# consumer and follows it. Bump the rev here and in the plugin together, never
-# one alone — `examples/huddle/Cargo.toml` documents the rule at length.
 clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 
-# `log` facade dependency for the release-only `lean` feature below — mirrors
-# the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes
-# `--features lean` for every `--release` build regardless of scaffold arch, so
-# this variant must declare the feature too or a release build fails on an
-# unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
 log = "0.4"
-
-# Login-token hygiene (review F5, app-side half): `ConnectController::token`
-# wraps its `String` in `zeroize::Zeroizing` so the buffer is scrubbed on
-# every drop/overwrite rather than left as stale plaintext in a freed
-# allocation, on top of the explicit clear-on-connect/clear-on-disconnect
-# calls that own the *when* — see that controller's module docs. Default
-# features (`alloc`) are all this needs; already a transitive dependency
-# elsewhere in the wider Frust workspace lock, so this pin adds no new
-# supply-chain surface.
 zeroize = "1"
-
-# `vt100`: the terminal emulator the real terminal grid
-# (`features::terminal::presentation::term`) feeds its byte stream through —
-# a REAL VT emulator, deliberately. The renderer this app replaces (a Flutter
-# client over kterm 1.5.3) carries a full emulator, so a hand-rolled
-# few-escape parser here would render a strictly worse grid than the incumbent
-# for every program that emits anything beyond SGR colours.
-#
-# Pinned to an EXACT patch, mirroring `benchmarks/frust_bench`'s own pin in the
-# Frust checkout: this is the crate whose parsing behaviour decides what a byte
-# stream rasterizes to, and every S9 measurement that made "a pure-frust
-# terminal is viable" the verdict was taken against this exact version. Its
-# whole tree is pure Rust — `vte` + `itoa` + `unicode-width`; no tokio, no PTY,
-# no `std::process` — and it type-checks for `aarch64-linux-android`,
-# `aarch64-apple-ios` and `aarch64-apple-ios-sim` (gated while landing S9).
 vt100 = "=0.16.2"
-
-# ── The `muxrd` gRPC substrate (`src/net`) ──────────────────────────────────
-#
-# `tonic` + `prost` on the **0.14 line, moved as one pair** — tonic 0.13 does
-# not compile against prost 0.14, so bumping either alone breaks the build;
-# `tonic-prost`/`tonic-prost-build` below ride the same line.
-#
-# Production is client-only and deliberately lean: `channel` is the HTTP/2
-# client transport (`Endpoint`/`Channel`), `codegen` is what the generated
-# stubs' `tonic::codegen::*` paths resolve against, and `tls-aws-lc` picks
-# aws-lc-rs as the crypto provider (see `rustls`, below). Deliberately NOT
-# enabled: `transport` (= `server` + `channel`) and `router`. The generated
-# server stubs type-check without them; only an in-process test fixture ever
-# stands a server up, so those features are widened in `[dev-dependencies]`
-# instead and no device build carries the server half.
 tonic = { version = "0.14", default-features = false, features = [
     "channel",
     "codegen",
     "tls-aws-lc",
 ] }
-
-# The runtime half of tonic 0.14's codegen split: `tonic_prost::ProstCodec` is
-# the codec path the generated stubs name, so this is a compile requirement of
-# `src/net/proto.rs`, not an optional extra. (`tonic-prost-build` — the codegen
-# half — is a build-dependency; see below.)
 tonic-prost = "0.14"
-
-# The generated messages' own derive/trait (`prost::Message`): every
-# encode/decode on the wire, and the round-trip test in `src/net/proto.rs`.
 prost = "0.14"
-
-# `tokio` in PRODUCTION carries only what this app's own code names: `sync`,
-# for the `mpsc` pair feeding the AttachTerminal request stream. The absence of
-# `rt`/`rt-multi-thread`/`macros` here is a CONTRACT, not an oversight — the
-# process runtime is frust's own (the shell builds one multi-thread runtime and
-# pumps it; app code reaches it through `frust::spawn`/`spawn_local`), and this
-# app never builds or enters a runtime of its own. Tonic's transport pulls the
-# rest of tokio in for its own use; that unification is not a licence for app
-# code to start one. (`[dev-dependencies]` keeps its own `rt`/`macros` for
-# `#[tokio::test]`, which is test-harness scaffolding, not production.)
 tokio = { version = "1", default-features = false, features = ["sync"] }
-
-# `ReceiverStream`: the bridge from that `mpsc::Receiver` to the `Stream` tonic
-# takes as a client-streaming request body. Named directly rather than through
-# tonic's `tonic::codegen::tokio_stream` re-export, which is `#[doc(hidden)]`
-# codegen plumbing with no stability promise.
 tokio-stream = "0.1"
-
-# TLS trust policy, named directly (not merely through tonic) because all three
-# of `TrustMode`'s arms are hand-built `rustls::client::danger::
-# ServerCertVerifier`s: pinned (SHA-256 over the presented leaf's DER vs. the
-# pairing URI's 64-hex fingerprint), trust-on-first-use, and an accept-any
-# verifier for a dev server. Default features keep **aws-lc-rs** as the
-# provider, matching tonic's `tls-aws-lc`: mismatched providers are a
-# process-wide runtime install conflict, not a compile error, so that pairing
-# is load-bearing.
 rustls = "0.23"
-
-# The System-CA trust mode: the OS certificate store (iOS Security.framework,
-# Android's own trust manager) rather than a list bundled into the binary. Its
-# Android verifier must be initialized with a JNI env + application Context
-# **before the first handshake** — `frust-plugin` below is a dependency for
-# exactly that seam.
 rustls-platform-verifier = "0.7"
-
-# Recorded contingency, unconsumed today: the bundled Mozilla root list, the
-# fallback for System-CA if `rustls-platform-verifier`'s Android initialization
-# ever proves unreachable from a host shell. Declared so the fallback is a
-# one-line swap and so the alternative is visible here rather than folklore.
 webpki-roots = "1"
-
-# Certificate-pin hashing: SHA-256 over the presented leaf certificate's **DER
-# bytes** — the whole cert, never its SPKI, because that is what muxrctl's
-# pairing payload encodes as `fp` (64 lowercase hex). 0.10 is the `digest` 0.10
-# API line the surrounding ecosystem is on.
 sha2 = "0.10"
-
-# The pairing URI's token parameter is base64url with NO padding
-# (`muxr://pair?…&t=<token>`), so the `URL_SAFE_NO_PAD` engine specifically —
-# the standard alphabet decodes those bytes wrongly rather than erroring. 0.22
-# is the line `rustls-platform-verifier` already resolves, so the lock keeps one
-# copy.
 base64 = "0.22"
-
-# The same URI's `n=` display label is percent-encoded.
 percent-encoding = "2"
-
-# The bearer session token is mutable process state: a re-login swaps it while
-# calls are in flight, and the auth interceptor reads it once per call.
-# `ArcSwap` makes that a lock-free read on the hot path, so a token rotation
-# never rebuilds the channel or blocks a stream pump.
 arc-swap = "1"
-
-# The Android JNI seam: `frust_plugin::android::with_jni_env` hands over the
-# `(Env, application Context)` pair from the handles the shell installed, which
-# is precisely what `rustls-platform-verifier`'s Android initialization needs.
-# Off-Android the module is inert by design, so this stays an unconditional
-# dependency. Same temporary path arrangement as `frust` above.
 frust-plugin = { path = "../../crates/frust-plugin" }
-
-# Three more OS-capability plugins, added the same pubspec way as
-# `frust-clipboard`/`frust-haptics` above — a platform plugin is a dependency
-# of the *app*, never something the `frust` facade re-exports. Declared here
-# ahead of the code that consumes them, so wiring a screen never edits this
-# manifest; each names its consumer:
-#
-# `frust-shared-preferences`: the saved-server list and the app preferences
-# `settings` currently keeps in memory (typed get/set under `frust.`-prefixed
-# keys) — persistence, not secrets.
 frust-shared-preferences = { path = "../../plugins/shared-preferences" }
-
-# `frust-secure-storage`: the per-server auth-token secret (Android Keystore /
-# iOS Keychain). Its biometric-gated calls BLOCK the calling thread, so such a
-# call belongs on `spawn_blocking`, never the UI thread; desktop reports
-# `NotAvailable` by design, so no desktop path may depend on a stored secret.
 frust-secure-storage = { path = "../../plugins/secure-storage" }
-
-# `frust-camera`: QR pairing — its barcode stream scans a `muxr://pair?…` URI
-# into the Connect screen's host/token fields.
 frust-camera = { path = "../../plugins/camera" }
-
-# Downloadable-font catalog (`src/fonts`): the plain-HTTPS client the manifest
-# fetch and the font downloads run over. The gRPC stack next door speaks HTTP/2
-# to `muxrd` only — a GET against `raw.githubusercontent.com` has no tonic
-# equivalent, so this is the app's one general-purpose HTTP client.
-#
-# **The feature set is load-bearing, not taste.** `default-features = false`
-# drops `default-tls` (native-tls/OpenSSL) entirely, and the roots feature is
-# the explicit `-no-provider` variant: reqwest's plain `rustls-tls` alias pulls
-# `__rustls-ring`, which would compile a **second** rustls crypto provider into
-# a tree that already carries aws-lc-rs (`rustls`/`tonic` below) — and two
-# providers is a process-wide runtime install conflict, not a compile error
-# (`docs/DEVELOPMENT.md`'s note on the single-provider rule). With no provider
-# feature of its own, reqwest's rustls config resolves the one provider the
-# tree already compiles. Roots come from the bundled Mozilla list
-# (`webpki-roots`, already declared below) rather than the platform store: a
-# font download needs no `rustls-platform-verifier` JNI initialization to
-# succeed on a cold Android start.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-webpki-roots-no-provider",
 ] }
-
-# Platform-directory resolution for that catalog's on-disk cache
-# (`<data_dir>/<app_stem>/fonts/`), plus the temp-file+rename `atomic_write`
-# every cached font file is written through. A leaf substrate crate with zero
-# `frust-*` dependencies (the same shape `frust-plugin` above has), named
-# directly for the same reason the plugins are: it is not something the
-# `frust` facade re-exports. Same temporary path arrangement as `frust`.
 frust-paths = { path = "../../crates/frust-paths" }
-
-# Android's app-private files directory, which `frust-paths` cannot resolve
-# (its Unix branch is `$XDG_DATA_HOME`/`$HOME`, neither of which points
-# anywhere writable inside an Android app sandbox) — `src/fonts/store.rs`
-# reads it off the application `Context` through the same
-# `frust_plugin::android::with_jni_env` accessor `src/net/tls.rs` already
-# uses. Target-gated exactly like `frust-plugin`'s own `jni` dependency, and
-# pinned to the same 0.22 line the plugins in the Frust checkout use — the
-# `Env`/`JObject` types cross that accessor's closure boundary, so a version
-# mismatch is a type error, not a runtime surprise.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
 
-# `muxr.v1` codegen, build-time only (`build.rs` documents the split). `protox`
-# is a protobuf compiler written in Rust, so **no `protoc` install** is needed
-# on any build machine — prost-build's own path shells out to a system binary.
-# `tonic-prost-build` turns protox's `FileDescriptorSet` into the client +
-# server stubs. Both must resolve the same `prost-types` version, which the
-# shared 0.14 line gives; neither `prost-build` nor `prost-types` is named
-# directly, because `build.rs` names neither type.
+
 [build-dependencies]
 protox = "0.9"
 tonic-prost-build = "0.14"
 
-# Test-harness-only, NOT an escape hatch: the headless screen tests
-# (`tests/*.rs`) drive Frust's `RenderRoot` directly (`tests/support/mod.rs` —
-# the desktop shell's own rebuild/layout/paint seam, no GPU, no window) and
-# pump the reactive runtime's UI-thread local task queue frame by frame.
-# `RenderRoot` is deliberately not in `frust::authoring` (it is shell-owned,
-# not something an app constructs), so the harness still names these crates
-# the long way; production code names none of `frust-core`/`frust-scene`/
-# `frust-text`/`kurbo`/`peniko` (mirrors `examples/huddle`'s own dev-deps
-# comment verbatim — see that file for the full rationale). `tokio` is kept
-# available for `#[tokio::test]`-style controller/use-case unit tests once
-# Phase 2 adds them; this crate's own production code never spawns a tokio
-# runtime itself.
-#
-# `frust-core`'s `test-support` feature compiles `PaintCtx::for_test`, the
-# sanctioned seam for painting a widget at a chosen `FrameTime` without a
-# `RenderRoot` (`PaintCtx::set_frame_time` is `pub(crate)` so only the
-# shell-owned clock may advance it in a production build). `tests/term_widget`
-# needs it to step the terminal caret's blink across a cycle; the feature is
-# **dev-only** here, so no production build ever sees the symbol.
-#
-# `frust-shell-common` is here for the same "test-only, deliberately not
-# re-exported through `frust::`" reason: `tests/terminal_live.rs` asserts on
-# `current_system_ui_mode()`, the headless peek at `frust::set_system_ui_mode`'s
-# process-global slot — a diagnostic accessor with no production caller, so
-# the facade names only the writer (`SystemUiMode`/`set_system_ui_mode`), not
-# this reader.
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core", features = ["test-support"] }
 frust-reactive = { path = "../../crates/frust-reactive" }
@@ -331,55 +65,33 @@ peniko = "0.6.1"
 reactive_graph = "0.2"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
-# Tonic's SERVER half, dev-only. The generated `MuxrServer` type-checks against
-# the production feature set above, but actually serving one in-process — the
-# fixture a `muxrd`-less test attaches to — needs `tonic::transport::Server`,
-# i.e. `server` + `router` + `transport`. Cargo unifies these into the test
-# build only, so `cargo build` for a device stays client-only.
+
 tonic = { version = "0.14", default-features = false, features = [
     "router",
     "server",
     "transport",
 ] }
-
-# Self-signed fixture certificates for those in-process servers — the same
-# generator muxrd itself serves with, so a test cert carries the same IP/DNS
-# SAN shape the pinned and system-CA paths must cope with. `aws_lc_rs` instead
-# of rcgen's default `ring` backend: one crypto provider across the tree
-# (`rustls` above), and ring is unmaintained.
 rcgen = { version = "0.14", default-features = false, features = [
     "aws_lc_rs",
     "pem",
 ] }
 
 [features]
-# Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).
 lean = ["log/release_max_level_warn"]
 
-# `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution. Mirrors the default template's
-# `Cargo.toml.tmpl` block verbatim (not covered by the `profile_sync`
-# tripwire test, which only compares the root/default-template/huddle
-# manifests, but kept in sync by hand for a consistent scaffold).
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
-# `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement. Artifacts land in
-# `target/<triple>/profile/` (custom-profile name, verified legal).
+
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# vello/wgpu/naga's shader-pipeline
-# translation runs at `opt-level = 0` by default, which is slow enough on a
-# physical iOS device that the OS SIGKILLs a debug `frust run` before the
-# synchronous, main-thread launch-time shader compile finishes.
 [profile.dev.package.vello]
 opt-level = 2
 
