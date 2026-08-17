@@ -24,27 +24,24 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # create` will emit a version dependency here instead.
 #
 # Design systems are no longer `frust` cargo features — the catalogs were
-# extracted into sibling plugin crates (`frust-glyph`, `frust-material`,
-# ...), so `frust` itself carries no catalog and stays
-# `default-features = false` with an empty feature list.
+# extracted into sibling plugin crates under `plugins/`, so `frust` itself
+# carries no catalog and stays `default-features = false` with an empty
+# feature list.
 #
-# `frust-glyph`: this app's design system. `src/lib.rs`'s
+# `frust-glyph`: this app's one and only design system, and its one and only
+# design-system dependency. `src/lib.rs`'s
 # `frust::app!(..., setup = { frust_glyph::install(); })` is the runtime call
 # that makes it the active theme; drop the dependency and that call to opt
-# out (still builds, neutral-themed), or depend on `frust-material`/
-# `frust-cupertino` plus the matching `frust::set_default_theme(...)` call to
-# use one of the other built-in design systems instead.
+# out (still builds, neutral-themed), or depend on one of the sibling catalog
+# plugin crates plus the matching `frust::set_default_theme(...)` call to use
+# one of the other built-in design systems instead. Every control this app
+# draws — including the Connect screen's remember toggle and the Settings
+# screen's bell/read-only toggles, which once reached past this catalog for a
+# baseline switch from another catalog crate — now comes from Glyph alone
+# (`frust_glyph::toggle`), so no second design-system crate is a dependency
+# here.
 frust = { path = "../../crates/frust", default-features = false }
 frust-glyph = { path = "../../plugins/glyph" }
-
-# `frust-material`: named explicitly too, even though this app's own design
-# system is Glyph, not Material — the Connect screen's remember toggle and
-# the Settings screen's bell toggle are the standard baseline
-# `frust_material::switch`. The Glyph catalog has no switch of its own (see
-# `src/features/settings/presentation/chrome.rs`'s module docs), so this app
-# reaches past its own design system for exactly that one widget rather than
-# hand-rolling one.
-frust-material = { path = "../../plugins/material" }
 
 # `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,

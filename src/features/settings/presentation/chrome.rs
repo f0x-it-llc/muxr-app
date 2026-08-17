@@ -1,10 +1,9 @@
 //! The Settings screen's hand-rolled primitives: a filled/bordered **panel**
 //! (single-child, with the row's bottom hairline, the dashed create-token
-//! outline and the picker sheet's full-bleed selected row as options), and the
-//! **switch-semantics** wrapper the bell toggle needs. No facade widget paints
-//! an arbitrary filled/bordered rect, so this [`View`]/[`Widget`] pair —
-//! authored through [`frust::authoring`], the same seam `crate::ui::backdrop`
-//! uses — fills the gap.
+//! outline and the picker sheet's full-bleed selected row as options). No
+//! facade widget paints an arbitrary filled/bordered rect, so this
+//! [`View`]/[`Widget`] pair — authored through [`frust::authoring`], the same
+//! seam `crate::ui::backdrop` uses — fills the gap.
 //!
 //! **Feature-local, and knowingly the third copy.** `features::connect` and
 //! `features::sessions` each own a panel of their own, since a feature never
@@ -14,11 +13,10 @@
 //! together in a task that owns all three screens' files — recorded rather
 //! than done.
 //!
-//! [`switch_semantics`] closes the accessibility hole composition opens: a
-//! toggle assembled from filled boxes and a `GestureDetector` contributes
-//! **no** accessibility node at all — delete it the day `frust_glyph` grows
-//! a real switch (the Material catalog's `Switch` is **not** compiled into
-//! this app).
+//! The bell toggle and the create-token dialog's read-only toggle both use
+//! `frust_glyph::toggle` directly — a real widget with its own labelled
+//! `Role::Switch` node built in (its `.label(...)` call), so this module
+//! carries no switch-semantics wrapper of its own.
 //!
 //! **Frust gaps worked around here:** `PaintScene` has no dash pattern, so a
 //! dashed panel walks each edge itself in on/off steps — delete that branch
@@ -32,10 +30,9 @@
 //! reusable container exposed for app chrome).
 
 use frust::authoring::{
-    Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect,
-    SemanticsCtx, Shape, Size, Toggled, View, Widget, any, build_child, rebuild_child,
-    route_event_single, teardown_child,
+    AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, RoundedRect, SemanticsCtx,
+    Shape, Size, View, Widget, any, build_child, rebuild_child, route_event_single, teardown_child,
 };
 
 /// Hairline border width in logical px (`1px solid` on every bordered rule in
@@ -334,103 +331,6 @@ fn dash_run(
         let (p0, p1) = segment((at, end));
         scene.stroke_line(p0, p1, HAIRLINE, color);
         at = end + DASH_OFF;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Switch semantics — the one node a composed toggle cannot grow itself
-// ---------------------------------------------------------------------------
-
-/// Give `child` — a hand-composed toggle's art plus its press recognizer — the
-/// one accessibility node it cannot grow itself: a labelled, toggled
-/// [`Role::Switch`] advertising the [`Action::Click`] it fires.
-///
-/// Layout, paint and event routing are pure pass-through; only
-/// [`Widget::semantics`] does anything. See the [module docs](self).
-pub(super) fn switch_semantics<State: 'static, V: View<State>>(
-    child: V,
-    label: impl Into<String>,
-    on: bool,
-) -> SwitchSemanticsView<State> {
-    SwitchSemanticsView {
-        child: any(child),
-        label: label.into(),
-        on,
-    }
-}
-
-/// The declarative half of [`switch_semantics`].
-pub(super) struct SwitchSemanticsView<State: 'static> {
-    child: AnyView<State>,
-    label: String,
-    on: bool,
-}
-
-/// The retained half of [`switch_semantics`].
-pub(super) struct SwitchSemanticsWidget {
-    child: ChildPod,
-    label: String,
-    on: bool,
-}
-
-impl<State: 'static> View<State> for SwitchSemanticsView<State> {
-    type Element = SwitchSemanticsWidget;
-
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> SwitchSemanticsWidget {
-        SwitchSemanticsWidget {
-            child: build_child(&self.child, ctx),
-            label: self.label.clone(),
-            on: self.on,
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut SwitchSemanticsWidget,
-        ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
-        if prev.label != self.label || prev.on != self.on {
-            element.label = self.label.clone();
-            element.on = self.on;
-            // Semantics-only: the accessibility tree is rebuilt off a paint
-            // pass, so PAINT is what republishes the node.
-            flags |= ChangeFlags::PAINT;
-        }
-        flags
-    }
-
-    fn teardown(&self, element: &mut SwitchSemanticsWidget, ctx: &mut BuildCtx<'_>) {
-        teardown_child(&self.child, &mut element.child, ctx);
-    }
-}
-
-impl Widget for SwitchSemanticsWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let size = self.child.layout_child(ctx, bc);
-        self.child.set_origin(Point::ZERO);
-        bc.constrain(size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.child.paint_child(ctx, scene);
-    }
-
-    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        route_event_single(&mut self.child, ctx, event)
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // A leaf node, deliberately: the composed art underneath has nothing
-        // to announce, and exposing two unlabelled boxes inside a switch would
-        // be noise rather than detail.
-        let (label, on) = (self.label.as_str(), self.on);
-        ctx.push_node(Role::Switch, |node| {
-            node.set_label(label);
-            node.set_toggled(if on { Toggled::True } else { Toggled::False });
-            node.add_action(Action::Click);
-        });
     }
 }
 

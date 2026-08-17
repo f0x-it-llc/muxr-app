@@ -279,7 +279,7 @@ impl Component for MuxrApp {
 // once, on the UI thread, before `Component::init`; `frust_glyph::install()`
 // makes Glyph this app's one design system — a theme read that ever runs
 // before it (or after it's skipped) must fall back to
-// `frust_glyph::baseline()`, never `Theme::neutral()`/`frust_material::baseline()`.
+// `frust_glyph::baseline()`, never `Theme::neutral()` or another catalog crate's own baseline.
 // `fonts::register_bundled_fonts` pushes the bundled JetBrains Mono + Symbols
 // Nerd Font Mono faces into the same pre-first-frame registry
 // `frust_glyph::install` uses; `fonts::apply_app_wide_theme` then forces the

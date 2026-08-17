@@ -5,9 +5,9 @@
 use frust::{
     AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, flexible, inflexible, text,
 };
-use frust_material::switch;
+use frust_glyph::toggle;
 
-use crate::features::settings::presentation::chrome::{panel, switch_semantics};
+use crate::features::settings::presentation::chrome::panel;
 use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
@@ -26,8 +26,8 @@ const BELL_VALUE: &str = "haptic + badge";
 const DISCONNECT_LABEL: &str = "Disconnect";
 
 /// A complete row with mark tile, flexible label/subtitle column, and the
-/// real, themed `frust_material::switch` — structured like [`super::rows::settings_row`]
-/// but with the switch owning its own tap target (no outer
+/// real, themed `frust_glyph::toggle` — structured like [`super::rows::settings_row`]
+/// but with the toggle owning its own tap target (no outer
 /// `GestureDetector`, the same pointer-capture constraint
 /// `widgets::tokens::dialog_read_only_row` documents).
 pub(super) fn bell_notifications_row(
@@ -36,13 +36,11 @@ pub(super) fn bell_notifications_row(
     on_toggle: impl Fn(&mut SettingsState) + 'static,
 ) -> AnyView<SettingsState> {
     let theme = active_theme();
-    let toggle = any(switch_semantics(
-        switch::<SettingsState, _>(on, move |state: &mut SettingsState, _requested: bool| {
-            on_toggle(state)
-        }),
-        "bell notifications",
+    let toggle_view = any(toggle::<SettingsState, _>(
         on,
-    ));
+        move |state: &mut SettingsState, _requested: bool| on_toggle(state),
+    )
+    .label("bell notifications"));
     let label_column = column(vec![
         any(text("bell notifications").style(inked(&theme.type_scale.label_large, colors.fg))),
         any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
@@ -53,7 +51,7 @@ pub(super) fn bell_notifications_row(
         h_gap(ROW_GAP),
         flexible(1, any(label_column)),
         h_gap(ROW_GAP),
-        inflexible(toggle),
+        inflexible(toggle_view),
     ];
 
     let box_ = panel(
