@@ -2,51 +2,23 @@
 //! (`src/features/sessions/**`) — no GPU, no window: a `RenderRoot` over the
 //! real page builder, driven through `tests/support`.
 //!
-//! # The harness, and why the screen is *beside* a navigator rather than in one
+//! `NavigatorWidget` publishes no semantics for its pages, so [`Harness`] mounts
+//! the screen as the bottom layer of a `Stack`, with an otherwise-empty
+//! navigator (the *same* `NavigatorController` the screen is handed) over it:
+//! the chrome stays reachable by label/value, while dialog/sheet/route pushes
+//! are exercised end to end through a real navigator, located by painted
+//! geometry ([`support::added`]). [`Harness::mount`] also installs the real app
+//! router over that navigator, so a push carries the real route table and
+//! session guard.
 //!
-//! In production `sessions_page` is a navigator page, but `NavigatorWidget`
-//! contributes no `Widget::semantics` and forwards none of its pages' (the
-//! framework gap `tests/ui_substrate.rs` documents), so nothing inside one
-//! would reach the accessibility tree. [`Harness`] instead mounts the screen
-//! as the **bottom layer of a `Stack`**, with an otherwise-empty navigator —
-//! driven by the *same* `NavigatorController` the screen is handed — stacked
-//! over it: the screen's own chrome stays reachable by semantics label/text
-//! value, while its dialog/sheet/route pushes are still exercised **end to
-//! end** through a real navigator, located by painted geometry.
+//! No top bar is mounted (that's shell chrome now, `tests/navigation_motion.rs`'
+//! job); this suite only owes the negative, that the screen grew none back —
+//! it still reserves the bar's clearance band, so every geometric probe here is
+//! relative rather than absolute.
 //!
-//! **No top bar mounted**: the muxr bar is app shell chrome now (asserted in
-//! `tests/navigation_motion.rs` instead) — what this suite owes the bar is
-//! the *negative*, that the screen grew none of it back. The screen does
-//! reserve the band the bar covers (`ui::topbar::topbar_clearance`), so
-//! everything located geometrically here sits 46px lower than it did when
-//! the shell handed the page a shortened box; every probe is relative
-//! (widths, before/after diffs, tap points), so that shift stays invisible.
-//!
-//! The navigator's base page is a full-bleed, childless `SizedBox` — paints
-//! and handles nothing, so every tap falls through to the screen, and stays
-//! inside `Stack`'s hit test even empty, which is what lets a pop's
-//! `on_result` flush at all. Locating an overlay's chrome diffs the frame
-//! *before* opening it against the one after ([`support::added`]) and
-//! addresses only what the overlay itself added.
-//!
-//! [`Harness::mount`] also installs the real app router
-//! (`muxr::routes::install_app_router`) over its navigator, so a push carries
-//! the real route table and session guard with it (exercised by
-//! [`a_card_tap_pushes_the_terminal_route_and_the_guard_still_applies`]).
-//!
-//! # Interaction model
-//!
-//! The cards carry no buttons: **a tap attaches, a long-press opens the
-//! management sheet**. A tap is [`support::tap`] on the card's own name run;
-//! a long-press is [`support::long_press`], spanning the two paints the
-//! framework's paint-clock hold timer needs.
-//!
-//! # Async
-//!
-//! Every repository call is real async work spawned onto the UI-thread queue,
-//! so a mutation is only visible after pumping —
-//! [`Harness::pump_until_values`] is the deadline-bounded wait every test
-//! uses instead of a fixed frame count.
+//! Cards carry no buttons: a tap attaches, a long-press opens the management
+//! sheet. Every repository call is real async work on the UI-thread queue, so
+//! [`Harness::pump_until_values`] deadline-waits for a mutation.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,10 +111,8 @@ fn metrics_at(size: Size) -> WindowMetrics {
 }
 
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
-/// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
-/// responsive width-clamp pass. `None` leaves context unset,
-/// exactly the state every other test in this suite mounts under (no shell
-/// has published yet), so this helper is purely additive.
+/// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
+/// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     if let Some(metrics) = metrics {
         provide_context(metrics);
@@ -166,31 +136,22 @@ impl Harness {
     /// Mount the screen (see the [module docs](self) for the shape), leaving
     /// the connection **disconnected** and the first load un-awaited.
     fn mount() -> Self {
-        // The real composition root: it publishes the app-scoped connection
-        // controller and calls every feature's `di::provide` — including this
-        // feature's repository. Its own router/navigator go unused; the
-        // harness drives its own controller so no `MuxrApp::build` (and so no
-        // cold-start splash) is ever involved.
+        // The real composition root, unbuilt: publishes DI including this
+        // feature's repository, but never plays a splash.
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
-        // Re-point the app's one path-pushing handle (`routes::app_nav`, which
-        // the screen resolves in its own `init`) at this fixture's navigator,
-        // real route table and real session guard included — as both of
-        // production's navigators (see the `sessions_page` call below).
+        // Re-points `routes::app_nav()` at this fixture's own navigator, real
+        // route table and session guard included.
         let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             any(Stack(vec![
-                // One controller plays both of the screen's navigators here:
-                // the route stack it reads its poll depth off, and the root
-                // overlay host its dialogs/sheet are pages of (in production
-                // those are two, `AppState::nav` and `AppState::overlays` —
-                // see `tests/navigation_motion.rs`, which mounts the real
-                // shell). Collapsing them keeps every overlay a page of the
-                // one *mounted* navigator, which is what makes it drivable
-                // and locatable here.
+                // One controller plays both of the screen's navigators here
+                // (route stack + overlay host, two in production —
+                // `AppState::nav`/`overlays`), keeping every overlay a page of
+                // the one mounted navigator, drivable and locatable here.
                 sessions_page(screen_nav, logic_nav.clone()),
                 any(navigator(&overlay_nav, || {
                     // Full-bleed and childless — see the module docs.
@@ -285,7 +246,6 @@ impl Harness {
         });
     }
 
-    /// A full tap at `point`.
     fn tap(&mut self, point: Point) {
         tap(&mut self.root, &mut self.state, point);
     }
@@ -893,16 +853,11 @@ fn the_dashed_row_creates_a_session() {
 }
 
 /// `ui::dialogs::name_input_dialog`'s field composes through `glyph_dialog`'s
-/// `.content()` slot, so it gets the framework's dead-space blur: a `Down`
-/// on the dialog's own dead panel space
-/// ends the field's IME session without dismissing the dialog, and a second
-/// tap on the field re-engages it. The same pin as `tests/settings.rs`'s own
-/// (New Token dialog), driven against the create-session dialog here since
-/// this suite already owns it. Modeled on
-/// `crates/frust-widgets/src/glyph/dialog.rs`'s own
-/// `dead_space_down_ends_the_field_session_and_keeps_the_dialog_open` fixture
-/// — `panel.origin + (2, 2)` sits inside `PANEL_PADDING`, above the title and
-/// above the content/action rows, so no child lives there.
+/// `.content()` slot, so it gets the framework's dead-space blur: a `Down` on
+/// the dialog's own dead panel space ends the field's IME session without
+/// closing the dialog, and a second tap re-engages it. The same pin as
+/// `tests/settings.rs`'s (New Token dialog); `panel.origin + (2, 2)` sits
+/// inside `PANEL_PADDING`, above every child.
 #[test]
 fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     let _g = serial();

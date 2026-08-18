@@ -2,64 +2,17 @@
 //! — no GPU, no window: a `RenderRoot` over the screen itself, driven through
 //! `tests/support`.
 //!
-//! # The harness shape, and why it is not just `MuxrApp`
+//! `NavigatorWidget` publishes no semantics for its pages, so [`Harness`] mounts
+//! a `Stack` of [`connect_page`] (fully addressable) over a [`navigator`] with a
+//! zero-size base page: the empty top page falls through to the screen, while a
+//! real push (the QR sheet, a landed `/sessions`) still owns input and reads as
+//! a depth change. `mount_seeded` re-points the app's router at the fixture's
+//! own navigator, so the screen pushes through the real route table and guard.
 //!
-//! `NavigatorWidget` contributes no `Widget::semantics` and forwards none of its
-//! pages', so **a screen mounted inside a navigator is invisible to the
-//! accessibility tree** — the route-level harness `tests/routes.rs` uses can only
-//! count glyph runs. This suite instead mounts a `Stack` of
-//!
-//! 1. [`connect_page`] — the real route builder, so the whole
-//!    `Component`/`use_controller`/pieces stack is under test, *outside* the
-//!    navigator and therefore fully addressable by role/label/value; and
-//! 2. a [`navigator`] over the same [`NavigatorController`] the screen pushes
-//!    through, whose base page is a deliberately **zero-size** child.
-//!
-//! The navigator sits on top, so anything it *does* have on its stack (the QR
-//! sheet, a pushed `/sessions`) owns input, while its empty base page ignores
-//! every pointer and lets the screen underneath receive it (`route_event`
-//! walks a `Stack` topmost-first and only stops on `Handled`). That gives one
-//! fixture that can both read semantics and observe real navigation
-//! (`NavigatorController::depth` is only published by a mounted navigator).
-//!
-//! `MuxrApp::init` still runs, unbuilt: it is the real composition root, and
-//! what publishes `features::connect::di`'s repository plus the app-scoped
-//! `ConnectionController` the screen resolves in its own `init`. Not *building*
-//! it is deliberate — the cold-start splash claim is spent on a launch's first
-//! build, so this suite never plays a splash. Because the fixture drives its
-//! **own** navigator (see above), it then calls
-//! [`muxr::routes::install_app_router`] over that controller — as both the
-//! route navigator and the root overlay host, where production has two
-//! (`muxr::AppState::nav` and `AppState::overlays`, the QR sheet being a page of
-//! the latter) — re-pointing the app's one path-pushing handle at it: the screen
-//! therefore pushes through the real route table and the real session guard, and
-//! this harness observes the result as a depth change.
-//!
-//! # Surface size
-//!
-//! The Connect screen is ~830px tall, so at `support`'s default 800×600 its
-//! last saved-server row would fall outside the viewport and be untappable —
-//! every frame here goes through `support`'s `*_sized` helpers at [`SURFACE`]
-//! instead.
-//!
-//! # What is asserted where
-//!
-//! Route *identity* after a successful connect (`/sessions` resolving to the
-//! Sessions page rather than the error page) is `tests/routes.rs`'s job — it
-//! can assert `Router::resolve` directly. Here a push is observed as a depth
-//! change plus the connection facts that came with it.
-//!
-//! # The placeholder-shaping suite
-//!
-//! The last section drives no widgets at all: it shapes the two fields' real
-//! placeholder strings with the fields' real [`TextStyle`] through a bare
-//! [`TextContext`], and reads the per-glyph advances back off the resulting
-//! glyph runs. That is the deliberate reproduction of a device defect
-//! (`zelli.example.com: 5 0 0 5 1`) whose cause is a font stack resolving to
-//! nothing — see `widgets::fields`' `field_font_family` for the mechanism.
-//!
-//! A bare `TextContext` is exactly what a `TextInputWidget` owns, so this is
-//! the field's own shaping environment and not an approximation of it.
+//! The screen is ~830px tall, so every frame here lays out at [`SURFACE`], not
+//! `support`'s default. The placeholder-shaping tests at the bottom shape the
+//! fields' real placeholder strings through a bare [`TextContext`], reproducing
+//! a still-live device defect (digits shaping a full em apart).
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -141,15 +94,9 @@ const INSECURE_TRUST: &str = "Trust anyway";
 const INSECURE_CHIP: &str = "insecure";
 
 /// The QR affordance's accessible name. Transcribed rather than imported (the
-/// CTA's is `widgets::cta::CONNECT_LABEL`, which *is* the run it paints and so has to
-/// be the same string): this one is the button's *name*, and a test that
-/// imported it could not catch it changing.
-///
-/// It used to be `▣` — the mark was the label, because the affordance was a
-/// text run. That is the defect this round closed: the glyph is in none of the
-/// bundled faces, so Android and iOS each drew a different mark for the app's
-/// primary pairing affordance (and a screen reader read out the name of a
-/// character). It is a vector now, named in words.
+/// CTA's is `widgets::cta::CONNECT_LABEL`, which *is* the run it paints, but
+/// this one is the button's *name* — a test that imported it could not catch
+/// it changing). See [`BANNED_GLYPH`] for why it is words, not a mark.
 const QR_LABEL: &str = "Pair by QR code";
 
 /// `.connect{padding:30px 22px}` — the layer's horizontal inset, transcribed
@@ -189,10 +136,8 @@ fn empty_base_page() -> AnyView<AppState> {
 }
 
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
-/// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
-/// responsive width-clamp pass. `None` leaves context unset,
-/// exactly the state every other test in this suite mounts under (no shell
-/// has published yet), so this helper is purely additive.
+/// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
+/// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     if let Some(metrics) = metrics {
         provide_context(metrics);
@@ -217,9 +162,7 @@ struct Harness {
 }
 
 impl Harness {
-    /// Run the real composition root's `init` (DI + the app-scoped connection
-    /// controller), re-point the app's nav handle at this fixture's own
-    /// navigator, then mount the screen and render its first settled frame.
+    /// [`Harness::mount_seeded`] with nothing seeded.
     fn mount() -> Self {
         Self::mount_seeded(|| {})
     }
@@ -236,9 +179,8 @@ impl Harness {
         let state = MuxrApp.init();
         seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
-        // The screen resolves `routes::app_nav()` in its own `init`; this makes
-        // that handle the app's real router over *this* navigator, guard and
-        // all (see the module docs).
+        // Re-points `routes::app_nav()` at this fixture's own navigator, guard
+        // and all.
         let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let nav_for_navigator = nav.clone();
         let nav_for_screen = nav.clone();
@@ -274,7 +216,6 @@ impl Harness {
         )
     }
 
-    /// A full tap at `point`.
     fn tap(&mut self, point: Point) {
         tap(&mut self.root, &mut self.state, point);
     }
@@ -311,7 +252,6 @@ impl Harness {
         self.settle();
     }
 
-    /// The center of the first node matching `pred`.
     fn center(&self, pred: &impl Fn(&Node) -> bool) -> Option<Point> {
         self.root.semantics().nodes.iter().find_map(|(_, node)| {
             if !pred(node) {
@@ -349,7 +289,6 @@ impl Harness {
             .collect()
     }
 
-    /// Whether the trust row labelled `label` reads as selected.
     fn trust_selected(&self, label: &str) -> bool {
         self.root
             .semantics()
@@ -418,12 +357,9 @@ impl Harness {
     }
 }
 
-/// Focus the server-URL field and type `url` into it.
-///
-/// Asserting on the value *after* a rebuild is what makes this a round-trip
-/// through the controller rather than a widget-local check: `TextInput` is a
-/// controlled component, so a rebuild re-applies the view's value — text that
-/// the controller never stored would be wiped by the very next frame.
+/// Focus the server-URL field and type `url` into it. Asserting the value
+/// *after* a rebuild is what makes this a round trip through the controller:
+/// `TextInput` is controlled, so a rebuild re-applies whatever it stored.
 fn type_url(harness: &mut Harness, url: &str) {
     harness.tap_node("the server URL field", |node| {
         node.role() == Role::TextInput
@@ -692,13 +628,10 @@ fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
 }
 
 /// The CTA's box in a standalone mount of the **splash's** assembly path:
-/// `connect_layout(connect_pieces(..))` inside a `Stack`, which is exactly what
-/// `crate::splash_overlay` hands the sequence and how the sequence hosts it
-/// (its own wrapper is a paint-time entrance and changes no geometry). The
-/// `Stack` matters: it hands its children a *bounded* height, where the live
-/// screen's `scroll_view` hands an unbounded one — the difference
-/// `pages::CLAMP_ALIGNMENT` exists for. Laid out at [`SURFACE`], under whatever
-/// `WindowMetrics` the caller has already provided.
+/// `connect_layout(connect_pieces(..))` inside a `Stack`, exactly what
+/// `crate::splash_overlay` hands the sequence. The `Stack` matters: it hands a
+/// *bounded* height, where the live screen's `scroll_view` hands an unbounded
+/// one — the difference `pages::CLAMP_ALIGNMENT` exists for.
 fn splash_cta_bounds(saved: &[SavedServer]) -> Rect {
     let theme = frust_glyph::baseline();
     let saved = saved.to_vec();
@@ -723,12 +656,9 @@ fn splash_cta_bounds(saved: &[SavedServer]) -> Rect {
 fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     let _g = serial();
     let _ambient = setup();
-    // The width jump: the clamp used to live in the screen's own `build`, so
-    // the splash assembled edge to edge on any window at or past the
-    // breakpoint and the whole form snapped inward at the handoff. It is
-    // `connect_layout`'s now — the one function both renderings assemble
-    // through — so this asserts the two land on the same horizontal box rather
-    // than that each happens to satisfy the same arithmetic.
+    // The clamp lives in `connect_layout`, the one function both renderings
+    // assemble through, so this asserts the two land on the same horizontal
+    // box rather than that each happens to satisfy the same arithmetic.
     let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
     let live = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
@@ -931,7 +861,7 @@ fn a_valid_url_connects_and_lands_on_sessions() {
 }
 
 // ---------------------------------------------------------------------------
-// Token hygiene (review F5): clear on connect/disconnect, zeroizing holder
+// Token hygiene: clear on connect/disconnect, zeroizing holder
 // ---------------------------------------------------------------------------
 
 /// A [`ConnectTarget`] mirroring `crate::connection`'s own test fixture —
@@ -1211,17 +1141,11 @@ type FormLogic = Box<dyn FnMut(&mut ()) -> AnyView<()>>;
 
 /// The eight Connect pieces mounted **live over a controller the test owns** —
 /// the same `Some(&Live)` composition the screen builds, minus the navigator.
-///
-/// Why not [`Harness`]: the screen hosts its controller through
-/// `use_controller`, so a test that mounts the screen cannot reach the very
-/// controller a scan would apply to. The pieces take their `Live` wiring as a
-/// parameter (that is what the splash/route split exists for), so composing
-/// them here is the *supported* way to drive a form whose controller the test
-/// also holds — and it is the same code path the route mounts.
-///
-/// The repository is deliberately **empty**: the seeded store carries a
-/// read-only row of its own, and this fixture asserts on how many `read-only`
-/// chips are on screen.
+/// Not [`Harness`]: the screen hosts its controller through `use_controller`,
+/// unreachable to a test mounting the screen, so the pieces are composed here
+/// instead, over a controller the test also holds. The repository is
+/// deliberately **empty**: the seeded store's own read-only row would otherwise
+/// double-count this fixture's `read-only` chip assertion.
 struct Form {
     root: RenderRoot<(), AnyView<()>>,
     logic: FormLogic,
@@ -1327,7 +1251,6 @@ impl Form {
         self.frame();
     }
 
-    /// Whether the trust row labelled `label` reads as selected.
     fn trust_selected(&self, label: &str) -> bool {
         self.root
             .semantics()
@@ -1781,12 +1704,10 @@ fn credential_fixture(rows: Vec<SavedServer>) -> Creds {
     }
 }
 
-/// Drive the UI-thread task queue until `done` answers `true`, or fail.
-///
-/// The credential flows are `spawn_local` chains over repositories that
-/// deliberately sleep (`MockAuthTokensRepository`'s own simulated latency), so a
-/// single pump is not enough — this is `support::pump_until`'s loop without a
-/// `RenderRoot`, since these cases drive a controller rather than a screen.
+/// Drive the UI-thread task queue until `done` answers `true`, or fail. The
+/// credential flows are `spawn_local` chains over repositories with simulated
+/// latency, so a single pump is not enough — `support::pump_until`'s loop
+/// without a `RenderRoot`, since these cases drive a controller, not a screen.
 fn pump_until_done(what: &str, mut done: impl FnMut() -> bool) {
     let runtime = frust_reactive::ReactiveRuntime::get().expect("setup() installed the runtime");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2004,15 +1925,12 @@ fn a_saved_row_with_no_credential_refills_the_form_without_raising_a_prompt() {
 
 // --- Flow 1: the manual save (the offer's accept) ----------------------------
 
-/// Connect the fixture's connection to [`CRED_ENDPOINT`], as a login would,
-/// so an accepted offer has a live session to save for.
-///
-/// The offer prompt is a **recorder**, not a dialog: these cases drive the save
-/// itself (mint, gate, rotate) through the connection's own accept, so what
-/// matters here is only that the held redirect stayed held — the screen-level
-/// suite below is where the dialog and the navigation it resolves are driven
-/// end to end. Each recorded entry is the offer's label and whether it asked to
-/// *replace* a credential this device already holds.
+/// Connect the fixture's connection to [`CRED_ENDPOINT`], as a login would, so
+/// an accepted offer has a live session to save for. The offer prompt is a
+/// **recorder**, not a dialog — these cases drive the save (mint, gate, rotate)
+/// through the connection's own accept; the screen-level suite below drives the
+/// dialog and navigation end to end. Each recorded entry is the offer's label
+/// and whether it asked to *replace* a credential this device already holds.
 fn connect_fixture(creds: &Creds) -> Rc<RefCell<Vec<(String, bool)>>> {
     let offered: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
     let record = Rc::clone(&offered);
@@ -2579,11 +2497,9 @@ fn tapping_a_credential_row_on_the_real_screen_unlocks_and_lands_on_sessions() {
 // ---------------------------------------------------------------------------
 
 /// Mount the real screen with [`credential_row`] saved and its secret seeded —
-/// the app's own DI stores, in `mount_seeded`'s window, so the row, the
-/// affordance and both stores are the production wiring.
-///
-/// Stamped now, so the row sorts ahead of the seeded ones and lays out inside
-/// the fixture's surface — the list is most-recently-used first.
+/// the app's own DI stores, so the row, the affordance and both stores are the
+/// production wiring. Stamped now so the row sorts ahead of the seeded ones
+/// (the list is most-recently-used first).
 fn mount_with_credential_row() -> Harness {
     Harness::mount_seeded(|| {
         let mut row = credential_row(true, Some("token_2"));
@@ -3271,12 +3187,9 @@ fn the_live_screens_fields_stay_enabled() {
 
 #[test]
 fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
-    // `connect_pieces` (== `connect_pieces_with(theme, None, saved)`) is
-    // exactly what the cold-start splash assembles — no navigator, no
-    // controller, and (per the module docs) no callback here reads the state
-    // it's handed, so a bare `()` state and a standalone `RenderRoot` reproduce
-    // it directly (mirroring `subtitle_lines`'s own standalone-piece pattern
-    // below).
+    // `connect_pieces` (== `connect_pieces_with(theme, None, saved)`) is what
+    // the cold-start splash assembles — no navigator, no controller — so a
+    // bare `()` state and a standalone `RenderRoot` reproduce it directly.
     let _g = serial();
     let _ambient = setup();
 
@@ -3308,10 +3221,8 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
          screen took over: {fields:?}"
     );
 
-    // A direct tap on either field's center must not move focus onto it —
-    // read-only hangs off the *same* focus gate `enabled(false)` did
-    // (`TextInputWidget::interactive` is `enabled && !read_only`): a `Down`
-    // inside one neither requests focus nor captures the pointer.
+    // Read-only hangs off the same focus gate `enabled(false)` did
+    // (`TextInputWidget::interactive` is `enabled && !read_only`).
     let centers: Vec<Point> = root
         .semantics()
         .nodes
@@ -3410,11 +3321,9 @@ fn subtitle_lines() -> (Vec<(f64, f64)>, Rect) {
 
 #[test]
 fn the_subtitle_centers_every_line_it_wraps_onto() {
-    // The device defect: `.sub` is `text-align:center`, but `TextView` has no
-    // paragraph alignment and `TextContext::layout` hardcodes
-    // `parley::Alignment::Start`, so under the old `Align(CENTER, text(..))`
-    // treatment only the *block* was centered — the second line hugged the
-    // leading edge. See `chrome::centered_paragraph`.
+    // `TextContext::layout` hardcodes `parley::Alignment::Start`, so a plain
+    // `Align(CENTER, text(..))` only centers the *block* — the second line
+    // hugs the leading edge. See `chrome::centered_paragraph`.
     let (lines, box_) = subtitle_lines();
     assert!(
         lines.len() >= 2,
@@ -3484,12 +3393,10 @@ fn field_style() -> TextStyle {
 
 #[test]
 fn the_server_url_placeholder_never_advances_its_digits_a_full_em() {
-    // The device defect, stated as an inequality: the digits of
-    // `zelli.example.com:50051` rendered one full em apart (13.0px at the
-    // 13px body role) while the letters around them stayed ~7px, which reads
-    // as `zelli.example.com: 5 0 0 5 1`. A digit advancing its own font size
-    // is the signature of the string having been split across a fallback font
-    // that the primary stack failed to cover.
+    // A digit advancing its own font size (13px, vs ~7px for the surrounding
+    // letters) is the signature of the string having split across a fallback
+    // font the primary stack failed to cover — read as
+    // `zelli.example.com: 5 0 0 5 1`.
     let style = field_style();
     let em = f64::from(style.size);
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &style, |c| c.is_ascii_digit());
@@ -3507,9 +3414,8 @@ fn the_server_url_placeholder_never_advances_its_digits_a_full_em() {
 
 #[test]
 fn the_server_url_placeholder_shapes_as_one_run_with_its_letters() {
-    // The positive half: digits and letters come from the *same* font, so
-    // their advances are drawn from one set of metrics. This is what makes
-    // the run a single legible string rather than two interleaved ones.
+    // The positive half: digits and letters share one font, so their
+    // advances share one set of metrics rather than interleaving two.
     let style = field_style();
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &style, |c| c.is_ascii_digit());
     let widest_letter = advances_where(SERVER_URL_PLACEHOLDER, &style, |c| c.is_ascii_alphabetic())
@@ -3543,10 +3449,7 @@ fn the_token_placeholder_stays_the_control_it_was_on_device() {
 fn a_stack_that_resolves_to_nothing_is_what_blows_the_digits_up() {
     // The counter-example that gives the three tests above their teeth: the
     // *same* string, shaped with a stack that cannot resolve, splits into more
-    // than one run and advances its digits a full em. Without this, the
-    // assertions above would pass on any machine whose generic `monospace`
-    // happens to resolve — which is every machine except the one that showed
-    // the bug.
+    // than one run and advances its digits a full em.
     let broken = TextStyle {
         family: FontFamily::Named(vec!["No Such Family 1234".to_string()]),
         ..field_style()
