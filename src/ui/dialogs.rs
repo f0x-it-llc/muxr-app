@@ -1,5 +1,5 @@
 use frust::{
-    any, button, text_input, ButtonStyle, Get, NavigatorController, PopResult, RwSignal, Set,
+    ButtonStyle, Get, NavigatorController, PopResult, RwSignal, Set, any, button, text_input,
 };
 use frust_glyph::{glyph_dialog, show_glyph_dialog};
 
@@ -79,10 +79,9 @@ pub fn name_input_dialog<State: 'static>(
             .on_submit(move |_state: &mut State, typed: String| submit(&enter_nav, &typed));
             glyph_dialog()
                 .title(title.clone())
-                // The content slot's own loose-width constraints fill the
-                // panel's content width intrinsically (`TextInput::layout`
-                // reaches for `bc.max().width` whenever it's finite) — no
-                // stretch wrapper needed for a single child.
+                // The content slot's loose-width constraints fill the panel
+                // width intrinsically (`TextInput::layout` reaches for
+                // `bc.max().width` when finite) — no stretch wrapper needed.
                 .content(any(field))
                 .action(any(button(CANCEL_LABEL, move |_state: &mut State| {
                     cancel_nav.pop()
@@ -90,9 +89,8 @@ pub fn name_input_dialog<State: 'static>(
                 .style(ButtonStyle::Ghost)
                 .small()))
                 .action(any(button(SUBMIT_LABEL, move |_state: &mut State| {
-                    // "Disabled": the style below is the visual half,
-                    // this guard the behavioral one (see the module
-                    // docs' framework-gap note).
+                    // "Disabled" here is two halves: the style below is the
+                    // visual one, this guard is the behavioral one.
                     if can_submit {
                         submit(&submit_nav, &current);
                     }

@@ -1,25 +1,17 @@
 //! The bearer credential: a swappable session token and the interceptor that
 //! stamps it onto every authenticated call.
 //!
-//! **The wire contract, from `muxrd`.** Authenticated RPCs carry
-//! `authorization: Bearer <session_token>`. Exactly two paths are public —
-//! `/muxr.v1.Muxr/GetVersion` and `/muxr.v1.Muxr/Login` — and an absent,
-//! malformed or expired token on any other path is answered
-//! `Status::unauthenticated`. That split is the reason for two stubs rather than
-//! one interceptor that skips a couple of methods: [`unauth_stub`] is what dials
-//! version + login, [`authed_stub`] is everything after.
+//! Wire contract: authenticated RPCs carry `authorization: Bearer
+//! <session_token>`; only `GetVersion`/`Login` are public, everything else
+//! answers `Status::unauthenticated` without one — hence two stubs
+//! ([`unauth_stub`], [`authed_stub`]) rather than one interceptor that skips
+//! methods.
 //!
-//! **The token is mutable process state.** A re-login swaps it while calls are
-//! in flight, so it lives behind an `ArcSwapOption`: the interceptor's read is
-//! lock-free, and a rotation never rebuilds the channel or stalls a stream pump.
-//! The stored value is a `Zeroizing<String>`, so the previous token's buffer is
-//! scrubbed when its last reader drops it — deferred, not immediate, if a call
-//! is mid-flight holding a clone, which is the correct order (scrubbing a buffer
-//! another thread is still reading would be the bug).
-//!
-//! The one residue this cannot cover is tonic's own copy: a `MetadataValue` is a
-//! `Bytes` the transport owns, so the header bytes for an in-flight request live
-//! outside this module's control until that request completes.
+//! The token lives behind an `ArcSwapOption<Zeroizing<String>>`: lock-free
+//! reads, and a rotation scrubs the old value only once its last in-flight
+//! reader drops it — never while a call still holds a clone. Tonic's own
+//! `MetadataValue` copy of the header is a separate `Bytes` this module
+//! cannot scrub, and can outlive the request it was built for.
 
 use std::sync::Arc;
 
@@ -45,17 +37,15 @@ pub type AuthedStub =
     crate::net::proto::muxr_client::MuxrClient<InterceptedService<Channel, BearerInterceptor>>;
 
 /// The process's current session token, swappable while calls are in flight.
-///
-/// Stores the whole header *value* (`Bearer <token>`) rather than the bare
-/// token: the interceptor then never formats a fresh, unscrubbed `String`
-/// holding the secret on the hot path.
+/// Stores the whole header value (`Bearer <token>`) so the interceptor never
+/// formats a fresh, unscrubbed `String` on the hot path.
 #[derive(Default)]
 pub struct SessionToken {
     header: ArcSwapOption<Zeroizing<String>>,
 }
 
-/// Reports only whether a credential is held — a derived `Debug` would print the
-/// session token into any log line that formats a client.
+/// Reports only whether a credential is held: a derived `Debug` would leak
+/// the token into any log line that formats a client.
 impl std::fmt::Debug for SessionToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionToken")
@@ -74,9 +64,8 @@ impl SessionToken {
     /// Install a session token, scrubbing the previous one.
     pub fn set(&self, token: &str) {
         let next = Zeroizing::new(format!("{BEARER_PREFIX}{token}"));
-        // Dropping the swapped-out value is what scrubs it: `Zeroizing` zeroes
-        // on drop, and the drop happens once the last in-flight reader releases
-        // its `Arc`.
+        // `Zeroizing` scrubs the swapped-out value on drop, once the last
+        // in-flight reader releases its `Arc`.
         drop(self.header.swap(Some(Arc::new(next))));
     }
 
@@ -97,7 +86,6 @@ impl SessionToken {
 }
 
 /// Stamps `authorization: Bearer <session token>` onto every request it sees.
-///
 /// Installed only on [`AuthedStub`], so it never reaches `GetVersion`/`Login`.
 #[derive(Clone, Debug)]
 pub struct BearerInterceptor {
@@ -105,8 +93,8 @@ pub struct BearerInterceptor {
 }
 
 impl BearerInterceptor {
-    /// Bind an interceptor to a token store; later swaps of that store are seen
-    /// by every stub already built from it.
+    /// Binds to a token store; later swaps of that store are seen by every
+    /// stub already built from it.
     pub fn new(token: Arc<SessionToken>) -> Self {
         Self { token }
     }
@@ -114,9 +102,8 @@ impl BearerInterceptor {
 
 impl Interceptor for BearerInterceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        // Failing here rather than sending an anonymous request is deliberate:
-        // the server's answer would be `unauthenticated` anyway, and failing
-        // locally keeps a token-less call off the wire entirely.
+        // Fail locally rather than send an anonymous request: the server
+        // would answer `unauthenticated` anyway, so keep it off the wire.
         let Some(header) = self.token.header_value() else {
             return Err(Status::unauthenticated("no session token"));
         };

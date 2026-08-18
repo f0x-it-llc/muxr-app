@@ -1,25 +1,20 @@
 //! The three trust modes a `muxrd` connection can be dialled under, and the
 //! `rustls` [`ServerCertVerifier`] each one installs.
 //!
-//! [`TrustConfig`] is this layer's own input type, deliberately separate from
-//! `crate::connection::TrustMode` (the app's plain-data posture enum): one
-//! carries a pin's 32 bytes, the other is a label a screen renders. The mapping
-//! between them belongs to whoever builds a connect request, not here.
+//! [`TrustConfig`] is separate from `crate::connection::TrustMode` (a
+//! screen's plain-data posture label) — mapping between them is the connect
+//! seam's job, not this module's.
 //!
-//! **A pin is over the leaf certificate's DER bytes, not its SPKI.** That is
-//! what `muxrctl`'s pairing payload encodes as `fp` (64 lowercase hex), so it is
-//! what [`TrustConfig::pinned_from_hex`] parses and what
-//! [`leaf_fingerprint_hex`] produces. Parsing is **fail-closed**: a missing,
-//! short, long or non-hex pin is an error *before* a socket is opened, never a
-//! silent downgrade to some weaker mode.
+//! A pin is over the leaf certificate's DER bytes, not its SPKI — the `fp`
+//! form a pairing payload encodes. Parsing is fail-closed: a missing, short,
+//! long or non-hex pin errors before a socket opens, never downgrades to a
+//! weaker mode.
 //!
-//! **Pinning replaces chain and name validation, not proof-of-possession.** The
-//! pinned verifier still routes `verify_tls12_signature`/`verify_tls13_signature`
-//! through `rustls`' own webpki-backed helpers, so a server that merely
-//! *presents* the pinned certificate — without holding its private key — still
-//! fails the handshake. Skipping those two methods (the shape most
-//! "danger" verifier snippets copy) would accept a replayed certificate from
-//! anyone who has ever seen one.
+//! Pinning replaces chain and name validation, not proof-of-possession: the
+//! pinned verifier still runs `verify_tls12/13_signature` through rustls'
+//! own helpers, so presenting the pinned cert without its private key still
+//! fails the handshake. Skipping those two methods — the shape most "danger"
+//! verifier snippets copy — would accept a replayed certificate.
 
 use std::fmt;
 use std::sync::Arc;
@@ -80,23 +75,18 @@ impl fmt::Display for PinError {
 impl std::error::Error for PinError {}
 
 impl From<PinError> for AppFailure {
-    /// A malformed pin lands on [`AppFailure::Network`], the same bucket
-    /// `connect`'s endpoint parsing already uses for a rejected target — it is a
-    /// bad *address*, not a rejected credential, so `Auth`'s "please reconnect"
-    /// message would misdescribe it.
+    /// Lands on [`AppFailure::Network`] — a bad address, not a rejected
+    /// credential, so `Auth`'s "please reconnect" message would misdescribe it.
     fn from(error: PinError) -> Self {
         AppFailure::Network(error.to_string())
     }
 }
 
 impl TrustConfig {
-    /// Parse a 64-character hex certificate pin.
-    ///
-    /// Case-insensitive on input (a pairing payload may arrive upper-cased),
-    /// exact-length and hex-only otherwise. There is no lenient path: the
-    /// Flutter client this replaces throws before dialing on a malformed pin,
-    /// and so does this — a pin that cannot be parsed must never degrade into
-    /// [`TrustConfig::SystemCa`] or [`TrustConfig::InsecureAcceptAny`].
+    /// Parse a 64-character hex certificate pin. Case-insensitive,
+    /// exact-length, hex-only — no lenient path: a pin that fails to parse
+    /// must never degrade into [`TrustConfig::SystemCa`] or
+    /// [`TrustConfig::InsecureAcceptAny`].
     pub fn pinned_from_hex(pin: &str) -> Result<Self, PinError> {
         let bytes = pin.as_bytes();
         if bytes.len() != PIN_HEX_LEN {
@@ -112,11 +102,10 @@ impl TrustConfig {
         Ok(TrustConfig::PinnedSha256(digest))
     }
 
-    /// The `rustls` verifier this mode installs on a client config.
-    ///
-    /// Fallible only for [`TrustConfig::SystemCa`], whose platform verifier can
-    /// fail to construct (and, on Android, needs the JNI handles the shell
-    /// installs — see [`ensure_platform_verifier_ready`]).
+    /// The `rustls` verifier this mode installs on a client config. Fallible
+    /// only for [`TrustConfig::SystemCa`] (its platform verifier can fail to
+    /// construct; on Android it needs JNI handles the shell installs — see
+    /// [`ensure_platform_verifier_ready`]).
     pub fn verifier(&self) -> Result<Arc<dyn ServerCertVerifier>, AppFailure> {
         let provider = crypto_provider();
         match self {
@@ -165,14 +154,11 @@ fn leaf_digest(leaf_der: &[u8]) -> [u8; PIN_LEN] {
     pin
 }
 
-/// Compare two pins without an early exit.
-///
-/// A hand-rolled XOR fold rather than the `subtle` crate: this crate's manifest
-/// is closed to new dependencies, and a certificate pin is public data (it ships
-/// in the pairing QR), so timing leakage here reveals nothing an attacker cannot
-/// already read. The fold is defense in depth against the *pattern* — a plain
-/// `==` on a secret would be a real defect — and `black_box` keeps a future
-/// optimizer from reintroducing the branch.
+/// Compare two pins without an early exit. Hand-rolled XOR fold rather than
+/// the `subtle` crate (no new deps) — a pin is public data (it ships in the
+/// pairing QR), so timing leakage reveals nothing new; this is defense in
+/// depth against the *pattern*, and `black_box` stops an optimizer from
+/// reintroducing the branch.
 fn pins_match(presented: &[u8; PIN_LEN], expected: &[u8; PIN_LEN]) -> bool {
     let mut difference = 0u8;
     for index in 0..PIN_LEN {
@@ -181,17 +167,13 @@ fn pins_match(presented: &[u8; PIN_LEN], expected: &[u8; PIN_LEN]) -> bool {
     std::hint::black_box(difference) == 0
 }
 
-/// The process-wide `rustls` crypto provider, installing **aws-lc-rs** if
-/// nothing has installed one yet.
-///
-/// Installing (rather than just constructing a local provider) matters: `tonic`
-/// builds its own `ClientConfig` from `CryptoProvider::get_default()`, so
-/// sharing one installed provider keeps the verifier's signature algorithms and
-/// the connection's cipher suites from being drawn from two separate instances.
-/// A lost install race is a no-op — the winner installed the same aws-lc-rs
-/// provider, which is the only one in this tree (`Cargo.toml` pairs rustls'
-/// default features with tonic's `tls-aws-lc`; a second provider is a runtime
-/// conflict, not a compile error).
+/// The process-wide `rustls` crypto provider, installing aws-lc-rs if
+/// nothing has installed one yet. Installing (not just constructing) matters
+/// because tonic builds its own `ClientConfig` from
+/// `CryptoProvider::get_default()`, so one shared provider keeps signature
+/// algorithms and cipher suites from splitting across two instances. A lost
+/// install race is a no-op: this tree pairs rustls' default features with
+/// tonic's `tls-aws-lc`, so the winner is always the same provider.
 fn crypto_provider() -> Arc<CryptoProvider> {
     if let Some(installed) = CryptoProvider::get_default() {
         return installed.clone();
@@ -208,19 +190,15 @@ fn ensure_platform_verifier_ready() -> Result<(), AppFailure> {
     Ok(())
 }
 
-/// Hand `rustls-platform-verifier` the JNI env + application `Context` it needs
-/// before its **first** handshake.
+/// Hands `rustls-platform-verifier` the JNI env + application `Context` it
+/// needs before its first handshake, via
+/// `frust_plugin::android::with_jni_env` (the sanctioned accessor;
+/// `new_local_ref` because the initializer wants an owned local reference).
 ///
-/// `frust_plugin::android::with_jni_env` is the sanctioned accessor for the
-/// `(Env, Context)` pair the Android shell installed; the verifier's own
-/// initializer wants an owned local reference, hence the `new_local_ref`.
-///
-/// **Only success is cached.** A dial that races the shell's own platform-handle
-/// installation reports `NotInitialized`, and caching *that* would leave
-/// system-CA trust broken for the rest of the process. The flag is therefore a
-/// fast path past the per-dial JNI attach, not a one-shot: a failure is retried
-/// on the next dial, which is safe because the verifier's own initializer is
-/// itself idempotent.
+/// Only success is cached: a dial racing the shell's own handle install
+/// reports `NotInitialized`, and caching that would leave system-CA trust
+/// broken for the rest of the process. A failure is retried on the next
+/// dial — safe, since the verifier's own initializer is idempotent.
 #[cfg(target_os = "android")]
 fn ensure_platform_verifier_ready() -> Result<(), AppFailure> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -237,8 +215,7 @@ fn ensure_platform_verifier_ready() -> Result<(), AppFailure> {
             .map_err(|err| err.to_string())
     });
 
-    // The outer error is the handle accessor's (`NotInitialized`/`Attach`); the
-    // inner one is the verifier's own initializer.
+    // Outer error: the handle accessor's; inner: the verifier's own initializer.
     let outcome = match attached {
         Ok(inner) => inner,
         Err(err) => Err(err.to_string()),

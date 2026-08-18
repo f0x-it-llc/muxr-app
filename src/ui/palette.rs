@@ -1,5 +1,5 @@
-use frust::authoring::text::TextStyle;
 use frust::authoring::Color;
+use frust::authoring::text::TextStyle;
 use frust::{StatusPalette, Theme};
 
 const AMBER_FAINT_ALPHA: f32 = 0.12;
@@ -37,7 +37,8 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Resolve every field above from
+    /// Resolve every field above from the theme's scheme, falling back to
+    /// scheme roles when no [`StatusPalette`] extension is attached.
     pub fn from_theme(theme: &Theme) -> Palette {
         let scheme = theme.scheme();
         let status = theme.extension::<StatusPalette>();
@@ -113,13 +114,11 @@ mod tests {
         assert_eq!(palette.amber, theme.scheme().primary);
     }
 
-    /// The unification the module docs describe: asserts the equality
-    /// relation (`primary == primary_container` under `frust_glyph::baseline()`'s
-    /// **dark** scheme) that this module's `amber` unification depends on, so
-    /// a future `frust-theme` change that splits the accent/container pair
-    /// apart under Dark fails loudly here rather than only showing up as a
-    /// pixel diff in a screen's device gate. (The literal hex is pinned by
-    /// `canonical_field_values_match_the_glyph_dark_source`, below.)
+    /// Guards this module's `amber` unification: `primary ==
+    /// primary_container` under `frust_glyph::baseline()`'s dark scheme. A
+    /// future `frust-theme` change splitting that pair apart under Dark
+    /// fails loudly here, not only as a pixel diff in a device gate. (Hex
+    /// pinned by `canonical_field_values_match_the_glyph_dark_source`, below.)
     #[test]
     fn glyph_baseline_dark_scheme_keeps_primary_and_primary_container_equal() {
         let theme = frust_glyph::baseline();
@@ -128,12 +127,11 @@ mod tests {
         assert_eq!(scheme.primary, scheme.primary_container);
     }
 
-    /// A handful of concrete, hand-verified field values against
-    /// `frust_glyph::baseline()` — the derivations above prove the *shape* of
-    /// each field's source, but not that the source itself still resolves to
-    /// what `docs/glyph-design-system.html` actually specifies. Pinned to the
+    /// Hand-verified against `frust_glyph::baseline()`: the derivations above
+    /// prove the *shape* of each field's source, not that the source still
+    /// matches what `docs/glyph-design-system.html` specifies. Pinned to the
     /// literal hex the design system's dark `:root` block carries
-    /// (`crates/frust-theme`'s `glyph_dark`/`StatusPalette::glyph` sources).
+    /// (`crates/frust-theme`'s `glyph_dark`/`StatusPalette::glyph`).
     #[test]
     fn canonical_field_values_match_the_glyph_dark_source() {
         let theme = frust_glyph::baseline();

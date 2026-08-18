@@ -1,9 +1,9 @@
-//! The splash orchestrator: five beats — the icon, the burst, the rain, the
-//! Connect screen's piece-by-piece assembly, and the unmount — sequenced over
-//! one **master** clock (starting on the overlay's first painted frame) plus
-//! a **rain-local** clock (`t = tOverall - ICON_DELAY`) that starts when the
-//! icon dissolves. Shown exactly once per process launch. Every value below
-//! is derived from [`spec`], never re-typed.
+//! The splash orchestrator: five beats — icon, burst, rain, the Connect
+//! screen's piece-by-piece assembly, and the unmount — sequenced over one
+//! master clock (starts on the overlay's first painted frame) plus a
+//! rain-local clock (`t = tOverall - ICON_DELAY`) that starts when the icon
+//! dissolves. Plays once per process launch. Every value below derives from
+//! [`spec`], never re-typed.
 //!
 //! | Master | Rain-local | Beat |
 //! |---|---|---|
@@ -14,37 +14,35 @@
 //! | 3860 ([`assembly_end_ms`]) | 2860 | The last piece has landed and its flash has faded |
 //! | 4200 ([`sequence_end_ms`]) | 3200 | The rain's own tail ends — the overlay unmounts |
 //!
-//! [`sequence_end_ms`] is the **later** of the assembly's and the rain's own
-//! end: unmounting at the assembly's end would cut the rain's drain short,
-//! popping the few columns still falling out of existence.
+//! [`sequence_end_ms`] is the later of the assembly's and the rain's own
+//! end, so unmounting never cuts the rain's drain short (popping the few
+//! columns still falling out of existence).
 //!
 //! # The handoff
 //!
-//! The overlay sits in a [`Stack`] **above** the live navigator, already
-//! rendering `/`. Its assembly lays out the very same
+//! The overlay sits in a [`Stack`] above the live navigator, already
+//! rendering `/`. Its assembly lays out the same
 //! [`connect_pieces`](crate::features::connect::presentation::widgets::connect_pieces)
-//! through the very same
+//! through the same
 //! [`connect_layout`](crate::features::connect::presentation::pages::connect_layout)
-//! the route uses, width clamp included, each piece additionally wrapped in
-//! [`piece_entry`] (a **paint-time** transform, no geometry change) — so when
+//! the route uses, width clamp included, each piece wrapped in
+//! [`piece_entry`] (paint-time transform, no geometry change) — so when
 //! [`Cue`] flips `done` and the shell drops the overlay, the pixels beneath
-//! are the ones already there. That the two pictures coincide is the
-//! `widgets` module's "parity contract", not this one's. Nothing here
-//! forwards input to the assembly either: [`DelayedWidget`] has no
-//! `Widget::event` of its own, and the assembled fields are additionally
-//! read-only in their own right.
+//! are the ones already there. Nothing here forwards input to the assembly
+//! either: [`DelayedWidget`] has no `Widget::event` of its own, and the
+//! assembled fields are read-only in their own right.
 //!
 //! # Clocking, without a per-frame rebuild
 //!
 //! [`Delayed`] gates its child by its own accumulated clock and simply
 //! doesn't paint it until its window opens; every gated child (`rain`,
-//! `burst`, each [`piece_entry`]) self-clocks from *its own first paint* —
-//! mounting it is the cue, painting it is the mount. The only signal write in
-//! the whole sequence is the one that ends it. The icon's own
+//! `burst`, each [`piece_entry`]) self-clocks from its own first paint —
+//! mounting is the cue, painting is the mount. The only signal write in the
+//! whole sequence is the one that ends it. The icon's own
 //! [`IconPhase`](super::icon_phase::IconPhase) publication is deliberately
-//! **not** used as the cue: both it and this module's schedule derive from
-//! the same [`spec::ICON_DELAY_MS`], so cueing off the signal would add a
-//! rebuild per phase without changing a single frame's timing.
+//! not used as the cue: both it and this schedule derive from
+//! [`spec::ICON_DELAY_MS`], so cueing off the signal would add a rebuild per
+//! phase without changing a single frame's timing.
 //!
 //! # Reduced motion
 //!
@@ -52,13 +50,11 @@
 //! [`reduced_splash`] instead: the static icon for
 //! [`spec::REDUCED_HOLD_MS`], then straight to the finished screen — no rain,
 //! no burst, no assembly. Each widget re-checks the theme at paint time
-//! anyway, so `reduce_motion` turning on *after* the mount decision still
-//! collapses to a terminal state. The one thing that must **not** collapse
-//! is that hold itself — it is only ever mounted under `reduce_motion`, so a
-//! cue short-circuiting on the theme would end it on its own first frame;
-//! [`Cue`] takes the short-circuit as an opt-out
-//! ([`CueView::honor_reduce_motion`]) rather than applying it
-//! unconditionally.
+//! anyway, so `reduce_motion` turning on after the mount decision still
+//! collapses to a terminal state. The hold itself must not collapse the same
+//! way — it is only ever mounted under `reduce_motion`, so [`Cue`] takes the
+//! short-circuit as an opt-out ([`CueView::honor_reduce_motion`]) rather
+//! than applying it unconditionally.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -81,10 +77,9 @@ use crate::ui::backdrop::page_backdrop;
 pub const ROOT_ROUTE: &str = "/";
 
 /// Whether this process has already resolved its cold-start splash.
-///
-/// Process-lifetime by design: the splash is a *launch* animation, so a warm
-/// in-process navigation back to `/` must never replay it. Claimed once, from
-/// [`claim_cold_start`], at the composition root's `init`.
+/// Process-lifetime by design: the splash is a launch animation, so a warm
+/// in-process navigation back to `/` must never replay it. Claimed once,
+/// from [`claim_cold_start`], at the composition root's `init`.
 static COLD_START_RESOLVED: AtomicBool = AtomicBool::new(false);
 
 /// What the composition root should mount for this launch.
@@ -132,10 +127,9 @@ fn claim(flag: &AtomicBool, start_route: &str, reduce_motion: bool) -> SplashPla
 ///
 /// Call once, from the composition root's first `build` (via
 /// `AppState::splash_plan()`) — not `Component::init`, since at `init` time
-/// the shell has not yet applied the theme (see that function's doc for
-/// why). Every later call returns [`SplashPlan::Skip`]. Logs the outcome at
-/// debug level: "did the splash play, and why" is otherwise only answerable
-/// by watching the screen.
+/// the shell has not yet applied the theme. Every later call returns
+/// [`SplashPlan::Skip`]. Logs the outcome at debug level: otherwise "did the
+/// splash play, and why" is only answerable by watching the screen.
 pub fn claim_cold_start(start_route: &str, reduce_motion: bool) -> SplashPlan {
     let plan = claim(&COLD_START_RESOLVED, start_route, reduce_motion);
     log::debug!("cold-start splash: {plan:?} (route {start_route}, reduce_motion {reduce_motion})");
@@ -182,19 +176,16 @@ pub fn sequence_end_ms() -> f64 {
 
 /// The full cold-start sequence, as one mountable overlay.
 ///
-/// - `art` — the decoded app icon. Decode it **once**
+/// - `art` — the decoded app icon. Decode it once
 ///   ([`splash_icon_art`](super::icon_phase::splash_icon_art), from the
-///   composition root's `init`) and clone the handle in; this function runs
-///   on every rebuild.
+///   composition root's `init`) and clone the handle in; this runs on every
+///   rebuild.
 /// - `seed` — fixes the burst's particles and the rain's whole field.
-/// - `pieces` — the screen to assemble, in stagger order. Build them with the
-///   *same* builder the route uses, from the same saved-server list
-///   (`connect_pieces` + `splash_saved_servers`), or the handoff below has two
-///   different pictures to cross.
-/// - `assemble` — lays those pieces out; hand it the *same* function the
-///   route's page uses (see the module docs' handoff note). It owns the
-///   responsive width clamp, so this sequence needs no window arithmetic of
-///   its own.
+/// - `pieces` — the screen to assemble, in stagger order, built with the
+///   same builder the route uses (see the module docs' handoff note) — or
+///   there are two different pictures to cross.
+/// - `assemble` — lays those pieces out; the same function the route's page
+///   uses, so this needs no window arithmetic of its own.
 /// - `done` — set `true` once, when the sequence is over.
 pub fn splash_sequence<State: 'static>(
     art: IconArt,
@@ -227,18 +218,17 @@ pub fn splash_sequence<State: 'static>(
 /// for [`spec::REDUCED_HOLD_MS`], then the finished screen directly.
 ///
 /// Mounted instead of [`splash_sequence`] when [`splash_plan`] resolves to
-/// [`SplashPlan::Reduced`]. There is no rain, no burst and no assembly to
-/// collapse — the source's reduced branch skips them outright, and mounting
-/// them only to have each self-collapse would flash a frame of nothing.
+/// [`SplashPlan::Reduced`] — no rain, burst or assembly to collapse, since
+/// mounting them only to self-collapse would flash a frame of nothing.
 ///
 /// [`IconArt::Vector`] (the decode-failure fallback) shows the backdrop
-/// alone: the vector stand-in is a *motion* affordance of
-/// [`icon_phase`](super::icon_phase), which is inert under reduced motion by
-/// contract, and a 200ms glimpse does not justify a second copy of it here.
+/// alone: the vector stand-in is a motion affordance of
+/// [`icon_phase`](super::icon_phase), inert under reduced motion by
+/// contract, and a 200ms glimpse doesn't justify a second copy here.
 ///
-/// Its cue **opts out** of the reduced-motion short-circuit: this overlay is
-/// only ever mounted when `reduce_motion` is on, so a cue honoring it would
-/// fire on the first painted frame and unmount the hold ~16ms after it
+/// Its cue opts out of the reduced-motion short-circuit: this overlay is
+/// only ever mounted when `reduce_motion` is on, so honoring it would fire
+/// on the first painted frame and unmount the hold ~16ms after it
 /// appeared — a flicker where the design reference has a 200ms beat.
 pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> AnyView<State> {
     let mut layers: Vec<AnyView<State>> = vec![any(page_backdrop::<State>().block_input(true))];
@@ -348,16 +338,13 @@ impl Widget for DelayedWidget {
     }
 
     // No `event` impl: the splash overlay is decorative and non-interactive
-    // (`.ui-layer{pointer-events:none}`), and its backdrop swallows anything
-    // that reaches it — see `crate::ui::backdrop`.
+    // (`.ui-layer{pointer-events:none}`); its backdrop swallows the rest.
 
     fn semantics(&self, _ctx: &mut SemanticsCtx) {
-        // Deliberately does NOT forward — the one place in this app that
-        // breaks the forward-to-every-child rule, and the reason is the
-        // handoff: the live route is mounted *underneath* this overlay and
-        // already contributes the Connect screen's nodes, so forwarding would
-        // publish every one of them twice for the sequence's four seconds.
-        // The gated children are otherwise decorative (rain, burst).
+        // Deliberately does not forward, breaking the usual rule: the live
+        // route mounted underneath already contributes the Connect screen's
+        // nodes, so forwarding would publish them twice. Gated children are
+        // otherwise decorative (rain, burst).
     }
 }
 
@@ -408,13 +395,11 @@ pub struct CueView<State: 'static> {
 
 impl<State: 'static> CueView<State> {
     /// Whether `reduce_motion` short-circuits this cue to its first painted
-    /// frame (default `true`).
-    ///
-    /// `true` is right for [`splash_sequence`]'s end cue: it is defense in
-    /// depth behind a four-second timeline that a reduced-motion theme should
-    /// never be held behind. It is *wrong* for [`reduced_splash`]'s hold,
-    /// which is only ever mounted under `reduce_motion` in the first place —
-    /// so pass `false` there, or the hold ends on the frame it starts.
+    /// frame (default `true`). Right for [`splash_sequence`]'s end cue
+    /// (defense in depth behind a timeline reduced motion should never be
+    /// held behind); wrong for [`reduced_splash`]'s hold, which is only
+    /// mounted under `reduce_motion` already — pass `false` there, or the
+    /// hold ends on the frame it starts.
     pub fn honor_reduce_motion(mut self, honor: bool) -> Self {
         self.honor_reduce_motion = honor;
         self
@@ -484,12 +469,11 @@ impl Widget for CueWidget {
             self.fired = true;
             self.signal.set(true);
         }
-        // Either way, ask for one more frame: while waiting it is what keeps
-        // this widget's own clock advancing, and on the firing frame it is the
-        // frame that *acts* on the write — the sequence has just stopped every
-        // other animation that could have driven one, so this does not lean on
-        // the reactive waker scheduling a repaint from inside a paint pass. The
-        // early return above makes it the last frame either way.
+        // Either way, ask for one more frame: while waiting it keeps this
+        // widget's clock advancing; on the firing frame it's the frame that
+        // acts on the write, rather than leaning on the reactive waker to
+        // schedule a repaint from inside a paint pass. The early return
+        // above makes it the last frame either way.
         ctx.request_frame();
     }
 }
@@ -527,14 +511,13 @@ const LANDED: PieceMotion = PieceMotion {
 /// A piece's appearance `elapsed_ms` into the assembly, given its own
 /// `delay_ms` stagger.
 ///
-/// One spring drives offset, rotation and scale together (the source's single
-/// `transform` transition on `--ease-spring`) and, clamped, the opacity —
-/// exactly as `.piece{transition:opacity .5s var(--ease-spring), transform
-/// .5s var(--ease-spring)}` does. The flash rides its own `ease-out` envelope
-/// over the same window.
+/// One spring drives offset, rotation and scale together, and (clamped) the
+/// opacity — matching `.piece{transition:opacity .5s var(--ease-spring),
+/// transform .5s var(--ease-spring)}`. The flash rides its own `ease-out`
+/// envelope over the same window.
 ///
 /// `reduce_motion` returns the landed state at every instant: the piece
-/// appears, finished, with no drop and no flash.
+/// appears finished, with no drop and no flash.
 pub fn piece_motion(elapsed_ms: f64, delay_ms: f64, reduce_motion: bool) -> PieceMotion {
     if reduce_motion {
         return LANDED;
@@ -625,16 +608,10 @@ impl PieceEntryWidget {
     /// Paint the amber land-flash glow around the piece's box.
     ///
     /// `PaintScene::draw_shadow` is a gaussian-blurred rounded rect — the
-    /// framework's own `box-shadow` approximation, and the only blur
-    /// affordance reachable from app code — so the source's
+    /// framework's `box-shadow` approximation — so the source's
     /// `box-shadow:0 0 24px 6px var(--amber-glow)` maps onto it directly:
-    /// the spread grows the rect, the blur radius is the standard deviation
-    /// (`frust_theme`'s elevation table stores CSS blur px the same way), and
-    /// the envelope scales all three plus the alpha.
-    ///
-    /// The glow's own corner radius is the spread (a piece's radius is its
-    /// business, not the wrapper's) — at peak that is 6px on a shape already
-    /// blurred by 24, which is well under the blur's own softening.
+    /// spread grows the rect, blur radius is the standard deviation, and the
+    /// envelope scales all three plus the alpha.
     fn paint_flash(&self, ctx: &PaintCtx, scene: &mut dyn PaintScene, glow: f64) {
         let spread = spec::LAND_FLASH_SPREAD * glow;
         let origin = ctx.origin();

@@ -6,15 +6,13 @@ use frust_glyph::toast_host;
 
 use crate::failure::AppFailure;
 
-
 #[derive(Clone, Copy)]
 pub struct FailureToasts {
     queue: RwSignal<Vec<String>>,
 }
 
 thread_local! {
-    /// The one [`FailureToasts`] per UI thread — see [`app_toasts`] and the
-    /// [module docs](self).
+    /// The one [`FailureToasts`] per UI thread — see [`app_toasts`].
     static TOASTS: Cell<Option<FailureToasts>> = const { Cell::new(None) };
 }
 

@@ -1,28 +1,23 @@
 //! `page_backdrop` — the app's full-bleed background fill.
 //!
-//! A hand-rolled [`View`]/[`Widget`] pair built against [`frust::authoring`]
-//! (the same shape `examples/huddle`'s `ui::fill_box` takes), needed because
-//! no facade widget paints an unconditional "fill the available space" rect
-//! (`SizedBox`/`Image` only tighten under an already-tight constraint, and
-//! [`Stack`](frust::Stack) hands every child a LOOSE one — this declares a
-//! larger-than-any-viewport intrinsic size and lets
-//! [`BoxConstraints::constrain`] clamp it down), and because the shell clears
-//! to `ColorScheme::surface` (Glyph's `--bg-surface`, the card/input tone),
-//! while Connect and the splash overlay are authored against the page tone
+//! Hand-rolled [`View`]/[`Widget`] pair against [`frust::authoring`] because
+//! no facade widget paints an unconditional fill (`SizedBox`/`Image` only
+//! tighten under an already-tight constraint, and [`Stack`](frust::Stack)
+//! hands every child a loose one) — this declares a larger-than-any-viewport
+//! intrinsic size and lets [`BoxConstraints::constrain`] clamp it down. Also
+//! needed because the shell clears to `ColorScheme::surface` (Glyph's
+//! `--bg-surface`) while Connect and the splash overlay want the page tone
 //! `--bg-base`.
 //!
-//! **One function serves both renderings on purpose.** `docs/redesign.html`
-//! paints the whole screen `--bg-base`; this backdrop and
+//! One function serves both renderings on purpose: this backdrop and
 //! `features::connect`'s widgets resolve the same role (`Palette::page`), so
 //! the splash overlay and the `/` route paint identical tone by construction
-//! and the handoff cannot develop a one-frame colour step. See
-//! `features::connect::presentation::widgets`' module docs.
+//! and the handoff cannot develop a one-frame colour step.
 //!
-//! The splash additionally needs an **opaque, input-blocking** layer: the
-//! navigator (already rendering the finished Connect screen) stays mounted
-//! underneath the overlay for the whole sequence, so any transparent pixel
-//! would leak the assembled screen through the rain, and any unblocked tap
-//! would reach a field under it. [`BackdropView::block_input`] is that half.
+//! The splash also needs an opaque, input-blocking layer — the navigator
+//! stays mounted underneath the overlay for the whole sequence, so a
+//! transparent pixel would leak it through and an unblocked tap would reach
+//! a field under it. [`BackdropView::block_input`] is that half.
 
 use frust::Theme;
 use frust::authoring::{
@@ -36,12 +31,11 @@ use frust::authoring::{
 const INTRINSIC: f64 = 1.0e7;
 
 /// The app's page background: a full-bleed fill of the active theme's
-/// `surface_container_low` (Glyph's `--bg-base`, the page tone — see the
-/// [module docs](self)).
+/// `surface_container_low` (Glyph's `--bg-base` — see the [module
+/// docs](self)).
 ///
-/// Resolves the theme at **build** time through `use_context::<Theme>()` (the
-/// app-code delivery path, mirroring `examples/glyph-catalog`'s own root
-/// background), falling back to [`frust_glyph::baseline`] — never
+/// Resolves the theme at build time through `use_context::<Theme>()`,
+/// falling back to [`frust_glyph::baseline`] — never
 /// `Theme::neutral`/`m3_baseline` — per `lib.rs`'s design-system note.
 pub fn page_backdrop<State: 'static>() -> BackdropView<State> {
     let color = frust::use_context::<Theme>()

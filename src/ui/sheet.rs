@@ -8,10 +8,8 @@ use frust::{
 };
 use frust_glyph::{GlyphSheetHandle, glyph_sheet, show_glyph_sheet};
 
-
 pub const SCRIM_ALPHA: f32 = 0.6;
 const PANEL_PAD: f64 = 20.0;
-
 
 pub fn show_sheet<State: 'static>(
     nav: &NavigatorController<State>,
@@ -38,7 +36,6 @@ pub fn show_sheet<State: 'static>(
     );
     *glyph_handle.borrow_mut() = Some(handle);
 }
-
 
 fn sheet_content<State: 'static>(body: AnyView<State>) -> AnyView<State> {
     any(safe_area(Padding(
