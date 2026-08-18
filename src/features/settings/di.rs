@@ -22,12 +22,14 @@ use crate::features::settings::domain::repositories::{
 
 static USE_MOCK_AUTH_TOKENS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
+/// Test-only; idempotent; must run before `MuxrApp::init` to have any effect.
 pub fn use_mock_auth_tokens_for_tests() {
     USE_MOCK_AUTH_TOKENS_FOR_TESTS.store(true, Ordering::Relaxed);
 }
 
 static USE_MOCK_PREFERENCES_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
+/// Test-only; idempotent; must run before `MuxrApp::init` to have any effect.
 pub fn use_mock_preferences_for_tests() {
     USE_MOCK_PREFERENCES_FOR_TESTS.store(true, Ordering::Relaxed);
 }
@@ -57,6 +59,8 @@ fn platform_preferences_repository() -> SharedPreferencesRepository {
     match PrefsRepository::standard() {
         Ok(repository) => Arc::new(repository),
         Err(err) => {
+            // A PrefsError falls back to MockPreferencesRepository::seeded() — in-memory,
+            // not persistence.
             log::warn!("preferences: falling back to the in-memory store: {err}");
             Arc::new(MockPreferencesRepository::seeded())
         }

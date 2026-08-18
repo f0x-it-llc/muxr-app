@@ -7,7 +7,8 @@
 //!
 //! [`TrustMode`] is reused from [`crate::connection::TrustMode`] rather than
 //! re-minted, so a saved row's posture flows into a connect request with no
-//! mapping layer.
+//! mapping layer — a documented layering exception; see
+//! `docs/FEATURES_ARCHITECTURE.md`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

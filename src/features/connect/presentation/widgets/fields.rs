@@ -128,7 +128,8 @@ fn field<S: 'static>(
     )
 }
 
-/// `body_medium` re-inked, with one deliberate change to its family. `pub` so
+/// `body_medium` re-inked, with one deliberate change to its family, applied
+/// to both the field's content and its placeholder. `pub` so
 /// `tests/connect.rs`'s shaping suite uses the real style, not a copy.
 pub fn field_text_style(theme: &Theme, ink: Color) -> TextStyle {
     let mut style = inked(&theme.type_scale.body_medium, ink);

@@ -373,6 +373,7 @@ mod tests {
 
     #[test]
     fn the_legacy_insecure_bool_is_still_written_beside_the_trust_mode() {
+        // Storage-safety: the encoded string stays "insecure" across the Rust-side rename.
         let mut unverified = server("rig.example", 50051, 0);
         unverified.trust_mode = TrustMode::NoVerification;
         let payload = encode_list(&[unverified]);
@@ -420,6 +421,7 @@ mod tests {
 
     #[test]
     fn a_legacy_insecure_record_migrates_to_the_no_verification_posture() {
+        // Storage-safety: a legacy "insecure" payload still decodes across the Rust-side rename.
         let decoded = decode_list(r#"[{"host":"rig","port":50051,"insecure":true}]"#);
         assert_eq!(decoded[0].trust_mode, TrustMode::NoVerification);
     }

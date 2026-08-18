@@ -108,7 +108,8 @@ impl CredentialService for SecureCredentialStore {
         })
         .await;
         match read {
-            // Wrapped the moment it arrives so every copy this app owns scrubs on drop.
+            // Wrapped the moment it arrives so every copy this app owns scrubs on drop;
+            // the plugin's own buffer is not addressable from here.
             Ok(Some(token)) => UnlockedCredential::recovered(Zeroizing::new(token)),
             Ok(None) => UnlockedCredential::refused(CredentialStatus::NotFound),
             Err(err) => UnlockedCredential::refused(status_of(&err)),
