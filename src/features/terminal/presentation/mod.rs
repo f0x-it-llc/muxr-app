@@ -10,12 +10,10 @@
 //! | [`term`] | the **real** terminal grid — VT emulator, run batching, cell geometry, the grid widget, and the keystroke source — what an attached session mounts (`pages`'s pane-content switch) |
 //! | [`keybar`] | the IME-active-only key bar (`Esc`/`Tab`/arrows/`PgUp`/`PgDn`/`Del` + the one-shot `Ctrl`/`Alt`/`Shift` latch) — mounted the same way, live-mode only |
 //!
-//! [`pages::open_terminal_menu`] is the one item outside this feature's own
-//! call graph: `crate::shell` forwards the app bar's `⋮` press to it.
-//!
-//! [`widgets`] and [`term`] are the two halves of the card body — the mock
-//! transcript by default, [`term::terminal_surface`] once the live pane has
-//! been entered (`pages`' pane-content switch).
+//! [`pages::open_terminal_menu`] is the one call-graph exception:
+//! `crate::shell` forwards the app bar's `⋮` press to it. [`widgets`] and
+//! [`term`] are the card body's two halves — mock transcript by default,
+//! [`term::terminal_surface`] once `pages`' pane-content switch enters live.
 
 pub mod chrome;
 pub mod controller;

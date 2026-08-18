@@ -1,36 +1,29 @@
-//! The terminal **key bar**: the twelve keys a soft keyboard has no room for,
-//! docked above the keyboard while — and only while — the IME is up.
+//! The terminal **key bar**: the twelve keys a soft keyboard has no room
+//! for, docked above the keyboard while — and only while — the IME is up.
 //!
 //! ```text
 //! Ctrl  Alt  Shift  Esc │ Tab  ↑  ↓  ←  → │ PgUp  PgDn │ Del
 //! ```
 //!
-//! Ported key for key from the Flutter incumbent (order, grouping, sequences and
-//! one-shot latch semantics verbatim), plus a `Shift` it never had; the
-//! *placement* is this app's own decision — the bar is **IME-active-only chrome**.
-//! Every byte leaves through the same [`InputSeam`] the grid emits on, so a `Ctrl`
-//! armed here transforms the next character typed on the **OS keyboard**; that is
-//! why the latch lives at the emission choke point.
+//! Ported from the Flutter incumbent (order/sequences/latch semantics), plus
+//! a `Shift` it never had. Every byte leaves through the same [`InputSeam`]
+//! the grid emits on, so a latch armed here transforms the next OS-keyboard
+//! character — the reason the latch lives at that emission choke point.
 //!
-//! Three contracts:
+//! Contracts:
+//! 1. **Fixed slot, never appears/disappears**: `key_bar(false, ..)` returns
+//!    a zero-height view, mounted unconditionally — an unkeyed child list
+//!    reconciles positionally, so an appearing bar would shift the grid's
+//!    index and drop focus, dismissing the keyboard it exists to serve.
+//! 2. **Every cap claims focus on every tap**: an unclaimed pointer `Down` is
+//!    a blur, which drops the IME surface and closes the keyboard. So each
+//!    cap requests focus, re-publishes the surface, and folds routed
+//!    `Key`/`Ime` events into the shared source via [`InputSeam::absorb`].
+//! 3. **Arrow caps are vectors** (`↑↓←→`), not font glyphs: no per-platform
+//!    fallback chain, and `frust::icons` has no arrow pair.
 //!
-//! 1. **The bar is a fixed slot that collapses, never a child that appears.**
-//!    `key_bar(false, ..)` returns a zero-height view and the screen mounts it
-//!    unconditionally, because an unkeyed child list reconciles positionally: a
-//!    bar that *appeared* would shift the grid's index, tear its pod down, drop
-//!    focus — and dismiss the keyboard whose presence put the bar on screen.
-//! 2. **Every cap claims focus on every tap** — not politeness: frust treats any
-//!    pointer `Down` that requests no focus as a blur, and a blur drops the
-//!    published IME surface, closing the keyboard the bar is docked to. So each
-//!    cap requests focus, re-publishes the surface, and — while it holds the focus
-//!    path — folds the `Key`/`Ime` events routed to it into the *same* keystroke
-//!    source via [`InputSeam::absorb`].
-//! 3. **Arrow caps are vectors, not font glyphs**: `↑↓←→` (U+2190–2193) have a
-//!    per-platform fallback chain, and `frust::icons` carries no arrow pair.
-//!
-//! The **row budget** ([`cap_weight`], [`CAP_GAP`]) and the colour rules (an armed
-//! latch cap takes the amber trio a selected pill takes; `Del` takes the scheme's
-//! `error` ink) are stated where they are enforced.
+//! Row budget ([`cap_weight`], [`CAP_GAP`]) and colour rules (armed latch =
+//! selected-pill amber; `Del` = scheme `error`) are stated where enforced.
 
 use std::rc::Rc;
 
@@ -80,10 +73,9 @@ pub const CAP_PAD_X: f64 = 4.0;
 /// and for [`CAP_PAD_X`]: the largest half-step that still leaves every cap its
 /// full padding at 360 lp, with `PgUp` the binding label.
 pub const LABEL_SIZE: f32 = 8.5;
-/// One label character's advance at [`LABEL_SIZE`], in logical px: the Glyph label
-/// face is IBM Plex Mono, a 0.6 em fixed pitch, plus `label_small`'s 0.475 px of
-/// tracking. Only *relative* cap widths derive from it, so a font fallback that
-/// measured differently shifts padding by a fraction of a px.
+/// One label character's advance at [`LABEL_SIZE`], px: IBM Plex Mono's 0.6em
+/// fixed pitch plus `label_small`'s 0.475px tracking. Only relative widths
+/// derive from it, so a differently-measured fallback shifts padding by a fraction.
 const LABEL_ADVANCE: f64 = 0.6 * LABEL_SIZE as f64 + 0.475;
 /// The drawn size of an arrow mark inside its cap.
 pub const ICON_SIZE: f64 = 13.0;
@@ -154,12 +146,11 @@ fn cap_weight(key: BarKey) -> u32 {
 /// The key bar, or a zero-height slot when the IME is down. `active` is the
 /// focused grid's published `ImeState.active` as the screen knows it.
 ///
-/// **Reads `seam.revision` tracked**, so a latch change — a tap on `Ctrl` here, or
-/// a soft-keyboard character *consuming* that `Ctrl` over on the grid — wakes the
-/// rebuild that repaints the armed pips. Mount it from a `Component::build`.
+/// **Reads `seam.revision` tracked**, so a latch change wakes the rebuild
+/// that repaints the armed pips. Mount from a `Component::build`.
 pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State> {
-    // Tracked: see the doc note above. Read unconditionally, before the inactive
-    // early-out, so the subscription exists on the frame the bar is still hidden.
+    // Read unconditionally, before the inactive early-out, so the
+    // subscription exists on the frame the bar is still hidden.
     let _revision = seam.revision.get();
     if !active {
         return any(SizedBox::<State>(None, Some(0.0)));
@@ -170,8 +161,7 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
     let ink = CardInk::from_theme(&theme);
     let danger = theme.scheme().error;
     let latch = seam.latch();
-    // The keyboard's own inset: the bar docks directly on top of it. Absent in
-    // a headless test and on desktop, where it is simply zero.
+    // The keyboard's own inset the bar docks on; zero in a headless test/desktop.
     let keyboard = frust::use_context::<WindowInsets>()
         .map(|insets| insets.view_insets.bottom)
         .unwrap_or(0.0);
@@ -179,8 +169,8 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
     let mut children: Vec<FlexChild<State>> = Vec::with_capacity(BarKey::ORDER.len() * 2);
     for (index, key) in BarKey::ORDER.iter().copied().enumerate() {
         if key.separator_before() {
-            // The rule stands **in place of** the gap rather than beside it: it
-            // carries its own margin, and the row has no px to spend twice.
+            // Replaces the gap rather than adding to it — its own margin,
+            // and the row has no px to spend twice.
             children.push(inflexible(separator::<State>(&colors)));
         } else if index > 0 {
             children.push(inflexible(SizedBox::<State>(Some(CAP_GAP), None)));
@@ -191,9 +181,8 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
         ));
     }
 
-    // Band outside, padding inside: the bar is full-bleed chrome docked on the
-    // keyboard, so its fill must reach both screen edges (and the keyboard inset
-    // below the caps must be filled too, not left as a gap).
+    // Band outside, padding inside: full-bleed chrome must reach both screen
+    // edges, keyboard inset included.
     any(BarBackdropView {
         fill: ink.head,
         hairline: ink.card_border,
@@ -256,19 +245,16 @@ fn key_cap<State: 'static>(
         border,
         armed,
         seam: seam.clone(),
-        // Through the seam, never `source.on_bar_key` + `dispatch` by hand:
-        // `press_bar_key` is where the session's read-only gate lives, so a cap
-        // mounted over a read-only session derives nothing.
+        // Via `press_bar_key`, never hand-rolled: it's where the read-only gate lives.
         on_press: Rc::new(move |_state: &mut State| {
             pressed_seam.press_bar_key(key);
         }),
     }
 }
 
-/// A filled rect behind one child, with an optional hairline along its **top**
-/// edge — the bar's own band, and (fill only) the group separators. Hand-rolled
-/// rather than reusing [`super::chrome`]'s `term_box`, which strokes a *full*
-/// border and rounds its corners: the bar's only edge is the rule above it.
+/// A filled rect behind one child, with an optional top hairline — the
+/// bar's band and (fill only) the group separators. Hand-rolled rather than
+/// [`super::chrome`]'s `term_box`, which strokes a full rounded border.
 struct BarBackdropView<State: 'static> {
     fill: Color,
     hairline: Color,
@@ -357,11 +343,9 @@ struct KeyCapView<State: 'static> {
 }
 
 impl<State: 'static> KeyCapView<State> {
-    /// The cap's content: a vector arrow, or its printed label — centred inside a
-    /// [`CAP_PAD_X`] inset, so nothing a cap draws reaches its own edge. The inset
-    /// is **inside** the press target and the fill: the whole box stays tappable
-    /// and painted, and a label too wide for its cap can never paint over the
-    /// border.
+    /// The cap's content: a vector arrow, or its printed label — centred
+    /// inside a [`CAP_PAD_X`] inset that stays inside the press target and
+    /// fill, so a wide label can never paint over the border.
     fn content(&self) -> AnyView<State> {
         let inner: AnyView<State> = match arrow_mark(self.key) {
             Some(mark) => any(icon(mark).size(ICON_SIZE).color(self.ink)),
@@ -418,8 +402,7 @@ impl<State: 'static> View<State> for KeyCapView<State> {
         element: &mut KeyCapWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // Closures aren't comparable; reinstall the adapter every time. The
-        // seam is `Rc`-backed and just as un-comparable, so it follows.
+        // Closures and the `Rc`-backed seam aren't comparable; reinstall both every time.
         element.on_press = erase_callback(&self.on_press);
         element.seam = self.seam.clone();
         let mut flags = rebuild_child(&prev.content(), &self.content(), &mut element.content, ctx);
@@ -427,8 +410,7 @@ impl<State: 'static> View<State> for KeyCapView<State> {
             element.fill = self.fill;
             element.border = self.border;
             element.toggled = self.key.is_latch().then_some(self.armed);
-            // Semantics are re-collected off the paint pass, so an armed-state
-            // change republishes through PAINT.
+            // Semantics are re-collected off paint, so this republishes through it.
             flags |= ChangeFlags::PAINT;
         }
         flags
@@ -455,8 +437,7 @@ impl Widget for KeyCapWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
-        // Scale about the cap's own centre while pressed. Hit testing stays at
-        // full size, exactly as the card's own `:active` treatment does.
+        // Scale about the cap's centre while pressed; hit testing stays full size.
         if self.pressed {
             let centre = Vec2::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
             scene.push_transform(
@@ -466,9 +447,8 @@ impl Widget for KeyCapWidget {
         let radius = CAP_RADIUS.min(size.width / 2.0).min(size.height / 2.0);
         scene.fill_rounded_rect(origin, size, radius, self.fill);
         if self.border != Color::TRANSPARENT {
-            // A hairline just inside the bounds: the outer rounded rect in the
-            // border tone, then the fill inset over it (`PaintScene` has no
-            // stroked-rounded-rect primitive).
+            // Border tone full-size, fill inset over it — `PaintScene` has no
+            // stroked-rounded-rect primitive.
             scene.fill_rounded_rect(origin, size, radius, self.border);
             let inset = Point::new(origin.x + SEPARATOR_W, origin.y + SEPARATOR_W);
             let inner = Size::new(
@@ -485,10 +465,9 @@ impl Widget for KeyCapWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         let InputEvent::Pointer(pointer) = event else {
-            // Focus-routed `Key`/`Ime` while this cap holds the focus path:
-            // fold it into the shared source, exactly as the grid would have.
-            // Same source, same content type — the platform never notices which
-            // widget it is talking to.
+            // Focus-routed `Key`/`Ime`: fold into the shared source, exactly
+            // as the grid would — the platform never notices which widget it
+            // is talking to.
             if !ctx.has_focus() {
                 return EventResult::Ignored;
             }
@@ -501,12 +480,8 @@ impl Widget for KeyCapWidget {
         };
         match pointer.phase {
             PointerPhase::Down => {
-                // Claim focus on **every** tap: a `Down` that claims nothing is
-                // a blur, and a blur drops the whole IME surface and closes the
-                // keyboard this bar is docked to. Recorded on the seam first,
-                // because this is a hand-off rather than a blur of the session:
-                // the claim is what stops the grid scrubbing its buffers when it
-                // notices it lost the focus path.
+                // Claim focus first (see contract 2, module docs) — this is a
+                // hand-off, not a session blur, so the grid must not scrub.
                 self.seam.claim_focus();
                 ctx.request_focus();
                 ctx.publish_ime_state(self.seam.ime_state(None));
