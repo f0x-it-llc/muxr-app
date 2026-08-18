@@ -11,13 +11,11 @@ use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::terminal::domain::entities::Workspace;
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
-/// What one load addresses — [`LoadWorkspace`]'s params. Two facts, not one, because
-/// the two reads this use case makes are addressed differently: the session *name*
-/// needs an id, and the space list needs to know whether this backend has spaces at
-/// all. Only herdr does — zellij answers an always-empty list — so a zellij
-/// session's load skips that round trip entirely. The caller decides: reading a
-/// backend off a session id is `presentation`'s own one-accessor job, so this stays
-/// a plain flag and this layer stays free of the id convention.
+/// What one load addresses — [`LoadWorkspace`]'s params. Two facts because the two reads this
+/// use case makes are addressed differently: the session *name* needs an id, and the space list
+/// needs to know whether this backend has spaces at all (only herdr does — zellij answers an
+/// always-empty list, so its load skips that round trip). The caller decides the flag;
+/// resolving a backend off a session id is `presentation`'s own job.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceQuery {
     /// The attached session's id (`/terminal?session=<id>`), or `None` for a
@@ -27,23 +25,20 @@ pub struct WorkspaceQuery {
     pub with_spaces: bool,
 }
 
-/// Loads the whole screen. `Params` is a [`WorkspaceQuery`]: which session to name,
-/// and whether this backend has spaces to list.
+/// Loads the whole screen. `Params` is a [`WorkspaceQuery`]: which session to name, and
+/// whether this backend has spaces to list.
 ///
-/// **Two injected repositories, on purpose.** Spaces/tabs/lines come from this
-/// feature's own [`TerminalRepository`]; the session *name* comes from the
-/// `sessions` feature's [`SessionsRepository`], because that is where a session's
-/// name lives and the rename this screen offers writes back to the same store.
-/// Reaching a sibling feature's **domain** contract is a deliberate widening of
-/// `docs/ARCHITECTURE.md`'s slice table, and strictly better than a second name
-/// store that could drift out of step with the sessions list.
+/// **Two injected repositories, on purpose.** Spaces/tabs/lines come from this feature's own
+/// [`TerminalRepository`]; the session *name* comes from `sessions`' [`SessionsRepository`],
+/// because that is where a session's name lives and this screen's rename writes back to the
+/// same store — a deliberate widening of `docs/ARCHITECTURE.md`'s slice table, strictly better
+/// than a second name store that could drift out of step with the sessions list.
 pub struct LoadWorkspace {
     terminal: Arc<dyn TerminalRepository + Send + Sync>,
     sessions: Arc<dyn SessionsRepository + Send + Sync>,
 }
 
 impl LoadWorkspace {
-    /// Construct with both injected repositories.
     pub fn new(
         terminal: Arc<dyn TerminalRepository + Send + Sync>,
         sessions: Arc<dyn SessionsRepository + Send + Sync>,

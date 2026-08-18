@@ -1,15 +1,12 @@
-//! [`DemoFeed`] — the mock-era terminal byte source: a checked-in build-log
-//! capture, replayed at its recorded rate, plus a PTY-style echo of anything sent
-//! back into it.
+//! [`DemoFeed`] — the mock-era terminal byte source: a checked-in build-log capture, replayed at
+//! its recorded rate, plus a PTY-style echo of anything sent back into it.
 //!
 //! **The fixture is data, never generated at runtime.** [`FIXTURE`] is
-//! `benchmarks/harness/fixtures/terminal/build-log.chunks` from the Frust
-//! checkout, copied **bit for bit** (sha256 [`FIXTURE_SHA256`], verified by this
-//! module's own test) and `include_bytes!`d rather than read from disk: Android's
-//! asset layout and iOS's bundle layout would each need their own loader, and a
-//! run could then silently replay a stale or missing file. It is the same 30 Hz,
-//! 900-chunk, 80x45 stream the S9 benchmark measured this renderer against.
-//! Framing, per that fixture directory's own `README.md`:
+//! `benchmarks/harness/fixtures/terminal/build-log.chunks` from the Frust checkout, copied bit
+//! for bit (sha256 [`FIXTURE_SHA256`], verified by this module's own test) and `include_bytes!`d
+//! rather than read from disk — Android/iOS asset layouts would each need their own loader, and a
+//! stale or missing file would then replay silently. Same 30 Hz, 900-chunk, 80x45 stream the S9
+//! benchmark measured this renderer against. Framing, per that fixture directory's `README.md`:
 //!
 //! ```text
 //! build-log.chunks   repeat [u32 little-endian length][length bytes]
@@ -17,13 +14,12 @@
 //! replay             emit chunk i at t = i * (1000 / HZ) ms from start
 //! ```
 //!
-//! **Time is injected, never read behind the caller's back**: the port
-//! ([`TerminalFeed`]) is deliberately time-free, so this feed owns a [`Cadence`] —
-//! real elapsed wall time in the app, or a test-driven cursor
-//! ([`DemoFeed::manual`]). **Echo mode** appends what is sent back to the output
-//! stream, the way a real PTY echoes before the program under it answers; whether
-//! [`is_open`] reports closed once the replay drains depends on whether an echo is
-//! **queued**, not on whether echo is switched on — see that method's own doc.
+//! **Time is injected, never read behind the caller's back**: the port ([`TerminalFeed`]) is
+//! deliberately time-free, so this feed owns a [`Cadence`] — real elapsed wall time in the app,
+//! or a test-driven cursor ([`DemoFeed::manual`]). Echo mode appends what is sent back to the
+//! output stream, the way a real PTY echoes before the program under it answers; whether
+//! [`is_open`] reports closed once the replay drains depends on whether an echo is queued, not
+//! on whether echo is switched on — see that method's own doc.
 //!
 //! [`is_open`]: TerminalFeed::is_open
 
@@ -207,11 +203,10 @@ impl Default for DemoFeed {
 }
 
 impl TerminalFeed for DemoFeed {
-    /// Echo first, then **every** chunk whose scheduled time
-    /// (`i * 1000 / HZ` ms) has passed. Echo leads because a PTY echoes a
-    /// keystroke before the program under it answers — and it is one write
-    /// however many keys arrived since the last wake. A late wake catches up on
-    /// every due chunk in one pass: the repaint is coalesced, the input is not.
+    /// Echo first, then every chunk whose scheduled time (`i * 1000 / HZ` ms) has passed. Echo
+    /// leads because a PTY echoes a keystroke before the program under it answers — one write
+    /// however many keys arrived since the last wake. A late wake catches up on every due chunk
+    /// in one pass: the repaint is coalesced, the input is not.
     fn drain_output(&mut self, sink: &mut dyn FnMut(&[u8])) -> usize {
         let mut writes = 0usize;
         if !self.echoed.is_empty() {
@@ -256,22 +251,15 @@ impl TerminalFeed for DemoFeed {
         self.last_resize = Some((cols, rows));
     }
 
-    /// Whether this feed can still produce output right now: open while the
-    /// replay has chunks left, **or** while an echo is queued and not yet
-    /// drained — not merely because echo is switched on.
+    /// Open while the replay has chunks left, or while an echo is queued and not yet drained —
+    /// not merely because echo is switched on. Echo used to be an unconditional "stay open
+    /// forever" clause; now that [`InputSeam::dispatch`] drains an echo synchronously, a drained
+    /// replay with nothing queued has nothing left to say.
     ///
-    /// Echo used to be an unconditional "stay open forever" clause, keeping
-    /// [`run_feed`]'s 30 Hz timer alive for the rest of the mount just so a
-    /// keystroke typed after the fixture drained still had somewhere to surface.
-    /// Now that [`InputSeam::dispatch`] drains an echo **synchronously**, a
-    /// drained replay with nothing queued really has nothing left to say.
+    /// A property of a **finite replay with no live process behind it**, not a rule every
+    /// [`TerminalFeed`] shares — the trait's own default stays `true`, and a live PTY/gRPC
+    /// session's should too, since a real process can answer at any time.
     ///
-    /// A property of being a **finite replay with no live process behind it**,
-    /// not a rule every [`TerminalFeed`] shares — the trait's own default stays
-    /// `true` unconditionally, and a live PTY/gRPC session's should too, since a
-    /// real process can answer at any time with nothing queued to observe.
-    ///
-    /// [`run_feed`]: crate::features::terminal::presentation::term::run_feed
     /// [`InputSeam::dispatch`]: crate::features::terminal::presentation::term::InputSeam::dispatch
     fn is_open(&self) -> bool {
         !self.is_drained() || !self.echoed.is_empty()

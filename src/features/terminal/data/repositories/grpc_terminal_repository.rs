@@ -1,29 +1,25 @@
-//! [`GrpcTerminalRepository`] — the real, `muxrd`-backed [`TerminalRepository`],
-//! and `terminal::di::provide`'s production choice.
+//! [`GrpcTerminalRepository`] — the real, `muxrd`-backed [`TerminalRepository`], and
+//! `terminal::di::provide`'s production choice.
 //!
-//! Every call resolves [`ConnectionController::client`] fresh — the sanctioned
-//! path to the live [`MuxrClient`] — rather than dialing a channel of its own;
-//! `None` (disconnected) maps to [`AppFailure::Network`] rather than panicking.
-//! The `Arc<ConnectionController>` field is this feature's one `data` →
-//! `crate::connection` edge, resolved once in `di::provide`.
+//! Every call resolves [`ConnectionController::client`] fresh — the sanctioned path to the live
+//! [`MuxrClient`] — rather than dialing a channel of its own; `None` (disconnected) maps to
+//! [`AppFailure::Network`] rather than panicking. The `Arc<ConnectionController>` field is this
+//! feature's one `data` → `crate::connection` edge, resolved once in `di::provide`.
 //!
-//! **What it addresses, and how it learns it.** The read/detach methods take no
-//! session id, so this repository is [`bind`](TerminalRepository::bind)-ed: the
-//! screen hands it the attached session on mount and the *connection id* the
-//! `AttachTerminal` stream minted as soon as one exists (and again on every
-//! re-attach). Both ride on every request with a field for them, which is what
-//! makes a space/tab switch land on **this** client's view; an unbound session is
-//! not an error, and a bare `/terminal` answers empty. Two calls never reach the
-//! wire: `tab_lines` (on a live session a tab's content is the emulator's) and
-//! `detach_session` (detaching *is* dropping the stream, which
-//! `GrpcTerminalFeed`'s own [`Drop`] does on unmount).
+//! **What it addresses, and how it learns it.** The read/detach methods take no session id, so
+//! this repository is [`bind`](TerminalRepository::bind)-ed: the screen hands it the attached
+//! session on mount and the connection id the `AttachTerminal` stream minted as soon as one
+//! exists (and again on every re-attach). Both ride on every request, which is what makes a
+//! space/tab switch land on this client's view; an unbound session is not an error, and a bare
+//! `/terminal` answers empty. Two calls never reach the wire: `tab_lines` (on a live session a
+//! tab's content is the emulator's) and `detach_session` (detaching *is* dropping the stream,
+//! which `GrpcTerminalFeed`'s own [`Drop`] does on unmount).
 //!
-//! **Tab keys are derived, not carried**, and **uniqueness is load-bearing** —
-//! [`map_tabs`]/[`unique_key`] state that contract. Failure mapping funnels
-//! through [`crate::net::error::from_status`], with `UNAUTHENTICATED`
-//! additionally invoking [`ConnectionController::on_session_expired`]; every
-//! `ActionAck`-returning call maps through [`crate::net::error::ack_result`]
-//! rather than trusting the outer `Status`.
+//! **Tab keys are derived, not carried**, and uniqueness is load-bearing —
+//! [`map_tabs`]/[`unique_key`] state that contract. Failure mapping funnels through
+//! [`crate::net::error::from_status`], with `UNAUTHENTICATED` additionally invoking
+//! [`ConnectionController::on_session_expired`]; every `ActionAck`-returning call maps through
+//! [`crate::net::error::ack_result`] rather than trusting the outer `Status`.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 

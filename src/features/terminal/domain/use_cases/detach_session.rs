@@ -19,7 +19,6 @@ pub struct DetachSession {
 }
 
 impl DetachSession {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn TerminalRepository + Send + Sync>) -> Self {
         Self { repo }
     }
