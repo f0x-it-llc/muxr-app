@@ -173,7 +173,9 @@ fn pins_match(presented: &[u8; PIN_LEN], expected: &[u8; PIN_LEN]) -> bool {
 /// `CryptoProvider::get_default()`, so one shared provider keeps signature
 /// algorithms and cipher suites from splitting across two instances. A lost
 /// install race is a no-op: this tree pairs rustls' default features with
-/// tonic's `tls-aws-lc`, so the winner is always the same provider.
+/// tonic's `tls-aws-lc`, so the winner is always the same provider. Getting
+/// this wrong — installing a second, conflicting provider at runtime — is
+/// exactly the failure this shared-provider contract guards against.
 fn crypto_provider() -> Arc<CryptoProvider> {
     if let Some(installed) = CryptoProvider::get_default() {
         return installed.clone();

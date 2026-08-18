@@ -167,8 +167,10 @@ conformance test enforcing that owner-dependent context lookups appear only at D
 sanctioned sites, and never inside a spawned async block's body regardless of directory.
 `comment_residue.rs` is a source-scan ratchet locking the frust checkout's Comment Conventions shut
 for this app's own `src/`/`tests/` — a slimmed port of frust's own conformance scan, plus a
-gate/G-ledger citation detector for this repo's device-gate review shorthand. Per-feature and
-net-transport suites are covered in [FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests) and
+gate/G-ledger citation detector for this repo's device-gate review shorthand. `comment_density.rs`
+is the sibling comment-density ratchet: overall + per-file caps with a justified allowlist, over
+the same `src/`/`tests/` roots. Per-feature and net-transport suites are covered in
+[FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests) and
 [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md#tests).
 
 ## Design References

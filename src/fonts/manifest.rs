@@ -273,7 +273,8 @@ mod tests {
 
     #[test]
     fn a_family_that_differs_from_its_display_name_keeps_both() {
-        // The whole reason this module models two names.
+        // Models two names because a picker row showing `BlexMono` would be unrecognizable,
+        // while a stack naming `IBM Plex Mono Nerd Font Mono` resolves to nothing.
         let entries = parse_manifest(FIXTURE.as_bytes()).expect("parses");
         let plex = entries
             .iter()
