@@ -113,7 +113,6 @@ impl ManageAction {
         }
     }
 
-    /// Whether the row is the destructive one.
     fn destructive(self) -> bool {
         matches!(self, ManageAction::Kill)
     }

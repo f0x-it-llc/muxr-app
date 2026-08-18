@@ -1,16 +1,9 @@
-//! `sessions` domain repository contract — the seam this feature's use cases
-//! depend on and `data` implements.
-//!
-//! [`SessionsRepository`] is the whole contract: list, create, rename, kill —
-//! exactly the four operations `docs/redesign.html`'s sessions block affords.
-//! Async because `data::GrpcSessionsRepository` genuinely awaits a `muxrd`
-//! gRPC round trip; `data::MockSessionsRepository` implements the identical
-//! `async` contract with no real await, so nothing above this trait branches
-//! on which implementation is behind it. Consumed as
-//! `Arc<dyn SessionsRepository + Send + Sync>` (huddle's DI convention), so
-//! neither the use cases nor the controller carry a repository type
-//! parameter. Every method fails with the app-wide [`AppFailure`]
-//! vocabulary — `data` owns the single mapping site into it.
+//! [`SessionsRepository`] — list/create/rename/kill, the four ops `data`
+//! implements and `domain::use_cases` depend on. Async so
+//! `GrpcSessionsRepository` can genuinely await a `muxrd` round trip while
+//! `MockSessionsRepository` implements the same contract with no real await.
+//! Consumed as `Arc<dyn SessionsRepository + Send + Sync>`; every method
+//! fails with [`AppFailure`], mapped once in `data`.
 
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{RenameRequest, Session};
@@ -19,17 +12,15 @@ use crate::features::sessions::domain::entities::{RenameRequest, Session};
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 pub trait SessionsRepository {
-    /// Every session the connected server currently knows about, in display
-    /// order (the daemon's own ordering — this layer never re-sorts).
+    /// Sessions in the server's own display order — never re-sorted here.
     async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure>;
 
-    /// Create a session named `name`, returning it as stored (with the id and
-    /// creation label the server minted).
+    /// Creates a session named `name`; returns it as stored (server-minted id).
     async fn create_session(&self, name: String) -> Result<Session, AppFailure>;
 
-    /// Rename an existing session, returning it as stored.
+    /// Renames an existing session; returns it as stored.
     async fn rename_session(&self, request: RenameRequest) -> Result<Session, AppFailure>;
 
-    /// Kill the session with `id`, disconnecting any attached client.
+    /// Kills the session with `id`, disconnecting any attached client.
     async fn kill_session(&self, id: String) -> Result<(), AppFailure>;
 }

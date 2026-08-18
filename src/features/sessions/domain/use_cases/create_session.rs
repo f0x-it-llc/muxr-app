@@ -15,13 +15,11 @@ use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::Session;
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
-/// Creates a session via the injected repository.
 pub struct CreateSession {
     repo: Arc<dyn SessionsRepository + Send + Sync>,
 }
 
 impl CreateSession {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn SessionsRepository + Send + Sync>) -> Self {
         Self { repo }
     }

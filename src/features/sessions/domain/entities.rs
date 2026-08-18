@@ -1,34 +1,16 @@
-//! `sessions` domain entities — the feature's plain-data types.
-//!
-//! One aggregate ([`Session`]) plus the value objects the `/sessions` screen
-//! renders from it. Every field exists because `docs/redesign.html`'s
-//! **sessions** block paints it: the card's name and avatar initial, its two
-//! chips ([`Session::status`]/[`Session::backend`]), and the `.sess-meta`
-//! counts row plus the `.pane-pill` previews ([`LayoutSummary`]). Nothing is
-//! modelled speculatively — there is no creation timestamp, since the
-//! redesigned card prints no `created` line.
-//!
-//! # The varying third metric
-//!
-//! The `.sess-meta` row's first two spans are always panes and tabs; the
-//! third **varies by what the session actually is** — `◎ N clients` for a
-//! running zellij session, `◆ N spaces` for a herdr one, `N tabs saved` for
-//! an idle resurrectible one. That is a difference in the *facts a daemon
-//! reports*, not a rendering choice, so it is modelled as [`ThirdMetric`] —
-//! one enum on [`LayoutSummary`] rather than three mostly-zero count fields.
-//!
-//! These shapes are plain owned data — real repository or mock alike map a
-//! session proto onto them field by field, with no presentation-layer change.
+//! `sessions` domain entities — the feature's plain-data types: one
+//! aggregate ([`Session`]) plus the value objects the `/sessions` screen
+//! renders from it. Real repository and mock alike map a session proto onto
+//! these field by field, with no presentation-layer change.
 
 /// One remote multiplexer session, as the sessions list renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
-    /// The daemon's stable key for this session, distinct from
-    /// [`name`](Self::name) (a rename changes the name, not the key) — every
+    /// Stable daemon key, distinct from [`name`](Self::name) — every
     /// mutation on [`SessionsRepository`](super::repositories::SessionsRepository)
-    /// addresses a session by this.
+    /// addresses a session by this, not the name.
     pub id: String,
-    /// The session's user-facing name (`.sess-name`), the one a rename edits.
+    /// User-facing name (`.sess-name`); what a rename edits.
     pub name: String,
     /// Live or merely resurrectible (`.sess-card.running` vs `.idle`).
     pub status: SessionStatus,
@@ -40,9 +22,9 @@ pub struct Session {
 }
 
 impl Session {
-    /// The uppercase first character of [`name`](Self::name), for the card's
-    /// `.sess-avatar` tile — `"?"` for an empty name (the repository rejects
-    /// blank names, so this is defence in depth, not a reachable state).
+    /// Uppercased first character of [`name`](Self::name) for the avatar
+    /// tile; `"?"` for empty (defence in depth — the repository rejects
+    /// blank names).
     pub fn initial(&self) -> String {
         self.name
             .chars()
@@ -52,8 +34,7 @@ impl Session {
     }
 }
 
-/// A session's liveness. Two states, because the daemon distinguishes exactly
-/// two on this screen: attached-and-running, or saved-and-resurrectible.
+/// A session's liveness — exactly the two states the daemon distinguishes here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
     /// Live: the multiplexer process is up (`.chip-run` "running").
@@ -63,7 +44,6 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    /// The chip label this status renders as.
     pub fn label(self) -> &'static str {
         match self {
             SessionStatus::Running => "running",
@@ -71,25 +51,21 @@ impl SessionStatus {
         }
     }
 
-    /// Whether this status is the live one — the card's success-hued chip keys
-    /// off this rather than re-matching the variant at each paint site.
+    /// Whether this is the live state — call sites key off this instead of
+    /// re-matching the variant.
     pub fn is_live(self) -> bool {
         matches!(self, SessionStatus::Running)
     }
 }
 
-/// Which multiplexer fronts a session. `muxrd` speaks to both (see the app's
-/// own README), and the card names which one.
+/// Which multiplexer fronts a session — `muxrd` speaks to both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionBackend {
-    /// A zellij session.
     Zellij,
-    /// A herdr session.
     Herdr,
 }
 
 impl SessionBackend {
-    /// The chip label this backend renders as.
     pub fn label(self) -> &'static str {
         match self {
             SessionBackend::Zellij => "zellij",
@@ -98,54 +74,47 @@ impl SessionBackend {
     }
 }
 
-/// A session's layout, summarized: the counts the `.sess-meta` row prints plus
-/// the `.pane-pill` previews under it. A *summary*, not the layout itself —
-/// the real tab/pane tree belongs to the terminal feature, and this screen
-/// never needs it.
+/// A session's layout, summarized — not the layout itself: the real
+/// tab/pane tree belongs to the terminal feature, and this screen never
+/// needs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutSummary {
     /// Open tabs (`◧ N tabs`).
     pub tabs: u32,
     /// Open panes across every tab (`▣ N panes`).
     pub panes: u32,
-    /// The `.sess-meta` row's varying third span — see [`ThirdMetric`] and the
-    /// [module docs](self).
+    /// The row's third, backend-dependent span — see [`ThirdMetric`].
     pub third: ThirdMetric,
-    /// Up to two pane titles the card previews as `.pane-pill`s. Empty for an
-    /// idle session (the mock's `jumping-peach` row shows none, and the card
-    /// draws no pills row at all for one).
+    /// Up to two pane titles previewed as `.pane-pill`s; empty for an idle
+    /// session (no pills row drawn).
     pub preview: Vec<String>,
 }
 
 impl LayoutSummary {
-    /// The `▣ N panes` span.
     pub fn panes_label(&self) -> String {
         format!("\u{25a3} {} panes", self.panes)
     }
 
-    /// The `◧ N tabs` span.
     pub fn tabs_label(&self) -> String {
         format!("\u{25e7} {} tabs", self.tabs)
     }
 }
 
-/// The `.sess-meta` row's third span: **which** fact it carries depends on the
-/// session, not on the screen (see the [module docs](self)). A daemon reports
-/// attached clients for a running zellij session, spaces for a herdr one, and
-/// how many tabs a resurrectible session has saved.
+/// The `.sess-meta` row's third span: which fact it carries varies by session
+/// kind — attached clients (running zellij), spaces (herdr), or saved tabs
+/// (idle/resurrectible).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThirdMetric {
-    /// `◎ N clients` — clients currently attached to a running zellij session.
+    /// `◎ N clients` — attached to a running zellij session.
     Clients(u32),
     /// `◆ N spaces` — a running herdr session's spaces.
     Spaces(u32),
-    /// `N tabs saved` — what an idle, resurrectible session kept. Glyphless in
-    /// the redesign, deliberately: it is a stored count, not a live one.
+    /// `N tabs saved` — an idle session's stored count; deliberately
+    /// glyphless (not a live metric).
     TabsSaved(u32),
 }
 
 impl ThirdMetric {
-    /// The span this metric renders as.
     pub fn label(self) -> String {
         match self {
             ThirdMetric::Clients(n) => format!("\u{25ce} {n} clients"),
@@ -156,9 +125,8 @@ impl ThirdMetric {
 }
 
 /// [`SessionsRepository::rename_session`](super::repositories::SessionsRepository::rename_session)'s
-/// two-field request — a named struct rather than a tuple because a use case's
-/// `Params` is a single associated type (see
-/// [`RenameSession`](super::use_cases::RenameSession)).
+/// request — a named struct, not a tuple, since a use case's `Params` is
+/// one associated type (see [`RenameSession`](super::use_cases::RenameSession)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenameRequest {
     /// The session to rename, by [`Session::id`].
@@ -199,7 +167,6 @@ mod tests {
 
     #[test]
     fn each_third_metric_prints_its_own_span() {
-        // The three shapes `docs/redesign.html`'s three cards draw, in order.
         assert_eq!(ThirdMetric::Clients(0).label(), "\u{25ce} 0 clients");
         assert_eq!(ThirdMetric::Spaces(5).label(), "\u{25c6} 5 spaces");
         assert_eq!(ThirdMetric::TabsSaved(0).label(), "0 tabs saved");
@@ -207,8 +174,6 @@ mod tests {
 
     #[test]
     fn the_meta_spans_are_addressable_one_by_one() {
-        // The card lays the three spans out separately (12px gap), so each
-        // has to be printable on its own.
         let layout = session("dev").layout;
         assert_eq!(layout.panes_label(), "\u{25a3} 9 panes");
         assert_eq!(layout.tabs_label(), "\u{25e7} 4 tabs");

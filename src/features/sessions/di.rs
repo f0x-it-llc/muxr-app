@@ -1,29 +1,10 @@
-//! `sessions`'s composition-root wiring seam.
-//!
-//! [`provide`], called once from `crate::MuxrApp::init` alongside every other
-//! feature's own `di::provide`, constructs this feature's one app-scoped
-//! [`SessionsRepository`] and publishes it under the root owner via
-//! [`frust::provide_context`], so every `/sessions` mount resolves the *same*
-//! store through [`expect_sessions_repository`]. Production builds
-//! [`GrpcSessionsRepository`] over the app's [`ConnectionController`]
-//! (already published by the time this runs).
-//!
-//! # The headless-test seam
-//!
-//! `provide` runs identically for a real launch or a `tests/*.rs` suite
-//! (`Harness::mount`) — no `cfg(test)` to branch on, since an integration
-//! test binary links the normal build. So a suite opts out **before**
-//! `provide` runs, via [`use_mock_sessions_for_tests`] (`tests/support::setup`
-//! is the one call site) — the same seam shape
-//! `settings::di::use_mock_preferences_for_tests` and
-//! `connection::use_mock_connection_for_tests` use.
-//!
-//! # Why `Arc<dyn …>` and not a generic
-//!
-//! `use_controller`'s bounds require `Send + Sync + 'static`, so the
-//! repository travels as `Arc<dyn SessionsRepository + Send + Sync>`
-//! (huddle's DI convention), keeping `SessionsController` free of a
-//! repository type parameter.
+//! `sessions`'s composition-root wiring seam (see
+//! `docs/FEATURES_ARCHITECTURE.md`'s DI pattern). [`provide`] constructs the
+//! one app-scoped [`SessionsRepository`] and publishes it via
+//! [`frust::provide_context`]. [`use_mock_sessions_for_tests`] must flip the
+//! mock switch before `provide` runs — no `cfg(test)` branch, since
+//! `tests/*.rs` links the normal build. `Arc<dyn SessionsRepository + Send +
+//! Sync>` satisfies `use_controller`'s `Send + Sync + 'static` bound.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,26 +17,23 @@ use crate::features::sessions::data::repositories::{
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
-/// The shared repository handle this feature publishes and resolves — a type
-/// alias so the provide/expect pair can never drift apart.
+/// Type alias so the provide/expect pair can never drift apart.
 pub type SharedSessionsRepository = Arc<dyn SessionsRepository + Send + Sync>;
 
-/// `false` (the real repository) for every app run; flipped once per test
-/// process, before [`provide`] ever runs.
+/// Real repository by default; flipped once per test process before
+/// [`provide`] runs.
 static USE_MOCK_SESSIONS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Opt the current process out of the real, `muxrd`-backed repository for the
-/// rest of its life. Idempotent; must run **before** `MuxrApp::init`.
+/// Opts the process onto the mock for its remaining life. Idempotent; must
+/// run before `MuxrApp::init`.
 pub fn use_mock_sessions_for_tests() {
     USE_MOCK_SESSIONS_FOR_TESTS.store(true, Ordering::Relaxed);
 }
 
-/// Wire this feature's dependencies into context. See the [module docs](self).
 pub fn provide() {
     provide_context(platform_sessions_repository());
 }
 
-/// The [`SessionsRepository`] [`provide`] publishes.
 fn platform_sessions_repository() -> SharedSessionsRepository {
     if USE_MOCK_SESSIONS_FOR_TESTS.load(Ordering::Relaxed) {
         return Arc::new(MockSessionsRepository::seeded());
@@ -63,12 +41,11 @@ fn platform_sessions_repository() -> SharedSessionsRepository {
     Arc::new(GrpcSessionsRepository::new(expect_connection_controller()))
 }
 
-/// Resolve the repository [`provide`] published.
+/// Resolves the repository [`provide`] published.
 ///
 /// # Panics
 ///
-/// Panics if called before `MuxrApp::init` has run. Every real call site
-/// (the sessions screen's `use_controller` factory) runs after it.
+/// Panics if called before `MuxrApp::init` has run.
 pub fn expect_sessions_repository() -> SharedSessionsRepository {
     use_context::<SharedSessionsRepository>().expect(
         "expect_sessions_repository: features::sessions::di::provide() must run first \

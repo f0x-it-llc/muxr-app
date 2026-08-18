@@ -1,45 +1,28 @@
 //! The `.conn-row` strip's connection heartbeat: a radar ping ring around its
-//! success dot, and the rolling latency readout at the other end of the row.
+//! success dot, and a rolling latency readout.
 //!
-//! `pages.rs`'s `Component::init` times one real `GetVersion` round trip
-//! ([`crate::connection::ConnectionController::ping`]) while `/sessions` is
-//! on top, on the **same live-resolved cadence** as the session-list poll
-//! (`settings`' own stored `layout_refresh_secs` preference) rather than a
-//! heartbeat-private constant. Each tick starts the ring's own clock; the
-//! measurement that comes back is **rolled** into the readout over
-//! [`ROLL_MS`] rather than snapping to it.
+//! `pages.rs`'s `Component::init` times each real `GetVersion` round trip on
+//! the same live-resolved cadence as the session-list poll (`settings`'
+//! `layout_refresh_secs`), not a heartbeat-private constant. Each tick starts
+//! the ring's clock; the answer rolls into the readout over [`ROLL_MS`]
+//! rather than snapping.
 //!
-//! **Wall clock, and the frame ticker that keeps it moving.** A signal write
-//! wakes exactly one rebuild, so the interval's tick alone would render a
-//! single frame of a 1.6s animation. [`FrameTicker`] — a zero-size
-//! [`View`]/[`Widget`] pair whose only job is an unconditional
-//! [`PaintCtx::request_frame`] in its own `paint` — is what keeps `build`
-//! re-invoked while an animation is still running, and [`ring_pose`]/
-//! [`rolled`] read `Instant::now()` on each of those passes. **Mount
-//! discipline lives at the call site, not in the widget**: the screen mounts
-//! a ticker only while [`HeartbeatVisual::animating`], so a settled strip
-//! asks for no frames at all.
+//! [`FrameTicker`] keeps `build` re-invoked mid-animation (a signal write
+//! otherwise wakes exactly one rebuild); the screen mounts it only while
+//! [`HeartbeatVisual::animating`], so a settled strip requests no frames.
 //!
-//! **The clip lesson [`RING_SLOT`] encodes.** [`AnimatedOpacity`] composites
-//! its child under `PaintScene::push_layer`, which records **its own
-//! (unscaled) layout rect** as that layer's clip — captured before the
-//! nested [`AnimatedScale`] has pushed its transform. A slot sized to the
-//! ring's own diameter therefore clips the ring away the instant it scales
-//! past `1.0x`; [`RING_SLOT`] is at least the ring's extent at
-//! [`RING_SCALE_MAX`], with the small unscaled ring [`Align`]-centered
-//! inside it.
+//! **Clip note:** [`AnimatedOpacity`] records its own *unscaled* layout rect
+//! as its child layer's clip, captured before the nested [`AnimatedScale`]
+//! pushes its transform — so a slot sized to the ring's resting diameter
+//! would clip it away past `1.0x` scale. [`RING_SLOT`] is sized to the
+//! ring's extent at [`RING_SCALE_MAX`] instead.
 //!
-//! **A `success` hairline circle, not `circular_progress`**: that widget
-//! inks itself from the theme's `primary`, which on this screen is the brand
-//! amber — never a health signal here, while a ping from the liveness dot
-//! *is* one — and its stroke is the wrong shape at this size. The ring is
-//! therefore [`super::chrome::panel`]'s hairline rounded-rect border at
-//! [`super::chrome::RADIUS_FULL`].
+//! The ring is a `success`-hued hairline border ([`super::chrome::panel`]),
+//! not `circular_progress` — that widget inks from the theme's `primary`
+//! (brand amber here, never a health signal) and has the wrong stroke shape.
 //!
-//! **Reduced motion** collapses the whole moment: no ring, no roll (the
-//! readout snaps to whatever the last ping measured), no ticker mounted.
-//! Pings themselves keep running — a round-trip measurement is not an
-//! animation.
+//! Reduced motion drops the ring and the roll (readout snaps, no ticker
+//! mounted); pings keep running — a round trip isn't an animation.
 
 use std::time::{Duration, Instant};
 
@@ -59,31 +42,26 @@ use super::widgets::DOT;
 
 /// How long one ping ring takes to expand and fade out.
 const RING_MS: f64 = 1600.0;
-/// How long the latency readout takes to roll from the previous reading to the
-/// one a ping just measured.
+/// How long the latency readout takes to roll to a new reading.
 const ROLL_MS: f64 = 300.0;
 
-/// The ring's opacity at the moment of the ping, fading linearly to nothing
-/// over [`RING_MS`].
+/// The ring's opacity at the ping, fading linearly to 0 over [`RING_MS`].
 const RING_PEAK_OPACITY: f64 = 0.7;
-/// The ring's scale arc: a small "closed" pip at the ping, growing well past
-/// the dot as it fades — the radar expand.
+/// The ring's scale arc: a closed pip at the ping, growing past the dot as
+/// it fades — the radar expand.
 const RING_SCALE_MIN: f64 = 0.6;
 const RING_SCALE_MAX: f64 = 2.8;
 
-/// The headroom slot the ring animates inside — see the [module docs](self)'
-/// clip note for why the ring's own diameter will not do. Two things pin this
-/// number: it must contain the ring at [`RING_SCALE_MAX`] (`DOT * 2.8 = 19.6`,
-/// plus a rounding margin), and it is exactly the strip's own text line box,
-/// so swapping a 7px dot for this cell leaves the row's height — and the dot's
-/// resting `y`, which `tests/navigation_motion.rs` pins to the pixel — where
-/// they were.
+/// The headroom slot the ring animates inside — see the [module docs](self)
+/// clip note. Sized to contain the ring at [`RING_SCALE_MAX`] (`DOT * 2.8 =
+/// 19.6`, plus rounding) while matching the strip's text line box, so
+/// swapping in this cell doesn't move the row's height or the dot's resting
+/// `y` (pinned to the pixel by `tests/navigation_motion.rs`).
 const RING_SLOT: f64 = 20.0;
 
-/// An immediate "current value" follower timing: zero duration, so the
-/// [`AnimatedOpacity`]/[`AnimatedScale`] wrappers snap to whatever pose
-/// [`ring_pose`] computed for this frame instead of re-easing on top of it.
-/// The clock is this module's, not theirs.
+/// Immediate "current value" follower: zero duration, so `AnimatedOpacity`/
+/// `AnimatedScale` snap to [`ring_pose`]'s frame value instead of re-easing —
+/// this module owns the clock, not those wrappers.
 const ZERO: Timing = Timing::Duration(Duration::ZERO, Curve::Linear);
 
 /// The ping ring's pose on one frame — an alpha and a scale factor.
@@ -105,12 +83,10 @@ struct LatencyRoll {
 /// Everything the strip renders of the heartbeat on one frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct HeartbeatVisual {
-    /// The ping ring's pose, or `None` once it has faded out (and always,
-    /// under reduced motion).
+    /// `None` once faded out, and always under reduced motion.
     pub(super) ring: Option<RingPose>,
-    /// The latency to print, mid-roll or settled.
     pub(super) latency_ms: u32,
-    /// Whether that number is still rolling — the readout's own ink cue.
+    /// Whether the number is mid-roll — the readout's own ink cue.
     pub(super) rolling: bool,
 }
 
@@ -125,11 +101,10 @@ impl HeartbeatVisual {
 /// The heartbeat's screen-scoped observed state: the clock a ping starts, and
 /// the roll its answer starts.
 ///
-/// Signals rather than retained `Component::State` because both are written
-/// from outside `build` — the interval's tick and the ping's own async
-/// completion — and each write is what wakes the rebuild that renders it.
-/// `Copy`, so one value serves the interval closure, the future it spawns, and
-/// the screen's state.
+/// Signals, not retained `Component::State`, since both are written from
+/// outside `build` (the interval tick, the ping's async completion) and each
+/// write wakes the rebuild that renders it. `Copy` so one value serves the
+/// interval closure, the spawned future, and the screen's state.
 #[derive(Clone, Copy)]
 pub(super) struct HeartbeatState {
     ping_started: RwSignal<Option<Instant>>,
@@ -146,14 +121,14 @@ impl HeartbeatState {
         }
     }
 
-    /// Start a ping's ring clock — called as the tick fires the round trip,
-    /// so the ring expands while the RPC is actually open.
+    /// Starts a ping's ring clock; call as the tick fires the round trip so
+    /// the ring expands while the RPC is open.
     pub(super) fn start_ping(self) {
         self.ping_started.set(Some(Instant::now()));
     }
 
-    /// Record the roll from the previous reading to the one a ping just
-    /// measured. Called on the ping's completion, on the UI thread.
+    /// Records the roll to a ping's answer; call on completion, on the UI
+    /// thread.
     pub(super) fn settle(self, from: u32, to: u32) {
         self.roll.set(Some(LatencyRoll {
             from,
@@ -163,22 +138,18 @@ impl HeartbeatState {
     }
 
     /// What the strip renders this frame, given the connection's currently
-    /// published `settled_ms` (which a completed ping has already replaced —
-    /// so a finished roll lands exactly on it, and a heartbeat that never ran
-    /// prints the connect's own measurement).
+    /// published `settled_ms` — a completed ping already replaced it, so a
+    /// finished roll lands exactly on it and a heartbeat that never ran
+    /// prints the connect's own measurement.
     ///
-    /// Tracked reads: the tick's clock write and the ping's roll write are
-    /// what wake the rebuild that calls this.
+    /// Reads `ping_started`/`roll` tracked, so their writes wake the rebuild
+    /// that calls this.
     pub(super) fn visual(self, settled_ms: u32, reduce: bool) -> HeartbeatVisual {
         let now = Instant::now();
         let ring = self
             .ping_started
             .get()
             .and_then(|started| ring_pose(elapsed_ms(started, now), reduce));
-        // A finished roll hands the readout back to the connection's own
-        // published reading rather than holding its endpoint, so a reconnect
-        // that republishes a different measurement is never overprinted by a
-        // stale roll.
         let rolling = self
             .roll
             .get()
@@ -192,17 +163,15 @@ impl HeartbeatState {
     }
 }
 
-/// Milliseconds from `since` to `now`, saturating — a clock that appears to
-/// run backwards (a re-recorded start racing this read) reads as zero elapsed
-/// rather than panicking.
+/// Milliseconds from `since` to `now`, saturating so a start re-recorded
+/// mid-read reads as zero rather than panicking.
 fn elapsed_ms(since: Instant, now: Instant) -> f64 {
     now.saturating_duration_since(since).as_secs_f64() * 1000.0
 }
 
-/// The ping ring's pose `elapsed_ms` into its own clock: fading from
-/// [`RING_PEAK_OPACITY`] to nothing while expanding [`RING_SCALE_MIN`] →
-/// [`RING_SCALE_MAX`]. `None` once the ring is spent — and always under
-/// `reduce`, which suppresses the ping outright.
+/// The ring's pose `elapsed_ms` into its own clock: opacity fades
+/// [`RING_PEAK_OPACITY`] → 0 while it scales [`RING_SCALE_MIN`] →
+/// [`RING_SCALE_MAX`]. `None` once spent, or always under `reduce`.
 fn ring_pose(elapsed_ms: f64, reduce: bool) -> Option<RingPose> {
     if reduce || !(0.0..RING_MS).contains(&elapsed_ms) {
         return None;
@@ -214,9 +183,9 @@ fn ring_pose(elapsed_ms: f64, reduce: bool) -> Option<RingPose> {
     })
 }
 
-/// The reading to print `elapsed_ms` into a roll from `from` to `to`, or
-/// `None` once the roll is over — past [`ROLL_MS`] the connection's own
-/// published reading takes back over.
+/// The reading to print `elapsed_ms` into a roll from `from` to `to`;
+/// `None` past [`ROLL_MS`], when the connection's own published reading
+/// takes back over.
 fn rolled(from: u32, to: u32, elapsed_ms: f64) -> Option<u32> {
     if elapsed_ms >= ROLL_MS {
         return None;
@@ -227,17 +196,12 @@ fn rolled(from: u32, to: u32, elapsed_ms: f64) -> Option<u32> {
     Some((from + (to - from) * progress).round() as u32)
 }
 
-// ---------------------------------------------------------------------------
-// The strip's dot cell
-// ---------------------------------------------------------------------------
-
-/// The strip's success dot with the ping ring expanding around it: one
-/// [`RING_SLOT`]-square cell, the ring layer under the dot, both centered.
+/// The strip's success dot with the ping ring expanding around it: a
+/// [`RING_SLOT`]-square cell, ring layer under the dot, both centered.
 ///
-/// The cell's size is a constant whether or not a ping is in flight — the row
-/// beside it must not twitch as the ring comes and goes — and its two stack
-/// children are always present for the same reason ([`Stack`] reconciles
-/// positionally, so a vanishing child would rebuild its sibling).
+/// Constant size whether or not a ping is in flight (the row must not
+/// twitch), and both stack children always present — [`Stack`] reconciles
+/// positionally, so a vanishing child would rebuild its sibling.
 pub(super) fn pinging_dot(ring: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
     any(
         SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)).child(Stack(vec![
@@ -250,10 +214,9 @@ pub(super) fn pinging_dot(ring: Option<RingPose>, ink: Color) -> AnyView<Session
     )
 }
 
-/// The ping ring at `pose`, or an empty slot of the same size when there is no
-/// ping to draw. See the [module docs](self) for the nesting order — the
-/// opacity layer is outermost and lays out at [`RING_SLOT`], the scale is
-/// inside it around a dot-sized ring.
+/// The ring at `pose`, or an empty [`RING_SLOT`] slot. Opacity layer
+/// outermost (lays out at `RING_SLOT`), scale inside it around a dot-sized
+/// ring — see the [module docs](self) clip note.
 fn ring_layer(pose: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
     let Some(pose) = pose else {
         return any(SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)));
@@ -277,15 +240,9 @@ fn ring_layer(pose: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
     .timing(ZERO))
 }
 
-// ---------------------------------------------------------------------------
-// FrameTicker — the per-frame rebuild this module's wall clock needs
-// ---------------------------------------------------------------------------
-
-/// A zero-size sentinel [`View`]/[`Widget`] pair whose only job is an
-/// unconditional [`PaintCtx::request_frame`] call in its own `paint`. Mounted
-/// by the screen only while its own animation is still running, so a frame
-/// request traces directly to the thing that needs it rather than riding some
-/// other widget's paint behaviour as a side effect.
+/// A zero-size sentinel [`View`]/[`Widget`] whose only job is an
+/// unconditional [`PaintCtx::request_frame`] in `paint`. Mount only while
+/// the animation needing it is still running.
 struct FrameTicker;
 
 impl<State: 'static> View<State> for FrameTicker {
@@ -305,7 +262,6 @@ impl<State: 'static> View<State> for FrameTicker {
     }
 }
 
-/// The retained widget for a [`FrameTicker`]. See its doc comment.
 struct FrameTickerWidget;
 
 impl Widget for FrameTickerWidget {
@@ -318,8 +274,8 @@ impl Widget for FrameTickerWidget {
     }
 }
 
-/// Mount a [`FrameTicker`] — call only while the heartbeat still needs another
-/// frame ([`HeartbeatVisual::animating`]); the widget itself just asks.
+/// Mounts a [`FrameTicker`] — call only while the heartbeat still needs
+/// another frame ([`HeartbeatVisual::animating`]).
 pub(super) fn frame_ticker() -> FlexChild<SessionsState> {
     inflexible(FrameTicker)
 }
@@ -347,8 +303,7 @@ mod tests {
             "{mid:?}"
         );
 
-        // Spent: no ring at all rather than a zero-opacity one still costing a
-        // layer push (and a scale the strip would have to lay out around).
+        // Spent: no ring, not a zero-opacity one still costing a layer push.
         assert_eq!(ring_pose(RING_MS, false), None);
         assert_eq!(ring_pose(RING_MS * 4.0, false), None);
     }
@@ -368,8 +323,7 @@ mod tests {
             "the roll starts where it was"
         );
         assert_eq!(rolled(36, 76, ROLL_MS / 2.0), Some(56), "…passes through");
-        // Over: the readout goes back to whatever the connection publishes,
-        // which is the value this roll was heading for anyway.
+        // Over: reverts to the connection's own published value.
         assert_eq!(rolled(36, 76, ROLL_MS), None);
         assert_eq!(rolled(36, 76, ROLL_MS * 10.0), None);
         // A roll that goes down reads the same way.
@@ -378,12 +332,8 @@ mod tests {
 
     #[test]
     fn the_ring_slot_contains_the_ring_at_its_maximum_extent() {
-        // The clip regression [`RING_SLOT`] exists for (see the module docs):
-        // the outer slot is what `AnimatedOpacity` records as its layer clip,
-        // so anything the scale pushes past it is *cut*, not merely
-        // unallocated. Measured off the poses the ring actually produces,
-        // sweeping its own clock, rather than off the scale constant — the
-        // slot has to contain what gets drawn.
+        // Regression for the module docs' clip note: measured off the poses
+        // the ring actually produces, not the scale constant.
         let widest = (0..=RING_MS as u32)
             .filter_map(|ms| ring_pose(f64::from(ms), false))
             .fold(0.0_f64, |widest, pose| widest.max(pose.scale * DOT));
