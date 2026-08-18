@@ -1,31 +1,23 @@
 //! [`TerminalController`] — the `/terminal` screen's view model: a
-//! [`ControllerCore`], four use cases over two injected repositories, and
-//! `settings`' preferences store (read by the appearance poll), each resolved
-//! once by `pages.rs`'s `use_controller` factory. Per-frame animation progress
-//! lives in `super::chrome`, off the signal graph — a per-frame signal write
-//! would wake a whole-app rebuild per frame — so this publishes only the cue
-//! ([`reveal_epoch`](TerminalController::reveal_epoch)).
+//! [`ControllerCore`], four use cases over two repositories, and `settings`'
+//! preferences store, resolved once by `pages.rs`'s `use_controller` factory.
+//! Per-frame reveal progress lives off-signal in `super::chrome`; this
+//! publishes only the replay cue ([`reveal_epoch`](TerminalController::reveal_epoch)).
 //!
-//! **Feed contract**: the feed is a byte stream ([`TerminalFeed`]), separate
-//! from [`TerminalRepository`]'s one-shot model calls, and writes no signal at
-//! all (its pump runs off the UI thread). Link status is polled, never pushed:
-//! [`mirror_link`](TerminalController::mirror_link), called on every wake of
-//! the UI-thread repaint pump, is the one place it becomes a signal, carrying
-//! the stream's minted connection id and the auth-expired edge with it.
+//! **Feed vs repository**: the feed ([`TerminalFeed`]) is a byte stream,
+//! separate from [`TerminalRepository`]'s one-shot calls, and writes no
+//! signal itself — [`mirror_link`](TerminalController::mirror_link), polled
+//! from the UI-thread repaint pump, is the one place link status becomes one.
 //!
-//! The tab/pane world has no server push either, so every refresh (mount load,
-//! a landed mutation's settle, the attach handshake, the sheet opening, the
-//! grid's tap-miss backstop, the [`LAYOUT_POLL_INTERVAL`] poll) is a round trip
-//! this screen decides to make, and they race freely. One reconciliation covers
-//! them: a generation counter committing only the newest fetch,
-//! read-compare-then-write in
+//! **No server push for tabs/panes**, so every refresh races freely; one
+//! reconciliation covers them all: a generation counter that commits only the
+//! newest fetch, read-compare-then-write in
 //! [`publish_tabs`](TerminalController::publish_tabs), self-healing
-//! active/browsed keys, and single-flight claims on the poll, on creates and on
-//! the sheet's own commit.
-//! [`is_herdr`] is the one backend discriminator: only herdr has spaces, only
-//! herdr records a move as the stream's resume hint
-//! ([`ResumeSlot`](crate::features::terminal::data::feeds::grpc_feed::ResumeSlot)),
-//! and the grid's content-tap hook is never wired there.
+//! active/browsed keys, and single-flight claims on the poll, creates, and
+//! the sheet's commit.
+//!
+//! [`is_herdr`] is the one backend discriminator: only herdr has spaces and a
+//! resume hint ([`ResumeSlot`]); the grid's content-tap hook is never wired there.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -114,40 +106,35 @@ pub struct TerminalController {
     /// The device-local preferences repository, resolved **once** by `pages.rs`'s
     /// factory — never re-resolved per poll tick, which would be ad-hoc DI.
     preferences: Arc<dyn PreferencesRepository + Send + Sync>,
-    /// Test/diagnostic-only: how many times
-    /// [`refresh_appearance`](Self::refresh_appearance) actually wrote one of the three
-    /// appearance signals, so a test can pin that an unchanged-prefs poll writes
-    /// nothing. Read through [`appearance_writes`](Self::appearance_writes).
+    /// Test-only: how many [`refresh_appearance`](Self::refresh_appearance)
+    /// ticks actually wrote a signal — pins that an unchanged poll writes
+    /// nothing. Read via [`appearance_writes`](Self::appearance_writes).
     appearance_writes: AtomicU64,
-    /// The staleness guard every layout fetch shares: bumped by
-    /// [`begin_layout_fetch`](Self::begin_layout_fetch) before the round trip goes out
-    /// and checked again before its answer is committed, so an earlier, slower fetch
-    /// landing after a later one cannot roll the layout back.
+    /// The staleness guard: bumped by
+    /// [`begin_layout_fetch`](Self::begin_layout_fetch) before a round trip,
+    /// re-checked before commit, so a slower fetch can't roll back a newer one.
     layout_generation: AtomicU64,
-    /// Whether a poll-driven layout reload is outstanding — the claim
-    /// [`take_layout_poll_tick`](Self::take_layout_poll_tick) takes and
-    /// [`refresh_layout_from_poll`](Self::refresh_layout_from_poll) releases, so a link
-    /// slower than the poll cadence never stacks round trips. Scoped to the poll: a
-    /// user-driven refresh is never dropped for a mid-flight one.
+    /// Whether a poll-driven layout reload is outstanding — claimed by
+    /// [`take_layout_poll_tick`](Self::take_layout_poll_tick), released by
+    /// [`refresh_layout_from_poll`](Self::refresh_layout_from_poll), so a slow
+    /// link never stacks round trips. Scoped to the poll only.
     layout_poll_in_flight: AtomicBool,
     /// Whether a create verb is in flight — the coalescing claim
     /// [`claim_create`](Self::claim_create) takes. A dropped press stays dropped.
     create_in_flight: AtomicBool,
-    /// [`create_in_flight`](Self::create_in_flight)'s counterpart for the sheet's
-    /// commit ([`claim_commit`](Self::claim_commit)), and its own claim rather than
-    /// a shared one: a commit and a create move unrelated things, and coalescing
-    /// them together would drop a pane tap because a tab is being made.
+    /// [`create_in_flight`](Self::create_in_flight)'s counterpart for the
+    /// sheet's commit ([`claim_commit`](Self::claim_commit)) — its own claim,
+    /// since a commit and a create move unrelated things.
     commit_in_flight: AtomicBool,
     /// Whether the attached stream's handshake has settled —
     /// [`mirror_link`](Self::mirror_link) answers `true` on the wake that flips this.
     attach_settled: AtomicBool,
-    /// Test/diagnostic-only counterpart of
+    /// Test-only counterpart of
     /// [`appearance_writes`](Self::appearance_writes), for layout fetches.
     layout_writes: AtomicU64,
-    /// Where a **fresh** attach should land: the space/tab/pane this user last
-    /// moved to. Handed to every feed this screen opens
-    /// ([`resume_slot`](Self::resume_slot)) and written by the two user-driven
-    /// moves alone — see [`remember_resume_pane`](Self::remember_resume_pane).
+    /// Where a **fresh** attach should land — the space/tab/pane the user
+    /// last moved to, written only by user-driven moves
+    /// (see [`remember_resume_pane`](Self::remember_resume_pane)).
     resume: Arc<ResumeSlot>,
 }
 
@@ -155,23 +142,19 @@ pub struct TerminalController {
 /// transcribed rather than reached for (this feature maps `settings`' values).
 const DEFAULT_LIVE_FONT_SIZE: f32 = 12.0;
 
-/// How often the live pane re-reads the terminal-appearance prefs while mounted —
-/// [`PreferencesRepository`] has no subscribe/push seam. **3s**, matching `sessions`'
-/// own cadence (transcribed: a feature never imports a sibling's `presentation`);
-/// [`refresh_appearance`](TerminalController::refresh_appearance)'s gate idles ticks.
+/// How often the live pane re-reads terminal-appearance prefs —
+/// [`PreferencesRepository`] has no push seam. **3s**, matching `sessions`'
+/// own cadence (transcribed, not imported: features don't share `presentation`).
 const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// How often an **attached** live mount re-reads the tab/pane layout: the wire has no
-/// layout-changed signal, so a tab opened elsewhere is only found by asking again.
-/// **3s**, the original client's cadence — not tighter, since every RPC shares the
-/// app's one HTTP/2 connection with the attach stream, whose inbound flow control can
-/// already backpressure it (`docs/ARCHITECTURE.md`'s Planned section).
+/// How often an attached live mount re-reads the tab/pane layout — the wire
+/// has no layout-changed signal. **3s**, the original client's cadence: not
+/// tighter, since RPCs share the attach stream's HTTP/2 connection and flow control.
 const LAYOUT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// How long a landed create waits before re-reading what it created: the relay acks a
-/// create when the action is **enqueued**, not applied, so a reload sent the instant
-/// the ack lands misses the tab/pane/space just made. 350ms is the original client's
-/// own settle for exactly this.
+/// How long a landed create waits before re-reading: the relay acks on
+/// **enqueue**, not apply, so an immediate reload misses what was just made.
+/// 350ms is the original client's own settle.
 const CREATE_SETTLE: Duration = Duration::from_millis(350);
 
 /// The sentinel [`CREATE_SETTLE_OVERRIDE_MS`] holds when no override is installed.
@@ -294,17 +277,15 @@ impl TerminalController {
         Arc::clone(&self.resume)
     }
 
-    /// Load the whole screen (spaces, tabs, the active tab's lines, the attached
-    /// session's name) and play the reveal. The space list is only read on a backend
-    /// that has one ([`has_spaces`](Self::has_spaces)); landing re-seeds
-    /// [`browsed_tab`](Self::browsed_tab), the one moment the sheet has nothing of its
-    /// own to preserve.
+    /// Load the whole screen (spaces, tabs, active tab's lines, session name)
+    /// and play the reveal. Spaces are read only on a backend that has them
+    /// ([`has_spaces`](Self::has_spaces)); landing re-seeds
+    /// [`browsed_tab`](Self::browsed_tab).
     ///
-    /// **A layout fetch like any other for its tabs**:
-    /// [`publish_tabs`](Self::publish_tabs) commits only if no later fetch landed
-    /// meanwhile. Everything else commits outside that guard, since no other fetch
-    /// reads it; under the guard, a one-RPC reload beating this four-RPC chain dropped
-    /// the spaces payload for good. The reverse race self-heals on the next space op.
+    /// **Tabs go through the layout staleness guard** like any other fetch
+    /// ([`publish_tabs`](Self::publish_tabs)); everything else commits
+    /// outside it, since nothing else reads that generation. The reverse
+    /// race (spaces dropped by a faster reload) self-heals on the next space op.
     pub async fn load(&self) {
         let generation = self.begin_layout_fetch();
         let query = WorkspaceQuery {
@@ -351,12 +332,10 @@ impl TerminalController {
         self.browsed_tab.set(self.active_tab.get_untracked());
     }
 
-    /// Move the session to the tab keyed `key`: focus that tab, replace the body's
-    /// lines, replay the reveal. The **tab step of a cross-tab pane commit**
-    /// ([`commit_pane`](Self::commit_pane)), its one caller. Answers whether the move
-    /// landed. An attached stream stays open across it on either backend — herdr's
-    /// server re-points *this connection's* relay in place, so dropping the stream
-    /// would throw that retarget away.
+    /// Move the session to tab `key`: focus it, replace the body's lines,
+    /// replay the reveal — the tab step of [`commit_pane`](Self::commit_pane)
+    /// (its one caller). The stream stays open across it: herdr re-points
+    /// this connection's relay in place, so dropping it would lose that retarget.
     pub async fn switch_tab(&self, key: String) -> bool {
         let Some(tab_id) = self.tab_id_for(&key) else {
             return false;
@@ -381,45 +360,19 @@ impl TerminalController {
         true
     }
 
-    /// Commit the sheet's browse: focus the pane `pane_id` of the tab keyed `tab_key`
-    /// (`is_plugin` picks the wire's id namespace). The sheet's **one** committing
-    /// path, in the order a backend needs it:
-    ///
-    /// 1. a tab move first, when the browsed tab is not the one the session is on — a
-    ///    pane can only be focused inside the focused tab;
-    /// 2. then the pane focus itself, on **every** backend: the verb is what moves a
-    ///    herdr session too, where the server wire-swaps *this connection's* relay
-    ///    onto the target pane's terminal in place. The attached stream must stay
-    ///    open across it — a fresh attach can only *ask* for the same pane (the
-    ///    resume hint a reconnect replays), and an older server ignores that field
-    ///    and lands on whatever the daemon has globally focused;
-    /// 3. then the focused flag moves in this screen's own tab state, optimistically:
-    ///    the layout reads that follow are answered against this connection's own
-    ///    focus, so they confirm the badge rather than reverting it.
-    ///
-    /// A refused step stops the sequence and emits on the usual failure sink. It
-    /// writes no optimistic state **of its own** — but a cross-tab commit whose tab
-    /// step landed and whose pane focus was then refused keeps that tab move: the
-    /// session really is on the new tab, and the card must say so. What only a
-    /// *fully* landed commit writes is the pane badge and, on herdr, the stream's
-    /// resume hint ([`remember_resume_pane`](Self::remember_resume_pane)).
-    ///
-    /// **Single-flight** ([`claim_commit`](Self::claim_commit)): a pane tap arriving
-    /// while a commit is in flight is dropped rather than queued, so two taps can
-    /// never race their `focus_pane` calls (or their resume writes) to an order
-    /// neither the badge nor the hint could reconstruct.
-    ///
-    /// Nothing is re-read behind the move on either backend. Accepted residuals,
-    /// both transient (≤ one [`LAYOUT_POLL_INTERVAL`] tick, self-correcting): a
-    /// tick landing inside the relay's own apply window answers with the focus
-    /// the server holds *now*; and a poll whose fetch was already in flight when
-    /// the tap landed passes the staleness guard and heals the pre-commit focus
-    /// back over the badge (the old post-commit reload's generation bump used to
-    /// discard exactly that answer). The known remedy for the second — bump
-    /// [`begin_layout_fetch`](Self::begin_layout_fetch) when the badge is
-    /// written, so the commit outdates every older fetch — is deliberately not
-    /// taken here: this counter's coupling has bitten before, and the change
-    /// belongs with its own test round.
+    /// Commit the sheet's browse: focus pane `pane_id` of tab `tab_key`
+    /// (`is_plugin` picks the wire namespace). Order: tab move first (a pane
+    /// only focuses inside the focused tab), then pane focus on every backend
+    /// — herdr wire-swaps this connection's relay in place, so a reconnect's
+    /// resume hint is only a best-effort ask. A refused pane focus after a
+    /// landed tab move still keeps that move. **Single-flight**
+    /// ([`claim_commit`](Self::claim_commit)): a tap in flight is dropped, not
+    /// queued. **Accepted residual**: no re-read behind the move — a racing
+    /// poll may transiently show the relay's own focus, self-correcting
+    /// within one [`LAYOUT_POLL_INTERVAL`] tick. A known remedy — bump
+    /// [`begin_layout_fetch`](Self::begin_layout_fetch) on the badge write,
+    /// so the commit outdates every older fetch — is deliberately not taken:
+    /// this counter's coupling has bitten before, and belongs in its own test round.
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
         let Some(_claim) = self.claim_commit() else {
             return false;
@@ -437,20 +390,17 @@ impl TerminalController {
         if self.is_herdr_session() {
             self.remember_resume_pane(&tab_key, pane_id);
         }
-        // …and no reload behind any of it. The optimistic badge above IS the
-        // immediate feedback, and the layout poll converges on the server's own
-        // per-connection focus. A reload here would add nothing in the good case
-        // and, landing before the relay applies the verb it only acked on enqueue,
-        // would revert the badge it just wrote.
+        // No reload behind this: the optimistic badge above is the feedback,
+        // and the layout poll converges on the server's own focus — a reload
+        // here could land before the enqueue-ack applies and revert the badge.
         true
     }
 
-    /// Focus the pane `pane_id` of the tab the live session is on — the content-tap
-    /// hook's route, never wired for a herdr session. Unlike
-    /// [`commit_pane`](Self::commit_pane) a grid tap never crosses tabs (it hit-tests
-    /// only the server-active tab's rectangles), so this skips the tab-switch step and
-    /// reloads the tab list on landing, converging the tap's rects and the sheet's
-    /// badge on what the server did. A refused call writes nothing.
+    /// Focus pane `pane_id` of the live session's active tab — the
+    /// content-tap hook's route, never wired for herdr. Unlike
+    /// [`commit_pane`](Self::commit_pane), a tap never crosses tabs, so this
+    /// skips the switch step and reloads on landing to converge the tap's
+    /// rects with the sheet's badge. A refused call writes nothing.
     pub async fn focus_pane_from_tap(&self, pane_id: u32, is_plugin: bool) -> bool {
         let tab_key = self.active_tab.get_untracked();
         if !self
@@ -491,30 +441,22 @@ impl TerminalController {
         self.tabs.set(tabs);
     }
 
-    /// Record the pane of the tab keyed `tab_key` as where a **fresh** attach should
-    /// land — the resume half of a landed herdr commit, written from this
-    /// user-driven path and no other.
-    ///
-    /// The rule this obeys ([`ResumeSlot`]'s own contract): a layout read reports the
-    /// focus the *server* currently holds, which right after a reconnect is the
-    /// daemon-global one — so [`publish_tabs`](Self::publish_tabs) and the poll behind
-    /// it must never write here, or the hint would be overwritten by exactly the
-    /// focus it exists to correct. The space is left standing: it survives a muxrd
-    /// restart the numeric tab/pane ids do not, so it stays the durable rung.
+    /// Record the pane of `tab_key` as where a **fresh** attach should land —
+    /// written only from this user-driven path, never from
+    /// [`publish_tabs`](Self::publish_tabs) or the poll: a layout read
+    /// reports the server's *current* focus, which right after reconnect is
+    /// the daemon-global one, and would overwrite the hint it exists to correct.
     fn remember_resume_pane(&self, tab_key: &str, pane_id: u32) {
         self.resume.remember_pane(self.tab_id_for(tab_key), pane_id);
     }
 
-    /// Make the space with [`Space::id`] `id` the active one and reload the tab world
-    /// behind it — the reload is the point: a space *is* a different set of tabs. The
-    /// wire marks `SwitchSpace` MUTATING (see [`TerminalRepository::switch_space`]),
-    /// so a read-only credential is turned back at the pill itself
-    /// (`presentation::pages`' `Actions::select_space`) rather than here; any other
-    /// refusal is the server's, and reaches the usual failure sink.
+    /// Make the space `id` active and reload the tab world behind it — a
+    /// space *is* a different set of tabs. `SwitchSpace` is wire-MUTATING, so
+    /// a read-only credential is turned back at the pill
+    /// (`pages::Actions::select_space`), not here.
     ///
-    /// A landed switch also becomes the stream's resume hint — spaces are herdr's
-    /// alone, and the space is the rung of that hint a muxrd restart cannot stale
-    /// (see [`remember_resume_pane`](Self::remember_resume_pane)).
+    /// A landed switch also becomes the resume hint's space rung — the one
+    /// part of it a muxrd restart cannot stale.
     pub async fn select_space(&self, id: String) {
         if !self.tell(self.terminal.switch_space(id.clone())).await {
             return;
@@ -651,19 +593,17 @@ impl TerminalController {
         }
     }
 
-    /// **Consume** one layout poll tick, answering whether the caller should refresh
-    /// now: a controller whose first load has not landed skips, and so does one whose
-    /// *previous* tick is still outstanding. The caller owns the timing and the async
-    /// spawn — through [`refresh_layout_from_poll`](Self::refresh_layout_from_poll),
-    /// which releases the claim this takes — so this stays synchronous.
+    /// **Consume** one layout poll tick: skips if the first load hasn't
+    /// landed, or the previous tick is still outstanding. The caller releases
+    /// the claim via [`refresh_layout_from_poll`](Self::refresh_layout_from_poll).
     pub fn take_layout_poll_tick(&self) -> bool {
         self.loaded.get_untracked() && !self.layout_poll_in_flight.swap(true, Ordering::SeqCst)
     }
 
-    /// The refresh a claimed poll tick runs: [`reload_tabs`](Self::reload_tabs) with
-    /// its failures swallowed ([`Report::Silent`]), releasing the claim
-    /// [`take_layout_poll_tick`](Self::take_layout_poll_tick) took. The release is an
-    /// **RAII guard**, so a future early return cannot leak it and wedge the poll shut.
+    /// The refresh a claimed poll tick runs: [`reload_tabs`](Self::reload_tabs)
+    /// with failures swallowed, releasing
+    /// [`take_layout_poll_tick`](Self::take_layout_poll_tick)'s claim via an
+    /// RAII guard, so an early return cannot wedge the poll shut.
     pub async fn refresh_layout_from_poll(&self) {
         struct ReleasePollClaim<'a>(&'a AtomicBool);
         impl Drop for ReleasePollClaim<'_> {
@@ -686,16 +626,15 @@ impl TerminalController {
         self.layout_generation.load(Ordering::SeqCst) == generation
     }
 
-    /// Publish a freshly read tab list, **read-compare-then-write** and with the
-    /// active/browsed keys reconciled per `seed` — the one commit point every layout
-    /// fetch goes through.
+    /// Publish a freshly read tab list, **read-compare-then-write** with the
+    /// active/browsed keys reconciled per `seed` — the one commit point
+    /// every layout fetch goes through.
     ///
-    /// Nothing is written that has not moved: `Set::set` notifies unconditionally,
-    /// [`tabs`](Self::tabs) is a tracked read in the screen's `build` and the sheet's
-    /// body, and the poll ticks for the life of the mount, so an unconditional write
-    /// would wake a whole-app rebuild every cadence forever on an idle session. A tick
-    /// that writes bumps [`layout_writes`](Self::layout_writes). **Disposal-safe**: a
-    /// tick in flight at teardown reads `try_*`, making the whole commit a no-op.
+    /// Nothing unchanged is written: `tabs` is a tracked read polled for the
+    /// mount's life, so an unconditional `set` would rebuild forever on an
+    /// idle session. A write bumps [`layout_writes`](Self::layout_writes).
+    /// **Disposal-safe**: a tick in flight at teardown reads `try_*`, so the
+    /// commit is a no-op.
     fn publish_tabs(&self, tabs: Vec<TabEntry>, seed: Seed) {
         let Some(unchanged) = self.tabs.try_with_untracked(|current| *current == tabs) else {
             return;
@@ -879,19 +818,17 @@ impl TerminalController {
         }
     }
 
-    /// Mirror one poll of the attached feed onto the UI thread: publish its status, and
-    /// re-bind the repository when the stream has minted a new connection id (so every
-    /// later request routes to *this* client's view).
+    /// Mirror one poll of the attached feed onto the UI thread: publish its
+    /// status, and re-bind the repository when the stream mints a new
+    /// connection id, so later requests route to this client's view.
     ///
-    /// **Read-compare-then-write**: this runs on every wake of the repaint pump and
-    /// [`link`](Self::link) is a tracked read in the screen's `build`, so an
-    /// unconditional `set` would wake a whole-app rebuild 30 times a second.
+    /// **Read-compare-then-write**: [`link`](Self::link) is a tracked read in
+    /// `build`, so an unconditional `set` would wake a rebuild 30x/s.
     ///
-    /// **Answers whether the attach just settled** — `true` on the first wake that sees
-    /// a real connection id (or a connected stream). The mount's own load went out
-    /// carrying no connection id to route by, so the caller turns that one `true` into
-    /// a catch-up [`reload_tabs`](Self::reload_tabs); without it a layout read that
-    /// raced the handshake stays the last word for the whole mount.
+    /// Answers `true` on the first wake with a real connection id — the
+    /// signal the caller uses to fire a catch-up
+    /// [`reload_tabs`](Self::reload_tabs), since the mount's own load went
+    /// out with no connection id to route by.
     pub fn mirror_link(&self, status: FeedStatus, connection_id: Option<String>) -> bool {
         if self.link.get_untracked() != Some(status) {
             self.link.set(Some(status));
@@ -916,19 +853,15 @@ impl TerminalController {
 
     /// Re-read the terminal-appearance prefs and update
     /// [`cursor_style`](Self::cursor_style)/[`font_size`](Self::font_size)/
-    /// [`font_family`](Self::font_family) — once on entering the live pane, then on
-    /// [`APPEARANCE_POLL_INTERVAL`]'s cadence. A failed read leaves the signals where
-    /// they were (stale beats wrong).
+    /// [`font_family`](Self::font_family) — once on entering the live pane,
+    /// then on [`APPEARANCE_POLL_INTERVAL`]'s cadence. A failed read leaves
+    /// the signals as they were.
     ///
-    /// **Read-compare-then-write**: all three are tracked reads in
-    /// `pages::TerminalScreen::build`, so writing one every tick would wake a whole-app
-    /// rebuild + unpaced frame every cadence, forever, on an idle pane. Each is `set()`
-    /// only when the mapped value differs, and a tick that wrote bumps
-    /// [`appearance_writes`](Self::appearance_writes). **Disposal-safe across the
-    /// `await`**: the kickoff and every tick spawn detached from the owner that created
-    /// the signals, so the first read is a
-    /// [`try_get_untracked`](GetUntracked::try_get_untracked) — one `None` stands for
-    /// the whole controller, since all three share one owner.
+    /// **Read-compare-then-write**: all three are tracked reads in `build`,
+    /// so an unconditional write would wake a rebuild every idle tick; only a
+    /// changed value is `set()`. **Disposal-safe**: each tick spawns detached
+    /// from the owner, so the first read is a `try_get_untracked` — `None`
+    /// stands for the whole controller (one shared owner).
     pub async fn refresh_appearance(&self) {
         let Ok(prefs) = self.preferences.load_preferences().await else {
             return;
@@ -978,13 +911,11 @@ impl Drop for FlightClaim<'_> {
 /// The backend prefix of a `<backend>:<name>` session id — see [`is_herdr`].
 const HERDR_BACKEND: &str = "herdr:";
 
-/// Drop the current `AttachTerminal` stream and open a fresh one at the grid's current
-/// size — [`LiveSession::reattach`]'s shareable form, and **recovery only** (the link
-/// strip's Retry): a fresh attach carries the resume hint as a *best-effort* request,
-/// never the in-place retarget a live stream's focus verbs are, so re-opening a stream
-/// is still how a herdr session risks landing on the daemon's globally focused pane.
-/// A boxed closure rather than a method because it owns the [`AttachSpec`] the reopen
-/// needs.
+/// Drop the current `AttachTerminal` stream and open a fresh one at the
+/// grid's current size — [`LiveSession::reattach`]'s shareable form,
+/// **recovery only**: unlike an in-place focus verb, a fresh attach's resume
+/// hint is best-effort, so a herdr session risks landing on the daemon's
+/// global focus. A closure (not a method) since it owns the [`AttachSpec`].
 pub type Reattach = Rc<dyn Fn()>;
 
 /// Whether the session with id `session` runs on the **herdr** backend — this screen's
@@ -1010,10 +941,9 @@ fn select_by_label(spaces: Vec<Space>, label: &str) -> Vec<Space> {
         .collect()
 }
 
-/// The live pane's byte source, held **concretely** so the half of it that is not on
-/// the [`TerminalFeed`] port stays reachable: the demo replay's test hooks on one side,
-/// a real session's status/connection-id/backoff controls on the other. The port stays
-/// a byte stream, so everything needing only bytes takes [`shared`](Self::shared).
+/// The live pane's byte source, held **concretely** so the half not on the
+/// [`TerminalFeed`] port stays reachable (demo test hooks; a real session's
+/// status/connection-id/backoff). Byte-only callers take [`shared`](Self::shared).
 pub enum LiveFeed {
     /// The checked-in fixture replay.
     Demo(Rc<RefCell<DemoFeed>>),
@@ -1049,16 +979,14 @@ impl LiveFeed {
     }
 }
 
-/// Everything the live pane needs: the emulator, the feed, the input and selection
-/// seams, and the pump's repaint counter — constructed **once**, on first entering the
-/// pane (see [`LiveSession::enter`]), dropped on unmount.
+/// Everything the live pane needs: emulator, feed, input/selection seams,
+/// and the pump's repaint counter — built once on entering the pane
+/// ([`LiveSession::enter`]), dropped on unmount. Not a [`TerminalController`]
+/// field: every handle is `Rc`-backed (event-pass mutation), which would
+/// make the controller `!Send`/`!Sync`.
 ///
-/// Deliberately **not** a [`TerminalController`] field: every handle here is `Rc`-backed
-/// (mutated during the event pass, where there is no reactive owner), and embedding one
-/// would make the controller `!Send`/`!Sync`, breaking `use_controller`'s bound.
-///
-/// **Dropping it is the detach**: [`GrpcTerminalFeed`]'s `Drop` shuts its request stream
-/// down, so leaving the route is what the server sees as this client going away.
+/// **Dropping it is the detach**: [`GrpcTerminalFeed`]'s `Drop` shuts the
+/// request stream, so unmount is what the server sees as this client leaving.
 pub struct LiveSession {
     /// The VT emulator the grid renders and the selection resolves against.
     pub emulator: term::SharedEmulator,
@@ -1081,28 +1009,25 @@ pub struct LiveSession {
 struct AttachSpec {
     connection: Arc<ConnectionController>,
     session: String,
-    /// The feed's auth-expired callback fires on the **background** runtime, where
-    /// writing a signal is forbidden (`crate::connection`'s threading note), so it can
-    /// only raise a flag; the UI-thread poll tick turns that flag into the teardown.
+    /// Fires on the **background** runtime, where writing a signal is
+    /// forbidden — it only raises a flag; the UI-thread poll tick turns
+    /// that into the teardown.
     auth_expired: Arc<AtomicBool>,
-    /// The controller's resume slot ([`TerminalController::resume_slot`]), handed to
-    /// every feed this spec opens — the screen's half of the hint every `AttachReq`
-    /// carries.
+    /// The controller's resume slot, handed to every feed this spec opens.
     resume: Arc<ResumeSlot>,
 }
 
 impl LiveSession {
     /// Construct the seams + feed and start the feed pump and appearance poll.
     ///
-    /// **Ambient-Owner contract: must run under the screen's own component owner**,
-    /// i.e. only from `Component::build` — never a press handler, which runs under no
-    /// owner at all on desktop — so `spawn_feed_pump`'s and `use_interval`'s
-    /// `on_cleanup` registrations bind to that owner and fire on unmount.
-    /// `pages::TerminalScreen::build` guards this so it runs at most once per mount.
+    /// **Must run under the screen's own component owner** (`Component::build`
+    /// only, never a press handler — no owner on desktop), so
+    /// `spawn_feed_pump`'s/`use_interval`'s `on_cleanup` bind and fire on
+    /// unmount. `pages::TerminalScreen::build` guards a once-per-mount call.
     ///
-    /// **Which feed** is [`TerminalController::attached_session`]'s answer, ANDed with
-    /// the connection actually holding a client: everything else replays the fixture
-    /// rather than panicking on a client that is not there.
+    /// **Which feed**: [`TerminalController::attached_session`] ANDed with a
+    /// live connection client — anything else falls back to the fixture
+    /// replay rather than panicking.
     pub fn enter(
         controller: &Arc<TerminalController>,
         connection: &Arc<ConnectionController>,

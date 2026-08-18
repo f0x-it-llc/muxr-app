@@ -1,18 +1,15 @@
 //! The `/terminal` route's page: muxr's terminal surface, a pixel copy of
-//! `docs/terminal.html` v2 — no tabs strip, no path bar, no cmd hint, no FAB.
-//! The overflow `⋮` lives on the *app* bar (`crate::shell` forwards it to
-//! [`open_terminal_menu`]), and the pane title sits in the card's own status row
-//! beside the fullscreen toggle.
+//! `docs/terminal.html` v2 — no tabs strip, path bar, cmd hint, or FAB. The
+//! overflow `⋮` lives on the *app* bar (`crate::shell` forwards it to
+//! [`open_terminal_menu`]); the pane title sits in the card's status row.
 //!
-//! [`terminal_page`] is what `crate::routes` mounts; below it is the canonical
-//! screen shape — a per-screen [`Component`] whose `init` hosts a
-//! [`TerminalController`] through `use_controller`, and whose `build` is pure
-//! arrangement over [`super::widgets`]' elements. Every contract is documented
-//! where it is enforced: fullscreen on
-//! [`Actions::toggle_fullscreen`]/[`restore_system_ui`], the component-state
-//! boundary on [`Actions`], the mock-vs-live switch on
-//! [`TerminalScreen::build`], gesture routing on
-//! [`resolve_tap_action`]/[`resolve_wheel_route`].
+//! [`terminal_page`] is what `crate::routes` mounts — a per-screen
+//! [`Component`] whose `init` hosts a [`TerminalController`] via
+//! `use_controller`, whose `build` is pure arrangement over
+//! [`super::widgets`]. Contracts live where enforced: fullscreen on
+//! [`Actions::toggle_fullscreen`]/[`restore_system_ui`], the state boundary
+//! on [`Actions`], the mock-vs-live switch on [`TerminalScreen::build`],
+//! gesture routing on [`resolve_tap_action`]/[`resolve_wheel_route`].
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -87,21 +84,16 @@ const READ_ONLY_TOAST: &str = "read-only session";
 /// `presentation`); `tests/terminal.rs` asserts the round trip.
 const SESSION_QUERY_KEY: &str = "session";
 
-/// The wrap padding's wide-window target — `super::chrome::WRAP_PAD`'s 14px
-/// scaled up past [`WIDE_BREAKPOINT_PX`]. Bespoke geometry, not a
-/// `crate::ui::spacing` tier.
-///
-/// **The card stays full-bleed at any width** — no content-column clamp, only
-/// more breathing room. Applied as an *extra* [`Padding`] outside
-/// `terminal_stage` rather than by widening `WRAP_PAD`, which also drives the
-/// fullscreen transition's animated-to-zero geometry.
+/// The wrap padding's wide-window target — `WRAP_PAD`'s 14px scaled up past
+/// [`WIDE_BREAKPOINT_PX`]. Bespoke geometry, not a `crate::ui::spacing` tier.
+/// The card stays full-bleed at any width (more breathing room, no
+/// content-column clamp), applied as an *extra* outside [`Padding`] rather
+/// than by widening `WRAP_PAD`, which also drives the fullscreen animation.
 const WIDE_WRAP_PAD_PX: f64 = 22.0;
 
-/// The portrait window's bar-to-card breathing room: a **top-only** gap, applied
-/// at the same outside-the-stage site as [`WIDE_WRAP_PAD_PX`]. A wide window is
-/// already spaced by its all-round step-up; a narrow one sat flush. The sides
-/// keep [`WRAP_PAD`], and fullscreen takes neither (the stage's own progress
-/// animation owns that geometry).
+/// The portrait window's **top-only** bar-to-card gap, at the same
+/// outside-the-stage site as [`WIDE_WRAP_PAD_PX`] — a narrow window sat
+/// flush otherwise. Sides keep [`WRAP_PAD`]; fullscreen takes neither.
 const PORTRAIT_TOP_GAP_PX: f64 = WIDE_WRAP_PAD_PX - WRAP_PAD;
 
 const _: () = {
@@ -137,18 +129,16 @@ pub struct TerminalState {
 }
 
 /// Every navigation and mutation this screen performs, plus the handles they
-/// need — the bundle that crosses the component-state boundary.
+/// need — the bundle crossing the component-state boundary.
 ///
-/// A `Component`'s subtree is bound to its own `State`, so this screen's gestures
-/// take `&mut TerminalState`. Its **overlays** are pages on the app's root
-/// overlay host (which is what keeps the `⋮` menu from clipping under the
-/// floating bar), so their callbacks receive `&mut AppState` and cannot see
-/// [`TerminalState`] at all — hence one cloneable bundle either side calls the
-/// same method through. The app bar's `⋮` is a step further out: its handler
-/// sees only `&mut AppState`, so this feature publishes its `Actions` in a
-/// `thread_local!` while mounted ([`open_terminal_menu`] is the one reader) —
-/// the `crate::routes::app_nav` idiom, for the same reason: `provide_context`
-/// requires `Send + Sync`, which an `Rc`-backed `NavigatorController` is not.
+/// A `Component`'s subtree is bound to its `State`, so gestures take
+/// `&mut TerminalState`. Overlay pages (the root host, so the `⋮` menu
+/// doesn't clip under the floating bar) get `&mut AppState` instead and
+/// can't see [`TerminalState`] — hence one cloneable bundle both sides call
+/// through. The app bar's `⋮` is a step further out still: its handler sees
+/// only `&mut AppState`, so this publishes `Actions` in a `thread_local!`
+/// while mounted ([`open_terminal_menu`] reads it) — the `app_nav` idiom,
+/// since `provide_context` needs `Send + Sync`, which `Rc` isn't.
 #[derive(Clone)]
 pub struct Actions {
     /// Which mount of the screen this bundle belongs to — see [`TERMINAL_CHROME`].
@@ -333,10 +323,9 @@ impl Component for TerminalScreen {
         on_cleanup(move || {
             // Leaving fullscreen set would strand a hidden bar on the route below.
             bar_fullscreen.set(false);
-            // …and, for the identical reason, a hidden OS status/nav bar: every
-            // exit that is not `toggle_fullscreen`'s collapse branch is an
-            // unmount, and this is the choke point they share. Unconditional:
-            // re-requesting a restored mode costs a no-op poll, not a flicker.
+            // …and the OS status/nav bar, for the same reason: every
+            // non-collapse exit is an unmount sharing this choke point;
+            // unconditional costs only a no-op poll, never a flicker.
             restore_system_ui();
             TERMINAL_CHROME.with(|cell| {
                 let mut published = cell.borrow_mut();
@@ -352,24 +341,21 @@ impl Component for TerminalScreen {
         }
     }
 
-    /// The screen: `crate::shell`'s floating bar over a `.term-wrap` card (status
-    /// row, optional link strip, staggered body) — `docs/terminal.html` v2 is the
-    /// pixel source.
+    /// The screen: `crate::shell`'s floating bar over a `.term-wrap` card
+    /// (status row, optional link strip, staggered body) —
+    /// `docs/terminal.html` v2 is the pixel source.
     ///
-    /// **Pane-content switch.** The card's body (and the key bar's mount) branch
-    /// on [`TerminalController::live`]: a real attached session mounts the grid
-    /// over a `GrpcTerminalFeed` from the first frame (`init` calls
-    /// [`TerminalController::attach_live`] when this screen carries a
-    /// `?session=<id>` *and* the app holds a live client), while a bare
-    /// `/terminal` and every headless suite keep [`card_body`]'s seeded mock
-    /// transcript. The third entry is the checked-in fixture replay, which has no
-    /// menu row: `tests/terminal_live.rs` enters it through [`debug_controller`].
+    /// **Pane-content switch** on [`TerminalController::live`]: a real
+    /// attached session mounts the grid from the first frame (`init` calls
+    /// [`TerminalController::attach_live`] when carrying `?session=<id>`
+    /// with a live client); a bare `/terminal` keeps [`card_body`]'s mock.
+    /// The fixture replay (no menu row) is entered via [`debug_controller`],
+    /// as `tests/terminal_live.rs` does.
     ///
-    /// [`LiveSession`] is constructed **once**, lazily, here rather than from a
-    /// press handler: `build` runs under this screen's reactive `Owner`, which is
-    /// what binds `spawn_feed_pump`'s and `use_interval`'s `on_cleanup` to *this*
-    /// screen (their Ambient-Owner contract). A press handler runs under no owner
-    /// at all on desktop, where such a registration silently leaks.
+    /// [`LiveSession`] is built **once**, lazily, here rather than in a
+    /// press handler: `build` runs under this screen's `Owner`, which is
+    /// what binds `spawn_feed_pump`'s/`use_interval`'s `on_cleanup` — a
+    /// press handler has no owner at all on desktop.
     fn build(&self, state: &mut TerminalState) -> AnyView<TerminalState> {
         // Owned, not borrowed: the live-pane entry below needs `&mut state`.
         let controller = Arc::clone(&state.actions.controller);
@@ -383,11 +369,10 @@ impl Component for TerminalScreen {
                 feed: session.feed.demo().map(Rc::clone),
             });
 
-            // The grid's gesture hooks (`resolve_tap_action`/`resolve_wheel_route`
-            // document the routing), built once beside this session's other seams
-            // and re-attached per rebuild by a cheap `Rc` clone. On herdr the tap
-            // hook stays `None`: a single-pane stream has nothing a tap could
-            // focus beyond the claim the grid's own `Down` already makes.
+            // Gesture hooks (routing documented on `resolve_tap_action`/
+            // `resolve_wheel_route`), built once, re-attached per rebuild by
+            // an `Rc` clone. `None` on herdr: nothing a tap could focus
+            // beyond the grid's own `Down` claim.
             let on_content_tap: Option<term::ContentTapSink> = if controller.is_herdr_session() {
                 None
             } else {
@@ -487,12 +472,10 @@ impl Component for TerminalScreen {
         let colors = Palette::from_theme(&theme);
         let ink = CardInk::from_theme(&theme);
 
-        // Responsive width-clamp pass: read metrics once, branch on one page
-        // constant, never touch layout again. `None` takes the narrow branch.
-        // Both non-fullscreen branches pad *outside* the stage, and fullscreen's
-        // zero is spelled as insets rather than as *no* wrapper: a `Padding` that
-        // comes and goes reconciles as a different child and would tear the stage
-        // — the fullscreen transition's driver included — down mid-flight.
+        // Responsive width-clamp: read metrics once, branch once. Fullscreen's
+        // zero is insets, not *no* `Padding` wrapper — a `Padding` that comes
+        // and goes reconciles as a different child and tears the stage
+        // (its fullscreen-transition driver included) down mid-flight.
         let metrics = use_context::<WindowMetrics>();
         let is_wide = metrics
             .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
@@ -614,15 +597,13 @@ fn active_title(tabs: &[TabEntry], active: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Hit-test a content tap's cell against `tab`'s pane rectangles — the first half
-/// of the grid's `on_content_tap` routing (see [`resolve_tap_action`]).
+/// Hit-test a content tap's cell against `tab`'s pane rectangles — the
+/// first half of [`resolve_tap_action`]'s routing.
 ///
-/// **Fullscreen wins outright**: if any pane is
-/// [`is_fullscreen`](PaneEntry::is_fullscreen), every tap belongs to it.
-/// **Floating beats tiled** past that check — the original's active-layer
-/// preference. An approximation, recorded rather than modeled: the wire carries
-/// no per-pane z-order beyond [`PaneEntry::floating`], so "topmost" is read as
-/// the last pane in wire order whose rect contains the cell, within its layer.
+/// **Fullscreen wins outright** ([`is_fullscreen`](PaneEntry::is_fullscreen));
+/// **floating beats tiled** past that. An approximation: the wire carries no
+/// per-pane z-order beyond [`PaneEntry::floating`], so "topmost" is the last
+/// pane in wire order whose rect contains the cell, within its layer.
 fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
     if let Some(fullscreen) = tab.panes.iter().find(|pane| pane.is_fullscreen) {
         return Some(fullscreen);
@@ -645,20 +626,18 @@ fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry>
 /// The `(pane_id, is_plugin)` a content tap should focus, if any — the live
 /// grid's whole `on_content_tap` routing decision.
 ///
-/// **Tap → FocusPane.** A tap hit-tests the server-active tab's pane rectangles
-/// ([`resolve_tapped_pane`]) and resolves to a focus call only when it lands on a
-/// *different*, non-fullscreen pane; the already-focused pane and a no-hit tap
-/// both answer `None`. A landed focus reloads the tab list
-/// ([`TerminalController::focus_pane_from_tap`]) so the rects and the sheet's
-/// badge converge on what the server did.
+/// **Tap → FocusPane**: hit-tests via [`resolve_tapped_pane`], resolving
+/// only when the tap lands on a *different*, non-fullscreen pane (the
+/// focused pane and a miss both answer `None`). A landed focus reloads the
+/// tab list ([`TerminalController::focus_pane_from_tap`]) to converge the
+/// rects and the sheet's badge.
 ///
-/// **Tap → keyboard** is the same answer read the other way: the hook returns
-/// *should this tap raise the keyboard?* ([`term::ContentTapSink`]), so `Some`
-/// focuses and answers `false` and `None` answers `true` — tapping an unfocused
-/// pane twice focuses, then types, with no extra state. herdr, whose hook is
-/// never wired, keeps the grid's unconditional tap → keyboard; a drag-scroll
-/// never reaches this hook. The focus *claim* is separate, made by the grid's own
-/// `Down` whatever this answers.
+/// **Tap → keyboard** reads the same answer inverted
+/// ([`term::ContentTapSink`]): `Some` focuses without raising the
+/// keyboard, `None` raises it — so tapping an unfocused pane twice
+/// focuses, then types. Never wired for herdr, which keeps the grid's
+/// unconditional tap → keyboard; the focus *claim* itself is separate,
+/// made by the grid's own `Down`.
 fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)> {
     let pane = resolve_tapped_pane(tab, col, row)?;
     if pane.focused {
@@ -686,15 +665,11 @@ enum WheelRoute {
     Drop,
 }
 
-/// Decide [`WheelRoute`] for one wheel step, given whether the server advertised
-/// [`CAP_MOUSE_INPUT`] and the server-active tab (`None` before the first load).
-///
-/// A server with the capability gets a `mouse` frame straight off the attach
-/// stream at the wheel's own cell, so it routes the step to whichever pane sits
-/// underneath (alt-screen apps like `htop` included). Without it, the step falls
-/// back to [`TerminalController::scroll_pane_from_wheel`] against the active
-/// tab's *focused* pane — never the pane under the pointer — and a step with no
-/// focused pane is dropped.
+/// Decide [`WheelRoute`] for one wheel step: [`CAP_MOUSE_INPUT`] present
+/// routes a `mouse` frame at the wheel's cell (whatever pane sits
+/// underneath, alt-screen apps included); absent, it falls back to
+/// [`TerminalController::scroll_pane_from_wheel`] on the active tab's
+/// *focused* pane — never the pointer's — dropped if none is focused.
 fn resolve_wheel_route(has_mouse_input: bool, active_tab: Option<&TabEntry>) -> WheelRoute {
     if has_mouse_input {
         return WheelRoute::Mouse;
@@ -713,32 +688,25 @@ fn toggle_fullscreen(state: &mut TerminalState) {
     state.actions.toggle_fullscreen();
 }
 
-/// Give the OS status/navigation bars back ([`SystemUiMode::EdgeToEdge`], the
-/// platform default) — the one restore helper every fullscreen exit calls:
-/// [`Actions::toggle_fullscreen`]'s collapse branch, and `init`'s [`on_cleanup`],
-/// which every *other* exit funnels through as an unmount.
-///
-/// **Edge-triggered, never build-time**: `frust::set_system_ui_mode` bumps a
-/// process-global generation counter a shell watcher polls each frame, so driving
-/// it from `build` would re-request the same mode every frame.
+/// Give the OS status/nav bars back ([`SystemUiMode::EdgeToEdge`]) — the
+/// one restore helper every fullscreen exit calls: the collapse branch of
+/// [`Actions::toggle_fullscreen`], and every other exit via `init`'s
+/// [`on_cleanup`]. **Edge-triggered, never build-time**: bumps a
+/// process-global generation a shell watcher polls, so a `build`-time call
+/// would re-request every frame.
 fn restore_system_ui() {
     set_system_ui_mode(SystemUiMode::EdgeToEdge);
 }
 
 impl Actions {
-    /// Flip fullscreen: one flag, three build-time consumers —
+    /// Flip fullscreen: one flag, four followers — the **card** animates its
+    /// clearance/padding/radius (`super::chrome::terminal_stage`), the
+    /// **button** swaps its mark, the **shell's bar** hides via
+    /// [`Nav::set_fullscreen`] (its existing driver), and the OS status/nav
+    /// bars follow via [`restore_system_ui`] — the one *not* build-time read.
     ///
-    /// 1. the **card** animates its top clearance (`safe-area + BAR_HEIGHT` →
-    ///    `safe-area`), wrap padding (14 → 0) and corner radius (22 → 0) in one
-    ///    gesture (`super::chrome::terminal_stage`);
-    /// 2. the **button** swaps its vector mark and takes the amber on-state;
-    /// 3. the **shell's bar** animates away via [`Nav::set_fullscreen`] — the
-    ///    bar's existing hidden/reveal driver, not a second hide path.
-    ///
-    /// The OS status/nav bars are the fourth follower and the one that is *not* a
-    /// build-time read — see [`restore_system_ui`]. **Unmount restores the bar**:
-    /// the flag outlives this screen, so `init`'s [`on_cleanup`] clears it rather
-    /// than stranding a hidden bar on `/sessions`.
+    /// **Unmount restores the bar**: the flag outlives this screen, so
+    /// `init`'s [`on_cleanup`] clears it rather than stranding it on `/sessions`.
     pub fn toggle_fullscreen(&self) {
         let on = self.controller.toggle_fullscreen();
         self.app_nav.set_fullscreen(on);
@@ -751,24 +719,19 @@ impl Actions {
         }
     }
 
-    /// Open the app bar's overflow menu, anchored to the bar slot the `⋮` actually
-    /// paints in.
+    /// Open the app bar's overflow menu, anchored to the bar slot the `⋮`
+    /// actually paints in.
     ///
-    /// `show_glyph_menu` takes a **caller-reported** window-coordinate rect (there
-    /// is no ancestor-bounds query a widget can make), and the slot belongs to
-    /// `crate::ui::topbar`, which this page cannot reach into — so
-    /// `super::chrome::terminal_stage`, which knows both the window box and the
-    /// status-bar inset, computes the rect during layout and drops it in
-    /// [`anchor`](Self::anchor) for this to read back.
+    /// `show_glyph_menu` needs a caller-reported window-coordinate rect (no
+    /// ancestor-bounds query exists), and this page can't reach the bar slot
+    /// owned by `crate::ui::topbar` — so `super::chrome::terminal_stage`
+    /// computes it during layout and drops it in [`anchor`](Self::anchor).
     ///
-    /// The menu is a transparent push onto the **root overlay host**, so it paints
-    /// over the bar rather than clipping under it and the bar goes inert for free.
-    /// It paints no scrim of its own by design: it is not a dimming modal.
+    /// A transparent push onto the **root overlay host**: paints over the
+    /// bar (rather than clipping under it) with no scrim of its own.
     ///
-    /// **The menu claims root focus on every press, and this app cannot stop it**
-    /// — a framework-side gap: the widget requests focus on any pointer `Down` so
-    /// a subsequent Escape has a chain to travel, with no opt-out. The claim
-    /// summons no keyboard and leaves with the menu.
+    /// **Claims root focus on every press** (a framework gap with no
+    /// opt-out) — summons no keyboard, and leaves with the menu.
     pub fn open_menu(&self) {
         let actions = self.clone();
         show_glyph_menu(
@@ -789,13 +752,12 @@ impl Actions {
 
     /// Open the "panes & tabs" sheet — the menu's first row.
     ///
-    /// The body builder is re-invoked on every rebuild while the sheet is up, so
-    /// its reads are tracked and a browse shows with no hand-rolled rebuild.
-    /// Opening points the browse back at the tab the session is on, and
-    /// **refreshes the layout** — the only way this sheet ever shows a tab or pane
-    /// opened elsewhere (there is no server push). The open is *not* blocked on
-    /// that round trip: the fresh answer patches in through [`sheet_body`]'s
-    /// tracked reads, so a slow link costs a late pill, never a stuck sheet.
+    /// The body builder re-invokes on every rebuild while up, so a browse
+    /// shows tracked with no hand-rolled rebuild. Opening re-points the
+    /// browse at the session's tab and **refreshes the layout** (no server
+    /// push otherwise) without blocking the open: the answer patches in
+    /// through [`sheet_body`]'s tracked reads, so a slow link costs a late
+    /// pill, never a stuck sheet.
     pub fn open_sheet(&self) {
         self.controller.begin_browsing();
         let actions = self.clone();
@@ -811,28 +773,20 @@ impl Actions {
         self.controller.browse_tab(key.to_string());
     }
 
-    /// Commit the sheet's browse: focus the pane `pane_id` of the tab keyed
-    /// `tab_key`, then close the sheet a beat later so the selection visibly moves
-    /// first (`setTimeout(closeSheet, 260)`).
+    /// Commit the sheet's browse: focus pane `pane_id` of tab `tab_key`,
+    /// then close the sheet a beat later (`setTimeout(closeSheet, 260)`) so
+    /// the selection visibly moves first. The sheet's one navigating gesture
+    /// and its one dismissal.
     ///
-    /// The sheet's **one** navigating gesture and its one dismissal, in two
-    /// phases. While a commit is **in flight**, a second row is dropped at the
-    /// controller's single-flight claim — **first tap wins**, and the dropped tap
-    /// schedules nothing. Once the commit has landed and the close beat is
-    /// pending, the sheet stays live and a repeat tap commits again —
-    /// [`SheetHandle::close_after`] re-times the one pending close rather than
-    /// stacking a second behind it (**latest tap wins**, only inside the beat),
-    /// and the superseded wait cannot pop the `/terminal` route.
+    /// **First tap wins**: a commit in flight drops a second row at the
+    /// controller's single-flight claim. **Latest tap wins** inside the
+    /// close beat: [`SheetHandle::close_after`] re-times the one pending
+    /// close rather than stacking a second.
     ///
-    /// Two commits are refused client-side for a **read-only** credential, each
-    /// because the server would otherwise answer with silence: one that has to move
-    /// **tabs** first (the wire's `GoToTab` is mutating, so the sequence would stop
-    /// there anyway), and any commit on **herdr**, whose relay drops an inbound
-    /// `FocusPane` from a read-only client without a word. Zellij's same-tab commit
-    /// is `FocusPane` alone, which that backend honours as the read it is.
-    ///
-    /// The stream is never touched here: the verbs [`TerminalController::commit_pane`]
-    /// sends are what move the session, on either backend.
+    /// Refused client-side for a **read-only** credential when it needs a
+    /// tab move first (`GoToTab` is mutating) or targets **herdr** (whose
+    /// relay silently drops a read-only `FocusPane`); Zellij's same-tab
+    /// commit is a plain read, so it's exempt.
     pub fn commit_pane(&self, sheet: &SheetHandle, tab_key: &str, pane_id: u32, is_plugin: bool) {
         // Untracked: a press handler has no reactive owner on desktop.
         let cross_tab = tab_key != self.controller.active_tab.get_untracked();
@@ -856,14 +810,12 @@ impl Actions {
         });
     }
 
-    /// Switch this connection's view to the space with id `id`, reloading the tab
-    /// world behind it. The sheet stays up.
+    /// Switch this connection's view to space `id`, reloading the tab world
+    /// behind it. The sheet stays up.
     ///
-    /// `SwitchSpace` is **MUTATING** on the wire, so a read-only credential is
-    /// refused here rather than at the server — the same pre-emption the rename
-    /// dialog and a herdr commit make, and for the same reason: the pill stays on
-    /// screen and says why. Every *other* refusal is still the server's, and
-    /// reaches the toast bridge through the controller's own failure sink.
+    /// `SwitchSpace` is wire-**MUTATING**, so a read-only credential is
+    /// refused here (not the server) — the pill stays and says why. Every
+    /// other refusal is the server's, via the controller's failure sink.
     pub fn select_space(&self, id: &str) {
         // Untracked: a press handler has no reactive owner on desktop.
         if self.connection.is_read_only.get_untracked() {
@@ -1033,15 +985,13 @@ impl Actions {
     }
 }
 
-/// The overflow menu's entries. A free fn because `show_glyph_menu` takes a
+/// The overflow menu's entries. A free fn: `show_glyph_menu` takes a
 /// `Fn() -> Vec<MenuEntry>` it may re-invoke per rebuild.
 ///
-/// **No icons**: `MenuEntry` is a label plus a normal/danger variant with no icon
-/// slot, and a glyph as label text is the font-fallback trap `crate::ui::topbar`'s
-/// vector rule forbids. *Detach* is deliberately not the danger variant —
-/// detaching leaves the session running. **No separators either**: three
-/// ungrouped rows have nothing to punctuate, and a separator's 11px band read on
-/// device as uneven row spacing.
+/// **No icons**: no icon slot on `MenuEntry`, and a glyph as label text is
+/// the font-fallback trap `crate::ui::topbar`'s vector rule forbids.
+/// *Detach* isn't the danger variant — it leaves the session running. **No
+/// separators**: nothing to punctuate, and the 11px band read as uneven spacing.
 fn menu_entries() -> Vec<MenuEntry> {
     vec![
         menu_item(MENU_PANES),
