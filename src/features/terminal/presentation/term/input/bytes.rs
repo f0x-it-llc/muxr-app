@@ -59,13 +59,13 @@ pub const SHIFT_PAGE_DOWN: &[u8] = b"\x1b[6;2~";
 /// Shift+`Del` — see [`SHIFT_PAGE_UP`].
 pub const SHIFT_FORWARD_DELETE: &[u8] = b"\x1b[3;2~";
 
-/// Every sequence that has a Shift variant, as `(plain, shifted)` — the whole of
-/// the modifier arithmetic this module performs on a sequence key. Keyed on the
-/// **bytes** rather than a key enum, so the bar's `↑` and a hardware `↑` keep
-/// sending the same thing shifted as they do plain, through one table instead of
-/// two. Deliberately not exhaustive: [`ESC`], [`HOME`] and [`END`] have no row and
-/// are sent unmodified with Shift armed, and **no other modifier is parameterized
-/// at all** (see [`ModifierLatch`]).
+/// Every sequence that has a Shift variant, as `(plain, shifted)` — the whole
+/// of the modifier arithmetic this module performs on a sequence key. Keyed
+/// on the **bytes**, not a key enum, so the bar's `↑` and a hardware `↑` send
+/// the same thing shifted as they do plain, through one table. Deliberately
+/// not exhaustive: [`ESC`], [`HOME`] and [`END`] have no row and are sent
+/// unmodified with Shift armed, and **no other modifier is parameterized at
+/// all** (see [`ModifierLatch`]).
 const SHIFTED_SEQUENCES: [(&[u8], &[u8]); 8] = [
     (TAB, BACK_TAB),
     (ARROW_UP, SHIFT_ARROW_UP),
@@ -235,10 +235,10 @@ impl BarKey {
 }
 
 /// The bytes a focus-routed [`NamedKey`] sends — the desktop preview's real
-/// keyboard, and Android's `IME_ACTION_DONE`-as-`Enter`. An exhaustive match, so a
-/// new [`NamedKey`] variant is a compile error here rather than a silently dropped
-/// key. Shares its sequences with [`BarKey`]: the bar's `↑` and a physical `↑` send
-/// the same three bytes — and the same six shifted ones.
+/// keyboard, and Android's `IME_ACTION_DONE`-as-`Enter`. An exhaustive match,
+/// so a new [`NamedKey`] variant is a compile error, not a silently dropped
+/// key. Shares its sequences with [`BarKey`]: the bar's `↑` and a physical
+/// `↑` send the same three bytes, and the same six shifted ones.
 pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
     match key {
         NamedKey::Enter => &[ENTER_BYTE],

@@ -1,33 +1,32 @@
-//! Same-style run batching: one emulator screen in, a reusable list of [`GridRun`]s
-//! out.
+//! Same-style run batching: one emulator screen in, a reusable list of
+//! [`GridRun`]s out.
 //!
 //! **Batching is the whole performance story.** Each `GlyphRun` the scene layer
-//! emits becomes exactly one vello `draw_glyphs` call, and the text engine's shape
-//! cache is a bounded LRU keyed on `(text, style)`. [`batch_screen`] coalesces
-//! consecutive cells sharing a whole [`CellStyle`] into **one** shaped run and
-//! **one** background rectangle — never a draw per cell. That is the property S9
-//! measured, and the reason a 54x60 grid costs ~130 shapes a frame on a build log
-//! rather than ~3200.
+//! emits becomes exactly one vello `draw_glyphs` call. [`batch_screen`]
+//! coalesces consecutive cells sharing a whole [`CellStyle`] into **one**
+//! shaped run and **one** background rectangle — never a draw per cell —
+//! costing a 54x60 grid ~130 shapes a frame rather than ~3200.
 //!
 //! Four things the naive loop gets wrong:
 //!
-//! 1. **A never-written cell has no contents.** `vt100` returns an empty string for
-//!    a cell nothing printed to; pushing that would shift every glyph after it one
-//!    column left, so a space is substituted.
-//! 2. **A wide character owns two columns.** Its continuation cell contributes no
-//!    glyph of its own, so it is skipped and the run's cell span advances by 2.
-//! 3. **Trailing blanks over the default background paint nothing.** They are
-//!    trimmed, and a run left empty by that is discarded — most of a terminal screen
-//!    most of the time. A run with a **non-default** background always commits: its
-//!    rect paints where its text does not.
-//! 4. **Interior blanks are not a run boundary.** Splitting on them would turn every
-//!    word of every line into its own draw call.
+//! 1. **A never-written cell has no contents.** `vt100` returns an empty
+//!    string for a cell nothing printed to; pushing that would shift every
+//!    glyph after it one column left, so a space is substituted.
+//! 2. **A wide character owns two columns.** Its continuation cell contributes
+//!    no glyph of its own, so it is skipped and the run's cell span advances
+//!    by 2.
+//! 3. **Trailing blanks over the default background paint nothing.** Trimmed,
+//!    and a run left empty by that is discarded — most of a terminal screen
+//!    most of the time. A run with a **non-default** background always
+//!    commits: its rect paints where its text does not.
+//! 4. **Interior blanks are not a run boundary** — splitting on them would
+//!    turn every word of every line into its own draw call.
 //!
 //! **Allocation reuse**: [`RunBatch`] retains its `GridRun` slots (and their
 //! `String`s) across generations — `runs[..len]` are live, `runs[len..]` are
-//! retained empties the next batch re-fills. At 30 repaints a second, re-allocating
-//! a few hundred `String`s per generation is the difference between a terminal and a
-//! garbage collector, so a test pins it.
+//! retained empties the next batch re-fills. At 30 repaints a second,
+//! re-allocating a few hundred `String`s per generation is the difference
+//! between a terminal and a garbage collector, so a test pins it.
 
 use frust::authoring::text::TextLayout;
 
@@ -160,9 +159,9 @@ impl RunBatch {
         }
         if default_bg {
             let trimmed = slot.text.trim_end_matches(' ').len();
-            // Each trimmed character is an ASCII space, i.e. exactly one byte and one
-            // column — so the span shrinks with the text, and a decoration spanning
-            // the run (an SGR underline) cannot trail off across blanks.
+            // Each trimmed char is an ASCII space (one byte, one column), so
+            // the span shrinks with the text and a decoration spanning the
+            // run (an SGR underline) can't trail off across blanks.
             let dropped = slot.text.len() - trimmed;
             slot.text.truncate(trimmed);
             slot.cells = slot.cells.saturating_sub(dropped as u16);
@@ -175,10 +174,10 @@ impl RunBatch {
 }
 
 /// Batch one emulator screen into same-style runs (see the [module docs](self)).
-/// Walks the screen's **own** size rather than a caller-supplied grid, so the batch
-/// can never disagree with what the emulator actually holds. `is_default_bg` decides
-/// which runs are blank-elidable; it is the palette's question, threaded in as a
-/// closure so this module stays free of colour resolution.
+/// Walks the screen's **own** size, not a caller-supplied grid, so the batch can
+/// never disagree with what the emulator holds. `is_default_bg` (the palette's
+/// question, threaded in as a closure so this module stays colour-free) decides
+/// which runs are blank-elidable.
 pub fn batch_screen(
     screen: &vt100::Screen,
     out: &mut RunBatch,

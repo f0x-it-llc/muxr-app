@@ -2,32 +2,29 @@
 //! `View`/`Widget` pair that batches, shapes and paints the emulator's screen.
 //! Three rules it is built around:
 //!
-//! 1. **Shaping happens in `layout`, so a new generation must report
-//!    `LAYOUT | PAINT`.** `layout` is the only pass carrying a `TextContext`, and
-//!    a bare `PAINT` leaves the grid frozen under the mobile shells' intra-frame
-//!    layout-skip gate; `paint` only replays what `layout` cached.
-//! 2. **The widget requests no frames for content**: the feed pump's one signal
-//!    write per wake is the sole content wake source, and a `request_frame` here
-//!    would repaint at panel rate forever and moot the coalescing. The single
-//!    exception is the cursor blink — pixels-only, and so requesting the *paced*
+//! 1. **A new generation reports `LAYOUT | PAINT`, never bare `PAINT`.** Shaping
+//!    happens in `layout` (the only pass carrying a `TextContext`); `paint` only
+//!    replays what `layout` cached, so a bare `PAINT` would freeze the grid.
+//! 2. **The widget requests no frames for content.** The feed pump's one signal
+//!    write per wake is the sole content wake source; a `request_frame` here
+//!    would repaint at panel rate forever and moot the coalescing. The one
+//!    exception is the cursor blink (pixels-only), which requests the *paced*
 //!    frame class the mobile frame gate may throttle.
-//! 3. **The emulator lives behind an `Rc<RefCell<_>>`, never a signal**; the
+//! 3. **The emulator lives behind an `Rc<RefCell<_>>`, never a signal** — the
 //!    generation counter is the only signal, written once per pump wake.
 //!
 //! **The grid is the IME client** given an [`InputSeam`] with `read_only` clear —
-//! the one place `request_focus` and `publish_ime_state` are called, deliberately
-//! not at the same moment (the press claims focus, the tap branch publishes).
-//! **Selection** makes it the gesture's *hands* — measuring, tracking and painting
-//! — while the enclosing [`GestureDetector`](frust::GestureDetector) owns the
-//! timing. **One `Down`, three outcomes** (tap / drag-scroll / long-press
-//! selection), discriminated at the framework's own [`TOUCH_SLOP`] so a press
-//! cannot be a scroll here and a long-press there; each branch's own method
-//! carries its contract. Two accepted limitations: **no fling** (a fling over a
-//! *remote* scrollback, every step an RPC, is a decision to take with a device in
-//! hand), and the detector's fire-on-release path, where an in-slop `Up` is
-//! indistinguishable from a tap, so a hold released inside the threshold frame
-//! reports one redundant content tap. Not here: no scrollback view, no key repeat,
-//! no selection handles, no double-tap-select, no select-all.
+//! the one place `request_focus`/`publish_ime_state` are called, deliberately not
+//! at the same moment (press claims focus, the tap branch publishes). Given a
+//! selection seam it's the gesture's *hands* (measure/track/paint) while the
+//! enclosing [`GestureDetector`](frust::GestureDetector) owns timing. **One
+//! `Down`, three outcomes** (tap / drag-scroll / long-press selection),
+//! discriminated at [`TOUCH_SLOP`] so a press can't be a scroll here and a
+//! long-press there. Accepted limitations: no fling (remote-scrollback fling is
+//! an RPC-per-step decision deferred to device testing), and the detector's
+//! fire-on-release path can report one redundant content tap for an in-slop
+//! `Up`. Not implemented: scrollback view, key repeat, selection handles,
+//! double-tap-select, select-all.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -47,9 +44,9 @@ use super::selection::{self, GridPoint, Segment};
 use super::style::{CellStyle, TerminalPalette};
 use super::{ContentTapSink, CursorStyle, InputSeam, SelectionSeam, SharedEmulator, WheelSink};
 
-/// The caret's blink period, in ms — one full on/off cycle. Transcribed from
-/// `docs/terminal.html`'s own `@keyframes blink` (1.1s), so the real grid and the
-/// mock card's caret blink together rather than beating against each other.
+/// The caret's blink period, in ms — one full on/off cycle. Matches
+/// `docs/terminal.html`'s `@keyframes blink` (1.1s) so the real grid and the
+/// mock card blink in sync.
 pub const CURSOR_BLINK_PERIOD_MS: f64 = 1100.0;
 
 /// The underline cursor's thickness, as a fraction of the cell height (floored
@@ -84,8 +81,8 @@ pub const LOUPE_W: f64 = 116.0;
 pub const LOUPE_H: f64 = 46.0;
 /// How much the cells inside it are magnified.
 pub const LOUPE_SCALE: f64 = 1.75;
-/// How far above the finger the window's **bottom edge** floats — enough that
-/// the hand is not covering the thing it is magnifying.
+/// How far above the finger the window's **bottom edge** floats, clear of the
+/// hand.
 pub const LOUPE_LIFT: f64 = 28.0;
 /// The gutter the window is kept inside the terminal rect by.
 pub const LOUPE_MARGIN: f64 = 4.0;
@@ -100,10 +97,9 @@ const LOUPE_SHADOW_ALPHA: f32 = 0.4;
 const LOUPE_TOLERANCE: f64 = 0.1;
 
 /// The loupe window's box inside a `bounds`-sized terminal rect, for a finger at
-/// `focal` (widget-local px): horizontally centred on the finger, floating
-/// [`LOUPE_LIFT`] above it, then clamped to a [`LOUPE_MARGIN`] gutter. Written
-/// low-bound-last (`max` after `min`) so a rect too small to hold the window pins
-/// it to the top-left rather than panicking on an inverted range.
+/// `focal` (widget-local px): centred on the finger, floating [`LOUPE_LIFT`]
+/// above it, clamped to a [`LOUPE_MARGIN`] gutter. `max` after `min` so a rect
+/// too small to hold the window pins it top-left rather than inverting the range.
 pub fn loupe_box(focal: Point, bounds: Size) -> Rect {
     let x = (focal.x - LOUPE_W / 2.0)
         .min(bounds.width - LOUPE_MARGIN - LOUPE_W)
@@ -117,12 +113,11 @@ pub fn loupe_box(focal: Point, bounds: Size) -> Rect {
 /// **The subtle part.** How far the magnified content is shifted off the window's
 /// own centre: `focal - centre_of(window)`.
 ///
-/// While the window can follow the finger this is a constant vertical shift, the
-/// window floating *above* the finger by design. Once a clamp pins the window
-/// against an edge — a finger in a corner, precisely when a magnifier matters
-/// most — the window stops moving but the finger keeps going, and re-deriving the
-/// offset from the **clamped** centre is what keeps the cell under the finger in
-/// the window.
+/// A constant vertical shift while the window follows the finger (it floats
+/// *above* it by design). Once a clamp pins the window against an edge — a
+/// finger in a corner, exactly when a magnifier matters most — the window stops
+/// but the finger keeps going; deriving the offset from the **clamped** centre
+/// keeps the cell under the finger inside the window.
 pub fn loupe_content_offset(focal: Point, window: Rect) -> Vec2 {
     focal.to_vec2() - window.center().to_vec2()
 }
@@ -136,14 +131,14 @@ fn loupe_transform(focal: Point, window: Rect) -> Affine {
         * Affine::translate(-focal.to_vec2())
 }
 
-/// Where the cursor is and what sits under it, captured during `layout` (the only
-/// pass that can shape) so `paint` touches neither the emulator nor the text
-/// engine.
+/// Where the cursor is and what sits under it, captured during `layout` (the
+/// only pass that can shape) so `paint` touches neither the emulator nor the
+/// text engine.
 struct CursorCell {
     row: u16,
     col: u16,
     /// The character under the cursor, re-shaped in the background ink for the
-    /// focused block style; `None` when the cell is blank.
+    /// focused block style; `None` when blank.
     inverse_glyph: Option<TextLayout>,
 }
 
@@ -164,9 +159,9 @@ pub struct TerminalGridView {
     on_wheel: Option<WheelSink>,
 }
 
-/// Build a grid view over `emulator` at `generation`, which must be a **tracked**
-/// read of the pump's signal in the caller's `build`: it is what makes a repaint
-/// happen at all. `font_family` starts at
+/// Build a grid view over `emulator` at `generation`, which must be a
+/// **tracked** read of the pump's signal in the caller's `build` — that's what
+/// makes a repaint happen at all. `font_family` starts at
 /// `crate::fonts::default_terminal_family()`.
 pub fn terminal_grid(
     emulator: SharedEmulator,
@@ -201,8 +196,7 @@ impl TerminalGridView {
 
     /// The primary+fallback font stack to shape with, resolved by
     /// `crate::fonts::resolve_terminal_family`. Defaults to
-    /// [`crate::fonts::default_terminal_family`], so a caller that never sets this
-    /// still shapes with a real monospace stack.
+    /// [`crate::fonts::default_terminal_family`], a real monospace stack.
     #[must_use]
     pub fn font_family(mut self, family: FontFamily) -> Self {
         self.font_family = family;
@@ -226,7 +220,7 @@ impl TerminalGridView {
 
     /// Make this grid the session's **keystroke source**: a tap claims focus and
     /// raises the keyboard, and every key/IME event becomes bytes on `seam`'s
-    /// feed. Without one the grid is a display surface only.
+    /// feed. Without one, the grid is a display surface only.
     #[must_use]
     pub fn input(mut self, seam: InputSeam) -> Self {
         self.input = Some(seam);
@@ -234,9 +228,9 @@ impl TerminalGridView {
     }
 
     /// A read-only grid: never an IME client, never an emitter, whatever seam it
-    /// was given. The **focus gate is the read-only gate**: a widget that refuses
-    /// focus is unreachable by the focus-routed `Key`/`Ime`, so nothing downstream
-    /// needs a second guard. Inert, not a shield — it consumes nothing.
+    /// was given. The **focus gate is the read-only gate** — a widget that
+    /// refuses focus is unreachable by focus-routed `Key`/`Ime`, so nothing
+    /// downstream needs a second guard. Inert, not a shield: it consumes nothing.
     #[must_use]
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
@@ -257,11 +251,12 @@ impl TerminalGridView {
     /// Report the **cell** a content tap landed on, and ask whether that tap
     /// should raise the keyboard.
     ///
-    /// Fires on the tap branch only — a release within [`TOUCH_SLOP`] of the
-    /// press — and always **in addition to** the focus claim the `Down` already
-    /// made. Not gated on [`read_only`](Self::read_only): pointing at a pane you
-    /// cannot type into is still pointing at it, though the publish it can trigger
-    /// *is* gated. Without a sink, a tap claims focus and raises the keyboard.
+    /// Fires on the tap branch only (a release within [`TOUCH_SLOP`] of the
+    /// press), always **in addition to** the focus claim the `Down` already
+    /// made. Not gated on [`read_only`](Self::read_only) — pointing at a pane
+    /// you can't type into is still pointing at it, though the publish it can
+    /// trigger *is* gated. Without a sink, a tap claims focus and raises the
+    /// keyboard.
     #[must_use]
     pub fn on_content_tap(mut self, sink: ContentTapSink) -> Self {
         self.on_content_tap = Some(sink);
@@ -269,7 +264,7 @@ impl TerminalGridView {
     }
 
     /// Report one wheel step per line of scroll, at the cell it applies to — one
-    /// hook for both sources, a touch drag past the slop and a desktop
+    /// hook for both a touch drag past the slop and a desktop
     /// [`InputEvent::Scroll`]. Without one, a drag scrolls nothing.
     #[must_use]
     pub fn on_wheel(mut self, sink: WheelSink) -> Self {
@@ -278,21 +273,21 @@ impl TerminalGridView {
     }
 }
 
-/// The pointer gesture in flight — the touch state machine's whole state. `Copy`,
+/// The pointer gesture in flight — the touch state machine's whole state. `Copy`
 /// so an event arm can read it by value and reassign in the same expression.
 #[derive(Clone, Copy, Debug)]
 enum Grab {
-    /// No press this widget armed: nothing down, or a gesture the selection —
-    /// or a `Down` outside the grid's own box — disarmed.
+    /// No press this widget armed: nothing down, or disarmed by the selection or
+    /// a `Down` outside the grid's box.
     Idle,
-    /// A finger is down and still within [`TOUCH_SLOP`] of where it landed: a
-    /// tap, a drag-scroll and a long-press selection are all still open.
+    /// A finger is down, still within [`TOUCH_SLOP`] of where it landed: tap,
+    /// drag-scroll, and long-press selection are all still open.
     Armed {
         /// Where the press landed, in widget-local px.
         origin: Point,
     },
-    /// The press crossed the slop before the long-press fired, so this gesture is
-    /// a scroll for the rest of its life.
+    /// The press crossed the slop before the long-press fired — a scroll for the
+    /// rest of its life.
     Scrolling {
         /// The position the scroll accumulator has already consumed up to.
         last: Point,
@@ -316,17 +311,17 @@ pub struct TerminalGridWidget {
     /// Which generation `batch` was shaped from (`None` = never / invalidated).
     shaped: Option<u64>,
     /// The `(content box, font size)` the geometry was solved against, and the
-    /// solution. Re-solved only when either changes, or when
+    /// solution. Re-solved only when either changes, or
     /// [`geometry_family`](Self::geometry_family) no longer matches.
     geometry: Option<(Size, f32, CellGeometry)>,
-    /// The font family [`geometry`](Self::geometry) was solved against — a sibling
-    /// field rather than part of that tuple, since `FontFamily` isn't `Copy`.
-    /// `None` exactly when [`geometry`](Self::geometry) is.
+    /// The font family [`geometry`](Self::geometry) was solved against — a
+    /// sibling field, not part of that tuple, since `FontFamily` isn't `Copy`.
+    /// `None` exactly when `geometry` is.
     geometry_family: Option<FontFamily>,
     cursor_cell: Option<CursorCell>,
-    /// Frame clock epoch the current blink cycle started from (`None` until the
-    /// first focused paint, and reset on a focus change so a freshly focused grid
-    /// shows a lit caret immediately).
+    /// Frame clock epoch the current blink cycle started from. `None` until the
+    /// first focused paint, and reset on a focus change so a freshly focused
+    /// grid shows a lit caret immediately.
     blink_from: Option<FrameTime>,
     /// The keystroke source + feed this grid emits through, when it is one.
     input: Option<InputSeam>,
@@ -340,21 +335,21 @@ pub struct TerminalGridWidget {
     /// Effective focus as of the last paint, for the blink-reset edge and the
     /// blur scrub (see [`note_focus_edge`](Self::note_focus_edge)).
     was_focused: bool,
-    /// The seam's focus claim as of the last time this grid took focus — what
-    /// tells a hand-off to the key bar from a real blur.
+    /// The seam's focus claim as of the last time this grid took focus — tells a
+    /// hand-off to the key bar apart from a real blur.
     focus_claim: u64,
-    /// Whether this grid has an IME surface **up**: raised by a qualifying tap (or
-    /// a keystroke, which implies one is already up), dropped only on a real blur.
-    /// The gate on the focused-paint republish, which is what makes the deferral
-    /// real: `press`'s `request_focus` makes `has_focus()` true by the next frame,
-    /// so a republish keyed on focus alone would raise the keyboard on every
-    /// `Down` whatever the tap branch decided.
+    /// Whether this grid has an IME surface **up**: raised by a qualifying tap
+    /// (or a keystroke, which implies one is already up), dropped only on a
+    /// real blur. Gates the focused-paint republish — load-bearing, since
+    /// `press`'s `request_focus` makes `has_focus()` true by the next frame, so
+    /// gating on focus alone would raise the keyboard on every `Down`
+    /// regardless of what the tap branch decided.
     ime_engaged: bool,
     /// The pointer gesture in flight (see [`Grab`]).
     grab: Grab,
-    /// The scroll accumulator's sub-step remainder, in **lines**: travel shorter
-    /// than one cell height is carried to the next event rather than dropped,
-    /// which is what makes a slow drag scroll smoothly. Reset at every press.
+    /// The scroll accumulator's sub-step remainder, in **lines**: travel
+    /// shorter than one cell height carries to the next event instead of
+    /// dropping, so a slow drag scrolls smoothly. Reset at every press.
     scroll_carry: f64,
     /// Where a content tap is reported, when a screen asked for them.
     on_content_tap: Option<ContentTapSink>,
@@ -370,8 +365,8 @@ impl<State: 'static> View<State> for TerminalGridView {
         if let Some(seam) = self.selection.as_ref() {
             seam.observe_generation(self.generation);
         }
-        // The read-only posture belongs to the session, not to this widget:
-        // published here so the key bar's caps are gated by the same flag.
+        // Read-only belongs to the session, published here so the key bar's
+        // caps are gated by the same flag.
         if let Some(seam) = self.input.as_ref() {
             seam.set_read_only(self.read_only);
         }
@@ -412,9 +407,9 @@ impl<State: 'static> View<State> for TerminalGridView {
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
 
-        // Anything that changes what is shaped forces LAYOUT, never a bare PAINT
-        // (rule 1). A font-family change rides the same contract a font-size
-        // change does; this only clears the shaped run cache.
+        // Anything that changes what is shaped forces LAYOUT, never a bare
+        // PAINT (rule 1) — a font-family change rides the same contract as a
+        // font-size change; this only clears the shaped run cache.
         let reshapes = prev.generation != self.generation
             || prev.font_size != self.font_size
             || prev.font_family != self.font_family
@@ -448,8 +443,8 @@ impl<State: 'static> View<State> for TerminalGridView {
             flags |= ChangeFlags::PAINT;
         }
 
-        // Seams and hooks are `Rc`-backed: cheap to clone, not comparable, so they
-        // are reinstalled every rebuild. Only *presence* changes what is painted.
+        // Seams/hooks are `Rc`-backed: cheap to clone, not comparable, so they're
+        // reinstalled every rebuild. Only *presence* changes what is painted.
         let clienthood = prev.input.is_some() != self.input.is_some()
             || prev.read_only != self.read_only
             || prev.selection.is_some() != self.selection.is_some();
@@ -461,15 +456,15 @@ impl<State: 'static> View<State> for TerminalGridView {
             element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
         }
-        // Republished every rebuild rather than only on the `clienthood` edge: the
-        // seam outlives this widget's element, and `set_read_only` is idempotent —
-        // only the false→true edge does anything, and what it does is scrub.
+        // Republished every rebuild, not just on the `clienthood` edge: the seam
+        // outlives this element, and `set_read_only` is idempotent — only the
+        // false→true edge does anything (scrub).
         if let Some(seam) = self.input.as_ref() {
             seam.set_read_only(self.read_only);
         }
 
-        // A new generation is new output — clear a held selection rather than let
-        // it retarget under streaming content. A no-op when neither moved.
+        // A new generation is new output — clear a held selection rather than
+        // let it retarget under streaming content. No-op when neither moved.
         if let Some(seam) = self.selection.as_ref() {
             seam.observe_generation(self.generation);
         }
@@ -478,10 +473,10 @@ impl<State: 'static> View<State> for TerminalGridView {
     }
 
     /// The grid is going away: drop everything the session buffered — the
-    /// **unmount scrub**. It lives here rather than on the screen's `on_cleanup`
-    /// for a mechanical reason: `on_cleanup` takes a `Send + Sync` closure and
-    /// every handle on this seam is `Rc`-backed. `ComponentWidget::teardown` tears
-    /// the element tree down *before* disposing the owner, so this runs first.
+    /// **unmount scrub**. Lives here rather than on the screen's `on_cleanup`
+    /// because `on_cleanup` needs `Send + Sync` and this seam is `Rc`-backed.
+    /// `ComponentWidget::teardown` tears the element tree down *before*
+    /// disposing the owner, so this runs first.
     fn teardown(&self, element: &mut TerminalGridWidget, _ctx: &mut BuildCtx<'_>) {
         if let Some(seam) = element.input.as_ref() {
             seam.scrub();
@@ -491,15 +486,14 @@ impl<State: 'static> View<State> for TerminalGridView {
 
 impl Widget for TerminalGridWidget {
     /// Solve the geometry, resize the emulator to it, re-shape if anything
-    /// changed, and take **exactly the grid's own box** (constrained by `bc`): at
-    /// most one cell of the offered box goes unused per axis, and a parent forcing
-    /// a tight size gets that instead, the grid anchored top-left inside it and
+    /// changed, and take **exactly the grid's own box** (constrained by `bc`):
+    /// at most one cell of the offered box goes unused per axis; a parent
+    /// forcing a tight size gets that instead, the grid anchored top-left with
     /// the leftover strip painted in the terminal's background.
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let available = bc.max();
-        // `geometry_family` joins the box/size in the cache key: a different family
-        // can measure a different cell advance at the identical size. A plain
-        // `bool`, so its borrow is dropped before the miss branch writes back.
+        // `geometry_family` joins the box/size in the cache key: a different
+        // family can measure a different cell advance at the identical size.
         let cache_hit = matches!(
             (&self.geometry, self.geometry_family.as_ref()),
             (Some((solved_box, solved_size, _)), Some(solved_family))
@@ -522,9 +516,9 @@ impl Widget for TerminalGridWidget {
             geometry
         };
 
-        // The grid the box divides into is what the emulator must hold: this is
-        // where a rotation, a fullscreen toggle or a font-size change becomes a
-        // real terminal resize.
+        // The grid the box divides into is what the emulator must hold — where
+        // a rotation, fullscreen toggle, or font-size change becomes a real
+        // terminal resize.
         if self
             .emulator
             .borrow_mut()
@@ -548,16 +542,17 @@ impl Widget for TerminalGridWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let Some((_, _, geometry)) = self.geometry else {
-            // Painted before ever being laid out: nothing measured, nothing honest.
+            // Painted before ever being laid out: nothing measured, nothing
+            // honest.
             return;
         };
         let origin = ctx.origin();
         let size = ctx.size();
 
-        // Effective focus: the builder input OR the pod's own recorded focus path.
-        // `has_focus` is authoritative for a *container-routed* blur — one that
-        // clears the pod's flag without reaching `event` — so a freshly blurred
-        // grid stops blinking on the very next frame.
+        // Effective focus: the builder input OR the pod's own recorded focus
+        // path. `has_focus` is authoritative for a *container-routed* blur (one
+        // that clears the pod's flag without reaching `event`), so a freshly
+        // blurred grid stops blinking on the very next frame.
         let focused = self.focused || ctx.has_focus();
         if focused != self.was_focused {
             self.was_focused = focused;
@@ -576,10 +571,10 @@ impl Widget for TerminalGridWidget {
         });
 
         // Republish the IME surface every painted frame while focused **and
-        // engaged**, so a platform mirror reseeded behind our back converges. The
-        // `ime_engaged` half is load-bearing: `press` requests focus on every
-        // `Down`, so a republish gated on focus alone would put the keyboard back
-        // up behind the tap branch's back.
+        // engaged**, so a platform mirror reseeded behind our back converges.
+        // `ime_engaged` is load-bearing: `press` requests focus on every `Down`,
+        // so gating on focus alone would put the keyboard back up behind the
+        // tap branch's back.
         if let Some(seam) = self.input.as_ref()
             && !self.read_only
             && ctx.has_focus()
@@ -589,13 +584,13 @@ impl Widget for TerminalGridWidget {
             ctx.publish_ime_state(state);
         }
 
-        // Blink bookkeeping runs exactly once per frame, before the content is
-        // painted, so the loupe's re-paint reuses the same answer rather than
-        // requesting a second frame or blinking out of phase with itself.
+        // Blink bookkeeping runs exactly once per frame, before content paints,
+        // so the loupe's re-paint reuses the same answer instead of requesting
+        // a second frame or blinking out of phase with itself.
         let lit = self.cursor_lit_now(ctx, focused);
 
         // The derived geometry already fits the content box, so the clip is a
-        // backstop — and it is what keeps the loupe inside the rect.
+        // backstop — and keeps the loupe inside the rect.
         scene.push_clip(origin, size);
         scene.fill_rect(origin, size, self.palette.background);
         self.paint_content(scene, origin, geometry, focused, lit, None);
@@ -604,16 +599,15 @@ impl Widget for TerminalGridWidget {
         // No `request_frame` for content: the pump's write is the wake (rule 2).
     }
 
-    /// The keystroke source's event half, the selection gesture's hands **and** the
-    /// touch state machine — one dispatch per event class, each arm's own method
-    /// carrying the ordering it owes the others.
+    /// The keystroke source's event half, the selection gesture's hands, **and**
+    /// the touch state machine — one dispatch per event class, each arm's own
+    /// method carrying the ordering it owes the others.
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         match event {
             InputEvent::Pointer(pointer) => self.pointer_event(ctx, pointer),
             // The desktop wheel folds into the touch drag's own accumulator.
             InputEvent::Scroll { position, delta } => self.wheel_event(*position, *delta),
             InputEvent::Key(_) | InputEvent::Ime(_) => self.key_event(ctx, event),
-            // Not user input — this widget queues no deferred callback for it.
             InputEvent::Housekeeping => EventResult::Ignored,
         }
     }
@@ -627,7 +621,6 @@ impl Widget for TerminalGridWidget {
             if !self.label.is_empty() {
                 node.set_label(self.label.as_str());
             }
-            // A grid that cannot take input says so.
             if self.read_only || self.input.is_none() {
                 node.set_read_only();
             }
@@ -648,9 +641,9 @@ fn overlaps(a: Rect, b: Rect) -> bool {
 }
 
 impl TerminalGridWidget {
-    /// Batch the emulator's current screen, shape every run, and capture the cursor
-    /// cell (see [`CursorCell`]). The `Rc` is cloned out first so the `RefCell`
-    /// borrow does not also borrow `self`.
+    /// Batch the emulator's current screen, shape every run, and capture the
+    /// cursor cell (see [`CursorCell`]). The `Rc` is cloned out first so the
+    /// `RefCell` borrow does not also borrow `self`.
     fn reshape(&mut self, ctx: &mut LayoutCtx, geometry: CellGeometry) {
         let emulator = Rc::clone(&self.emulator);
         let palette = self.palette;
@@ -693,19 +686,20 @@ impl TerminalGridWidget {
         });
     }
 
-    /// Every pointer phase, in the order the two owners must see it: the selection
-    /// arms first (they work `read_only` and with no [`InputSeam`] at all), then
-    /// the touch state machine. The hand-over point is `Handled`, not "the
-    /// selection had an opinion": its arms answer `Ignored` for the phases it has
-    /// nothing to do with, and those are exactly what a scroll or a tap is made of.
+    /// Every pointer phase, in the order the two owners must see it: the
+    /// selection arms first (they work `read_only` and with no [`InputSeam`] at
+    /// all), then the touch state machine. The hand-over is `Handled`, not "the
+    /// selection had an opinion" — its arms answer `Ignored` for phases it has
+    /// nothing to do with, exactly what a scroll or a tap is made of.
     fn pointer_event(&mut self, ctx: &mut EventCtx, pointer: &PointerEvent) -> EventResult {
         if let Some(seam) = self.selection.clone()
             && let Some(result) = self.selection_event(ctx, pointer, &seam)
             && matches!(result, EventResult::Handled)
         {
-            // A phase the selection owned — a clearing tap's `Down`, or any phase
-            // of a live selection drag. Disarm rather than race it: no content tap
-            // and no wheel step comes out of a gesture the selection is driving.
+            // A phase the selection owned — a clearing tap's `Down`, or any
+            // phase of a live selection drag. Disarm rather than race it: no
+            // content tap or wheel step comes out of a gesture the selection
+            // is driving.
             self.grab = Grab::Idle;
             return result;
         }
@@ -724,8 +718,8 @@ impl TerminalGridWidget {
     /// A `Down`: arm the touch machine, then claim the focus session — the
     /// claim is invariant across all three outcomes.
     fn press(&mut self, ctx: &mut EventCtx, at: Point) -> EventResult {
-        // Armed only inside the grid's own box: the surface stack is full-bleed,
-        // so a press on the sub-cell remainder strip is not a cell.
+        // Armed only inside the grid's own box: the surface stack is
+        // full-bleed, so a press on the sub-cell remainder strip is not a cell.
         let inside_grid = inside(at, ctx.size());
         self.grab = if inside_grid {
             Grab::Armed { origin: at }
@@ -741,12 +735,12 @@ impl TerminalGridWidget {
         if self.read_only || !inside_grid {
             return EventResult::Ignored;
         }
-        // Every `Down` re-claims the focus session, unconditionally and before this
-        // widget can know whether the gesture is a tap, a scroll or a hold, because
-        // frust-core reads a `Down` that requested no focus as a blur. The claim is
-        // recorded so the next blur edge can tell a real blur from the key bar
-        // taking the surface (`note_focus_edge`). No IME publish here: raising the
-        // keyboard is `release`'s call.
+        // Every `Down` re-claims the focus session, unconditionally and before
+        // this widget knows whether the gesture is a tap, scroll, or hold,
+        // because frust-core reads a `Down` that requested no focus as a blur.
+        // The claim is recorded so the next blur edge can tell a real blur from
+        // the key bar taking the surface (`note_focus_edge`). No IME publish
+        // here: raising the keyboard is `release`'s call.
         self.focus_claim = seam.claim_focus();
         ctx.request_focus();
         ctx.request_redraw();
@@ -762,8 +756,8 @@ impl TerminalGridWidget {
                 if (at - origin).hypot() <= TOUCH_SLOP {
                     return EventResult::Ignored;
                 }
-                // Past the slop before the long-press threshold, so this is a scroll
-                // for the rest of the gesture. The accumulator starts at the press
+                // Past the slop before the long-press threshold — a scroll for
+                // the rest of the gesture. The accumulator starts at the press
                 // **origin**, so a drag's steps count its whole travel.
                 self.grab = Grab::Scrolling { last: origin };
                 self.scroll_to(at)
@@ -784,11 +778,11 @@ impl TerminalGridWidget {
         self.wheel_steps((at.y - last.y) / height, at)
     }
 
-    /// An `Up` the selection did not take: the tap branch — the cell report, and
-    /// the one place the keyboard can come up. A gesture that turned into a scroll
-    /// (or never armed inside the grid) leaves here having done nothing. A
-    /// qualifying tap reports its cell and obeys the sink's answer; with no sink to
-    /// ask, it raises.
+    /// An `Up` the selection did not take: the tap branch — the cell report,
+    /// and the one place the keyboard can come up. A gesture that turned into a
+    /// scroll (or never armed inside the grid) does nothing here. A qualifying
+    /// tap reports its cell and obeys the sink's answer; with no sink to ask,
+    /// it raises.
     fn release(&mut self, ctx: &mut EventCtx, at: Point) -> EventResult {
         let tapped = matches!(
             self.grab,
@@ -800,7 +794,7 @@ impl TerminalGridWidget {
         }
         let reported = match (self.on_content_tap.clone(), self.cell_at(at)) {
             (Some(sink), Some(cell)) => Some(sink(u32::from(cell.col), u32::from(cell.row))),
-            // Nobody to ask (no hook, or no geometry), so the tap answers itself.
+            // Nobody to ask (no hook, or no geometry): the tap answers itself.
             _ => None,
         };
         let raised = reported.unwrap_or(true) && self.engage_ime(ctx);
@@ -811,10 +805,10 @@ impl TerminalGridWidget {
         }
     }
 
-    /// Raise the keyboard: latch [`ime_engaged`](Self::ime_engaged) and publish the
-    /// surface, reporting whether anything was published. Gated exactly as the
-    /// paint-time republish is — a grid with no [`InputSeam`], or a `read_only`
-    /// one, is not an IME client at all however it was tapped.
+    /// Raise the keyboard: latch [`ime_engaged`](Self::ime_engaged) and publish
+    /// the surface, reporting whether anything was published. Gated exactly as
+    /// the paint-time republish is — a grid with no [`InputSeam`], or a
+    /// `read_only` one, is not an IME client however it was tapped.
     fn engage_ime(&mut self, ctx: &mut EventCtx) -> bool {
         let Some(seam) = self.input.clone() else {
             return false;
@@ -830,9 +824,9 @@ impl TerminalGridWidget {
     }
 
     /// The desktop wheel, through the **same** step machinery a touch drag goes
-    /// through. A line delta already *is* steps; a precision (trackpad) delta is
-    /// pixels and divides by the cell height like a finger's `dy`. Either way
-    /// positive `y` is content moving **down**, so both reach
+    /// through. A line delta already *is* steps; a precision (trackpad) delta
+    /// is pixels and divides by the cell height like a finger's `dy`. Either
+    /// way, positive `y` is content moving **down**, so both reach
     /// [`wheel_steps`](Self::wheel_steps) with one sign convention.
     fn wheel_event(&mut self, position: Point, delta: ScrollDelta) -> EventResult {
         let lines = match delta {
@@ -847,19 +841,19 @@ impl TerminalGridWidget {
         self.wheel_steps(lines, position)
     }
 
-    /// Fold `lines` of scroll into the accumulator and emit one step per whole line
-    /// it crosses, at the cell under `at`, keeping the remainder. Positive `lines`
-    /// is content moving **down**: earlier lines are revealed, which is a wheel
-    /// **up** step — the incumbent's mapping.
+    /// Fold `lines` of scroll into the accumulator and emit one step per whole
+    /// line it crosses, at the cell under `at`, keeping the remainder. Positive
+    /// `lines` is content moving **down**: earlier lines are revealed, which is
+    /// a wheel **up** step.
     fn wheel_steps(&mut self, lines: f64, at: Point) -> EventResult {
         if !lines.is_finite() || lines == 0.0 {
             return EventResult::Ignored;
         }
         let (Some(sink), Some(cell)) = (self.on_wheel.clone(), self.cell_at(at)) else {
-            // Nothing to report to: the accumulator stays where it was.
+            // Nothing to report to: the accumulator stays put.
             return EventResult::Ignored;
         };
-        // Clamped, so a degenerate delta cannot spin the loop below.
+        // Clamped so a degenerate delta cannot spin the loop below.
         self.scroll_carry = (self.scroll_carry + lines).clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
         let (col, row) = (u32::from(cell.col), u32::from(cell.row));
         let mut steps = 0u32;
@@ -903,9 +897,9 @@ impl TerminalGridWidget {
         }
         // A keystroke arrived, so a keyboard is up whatever this widget decided.
         self.ime_engaged = true;
-        // The publish is unconditional and idempotent: leaving a stale editing state
-        // behind would make a shell's steady-active reconcile push the
-        // *pre-keystroke* text back into the platform mirror.
+        // Unconditional and idempotent: a stale editing state left behind would
+        // let a shell's steady-active reconcile push *pre-keystroke* text back
+        // into the platform mirror.
         let state = seam.ime_state(self.caret_rect);
         ctx.publish_ime_state(state);
         ctx.request_redraw();
@@ -914,9 +908,9 @@ impl TerminalGridWidget {
 
     /// The selection half of `event` — see [`pointer_event`](Self::pointer_event)
     /// for the ordering. `Some(result)` when this phase was the selection's to
-    /// answer, `None` to fall through. Deliberately **no** `capture_pointer` here:
-    /// the enclosing [`GestureDetector`](frust::GestureDetector) already captures
-    /// and forwards every `Move`/`Up` to its child.
+    /// answer, `None` to fall through. Deliberately **no** `capture_pointer`
+    /// here: the enclosing [`GestureDetector`](frust::GestureDetector) already
+    /// captures and forwards every `Move`/`Up` to its child.
     fn selection_event(
         &mut self,
         ctx: &mut EventCtx,
@@ -931,14 +925,14 @@ impl TerminalGridWidget {
                 if seam.clear_if_active() {
                     ctx.request_redraw();
                     // `Handled` does not spare this `Down` the root's focus
-                    // bookkeeping: ANY pointer `Down` that requested no focus reads
-                    // as a blur, so the next paint would flip this widget's focus
-                    // edge and scrub the input baseline out from under a session
-                    // still being typed into. So it claims the seam's focus counter
-                    // — the key-cap hand-off mechanism — without calling
-                    // `request_focus`: the counter moves while `self.focus_claim`
-                    // stays stale, so `note_focus_edge` reads a hand-off and skips
-                    // the scrub. No keyboard: nothing here publishes a surface.
+                    // bookkeeping: ANY pointer `Down` requesting no focus reads
+                    // as a blur, which would scrub the input baseline out from
+                    // under a session still being typed into. So it claims the
+                    // seam's focus counter (the key-cap hand-off mechanism)
+                    // without calling `request_focus`: the counter moves while
+                    // `self.focus_claim` stays stale, so `note_focus_edge` reads
+                    // a hand-off and skips the scrub. No keyboard: nothing here
+                    // publishes a surface.
                     if let Some(input) = self.input.as_ref() {
                         input.claim_focus();
                     }
@@ -951,8 +945,8 @@ impl TerminalGridWidget {
                 if !seam.dragging() {
                     return Some(EventResult::Ignored);
                 }
-                // Unthrottled and signal-free: both endpoints re-resolve and the
-                // frame repaints, which is also what refreshes the loupe.
+                // Unthrottled and signal-free: both endpoints re-resolve and
+                // the frame repaints, which also refreshes the loupe.
                 seam.extend();
                 ctx.request_redraw();
                 Some(EventResult::Handled)
@@ -966,8 +960,8 @@ impl TerminalGridWidget {
                 ctx.request_redraw();
                 Some(EventResult::Handled)
             }
-            // Flags only. The loupe has to go (a gesture affordance, and the gesture
-            // is over); the selection it produced stays until the next tap clears it.
+            // Flags only. The loupe has to go (the gesture is over), but the
+            // selection it produced stays until the next tap clears it.
             PointerPhase::Cancel => {
                 seam.track(pointer.position, false);
                 seam.cancel_drag();
@@ -977,22 +971,24 @@ impl TerminalGridWidget {
         }
     }
 
-    /// One end of a focus edge, as `paint` observed it: the **blur scrub**, and the
-    /// claim bookkeeping that keeps it honest.
+    /// One end of a focus edge, as `paint` observed it: the **blur scrub**, and
+    /// the claim bookkeeping that keeps it honest.
     ///
-    /// A blur is where buffered keystrokes stop being live, so it is a scrub
-    /// boundary — but two things move the focus path without the session stopping:
-    /// a tap on a key bar cap (which claims the seam itself), and a clearing tap
-    /// this widget consumed (frust-core reads any `Down` that requested no focus as
-    /// a blur regardless of `Handled`, so `selection_event` claims the seam there
-    /// for exactly this reason). Scrubbing either would silently cost the user
-    /// their next Backspace, so the seam's claim counter is the discriminator:
-    /// unchanged across the edge means a real blur.
+    /// A blur is where buffered keystrokes stop being live, so it's a scrub
+    /// boundary — but two things move the focus path without the session
+    /// stopping: a tap on a key bar cap (claims the seam itself), and a
+    /// clearing tap this widget consumed (frust-core reads any focus-less
+    /// `Down` as a blur regardless of `Handled`, so `selection_event` claims
+    /// the seam there for exactly this reason). Scrubbing either would
+    /// silently cost the user their next Backspace, so the seam's claim
+    /// counter is the discriminator: unchanged across the edge means a real
+    /// blur.
     ///
-    /// **Residual:** a cap holding the focus path when the keyboard is dismissed
-    /// tears down with the bar and reports no blur, so that path's scrub waits for
-    /// the pane's teardown or the grid's next real blur. Every path that *submits*
-    /// a line already scrubs at the source. The same edge drops the IME latch.
+    /// **Residual:** a cap holding the focus path when the keyboard is
+    /// dismissed tears down with the bar and reports no blur, so that path's
+    /// scrub waits for the pane's teardown or the grid's next real blur. Every
+    /// path that *submits* a line already scrubs at the source. The same edge
+    /// drops the IME latch.
     fn note_focus_edge(&mut self, focused: bool) {
         let Some(seam) = self.input.clone() else {
             return;
@@ -1006,33 +1002,34 @@ impl TerminalGridWidget {
     }
 
     /// Whether the caret is lit this frame, doing the blink cycle's bookkeeping
-    /// exactly once per paint — split out so the loupe's re-paint reuses the answer
-    /// rather than requesting a second paced frame.
+    /// exactly once per paint — split out so the loupe's re-paint reuses the
+    /// answer instead of requesting a second paced frame.
     fn cursor_lit_now(&mut self, ctx: &mut PaintCtx, focused: bool) -> bool {
         if !focused {
             return false;
         }
         if Theme::from_paint_ctx(ctx).is_some_and(|theme| theme.motion.reduce_motion) {
-            // Frozen lit: a caret is a position cue, so it must not vanish for a
-            // user who asked motion to stop.
+            // Frozen lit: a caret is a position cue, so it must not vanish for
+            // a user who asked motion to stop.
             return true;
         }
         let from = *self.blink_from.get_or_insert(ctx.frame_time());
         let since = ctx.frame_time().saturating_sub(from).as_secs_f64() * 1000.0;
-        // Paced at the blink's own half-period rather than the cosmetic cap: a 1.1s
-        // two-state blink needs one paint per visibility flip, and the gate repaints
-        // the full grid per paced frame — ~2 rather than ~30 grid paints a second at
-        // focused idle. `cursor_lit` derives phase from the frame clock, so cadence
-        // never shifts the flip points.
+        // Paced at the blink's own half-period, not the cosmetic cap: a 1.1s
+        // two-state blink needs one paint per visibility flip, and the gate
+        // repaints the full grid per paced frame — ~2 rather than ~30 grid
+        // paints a second at focused idle. `cursor_lit` derives phase from the
+        // frame clock, so cadence never shifts the flip points.
         ctx.request_frame_paced_at(Duration::from_millis((CURSOR_BLINK_PERIOD_MS / 2.0) as u64));
         cursor_lit(since)
     }
 
-    /// Paint the grid's cells, the selection wash and the caret at `origin`. `cull`
-    /// (grid-local) drops everything outside a region — how the loupe re-paints its
-    /// window without submitting a whole screen of glyph runs the clip would throw
-    /// away; `None` paints everything. Takes `&self` because it is called **twice**
-    /// per frame (grid, then loupe), so it must carry no per-frame bookkeeping.
+    /// Paint the grid's cells, the selection wash and the caret at `origin`.
+    /// `cull` (grid-local) drops everything outside a region — how the loupe
+    /// re-paints its window without submitting a whole screen of glyph runs the
+    /// clip would throw away; `None` paints everything. Takes `&self` because it
+    /// is called **twice** per frame (grid, then loupe), so it carries no
+    /// per-frame bookkeeping.
     fn paint_content(
         &self,
         scene: &mut dyn PaintScene,
@@ -1078,7 +1075,7 @@ impl TerminalGridWidget {
 
     /// Paint the selection wash: one rect per line-wise
     /// [`Segment`](super::selection::Segment), **over** the runs it covers (see
-    /// [`style`](super::style)'s selection note for why over and not behind).
+    /// [`style`](super::style)'s selection note for why).
     fn paint_selection(
         &self,
         scene: &mut dyn PaintScene,
@@ -1172,7 +1169,7 @@ impl TerminalGridWidget {
     /// Paint the magnifier, if a selection drag is live. A **re-render**, not a
     /// backdrop sample: the same runs painted again under a [`LOUPE_SCALE`]
     /// transform inside a rounded clip, so the user sees real text re-rasterized
-    /// rather than a blown-up bitmap. Paint only — `event` knows nothing about it.
+    /// rather than a blown-up bitmap. Paint only — `event` knows nothing of it.
     fn paint_loupe(
         &self,
         scene: &mut dyn PaintScene,
@@ -1192,8 +1189,8 @@ impl TerminalGridWidget {
         let window = loupe_box(focal, size);
         let at = Point::new(origin.x + window.x0, origin.y + window.y0);
         let box_size = Size::new(window.width(), window.height());
-        // Absolute (paint-space) counterparts: `push_transform` composes with the
-        // scene's current transform.
+        // Absolute (paint-space) counterparts: `push_transform` composes with
+        // the scene's current transform.
         let focal_abs = Point::new(origin.x + focal.x, origin.y + focal.y);
         let window_abs = window + Vec2::new(origin.x, origin.y);
 

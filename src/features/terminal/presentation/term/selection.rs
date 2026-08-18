@@ -3,28 +3,27 @@
 //! [`super::SelectionSeam`] is the runtime half, the same split
 //! [`input`](super::input) and [`InputSeam`](super::InputSeam) use.
 //!
-//! **Everything here speaks GRID coordinates.** A [`GridPoint`] is a `(row, col)`
-//! cell address on the **rendered** screen. That is the emulator's *visible*
-//! screen today; when a scrollback view lands it arrives as a **row offset**
-//! applied where pixels become cells ([`cell_at`]) and where cells become text
-//! ([`selected_text`]), and nothing else here changes.
+//! **Everything here speaks GRID coordinates.** A [`GridPoint`] is a `(row,
+//! col)` cell address on the **rendered** screen — the emulator's *visible*
+//! screen today; a future scrollback view would arrive as a row offset applied
+//! only where pixels become cells ([`cell_at`]) and cells become text
+//! ([`selected_text`]).
 //!
-//! **The word rule is ported verbatim**: boundaries are **per line** and the
-//! separator set is [`SEPARATORS`], so expansion never crosses a row (though the
-//! *text* those cells copy to still joins without a newline) and landing on a
-//! separator selects nothing while the long-press haptic still fires — the
-//! incumbent's own ordering. A drag **re-resolves BOTH ends** ([`resolve`]), so
-//! reversing direction is symmetric by construction rather than by a special case.
+//! **The word rule**: boundaries are **per line** and the separator set is
+//! [`SEPARATORS`], so expansion never crosses a row (though the *text* those
+//! cells copy to still joins without a newline), and landing on a separator
+//! selects nothing while the long-press haptic still fires. A drag
+//! **re-resolves BOTH ends** ([`resolve`]), so reversing direction is
+//! symmetric by construction, not a special case.
 //!
-//! **Streaming output clears a held selection.** Because a [`GridPoint`] addresses
-//! the rendered screen and nothing here buffer-anchors it, new output scrolling
-//! the screen underneath a held selection would silently retarget it — Copy would
-//! hand back whatever now sits at those rows. Rather than try to tell "this
-//! repaint scrolled" apart from "this repaint didn't",
-//! [`SelectionSeam::observe_generation`] drops a held selection outright the moment
-//! *any* new content generation arrives: a real behaviour change from the
-//! buffer-anchored Flutter incumbent, and the honest default until a scrollback
-//! view gives a selection something stable to hold onto.
+//! **Streaming output clears a held selection.** Since a [`GridPoint`]
+//! addresses the rendered screen with no buffer anchor, new output scrolling
+//! underneath a held selection would silently retarget it (Copy handing back
+//! whatever now sits at those rows). Rather than tell "this repaint scrolled"
+//! apart from "this repaint didn't", [`SelectionSeam::observe_generation`]
+//! drops a held selection the moment *any* new content generation arrives —
+//! the honest default until a scrollback view gives a selection something
+//! stable to hold onto.
 
 use frust::authoring::Point;
 
@@ -92,14 +91,14 @@ impl GridRange {
 
     /// Clamp both ends onto a `cols` x `rows` grid — what lets
     /// [`SelectionSeam::set_metrics`](super::SelectionSeam::set_metrics) keep a
-    /// held selection valid the instant a grid shrinks under it, rather than
-    /// carry a stale, off-screen `begin` into [`selected_text`].
+    /// held selection valid the instant a grid shrinks under it, instead of
+    /// carrying a stale, off-screen `begin` into [`selected_text`].
     ///
-    /// Each point clamps **independently** and neither is re-sorted: a row-only
-    /// shrink can collapse both ends onto the same surviving row in an order
-    /// that reads reversed, and [`selected_text`]/[`segments`] both already
-    /// treat a reversed range as "nothing selected" — so that degrades to no
-    /// text/no paint rather than a panic.
+    /// Each point clamps **independently** and neither is re-sorted: a
+    /// row-only shrink can collapse both ends onto the same row in an order
+    /// that reads reversed, and [`selected_text`]/[`segments`] already treat a
+    /// reversed range as "nothing selected" — degrading to no text/paint
+    /// rather than a panic.
     #[must_use]
     pub fn clamp_to(self, cols: u16, rows: u16) -> Self {
         let last_col = cols.saturating_sub(1);
@@ -236,19 +235,18 @@ pub fn segments(range: GridRange, cols: u16) -> Vec<Segment> {
 
 /// The text `range` selects, as the clipboard should receive it.
 ///
-/// Delegates to `vt100`'s own `Screen::contents_between`, which already implements
-/// **exactly** the incumbent's join rule: trailing blanks on a row contribute
-/// nothing; a row the emulator marked **wrapped** joins to the next with no
-/// newline, so a wrapped command line or path pastes back as one line; a row that
-/// ended for real joins with `\n`.
+/// Delegates to `vt100`'s own `Screen::contents_between`, which implements the
+/// join rule: trailing blanks on a row contribute nothing; a row marked
+/// **wrapped** joins to the next with no newline (a wrapped command line or
+/// path pastes back as one line); a row that ended for real joins with `\n`.
 ///
-/// The one adaptation is the end bound: `contents_between`'s `end_col` is
-/// **exclusive** while a [`GridRange`] is inclusive, so this passes `end.col + 1`.
-/// Both ends are clamped onto the *current* screen before either reaches it — an
-/// unclamped `begin` underflowed `contents_between`'s multi-row branch
-/// (`cols - start_col`, in `u16`) the moment a held selection outlived a grid
-/// shrink. `SelectionSeam::set_metrics` clamps the stored range too, so this is a
-/// backstop. A reversed/empty range yields an empty string rather than a panic.
+/// One adaptation: `contents_between`'s `end_col` is **exclusive** while a
+/// [`GridRange`] is inclusive, so this passes `end.col + 1`. Both ends are
+/// clamped onto the *current* screen first — an unclamped `begin` underflowed
+/// `contents_between`'s multi-row branch (`cols - start_col`, in `u16`) the
+/// moment a held selection outlived a grid shrink; `SelectionSeam::set_metrics`
+/// clamps the stored range too, so this is a backstop. A reversed/empty range
+/// yields an empty string, not a panic.
 pub fn selected_text(screen: &vt100::Screen, range: GridRange) -> String {
     let (rows, cols) = screen.size();
     if rows == 0 || cols == 0 {

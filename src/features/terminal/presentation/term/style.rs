@@ -1,51 +1,51 @@
-//! Cell style and colour resolution: the [`TerminalPalette`] the grid paints from
-//! (its own doc carries the theme-token → ANSI-16 mapping table), and
-//! [`CellStyle`], the whole of what makes two neighbouring cells batch into one
-//! run. [`terminal_palette`] resolves the palette once per `Component::build` and
-//! hands it to the widget as a plain value — no widget-side theme lookup per frame.
+//! Cell style and colour resolution: the [`TerminalPalette`] the grid paints
+//! from (its own doc carries the theme-token → ANSI-16 mapping table), and
+//! [`CellStyle`], the whole of what makes two neighbouring cells batch into
+//! one run. [`terminal_palette`] resolves the palette once per
+//! `Component::build` and hands it to the widget as a plain value — no
+//! widget-side theme lookup per frame.
 //!
 //! **Every slot resolves against the theme's DARK side, whatever the platform
 //! brightness is.** The grid's surface is `GlyphInk::terminal_bg`, which is
-//! brightness-invariant by Glyph's own mandate — so pulling, say,
+//! brightness-invariant by Glyph's own mandate — pulling, say,
 //! `StatusPalette`'s *light* warning (tuned for AA on paper) would paint
-//! dark-on-dark the moment the phone left dark mode. The same trap
-//! `docs/CODE_STANDARDS.md` records as "`GlyphInk` is never brightness-swapped".
+//! dark-on-dark the moment the phone left dark mode (the trap
+//! `docs/CODE_STANDARDS.md` records as "`GlyphInk` is never brightness-swapped").
 //!
-//! **Two slots have no token at all.** Glyph is a single-accent system whose only
-//! hue-bearing tokens are amber, red, green and cyan; it carries no blue and no
-//! magenta, and the nearest scheme role (`tertiary`) is the cyan hue re-used,
-//! which would collide slot 4 with slot 6 — a real defect for anything colouring
-//! by ANSI index. So [`ANSI_BLUE`]/[`ANSI_MAGENTA`] are hand-tuned constants in
-//! the same luminance band as the tokened hues rather than xterm's classic table,
-//! whose `#0000EE` blue is illegible on a `#1c1912` surface. The honest fix is a
-//! `GlyphInk` widening upstream.
+//! **Two slots have no token at all.** Glyph is a single-accent system whose
+//! only hue-bearing tokens are amber, red, green and cyan — no blue, no
+//! magenta, and the nearest scheme role (`tertiary`) reuses the cyan hue,
+//! colliding slot 4 with slot 6. So [`ANSI_BLUE`]/[`ANSI_MAGENTA`] are
+//! hand-tuned constants in the same luminance band as the tokened hues rather
+//! than xterm's classic table, whose `#0000EE` blue is illegible on a
+//! `#1c1912` surface. The honest fix is a `GlyphInk` widening upstream.
 
 use frust::authoring::Color;
 use frust::authoring::text::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
 use frust::{Brightness, StatusPalette, Theme, Tween};
 use frust_glyph::GlyphInk;
 
-/// Cell height as a multiple of the font size (CSS unitless `line-height`). 1.2 —
-/// what kterm's `TerminalStyle.height` defaults to and what the S9 measurement ran
-/// at, so the row pitch derives from the font size the same way the benchmarked
-/// renderer's did. The *measured* line box still comes back from the shaper; this
-/// only sets what the shaper is asked for. See `geometry`.
+/// Cell height as a multiple of the font size (CSS unitless `line-height`).
+/// 1.2 — kterm's `TerminalStyle.height` default and what the `s9_terminal`
+/// benchmark ran at, so row pitch derives from font size the same way. The
+/// *measured* line box still comes back from the shaper; this only sets what
+/// the shaper is asked for. See `geometry`.
 pub const LINE_HEIGHT: f32 = 1.2;
 
 /// Alpha applied to the foreground for SGR 2 (dim).
 pub const DIM_ALPHA: f32 = 0.66;
 
 /// How far a normal slot is mixed toward white to make its bright pair (slots
-/// 9-14). **Hand-tuned**: xterm's classic literals are not derivable from Glyph's
-/// tokens, but the relationship they encode ("visibly lighter, same hue") is. 0.35
-/// is where the pairs separate clearly on `terminal_bg` without washing out.
+/// 9-14). **Hand-tuned**: xterm's literals aren't derivable from Glyph's
+/// tokens, but "visibly lighter, same hue" is. 0.35 is where the pairs
+/// separate clearly on `terminal_bg` without washing out.
 pub const BRIGHT_MIX: f64 = 0.35;
 
 /// Alpha of the selection wash over the runs it covers. **Hand-tuned, and
-/// deliberately not the mock's 0.12** — see the [module docs](self): a CSS
-/// `::selection` background paints *behind* its text and this one paints over it.
-/// High enough to be unmistakable over a coloured run, low enough that the glyphs
-/// under it stay readable.
+/// deliberately not the mock's 0.12** (see the [module docs](self)): a CSS
+/// `::selection` background paints *behind* its text, and this one paints
+/// over it. High enough to be unmistakable over a coloured run, low enough
+/// that the glyphs under it stay readable.
 pub const SELECTION_ALPHA: f32 = 0.28;
 
 /// ANSI slot 4 (blue). **Hand-tuned** — Glyph carries no blue token (see the
@@ -87,12 +87,12 @@ pub struct TerminalPalette {
     /// The cursor's ink (block fill, underline, bar, and the unfocused
     /// outline).
     pub cursor: Color,
-    /// The wash a selected cell is painted over with: the same swatch the mock's
-    /// `--amber` is, painted **over** the runs rather than behind them, so a cell
-    /// with a non-default background still reads as selected. CSS `::selection`
-    /// sits *behind* its text, which is why the mock's 0.12 is enough there and
-    /// [`SELECTION_ALPHA`] is higher here; the text is deliberately not recoloured,
-    /// which would re-shape every partly selected run on every pointer move.
+    /// The wash a selected cell is painted over with: the same swatch as the
+    /// mock's `--amber`, painted **over** the runs rather than behind them, so
+    /// a cell with a non-default background still reads as selected. CSS
+    /// `::selection` sits *behind* its text (why the mock's 0.12 is enough
+    /// there, [`SELECTION_ALPHA`] higher here); text isn't recoloured, which
+    /// would re-shape every partly selected run on every pointer move.
     pub selection: Color,
     /// `Color::Idx(0..=15)`: 0-7 normal, 8-15 bright.
     pub ansi: [Color; 16],
@@ -155,9 +155,9 @@ fn brighten(color: Color) -> Color {
     Tween::new(color, Color::WHITE).lerp(BRIGHT_MIX)
 }
 
-/// Everything about a cell that affects how it paints. Two consecutive cells batch
-/// into one run iff their whole `CellStyle`s are equal — the contract the measured
-/// S9 renderer (and kterm, the incumbent) batch on.
+/// Everything about a cell that affects how it paints. Two consecutive cells
+/// batch into one run iff their whole `CellStyle`s are equal — the same
+/// contract kterm and the `s9_terminal` benchmark batch on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CellStyle {
     /// SGR foreground, unresolved (a `Color::Default` sentinel until
@@ -186,14 +186,14 @@ impl CellStyle {
         }
     }
 
-    /// Resolved `(foreground, background)` against `palette`, applying `inverse`
-    /// (swap) and `dim` (foreground alpha). The background is `None` when it
-    /// resolves to the palette's own background, which the whole-grid backdrop
-    /// already covers — one fewer rect per run.
+    /// Resolved `(foreground, background)` against `palette`, applying
+    /// `inverse` (swap) and `dim` (foreground alpha). The background is
+    /// `None` when it resolves to the palette's own background, already
+    /// covered by the whole-grid backdrop — one fewer rect per run.
     ///
     /// **The two default sentinels resolve against their own fallbacks BEFORE
-    /// `inverse` swaps them.** Swapping first would leave `ESC[7m` on an
-    /// otherwise-unstyled cell painting light-on-dark — i.e. not inverted at all.
+    /// `inverse` swaps them** — swapping first would leave `ESC[7m` on an
+    /// otherwise-unstyled cell painting light-on-dark, i.e. not inverted at all.
     pub fn resolve(self, palette: &TerminalPalette) -> (Color, Option<Color>) {
         let fg = resolve_color(self.fg, palette.foreground, palette);
         let bg = resolve_color(self.bg, palette.background, palette);
@@ -239,8 +239,8 @@ pub fn resolve_color(color: vt100::Color, fallback: Color, palette: &TerminalPal
 }
 
 /// The xterm 256-colour table: 0-15 the themed palette, 16-231 the 6x6x6 cube,
-/// 232-255 the 24-step greyscale ramp. Only the first 16 are themed: the cube and
-/// the ramp are *computed* coordinates in a colour space a program picked
+/// 232-255 the 24-step greyscale ramp. Only the first 16 are themed — the cube
+/// and ramp are *computed* coordinates in a colour space a program picked
 /// deliberately, so re-tinting them would corrupt gradients and heat maps.
 pub fn indexed_color(i: u8, palette: &TerminalPalette) -> Color {
     match i {
