@@ -1,27 +1,21 @@
-//! Headless tests for the cold-start splash *sequence* — the orchestrator,
-//! its handoff to the `/` route, and the reduced-motion fallback.
+//! Headless tests for the cold-start splash *sequence* — the orchestrator, its handoff to the
+//! `/` route, and the reduced-motion fallback.
 //!
-//! `tests/splash.rs` covers the three beats in isolation; this file covers
-//! what only the assembled thing can show: that the beats fire in the right
-//! order off one clock, that the widgets stagger in, that the overlay
-//! unmounts itself, and that what is underneath when it does is the same
-//! picture. Like `tests/splash.rs` these can't use `support::frame` (which
-//! pins `FrameTime::ZERO`): every assertion here is a function of the frame
-//! clock, so each test drives rebuild → layout → paint itself, exactly as a
-//! shell's frame loop does — which is also what lets the overlay's unmount
-//! actually happen mid-run.
+//! `tests/splash.rs` covers the three beats in isolation; this file covers what only the
+//! assembled thing can show: beats firing in order off one clock, widgets staggering in, the
+//! overlay unmounting itself onto an identical picture underneath. Like `tests/splash.rs` these
+//! can't use `support::frame` (pins `FrameTime::ZERO`): every assertion here is a function of the
+//! frame clock, so each test drives rebuild → layout → paint itself, exactly as a shell's frame
+//! loop does — which is also what lets the overlay's unmount happen mid-run.
 //!
-//! **Frame cadence.** Every helper takes the cadence in nanoseconds
-//! ([`drive_at`], [`frame_at_cadence`]) and the plain [`drive`]/[`frame_at`]
-//! wrappers pin [`FRAME_NS`] (60Hz). The splash is clock-driven, not
-//! frame-driven, so the same wall-clock timeline must come out of a
-//! [`FRAME_NS_120`] run too — see
-//! [`the_timeline_lands_on_the_same_wall_clock_at_120hz`].
+//! **Frame cadence.** Every helper takes the cadence in nanoseconds ([`drive_at`],
+//! [`frame_at_cadence`]); the plain [`drive`]/[`frame_at`] wrappers pin [`FRAME_NS`] (60Hz). The
+//! splash is clock-driven, not frame-driven, so the same wall-clock timeline must come out of a
+//! [`FRAME_NS_120`] run too — see [`the_timeline_lands_on_the_same_wall_clock_at_120hz`].
 //!
-//! **Reading a widget's text out of a paint pass.** A painted `GlyphRun`
-//! carries glyph *ids*, not a string. [`glyph_ids`] shapes an expected string
-//! through the same [`TextContext`] the widgets lay out against and compares
-//! id sequences — and counting *occurrences* distinguishes the splash's
+//! **Reading a widget's text out of a paint pass.** A painted `GlyphRun` carries glyph *ids*, not
+//! a string. [`glyph_ids`] shapes an expected string through the same [`TextContext`] the widgets
+//! lay out against and compares id sequences — counting *occurrences* distinguishes the splash's
 //! assembling copy from the live route's copy underneath it.
 
 use std::any::Any;
@@ -61,16 +55,12 @@ const FRAME_NS_120: u64 = 8_333_333;
 const REDUCED_HOLD_MS: f64 = 200.0;
 /// The heading piece's stagger (`spec::PIECE_DELAYS_MS[2]`, likewise).
 const HEADING_DELAY_MS: f64 = 260.0;
-/// How many blurred halos a **settled** Connect screen paints, land flashes
-/// excluded: one per saved-server row, each row's `.dot-ok`
-/// (`box-shadow:0 0 5px var(--success)`).
-///
-/// Three, because the splash's copy of piece 7 renders the **real**
-/// repository's list now (it used to invent a single stand-in row that
-/// vanished at the handoff), and every headless suite runs on
-/// `MockSavedServersRepository::seeded`'s three rigs. Asserting the exact
-/// residue rather than zero keeps the original claim — that every *land flash*
-/// has faded — intact: a flash left running would push this above three.
+/// How many blurred halos a **settled** Connect screen paints, land flashes excluded: one per
+/// saved-server row's `.dot-ok` glow. Three because piece 7 now renders the **real** repository's
+/// list (it used to invent a vanishing stand-in row), and every headless suite runs on
+/// `MockSavedServersRepository::seeded`'s three rigs. Asserting the exact residue rather than
+/// zero keeps the original claim — every *land flash* has faded — intact: a flash left running
+/// would push this above three.
 const RESTING_SHADOWS: usize = 3;
 
 /// A recording paint target: the flattened glyph-id stream (for text
@@ -138,13 +128,10 @@ fn frame_at(ms: f64) -> usize {
     frame_at_cadence(ms, FRAME_NS)
 }
 
-/// Drive `frames` frames of the real shell loop at `cadence_ns` — rebuild, lay
-/// out shaping real text, paint — returning each frame's recording and whether
-/// it asked for another one.
-///
-/// Rebuilding *every* frame (rather than laying out once up front) is what
-/// makes the overlay's own unmount observable: the sequence ends by writing a
-/// signal the root component reads.
+/// Drive `frames` frames of the real shell loop at `cadence_ns` — rebuild, lay out shaping real
+/// text, paint — returning each frame's recording and whether it asked for another one.
+/// Rebuilding *every* frame (rather than once up front) is what makes the overlay's own unmount
+/// observable: the sequence ends by writing a signal the root component reads.
 fn drive_at<V: View<AppState>>(
     cadence_ns: u64,
     logic: &mut impl FnMut(&mut AppState) -> V,
@@ -236,14 +223,10 @@ fn decoded_icon() -> IconArt {
 // The sequence, mounted on its own
 // ---------------------------------------------------------------------------
 
-/// Mount the orchestrator alone (no navigator underneath) at `cadence_ns`, so
-/// every draw recorded belongs to the splash.
-///
-/// `saved` is piece 7's rows: `None` reads them exactly as the app does
-/// (`widgets::saved::splash_saved_servers`, resolved *after* `MuxrApp::init` has
-/// published the repository — the same ordering `AppState::splash_plan`
-/// relies on), and `Some(..)` pins a list so a test can mount the store state
-/// it wants.
+/// Mount the orchestrator alone (no navigator underneath) at `cadence_ns`, so every draw recorded
+/// belongs to the splash. `saved` is piece 7's rows: `None` reads them exactly as the app does
+/// (resolved *after* `MuxrApp::init` publishes the repository, `AppState::splash_plan`'s
+/// ordering), `Some(..)` pins a list so a test can mount the store state it wants.
 fn mount_sequence_at(
     cadence_ns: u64,
     reduce_motion: bool,
@@ -288,7 +271,7 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
     let (frames, done) = mount_sequence(false, frame_at(sequence_end_ms() + 200.0));
     let heading = heading_ids();
 
-    // --- the icon beat: the bitmap is up, the rain has not started ---------
+    // Icon beat: bitmap up, rain not started.
     let icon_beat = &frames[frame_at(500.0)].0;
     assert_eq!(icon_beat.images, 1, "the app icon paints on its own first");
     assert_eq!(
@@ -297,7 +280,7 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
         icon_beat.glyph_runs
     );
 
-    // --- the rain cue: hundreds of glyphs, still no assembled screen -------
+    // Rain cue: hundreds of glyphs, still no assembled screen.
     let rain_beat = &frames[frame_at(rain_cue_ms() + 200.0)].0;
     assert!(
         rain_beat.glyph_runs > 100,
@@ -310,7 +293,7 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
         "the assembly has not begun yet"
     );
 
-    // --- the assembly: staggered, piece by piece --------------------------
+    // Assembly: staggered, piece by piece.
     let before_heading = &frames[frame_at(assembly_start_ms() + HEADING_DELAY_MS - 60.0)].0;
     assert_eq!(
         occurrences(&before_heading.glyph_ids, &heading),
@@ -328,7 +311,7 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
         "a landing piece flashes amber (draw_shadow)"
     );
 
-    // --- the end: assembled, quiet, and cueing the unmount ----------------
+    // End: assembled, quiet, cueing the unmount.
     let (last, needs_frame) = frames.last().expect("frames were painted");
     assert_eq!(
         occurrences(&last.glyph_ids, &heading),
@@ -352,14 +335,11 @@ fn a_store_with_no_saved_servers_assembles_no_saved_card_at_all() {
     let _g = serial();
     let _ambient = setup();
 
-    // The phantom card the splash used to paint: one hardcoded "Home rig" row
-    // whatever the store held, so a user with nothing saved watched a card
-    // assemble and then vanish as the route took over. Piece 7's rows are an
-    // input now — an empty list is an empty list on both sides.
-    //
-    // Each row's status dot is a glowing swatch (`draw_shadow`), and the
-    // settled overlay paints no other blurred rect (`RESTING_SHADOWS`), so the
-    // shadow count *is* the row count.
+    // Regression: the splash used to paint one hardcoded "Home rig" row whatever the store held,
+    // so an empty-store user watched a card assemble then vanish at the route handoff. Piece 7's
+    // rows are an input now — empty list in, empty list out. Each row's status dot is a glowing
+    // swatch (`draw_shadow`), and the settled overlay paints no other blurred rect
+    // (`RESTING_SHADOWS`), so the shadow count *is* the row count.
     let end = frame_at(sequence_end_ms() + 200.0);
     let (empty, _) = mount_sequence_at(FRAME_NS, false, end, Some(Vec::new()));
     let (last, _) = empty.last().expect("frames were painted");
@@ -368,9 +348,8 @@ fn a_store_with_no_saved_servers_assembles_no_saved_card_at_all() {
         "no saved servers must assemble no saved rows"
     );
 
-    // …and the control: the same mount over the app's own read of the seeded
-    // store paints one dot per stored rig, so the assertion above is about the
-    // data and not about the dot having stopped painting.
+    // Control: the seeded store still paints one dot per stored rig, so the assertion above is
+    // about the data, not the dot having stopped painting.
     let (seeded, _) = mount_sequence_at(FRAME_NS, false, end, None);
     let (last_seeded, _) = seeded.last().expect("frames were painted");
     assert_eq!(
@@ -384,11 +363,11 @@ fn the_completion_cue_fires_once_the_whole_timeline_has_run() {
     let _g = serial();
     let _ambient = setup();
 
-    // A frame short of the end, the cue must not have fired...
+    // A frame short of the end: must not have fired yet.
     let (_, early) = mount_sequence(false, frame_at(sequence_end_ms()) - 2);
     assert!(!early.get(), "the sequence is not over before its end");
 
-    // ...and just past it, it has.
+    // Just past it: has fired.
     let (_, done) = mount_sequence(false, frame_at(sequence_end_ms()) + 2);
     assert!(done.get());
 }
@@ -397,18 +376,16 @@ fn the_completion_cue_fires_once_the_whole_timeline_has_run() {
 // Frame cadence
 // ---------------------------------------------------------------------------
 
-/// The three timeline beats a paint stream can actually witness, as
-/// wall-clock ms since the overlay's first frame.
+/// The three timeline beats a paint stream can witness, as wall-clock ms since the overlay's
+/// first frame.
 #[derive(Debug)]
 struct Beats {
-    /// The rain + burst cue: the first frame drawing any glyph at all (the
-    /// icon beat before it draws only the bitmap).
+    /// First frame drawing any glyph at all (the icon beat before it draws only the bitmap).
     rain_cue: f64,
-    /// The assembly: the first frame the staggered heading piece paints.
+    /// First frame the staggered heading piece paints.
     heading: f64,
-    /// The end: the frame the completion cue fired on — which is the last one
-    /// that asked for another, since a fired cue early-returns without
-    /// requesting and nothing else is left animating.
+    /// The frame the completion cue fired on — the last one that asked for another, since a
+    /// fired cue early-returns without requesting.
     end: f64,
 }
 
@@ -445,11 +422,10 @@ fn the_timeline_lands_on_the_same_wall_clock_at_120hz() {
     let one_twenty = observed_beats(FRAME_NS_120);
     let frame = cadence_ms(FRAME_NS);
 
-    // Twice the frames, the same wall clock: the splash is clock-driven, and
-    // `spec::REFERENCE_FRAME_MS`/`frame_factor` exist so the one per-frame
-    // quantity (the rain's row advance) doesn't turn cadence into speed.
-    // Each beat is quantized to its own cadence, so two runs can differ by at
-    // most the coarser frame.
+    // Twice the frames, same wall clock: the splash is clock-driven, and
+    // `spec::REFERENCE_FRAME_MS`/`frame_factor` exist so the rain's per-frame row advance
+    // doesn't turn cadence into speed. Each beat is quantized to its own cadence, so two runs
+    // can differ by at most the coarser frame.
     for (what, at_60, at_120, expected, gates) in [
         (
             "the rain cue",
@@ -463,8 +439,7 @@ fn the_timeline_lands_on_the_same_wall_clock_at_120hz() {
             sixty.heading,
             one_twenty.heading,
             assembly_start_ms() + HEADING_DELAY_MS,
-            // Two quantizations compound here: the assembly gate opening, and
-            // then the piece's own stagger off that gate's first painted frame.
+            // Two quantizations compound: the assembly gate opening, then the piece's stagger.
             2.0,
         ),
         (
@@ -494,9 +469,8 @@ fn reduced_motion_collapses_the_sequence_on_its_first_frame() {
     let _g = serial();
     let _ambient = setup();
 
-    // Defense in depth: the shell mounts `reduced_splash` instead, but a
-    // theme that flips `reduce_motion` on *after* the mount decision must not
-    // hold the app behind a four-second timeline.
+    // Defense in depth: the shell mounts `reduced_splash` instead, but a theme that flips
+    // `reduce_motion` on *after* the mount decision must not hold the app behind the full timeline.
     let (frames, done) = mount_sequence(true, 4);
     assert!(done.get(), "the cue fires immediately under reduced motion");
     for (index, (scene, needs_frame)) in frames.iter().enumerate() {
@@ -506,14 +480,13 @@ fn reduced_motion_collapses_the_sequence_on_its_first_frame() {
             "no land flashes — only the resting dot glow, which is chrome \
              rather than motion and so survives reduced motion"
         );
-        // The firing frame asks for the one frame that acts on its write; from
-        // the next one on there is nothing left to animate.
+        // The firing frame asks for the one frame that acts on its write; nothing left after.
         assert!(
             !needs_frame || index == 0,
             "frame {index} kept the shell spinning"
         );
     }
-    // The pieces are painted in their landed state, not withheld.
+    // Pieces are painted in their landed state, not withheld.
     assert_eq!(
         occurrences(&frames[0].0.glyph_ids, &heading_ids()),
         1,
@@ -529,11 +502,9 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
     let mut state = MuxrApp.init();
     let art = decoded_icon();
     let done = RwSignal::new(false);
-    // Mirrors the shell (`AppState::splash_overlay`): the cue's write is what
-    // *unmounts* the overlay, so this closure has to drop it once `done` is
-    // set. A harness that re-mounted `reduced_splash` unconditionally could
-    // never see the hold end — nor see it end too early, which is the
-    // regression below.
+    // Mirrors the shell (`AppState::splash_overlay`): the cue's write is what *unmounts* the
+    // overlay, so this closure drops it once `done` is set — a harness that re-mounted
+    // `reduced_splash` unconditionally could never see the hold end, or end too early.
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
         if done.get() {
             any(page_backdrop::<AppState>())
@@ -548,10 +519,9 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
         frame_at(REDUCED_HOLD_MS + 100.0),
     );
 
-    // The whole hold shows the icon. `reduce_motion` is on for every frame of
-    // this path (it is why the path was chosen), so a cue short-circuiting on
-    // it would fire on frame 0 and leave one ~16ms flicker here instead of a
-    // 200ms beat.
+    // The whole hold shows the icon. `reduce_motion` is on for every frame here (why the path was
+    // chosen), so a cue short-circuiting on it would fire on frame 0, leaving a ~16ms flicker
+    // instead of a 200ms beat.
     for (index, (scene, _)) in frames
         .iter()
         .take(frame_at(REDUCED_HOLD_MS) - 1)
@@ -565,7 +535,7 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
         );
     }
 
-    // ...and once the hold is out, the overlay is gone.
+    // Once the hold is out, the overlay is gone.
     let after = frame_at(REDUCED_HOLD_MS + 50.0);
     assert_eq!(
         frames[after].0.images, 0,
@@ -597,10 +567,8 @@ fn the_cold_start_overlay_unmounts_onto_an_identical_connect_screen() {
     );
     let heading = heading_ids();
 
-    // Whether *this* test won the process's one cold-start claim decides
-    // whether an overlay ever mounted (test order within the binary is not
-    // fixed) — but either way the final frame is the same: the route's own
-    // Connect screen, exactly once, with nothing left animating.
+    // Whether *this* test won the process's one cold-start claim decides whether an overlay ever
+    // mounted (test order in the binary isn't fixed) — either way the final frame is the same.
     let (last, needs_frame) = frames.last().expect("frames were painted");
     assert_eq!(
         occurrences(&last.glyph_ids, &heading),
@@ -612,8 +580,7 @@ fn the_cold_start_overlay_unmounts_onto_an_identical_connect_screen() {
     assert!(!needs_frame, "and the app has settled");
 
     if frames[frame_at(500.0)].0.images == 1 {
-        // This test claimed the launch: assert the overlay really did cover
-        // the live route while it played.
+        // This test claimed the launch: assert the overlay really covered the live route.
         assert_eq!(
             occurrences(&frames[frame_at(500.0)].0.glyph_ids, &heading),
             1,
@@ -635,11 +602,10 @@ fn a_second_launch_decision_in_the_same_process_never_replays_the_splash() {
     let _g = serial();
     let _ambient = setup();
 
-    // Whichever of these claimed the process's splash, the *second* one must
-    // not play — the once-per-process rule, observed end to end rather than
-    // through the pure decision function. Both are actually *built*: the
-    // claim is spent on a launch's first build, not on `init` (see
-    // `AppState::splash_plan`), so an unbuilt app never spends one.
+    // Whichever of these claimed the process's splash, the *second* must not play — the
+    // once-per-process rule, observed end to end. Both are actually *built*: the claim is spent
+    // on a launch's first build, not `init` (`AppState::splash_plan`), so an unbuilt app never
+    // spends one.
     let mut logic = |s: &mut AppState| MuxrApp.build(s);
     let mut first = MuxrApp.init();
     drive(&mut logic, &mut first, theme(false), 2);

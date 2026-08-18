@@ -1,17 +1,15 @@
 //! The `src/net` transport surface, exercised from outside the crate.
 //!
-//! This suite covers the contracts that hold with no server on the other end:
-//! fail-closed pin parsing, endpoint/trust-mode construction (system-CA
-//! included — construction only, since a real CA chain needs a real CA), the
-//! keepalive parity constants, the `Status`/`ActionAck` failure mapping, and one
-//! genuine dial against a closed port.
+//! This suite covers the contracts that hold with no server on the other end: fail-closed pin
+//! parsing, endpoint/trust-mode construction (system-CA included — construction only, since a
+//! real CA chain needs a real CA), the keepalive parity constants, the `Status`/`ActionAck`
+//! failure mapping, and one genuine dial against a closed port.
 //!
-//! The handshake and credential round trips — right pin connects, wrong pin
-//! does not, `Login` mints a token an authenticated RPC accepts — run against
-//! the in-process fixture in `src/net/testing.rs`, and live in `src/net`'s own
-//! unit tests: that fixture needs `rcgen` and tonic's server features, which are
-//! `[dev-dependencies]` and so are unreachable from the library build an
-//! integration test links (see the fixture's module docs).
+//! The handshake and credential round trips — right pin connects, wrong pin does not, `Login`
+//! mints a token an authenticated RPC accepts — run against the in-process fixture in
+//! `src/net/testing.rs`, and live in `src/net`'s own unit tests: that fixture needs `rcgen` and
+//! tonic's server features, `[dev-dependencies]` unreachable from the library build an
+//! integration test links.
 
 use std::net::TcpListener;
 use std::sync::Arc;

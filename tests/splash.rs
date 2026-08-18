@@ -1,23 +1,20 @@
 //! Headless smoke tests for the splash sequence's three paint-driven widgets
-//! (`muxr::ui::splash`), driven through `RenderRoot` with a real frame clock —
-//! no GPU, no window, no orchestrator. The pure math (phase machines, rain
-//! density/alpha, particle kinematics) is unit-tested next to the code; this
-//! file covers what only a real paint pass can show: what actually lands in
-//! the scene, and whether each widget keeps asking for frames.
+//! (`muxr::ui::splash`), driven through `RenderRoot` with a real frame clock — no GPU, no window,
+//! no orchestrator. The pure math (phase machines, rain density/alpha, particle kinematics) is
+//! unit-tested next to the code; this file covers what only a real paint pass can show: what
+//! lands in the scene, and whether each widget keeps asking for frames.
 //!
-//! Unlike `tests/routes.rs` these tests can't use `support::frame`, which
-//! pins `FrameTime::ZERO` — every animation here is a function of the frame
-//! clock, so they drive `RenderRoot::paint` themselves (the same shape
-//! `examples/huddle`'s toast-entrance test uses) and record through their own
-//! [`SplashScene`]. They still share the harness's `serial`/`setup` guards.
+//! Unlike `tests/routes.rs` these tests can't use `support::frame` (pins `FrameTime::ZERO`) —
+//! every animation here is a function of the frame clock, so they drive `RenderRoot::paint`
+//! themselves and record through their own [`SplashScene`]. They still share the harness's
+//! `serial`/`setup` guards.
 //!
 //! # Frame cadence
 //!
-//! [`run_frames_at`]/[`frame_at_cadence`] take the cadence in nanoseconds and
-//! the [`run_frames`]/[`frame_at`] wrappers pin [`FRAME_NS`] (60Hz). The rain
-//! is the one widget with a genuinely *per-frame* quantity (the source
-//! specifies its fall in rows per `requestAnimationFrame`), so it is the one
-//! that must be exercised at [`FRAME_NS_120`] as well — see
+//! [`run_frames_at`]/[`frame_at_cadence`] take the cadence in nanoseconds; the
+//! [`run_frames`]/[`frame_at`] wrappers pin [`FRAME_NS`] (60Hz). The rain is the one widget with
+//! a genuinely *per-frame* quantity (fall in rows per `requestAnimationFrame`), so it must also
+//! be exercised at [`FRAME_NS_120`] — see
 //! [`the_rain_falls_the_same_distance_per_second_at_60hz_and_120hz`].
 
 use std::any::Any;
@@ -467,10 +464,9 @@ fn the_rain_never_starts_under_reduced_motion() {
 // Rain — frame cadence
 // ---------------------------------------------------------------------------
 
-/// The window each cadence's fall is measured over, in ms. Short enough that
-/// most columns are still on the surface at the end of it (an exited column
-/// respawns at the top and is excluded from the measurement) — including in
-/// the failure case this test exists to catch, where the 120Hz field falls at
+/// The window each cadence's fall is measured over, in ms. Short enough that most columns are
+/// still on the surface at the end of it (an exited column respawns at the top and is excluded)
+/// — including in the failure case this test exists to catch, where the 120Hz field falls at
 /// twice the speed and drains twice as fast.
 const FALL_WINDOW_MS: f64 = 250.0;
 /// The seed fixing the measured field.
@@ -479,12 +475,10 @@ const FALL_SEED: u64 = 7;
 /// Every column's head position in a recorded frame, in rows, keyed by column
 /// index.
 ///
-/// A column paints its trail *upward* from its head, so the head is the
-/// lowest glyph the column drew. A head that has fallen past the surface has
-/// its own glyph skipped (leaving a trail glyph as the lowest one), so a
-/// column only counts here when its lowest glyph is a full row clear of the
-/// bottom edge — the condition under which that glyph must be the head
-/// itself.
+/// A column paints its trail *upward* from its head, so the head is the lowest glyph it drew. A
+/// head fallen past the surface has its own glyph skipped (leaving a trail glyph as the lowest),
+/// so a column only counts here when its lowest glyph is a full row clear of the bottom edge —
+/// the condition under which that glyph must be the head itself.
 fn head_rows(scene: &SplashScene) -> HashMap<usize, f64> {
     let mut heads: HashMap<usize, f64> = HashMap::new();
     for (x, y) in scene.glyph_x.iter().zip(&scene.glyph_y) {
@@ -502,9 +496,8 @@ fn head_rows(scene: &SplashScene) -> HashMap<usize, f64> {
 /// How far each column's head fell over [`FALL_WINDOW_MS`], in rows, on a run
 /// driven at `cadence_ns` — plus how many frames that run took.
 ///
-/// A column that exited (and so respawned at the top) shows a *negative*
-/// displacement and is dropped, as is one whose head left the measurable band
-/// at either end.
+/// A column that exited (respawned at the top) shows a *negative* displacement and is dropped, as
+/// is one whose head left the measurable band at either end.
 fn column_falls(cadence_ns: u64) -> (HashMap<usize, f64>, usize) {
     let count = frame_at_cadence(FALL_WINDOW_MS, cadence_ns);
     let frames = run_frames_at(

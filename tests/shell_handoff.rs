@@ -1,28 +1,19 @@
-//! Widget-identity test for the splash handoff — the regression `src/shell.rs`'s
-//! `root_view` guards against: a stable four-slot `Stack` root, never a bare
-//! navigator that swaps with a `Stack` when the overlay comes and goes.
+//! Widget-identity regression test: `src/shell.rs`'s `root_view` must return a stable four-slot
+//! `Stack` root, never a bare navigator that swaps with a `Stack` as the splash overlay comes
+//! and goes.
 //!
-//! **Why this can't call `shell::root_view` directly.** `root_view` is `pub`,
-//! but its module (`mod shell;` in `src/lib.rs`) is not — an integration test
-//! under `tests/` links `muxr` as a library, so a `pub fn` inside a private
-//! module is still invisible from outside the crate. So instead this test
-//! reproduces `root_view`'s pre-fix and post-fix bodies verbatim as
-//! [`pre_fix_root`]/[`post_fix_root`] (cross-reference `src/shell.rs`'s
-//! current body — keep these in sync by eye if it ever changes shape again)
-//! over a synthetic [`ProbeView`]/[`ProbeWidget`] standing in for the
-//! navigator, asserting on the exact mechanism `src/shell.rs`'s doc comment
-//! cites: `AnyView::rebuild`'s `dyn_rebuild` (`frust-core/src/view.rs`) tears
-//! a widget down and rebuilds it fresh the instant the erased view's concrete
-//! type changes between two builds, and rebuilds it in place (`View::rebuild`,
-//! no fresh `View::build`) otherwise.
+//! Can't call `root_view` directly — its module (`mod shell;`) is private, invisible to an
+//! integration test even though the fn is `pub`. So this reproduces its pre-fix/post-fix bodies
+//! verbatim as [`pre_fix_root`]/[`post_fix_root`] (keep in sync by eye with `src/shell.rs` if it
+//! changes shape) over a synthetic [`ProbeView`]/[`ProbeWidget`] standing in for the navigator.
+//! Mechanism under test: `AnyView::rebuild`'s `dyn_rebuild` tears a widget down and rebuilds it
+//! fresh the instant the erased view's concrete type changes between builds, and rebuilds it in
+//! place otherwise.
 //!
-//! [`ProbeWidget`] makes that directly observable: each *freshly built*
-//! instance is stamped with a new identity id (bumped only in
-//! [`View::build`], never [`View::rebuild`]) and logs it on every paint, so
-//! comparing the id two consecutive frames painted tells us whether the
-//! navigator's widget was retained or replaced across the handoff frame (the
-//! overlay flipping `Some` to `None`, mirroring `AppState::splash_overlay`).
-//! `State` is `()` throughout — irrelevant to the app's own `AppState`.
+//! [`ProbeWidget`] makes that observable: each freshly built instance gets a new id (bumped only
+//! in `build`, never `rebuild`), logged on every paint, so comparing consecutive frames' ids
+//! shows whether the navigator was retained or torn down across the overlay's `Some -> None`
+//! flip. `State` is `()` throughout.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -39,9 +30,7 @@ use peniko::Color;
 type S = ();
 
 // ---------------------------------------------------------------------------
-// The probe: a widget whose identity (a freshly assigned id, logged on every
-// paint) reveals whether it was retained across a rebuild or torn down and
-// rebuilt fresh.
+// The probe: a fresh-build id logged on every paint reveals retain vs. rebuild.
 // ---------------------------------------------------------------------------
 
 struct ProbeView {
@@ -58,11 +47,9 @@ fn probe(log: &Rc<RefCell<Vec<u32>>>, next_id: &Rc<Cell<u32>>) -> ProbeView {
     }
 }
 
-/// A throwaway probe standing in for the splash overlay — its identity is
-/// never inspected, only its presence/absence in the child list matters, so
-/// it gets its own log/id source nobody reads. Avoids pulling in a `Text`
-/// (and the `TextContext` threading a real one would need in this harness)
-/// just to occupy the second slot.
+/// A throwaway probe standing in for the splash overlay — only its presence/absence in the child
+/// list matters, so it gets its own log/id source nobody reads. Avoids pulling in a `Text` (and
+/// the `TextContext` a real one would need here) just to occupy the second slot.
 fn overlay_probe() -> AnyView<S> {
     any(probe(
         &Rc::new(RefCell::new(Vec::new())),
@@ -79,9 +66,8 @@ impl View<S> for ProbeView {
     type Element = ProbeWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ProbeWidget {
-        // A fresh instance: stamp it with a never-reused id — the tell that
-        // this frame tore down whatever was here before (or is the first
-        // mount) rather than reconciling in place.
+        // A never-reused id: the tell that this frame tore down (or first-mounted) rather than
+        // reconciling in place.
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         ProbeWidget {
@@ -96,8 +82,7 @@ impl View<S> for ProbeView {
         _element: &mut ProbeWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // Same instance, nothing to reconcile: the mere absence of a fresh
-        // `build` call this frame *is* the assertion.
+        // No fresh `build` call this frame *is* the assertion.
         ChangeFlags::NONE
     }
 }
@@ -122,8 +107,7 @@ impl PaintScene for NullScene {
 }
 
 // ---------------------------------------------------------------------------
-// `root_view`'s two shapes, reproduced (see the module doc for why this test
-// can't call `src/shell.rs::root_view` itself).
+// `root_view`'s two shapes, reproduced (module doc explains why).
 // ---------------------------------------------------------------------------
 
 /// **Pre-fix.** A bare navigator when there is no overlay, a `Stack` wrapping
@@ -145,10 +129,9 @@ fn post_fix_root(navigator: AnyView<S>, overlay: Option<AnyView<S>>) -> AnyView<
     any(Stack(children))
 }
 
-/// Mount `compose` with an overlay present, paint one frame, then rebuild
-/// with the overlay gone and paint again — the exact handoff frame
-/// `AppState::splash_overlay` returning `None` produces. Returns the probe's
-/// logged id from each of the two frames.
+/// Mount `compose` with an overlay present, paint one frame, then rebuild with the overlay gone
+/// and paint again — the handoff frame `AppState::splash_overlay` returning `None` produces.
+/// Returns the probe's logged id from each frame.
 fn drive_handoff(compose: fn(AnyView<S>, Option<AnyView<S>>) -> AnyView<S>) -> (u32, u32) {
     let log = Rc::new(RefCell::new(Vec::<u32>::new()));
     let next_id = Rc::new(Cell::new(0u32));
@@ -202,12 +185,10 @@ fn post_fix_root_keeps_the_navigator_across_the_handoff() {
 
 #[test]
 fn pre_fix_root_tears_the_navigator_down_across_the_handoff() {
-    // Kept only to demonstrate the regression the fix above closes: with the
-    // pre-fix bare-navigator/Stack swap, the erased root's concrete type
-    // changes the instant the overlay disappears, so `AnyView::rebuild`
-    // (`dyn_rebuild`) tears the whole subtree down and builds it fresh —
-    // discarding whatever retained state (focus, cursor, scroll offset, …)
-    // it held, one frame before it would have been rebuilt anyway.
+    // Demonstrates the regression the fix closes: the pre-fix bare-navigator/Stack swap changes
+    // the erased root's concrete type the instant the overlay disappears, so `dyn_rebuild` tears
+    // the whole subtree down and rebuilds it fresh — discarding retained state (focus, cursor,
+    // scroll offset, …).
     let (mounted, handoff) = drive_handoff(pre_fix_root);
     assert_ne!(
         mounted, handoff,
