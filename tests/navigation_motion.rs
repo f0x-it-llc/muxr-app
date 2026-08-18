@@ -3,26 +3,21 @@
 //! it (`src/routes.rs`), and the GlyphSlide page transition every path
 //! navigation carries.
 //!
-//! **Why this suite mounts the *whole* app.** Every other screen suite mounts
-//! its screen *beside* a navigator, because `NavigatorWidget` contributes no
-//! `Widget::semantics` and forwards none of its pages' — a page inside a
-//! navigator is invisible to the accessibility tree. The bar has the opposite
-//! problem solved for it: it is **shell** chrome, a fixed-index sibling of the
-//! navigator in `shell::root_view`'s root `Stack`, so mounting the real
-//! `MuxrApp` leaves it fully addressable while the routes underneath stay
-//! opaque — exactly the split this suite wants.
+//! This suite mounts the *whole* app rather than a screen beside a bare
+//! navigator (every other screen suite's shape): the bar is shell chrome, a
+//! fixed-index sibling of the navigator in `shell::root_view`'s root `Stack`,
+//! so mounting the real `MuxrApp` leaves it fully addressable while the routes
+//! underneath stay opaque.
 //!
-//! **Two observables:** semantics for everything the bar *is* (a bar
-//! **mid-reveal** publishes nothing, so every semantics assertion settles
-//! first), and recorded geometry for the page transition, since a
-//! `TransitionSpec` isn't readable back off a `NavigatorController` — the
-//! leaving page displaces along x mid-flight, zero under `reduce_motion`.
+//! Two observables: semantics for what the bar *is* (settled first — mid-reveal
+//! it publishes nothing), and recorded geometry for the page transition, since
+//! a `TransitionSpec` isn't readable back off a `NavigatorController`.
 //!
-//! **Two navigators:** the *route* navigator ([`Harness::depth`]) and the
-//! *host* above all the chrome, where every menu/sheet/dialog is a page
-//! ([`Harness::overlay_depth`]) — an overlay never perturbs the route stack,
-//! and an open overlay makes the app underneath, bar included, omitted and
-//! inert. [`spend_cold_start`] burns the one-per-process splash claim first.
+//! Two navigators: the *route* navigator ([`Harness::depth`]) and the *host*
+//! above all the chrome, where every menu/sheet/dialog is a page
+//! ([`Harness::overlay_depth`]) — an overlay never perturbs the route stack, and
+//! an open overlay makes the app underneath, bar included, inert.
+//! [`spend_cold_start`] burns the one-per-process splash claim first.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -57,18 +52,12 @@ const PORT: u16 = 7777;
 /// The bar's brand wordmark, and its two slot affordances' **accessible
 /// names** — transcribed rather than imported: `ui::topbar`'s constants are
 /// the implementation's, and a test that imported them could not catch one of
-/// them changing.
-///
-/// Both slots used to be labelled by the glyph they set as text (`‹`/`⚙`),
-/// because the mark *was* the label. They are vectors now (see `ui::topbar`'s
-/// "Chrome icons are vectors" rule) and carry names instead — which is also
-/// what a screen reader now announces in place of "single left-pointing angle
-/// quotation mark".
+/// them changing. See [`BANNED_GLYPHS`] for why they're words, not marks.
 const BRAND: &str = "muxr";
 const BACK: &str = "Back";
 const GEAR: &str = "Settings";
 
-/// The two glyphs that used to stand in for those affordances. **Nothing in
+/// The two glyphs that used to label [`BACK`]/[`GEAR`] as text. **Nothing in
 /// the bar may carry either again**: neither is in the bundled Glyph faces, so
 /// each platform's font-fallback chain answered differently (the `⚙` was
 /// simply absent on iPhone) — a device-verified regression this suite pins shut.
@@ -218,24 +207,18 @@ impl Harness {
         self.settle();
     }
 
-    /// One frame, run the way `frust-shell-desktop`'s loop runs one: the
-    /// rebuild inside a [`TrackedScope`] (so a signal written *after* it is
-    /// observable), then layout, then paint. Returns the painted frame and
-    /// whether the app asked for another — `PaintOutcome::needs_frame` (an
-    /// animation still in flight) or a tracked write since the rebuild
-    /// (`TrackedScope::is_dirty`), which are precisely the two conditions that
-    /// shell turns into a `request_redraw`.
+    /// One frame, run the way `frust-shell-desktop`'s loop runs one: rebuild
+    /// inside a [`TrackedScope`], then layout, then paint. Returns the painted
+    /// frame and whether the app asked for another — an animation still in
+    /// flight (`PaintOutcome::needs_frame`) or a tracked write since the
+    /// rebuild (`TrackedScope::is_dirty`), the two conditions shell turns into
+    /// a `request_redraw`.
     ///
-    /// # The one request that does not count as "still converging"
-    ///
-    /// A frame whose **every** request was `TickClass::CosmeticLoop`
-    /// (`PaintOutcome::needs_frame_paced_only`) reports `false` here. That is
-    /// the framework's own name for a loop that never settles by design — on
-    /// `/terminal` it is the caret's 1.1s blink — and the mobile frame gate
-    /// throttles it for exactly that reason. Counting it would make
-    /// [`Harness::park`] unusable on the one screen the menu → sheet chain
-    /// lives on, and it costs nothing: a paced-only frame is by construction a
-    /// frame in which no transition, no reveal and no staging is in flight.
+    /// A frame whose every request was `TickClass::CosmeticLoop` (a loop that
+    /// never settles by design, e.g. `/terminal`'s caret blink) reports `false`
+    /// here instead: counting it would make [`Harness::park`] unusable on the
+    /// menu → sheet chain, and costs nothing, since such a frame by
+    /// construction has no transition, reveal or staging in flight.
     fn requested_frame(&mut self) -> (RecScene, bool) {
         self.clock += FRAME_MS;
         let root = &mut self.root;
@@ -530,13 +513,10 @@ fn a_transparent_overlay_over_sessions_never_retitles_the_bar() {
 // 3b — an open overlay dims the bar and takes its input, from the host
 // ---------------------------------------------------------------------------
 //
-// Both halves used to be the bar's own doing: a counted modality flag on
-// `BarState` drove a scrim `ui::topbar` painted over itself and withdrew the
-// bar's input and semantics. It was deleted with the root overlay host, because the
-// host does them properly — it routes input (and publishes accessibility
-// nodes) for its **top page only**, and an overlay's scrim is painted at the
-// root, over the floating bar rather than mirrored onto it. These tests are the
-// proof that nothing user-visible went with the deletion.
+// Both halves are the root overlay host's doing, not the bar's own: it routes
+// input (and publishes accessibility nodes) for its **top page only**, and an
+// overlay's scrim is painted at the root, over the floating bar rather than
+// mirrored onto it.
 
 /// Every plain fill covering exactly the bar's own box, in paint order. At a
 /// zero window inset that box is `W × BAR_HEIGHT` at the origin, and the bar's
@@ -695,20 +675,16 @@ fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
 // ---------------------------------------------------------------------------
 //
 // Section 3b asserts *what* the bar does under a modal; this one asserts
-// **when** — and it is the only section here that refuses the harness's
-// courtesy frames (see [`Harness::park`]).
+// **when** — the only section here that refuses the harness's courtesy frames
+// (see [`Harness::park`]).
 //
-// The defect it pins shut: the bar's modality used to be derived from
-// `NavigatorController::depth`, and `RenderRoot::rebuild` runs the whole
-// app-logic closure — this bar included — *before* the navigator drains its
-// queued ops. So the one frame that followed a modal's pop still published the
-// dimmed state, nothing asked for another, and the loop parked with the bar
-// dark and its affordances inert until unrelated input happened along. The
-// host answers on the frame it actually applies the op (it reconciles before
-// the page under it rebuilds), which is what let the app-side accounting that
-// papered over the gap be deleted. Every test below dismisses a **real**
-// overlay (the app's own `show_sheet`/`confirm_dialog`) and then asserts with
-// no frames in between.
+// The defect it pins shut: a bar deriving modality from
+// `NavigatorController::depth` would still see the stale dimmed state on the
+// frame right after a modal's pop (`RenderRoot::rebuild` runs before the
+// navigator drains its queued ops), leaving it dark and inert until unrelated
+// input woke it. The host reconciles before the page under it rebuilds, so
+// this is asserted with no frames in between, against a **real** overlay
+// (`show_sheet`/`confirm_dialog`).
 
 /// The sheet body these tests open — big enough to place the panel, small
 /// enough to leave most of the surface scrim.
@@ -860,19 +836,13 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
 }
 
 /// **R44-back, end to end** — and the reason the root host had to be a `host`
-/// rather than one more navigator.
-///
-/// The press is delivered the way a platform delivers one: through
-/// `frust::push_back_press`, the process-wide source the facade's own wiring
-/// arbitrates behind (a root overlay host outranks every plain navigator, so an
-/// open overlay claims the press ahead of the route stack under it). Nothing
-/// here names a controller to pop — that choice **is** what is under test.
-///
-/// It doubles as the original defect's guard: the press reaches this sheet as
-/// `BackPolicy::DismissAnimated`, so the widget plays its own staged exit and
-/// pops itself, and the app hears about the dismissal only through the page's
-/// completion latch. The bar must be lit and live again regardless — which it
-/// is, because it never knew about the overlay in the first place.
+/// rather than one more navigator. The press is delivered through
+/// `frust::push_back_press`, the process-wide source the facade arbitrates
+/// behind (a root overlay host outranks every plain navigator); nothing here
+/// names a controller to pop — that choice **is** what is under test. It
+/// doubles as the original defect's guard: the sheet dismisses itself
+/// (`BackPolicy::DismissAnimated`), so the bar has to come back live with no
+/// app code ever having known about the overlay.
 #[test]
 fn an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone() {
     let _g = serial();
@@ -912,21 +882,13 @@ fn an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone() {
 // ---------------------------------------------------------------------------
 //
 // Section 3c asserts that a *closed* modal gives the bar back. This one covers
-// the two handler shapes that used to corrupt the route-meta mirror while an
-// overlay opened or closed, both of them one-rebuild staleness read as fact:
-//
-// - a handler that closes an overlay *and* pushes a route in one rebuild (the
-//   Sessions Attach row, verbatim) recorded that route one too deep —
-//   permanently — because `NavigatorController::depth` still counted the
-//   overlay's page, and the next depth fall past it evicted the route's own bar
-//   entry;
-// - an overlay opened out of the overlay before it (the terminal's menu →
-//   sheet chain), whose intermediate frames used to strand a dimmed, inert bar.
-//
+// two handler shapes that used to corrupt the route-meta mirror by reading a
+// one-rebuild-stale depth as fact: a handler that closes an overlay *and*
+// pushes a route in the same rebuild (Sessions' Attach row), and an overlay
+// opened out of the overlay before it (the terminal's menu → sheet chain).
 // Both are structurally impossible now — an overlay is a page of the host, so
-// the route depth never moves at all — and both are still asserted end to end,
-// at the parking point, with no courtesy frames: this is where that claim is
-// paid for rather than assumed.
+// the route depth never moves — and both are still asserted end to end, at the
+// parking point, with no courtesy frames.
 
 /// Open the app's real sheet over `h` and hand back the [`SheetHandle`] its
 /// body's rows close it through — captured out of the body builder exactly as
@@ -965,13 +927,9 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
         "the sheet is its own page on the host"
     );
 
-    // The Attach row's own two calls (`features::sessions`' `sheet_action`:
-    // `sheet.close(); actions.attach(&id)`), run against the **real** handle
-    // and back to back — which is the whole shape that matters: no frame lands
-    // between them, so the close's queued pop is still counted by the host's
-    // depth while the route push below is being recorded. (Driven from here
-    // rather than by pressing a row: a sheet's body lives inside a navigator,
-    // where nothing is addressable by semantics.)
+    // The Attach row's own two calls (`sheet.close(); actions.attach(&id)`),
+    // back to back with no frame between them: the close's queued pop is
+    // still counted by the host's depth while the route push is recorded.
     sheet.close();
     app_nav().push("/settings");
     h.park();
@@ -988,10 +946,9 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     // pop-completion callback, which is what latches its handle.
     h.dispatch(&pointer(PointerPhase::Move, IDLE_MOVE));
 
-    // And now the eviction the mis-recorded depth used to cause: the *first*
-    // overlay to open and close over that route (on `/terminal` it is the ⋮
-    // menu) drops the live depth back past the entry, and a retain measured
-    // against a too-deep record takes the route's own bar with it.
+    // The eviction the mis-recorded depth used to cause: the first overlay to
+    // open and close over that route would drop the depth back past the
+    // entry, and a retain against a too-deep record took the bar with it.
     let overlay = open_sheet_with_handle(&mut h);
     assert_eq!(
         h.overlay_depth(),
@@ -1026,20 +983,12 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
 /// transcribed from `crate::shell`, like [`BACK`]/[`GEAR`] above.
 const TERMINAL_MENU: &str = "Terminal menu";
 /// `frust_glyph::menu`'s own panel gutter and item-row height, transcribed
-/// (both are private to that module, and a test that imported them could not
-/// catch one of them changing).
-///
-/// # Why this suite pixel-hunts a menu row where `tests/terminal.rs` refuses to
-///
-/// That suite selects a row by popping the menu page with its documented
-/// `PopResult::of(index)` contract, because it only needs the *action* a row
-/// runs. This one needs the widget's own dismissal path: the menu pops **itself
-/// from inside its paint**, with no app seam in between, and that self-pop is
-/// precisely the unobserved depth fall the defect below turns on. So the row is
-/// pressed for real — and a row is reachable by neither semantics (it lives in
-/// the navigator) nor a rect of its own (the panel paints its rows internally),
-/// leaving its geometry: the first item is one [`MENU_PANEL_PAD`] into the
-/// panel, [`MENU_ROW_H`] tall.
+/// (private to that module). Needed because this suite presses a menu row for
+/// real rather than popping it via `PopResult::of(index)` (`tests/terminal.rs`'
+/// way): the menu pops **itself from inside its paint**, and that self-pop is
+/// the unobserved depth fall this suite is testing. A row is reachable by
+/// neither semantics nor a rect of its own, leaving only its geometry: the
+/// first item is one [`MENU_PANEL_PAD`] into the panel, [`MENU_ROW_H`] tall.
 const MENU_PANEL_PAD: f64 = 6.0;
 const MENU_ROW_H: f64 = 34.0;
 
@@ -1055,11 +1004,8 @@ fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
     let before = h.park();
     assert_titled(&h, "terminal");
 
-    // The real ⋮, opening the real `frust_glyph` menu — the one overlay in
-    // the app the app itself never gets to observe closing: a menu dismissal
-    // is popped from inside the widget's own paint, with no app seam in
-    // between. Nothing app-side has to hear about it any more, which is the
-    // point of the chain below.
+    // The real ⋮, opening the real `frust_glyph` menu — the one overlay whose
+    // dismissal the app never observes (it pops itself from inside its paint).
     h.tap_label(TERMINAL_MENU);
     let open = h.park();
     assert_eq!(
@@ -1087,10 +1033,8 @@ fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
     h.tap_parked(first_row);
 
     // No hand-off pass, no gap: the rebuild that pops the menu also flushes
-    // its completion callback (the navigator's housekeeping broadcast), so the
-    // `open_sheet` it carries runs on the pop's own frame — the sheet is
-    // already standing where the menu was by the time the park returns,
-    // without a single further input.
+    // its completion callback, so the `open_sheet` it carries runs on the
+    // pop's own frame — the sheet is already standing where the menu was.
     assert_eq!(
         h.overlay_depth(),
         REST_DEPTH + 1,
@@ -1102,12 +1046,10 @@ fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
         node_roles(&h.root)
     );
 
-    // THE assertion, and the one an overlay opened *out of another overlay*
-    // used to fail: the second dismissal has to give the bar back on the frames
-    // production actually runs, with no unrelated input to save it. The old
-    // accounting could only manage that if the menu's unobserved depth fall had
-    // been spent before the sheet counted itself; the host owes no such
-    // bookkeeping — it pops, and the app under it is live again.
+    // THE assertion: an overlay opened *out of another overlay* still has to
+    // give the bar back on the frames production actually runs, with no
+    // unrelated input to save it — the host owes no bookkeeping across the
+    // hand-off; it pops, and the app under it is live again.
     h.tap_parked(SHEET_SCRIM_POINT);
 
     assert_eq!(
@@ -1193,21 +1135,16 @@ fn a_back_press_that_bypassed_the_handle_still_retitles_the_bar() {
 // 3e — back on /sessions is a question, not a pop
 // ---------------------------------------------------------------------------
 //
-// `/sessions` is the one route pushed with `BackPolicy::DismissAnimated`
-// (`routes::Nav::push`), so a back press there **bumps the page's dismiss cell
-// instead of popping it** and the screen raises its own disconnect
-// confirmation. This suite is where that belongs — not `sessions.rs`, which
-// mounts the screen *beside* a navigator rather than as a page pushed through
-// `Nav`, so nothing there carries the policy the arbitration reads. Here the
-// press is delivered exactly as section 3c's R44-back test delivers one
-// (`frust::push_back_press`, the process-wide platform source), against the
-// whole app, and every claim below is read off the two real stacks.
+// `/sessions` is the one route pushed with `BackPolicy::DismissAnimated`, so a
+// back press there **bumps the page's dismiss cell instead of popping it** and
+// the screen raises its own disconnect confirmation. This belongs here, not
+// `sessions.rs`, which mounts the screen beside a navigator rather than as a
+// page pushed through `Nav`, so nothing there carries the policy read here.
 //
-// What the *bar* contributes is the negative half, which is the whole point of
-// the feature: neither stack moves, so the mirror never hears of the press —
-// `/sessions` is still titled once the question is answered "no", and while it
-// is up the bar is not addressable at all (the host forwards its top page
-// only).
+// What the *bar* contributes is the negative half: neither stack moves, so the
+// mirror never hears of the press — `/sessions` is still titled once the
+// question is answered "no", and while it is up the bar is not addressable at
+// all (the host forwards its top page only).
 
 /// The confirmation's title, as the user reads it — transcribed rather than
 /// imported, like [`BRAND`]/[`BACK`]/[`GEAR`] above (`features::sessions`'
@@ -1680,16 +1617,11 @@ fn page_tone(scene: &RecScene) -> (Point, Size) {
     largest(&scene.rounded).unwrap_or_else(|| panic!("the Sessions page painted no tone"))
 }
 
-/// The `y` of every 7×7 tile in `scene`. Three things on a `/sessions` frame
-/// are that size: the bar's four `.brand-mark span` cells, the conn-row's
-/// `.dot-ok`, and — on the Connect page sliding past it — that screen's own
-/// saved-server dots, none of which sit anywhere near the top (its first piece
-/// is a 60px mark tile whose cells are 15.5px, so nothing 7×7 paints above
-/// `y ≈ 112`).
-///
-/// Told apart by **band**, never by `x`: a transition slides both pages
-/// horizontally, so an x filter would find the strip at rest and lose it
-/// mid-flight — which is precisely the frame these probes exist for.
+/// The `y` of every 7×7 tile in `scene`: the bar's four brand-mark cells, the
+/// conn-row's `.dot-ok`, and the sliding Connect page's own dots (none near the
+/// top). Told apart by **band**, never by `x`: a transition slides both pages
+/// horizontally, so an x filter would lose the strip mid-flight — precisely
+/// the frame these probes exist for.
 fn tiles(scene: &RecScene) -> Vec<f64> {
     scene
         .rounded

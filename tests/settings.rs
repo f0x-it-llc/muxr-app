@@ -2,51 +2,25 @@
 //! (`src/features/settings/**`) — no GPU, no window: a `RenderRoot` over the
 //! real page builder, driven through `tests/support`.
 //!
-//! # The harness, and why the screen is *beside* a navigator rather than in one
+//! `NavigatorWidget` publishes no semantics for its pages, so [`Harness`] mounts
+//! the screen as the bottom layer of a `Stack`, with an otherwise-empty
+//! navigator over it — the same shape `tests/sessions.rs` uses. The screen's
+//! rows stay reachable by value, while its dialogs and picker sheets are
+//! exercised end to end through a real navigator and located by painted
+//! geometry.
 //!
-//! In production `settings_page` is a navigator page. Mounting it that way here
-//! would make every assertion geometric: `NavigatorWidget` contributes no
-//! `Widget::semantics` and forwards none of its pages' (the framework gap
-//! `tests/ui_substrate.rs` documents), so nothing inside a navigator appears in
-//! the accessibility tree at all.
-//!
-//! So [`Harness`] mounts the screen as the **bottom layer of a `Stack`**, with
-//! an otherwise-empty navigator — driven by the *same* `NavigatorController`
-//! the screen is handed — stacked over it, exactly as `tests/sessions.rs` does
-//! (see that suite's own module docs for why the base page is a full-bleed,
-//! childless `SizedBox`). The screen's rows therefore stay reachable by text
-//! value, while the dialogs and picker sheets it pushes are exercised end to
-//! end through a real navigator and located by painted geometry.
-//!
-//! # A taller surface than the default
-//!
-//! Four groups plus the Disconnect action run past 1000px, so every frame here
-//! lays out at [`SURFACE`] rather than `support::surface()`'s 800×600 — a row
-//! laid out below the fold would be untappable and invisible to a semantics
-//! probe. That is also why this file pumps through its own
+//! Five groups plus Disconnect run past 1000px, so every frame here lays out at
+//! [`SURFACE`], not `support::surface()`'s default — hence this file's own
 //! [`Harness::pump_once`] rather than `support::pump_frames`, which frames at
-//! the default size: a pump at 600px high would silently re-layout everything
-//! the next probe is about to measure. (Inlined here rather than added to
-//! `tests/support`, whose additive rights belong to another task in this wave.)
+//! the default (smaller) size and would silently re-layout what the next probe
+//! is about to measure.
 //!
-//! # Reading a picker sheet without semantics
-//!
-//! A sheet is a navigator page, so its rows are invisible to
-//! `node_values`. Three painted facts stand in, and between them they pin the
-//! whole of `docs/redesign.html`'s screen 6:
-//!
-//! - **how many rows** — the sheet's `glyph_runs` delta is `options + 1` (the
-//!   title);
-//! - **which one is selected** — only that row paints a fill, and it is the
-//!   one rect as wide as the panel itself (`.pick-row.sel{margin:0 -20px}`
-//!   bleeding exactly the sheet's own 20px gutter on each side), plus the one
-//!   filled vector path the sheet adds beyond its own panel (the `✓` — see
-//!   `Chrome::vectors`);
-//! - **what the rows say** — by picking one and watching the row value on the
-//!   screen behind change, which is the round trip that matters anyway.
-//!
-//! Row *k* is addressed relative to the selected row's measured rect: every
-//! `.pick-row` is one line tall, so the pitch is that rect's own height.
+//! A picker sheet's rows are invisible to `node_values` (a sheet is a navigator
+//! page), so they're read through three painted facts instead: row count via
+//! the `glyph_runs` delta (`options + 1` for the title), the selected row via
+//! its full-panel-width fill plus its `✓` vector, and a picked value via the
+//! row on the screen behind changing. Row *k* is addressed relative to the
+//! selected row's own height, since every `.pick-row` is one line tall.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -158,10 +132,8 @@ fn metrics_at(size: Size) -> WindowMetrics {
 }
 
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
-/// the shape `muxr`'s pages read via `use_context::<WindowMetrics>()` for the
-/// responsive width-clamp pass. `None` leaves context unset, exactly the
-/// state every other test in this suite mounts under (no shell has published
-/// yet), so this helper is purely additive.
+/// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
+/// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     if let Some(metrics) = metrics {
         provide_context(metrics);
@@ -213,27 +185,18 @@ impl Harness {
 
     /// [`Harness::mount`] with `seed` run in between: after `MuxrApp::init` has
     /// published every feature's stores, and **before** the screen's own
-    /// controller reads them.
-    ///
-    /// The window matters — `init` constructs fresh repositories every time it
-    /// runs, so anything written before it is discarded, and the screen loads
-    /// its lists once at construction.
+    /// controller reads them (which happens once, at construction).
     fn mount_seeded(seed: impl FnOnce()) -> Self {
-        // The real composition root: it publishes the app-scoped connection
-        // controller and calls every feature's `di::provide` — including this
-        // feature's two repositories and (for the saved-server group)
-        // `connect`'s own two.
+        // The real composition root: publishes the connection controller and
+        // every feature's `di::provide`, including `connect`'s own for the
+        // saved-server group.
         let state = MuxrApp.init();
         seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
-        // Re-point the app's one path-pushing handle (`routes::app_nav`, which
-        // the screen resolves in its own `init`) at this fixture's navigator,
-        // real route table and real session guard included — which is what
-        // makes Disconnect's `go("/")` the app's real navigation. The one
-        // controller plays both of production's navigators (`AppState::nav`
-        // and the root overlay host `AppState::overlays`, where the dialogs
-        // and picker sheets are pages), which is what keeps every overlay a
-        // page of the *mounted* navigator and so drivable here.
+        // Re-points `routes::app_nav()` at this fixture's own navigator, real
+        // route table and session guard included (what makes Disconnect's
+        // `go("/")` real navigation) — playing both of production's
+        // navigators, so every overlay stays a page of this one mounted one.
         let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
@@ -342,7 +305,6 @@ impl Harness {
         });
     }
 
-    /// A full tap at `point`.
     fn tap(&mut self, point: Point) {
         tap(&mut self.root, &mut self.state, point);
     }
@@ -843,12 +805,10 @@ fn revoking_a_token_confirms_first_then_removes_it() {
 // 3a — the revoke animation (scramble, then collapse)
 // ---------------------------------------------------------------------------
 
-/// The revoke timeline runs off a wall clock, so a suite that let it run in
-/// real time could only ever assert "eventually". Pinning that clock (through
-/// `presentation::scramble`'s own test seam) makes "three scramble frames in"
-/// and "one frame past the end" exact positions instead. Restores the wall
-/// clock on drop, so a later test in the same binary is never left holding a
-/// frozen one.
+/// The revoke timeline runs off a wall clock; pinning it (through
+/// `presentation::scramble`'s test seam) makes "three scramble frames in" an
+/// exact position instead of an "eventually". Restores the wall clock on drop,
+/// so a later test is never left holding a frozen one.
 struct AnimationClock;
 
 impl AnimationClock {
@@ -870,13 +830,10 @@ impl Drop for AnimationClock {
     }
 }
 
-/// The rendered value that is `name` mid-scramble, if one is on screen.
-///
-/// The noise substitutes characters one for one and never a space, so a
-/// scrambled name is exactly as long as the name, still has no whitespace in
-/// it, and is not the name — which no other value this screen prints at that
-/// length is (every long one it draws, a saved server's `endpoint · recency`
-/// line included, carries spaces).
+/// The rendered value that is `name` mid-scramble, if one is on screen. The
+/// noise substitutes characters one for one and never a space, so a scrambled
+/// name is exactly as long as `name`, whitespace-free, and not `name` itself —
+/// which no other value this screen prints at that length is.
 fn scrambled_variant(values: &[String], name: &str) -> Option<String> {
     values
         .iter()
@@ -1145,15 +1102,11 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
 }
 
 /// Open the dashed create row's dialog, type `name` into its field, flip the
-/// read-only toggle when `read_only`, and submit.
-///
-/// The two submit paths differ on purpose: with no toggle tap the field still
-/// holds focus, so Enter submits it. Tapping the switch first blurs that
-/// focus (it owns its own tap target and claims none of its own), so Enter
-/// would route nowhere — the Save button submits instead. Save's own
-/// `can_submit` bool is captured at the dialog body's *last rebuild*, so an
-/// explicit [`Harness::frame`] after typing is what lets it see the typed
-/// name before either submit path fires.
+/// read-only toggle when `read_only`, and submit. The two submit paths differ
+/// on purpose: with no toggle tap the field still holds focus, so Enter
+/// submits it; tapping the switch first blurs it, so Save submits instead. An
+/// explicit [`Harness::frame`] after typing lets `can_submit` see the typed
+/// name before either path fires (it's captured at the body's last rebuild).
 fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
     let dialog = open_dialog_by_value(h, "create new token");
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
@@ -1169,12 +1122,9 @@ fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
     h.flush();
 }
 
-/// A landed mint's dialog pop and its follow-up secret-reveal sheet push both
-/// land inside the same async continuation (`SettingsController::create_token`
-/// refreshes the list and parks the secret before its caller opens the
-/// sheet), so [`Harness::pump_until_values`] often returns with the sheet
-/// already mid-transition. One extra [`Harness::settle`] finishes it before a
-/// test taps into the sheet.
+/// A landed mint's dialog pop and its secret-reveal sheet push land in the
+/// same async continuation, so [`Harness::pump_until_values`] often returns
+/// mid-transition; one extra [`Harness::settle`] finishes it.
 fn await_secret_reveal(h: &mut Harness, minted_name: &str) {
     h.pump_until_values("the minted token", |values| {
         values.iter().any(|v| v == minted_name)
@@ -1287,12 +1237,9 @@ fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
     );
     assert_eq!(state, Toggled::False, "unchecked by default");
 
-    // No outer row-wide `GestureDetector` wraps the switch (see
-    // `widgets::tokens::dialog_read_only_row`'s own doc), so the switch's own
-    // semantics bounds are what a tap must land inside. One `Harness::frame`
-    // after the tap is what lets `checked` reflect the signal the tap just
-    // moved — `RwSignal::set` is synchronous, unlike the bell row's own
-    // async-preferences round trip.
+    // No outer row-wide `GestureDetector` wraps the switch, so a tap must land
+    // inside its own semantics bounds. `RwSignal::set` is synchronous, so one
+    // `Harness::frame` is enough to see it reflected.
     h.tap_label("read-only");
     h.frame();
     let (_, state) = h
@@ -1385,21 +1332,14 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
 
 // -- Keyboard-aware dialogs ---------------------------------------------------
 //
-// App-level pin for `crates/frust-widgets/src/glyph/dialog.rs`'s
-// keyboard-avoidance behavior: the panel centers in the keyboard-free band
-// instead of the full window. Exercised against the New Token dialog
-// (`widgets::tokens::open_create_token_dialog`) — title + field + toggle + a
-// two-button action row, the tallest content any dialog in this app pushes.
-// No app production code changed here — `Cargo.toml`'s path dep onto frust
-// delivers it, so this pin is the app-level proof, not a behavior change of
-// its own.
+// App-level pin for `frust-widgets`' keyboard-avoidance behavior (the panel
+// centers in the keyboard-free band, not the full window), exercised against
+// the New Token dialog — the tallest content any dialog here pushes. No app
+// production code changed for this; it's the framework's path dep proven at
+// this app's own scale.
 //
-// The other half — a `Down` on dead panel space blurs the focused field
-// without dismissing the dialog — is pinned below
-// (`a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog`).
-// It reads from `GlyphDialogWidget::body` (the `.content()` slot); this
-// dialog's field and read-only toggle compose through `.content(...)` rather
-// than `.action(...)` accordingly.
+// The other half — a `Down` on dead panel space blurs the field without
+// dismissing the dialog — is pinned below.
 
 #[test]
 fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
@@ -1442,12 +1382,9 @@ fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
 }
 
 /// The fix's other half (see the [module comment](self) above): a `Down` on
-/// the dialog's own dead panel space blurs the focused field's IME session
-/// without dismissing the dialog, and a second tap on the field re-engages
-/// it. Modeled on `crates/frust-widgets/src/glyph/dialog.rs`'s own
-/// `dead_space_down_ends_the_field_session_and_keeps_the_dialog_open` fixture
-/// — `panel.origin + (2, 2)` sits inside `DIALOG_PADDING`, above the title
-/// and above the content/action rows, so no child lives there.
+/// the dialog's dead panel space blurs the focused field's IME session
+/// without dismissing the dialog, and a second tap re-engages it.
+/// `panel.origin + (2, 2)` sits inside `DIALOG_PADDING`, above every child.
 #[test]
 fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     let _g = serial();
@@ -1762,15 +1699,11 @@ fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
 // 4b — the font picker sheet (its own sheet, not one of the four above)
 // ---------------------------------------------------------------------------
 //
-// The font sheet lists two sections — the faces installed on the device, and
-// the downloadable catalog — over one scrolling body. Read the same way every
-// other sheet in this suite is (see the module docs): by counted glyph runs,
-// by the one full-bleed amber fill the selected row paints, and by the row
-// value on the screen behind once a choice lands.
+// Two sections — installed faces, and the downloadable catalog — over one
+// scrolling body, read the same way as any other sheet (see the module docs).
 //
-// **No test here touches the network.** `support::setup` installs the offline
-// font source for the whole process, and the two catalog cases install their
-// own in-memory fixture source over it.
+// No test here touches the network: `support::setup` installs the offline
+// font source, and the two catalog cases install their own in-memory fixture.
 
 /// The bytes every fixture "download" serves — a real, parseable TTF, so the
 /// install path's own registration probe has something to resolve. It resolves
@@ -2684,13 +2617,10 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
 // 8 — saved-server card clip regression at the phone-narrow width
 // ---------------------------------------------------------------------------
 
-/// A frame width matching the device's own narrow branch — the Xiaomi's 1080
-/// physical px is ~395 logical px at its density, comfortably under
-/// `crate::responsive::WIDE_BREAKPOINT_PX` (600); `360` here sits inside that
-/// same narrow band. Tall enough that the saved-server group — which sorts
-/// [`with_saved_credential`]'s freshly-stamped row to its top — is still
-/// laid out on-screen rather than below the fold (this suite's own module
-/// docs note why an off-screen row is invisible to its semantics probe).
+/// A frame width matching the device's own narrow branch — a Xiaomi's 1080
+/// physical px is ~395 logical px, comfortably under
+/// `crate::responsive::WIDE_BREAKPOINT_PX` (600). Tall enough that
+/// [`with_saved_credential`]'s freshly-stamped row stays on-screen.
 const NARROW_SURFACE: Size = Size::new(360.0, 3000.0);
 
 #[test]
