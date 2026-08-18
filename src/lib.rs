@@ -12,15 +12,15 @@ mod shell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::{any, overlay_host, AnyView, Component, Get, NavigatorController, Router, RwSignal};
+use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
 
 use features::connect::domain::entities::SavedServer;
 use features::connect::presentation::pages::connect_layout;
 use features::connect::presentation::widgets::connect_pieces;
 use features::connect::presentation::widgets::saved::splash_saved_servers;
 use ui::palette::active_theme;
-use ui::splash::icon_phase::{splash_icon_art, IconArt};
-use ui::splash::sequence::{claim_cold_start, reduced_splash, splash_sequence, SplashPlan};
+use ui::splash::icon_phase::{IconArt, splash_icon_art};
+use ui::splash::sequence::{SplashPlan, claim_cold_start, reduced_splash, splash_sequence};
 
 const START_LOCATION: &str = "/";
 
