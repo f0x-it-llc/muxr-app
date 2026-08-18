@@ -1,37 +1,17 @@
 //! The `/sessions` screen's widget clusters, transcribed from
-//! `docs/redesign.html`'s **sessions** block (CSS lines 92-113, markup lines
-//! 227-257) — one submodule per visual cluster, so
-//! [`pages`](super::pages)'s `Component::build` reads as an arrangement
-//! rather than a wall of nesting. These modules are page-coupled by design:
-//! each reads the page's state type or calls its `pages::*` action shims
-//! directly (the screen-state form of the sanctioned pages↔widgets back-edge
-//! — see `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph):
+//! `docs/redesign.html`'s **sessions** block — one submodule per visual
+//! cluster: [`server_strip`] (`.conn-row`), [`session_card`] (`.sess-card`),
+//! [`list`] (new-session button + empty state), [`manage_sheet`] (long-press
+//! sheet rows). Page-coupled by design (`docs/FEATURES_ARCHITECTURE.md`'s
+//! widgets/ paragraph): each reads the page's state type or calls its
+//! `pages::*` action shims directly.
 //!
-//! - [`server_strip`] — `.conn-row`: the heartbeat dot, version meta,
-//!   latency, the `insecure` chip.
-//! - [`session_card`] — `.sess-card`: accent, avatar, name, chips, meta row,
-//!   pane pills.
-//! - [`list`] — `.new-sess-btn` and the empty state, the screen's two create
-//!   entry points.
-//! - [`manage_sheet`] — the long-press management sheet's rows.
-//!
-//! # Colour roles: amber is the brand, green is health
-//!
-//! Amber appears only as brand/call-to-action (the top bar's mark, the `+`
-//! on the new-session row) and never as a health or selection signal —
-//! liveness is `success` (the card's left accent, its avatar wash, the
-//! strip's dot). A running session must never read as "selected".
-//!
-//! # Real components over hand-composed chrome
-//!
-//! Every element with a Glyph catalog counterpart uses it — `badge` for
-//! chips, `avatar` for `.sess-avatar`, `empty_state` for the empty list,
-//! `button` for the sheet's rows. [`super::chrome`]'s panel/swatch/dashed-box
-//! cover what the catalog has no counterpart for: the card's 2px left
-//! accent, the pane pills, the `.conn-row` rule, the dashed new-session
-//! outline.
-//!
-//! `frust_glyph::baseline()` is canonical where it and the HTML disagree.
+//! Amber is brand/CTA only, never a health/selection signal — liveness is
+//! always `success`; a running session must never read as "selected". Every
+//! element with a Glyph catalog counterpart uses it; [`super::chrome`] covers
+//! what the catalog doesn't (card accent, pane pills, `.conn-row` rule,
+//! dashed outline). `frust_glyph::baseline()` wins where it and the HTML
+//! disagree.
 
 mod list;
 mod manage_sheet;
@@ -54,9 +34,9 @@ pub(in crate::features::sessions::presentation) use manage_sheet::sheet_body;
 pub(in crate::features::sessions::presentation) use server_strip::{DOT, server_strip};
 pub(in crate::features::sessions::presentation) use session_card::session_card;
 
-/// The screen's page tone behind `body` — `--bg-base`, which the shell's own
-/// clear colour (`--bg-surface`, the *card* tone) is not, so a screen that
-/// painted nothing would show cards with no visible edge at all.
+/// Page tone behind `body`: `--bg-base`, not the shell's `--bg-surface`
+/// clear colour — without it, cards would show no visible edge against an
+/// unpainted background.
 pub(in crate::features::sessions::presentation) fn page_tone(
     body: impl frust::View<SessionsState>,
     colors: &Palette,
@@ -64,12 +44,10 @@ pub(in crate::features::sessions::presentation) fn page_tone(
     any(panel(body, colors.base, 0.0))
 }
 
-/// A `gap`-wide horizontal spacer, shared by every row-shaped piece.
 pub(super) fn h_gap(gap: f64) -> FlexChild<SessionsState> {
     inflexible(SizedBox::<SessionsState>(Some(gap), None))
 }
 
-/// A vertically-centered row, shared by every row-shaped piece.
 pub(super) fn row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }

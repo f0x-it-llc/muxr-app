@@ -1,23 +1,13 @@
-//! The `sessions` feature slice — muxr's `/sessions` route: the list of a
-//! connected server's terminal sessions, with create/rename/kill (a card tap
-//! attaches, a long-press opens the management sheet those two live in), the
-//! fixed server-info + latency strip, and the attach path into `/terminal`.
+//! The `sessions` feature slice — muxr's `/sessions` route: session list with
+//! create/rename/kill, the server-info/latency strip, and the attach path into
+//! `/terminal`. Credential-offer UI lives on Connect, not here (see
+//! [`crate::connection`]).
 //!
-//! The save-credential offer used to be this screen's too; it is answered on
-//! Connect now, before the redirect that lands here — see
-//! [`crate::connection`]'s "Credential offer placement".
-//!
-//! `{domain, data, presentation}`, per the clean-architecture convention
-//! `examples/huddle` establishes: dependencies point inward only,
-//! `presentation` → `domain` ← `data`. [`di`] is the composition-root wiring
-//! seam `crate::MuxrApp::init` calls into — not part of the inward-dependency
-//! slice itself, and the only place the three meet.
-//!
-//! **`GrpcSessionsRepository`** (`data::repositories`) is the production
-//! `data` implementation; `di::provide` publishes it unless a test process
-//! opted out via `di::use_mock_sessions_for_tests`, in which case
-//! `MockSessionsRepository` stands in — a real implementation for headless
-//! suites, not a placeholder for the real client.
+//! `{domain, data, presentation}` clean-architecture split, dependencies
+//! inward only (`docs/FEATURES_ARCHITECTURE.md`). [`di`] is the
+//! composition-root seam `crate::MuxrApp::init` calls; it publishes
+//! `GrpcSessionsRepository` in production, `MockSessionsRepository` for
+//! headless tests.
 
 pub mod data;
 pub mod di;

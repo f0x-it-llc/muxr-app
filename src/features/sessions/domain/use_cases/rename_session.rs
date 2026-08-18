@@ -10,13 +10,11 @@ use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{RenameRequest, Session};
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
-/// Renames a session via the injected repository.
 pub struct RenameSession {
     repo: Arc<dyn SessionsRepository + Send + Sync>,
 }
 
 impl RenameSession {
-    /// Construct with the injected repository.
     pub fn new(repo: Arc<dyn SessionsRepository + Send + Sync>) -> Self {
         Self { repo }
     }
