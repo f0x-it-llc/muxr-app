@@ -1,19 +1,16 @@
 //! [`MuxrClient`] — one connected `muxrd` handle: the channel, the session
 //! token, and the two stubs everything above this layer calls through.
 //!
-//! **Teardown is a drop, always.** There is no `shutdown()` and there will not
-//! be one: an `AttachTerminal` stream never completes on its own, so a graceful
-//! shutdown that waits for in-flight RPCs hangs forever. Dropping the last
-//! clone closes the transport, which is the whole contract.
+//! Teardown is a drop, always: an `AttachTerminal` stream never completes on
+//! its own, so a graceful `shutdown()` would hang forever. Dropping the last
+//! clone closes the transport.
 //!
-//! **Rebuild is single-flight.** A dropped connection typically fails several
-//! in-flight calls at once, so every one of their error handlers reaches for a
-//! reconnect at the same moment. [`MuxrClient::reconnect`] takes a lock and
-//! re-checks a generation counter behind it: the first caller dials, the rest
-//! observe the newer generation and return without opening a second connection.
-//! Stubs are minted per call from the current channel, so a caller that already
-//! holds one keeps using the old connection until it next asks for a stub —
-//! which is what a retry does.
+//! Rebuild is single-flight: [`MuxrClient::reconnect`] takes a lock and
+//! re-checks a generation counter behind it, so several callers' error
+//! handlers reaching for a reconnect at once collapse into one dial. Stubs
+//! are minted per call from the current channel, so a caller already
+//! holding one keeps using the old connection until its next stub — which
+//! is what a retry does.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,9 +39,8 @@ struct Inner {
     trust: TrustConfig,
     token: Arc<SessionToken>,
     channel: ArcSwap<Channel>,
-    /// Bumped on every successful rebuild; the value a [`MuxrClient::reconnect`]
-    /// caller read before queueing for the lock tells it whether someone else
-    /// already did the work.
+    /// Bumped on every successful rebuild — tells a queued `reconnect` caller
+    /// whether someone else already did the work.
     generation: AtomicU64,
     rebuild: Mutex<()>,
 }
@@ -115,8 +111,8 @@ impl MuxrClient {
         let seen = self.inner.generation.load(Ordering::Acquire);
         let _guard = self.inner.rebuild.lock().await;
         if self.inner.generation.load(Ordering::Acquire) != seen {
-            // Someone else rebuilt while this caller waited for the lock; their
-            // channel is the current one, and dialing again would open a second.
+            // Someone else already rebuilt while this caller waited for the
+            // lock; dialing again would open a second connection.
             return Ok(());
         }
 

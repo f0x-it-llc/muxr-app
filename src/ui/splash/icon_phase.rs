@@ -11,26 +11,23 @@
 //! [`icon_visual`] is the whole state machine as one pure function of elapsed
 //! milliseconds — the widget only accumulates a clock, calls it, and paints
 //! what it returns. The phase is published through an optional [`RwSignal`]
-//! ([`IconPhaseView::on_phase`]), written **only when it changes**, so the
-//! orchestrator can start the burst and the rain the instant the icon starts
-//! dissolving — a reactive edge instead of a timer; `IconPhase::Dissolve`
-//! publishes at exactly [`spec::ICON_DELAY_MS`].
+//! ([`IconPhaseView::on_phase`]), written only when it changes, so the
+//! orchestrator can start the burst and rain on a reactive edge instead of a
+//! timer; `IconPhase::Dissolve` publishes at exactly [`spec::ICON_DELAY_MS`].
 //!
-//! **How the icon is drawn.** The framework has no app-reachable way to hand
-//! a decoded image's pixels to `PaintScene::draw_image`, so this widget
-//! composes rather than blits: it retains `frust`'s own `Image` widget as a
-//! child pod and paints it under a scale transform plus a translucent layer
-//! (both `PaintScene::push_transform`/`push_layer` compose onto the child's
-//! draws). [`IconArt::Vector`] is the decode-failure fallback: a rounded
-//! amber tile with the `▣` brand glyph centered.
+//! The framework has no app-reachable way to hand a decoded image's pixels
+//! to `PaintScene::draw_image`, so this widget composes rather than blits:
+//! it retains `frust`'s own `Image` widget as a child pod and paints it
+//! under a scale transform plus a translucent layer. [`IconArt::Vector`] is
+//! the decode-failure fallback: a rounded amber tile with the `▣` brand
+//! glyph centered.
 //!
-//! **Reduced motion** collapses the whole beat: [`icon_visual`] reports
+//! Reduced motion collapses the whole beat: [`icon_visual`] reports
 //! [`IconPhase::Done`] on the first frame with nothing painted and no
-//! continuation frames requested, so an orchestrator mounting this under
-//! reduced motion is cued straight to the assembled screen (the source's
-//! 200ms static-icon reduced path is deliberately dropped in favour of this
-//! flat "terminal state immediately" rule — the orchestrator is expected to
-//! skip the splash entirely rather than flash a frame of nothing).
+//! continuation frames requested, cueing an orchestrator mounted under
+//! reduced motion straight to the assembled screen (the orchestrator is
+//! expected to skip the splash entirely rather than flash a frame of
+//! nothing).
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
@@ -50,9 +47,8 @@ const SPLASH_ICON_PNG: &[u8] = include_bytes!("../../../assets/splash_icon.png")
 
 /// The brand glyph the [`IconArt::Vector`] fallback centers on its tile.
 const FALLBACK_GLYPH: &str = "▣";
-/// The fallback glyph's size as a fraction of the tile — a hand-tuned
-/// **community-approximate** value (the design reference has no vector
-/// stand-in for the icon at all, so there is nothing to match): half the tile
+/// The fallback glyph's size as a fraction of the tile — a hand-tuned value
+/// (the design reference has no vector stand-in to match): half the tile
 /// reads as an icon rather than as text.
 const FALLBACK_GLYPH_FRACTION: f64 = 0.5;
 
@@ -146,12 +142,10 @@ pub enum IconArt {
 /// Decode the embedded app icon, falling back to [`IconArt::Vector`] if the
 /// bytes don't decode.
 ///
-/// **Call once and retain the result** (from the composition root's first
-/// `build`, via `AppState::splash_plan()` — not `Component::init`, since at
-/// `init` time the shell has not yet applied the theme; see that function's
-/// doc for why), mirroring how `examples/huddle` stashes its decoded logo in
-/// state: decoding is a real PNG decode plus a full-size RGBA allocation, and
-/// `IconArt` clones for free afterwards (`ImageSource` is `Arc`-backed).
+/// Call once and retain the result (from the composition root's first
+/// `build`, via `AppState::splash_plan()`, not `Component::init`): decoding
+/// is a real PNG decode plus a full-size RGBA allocation, and `IconArt`
+/// clones for free afterwards (`ImageSource` is `Arc`-backed).
 pub fn splash_icon_art() -> IconArt {
     match ImageSource::decode(SPLASH_ICON_PNG) {
         Ok(source) => IconArt::Image(source),
@@ -236,8 +230,7 @@ impl IconPhaseWidget {
     fn paint_fallback(&self, ctx: &PaintCtx, scene: &mut dyn PaintScene, origin: Point) {
         let theme = Theme::from_paint_ctx(ctx);
         // Glyph's accent-role split: `primary_container`/`on_primary_container`
-        // is the *bright fill* pair (`primary` is accent ink) — see
-        // `docs/CODE_STANDARDS.md`'s Glyph token precedents.
+        // is the bright-fill pair (`primary` is accent ink).
         let (fill, ink) = theme.map_or((spec::AMBER_FALLBACK, spec::ON_AMBER_FALLBACK), |theme| {
             let scheme = theme.scheme();
             (scheme.primary_container, scheme.on_primary_container)

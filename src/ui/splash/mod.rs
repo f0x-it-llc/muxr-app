@@ -1,6 +1,6 @@
 //! The cold-start splash sequence's paint-driven building blocks — five
-//! beats off one master clock (see [`sequence`]'s own docs for the timeline),
-//! each independently mountable/testable, plays once per process launch:
+//! beats off one master clock (see [`sequence`] for the timeline), each
+//! independently mountable/testable, plays once per process launch:
 //!
 //! | Module | What it paints |
 //! |---|---|
@@ -10,22 +10,22 @@
 //! | [`sequence`] | The orchestrator: all three over one clock, ending in the Connect screen's piece-by-piece assembly |
 //!
 //! None of the first three widgets knows about the others — [`sequence`]
-//! owns the sequencing, cueing [`burst`]/[`rain`] at exactly
-//! [`spec::ICON_DELAY_MS`] and the assembly [`spec::ASSEMBLY_START_MS`] after
-//! that.
+//! owns the sequencing, cueing [`burst`]/[`rain`] at
+//! [`spec::ICON_DELAY_MS`] and the assembly at [`spec::ASSEMBLY_START_MS`]
+//! after that.
 //!
-//! **Source of truth.** `docs/splash.html` is the design reference; its
-//! `<script>` constants are the timing contract, transcribed exactly once,
-//! here, into [`spec`] — never re-typed at a use site. Colors come from the
-//! active [`frust::Theme`] where a token exists; the two with no token (the
-//! rain's near-white head, the reference amber for an unthemed paint pass)
-//! are named constants in [`spec`] carrying the CSS custom property they
+//! `docs/splash.html` is the design reference; its `<script>` constants are
+//! the timing contract, transcribed exactly once, here, into [`spec`] —
+//! never re-typed at a use site. Colors come from the active
+//! [`frust::Theme`] where a token exists; the two with none (the rain's
+//! near-white head, the reference amber for an unthemed paint pass) are
+//! named constants in [`spec`] carrying the CSS custom property they
 //! transcribe.
 //!
-//! **Determinism.** Every random choice comes from [`SplashRng`], a seeded
-//! LCG, never a system RNG: each widget takes a `seed: u64` so a test can
-//! replay an exact sequence. Each widget also independently collapses under
-//! `MotionScheme::reduce_motion` (see its own module docs).
+//! Every random choice comes from [`SplashRng`], a seeded LCG, never a
+//! system RNG: each widget takes a `seed: u64` so a test can replay an exact
+//! sequence. Each widget also independently collapses under
+//! `MotionScheme::reduce_motion`.
 
 pub mod burst;
 pub mod icon_phase;
@@ -39,11 +39,9 @@ use frust::{FrameTime, Theme};
 
 /// The `docs/splash.html` timing/geometry contract, transcribed once.
 ///
-/// Every value below is quoted from that file (the `<script>` constants for
-/// timing, the CSS rules for geometry/color), with the source expression in
-/// the doc comment. Retrieved 2026-07-31 from the app's own design reference,
-/// which is checked in — so "retrieved" here means "transcribed from the
-/// checked-in file", not from a remote source that can drift.
+/// Every value below is quoted from that checked-in file (the `<script>`
+/// constants for timing, the CSS rules for geometry/color), with the source
+/// expression in the doc comment — so it cannot drift from a remote source.
 pub(crate) mod spec {
     use frust::Curve;
     use frust::authoring::Color;
@@ -54,9 +52,8 @@ pub(crate) mod spec {
     pub(crate) const ICON_IN_MS: f64 = 350.0;
     /// Hold-at-rest duration (`ICON_HOLD = 650`).
     pub(crate) const ICON_HOLD_MS: f64 = 650.0;
-    /// When the icon dissolves and the rain takes over
-    /// (`ICON_DELAY = ICON_IN + ICON_HOLD`). Also the orchestrator's cue for
-    /// the burst + rain.
+    /// When the icon dissolves and the rain takes over (`ICON_DELAY =
+    /// ICON_IN + ICON_HOLD`); also the orchestrator's cue for burst + rain.
     pub(crate) const ICON_DELAY_MS: f64 = ICON_IN_MS + ICON_HOLD_MS;
     /// Dissolve duration (`.app-icon.dissolve{transition:… .38s …}`).
     pub(crate) const ICON_DISSOLVE_MS: f64 = 380.0;
@@ -131,14 +128,12 @@ pub(crate) mod spec {
     pub(crate) const RAIN_HEAD_ALPHA: f64 = 0.95;
     /// Trail-glyph alpha multiplier (`alpha*0.75*overallFade`).
     pub(crate) const RAIN_TRAIL_ALPHA: f64 = 0.75;
-    /// The near-white head ink (`rgba(255,238,200,…)`). **No `Theme` token**:
-    /// this is a one-off "hot leading glyph" tint the design system has no
-    /// role for (it is neither `on_surface` nor the accent), so it stays a
-    /// named constant per `docs/CODE_STANDARDS.md`'s token-not-hardcode rule.
+    /// The near-white head ink (`rgba(255,238,200,…)`). No `Theme` token
+    /// fits (neither `on_surface` nor the accent), so it stays a named
+    /// constant per `docs/CODE_STANDARDS.md`'s token-not-hardcode rule.
     pub(crate) const RAIN_HEAD_COLOR: Color = Color::from_rgb8(0xff, 0xee, 0xc8);
-    /// Glyph's amber accent (`--amber:#ffb627`), used **only** as the
-    /// unthemed fallback — a themed paint pass resolves
-    /// `Theme::scheme().primary` instead.
+    /// Glyph's amber accent (`--amber:#ffb627`), used only as the unthemed
+    /// fallback — a themed paint pass resolves `Theme::scheme().primary`.
     pub(crate) const AMBER_FALLBACK: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
     /// Ink on an amber fill (`.btn-primary{color:#241a04}`), the unthemed
     /// fallback for `ColorScheme::on_primary_container`.
@@ -160,17 +155,15 @@ pub(crate) mod spec {
 
     // ---- Assembly (`.piece` + `landPieces`) ------------------------------
 
-    /// How long after the rain is cued the first piece lands, on the
-    /// rain-local clock (`landPieces`: `data-delay + ICON_DELAY + 1500`, of
-    /// which `ICON_DELAY` is the rain cue itself).
+    /// How long after the rain is cued the first piece lands, rain-local
+    /// clock (`landPieces`: `data-delay + ICON_DELAY + 1500`).
     pub(crate) const ASSEMBLY_START_MS: f64 = 1500.0;
     /// Per-piece stagger in source order (each `.piece`'s `data-delay`), from
     /// the assembly start. Eight entries, one per Connect-screen piece.
     pub(crate) const PIECE_DELAYS_MS: [f64; 8] =
         [0.0, 130.0, 260.0, 390.0, 480.0, 580.0, 720.0, 860.0];
     /// A piece's entrance duration (`.piece{transition:opacity .5s
-    /// var(--ease-spring), transform .5s var(--ease-spring)}`). Rides
-    /// [`SPRING`], the same overshooting curve the icon springs in on.
+    /// var(--ease-spring)…}`), riding [`SPRING`]'s overshoot curve.
     pub(crate) const PIECE_IN_MS: f64 = 500.0;
     /// Vertical offset a piece drops in from (`transform:translateY(-70px)`).
     pub(crate) const PIECE_ENTER_DY: f64 = -70.0;
@@ -186,9 +179,8 @@ pub(crate) mod spec {
     /// The flash's easing (`animation:landFlash .5s ease-out`).
     pub(crate) const LAND_FLASH_EASE: Curve = Curve::EaseOut;
     /// Peak glow blur radius in logical px (`box-shadow:0 0 24px 6px`), used
-    /// directly as `PaintScene::draw_shadow`'s `std_dev` — the same
-    /// CSS-blur-px-as-`blur_std_dev` treatment `frust_theme`'s Glyph
-    /// elevation table applies to the source's own shadow recipes.
+    /// directly as `PaintScene::draw_shadow`'s `std_dev` (same CSS-blur-px
+    /// treatment `frust_theme`'s Glyph elevation table applies).
     pub(crate) const LAND_FLASH_BLUR: f64 = 24.0;
     /// Peak glow spread in logical px (the `6px` in the same rule): how far
     /// the glow's rounded rect grows past the piece's own box.
@@ -205,10 +197,9 @@ pub(crate) mod spec {
     pub(crate) const REDUCED_HOLD_MS: f64 = 200.0;
 
     /// The reference frame the source's per-frame constants were authored
-    /// against (60 Hz). The rain scales its per-frame row advance by
+    /// against (60 Hz). The rain scales its row advance by
     /// `delta / REFERENCE_FRAME_MS` so a 120 Hz device falls at the same
-    /// *speed* rather than twice as fast — the source, being a
-    /// `requestAnimationFrame` loop with no delta term, has no equivalent.
+    /// speed rather than twice as fast.
     pub(crate) const REFERENCE_FRAME_MS: f64 = 1000.0 / 60.0;
     /// Ceiling on that scale factor, so a stalled frame (app resumed, GC
     /// pause) teleports the rain at most four reference frames instead of
@@ -228,12 +219,9 @@ pub(crate) mod spec {
         }
     }
 
-    /// The `index`th piece's stagger, from [`PIECE_DELAYS_MS`].
-    ///
-    /// An index past the table's end reuses the last entry rather than
-    /// panicking: the table is the source's eight `.piece` elements, and the
-    /// orchestrator staggers whatever piece list it is handed (a ninth piece
-    /// would land with the eighth rather than take the whole sequence down).
+    /// The `index`th piece's stagger, from [`PIECE_DELAYS_MS`]. An index
+    /// past the table's end reuses the last entry rather than panicking — a
+    /// ninth piece lands with the eighth rather than taking the sequence down.
     pub(crate) fn piece_delay_ms(index: usize) -> f64 {
         PIECE_DELAYS_MS[index.min(PIECE_DELAYS_MS.len() - 1)]
     }
@@ -258,14 +246,11 @@ pub(crate) mod spec {
 
 /// One glyph, shaped once at layout and re-drawn many times per paint.
 ///
-/// The rain draws ~200 glyphs a frame and the burst 14, each at its own
-/// position and alpha. Re-shaping per draw would be absurd, and re-shaping per
-/// *alpha* would be worse (a [`TextStyle`] bakes its color into the shaped
-/// run) — so each distinct glyph is shaped exactly once, at layout, and every
-/// draw clones the resulting run, overriding only its transform and brush.
-/// Both are plain public fields on `frust`'s scene-level `GlyphRun`, which is
-/// what makes the "shape once, tint per draw" trick reachable from app code at
-/// all.
+/// The rain draws ~200 glyphs a frame and the burst 14. Re-shaping per draw
+/// (or per alpha — a [`TextStyle`] bakes color into the shaped run) would be
+/// wasteful, so each distinct glyph is shaped once and every draw clones the
+/// run, overriding only its transform and brush — both plain public fields
+/// on `frust`'s scene-level `GlyphRun`.
 pub(crate) struct ShapedGlyph {
     /// The origin-relative runs (`Point::ORIGIN`-anchored, so a draw's
     /// transform is the whole placement).
@@ -276,10 +261,8 @@ pub(crate) struct ShapedGlyph {
 
 impl ShapedGlyph {
     /// Shape `text` at `style` through the layout pass's text context.
-    ///
-    /// Panics if no text context was threaded into this layout pass — that is
-    /// a shell-wiring bug (the same contract `frust`'s own text widgets rely
-    /// on), not a runtime state a splash widget should paper over.
+    /// Panics if no text context was threaded into this layout pass — a
+    /// shell-wiring bug, not a state a splash widget should paper over.
     pub(crate) fn shape(ctx: &mut LayoutCtx, text: &str, style: &TextStyle) -> Self {
         let text_ctx = ctx.text_context::<TextContext>();
         let layout = text_ctx.layout(text, style, None);
@@ -295,12 +278,10 @@ impl ShapedGlyph {
         self.size
     }
 
-    /// Draw this glyph under `transform`, tinted `color`.
-    ///
-    /// `transform` maps the glyph's own top-left-anchored box into absolute
-    /// surface coordinates, so callers compose translation (and, for the
-    /// burst, scale) themselves rather than going through
-    /// `PaintScene::push_transform` per glyph.
+    /// Draw this glyph under `transform`, tinted `color`. `transform` maps
+    /// the glyph's top-left-anchored box into absolute surface coordinates,
+    /// so callers compose translation/scale themselves rather than going
+    /// through `PaintScene::push_transform` per glyph.
     pub(crate) fn draw(&self, scene: &mut dyn PaintScene, transform: Affine, color: Color) {
         for base in &self.runs {
             let mut run = base.clone();
@@ -366,12 +347,10 @@ pub(crate) fn reduce_motion(theme: Option<&Theme>) -> bool {
     theme.is_some_and(|theme| theme.motion.reduce_motion)
 }
 
-/// Milliseconds elapsed since the previous paint, advancing `previous`.
-///
-/// The first call is the clock reference and returns `0.0` (the
-/// `AnimationController::advance` convention) — a widget's first paint never
-/// jumps its animation forward by an arbitrary shell epoch. `FrameTime`s are
-/// only ever differenced, never read absolutely (`docs/CODE_STANDARDS.md`:
+/// Milliseconds elapsed since the previous paint, advancing `previous`. The
+/// first call is the clock reference and returns `0.0`, so a widget's first
+/// paint never jumps its animation by an arbitrary shell epoch. `FrameTime`s
+/// are only ever differenced, never read absolutely (`docs/CODE_STANDARDS.md`:
 /// no wall clock inside widget code).
 pub(crate) fn delta_ms(previous: &mut Option<FrameTime>, now: FrameTime) -> f64 {
     match previous.replace(now) {
@@ -386,13 +365,10 @@ pub(crate) fn frame_factor(delta_ms: f64) -> f64 {
     (delta_ms / spec::REFERENCE_FRAME_MS).clamp(0.0, spec::MAX_FRAME_FACTOR)
 }
 
-/// A tiny seeded linear-congruential generator — the splash's only randomness
-/// source.
-///
-/// Deliberately *not* a `rand` dependency: the sequence must be replayable
-/// from a `u64` seed so a unit test can assert on exact column/particle
-/// behavior, and nothing here needs statistical quality (it picks glyphs and
-/// jitters fall speeds). Constants are Knuth's MMIX LCG multiplier/increment;
+/// A tiny seeded linear-congruential generator — the splash's only
+/// randomness source. Deliberately not a `rand` dependency: the sequence
+/// must replay from a `u64` seed for tests, and nothing here needs
+/// statistical quality. Constants are Knuth's MMIX LCG multiplier/increment;
 /// the high 32 bits are taken because an LCG's low bits have short periods.
 #[derive(Clone, Debug)]
 pub(crate) struct SplashRng {

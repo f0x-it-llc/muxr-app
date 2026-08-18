@@ -1,14 +1,10 @@
 //! Named spacing tokens on the app's measured de-facto scale — the values
-//! `docs/redesign.html`'s screens repeat over and over once transcribed into
-//! per-screen padding/gap constants (`6`/`8`/`10`/`12`/`16` are the biggest
-//! clusters). Adopted by every feature in place of its own local constants,
-//! so the values below equal today's de-facto ones exactly — no rendered
-//! value moved when call sites switched over.
+//! `docs/redesign.html`'s screens already repeat, transcribed exactly so no
+//! rendered value moved when call sites switched over from local constants.
 //!
-//! Eleven tiers cover the eleven values that recur across more than one
-//! screen; an odd one-off (`3`/`5`/`7`/`9`/`11`/`13`/`18`px) stays
-//! feature-local rather than getting a token of its own — a token here is a
-//! claim that the value recurs, not that it's merely convenient.
+//! Eleven tiers cover the values that recur across more than one screen; an
+//! odd one-off stays feature-local — a token here is a claim that the value
+//! recurs, not that it's merely convenient.
 
 /// Hairline-scale gap — a badge's line gap, an accent bar's width, a keybar
 /// cap's inter-glyph gap.

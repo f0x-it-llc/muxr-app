@@ -1,28 +1,19 @@
 //! An in-process `muxrd` stand-in: a real TLS gRPC server on a loopback port,
-//! serving the real generated stubs, so the client stack is exercised without
-//! the docker rig.
+//! serving the real generated stubs, so the client stack is exercised
+//! without the docker rig.
 //!
-//! **`#[cfg(test)]`, not a feature flag.** The fixture needs `rcgen` and
-//! tonic's `server`/`router`/`transport` features, all `[dev-dependencies]` —
-//! reachable from the crate's own unit tests, never from a `tests/*.rs`
-//! integration suite (Cargo links those against the dev-dependency-free
-//! *library* build). The handshake/credential coverage has nowhere else to go.
+//! `#[cfg(test)]`, not a feature flag: needs `rcgen` + tonic's
+//! `server`/`router`/`transport`, all `[dev-dependencies]`-only, so it's
+//! reachable from the crate's unit tests but not a `tests/*.rs` integration
+//! suite (linked against the dev-dependency-free library build).
 //!
-//! **Auth mirrors `muxrd`, checked per method.** Only `GetVersion`/`Login` are
-//! public; every other RPC calls [`require_bearer`] first — a tonic
-//! interceptor can't express that allowlist (it sees only a `Request<()>`'s
-//! metadata, never the URI). Unanswered RPCs return `UNIMPLEMENTED`, not a
-//! plausible canned value.
+//! Auth mirrors `muxrd`, checked per method via [`require_bearer`] (a tonic
+//! interceptor can't see the URI to build an allowlist); unanswered RPCs
+//! return `UNIMPLEMENTED`, never a plausible canned value.
 //!
-//! **`AttachTerminal` is scripted, not canned.** [`TerminalScript`] records
-//! what the client sent and pushes back a render frame, a clean
-//! [`exit`](crate::net::control::CONTROL_EXIT), or a mid-flight drop (for a
-//! reconnect test); every stream announces a
-//! [`connection_id`](crate::net::control::CONTROL_CONNECTION_ID) and echoes
-//! input as render frames.
-//!
-//! **The one-shot workspace-verb RPCs are recorded, not scripted** — each
-//! answers once, so [`ActionLog`] just records the request and acks.
+//! `AttachTerminal` is scripted via [`TerminalScript`] (render frame, clean
+//! [`exit`](crate::net::control::CONTROL_EXIT), or mid-flight drop); the
+//! one-shot workspace-verb RPCs are just recorded via [`ActionLog`].
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -36,10 +27,8 @@ use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
-// The two control-event kinds, from this layer's own `control` module rather
-// than re-spelled as literals: the fixture has to say exactly what the feed
-// listens for, and two independent string constants is precisely the drift a
-// green fixture test would then hide.
+// Control-event kinds come from `control`, never re-spelled as literals —
+// see that module's docs on the drift two independent constants would hide.
 use crate::net::client::MuxrClient;
 use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::muxr_server::{Muxr, MuxrServer};
@@ -69,13 +58,12 @@ pub const SERVER_VERSION: &str = "0.0.0-fixture";
 /// Frames one scripted `AttachTerminal` stream buffers in each direction.
 const ATTACH_CAPACITY: usize = 64;
 
-/// How long [`wait_until`] gives a condition before failing the test. Long
-/// enough that a loaded machine never flakes, short enough that a genuinely
-/// stuck pump fails rather than hangs the suite.
+/// How long [`wait_until`] gives a condition before failing — long enough
+/// not to flake on a loaded machine, short enough a stuck pump fails fast.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often [`wait_until`] re-checks. A poll rather than a notification
-/// because the conditions worth waiting on live on both sides of the wire.
+/// How often [`wait_until`] re-checks — a poll, since the awaited condition
+/// can live on either side of the wire.
 const WAIT_POLL: Duration = Duration::from_millis(1);
 
 /// The id [`Muxr::attach_terminal`] mints for the `nth` stream it serves
@@ -86,11 +74,8 @@ pub fn connection_id(nth: usize) -> String {
 }
 
 /// Poll `probe` until it holds, failing the test after [`WAIT_TIMEOUT`] with
-/// `label` in the message.
-///
-/// The fixture's answer to "wait for the other side to catch up": a fixed
-/// sleep would be either a flake or a slow suite, and the two sides of a
-/// stream have no shared clock to await on.
+/// `label` in the message — a fixed sleep would be either a flake or a slow
+/// suite, since the two stream sides share no clock to await on.
 pub async fn wait_until(label: &str, mut probe: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     while !probe() {
@@ -233,12 +218,10 @@ fn unsupported(rpc: &str) -> Status {
     Status::unimplemented(format!("{rpc} is outside the fixture's answered subset"))
 }
 
-/// The `ActionAck` every recording RPC below answers with — every one of them
-/// is a plain record-then-succeed, since no test yet needs to script a
-/// refusal (a test that does drives [`crate::net::error::ack_result`] against
-/// a hand-built `ActionAck` directly, the same way
-/// `data::repositories::grpc_terminal_repository`'s own ack-mapping test
-/// does).
+/// The `ActionAck` every recording RPC below answers with — record then
+/// succeed. A test scripting a refusal drives
+/// [`crate::net::error::ack_result`] against a hand-built `ActionAck`
+/// directly instead.
 fn ack_ok() -> ActionAck {
     ActionAck {
         ok: true,
@@ -247,14 +230,9 @@ fn ack_ok() -> ActionAck {
     }
 }
 
-/// The record-and-drive half of the fixture's one-shot workspace-verb RPCs —
-/// `CreateSpace`/`RenameSpace`/`NewTab`/`RenameTab`/`NewPane`/`RenamePane`/
-/// `FocusPane`/`ScrollPane`. Unlike [`TerminalScript`] (the streaming
-/// `AttachTerminal` half) there is nothing to *drive*: each of these RPCs
-/// answers once, so this is a plain typed record of every request seen,
-/// exposed the same "clone out a snapshot" way as `TerminalScript`'s own
-/// accessors.
-///
+/// A typed record of every one-shot workspace-verb RPC seen
+/// (`CreateSpace`/`RenameSpace`/`NewTab`/…/`ScrollPane`) — unlike
+/// [`TerminalScript`] there's nothing to drive, each RPC just answers once.
 /// Shared with a test through [`MuxrdFixture::actions`].
 #[derive(Default)]
 pub struct ActionLog {
@@ -492,10 +470,9 @@ impl TerminalScript {
         self.state().resizes.push((cols, rows));
     }
 
-    /// Record one `mouse` frame, its `kind` decoded from the wire's `i32` —
-    /// an unrecognised value falls back to [`MouseKind::WheelUp`] (variant
-    /// `0`), the same never-fail-just-fall-back rule every wire `i32`-to-enum
-    /// read in this app's `data` layer takes.
+    /// Record one `mouse` frame; an unrecognised `kind` falls back to
+    /// [`MouseKind::WheelUp`] (variant `0`), the same never-fail rule every
+    /// wire `i32`-to-enum read in this app's `data` layer takes.
     fn record_mouse(&self, mouse: MouseInput) {
         self.state().mice.push(MouseObservation {
             kind: MouseKind::try_from(mouse.kind).unwrap_or(MouseKind::WheelUp),

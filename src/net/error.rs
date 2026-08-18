@@ -1,27 +1,18 @@
 //! The one boundary that turns a gRPC outcome into [`AppFailure`].
 //!
 //! Everything below `src/net` speaks `tonic::Status`/`tonic::transport::Error`;
-//! nothing above it does. A repository calling a stub maps here and hands its
-//! caller the app's own closed vocabulary, exactly as the mock repositories'
-//! module docs already promise ("the real gRPC client maps transport errors to
-//! `AppFailure::Network` and a rejected token to `AppFailure::Auth` in exactly
-//! this spot").
+//! nothing above it does — a repository maps here and hands its caller the
+//! app's closed vocabulary.
 //!
-//! **The mapping.** `UNAUTHENTICATED` — the code `muxrd` answers for a missing,
-//! invalid or expired session token — is the only one that becomes
-//! [`AppFailure::Auth`], because it is the only one the user resolves by
-//! reconnecting. `UNAVAILABLE` and `DEADLINE_EXCEEDED` are the retryable
-//! transport codes and become [`AppFailure::Network`]; every remaining code
-//! lands there too. That collapse is deliberate and lossy: [`AppFailure`] has
-//! exactly one network variant and it is unconditionally retryable, so a
-//! server-side `PERMISSION_DENIED` (a read-only token refusing a mutating RPC)
-//! is currently offered as retryable. Splitting it would mean a new `AppFailure`
-//! variant and a new toast string for every existing caller — a change to the
-//! app's failure vocabulary, not to this module, and not one this layer may make
-//! on its own.
+//! Only `UNAUTHENTICATED` becomes [`AppFailure::Auth`] (the one code a user
+//! resolves by reconnecting); `UNAVAILABLE`/`DEADLINE_EXCEEDED` and every
+//! other code become [`AppFailure::Network`]. That collapse is deliberate
+//! and lossy — e.g. a `PERMISSION_DENIED` from a read-only token currently
+//! reads as retryable — but splitting it needs a new `AppFailure` variant,
+//! which is the failure vocabulary's call, not this module's.
 //!
-//! Detail strings are for logs. `AppFailure::user_message()` is what a toast
-//! shows, and it never includes them.
+//! Detail strings are for logs only; `AppFailure::user_message()` never
+//! includes them.
 
 use tonic::{Code, Status};
 
@@ -32,12 +23,10 @@ use crate::net::proto::ActionAck;
 pub fn from_status(status: &Status) -> AppFailure {
     let detail = format!("{:?}: {}", status.code(), status.message());
     match status.code() {
-        // The one credential-shaped code muxrd emits: an absent, malformed or
-        // expired bearer token on an authenticated path.
         Code::Unauthenticated => AppFailure::Auth(detail),
-        // Retryable transport codes.
+        // Retryable transport codes; everything else collapses here too (see
+        // module docs).
         Code::Unavailable | Code::DeadlineExceeded => AppFailure::Network(detail),
-        // Everything else — see the module docs on why this collapses.
         _ => AppFailure::Network(detail),
     }
 }
