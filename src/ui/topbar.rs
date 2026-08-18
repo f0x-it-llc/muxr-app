@@ -5,16 +5,16 @@ use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
 use frust::authoring::{
-    any, build_child, erase_callback, rebuild_child, route_event, teardown_child, Action, AnyView,
-    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role, SemanticsCtx, Size,
-    View, Widget, PRESSED_OPACITY,
+    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point,
+    PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
+    rebuild_child, route_event, teardown_child,
 };
 use frust::motion::patterns::{PatternLayer, TransitionPattern};
-use frust::motion::switcher::{pattern_switcher, REDUCE_MOTION_DURATION};
+use frust::motion::switcher::{REDUCE_MOTION_DURATION, pattern_switcher};
 use frust::{
-    icon, inflexible, safe_area, text, AnimationController, Axis, ChildKey, CrossAxisAlignment,
-    Curve, EdgeInsets, FlexView, IconData, IconSource, Padding, SizedBox, Theme, Timing,
+    AnimationController, Axis, ChildKey, CrossAxisAlignment, Curve, EdgeInsets, FlexView, IconData,
+    IconSource, Padding, SizedBox, Theme, Timing, icon, inflexible, safe_area, text,
 };
 use frust_glyph::motion::{GLYPH_SLIDE_ENTER, GLYPH_SLIDE_EXIT};
 
@@ -106,7 +106,6 @@ fn reveal_layer(p: f64, showing: bool, extent: f64, reduce_motion: bool) -> Patt
 }
 
 /// One in-flight reveal: a `0→1` driver plus the visual range it maps onto.
-
 struct Reveal {
     driver: AnimationController,
     from: f64,
@@ -236,7 +235,6 @@ fn content_y(top_inset: f64, height: f64) -> f64 {
 /// `body` with the top clearance a bar-bearing page owes reserved above it:
 /// the status-bar inset **plus** [`BAR_HEIGHT`], which is exactly the box the
 /// floating bar occupies.
-
 pub fn topbar_clearance<State: 'static, V: View<State>>(body: V) -> AnyView<State> {
     any(safe_area(Padding(
         EdgeInsets {
@@ -278,7 +276,6 @@ impl<State: 'static> TopBarView<State> {
     /// Put a vector `mark` (`icons::SETTINGS`, `icons::MORE_VERT`) in the
     /// trailing icon slot under the accessible name `label`, firing
     /// `on_press` when it is tapped.
-
     pub fn action<F: Fn(&mut State) + 'static>(
         mut self,
         mark: impl Into<IconData>,
@@ -333,7 +330,6 @@ impl<State: 'static> TopBarView<State> {
 }
 
 /// A `'static`, cheaply clonable handle to one slot's [`AnyView`].
-
 struct Slot<State: 'static>(Rc<AnyView<State>>);
 
 impl<State: 'static> View<State> for Slot<State> {
@@ -419,7 +415,6 @@ impl Widget for BrandMarkWidget {
 
 /// A pressable **vector** icon: `mark` centred in a box, labelled `label` for
 /// accessibility, firing `on_press` on a release inside its bounds.
-
 pub fn icon_button<State: 'static, F: Fn(&mut State) + 'static>(
     mark: impl Into<IconData>,
     label: impl Into<String>,

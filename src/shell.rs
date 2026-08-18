@@ -1,11 +1,11 @@
-use frust::{any, icons, navigator, AnyView, NavigatorController, Stack};
+use frust::{AnyView, NavigatorController, Stack, any, icons, navigator};
 
+use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::terminal::presentation::pages::open_terminal_menu;
 use crate::routes::{BarAction, BarDirection, BarLeading, Nav, SETTINGS_ROUTE};
 use crate::ui::toasts::toast_layer;
 use crate::ui::topbar::muxr_topbar;
-use crate::AppState;
 
 const SETTINGS_LABEL: &str = "Settings";
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
