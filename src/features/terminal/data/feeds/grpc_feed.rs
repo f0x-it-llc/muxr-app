@@ -1,32 +1,27 @@
-//! [`GrpcTerminalFeed`] — the live `muxrd` byte source: one `AttachTerminal`
-//! bidirectional stream behind this feature's own
-//! [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed) port,
-//! with a bounded reconnect schedule. `LiveSession::enter` builds one for a real
-//! attached session; [`DemoFeed`](super::demo_feed::DemoFeed) is the fixture
-//! replayed for anything else.
+//! [`GrpcTerminalFeed`] — the live `muxrd` byte source: one `AttachTerminal` bidirectional
+//! stream behind this feature's own
+//! [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed) port, with a bounded
+//! reconnect schedule. `LiveSession::enter` builds one for a real attached session;
+//! [`DemoFeed`](super::demo_feed::DemoFeed) is the fixture replayed for anything else.
 //!
-//! **Wire contract** (`proto/muxr.proto`): `attach: AttachReq{session, rows,
-//! cols}` — plus the [`ResumeTarget`] hints, when one is set — is the
-//! **mandatory first frame** of every stream, reconnects included, then
-//! `input`/`resize`/`mouse` out and `render`/`control` back. Input goes **on
-//! the stream**, never through `WriteToPane`, so a keystroke keeps its order
-//! relative to the resizes around it; the attach frame replays the **current**
-//! grid, since [`TerminalFeed::resize`] caches `cols`/`rows`. Two control kinds
-//! are understood ([`CONTROL_CONNECTION_ID`], [`CONTROL_EXIT`]) and every other is
-//! *ignored*, never an error, so a newer `muxrd` can add one; `exit` is a clean
-//! close, with no reconnect.
+//! **Wire contract** (`proto/muxr.proto`): `attach: AttachReq{session, rows, cols}` — plus the
+//! [`ResumeTarget`] hints, when set — is the mandatory first frame of every stream, reconnects
+//! included, then `input`/`resize`/`mouse` out and `render`/`control` back. Input goes on the
+//! stream, never through `WriteToPane`, so a keystroke keeps its order relative to the resizes
+//! around it; the attach frame replays the current grid, since [`TerminalFeed::resize`] caches
+//! `cols`/`rows`. Two control kinds are understood ([`CONTROL_CONNECTION_ID`],
+//! [`CONTROL_EXIT`]); every other is ignored, never an error, so a newer `muxrd` can add one.
+//! `exit` is a clean close, with no reconnect.
 //!
-//! Three contracts are stated where they are enforced: the fixed, jitter-free
-//! reconnect schedule ([`RECONNECT_BACKOFF`]), the inbound flow control that
-//! **pauses the reader rather than dropping anything** ([`INBOUND_HIGH_WATER`],
-//! [`await_capacity`]), and the threading split ([`Shared`] — the UI thread
-//! drains, a background task that writes no signal reads). The loop is spelled by
-//! hand because production `tokio` carries the `sync` feature only, so the backoff
-//! nap goes through [`frust::spawn_blocking`] and the two-way race is [`race`];
-//! those plus [`frust::spawn`] are this file's only reaches for `frust::` in an
-//! otherwise framework-free data layer. **Test seam**: the schedule and the nap
-//! are arguments of a `#[cfg(test)]`-only `detached` constructor, which also hands
-//! the pump future back rather than spawning it.
+//! Three contracts, stated where enforced: the fixed, jitter-free reconnect schedule
+//! ([`RECONNECT_BACKOFF`]), the inbound flow control that pauses the reader rather than
+//! dropping anything ([`INBOUND_HIGH_WATER`], [`await_capacity`]), and the threading split
+//! ([`Shared`] — the UI thread drains, a background task that writes no signal reads). The loop
+//! is spelled by hand because production `tokio` carries the `sync` feature only: the backoff
+//! nap goes through [`frust::spawn_blocking`] and the two-way race is [`race`]; those plus
+//! [`frust::spawn`] are this file's only reaches for `frust::` in an otherwise framework-free
+//! data layer. **Test seam**: the schedule and the nap are arguments of a `#[cfg(test)]`-only
+//! `detached` constructor, which also hands the pump future back rather than spawning it.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -46,18 +41,17 @@ use crate::net::proto::{
     AttachReq, ClientFrame, MouseInput, MouseKind, Resize, ServerFrame, client_frame, server_frame,
 };
 
-/// The reconnect schedule: 1, 2, 4, 8, 16 seconds, **no jitter**, matching the
-/// Flutter client this replaces. The contract; nothing overrides it.
+/// The reconnect schedule: 1, 2, 4, 8, 16 seconds, no jitter, matching the Flutter client this
+/// replaces. Nothing overrides it.
 ///
-/// A stream that errors or ends takes the next step; the counter resets on the
-/// **first render frame after a (re)connect** — a stream that opens and delivers
-/// nothing has proved nothing — and on
-/// [`reset_backoff`](GrpcTerminalFeed::reset_backoff), the manual retry. Running
-/// off the end parks the loop at [`FeedStatus::Disconnected`]. A drop reports
-/// [`FeedStatus::Reconnecting`] for the **whole step, nap included**, since the
-/// link strip renders nothing for `Connected` and would otherwise leave a frozen
-/// grid with no banner for up to 16 seconds. `UNAUTHENTICATED` short-circuits all
-/// of it: the loop stops at once and invokes the injected auth-expired callback.
+/// A stream that errors or ends takes the next step; the counter resets on the first render
+/// frame after a (re)connect (a stream that opens and delivers nothing has proved nothing) and
+/// on [`reset_backoff`](GrpcTerminalFeed::reset_backoff), the manual retry. Running off the end
+/// parks the loop at [`FeedStatus::Disconnected`]. A drop reports [`FeedStatus::Reconnecting`]
+/// for the whole step, nap included, since the link strip renders nothing for `Connected` and
+/// would otherwise leave a frozen grid with no banner for up to 16 seconds. `UNAUTHENTICATED`
+/// short-circuits all of it: the loop stops at once and invokes the injected auth-expired
+/// callback.
 pub const RECONNECT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -66,31 +60,29 @@ pub const RECONNECT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(16),
 ];
 
-/// Frames the outbound channel buffers before a send is dropped. Generous on
-/// purpose: outbound is keystrokes and resizes at human rate, so filling it means
-/// a wedged transport, where the only alternatives are dropping a frame or
-/// blocking the UI thread on a dead socket. Drops are counted.
+/// Frames the outbound channel buffers before a send is dropped. Generous: outbound is
+/// keystrokes and resizes at human rate, so filling it means a wedged transport, where the only
+/// alternatives are dropping a frame or blocking the UI thread on a dead socket. Drops are
+/// counted.
 const OUTBOUND_CAPACITY: usize = 256;
 
-/// Queued inbound bytes at which the pump stops reading the stream. 2 MiB is
-/// generous for interactive use and still bounded: the UI drains every ~33 ms, so
-/// reaching it means a burst faster than ~60 MB/s or a UI that stopped draining.
-/// A **pause** threshold, not an admission filter.
+/// Queued inbound bytes at which the pump stops reading the stream. 2 MiB is generous for
+/// interactive use and still bounded: the UI drains every ~33 ms, so reaching it means a burst
+/// faster than ~60 MB/s or a UI that stopped draining. A pause threshold, not an admission filter.
 pub const INBOUND_HIGH_WATER: usize = 2 * 1024 * 1024;
 
-/// Queued inbound bytes the drain side must bring the queue back under before the
-/// pump resumes reading — a quarter of [`INBOUND_HIGH_WATER`], so a queue hovering
-/// at the mark cannot stop/start the read on every frame.
+/// Queued inbound bytes the drain side must bring the queue back under before the pump resumes
+/// reading — a quarter of [`INBOUND_HIGH_WATER`], so a queue hovering at the mark cannot
+/// stop/start the read on every frame.
 pub const INBOUND_LOW_WATER: usize = INBOUND_HIGH_WATER / 4;
 
-/// Queued inbound **frames** at which the pump stops reading — the frame-count
-/// half of the flow control, since a flood of tiny frames stays under the byte cap
-/// while each still costs a queue slot and an allocation.
+/// Queued inbound frames at which the pump stops reading — the frame-count half of the flow
+/// control, since a flood of tiny frames stays under the byte cap while each still costs a
+/// queue slot and an allocation.
 pub const INBOUND_HIGH_WATER_FRAMES: usize = 4096;
 
-/// Queued inbound frames the drain side must bring the queue back under before the
-/// pump resumes — a quarter of [`INBOUND_HIGH_WATER_FRAMES`], for the reason
-/// [`INBOUND_LOW_WATER`] records.
+/// Queued inbound frames the drain side must bring the queue back under before the pump resumes
+/// — a quarter of [`INBOUND_HIGH_WATER_FRAMES`], for the reason [`INBOUND_LOW_WATER`] records.
 pub const INBOUND_LOW_WATER_FRAMES: usize = INBOUND_HIGH_WATER_FRAMES / 4;
 
 /// Where a feed's session currently stands. Plain shared state, polled by the
@@ -113,15 +105,14 @@ pub enum FeedStatus {
     Closed,
 }
 
-/// Where a **fresh** attach should land, as far as this client knows: the
-/// space/tab/pane the user last moved to themselves.
+/// Where a fresh attach should land, as far as this client knows: the space/tab/pane the user
+/// last moved to themselves.
 ///
-/// Sent on every `AttachReq` — see [`ResumeSlot`] for why only user-driven moves
-/// write it. Every field is best-effort and independent: the server resolves them
-/// pane → tab → space and falls through on anything stale, so an unset field
-/// (`None`, the wire's proto3 default) is simply no hint, and a hint the server
-/// cannot resolve is not an error. herdr sessions only; a zellij attach is the
-/// whole composited session and follows the server's own focus.
+/// Sent on every `AttachReq` — see [`ResumeSlot`] for why only user-driven moves write it. Every
+/// field is best-effort and independent: the server resolves them pane → tab → space and falls
+/// through on anything stale, so an unset field (`None`, the wire's proto3 default) is simply no
+/// hint, and a hint the server cannot resolve is not an error. herdr sessions only; a zellij
+/// attach is the whole composited session and follows the server's own focus.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResumeTarget {
     /// The opaque herdr workspace id (`Space::id`).
@@ -132,19 +123,17 @@ pub struct ResumeTarget {
     pub pane_id: Option<u32>,
 }
 
-/// The shared, updatable [`ResumeTarget`] a feed attaches with: the screen writes
-/// it, the pump reads it on **every** attach — the first one and each backoff
-/// reconnect alike, since both go through one code path.
+/// The shared, updatable [`ResumeTarget`] a feed attaches with: the screen writes it, the pump
+/// reads it on every attach — the first one and each backoff reconnect alike, since both go
+/// through one code path.
 ///
-/// Held behind an `Arc` rather than reached through the feed handle, because the
-/// two ends live on different sides of the screen's `Rc`/`Arc` split: the feed is
-/// owned by the live session (`Rc`, UI thread), the writer is the controller
-/// (`Arc`, `Send + Sync`).
+/// Held behind an `Arc` rather than reached through the feed handle, because the two ends live
+/// on different sides of the screen's `Rc`/`Arc` split: the feed is owned by the live session
+/// (`Rc`, UI thread), the writer is the controller (`Arc`, `Send + Sync`).
 ///
-/// **Only user-driven moves write it** (the controller's own contract): a layout
-/// poll answers with whatever focus the *server* currently reports, which after a
-/// reconnect is the daemon-global one — recording that would overwrite the very
-/// intent this slot exists to replay.
+/// **Only user-driven moves write it** (the controller's own contract): a layout poll answers
+/// with whatever focus the server currently reports, which after a reconnect is the
+/// daemon-global one — recording that would overwrite the very intent this slot replays.
 #[derive(Debug, Default)]
 pub struct ResumeSlot {
     target: Mutex<ResumeTarget>,
@@ -696,15 +685,13 @@ async fn run_pump(pump: Pump) {
     shared.retire();
 }
 
-/// One attach attempt: open the stream with its mandatory first frame, then pump
-/// it until it ends.
+/// One attach attempt: open the stream with its mandatory first frame, then pump it until it
+/// ends.
 ///
-/// The **one** place an `AttachReq` is built, which is what makes the resume hint
-/// ride the backoff reconnect as well as the first attach: the loop above calls
-/// this for both. The hint is read here rather than captured with the pump, so
-/// every attempt carries the last move the screen recorded *before* the drop —
-/// which is the whole of what the slot can offer, since a move made while the
-/// link is down never lands at all (its RPC fails, and a refused move records
+/// The one place an `AttachReq` is built, so the resume hint rides the backoff reconnect as
+/// well as the first attach — the loop above calls this for both. The hint is read here rather
+/// than captured with the pump, so every attempt carries the last move the screen recorded
+/// before the drop (a move made while the link is down never lands: its RPC fails and records
 /// nothing).
 async fn attach(client: &MuxrClient, session: &str, shared: &Shared) -> Attempt {
     let (outbound, requests) = mpsc::channel(OUTBOUND_CAPACITY);
@@ -810,14 +797,14 @@ fn classify(status: &tonic::Status) -> Attempt {
     }
 }
 
-/// Hold the reader off the stream while the queue sits at [`INBOUND_HIGH_WATER`]
-/// or [`INBOUND_HIGH_WATER_FRAMES`], returning once a drain has brought it back
-/// under both low-water marks — the pause half of the inbound flow control.
+/// Hold the reader off the stream while the queue sits at [`INBOUND_HIGH_WATER`] or
+/// [`INBOUND_HIGH_WATER_FRAMES`], returning once a drain has brought it back under both
+/// low-water marks — the pause half of the inbound flow control.
 ///
-/// `Some` when the wait ended the attempt instead of resuming it: a shutdown is
-/// the one thing besides a drain that reaches a paused reader, which keeps
-/// teardown from waiting on a drain that will never come. A no-op — one lock, no
-/// await — on every frame below the mark, which is every frame of a real session.
+/// `Some` when the wait ended the attempt instead of resuming it: a shutdown is the one thing
+/// besides a drain that reaches a paused reader, keeping teardown from waiting on a drain that
+/// will never come. A no-op (one lock, no await) on every frame below the mark, which is every
+/// frame of a real session.
 async fn await_capacity(shared: &Shared) -> Option<Attempt> {
     if !shared.inbound_saturated() {
         return None;

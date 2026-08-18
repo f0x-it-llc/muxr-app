@@ -1,28 +1,23 @@
-//! [`MockTerminalRepository`] — the in-memory [`TerminalRepository`] every
-//! headless suite and the mock-era screen run on.
+//! [`MockTerminalRepository`] — the in-memory [`TerminalRepository`] every headless suite and
+//! the mock-era screen run on.
 //!
-//! Seeds **exactly** what `docs/terminal.html` v2 ships — three spaces, four tabs,
-//! each tab's title/name/path and its four `.term-line`s — every string transcribed
-//! rather than paraphrased, so the screen and the mock are the same picture.
-//! Framework-free (the data-layer rule): a [`Mutex`]-guarded space list plus
-//! immutable tab data; the mutex rather than a `RefCell` is what makes it
-//! `Send + Sync`, which the controller needs to hold it behind an `Arc`.
+//! Seeds exactly what `docs/terminal.html` v2 ships — three spaces, four tabs, each tab's
+//! title/name/path and its four `.term-line`s, transcribed rather than paraphrased. Framework-free:
+//! a [`Mutex`]-guarded space list plus immutable tab data; the mutex (not a `RefCell`) is what
+//! makes it `Send + Sync`, which the controller needs to hold it behind an `Arc`.
 //!
-//! **What mutates**: space selection, and **pane focus** — a
-//! [`TerminalRepository::focus_pane`] moves the `focused` flag, so a later
-//! `list_tabs` agrees with the focus move a client just made. The tab *set*, its
-//! panes' identities and its lines are fixed.
+//! **What mutates**: space selection, and pane focus — [`TerminalRepository::focus_pane`] moves
+//! the `focused` flag, so a later `list_tabs` agrees with the move a client just made. The tab
+//! set, its panes' identities and its lines are fixed.
 //!
-//! **The headless-test tab seam.** A tab world that never moves cannot exercise the
-//! screen's reason for re-reading one, so [`add_test_tab`]/[`clear_test_tabs`]
-//! append synthetic tabs to every later `list_tabs`. Process-global, because a
-//! suite reaches this store only as the `Arc<dyn TerminalRepository>` its `di`
-//! published — so it belongs to a **serialized** suite.
+//! **Headless-test tab seam.** A tab world that never moves cannot exercise the screen's reason
+//! for re-reading one, so [`add_test_tab`]/[`clear_test_tabs`] append synthetic tabs to every
+//! later `list_tabs`. Process-global — belongs to a serialized suite, since a suite reaches this
+//! store only as the `Arc<dyn TerminalRepository>` its `di` published.
 //!
-//! Failure mapping: an unknown tab key or a blank session id maps to
-//! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just
-//! rendered. [`MOCK_LATENCY`] is a short deliberate sleep before every call, so the
-//! screen's async path is the one the real client will take.
+//! Failure mapping: an unknown tab key or blank session id maps to [`AppFailure::Internal`] — a
+//! bug, since the screen only addresses what it just rendered. [`MOCK_LATENCY`] is a short sleep
+//! before every call, so the screen's async path is the one the real client will take.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -151,8 +146,6 @@ fn seed_spaces() -> Vec<Space> {
     ]
     .into_iter()
     .map(|(name, selected)| Space {
-        // No backend, so a space's routing id is simply its name (see the
-        // module docs).
         id: name.to_string(),
         name: name.to_string(),
         selected,
@@ -214,16 +207,14 @@ fn seed_tabs() -> Vec<TabEntry> {
     ]
 }
 
-/// One tab's two panes: the mock's own focused `.pane-item`, and an unfocused `zsh`
-/// beside it — see [`seed_tabs`].
+/// One tab's two panes: the mock's own focused `.pane-item`, and an unfocused `zsh` beside it
+/// — see [`seed_tabs`].
 ///
-/// The two are **side by side**, splitting a classic 80x24 grid down the middle,
-/// rather than sharing one full-grid rect. The rects are what `presentation::pages`'
-/// content-tap hit test resolves a tapped cell against, and identical ones resolve
-/// *every* in-bounds tap to the same pane — leaving no cell anybody could aim at the
-/// **focused** pane. Two disjoint halves make "tap the pane you are already on" and
-/// "tap the other one" both expressible, which is the distinction a tap's
-/// focus-or-keyboard verdict turns on.
+/// Side by side, splitting a classic 80x24 grid down the middle, rather than sharing one
+/// full-grid rect: `presentation::pages`' content-tap hit test resolves a tapped cell against
+/// these rects, and identical ones would resolve every in-bounds tap to the same pane, leaving
+/// no cell to aim at the *other* one. Two disjoint halves make both panes tappable, which is
+/// what a tap's focus-or-keyboard verdict turns on.
 fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
     let pane = |id: u32, title: String, focused: bool, x: u32| PaneEntry {
         id,

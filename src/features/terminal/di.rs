@@ -1,20 +1,16 @@
 //! `terminal`'s composition-root wiring seam.
 //!
-//! [`provide`] is called exactly once, from `crate::MuxrApp::init`. It constructs
-//! this feature's one app-scoped singleton — the [`TerminalRepository`]
-//! implementation — and publishes it under the **root owner**, so every mount of
-//! `/terminal` resolves the *same* store and a space selected on one visit is still
-//! selected on the next. Choosing the implementation is this file's whole job.
+//! [`provide`] runs exactly once, from `crate::MuxrApp::init`. It constructs this feature's one
+//! app-scoped singleton — the [`TerminalRepository`] implementation — and publishes it under the
+//! root owner, so every mount of `/terminal` resolves the same store.
 //!
-//! **The headless-test seam.** `provide` runs from the same `MuxrApp::init` call
-//! whether this is a real launch or a `tests/*.rs` suite, and an integration binary
-//! links the *normal* build of the crate, so there is no `cfg(test)` to branch on. A
-//! suite opts out **before** `provide` runs, via [`use_mock_terminal_for_tests`],
-//! whose one call site is `tests/support::setup()`.
+//! **Headless-test seam.** `provide` runs from the same `MuxrApp::init` call in both a real
+//! launch and a `tests/*.rs` suite (no `cfg(test)` to branch on), so a suite opts out before
+//! `provide` runs via [`use_mock_terminal_for_tests`] (`tests/support::setup()`'s one call site).
 //!
-//! Rename is **not** published here: a session's name is the `sessions` feature's,
-//! and the controller resolves that repository through `sessions`' own `di` — which
-//! is what makes a rename from the terminal visible in the session list.
+//! Rename is not published here: a session's name is `sessions`' own, and the controller
+//! resolves that repository through `sessions`' own `di` — what makes a rename from the terminal
+//! visible in the session list.
 //!
 //! The repository travels as `Arc<dyn TerminalRepository + Send + Sync>` because
 //! `use_controller` and frust's context both require `Send + Sync + 'static`.
