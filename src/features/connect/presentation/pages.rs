@@ -1,23 +1,17 @@
 //! The `/` route's page: the Connect screen scaffold.
 //!
-//! [`connect_page`] is the route seam (`AnyView<AppState>` out, a `Component` with
-//! its own [`ConnectState`] inside); [`connect_layout`] is the arrangement half,
-//! split out because the cold-start splash lays the *same* eight pieces out
-//! through the *same* function, so the frame it finishes on and the frame the
-//! route paints are one picture. **Every** arrangement decision belongs to it, the
-//! responsive clamp included.
+//! [`connect_page`] is the route seam; [`connect_layout`] is the arrangement
+//! half, split out because the cold-start splash lays the same pieces out
+//! through the same function, so the frame it finishes on and the frame the
+//! route paints are one picture.
 //!
 //! The screen's three layers are backdrop, scrolled layout, QR affordance. The
-//! **scroll is the screen's, not the layout's** — the splash assembles into a
-//! fixed layer with nothing to scroll — and so is the FAB, which is chrome rather
-//! than one of the eight staggered pieces.
+//! scroll and the FAB both belong to the screen, not the layout — the splash
+//! assembles into a fixed layer with nothing to scroll.
 //!
-//! Handles are resolved once in [`Component::init`], never in a press handler: the
-//! app's one [`Nav`] (whose push runs the real route table *and* its
-//! capture-based session guard), the **root overlay host's** navigator (what puts
-//! a sheet above the floating top bar and under its own scrim), and the app-scoped
-//! [`ConnectionController`]. The credential dialogs live in
-//! [`super::widgets::credential_dialogs`], the QR gate and camera lifecycle in
+//! Handles are resolved once in [`Component::init`], never in a press handler.
+//! The credential dialogs live in [`super::widgets::credential_dialogs`], the
+//! QR gate and camera lifecycle in
 //! [`super::widgets::qr_affordance`]/[`super::widgets::qr_sheet`].
 
 use std::cell::Cell;
@@ -49,32 +43,24 @@ use crate::ui::palette::active_theme;
 use crate::ui::spacing;
 
 /// The content column's max width past [`WIDE_BREAKPOINT_PX`]: a wide window
-/// centers the form rather than stretching it edge to edge, with the CTA and
-/// fields still full-width *within* the clamp. A plain clamp, not a layout switch
-/// (see `crate::responsive`).
+/// centers the form rather than stretching it edge to edge. A plain clamp, not
+/// a layout switch (see `crate::responsive`).
 const CONNECT_CLAMP_WIDTH: f64 = 520.0;
 /// Where the clamped column sits in a wide window: centered horizontally,
-/// **top**-anchored vertically. Not [`Alignment::CENTER`] — inside the screen's
-/// [`scroll_view`] the vertical fraction is dead either way, but the splash
-/// assembles into a `Stack` layer whose height *is* bounded, and `CENTER` there
-/// would trade this clamp's horizontal jump for a vertical one.
+/// top-anchored vertically. Not [`Alignment::CENTER`] — the splash assembles
+/// into a bounded `Stack` layer, and `CENTER` there would trade this clamp's
+/// horizontal jump for a vertical one.
 const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
 
-/// Arrange `pieces` as `.ui-layer` does: a safe-area-inset, `spacing::SHEET`/
-/// `spacing::HERO`-padded, top-anchored column with `spacing::SHEET` between
-/// consecutive pieces, each stretched to the layer width — **and**, past
-/// [`WIDE_BREAKPOINT_PX`], clamped to [`CONNECT_CLAMP_WIDTH`] and centered.
+/// Arranges `pieces` into a safe-area-inset, padded, top-anchored column with
+/// [`spacing::SHEET`] between them, each stretched to the layer width — and,
+/// past [`WIDE_BREAKPOINT_PX`], clamped to [`CONNECT_CLAMP_WIDTH`] and
+/// centered.
 ///
-/// Takes the pieces already built, so the splash can pass its wrapped copies and
-/// the screen its live ones. The gap is the one number the two mocks disagree on
-/// (`docs/splash.html` says 20, `docs/redesign.html` 22); the redesign wins, and
-/// this shared seam is what keeps both renderings on it.
-///
-/// **The clamp lives here** rather than in the screen's own `build`, where it made
-/// the splash assemble edge to edge and the form jump inward as the route took
-/// over. The read is `crate::responsive`'s reference idiom:
-/// `use_context::<WindowMetrics>()` once, branch on the one shared constant, never
-/// touch layout again.
+/// Takes the pieces already built, so the splash can pass its wrapped copies
+/// and the screen its live ones. The clamp lives here rather than in the
+/// screen's own `build`, so the splash and the route agree on layout without
+/// a jump between them.
 pub fn connect_layout<S: 'static>(pieces: Vec<AnyView<S>>) -> AnyView<S> {
     let mut children = Vec::with_capacity(pieces.len() * 2);
     for (index, piece) in pieces.into_iter().enumerate() {
@@ -89,8 +75,8 @@ pub fn connect_layout<S: 'static>(pieces: Vec<AnyView<S>>) -> AnyView<S> {
         FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch),
     )));
 
-    // `None` — no shell has published metrics yet, or a bare test harness — takes
-    // the same branch as a genuinely narrow window.
+    // `None` (no shell published metrics yet, or a bare test harness) takes the
+    // same branch as a genuinely narrow window.
     let is_wide = use_context::<WindowMetrics>()
         .map(|metrics| metrics.size.width >= WIDE_BREAKPOINT_PX)
         .unwrap_or(false);
@@ -108,33 +94,28 @@ pub fn connect_page(overlays: frust::NavigatorController<AppState>) -> AnyView<A
     any(component(ConnectScreen { overlays }))
 }
 
-/// The Connect screen `Component`. Stateless configuration; everything retained
-/// lives in [`ConnectState`].
+/// Stateless configuration; everything retained lives in [`ConnectState`].
 struct ConnectScreen {
     overlays: frust::NavigatorController<AppState>,
 }
 
-/// The Connect screen's retained state: the **non-reactive** half only. Every
+/// The Connect screen's retained state: the non-reactive half only. Every
 /// observed value lives on [`ConnectController`]'s signals instead.
 pub struct ConnectState {
-    /// The hosted view model, disposed with this component (`use_controller`).
+    /// Disposed with this component (`use_controller`).
     controller: Arc<ConnectController>,
-    /// The app's one path-pushing handle. Clonable, so a press closure captures
-    /// its own copy.
     app_nav: Nav,
-    /// The root overlay host's navigator — every sheet and dialog this screen
-    /// raises.
+    /// Every sheet and dialog this screen raises.
     overlays: frust::NavigatorController<AppState>,
-    /// The app-scoped connection handle, held only so `build` can watch
-    /// `connected`'s true→false edge (a Disconnect) and scrub the token field.
+    /// Held only so `build` can watch `connected`'s true→false edge (a
+    /// Disconnect) and scrub the token field.
     connection: Arc<ConnectionController>,
-    /// Whether `connected` read `true` on the last `build` — the value that edge is
-    /// detected against. Seeded at mount, so a screen that mounted
-    /// already-connected does not misfire a clear on its first build.
+    /// Whether `connected` read `true` on the last `build`. Seeded at mount, so
+    /// an already-connected screen doesn't misfire a clear on its first build.
     was_connected: bool,
     /// The FAB's single-flight latch (see [`super::widgets::qr_affordance`]).
-    /// Non-reactive, and an `Rc<Cell<bool>>` because the permission check's
-    /// completion runs from inside its own future, off this handler's borrow.
+    /// `Rc<Cell<bool>>` because the permission check's completion runs off
+    /// this handler's borrow.
     qr_permission_pending: Rc<Cell<bool>>,
 }
 
@@ -142,12 +123,11 @@ impl Component for ConnectScreen {
     type State = ConnectState;
 
     fn init(&self) -> ConnectState {
-        // Resolve app-scoped dependencies HERE, where a reactive owner is live. A
-        // press handler cannot — see `super::controller`'s injection note.
+        // Resolved here, where a reactive owner is live — a press handler cannot.
         let repository = expect_saved_servers();
         let credentials = expect_credential_service();
-        // The one cross-feature resolve: a saved credential *is* a server-side
-        // token, and `settings` owns that store.
+        // Cross-feature resolve: a saved credential is a server-side token, and
+        // `settings` owns that store.
         let tokens = expect_auth_tokens_repository();
         let connection = expect_connection_controller();
         let was_connected = connection.connected.get_untracked();
@@ -155,8 +135,7 @@ impl Component for ConnectScreen {
             let connection = Arc::clone(&connection);
             move || ConnectController::new(repository, credentials, tokens, connection)
         });
-        // The credential-save seam `crate::connection` calls on an accepted offer:
-        // installed here, where the flow's dependencies are already resolved.
+        // Installed here, where the flow's dependencies are already resolved.
         connection.set_credential_saver(controller.credential_saver());
 
         ConnectState {
@@ -172,15 +151,13 @@ impl Component for ConnectScreen {
     fn build(&self, state: &mut ConnectState) -> AnyView<ConnectState> {
         let theme = active_theme();
 
-        // Login-token hygiene, the disconnect half: a Disconnect can flip
-        // `connected` back to `false` while this screen stays mounted underneath
-        // whatever covers it. A **tracked** read is what lets that write wake this
-        // component's next rebuild.
+        // Tracked read: a Disconnect can flip `connected` back to `false` while
+        // this screen stays mounted underneath whatever covers it.
         let connected = state.connection.connected.get();
         if state.was_connected && !connected {
             state.controller.clear_token();
-            // A stashed pairing goes out on the same edge: the pin it carries
-            // belongs to a session that has ended.
+            // A stashed pairing goes out on the same edge — its pin belonged to
+            // the session that just ended.
             state.controller.clear_pending_pairing();
         }
         state.was_connected = connected;
@@ -214,8 +191,7 @@ impl Component for ConnectScreen {
             },
         };
 
-        // Piece 7's rows, read here rather than inside the piece: the one
-        // **tracked** read of the list, and what lets the splash hand the same
+        // The one tracked read of the list — lets the splash hand the same
         // builder its own snapshot (the widgets' parity contract).
         let saved = state.controller.saved.get();
         let content = connect_layout(connect_pieces_with(&theme, Some(&live), &saved));

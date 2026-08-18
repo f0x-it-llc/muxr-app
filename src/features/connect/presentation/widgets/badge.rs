@@ -15,8 +15,7 @@ pub const SUBTITLE: &str = "Enter credentials to attach to a remote zellij or he
 /// Piece 1 — a centered, bordered two-line box naming the daemon and the
 /// multiplexers it fronts. Pure decoration — no [`Live`](super::Live).
 pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
-    // Hugging, not stretched: the box is `margin:0 auto`-width, so the lines
-    // center themselves against each other rather than against the layer.
+    // Hugging, not stretched: the lines center against each other, not the layer.
     let lines = hugging_column::<S>(vec![
         any(text("muxrd server").style(inked(&theme.type_scale.body_small, colors.fg_muted))),
         v_gap::<S>(spacing::MICRO),
@@ -31,13 +30,12 @@ pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
     any(Align(Alignment::CENTER, box_))
 }
 
-/// Piece 2 — the screen's title and its explanation, both centered. Pure copy —
-/// no [`Live`](super::Live).
+/// Piece 2 — the screen's title and its explanation, both centered. Pure
+/// copy — no [`Live`](super::Live).
 ///
-/// The title is one line and centers as a block ([`Align`]); the subtitle wraps
-/// on a phone and centers **per line**, which no composition can express — see
-/// [`centered_paragraph`](super::super::chrome::centered_paragraph) for the
-/// framework gap and the workaround.
+/// The title centers as a block ([`Align`]); the subtitle wraps on a phone
+/// and centers per line, which no composition can express — see
+/// [`centered_paragraph`](super::super::chrome::centered_paragraph).
 pub fn heading<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
     backed(
         column::<S>(vec![

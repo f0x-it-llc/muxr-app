@@ -9,28 +9,26 @@ use crate::features::connect::domain::entities::PairingTrust;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
-/// The pinned CTA's label — the **explicit action** a scanned pairing waits for (a
-/// scan prefills; only this connects). `pub` for `tests/connect.rs`.
+/// The explicit action a scanned pairing waits for (a scan prefills; only
+/// this connects). `pub` for `tests/connect.rs`.
 pub const PINNED_CONNECT_LABEL: &str = "Connect now (pinned)";
-/// …and the same CTA for a `tm=ca` pairing, which carries no pin to name. The
-/// action is the same one; only the word that would be a lie changes.
+/// The same CTA for a `tm=ca` pairing, which carries no pin to name.
 pub const PAIRED_CONNECT_LABEL: &str = "Connect now (paired)";
-/// The caption over the pinned CTA, naming where the credentials came from. `pub`
-/// — `tests/connect.rs` reads this exact run.
+/// The caption over the pinned CTA. `pub` — `tests/connect.rs` reads this exact run.
 pub const PAIRING_CAPTION: &str = "scanned pairing — the code's own token and trust";
 /// The chip a `ro=1` pairing (or a stored read-only credential) carries — one
-/// spelling for both, since it is the same fact.
+/// spelling for both.
 pub const READ_ONLY_CHIP: &str = "read-only";
 
-/// What a stashed pairing contributes to the form's chrome — deliberately **not**
-/// the payload itself, since a piece rebuilds at signal rate and copying the
-/// scanned token out to read two booleans is a copy nobody needs.
+/// What a stashed pairing contributes to the form's chrome — not the payload
+/// itself, since a piece rebuilds at signal rate and copying the scanned
+/// token out to read two booleans is a copy nobody needs.
 #[derive(Clone, Copy)]
 pub(super) struct PairingChrome {
-    /// Whether the code's credential is read-only (`ro=1`).
+    /// The code's credential is read-only (`ro=1`).
     read_only: bool,
-    /// Whether the code pinned a certificate (`tm=pin`/v1) rather than asking
-    /// for ordinary CA validation.
+    /// The code pinned a certificate (`tm=pin`/v1) rather than asking for
+    /// ordinary CA validation.
     pinned: bool,
 }
 
@@ -45,8 +43,7 @@ impl PairingChrome {
     }
 }
 
-/// Read the live pairing's chrome, tracked, or `None` when nothing is stashed
-/// (and always `None` for the splash, which has no controller to read).
+/// `None` when nothing is stashed, and always for the splash (no controller to read).
 pub(super) fn pairing_chrome(live: Option<&Live>) -> Option<PairingChrome> {
     live?.controller.pending_pairing.with(|pending| {
         pending.as_ref().map(|payload| PairingChrome {
@@ -56,8 +53,7 @@ pub(super) fn pairing_chrome(live: Option<&Live>) -> Option<PairingChrome> {
     })
 }
 
-/// The caption over the pinned CTA, plus — for a `ro=1` code — the same read-only
-/// chip a stored read-only credential's row carries.
+/// The caption over the pinned CTA, plus — for a `ro=1` code — the read-only chip.
 pub(super) fn pairing_banner<S: 'static>(
     theme: &Theme,
     colors: &Palette,

@@ -1,21 +1,21 @@
 //! The `.fab` QR affordance and its camera-permission gate.
 //!
-//! The permission prompt is gated on the **tap**, not the sheet's mount:
-//! [`request_camera_access`] runs the blocking permission call off the UI thread
-//! and pushes [`open_qr_sheet`] only on `Granted`. Every other outcome raises a
-//! toast instead ([`permission_outcome_message`] is the whole decision table) and
-//! never mounts the sheet; the FAB stays tappable, so a re-tap is the retry.
-//! Asking before the sheet exists is what keeps the OS dialog from showing *over*
-//! the sheet's entrance animation.
+//! The permission prompt is gated on the tap, not the sheet's mount:
+//! [`request_camera_access`] runs the blocking permission call off the UI
+//! thread and pushes [`open_qr_sheet`] only on `Granted`. Every other
+//! outcome raises a toast instead ([`permission_outcome_message`] is the
+//! whole decision table) and never mounts the sheet; the FAB stays tappable,
+//! so a re-tap is the retry. Asking before the sheet exists keeps the OS
+//! dialog from showing over the sheet's entrance animation.
 //!
 //! That round trip is a real async window, so `request_camera_access` owns a
-//! single-flight latch: a re-entrant call while it reads `true` is dropped rather
-//! than starting a second check that could resolve `Granted` twice and open two
-//! sessions on one physical camera. It clears once *this* check has settled,
-//! whichever way. The press handler additionally refuses the tap while
-//! [`ConnectController::busy_untracked`] holds — load-bearing, not redundant: the
-//! offer dialog pops synchronously on accept, so for the rest of the held save
-//! this screen is uncovered and the affordance is reachable.
+//! single-flight latch: a re-entrant call while it reads `true` is dropped,
+//! rather than starting a second check that could resolve `Granted` twice
+//! and open two sessions on one physical camera. It clears once this check
+//! has settled, whichever way. The press handler additionally refuses the
+//! tap while [`ConnectController::busy_untracked`] holds — load-bearing: the
+//! offer dialog pops synchronously on accept, so for the rest of the held
+//! save this screen is uncovered and the affordance is reachable.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -39,40 +39,34 @@ use crate::ui::topbar::icon_button;
 /// what `tests/connect.rs` addresses the button by.
 pub const FAB_LABEL: &str = "Pair by QR code";
 
-/// `.fab{right:20px;bottom:20px}` — the inset from the screen's safe area.
-/// Bespoke placement geometry, not a spacing step.
+/// Inset from the screen's safe area. Bespoke placement geometry, not a spacing step.
 const FAB_MARGIN: f64 = 20.0;
-/// The FAB's box, in logical px — the mock's 46px disc, which also clears the
-/// 44px platform minimum tap target.
+/// The FAB's box, in logical px — clears the 44px platform minimum tap target.
 const FAB_BOX: f64 = 46.0;
-/// The scan mark drawn inside it, in logical px.
 const FAB_MARK: f64 = 22.0;
 
-/// …when a concurrent request raced this tap's own call out. Transient by
-/// construction, so a re-tap is the retry.
+/// A concurrent request raced this tap's own call out. Transient, so a re-tap is the retry.
 const PERMISSION_PENDING: &str =
     "Camera permission request already in progress — try again in a moment.";
-/// …once it has refused. iOS shows its dialog once per install, so a second ask
-/// is a no-op and the only way forward is the system settings app.
+/// iOS shows its dialog once per install, so a second ask is a no-op and the
+/// only way forward is the system settings app.
 const PERMISSION_DENIED: &str = concat!(
     "Camera permission denied — enable camera access for muxr in your device ",
     "settings, then scan again.",
 );
-/// …when Android has no foreground activity cached to show the dialog on —
-/// transient, so a retry is worth offering.
+/// Android has no foreground activity cached to show the dialog on — transient.
 const PERMISSION_NEEDS_UI: &str =
     "The permission dialog needs muxr in the foreground — try again from here.";
 
-/// `.fab` renders `▣` — the mock's QR/scan mark, **as a vector, never that
-/// glyph**: `U+25A3` is in none of the bundled faces, so each platform resolved it
-/// through its own fallback chain and drew a *different mark*
+/// The QR/scan mark, as a vector rather than the `▣` glyph: `U+25A3` is in
+/// none of the bundled faces, so each platform would draw a different mark
 /// (`crate::ui::topbar`'s "Chrome icons are vectors").
 ///
-/// App-supplied because `frust::icons` carries no QR/scan glyph at all. Authored
-/// against the same 24×24 design box every generated entry uses, as one `d` string
-/// of axis-aligned rectangles: eight bracket arms ([`SCAN_BRACKET`]-long,
-/// [`SCAN_STROKE`]-thick, inset [`SCAN_INSET`]) plus the centre square. The tests
-/// below re-derive that geometry, so a typo cannot pass as art.
+/// App-supplied because `frust::icons` carries no QR/scan glyph. Authored
+/// against the standard 24×24 design box as one `d` string of axis-aligned
+/// rectangles: eight bracket arms ([`SCAN_BRACKET`]-long, [`SCAN_STROKE`]-thick,
+/// inset [`SCAN_INSET`]) plus the centre square. The tests below re-derive
+/// that geometry, so a typo cannot pass as art.
 pub(super) const SCAN_MARK: IconSource = IconSource {
     d: concat!(
         // top-left corner: across, then down
@@ -89,8 +83,8 @@ pub(super) const SCAN_MARK: IconSource = IconSource {
     design: 24.0,
 };
 
-/// [`SCAN_MARK`]'s inset from its design box's edge, its bracket-arm length, and
-/// its arm thickness — the three numbers the `d` string is built from.
+/// [`SCAN_MARK`]'s inset, bracket-arm length, and arm thickness — the three
+/// numbers the `d` string is built from.
 const SCAN_INSET: f64 = 4.0;
 const SCAN_BRACKET: f64 = 7.0;
 const SCAN_STROKE: f64 = 2.5;
@@ -103,13 +97,13 @@ const _: () = {
     assert!(SCAN_STROKE < SCAN_BRACKET);
 };
 
-/// `.fab`: the amber QR/pair affordance, pinned to the screen's bottom-trailing
-/// safe area. The tap is the camera-permission gate (see the [module docs](self)).
+/// The amber QR/pair affordance, pinned to the screen's bottom-trailing safe
+/// area. The tap is the camera-permission gate (see the [module docs](self)).
 ///
-/// `pending` is threaded down rather than resolved here: it has to survive across
-/// rebuilds, so two taps landing on two builds' press handlers close over the
-/// *same* cell. An [`icon_button`] rather than [`frust::button`] because the
-/// affordance is a **mark**, and `button` takes a `String` label and nothing else.
+/// `pending` is threaded down rather than resolved here: it has to survive
+/// across rebuilds, so two taps landing on two builds' press handlers close
+/// over the same cell. An [`icon_button`] rather than [`frust::button`]
+/// because the affordance is a mark, not a `String` label.
 pub(crate) fn qr_affordance<S: 'static>(
     overlays: &frust::NavigatorController<AppState>,
     controller: &Arc<ConnectController>,
@@ -132,7 +126,6 @@ pub(crate) fn qr_affordance<S: 'static>(
                 let controller = Arc::clone(&controller);
                 request_camera_access(&pending, move || open_qr_sheet(&overlays, controller));
             })
-            // The mock's amber disc and the ink the design pairs with it.
             .fill(scheme.primary_container)
             .ink(scheme.on_primary_container)
             .icon_size(FAB_MARK)
@@ -142,15 +135,14 @@ pub(crate) fn qr_affordance<S: 'static>(
     )))
 }
 
-/// Push the QR sheet as a page of `overlays`, closing itself the moment a scanned
-/// payload lands.
+/// Pushes the QR sheet as a page of `overlays`, closing itself the moment a
+/// scanned payload lands.
 fn open_qr_sheet(
     overlays: &frust::NavigatorController<AppState>,
     controller: Arc<ConnectController>,
 ) {
     show_sheet(overlays, move |sheet| {
-        // The sheet's handle is threaded in as the one-shot closer the scan pump
-        // fires — the same at-most-one-pop gate every other closer goes through.
+        // Threaded in as the one-shot closer the scan pump fires.
         let sheet = sheet.clone();
         qr_sheet_body(
             Rc::new(move || {
@@ -161,10 +153,10 @@ fn open_qr_sheet(
     });
 }
 
-/// The FAB permission gate: check/request off the UI thread and call `on_granted`
-/// only on `Granted` (see the [module docs](self)). With no camera backend there
-/// is no dialog to race, so this calls `on_granted` directly and lets the sheet
-/// render its own unavailable state.
+/// The FAB permission gate: checks/requests off the UI thread and calls
+/// `on_granted` only on `Granted` (see the [module docs](self)). With no
+/// camera backend there is no dialog to race, so this calls `on_granted`
+/// directly and lets the sheet render its own unavailable state.
 fn request_camera_access(pending: &Rc<Cell<bool>>, on_granted: impl FnOnce() + 'static) {
     if pending.replace(true) {
         return;
@@ -188,9 +180,9 @@ fn request_camera_access(pending: &Rc<Cell<bool>>, on_granted: impl FnOnce() + '
     });
 }
 
-/// `Camera::request_permission`, target-gated so a build with no camera backend
-/// never reaches AVFoundation (or the Android JNI surface) at all. The `Err` arm
-/// is reachable only in principle, since the caller checks the gate first.
+/// Target-gated so a build with no camera backend never reaches AVFoundation
+/// (or the Android JNI surface) at all. The `Err` arm is reachable only in
+/// principle, since the caller checks the gate first.
 fn request_permission_checked() -> Result<PermissionStatus, CameraError> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -202,9 +194,9 @@ fn request_permission_checked() -> Result<PermissionStatus, CameraError> {
     }
 }
 
-/// What an outcome means for the gate: `None` opens the sheet, `Some` is the toast
-/// to show instead. Split out so the mapping is unit-testable independent of the
-/// target-gated platform call behind it.
+/// `None` opens the sheet; `Some` is the toast to show instead. Split out so
+/// the mapping is unit-testable independent of the target-gated platform
+/// call behind it.
 fn permission_outcome_message(
     outcome: &Result<PermissionStatus, CameraError>,
 ) -> Option<&'static str> {
@@ -213,8 +205,7 @@ fn permission_outcome_message(
         Ok(PermissionStatus::Denied) => Some(PERMISSION_DENIED),
         Ok(PermissionStatus::NeedsUi) => Some(PERMISSION_NEEDS_UI),
         Ok(PermissionStatus::Pending) => Some(PERMISSION_PENDING),
-        // `PermissionStatus` is `#[non_exhaustive]`: an answer this build has
-        // never heard of reads as an unspecified refusal.
+        // `#[non_exhaustive]`: an unrecognized answer reads as an unspecified refusal.
         Ok(_) | Err(_) => Some(CAMERA_UNAVAILABLE),
     }
 }
@@ -224,13 +215,11 @@ mod tests {
     use super::*;
     use frust::authoring::{BezPath, Shape};
 
-    /// Geometry tolerance, in design-box units.
     const EPSILON: f64 = 1e-9;
 
     #[test]
     fn the_scan_mark_parses_into_nine_subpaths() {
-        // A malformed `d` is a *panic* at first paint, which on device means a
-        // crash rather than a wrong-looking FAB. This is the tripwire.
+        // A malformed `d` is a panic at first paint — this is the tripwire.
         let path = BezPath::from_svg(SCAN_MARK.d).expect("the scan mark parses");
         assert!(!path.elements().is_empty());
         assert_eq!(
@@ -242,9 +231,7 @@ mod tests {
 
     #[test]
     fn the_scan_mark_fills_its_design_box_symmetrically() {
-        // Every bracket sits `SCAN_INSET` in from its own edge, so the mark's
-        // bounds are that inset on all four sides — what makes it read as centred
-        // at any drawn size.
+        // Every bracket sits `SCAN_INSET` in from its own edge on all four sides.
         let path = BezPath::from_svg(SCAN_MARK.d).expect("the scan mark parses");
         let bbox = path.bounding_box();
         let far = SCAN_MARK.design - SCAN_INSET;
@@ -256,25 +243,21 @@ mod tests {
 
     #[test]
     fn the_far_brackets_sit_where_the_named_numbers_put_them() {
-        // `24 - 4 - 7` and `24 - 4 - 2.5`: the transcription's own tripwire, since
-        // the path data is authored by hand.
         assert!((SCAN_MARK.design - SCAN_INSET - SCAN_BRACKET - 13.0).abs() < EPSILON);
         assert!((SCAN_MARK.design - SCAN_INSET - SCAN_STROKE - 17.5).abs() < EPSILON);
     }
 
     #[test]
     fn the_fab_clears_the_minimum_tap_target() {
-        // The mock's disc clears the platform floor; the mark inside it is
-        // decoration and has no floor of its own.
         const MIN_TAP_TARGET: f64 = 44.0;
         const { assert!(FAB_BOX >= MIN_TAP_TARGET) };
         const { assert!(FAB_MARK < FAB_BOX) };
     }
 
-    // The real permission arm is target-gated, so an end-to-end test cannot run
-    // headless. These pin what that arm is built on: the outcome→action table, the
-    // pass-through with no camera backend, and the single-flight latch — simulated
-    // by re-entering from inside a call's own `on_granted`.
+    // The real permission arm is target-gated, so an end-to-end test cannot
+    // run headless. These pin the outcome→action table, the pass-through
+    // with no camera backend, and the single-flight latch (simulated by
+    // re-entering from inside a call's own `on_granted`).
 
     #[test]
     fn only_a_granted_outcome_opens_the_sheet() {
@@ -329,9 +312,8 @@ mod tests {
 
     #[test]
     fn a_second_tap_while_the_first_permission_check_is_still_open_is_dropped() {
-        // Re-enter from *inside* the first call's `on_granted`, before `pending`
-        // clears, so it lands as a fast double tap would during a device's own
-        // async permission window.
+        // Re-enters from inside the first call's `on_granted`, before `pending`
+        // clears — a fast double tap during the async permission window.
         let pending = Rc::new(Cell::new(false));
         let opens = Rc::new(Cell::new(0_u32));
 

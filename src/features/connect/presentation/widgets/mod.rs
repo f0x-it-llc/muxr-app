@@ -1,39 +1,32 @@
 //! The Connect screen's widgets: the eight staggered pieces, plus the screen's
 //! own QR and credential chrome.
 //!
-//! [`connect_pieces_with`] returns the eight `.piece` elements of
-//! `docs/splash.html`'s `.ui-layer` in source order — the order
-//! `crate::ui::splash::spec::PIECE_DELAYS_MS` staggers them by:
+//! [`connect_pieces_with`] returns the eight pieces in stagger order:
 //! [`mark::connect_mark`], [`badge::server_badge`], [`badge::heading`],
 //! [`fields::server_url_field`], [`fields::token_field`],
 //! [`trust::remember_row`], [`cta::connect_button`], [`saved::saved_address`].
-//! [`qr_affordance`], [`qr_sheet`] and [`credential_dialogs`] are screen chrome,
-//! never staggered pieces.
+//! [`qr_affordance`], [`qr_sheet`] and [`credential_dialogs`] are screen
+//! chrome, never staggered pieces.
 //!
 //! # The parity contract
 //!
-//! `Option<&`[`Live`]`>` is a **wiring** difference and nothing else: `Some(..)`
-//! turns a piece into a control, `None` (the splash, which assembles this screen
-//! before any controller exists) paints the same pixels with no callbacks, at every
-//! window size. Three structural guarantees hold that true:
+//! `Option<&`[`Live`]`>` is a wiring difference and nothing else: `Some(..)`
+//! turns a piece into a control, `None` (the splash, assembled before any
+//! controller exists) paints the same pixels with no callbacks. Three
+//! guarantees hold that true:
 //!
-//! 1. Piece 7's rows are an input, so neither caller can invent a row the other
-//!    does not have — the screen passes its controller's signal, the splash
-//!    [`saved::splash_saved_servers`]' snapshot of the same repository.
-//! 2. The splash's fields are `read_only`, never `enabled(false)`: the same focus
-//!    gate without the dimming that used to pop at the handoff.
+//! 1. Piece 7's rows are an input — the screen passes its controller's
+//!    signal, the splash [`saved::splash_saved_servers`]' snapshot of the
+//!    same repository.
+//! 2. The splash's fields are `read_only`, never `enabled(false)`: the same
+//!    focus gate without the dimming.
 //! 3. The responsive clamp lives in
-//!    [`connect_layout`](super::pages::connect_layout), the one function both
-//!    callers assemble through.
+//!    [`connect_layout`](super::pages::connect_layout), the one function
+//!    both callers assemble through.
 //!
-//! Every piece is `<State>`-generic (the splash composes under [`crate::AppState`],
-//! the screen under its own `ConnectState`), reads no state it is handed, and takes
-//! the [`Palette`] resolved once per build rather than resolving its own.
-//!
-//! Tokens: the Glyph theme's roles are canonical where they and the mock's CSS
-//! disagree, and `docs/redesign.html` wins over the older `docs/splash.html`. Both
-//! fields and the trust rows render at `body_medium` (13) rather than the source's
-//! 12px, and the CTA at `label_large_emphasized`.
+//! Every piece is `<State>`-generic (the splash composes under
+//! [`crate::AppState`], the screen under its own `ConnectState`), reads no
+//! state it is handed, and takes the [`Palette`] resolved once per build.
 
 pub mod badge;
 pub mod credential_dialogs;
@@ -56,27 +49,26 @@ use super::controller::ConnectController;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::ui::palette::Palette;
 
-/// What a piece needs to be a control rather than a picture: the screen's hosted
-/// controller, plus the four actions it cannot express itself.
+/// What a piece needs to be a control rather than a picture: the screen's
+/// hosted controller, plus the four actions it cannot express itself.
 ///
-/// Built fresh on every `ConnectScreen::build` and passed down by reference. Each
-/// action is a state-free `Rc<dyn Fn(..)>` because it navigates or raises an
-/// overlay, and both handles are `Rc`-backed — they cannot live on the
-/// `Send + Sync` controller, so the screen owns them and closes over them here.
+/// Built fresh on every `ConnectScreen::build` and passed down by reference.
+/// Actions are `Rc<dyn Fn(..)>` — they navigate or raise an overlay, so
+/// cannot live on the `Send + Sync` controller; the screen owns and closes
+/// over them here.
 pub struct Live {
-    /// The screen's form/view model.
     pub controller: Arc<ConnectController>,
-    /// Validate, connect, and navigate — raising the save-credential offer first
-    /// where there is one, since that answer is what the held redirect resolves on.
+    /// Validates, connects, and navigates — raising the save-credential offer
+    /// first where there is one.
     pub on_connect: Rc<dyn Fn()>,
-    /// Connect with the **scanned pairing's** own credentials, and navigate.
-    /// Reached only from the pinned CTA, which renders only while one is stashed.
+    /// Connects with the scanned pairing's own credentials. Reached only from
+    /// the pinned CTA, which renders only while one is stashed.
     pub on_connect_pinned: Rc<dyn Fn()>,
-    /// A saved row was tapped, by index — refill the form, or unlock its stored
-    /// credential and connect.
+    /// A saved row tapped, by index — refills the form, or unlocks its stored
+    /// credential and connects.
     pub on_saved_tap: Rc<dyn Fn(usize)>,
-    /// A saved row's delete affordance was pressed, by index: confirm, then drop
-    /// **this device's** copy (nothing is deleted on the server).
+    /// A saved row's delete pressed, by index: confirm, then drop this
+    /// device's copy (nothing is deleted on the server).
     pub on_saved_delete: Rc<dyn Fn(usize)>,
 }
 
@@ -100,9 +92,9 @@ fn column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
     .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// A vertical stack that **shrink-wraps** to its widest child and centers each one
-/// — the `margin:0 auto` blocks, whose boxes must hug their content rather than
-/// span the layer (stretching one turns the mark's tile into a full-width bar).
+/// A vertical stack that shrink-wraps to its widest child and centers each
+/// one, rather than spanning the layer (stretching would turn the mark's
+/// tile into a full-width bar).
 fn hugging_column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
     FlexView::new(
         Axis::Vertical,
@@ -116,17 +108,14 @@ fn row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-/// A full-width piece backing in the page tone — the same role
-/// `crate::ui::backdrop::page_backdrop` paints, so it is invisible over the
-/// route's backdrop while still giving the splash something opaque behind its
-/// assembling text.
+/// A full-width piece backing in the page tone — invisible over the route's
+/// backdrop, while giving the splash something opaque behind its assembling text.
 fn backed<S: 'static>(child: impl frust::View<S>, colors: &Palette) -> AnyView<S> {
     any(panel(child, colors.page, 0.0))
 }
 
-/// The eight pieces, in `docs/splash.html`'s source order. `live` is `Some(..)`
-/// for the screen and `None` for the splash (the parity contract); `saved` is
-/// piece 7's rows, which both callers read from the same repository.
+/// `live` is `Some(..)` for the screen and `None` for the splash (the parity
+/// contract); `saved` is piece 7's rows.
 pub fn connect_pieces_with<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,
@@ -145,8 +134,7 @@ pub fn connect_pieces_with<S: 'static>(
     ]
 }
 
-/// The eight pieces with **no** live wiring — the shared splash/route seam
-/// (`crate::splash_overlay` and `tests/sequence.rs` both call exactly this).
+/// The eight pieces with no live wiring — the shared splash/route seam.
 pub fn connect_pieces<S: 'static>(theme: &Theme, saved: &[SavedServer]) -> Vec<AnyView<S>> {
     connect_pieces_with(theme, None, saved)
 }

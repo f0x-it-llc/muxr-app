@@ -8,12 +8,10 @@ use super::{h_gap, hugging_column, row, v_gap};
 use crate::ui::palette::Palette;
 use crate::ui::spacing;
 
-/// `.connect-mark{width:60px;height:60px}`.
 const MARK_SIZE: f64 = 60.0;
-/// `.connect-mark{gap:5px}` — off the app's spacing scale, so it stays local.
+/// Off the app's spacing scale, so it stays local.
 const MARK_GAP: f64 = 5.0;
-/// One grid cell: the tile minus its padding (`spacing::BASE`, the source's
-/// `padding:12px`) and the single gap, halved (`grid-template-columns:1fr 1fr`).
+/// One grid cell: the tile minus its padding and the single gap, halved.
 const MARK_CELL: f64 = (MARK_SIZE - 2.0 * spacing::BASE - MARK_GAP) / 2.0;
 
 /// Piece 0 — a bordered 60×60 tile holding a 2×2 grid whose diagonal is solid
@@ -22,8 +20,7 @@ const MARK_CELL: f64 = (MARK_SIZE - 2.0 * spacing::BASE - MARK_GAP) / 2.0;
 pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
     let cell = Size::new(MARK_CELL, MARK_CELL);
     let cell_radius = theme.shape.extra_small;
-    // `.connect-mark span:nth-child(1),(4)` — faint wash + hairline accent
-    // border; `(2),(3)` — the solid accent fill.
+    // Diagonal is a hairline-bordered faint wash; off-diagonal is solid accent fill.
     let faint = || any(swatch(cell, colors.amber_faint, cell_radius).border(colors.amber_border));
     let solid = || any(swatch(cell, colors.amber, cell_radius));
     let grid = hugging_column::<S>(vec![
@@ -54,9 +51,7 @@ mod tests {
 
     #[test]
     fn the_grid_cells_tile_the_marks_content_box() {
-        // 2 cells + 1 gap + 2 paddings == the tile edge (the CSS grid's own
-        // arithmetic, asserted so a later tweak to one constant can't silently
-        // unbalance the tile).
+        // 2 cells + 1 gap + 2 paddings == the tile edge.
         assert!(
             (2.0 * MARK_CELL + MARK_GAP + 2.0 * spacing::BASE - MARK_SIZE).abs() < 1e-9,
             "cells must exactly fill the mark's content box"
