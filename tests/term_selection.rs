@@ -1,16 +1,13 @@
-//! Headless end-to-end coverage for the terminal's **selection, loupe and copy** —
-//! no GPU, no window, no device, and no touching the developer's real clipboard.
+//! Headless end-to-end coverage for the terminal's **selection, loupe and copy** — no GPU, no
+//! window, no device, and no touching the developer's real clipboard.
 //!
-//! Every test drives the real assembly (`term::terminal_surface`): a `RenderRoot`
-//! over the grid, its `GestureDetector`, and the Copy chip above it. The pure halves
-//! are unit-tested next to their code, so what is left to prove is the wiring — a
-//! **perfectly stationary** hold selects at the threshold (frust's threshold-fire
-//! long-press meeting its first real consumer: no `Move`, no `Up`, just paints past
-//! the threshold and the rebuild that drains the `Housekeeping` flush); the
-//! selection-click haptic fires **exactly once per gesture**; a clearing tap is
-//! checked *before* the focus claim, so it cannot also summon the keyboard; and
-//! `Copy` hands the exact expected string to the clipboard seam, read through an
-//! **injected sink**.
+//! Every test drives the real assembly (`term::terminal_surface`): a `RenderRoot` over the grid,
+//! its `GestureDetector`, and the Copy chip above it. The pure halves are unit-tested next to
+//! their code, so what's left to prove is the wiring — a **perfectly stationary** hold selects at
+//! the threshold (no `Move`, no `Up`, just paints past the threshold and the rebuild that drains
+//! the `Housekeeping` flush); the selection-click haptic fires **exactly once per gesture**; a
+//! clearing tap is checked *before* the focus claim, so it can't also summon the keyboard; and
+//! `Copy` hands the exact expected string to the clipboard seam, read through an **injected sink**.
 
 use std::cell::RefCell;
 use std::rc::Rc;

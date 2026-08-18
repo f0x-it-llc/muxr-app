@@ -1,16 +1,14 @@
 //! Headless behavior coverage for the real terminal grid
 //! (`muxr::features::terminal::presentation::term`) — no GPU, no window.
 //!
-//! Two shapes of test, because the grid has two kinds of behavior: **widget-level**,
-//! the `View`/`Widget` pair driven directly against [`GridScene`], a recorder
-//! keeping the four channels this widget paints into (`tests/support`'s `RecScene`
-//! records neither `stroke_line` nor plain clips, and a leaf widget needs no
-//! `RenderRoot` to lay out); and **mounted**, a one-widget `Component` in a real
-//! `RenderRoot` — the only way to exercise the feed pump's `on_cleanup` cancellation
-//! and the semantics pass, both properties of being *mounted*.
+//! Two shapes of test: **widget-level**, the `View`/`Widget` pair driven directly against
+//! [`GridScene`], a recorder keeping the four channels this widget paints into (`tests/support`'s
+//! `RecScene` records neither `stroke_line` nor plain clips, and a leaf widget needs no
+//! `RenderRoot` to lay out); and **mounted**, a one-widget `Component` in a real `RenderRoot` —
+//! the only way to exercise the feed pump's `on_cleanup` cancellation and the semantics pass,
+//! both properties of being *mounted*.
 //!
-//! Clock-driven behavior is **stepped**, never waited on: a paint at `t` is the
-//! caret at `t`.
+//! Clock-driven behavior is **stepped**, never waited on: a paint at `t` is the caret at `t`.
 
 use std::any::Any;
 use std::cell::RefCell;

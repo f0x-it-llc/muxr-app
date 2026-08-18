@@ -1,28 +1,16 @@
-//! Shared headless-test harness for muxr's integration tests: a GPU-free
-//! recording paint target ([`RecScene`], rounded-rect/stroke chrome so a test
-//! can locate and tap a button), a one-frame helper, a recording waker, the
-//! [`setup`] ambient-owner + mock-opt-in seam (see its own doc for the full
-//! seven-seam contract every suite runs through before `MuxrApp::init`), an
-//! async pump-poll loop, and generic pointer/keyboard-event helpers — factored
-//! so every `tests/*.rs` file (each its own crate root) can share it. Not
-//! every test uses every helper.
+//! Shared headless-test harness: a GPU-free recording paint target ([`RecScene`]), frame/pointer/
+//! keyboard helpers, and the [`setup`] ambient-owner + mock-opt-in seam every suite runs through
+//! before `MuxrApp::init`. Factored so every `tests/*.rs` file (each its own crate root) can
+//! share it; not every test uses every helper.
 //!
-//! **Overlay helpers.** [`frame`] always paints at `FrameTime::ZERO`, fine for
-//! static screens but frozen for anything driven off the frame clock —
-//! including the navigator's own push/pop transition, which **blocks all
-//! input** mid-flight. [`frame_at`] paints at an explicit time and [`settle`]
-//! drives a pushed overlay past its transition so a test can then tap it;
-//! [`long_press`] spans two paints so the paint-clock hold timer crosses its
-//! threshold. Each lays out at the default [`surface`] (800×600); the
-//! `*_sized` variants take it explicitly for a taller screen.
+//! [`frame`] paints at `FrameTime::ZERO`; use [`frame_at`]/[`settle`] for anything driven off the
+//! frame clock — a navigator push/pop transition **blocks all input** mid-flight. [`long_press`]
+//! spans two paints so the hold timer crosses its threshold.
 //!
-//! **Locating what to tap** has two routes: semantics
-//! ([`node_labels`]/[`node_values`]/[`node_center_by_label`]/etc.) reads
-//! labels/values/bounds off the accessibility tree and is the only way to
-//! assert *what a toast said*, but sees nothing inside a `Navigator`
-//! (`NavigatorWidget` forwards no child semantics); recorded geometry
-//! ([`largest`]/[`smallest`]/[`by_width`]/[`added`]) is what a test must use
-//! for a pushed page instead.
+//! To locate what to tap: semantics helpers (`node_labels`/`node_center_by_label`/etc.) read the
+//! accessibility tree and are the only way to assert what a toast said, but see nothing inside a
+//! `Navigator` (no child semantics forwarded); use the recorded-geometry helpers
+//! (`largest`/`smallest`/`by_width`/`added`) for a pushed page instead.
 #![allow(dead_code)]
 
 use std::any::Any;
@@ -45,9 +33,7 @@ use reactive_graph::owner::Owner;
 pub const W: f64 = 800.0;
 pub const H: f64 = 600.0;
 
-/// Geometry comparison tolerance, in logical px — what "the same recorded
-/// rect" means to [`by_width`]/[`same`] and to any suite matching painted
-/// chrome by size.
+/// Geometry-match tolerance in logical px — what "the same recorded rect" means to [`same`].
 pub const EPSILON: f64 = 0.5;
 
 /// The default surface every un-sized frame helper lays out at ([`W`]×[`H`]).
@@ -55,15 +41,9 @@ pub fn surface() -> Size {
     Size::new(W, H)
 }
 
-/// A [`WindowInsets`] carrying only an IME (`view_insets`) bottom occlusion —
-/// the layout input a shell's keyboard listener pushes (Android
-/// `WindowInsetsCompat.Type.ime()`, iOS `keyboardWillChangeFrame`), landing as
-/// `view_insets.bottom` (never `view_padding` — system bars are not the IME,
-/// see `frust_core::WindowInsets`'s own doc). Mirrors
-/// `frust-widgets`' `glyph::dialog` test module's own private `ime_insets`
-/// helper, transcribed here since that one isn't public. Publish it onto a
-/// harness's `RenderRoot` with [`RenderRoot::set_insets`] before the frame
-/// that should see the keyboard up.
+/// A [`WindowInsets`] with only an IME bottom occlusion (`view_insets.bottom`, never
+/// `view_padding` — system bars aren't the IME). Publish via [`RenderRoot::set_insets`] before
+/// the frame that should see the keyboard up.
 pub fn ime_bottom_inset(bottom: f64) -> WindowInsets {
     WindowInsets::new(
         WindowEdgeInsets::ZERO,
@@ -71,52 +51,28 @@ pub fn ime_bottom_inset(bottom: f64) -> WindowInsets {
     )
 }
 
-/// A GPU-free paint target: counts glyph runs (one per painted `Text` — enough
-/// to observe whether a page's placeholder text painted) and records
-/// rounded-rect chrome (each `TextInput` field and filled `Button`) so a test
-/// can locate a button to tap it, plus stroked outlines
-/// ([`RecScene::strokes`]) — a Glyph ghost/danger button has a **transparent**
-/// fill and is invisible in `rounded`, so its border is the only geometry it
-/// paints.
-///
-/// Two more channels, for chrome whose *colour* or whose *vector-ness* is the
-/// assertion (rather than its box):
-///
-/// - [`RecScene::fills`] — plain `fill_rect`s **with their colour**. A scrim is
-///   a full-coverage rect whose only frame-to-frame difference is its alpha, so
-///   a geometry-only recorder cannot tell a faded one from an opaque one (see
-///   [`alpha_of`]/[`fills_at`]).
-/// - [`RecScene::paths`] — filled vector paths, the one thing a
-///   `frust::icon` emits. "This affordance is a vector, not a font glyph" is
-///   exactly "it drew a path and contributed no run of its own".
-/// - [`RecScene::rounded_fills`] — [`RecScene::rounded`]'s colour- *and*
-///   radius-carrying sibling. Most chrome in this app is a **rounded** fill, so
-///   a suite asserting on the *tone* of a card (or on a radius that animates)
-///   needs the same channel `fills` gives plain rects.
-/// - [`RecScene::transforms`] — every pushed `Affine`. Each other channel
-///   records the geometry a widget *hands* the scene, which is its resting
-///   geometry when the widget animates by pushing a transform around its paint
-///   instead of by moving pod origins (`frust_glyph`'s sheet slides its panel
-///   that way). Recording the transform itself is the only way such a slide is
-///   observable at all here — this recorder deliberately does not compose it
-///   into the coordinates it stores, so every pre-existing suite reads
-///   unchanged.
+/// A GPU-free paint target. `glyph_runs` counts painted text runs; `rounded` records each
+/// `TextInput`/filled-`Button`'s box so a test can locate one to tap (a ghost/danger button has a
+/// **transparent** fill, so its `strokes` outline is the only geometry it paints). `fills`/
+/// `rounded_fills` carry colour (and radius) for tone assertions a box alone can't make — e.g. a
+/// scrim rect that only changes alpha frame to frame ([`alpha_of`]/[`fills_at`]). `paths` is
+/// filled vector geometry, the one thing `frust::icon` emits (a path with no glyph run).
+/// `transforms` is every pushed `Affine`, recorded standalone rather than composed into the other
+/// channels' coordinates — the only way to observe a widget that animates via a paint-time
+/// transform push (e.g. `frust_glyph`'s sliding sheet panel) instead of moving pod origins.
 #[derive(Default)]
 pub struct RecScene {
     pub glyph_runs: usize,
     pub rounded: Vec<(Point, Size)>,
-    /// `(origin, bounding-box size)` per stroked path — see the struct docs.
+    /// `(origin, bbox)` per stroked path.
     pub strokes: Vec<(Point, Size)>,
-    /// `(origin, size, colour)` per plain filled rect — see the struct docs.
+    /// `(origin, size, colour)` per plain filled rect.
     pub fills: Vec<(Point, Size, Color)>,
-    /// `(origin, bounding-box size)` per **filled** path — every `frust::icon`
-    /// paints exactly one.
+    /// `(origin, bbox)` per filled path — one per `frust::icon`.
     pub paths: Vec<(Point, Size)>,
-    /// `(origin, size, radius, colour)` per rounded fill, in paint order — see
-    /// the struct docs. Parallel to [`RecScene::rounded`], which stays
-    /// geometry-only so every existing suite reads unchanged.
+    /// `(origin, size, radius, colour)` per rounded fill, paint order.
     pub rounded_fills: Vec<(Point, Size, f64, Color)>,
-    /// Every `push_transform`, in paint order — see the struct docs.
+    /// Every `push_transform`, paint order.
     pub transforms: Vec<Affine>,
 }
 
@@ -148,9 +104,8 @@ impl PaintScene for RecScene {
     }
 }
 
-/// Every plain fill in `scene` covering exactly `(origin, size)` (within
-/// [`EPSILON`]), in paint order — how a test picks one band's fills out of a
-/// frame that fills plenty of others.
+/// Plain fills in `scene` matching `(origin, size)` within [`EPSILON`], paint order — how a test
+/// picks one band's fills out of a frame that fills plenty of others.
 pub fn fills_at(scene: &RecScene, origin: Point, size: Size) -> Vec<Color> {
     scene
         .fills
@@ -165,10 +120,8 @@ pub fn alpha_of(color: Color) -> f32 {
     color.components[3]
 }
 
-/// Every rounded fill in `scene` painted in exactly `color`, as
-/// `(origin, size, radius)` in paint order — [`fills_at`]'s sibling for chrome
-/// whose **tone** is the assertion (a terminal card's `GlyphInk` body, a
-/// selected pill's amber wash) and whose box is not.
+/// Rounded fills in `scene` painted exactly `color`, as `(origin, size, radius)`, paint order —
+/// [`fills_at`]'s sibling for chrome whose tone (not box) is the assertion.
 pub fn rounded_in(scene: &RecScene, color: Color) -> Vec<(Point, Size, f64)> {
     scene
         .rounded_fills
@@ -178,9 +131,8 @@ pub fn rounded_in(scene: &RecScene, color: Color) -> Vec<(Point, Size, f64)> {
         .collect()
 }
 
-/// The recorded rect with the largest area, or `None` when nothing was
-/// recorded — an overlay's own panel is always the biggest thing it paints, so
-/// this is how a test finds it without hardcoding geometry.
+/// The recorded rect with the largest area, or `None` if nothing was recorded — an overlay's own
+/// panel is always its biggest paint, so this finds it without hardcoding geometry.
 pub fn largest(rects: &[(Point, Size)]) -> Option<(Point, Size)> {
     rects
         .iter()
@@ -197,9 +149,8 @@ pub fn smallest(rects: &[(Point, Size)]) -> Option<(Point, Size)> {
         .min_by(|a, b| area(a).total_cmp(&area(b)))
 }
 
-/// The first recorded rect whose width matches `width` (within [`EPSILON`]) —
-/// the deterministic way to pick a full-content-width child (a dialog's text
-/// field) out of a frame.
+/// The first recorded rect whose width matches `width` (within [`EPSILON`]) — the deterministic
+/// way to pick a full-content-width child (a dialog's text field) out of a frame.
 pub fn by_width(rects: &[(Point, Size)], width: f64) -> Option<(Point, Size)> {
     rects
         .iter()
@@ -207,10 +158,9 @@ pub fn by_width(rects: &[(Point, Size)], width: f64) -> Option<(Point, Size)> {
         .find(|(_, size)| (size.width - width).abs() < EPSILON)
 }
 
-/// The rects in `after` that weren't in `before` — an overlay's own chrome,
-/// isolated from whatever screen is painting underneath it. Matching is
-/// one-to-one (each `before` rect is consumed by at most one `after` rect), so
-/// a screen that paints five identical rows stays five rows.
+/// The rects in `after` that weren't in `before` — an overlay's own chrome, isolated from the
+/// screen underneath it. Matching is one-to-one, so a screen painting five identical rows stays
+/// five rows rather than being consumed away.
 pub fn added(before: &[(Point, Size)], after: &[(Point, Size)]) -> Vec<(Point, Size)> {
     let mut remaining: Vec<(Point, Size)> = before.to_vec();
     let mut new = Vec::new();
@@ -261,12 +211,9 @@ pub fn frame_sized<S: 'static, V: View<S>>(
     frame_at_sized(root, logic, state, tcx, size, FrameTime::ZERO)
 }
 
-/// One frame painted at an explicit `frame_time` — [`frame`]'s
-/// clock-advancing sibling, for anything driven off `PaintCtx::frame_time`
-/// (navigator transitions, a dialog's enter staging, a toast's timeline).
-///
-/// Deliberately a separate function rather than a parameter on [`frame`]:
-/// every existing test calls `frame` and none of them should have to change.
+/// One frame painted at an explicit `frame_time` — [`frame`]'s clock-advancing sibling, for
+/// anything driven off `PaintCtx::frame_time` (navigator transitions, a dialog's enter staging,
+/// a toast's timeline).
 pub fn frame_at<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -300,16 +247,14 @@ pub fn frame_at_sized<S: 'static, V: View<S>>(
 /// navigator's own ~400ms preset).
 pub const SETTLE_MS: f64 = 2_000.0;
 
-/// Drive a freshly pushed (or popped) overlay past its transition: one frame
-/// seeding the clock at zero, one at [`SETTLE_MS`] (which *completes* the
-/// transition during paint), and one more whose **rebuild** finalizes it.
+/// Drive a freshly pushed/popped overlay past its transition: frames at 0 and [`SETTLE_MS`]
+/// (completing the transition during paint), then one more whose **rebuild** finalizes it.
 ///
-/// **Required before tapping a pushed page.** While a transition is in flight
-/// the navigator suppresses all routing to pages, so a tap sent too early is
-/// silently swallowed — and a transition isn't done when its last frame
-/// paints, but when the following rebuild finalizes it. That third frame is
-/// the difference between a test that taps a live sheet and one that taps a
-/// blocked navigator and passes for the wrong reason.
+/// **Required before tapping a pushed page**: mid-transition the navigator suppresses all
+/// routing (a tap sent too early is silently swallowed), and the transition isn't done when its
+/// last frame paints but when the *following rebuild* finalizes it — the third frame is what
+/// separates a test that taps a live sheet from one that taps a blocked navigator and passes for
+/// the wrong reason.
 pub fn settle<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -348,11 +293,9 @@ pub fn node_labels<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<Strin
         .collect()
 }
 
-/// Every semantics **value** the current tree carries, in pass order.
-/// [`node_labels`]'s other half: frust's `text` widget contributes a
-/// `Role::Label` node carrying its run in `value` (accesskit guidance), so
-/// "this name is on screen" is a value assertion, while a button/badge/alert
-/// title is a label one.
+/// Every semantics **value** the current tree carries, in pass order. [`node_labels`]'s other
+/// half: `text` contributes a `Role::Label` node carrying its run in `value` (accesskit
+/// guidance), so "this name is on screen" is a value assertion, a button/badge title a label one.
 pub fn node_values<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<String> {
     root.semantics()
         .nodes
@@ -370,9 +313,8 @@ pub fn node_center_by_label<S: 'static, V: View<S>>(
     node_center(root, |node| node.label() == Some(label))
 }
 
-/// The centers of **every** semantics node labelled `label`, in pass order —
-/// [`node_center_by_label`]'s all-matches sibling, for a screen that renders
-/// the same affordance once per row (an "Attach"/"Rename"/"Kill" per card).
+/// The centers of **every** node labelled `label` — [`node_center_by_label`]'s all-matches
+/// sibling, for a per-row affordance ("Attach"/"Rename"/"Kill" repeated per card).
 pub fn node_centers_by_label<S: 'static, V: View<S>>(
     root: &RenderRoot<S, V>,
     label: &str,
@@ -386,12 +328,9 @@ pub fn node_centers_by_label<S: 'static, V: View<S>>(
         .collect()
 }
 
-/// Every semantics **role** the current tree carries, in pass order.
-///
-/// [`node_labels`]/[`node_values`]' third sibling, for chrome whose presence is
-/// the assertion and whose text is not: a shell bar that is *hidden* on one
-/// route contributes no `Role::TitleBar` node at all, which is the cheapest
-/// honest read on "there is no bar here".
+/// Every semantics **role** the current tree carries, in pass order. [`node_labels`]/
+/// [`node_values`]'s third sibling, for chrome whose presence (not text) is the assertion: a
+/// shell bar hidden on one route contributes no `Role::TitleBar` node at all.
 pub fn node_roles<S: 'static, V: View<S>>(root: &RenderRoot<S, V>) -> Vec<Role> {
     root.semantics()
         .nodes
@@ -427,26 +366,17 @@ fn node_center<S: 'static, V: View<S>>(
     })
 }
 
-/// How far past the framework's long-press threshold
-/// (`frust_widgets::gesture`'s `LONG_PRESS_MS`, 500ms) [`long_press`] holds its
-/// synthetic press. Transcribed rather than imported: the constant is private
-/// to that module, and a test that held for *exactly* the threshold would be
-/// asserting on floating-point equality.
+/// How far past the framework's long-press threshold (`frust_widgets::gesture`'s
+/// `LONG_PRESS_MS`, 500ms) [`long_press`] holds — transcribed rather than imported (private
+/// constant), and past rather than at the threshold to avoid a float-equality assertion.
 pub const HELD_MS: f64 = 600.0;
 
 /// A full long-press at `p`: press, hold past [`HELD_MS`], release.
 ///
-/// **The two frames in the middle are the whole point.** A `GestureDetector`
-/// measures a hold across *paints* — the only pass carrying a clock — so the
-/// first frame records the press epoch and the second (at `HELD_MS`) marks the
-/// threshold as passed; the callback itself fires on the **next pointer
-/// event**, which is the `Up` below (`frust_widgets::gesture`'s
-/// "fire-on-release" contract). A test that sent Down/Up with no frames between
-/// them would produce an ordinary tap, and one that painted only once would
-/// never cross the threshold.
-///
-/// A press resolved as a long-press never *also* fires `on_tap`, so this is
-/// also how a test proves the tap path stayed untaken.
+/// The two middle frames are required: `GestureDetector` measures a hold across *paints* (the
+/// only pass with a clock), and its callback fires on the *next pointer event* — the `Up` below
+/// (`frust_widgets::gesture`'s fire-on-release contract). A long-press never also fires `on_tap`,
+/// so this doubles as proof the tap path stayed untaken.
 pub fn long_press<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -460,10 +390,9 @@ pub fn long_press<S: 'static, V: View<S>>(
     root.event(state, &pointer(PointerPhase::Up, p));
 }
 
-/// The centers of every semantics node whose **value** is `value`, in pass
-/// order — [`node_centers_by_label`]'s value-side sibling, for chrome composed
-/// out of plain `text` runs (a card's name, the dashed new-session row) rather
-/// than out of a labelled control.
+/// The centers of every semantics node whose **value** is `value`, in pass order —
+/// [`node_centers_by_label`]'s value-side sibling, for chrome built of plain `text` runs (a
+/// card's name, the dashed new-session row) rather than a labelled control.
 pub fn node_centers_by_value<S: 'static, V: View<S>>(
     root: &RenderRoot<S, V>,
     value: &str,
@@ -487,13 +416,9 @@ pub fn recording_waker() -> FrameWaker {
     })
 }
 
-/// A process-wide serialization guard for tests that touch process-global
-/// reactive state (the shared background executor's timing, `set_app_theme`,
-/// …). Two such tests in the same binary would otherwise race under default
-/// parallel `cargo test` — the known flake this harness avoids by having each
-/// such test take this lock first. Poisoning is ignored (a panicking test
-/// still releases a usable guard) so one failure doesn't cascade into
-/// spurious failures in the rest of the binary.
+/// A process-wide serialization guard for tests touching process-global reactive state (the
+/// shared executor's timing, `set_app_theme`, …) — avoids a known race under parallel
+/// `cargo test`. Poisoning is ignored so one panicking test doesn't cascade failures onto others.
 pub fn serial() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -501,43 +426,21 @@ pub fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// Installs the reactive runtime and an ambient owner for a test, mirroring the
-/// desktop shell's startup. Returns the ambient owner (held for the test's
-/// duration so component owners stay valid children of it). Required before any
-/// test that mounts a `Component` (`on_cleanup`/`spawn_local`/context all need an
-/// ambient owner + the installed executor).
+/// Installs the reactive runtime and an ambient owner (returned, held for the test's duration),
+/// mirroring desktop-shell startup. Required before mounting any `Component`. Also opts this
+/// process out of `MuxrApp::init`'s real platform-backed dependencies — an integration binary
+/// links the normal (non-`cfg(test)`) library build, so this is the one seam every `tests/*.rs`
+/// file goes through without editing each individually:
 ///
-/// Also opts this process out of the two real, platform-backed dependencies
-/// `MuxrApp::init` would otherwise construct — each through its own module's
-/// documented headless-test seam, and each for the same structural reason: an
-/// integration test binary links the *normal* build of the library, so neither
-/// module has a `cfg(test)` to branch on. Every suite calls this before
-/// `MuxrApp::init` ever runs, which is what makes it the one seam that reaches
-/// every `tests/*.rs` file without editing each one individually.
-///
-/// - `settings::di`'s `frust-shared-preferences` store — without the opt-out a
-///   suite reads and writes this dev machine's own NSUserDefaults (or, off
-///   Apple/Android, a JSON file), and leftover state from a *previous* run
-///   would make the suite order-dependent.
-/// - `connection`'s `muxrd` client — without the opt-out every `connect` in
-///   these suites would try to open a real socket, and the mock facts each
-///   suite asserts on (the sessions strip's `zellij 0.44.3 · 36ms`) have no
-///   server to come from.
-/// - each feature's own repository — with a mock-only connection there is no
-///   client for a `muxrd`-backed one to call through, so every read would fail
-///   "not connected" instead of answering the seeded facts the suites assert
-///   on.
-/// - `connect::di`'s two stores — the saved-server list (same
-///   leftover-state-between-runs problem the preferences store has) and the
-///   biometric-gated credential store, whose real gate answers "unavailable"
-///   permanently off-device and waits for a human on one. The mock is also the
-///   only way to drive the gate's outcome table at all.
-/// - `fonts`' download source and cache — the real source is plain HTTPS
-///   against `raw.githubusercontent.com`, so the **offline** source is the
-///   headless default: no suite can reach the network by omission (a suite
-///   that wants a catalog installs its own fixture source over this one), and
-///   the cache is pointed at a throwaway temp directory so nothing writes into
-///   this machine's own app data.
+/// - `settings`/`connect` `di`: mock preferences, auth tokens, saved-server list, and credential
+///   store — a real one would read/write this machine's own data and leak state across runs; the
+///   credential store's real biometric gate also answers "unavailable" off-device.
+/// - `connection`: mock `muxrd` client — no real socket opened; the mock supplies every fact
+///   these suites assert on (e.g. the sessions strip's `zellij 0.44.3 · 36ms`).
+/// - `sessions`/`terminal` `di`: mock repositories — a real one would fail "not connected"
+///   against the mock-only connection above.
+/// - `fonts`: offline download source (no suite reaches the network by omission) and a throwaway
+///   temp cache dir (nothing writes into this machine's real app data).
 pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
     muxr::connection::use_mock_connection_for_tests();
@@ -556,13 +459,9 @@ pub fn setup() -> Owner {
     ambient
 }
 
-/// Drives frames — pump the UI-thread local task queue, sleep 1ms, rebuild —
-/// until `done` returns `true`, starting from an already-rendered `scene`. This
-/// is the `examples/inbox` pump-poll pattern: the only sleep in this harness,
-/// bounded by a 5-second deadline so a stuck async task fails the test instead of
-/// hanging it.
-///
-/// Requires [`setup`] to have run (needs the installed [`ReactiveRuntime`]).
+/// Pumps the UI-thread task queue, sleeps 1ms, and rebuilds until `done()` returns `true` — the
+/// `examples/inbox` pump-poll pattern. The harness's only sleep; a 5s deadline fails the test
+/// instead of hanging it. Requires [`setup`] (needs the installed [`ReactiveRuntime`]).
 pub fn pump_until<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -586,10 +485,8 @@ pub fn pump_until<S: 'static, V: View<S>>(
     scene
 }
 
-/// Pumps and rebuilds `count` more frames unconditionally — for tests that need
-/// to drive frames forward without waiting on a specific condition.
-///
-/// Requires [`setup`] to have run.
+/// Pumps and rebuilds `count` more frames unconditionally, for tests that drive frames forward
+/// without waiting on a specific condition. Requires [`setup`].
 pub fn pump_frames<S: 'static, V: View<S>>(
     root: &mut RenderRoot<S, V>,
     logic: &mut impl FnMut(&mut S) -> V,
@@ -616,9 +513,8 @@ pub fn pointer(phase: PointerPhase, p: Point) -> InputEvent {
     })
 }
 
-/// A full tap (Down then Up) at `p` — fires a `Button`'s `on_press` only when
-/// both land inside its bounds (see `docs/CODE_STANDARDS.md`'s
-/// "fire on up-inside" convention).
+/// A full tap (Down then Up) at `p` — fires a `Button`'s `on_press` only when both land inside
+/// its bounds (`docs/CODE_STANDARDS.md`'s "fire on up-inside" convention).
 pub fn tap<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, p: Point) {
     root.event(state, &pointer(PointerPhase::Down, p));
     root.event(state, &pointer(PointerPhase::Up, p));

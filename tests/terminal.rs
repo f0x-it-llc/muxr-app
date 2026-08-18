@@ -1,29 +1,25 @@
-//! Headless behavior coverage for the `/terminal` screen
-//! (`src/features/terminal/**`) — no GPU, no window: a `RenderRoot` over the real
-//! page builder, driven through `tests/support`.
+//! Headless behavior coverage for the `/terminal` screen (`src/features/terminal/**`) — no GPU,
+//! no window: a `RenderRoot` over the real page builder.
 //!
-//! [`Harness`] mounts the screen as the **bottom layer of a `Stack`** with a
-//! navigator over it, because `NavigatorWidget` contributes no
-//! `Widget::semantics`: a screen mounted *inside* one is invisible to the
-//! accessibility tree. Two navigators, deliberately — the **mounted** one stands
-//! in for the app's root overlay host, which is what the screen pushes its
-//! overlays through, so each is exercised end to end and located by painted
-//! geometry; the **record-only** one carries the app's `Nav` handle, so pushing
-//! `/terminal?session=s-1` records that query in the route-meta mirror (the only
-//! way this screen learns its session id) while the page op it enqueues is never
-//! drained. Without the split, that push would build a second terminal screen
-//! inside the mounted navigator and the two would fight over the published chrome.
+//! [`Harness`] mounts the screen as the **bottom layer of a `Stack`** with a navigator over it,
+//! because `NavigatorWidget` contributes no `Widget::semantics`: a screen mounted *inside* one is
+//! invisible to the accessibility tree. Two navigators, deliberately: the **mounted** one stands
+//! in for the app's root overlay host the screen pushes overlays through (exercised end to end,
+//! located by painted geometry); the **record-only** one carries the app's `Nav` handle, so
+//! pushing `/terminal?session=s-1` records that query in the route-meta mirror (the only way
+//! this screen learns its session id) while the page op it enqueues is never drained. Without the
+//! split, that push would build a second terminal screen inside the mounted navigator and the
+//! two would fight over the published chrome.
 //!
-//! That mirror also makes two invisible facts assertable:
-//! `Nav::bar().fullscreen` is "the shell's bar has been told to get out of the
-//! way", and `Nav::bar().meta` going `None` is "the terminal route was popped".
+//! That mirror also makes two invisible facts assertable: `Nav::bar().fullscreen` is "the shell's
+//! bar has been told to get out of the way", and `Nav::bar().meta` going `None` is "the terminal
+//! route was popped".
 //!
-//! A menu row is reachable neither by semantics nor by a rect of its own, but its
-//! contract is exact: a selection pops the menu page with `PopResult::of(index)`,
-//! so [`Harness::choose_menu_row`] pops with that result, running the very
-//! `on_result` the widget would have. The card's reveal, caret and fullscreen
-//! transition advance off `PaintCtx::frame_time`, so they are **stepped** with
-//! [`support::frame_at`] rather than waited on.
+//! A menu row is reachable neither by semantics nor by a rect of its own, but its contract is
+//! exact: a selection pops the menu page with `PopResult::of(index)`, so
+//! [`Harness::choose_menu_row`] pops with that result, running the very `on_result` the widget
+//! would have. The card's reveal, caret, and fullscreen transition advance off
+//! `PaintCtx::frame_time`, so they are **stepped** with [`support::frame_at`] rather than waited on.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -91,17 +87,15 @@ const EDIT_LABEL: &str = "Rename";
 /// transcribed — the two numbers fullscreen animates to zero.
 const WRAP_PAD: f64 = 14.0;
 const CARD_RADIUS: f64 = 22.0;
-/// The wrap padding's wide-window target past
-/// `crate::responsive::WIDE_BREAKPOINT_PX`, transcribed because it is private to
-/// `presentation::pages` — the card stays full-bleed at any width; only the space
+/// Wrap padding's wide-window target past `crate::responsive::WIDE_BREAKPOINT_PX` (transcribed,
+/// private to `presentation::pages`) — the card stays full-bleed at any width; only the space
 /// around it grows from [`WRAP_PAD`]'s 14px to this.
 const WIDE_WRAP_PAD: f64 = 22.0;
-/// The narrow/portrait window's **top-only** bar-to-card gap, transcribed
-/// (private to `presentation::pages`) — the same step-up the wide branch
-/// already applied on all four sides.
+/// The narrow/portrait window's **top-only** bar-to-card gap (transcribed, private) — the same
+/// step-up the wide branch already applied on all four sides.
 const PORTRAIT_TOP_GAP: f64 = WIDE_WRAP_PAD - WRAP_PAD;
-/// `presentation::widgets::status`' own status-row height, transcribed: the 28px
-/// expand button plus its tightened 6px padding either side.
+/// `presentation::widgets::status`'s status-row height (transcribed): the 28px expand button
+/// plus its tightened 6px padding either side.
 const STATUS_ROW_H: f64 = 40.0;
 /// `.cur{width:7px;height:13px}` — the caret's own box, which is how a frame
 /// is asked whether the caret is lit.
@@ -118,36 +112,30 @@ const ROW_DETACH: usize = 2;
 /// initial page.
 const REST_DEPTH: usize = 1;
 
-/// `presentation::pages`' own `SHEET_CLOSE_DELAY`, transcribed (it is private
-/// there, and a test that imported it could not catch it changing): how long a
-/// tab pill leaves the sheet up so the selection visibly moves first.
+/// `presentation::pages`'s `SHEET_CLOSE_DELAY` (transcribed, private): how long a tab pill
+/// leaves the sheet up so the selection visibly moves first.
 const CLOSE_DELAY: Duration = Duration::from_millis(260);
 
-/// What a landed detach says, transcribed from `presentation::pages`.
+/// What a landed detach says (transcribed from `presentation::pages`).
 const DETACHED_TOAST: &str = "detached";
 
-/// …and what a control a read-only credential may not use says instead, same
-/// provenance.
+/// What a control a read-only credential may not use says instead, same provenance.
 const READ_ONLY_TOAST: &str = "read-only session";
 
-/// `muxr::failure::AppFailure::Internal`'s own `user_message()`, transcribed —
-/// what every one of the sheet's three create affordances shows once the
-/// repository answers, since `MockTerminalRepository` deliberately leaves
-/// `create_space`/`new_tab`/`new_pane` at `TerminalRepository`'s own "unsupported"
-/// default. Seeing this toast is this suite's proof an affordance actually reached
-/// the repository.
+/// `AppFailure::Internal`'s `user_message()` (transcribed) — what all three of the sheet's create
+/// affordances show once the repository answers, since `MockTerminalRepository` leaves
+/// `create_space`/`new_tab`/`new_pane` at `TerminalRepository`'s "unsupported" default. Seeing
+/// this toast is this suite's proof an affordance actually reached the repository.
 const INTERNAL_FAILURE_TOAST: &str = "Something went wrong — please try again.";
 
-/// `presentation::widgets::panes`' own `NEW_PANE_LABEL` (private there) — the new-pane
-/// row's label, and the only way this suite locates it: the row paints a
-/// **transparent**-filled, dashed-bordered box, so it shows up in neither
-/// [`RecScene::rounded`] nor [`RecScene::strokes`], and is found by its accessible
-/// *value* instead.
+/// `presentation::widgets::panes`'s `NEW_PANE_LABEL` (private) — the new-pane row's label, and
+/// the only way this suite locates it: the row paints a **transparent**-filled, dashed-bordered
+/// box (shows up in neither [`RecScene::rounded`] nor [`RecScene::strokes`]), found by its
+/// accessible *value* instead.
 const NEW_PANE_LABEL: &str = "new pane \u{b7} long-press for floating";
 
-/// `presentation::pages`' own `ADD_SPACE_LABEL`/`ADD_TAB_LABEL`, private there —
-/// the two full-size create rows' dim label runs, found the identical way
-/// [`NEW_PANE_LABEL`] is, and for the same reason.
+/// `presentation::pages`'s `ADD_SPACE_LABEL`/`ADD_TAB_LABEL` (private) — the two full-size
+/// create rows' dim label runs, found the same way [`NEW_PANE_LABEL`] is.
 const ADD_SPACE_LABEL: &str = "new space";
 const ADD_TAB_LABEL: &str = "new tab";
 
@@ -699,10 +687,9 @@ fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
     rows
 }
 
-/// Which pane row wears the focused mark — its amber mark box and its `focused`
-/// chip — or `None` when no row does. A selected pill shares that same amber-faint
-/// wash, so the row is found by *containment*: the chip and the mark box are the
-/// only amber-faint tiles that sit inside a [`pane_rows`] rect.
+/// Which pane row wears the focused mark (its amber mark box + `focused` chip), or `None`. A
+/// selected pill shares the same amber-faint wash, so the row is found by *containment*: the
+/// chip and mark box are the only amber-faint tiles inside a [`pane_rows`] rect.
 fn focused_row(scene: &RecScene) -> Option<usize> {
     let theme = frust_glyph::baseline();
     let faint = theme.scheme().primary.with_alpha(AMBER_FAINT);
@@ -723,9 +710,8 @@ fn inside((origin, size): (Point, Size), point: Point) -> bool {
         && point.y <= origin.y + size.height
 }
 
-/// The [`EDIT_LABEL`]-labelled icon whose center falls inside `rect` — a chip's
-/// trailing edit icon, located by *containment* rather than a fixed index into
-/// every "Rename" node on the sheet (there is one per renamable chip).
+/// The [`EDIT_LABEL`]-labelled icon whose center falls inside `rect` — a chip's trailing edit
+/// icon, located by *containment* rather than a fixed index (one "Rename" node per renamable chip).
 fn edit_icon_in(root: &RenderRoot<AppState, AnyView<AppState>>, rect: (Point, Size)) -> Point {
     node_centers_by_label(root, EDIT_LABEL)
         .into_iter()
@@ -733,18 +719,16 @@ fn edit_icon_in(root: &RenderRoot<AppState, AnyView<AppState>>, rect: (Point, Si
         .unwrap_or_else(|| panic!("no {EDIT_LABEL:?} icon inside {rect:?}"))
 }
 
-/// A point inside `rect`'s own leading edge — reliably inside a chip's *main*
-/// tap region regardless of label width: `presentation::widgets::pills::pill`
-/// puts its icon at the trailing edge, so `rect`'s own [`center`] can land on
-/// it for a short enough label.
+/// A point inside `rect`'s leading edge — reliably inside a chip's *main* tap region regardless
+/// of label width (`pills::pill` puts its icon at the trailing edge, where [`center`] could land
+/// for a short label).
 fn leading_point((origin, size): (Point, Size)) -> Point {
     Point::new(origin.x + 8.0, origin.y + size.height / 2.0)
 }
 
-/// Focus a just-opened [`name_input_dialog`](muxr::ui::dialogs::name_input_dialog)'s
-/// one field, diffed against `under` (the frame painted just before it opened): a
-/// field with no recorded focus routes neither a keystroke nor the submitting
-/// Enter.
+/// Focus a just-opened [`name_input_dialog`](muxr::ui::dialogs::name_input_dialog)'s one field,
+/// diffed against `under` (the frame painted before it opened) — an unfocused field routes
+/// neither a keystroke nor the submitting Enter.
 fn tap_dialog_field(h: &mut Harness, under: &RecScene) {
     let dialog_frame = h.settle();
     let dialog = added(&under.rounded, &dialog_frame.rounded);
@@ -753,11 +737,10 @@ fn tap_dialog_field(h: &mut Harness, under: &RecScene) {
     h.tap(center(field));
 }
 
-/// The sheet's pill rects, in reading order (top to bottom, then left to right).
-/// Every pill is the same height — one 11px run inside 8px of vertical padding —
-/// and there are nine of them, so the **most common height** among the sheet's own
-/// rects is the pills' and nothing else's. Picking them that way keeps the locator
-/// independent of the type role's line box, a theme number rather than a mock one.
+/// The sheet's pill rects, in reading order (top to bottom, then left to right). Every pill is
+/// the same height, and there are nine of them, so the **most common height** among the sheet's
+/// rects is the pills' and nothing else's — independent of the type role's line box, a theme
+/// number rather than a mock one.
 fn pills(added: &[(Point, Size)]) -> Vec<(Point, Size)> {
     let mut heights: Vec<(f64, usize)> = Vec::new();
     for (_, size) in added {
@@ -1506,13 +1489,10 @@ fn the_scrim_dismisses_the_sheet_too() {
     assert_eq!(h.depth(), REST_DEPTH);
 }
 
-// 6b — the sheet closes once, whatever happens during the close beat.
-//
-// A pane row leaves the sheet up for `CLOSE_DELAY` so the selection visibly
-// moves first, and the sheet stays fully interactive for that whole beat. Every
-// test here fires a *second* dismissal inside it and asserts the same two
-// things: the sheet closes once, and the page under it is still there
-// afterwards. Before `ui::sheet`'s dismissal gate, each of these popped it.
+// The sheet closes once, whatever happens during the close beat. A pane row leaves it up for
+// `CLOSE_DELAY` so the selection visibly moves first, staying fully interactive that whole beat.
+// Every test below fires a *second* dismissal inside it and asserts the sheet closes once and the
+// page under it survives — before `ui::sheet`'s dismissal gate, each of these popped it too.
 
 #[test]
 fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
@@ -1524,8 +1504,8 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     let (before, after) = h.open_sheet();
     assert_eq!(h.depth(), floor + 1, "the sheet is up over the route");
     let sheet = added(&before.rounded, &after.rounded);
-    // Browse `1 btop`, commit its first pane, then — inside the same close
-    // beat — browse `2 minefit-api` and commit its first pane too.
+    // Browse `1 btop`, commit its first pane, then — inside the same close beat — browse
+    // `2 minefit-api` and commit its first pane too.
     h.tap(center(pills(&sheet)[0]));
     h.settle();
     h.tap_pane_row(0);
@@ -1533,16 +1513,15 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     h.settle();
     h.tap_pane_row(0);
 
-    // The commit is single-flight, so the second row is *dropped* rather than
-    // raced against the first: the first selection is the one that lands…
+    // The commit is single-flight, so the second row is *dropped* rather than raced against the
+    // first — the first selection is the one that lands…
     h.pump_until_values("the btop tab", |values| {
         values.iter().any(|v| v == BTOP_TITLE)
     });
-    // …one close fires (`<=`, not `==`: two stacked closes can land in the
-    // same rebuild, and this test must report *that* rather than time out)…
+    // …one close fires (`<=`, not `==`: two stacked closes can land in the same rebuild, and this
+    // test must report *that* rather than time out)…
     h.pump_until_closed("the sheet to close", |h| h.depth() <= floor);
-    // …and the dropped row, given every chance to wake, lands on nothing: it
-    // never reached the controller, so it never took a close ticket either.
+    // …and the dropped row, given every chance to wake, lands on nothing.
     h.pump_for(2 * CLOSE_DELAY);
 
     assert_eq!(
@@ -1726,13 +1705,12 @@ fn a_second_detach_while_the_first_is_in_flight_pops_once() {
 }
 
 // ---------------------------------------------------------------------------
-// 7b — a read-only credential
+// A read-only credential
 // ---------------------------------------------------------------------------
 
-/// Flipping `muxr::connection::ConnectionController::is_read_only` directly is how
-/// a suite reaches this state: the mock backend always answers
-/// `is_read_only: false`, so no mock connect could produce one — the same seam
-/// `tests/sessions.rs` and `tests/settings.rs` already use.
+/// Flips `ConnectionController::is_read_only` directly — the mock backend always answers
+/// `false`, so no mock connect could produce one. Same seam `tests/sessions.rs`/`tests/settings.rs`
+/// already use.
 fn make_read_only(h: &mut Harness) {
     expect_connection_controller().is_read_only.set(true);
     h.frame();
@@ -2114,15 +2092,12 @@ fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
     );
 }
 
-// 11 — the sheet's three create affordances.
-//
-// Request shapes are already pinned at the repository/mock-server level, and the
-// happy-path reload/select-by-label flow at the controller level —
-// `MockTerminalRepository` deliberately leaves these three verbs at
-// `TerminalRepository`'s shared "unsupported" default — so what is left to pin
-// here is *flow*: both the space and tab rows open a dialog, the space one keeps
-// its non-blank guard while the tab one deliberately does not, and the sheet
-// stays up around all three regardless of how the repository answers.
+// The sheet's three create affordances. Request shapes are already pinned at the
+// repository/mock-server level, and the happy-path reload/select-by-label flow at the controller
+// level (`MockTerminalRepository` leaves these three verbs at the shared "unsupported" default),
+// so what's left to pin here is *flow*: both the space and tab rows open a dialog, the space one
+// keeps its non-blank guard while the tab one deliberately doesn't, and the sheet stays up
+// around all three regardless of how the repository answers.
 
 #[test]
 fn the_add_space_row_opens_an_empty_dialog_and_a_typed_label_reaches_the_repository() {
@@ -2302,14 +2277,11 @@ fn a_long_press_on_the_new_pane_row_also_opens_no_dialog_and_leaves_the_sheet_up
     assert_eq!(h.depth(), floor, "…and the sheet stayed up");
 }
 
-// 12 — every chip's trailing edit icon.
-//
-// Request shapes and the reload each verb settles with are pinned at the
-// controller level; `MockTerminalRepository` leaves the three renames at the
-// shared "unsupported" default — so what these pin is *flow* and, above all,
-// that the icon's own tap region is disjoint from the chip's main one: tapping
-// it opens a prefilled rename dialog and never also selects/browses/commits,
-// while a plain tap on the rest of the same chip still does exactly that.
+// Every chip's trailing edit icon. Request shapes and the settled reload are pinned at the
+// controller level (`MockTerminalRepository` leaves the three renames at the shared
+// "unsupported" default), so what these pin is *flow* and, above all, that the icon's tap
+// region is disjoint from the chip's main one: tapping it opens a prefilled rename dialog and
+// never also selects/browses/commits, while a plain tap on the rest of the chip still does.
 
 #[test]
 fn a_space_pills_edit_icon_renames_it_without_selecting_it() {

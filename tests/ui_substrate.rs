@@ -1,28 +1,21 @@
-//! Headless coverage for the shared presentation substrate (`src/ui/dialogs.rs`,
-//! `src/ui/sheet.rs`, `src/ui/toasts.rs`) — no GPU, no window: a `RenderRoot`
-//! over a bare navigator, driven through `tests/support`.
+//! Headless coverage for the shared presentation substrate (`src/ui/dialogs.rs`, `src/ui/sheet.rs`,
+//! `src/ui/toasts.rs`) — no GPU, no window: a `RenderRoot` over a bare navigator.
 //!
-//! Every dialog/sheet here is a **pushed navigator page**, so each test follows
-//! the same three beats: push it, [`support::settle`] it past the navigator's
-//! input-blocking transition, then tap/type.
+//! Every dialog/sheet here is a **pushed navigator page**, so each test follows the same three
+//! beats: push it, [`support::settle`] it past the navigator's input-blocking transition, then
+//! tap/type.
 //!
-//! **Why taps are addressed by painted geometry.** `NavigatorWidget`
-//! contributes no `Widget::semantics` and forwards none of its pages', so
-//! **nothing inside a pushed page appears in the accessibility tree** — a
-//! label-addressed tap can't find a dialog button. The overlay tests
-//! therefore locate their targets in the recorded paint output instead
-//! (`support`'s [`largest`]/[`smallest`]/[`by_width`]), addressing each by the
-//! one geometric property the widget's own layout fixes: the panel is the
-//! biggest thing an overlay paints, a dialog's field spans its full content
-//! width, and the danger action is the smallest stroked outline. The toast
-//! tests, mounting the host without a navigator, use semantics directly (and
-//! are the ones that assert message *text*).
+//! **Why taps are addressed by painted geometry.** `NavigatorWidget` contributes no
+//! `Widget::semantics` and forwards none of its pages' — **nothing inside a pushed page appears
+//! in the accessibility tree**, so a label-addressed tap can't find a dialog button. The overlay
+//! tests locate targets in the recorded paint output instead (`support`'s
+//! [`largest`]/[`smallest`]/[`by_width`]), addressing each by the one geometric property its
+//! layout fixes: the panel is the biggest paint, a dialog's field spans its full content width,
+//! the danger action is the smallest stroked outline. The toast tests mount the host without a
+//! navigator and use semantics directly (and are the ones asserting message *text*).
 //!
-//! `State` is a small test-local struct, not `muxr::AppState`: all three
-//! helpers are generic over the app state so a screen (or a test) brings its
-//! own, each taking nothing but the navigator to push its page onto. In the
-//! app that navigator is the root overlay host (`muxr::AppState::overlays`);
-//! here it is this harness's own controller.
+//! `State` is a small test-local struct, not `muxr::AppState`: all three helpers are generic over
+//! the app state, each taking nothing but the navigator to push its page onto.
 
 use frust::{
     AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator, text,
@@ -95,10 +88,9 @@ impl Harness {
         Self::themed(None)
     }
 
-    /// Mount under `theme` — what the sheet-staging tests need, since the
-    /// staging's durations, easings and `reduce_motion` collapse are all theme
-    /// reads (an unthemed mount stages on the widget's own transcribed Glyph
-    /// fallbacks instead, which is what every other test here runs on).
+    /// Mount under `theme` — the sheet-staging tests need this since durations, easings, and
+    /// `reduce_motion` are all theme reads (an unthemed mount stages on transcribed Glyph
+    /// fallbacks instead, what every other test here runs on).
     fn themed(theme: Option<Theme>) -> Self {
         let controller: NavigatorController<State> = NavigatorController::new();
         let logic_controller = controller.clone();
@@ -140,10 +132,9 @@ impl Harness {
         )
     }
 
-    /// Settle, then deliver a pop's result: the navigator flushes a pusher's
-    /// `on_result` at the start of the first event pass **after** the pop's
-    /// rebuild, so a harmless `Move` is what actually hands the answer to app
-    /// state.
+    /// Settle, then deliver a pop's result: the navigator flushes a pusher's `on_result` at the
+    /// start of the first event pass **after** the pop's rebuild, so a harmless `Move` is what
+    /// actually hands the answer to app state.
     fn flush(&mut self) {
         self.settle();
         self.settle();
@@ -175,11 +166,9 @@ impl Harness {
     }
 }
 
-/// The overlay panel in `scene` — the biggest surface it filled.
-///
-/// Both channels, because the two overlays paint their panel differently: a
-/// dialog's is a plain rounded rect, while the Glyph sheet's is a *path* (only
-/// its top corners are rounded, which `fill_rounded_rect` cannot express).
+/// The overlay panel in `scene` — the biggest surface it filled. Checks both channels: a dialog's
+/// panel is a plain rounded rect, the Glyph sheet's is a *path* (only its top corners are
+/// rounded, which `fill_rounded_rect` can't express).
 fn panel(scene: &RecScene) -> (Point, Size) {
     let mut candidates = scene.rounded.clone();
     candidates.extend(scene.paths.iter().copied());
@@ -220,9 +209,8 @@ fn confirm_dialog_fires_on_confirm_and_closes() {
     let scene = open_confirm(&mut h);
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
 
-    // The danger confirm action paints a transparent fill and an error-colored
-    // border, so it is the smallest stroked outline on screen (the panel's own
-    // border being the other one).
+    // Danger action: transparent fill + error-colored border, so it's the smallest stroked
+    // outline on screen (the panel's own border being the other one).
     let confirm = smallest(&scene.strokes).expect("the danger action strokes its border");
     assert!(
         confirm.1.width < panel(&scene).1.width,
@@ -242,8 +230,7 @@ fn confirm_dialog_scrim_tap_closes_without_running_the_action() {
     let mut h = Harness::mount();
 
     open_confirm(&mut h);
-    // Press and release on the scrim: the widget plays its staged exit, then
-    // pops with an empty result — which reads as "cancelled", so nothing runs.
+    // Scrim tap: staged exit, then pop with an empty result — reads as "cancelled".
     h.tap(SCRIM_POINT);
     h.flush();
 
@@ -278,7 +265,7 @@ fn name_input_dialog_submits_the_typed_text() {
     let scene = open_name_input(&mut h);
     h.tap(center(content_child(&scene)));
     h.type_text("dev");
-    // A single-line field submits on Enter, popping the page with its text.
+    // A single-line field submits on Enter.
     h.press(NamedKey::Enter);
     h.flush();
 
@@ -297,8 +284,7 @@ fn name_input_dialog_submits_from_its_button_too() {
     h.tap(center(content_child(&scene)));
     h.type_text("dev");
 
-    // Typing "enables" the submit: it flips from the ghost style (which paints
-    // nothing at all) to the filled primary one, so a new filled rect appears.
+    // Typing "enables" the submit: ghost style (paints nothing) flips to filled primary.
     let scene = h.settle();
     assert!(
         scene.rounded.len() > filled_while_empty,
@@ -323,14 +309,14 @@ fn name_input_dialog_blocks_an_empty_submit() {
     let scene = open_name_input(&mut h);
     let field = center(content_child(&scene));
 
-    // Enter on an untouched (empty) field: nothing submits, nothing closes.
+    // Enter on an untouched (empty) field: nothing submits or closes.
     h.tap(field);
     h.press(NamedKey::Enter);
     h.flush();
     assert!(h.state.names.is_empty(), "an empty name never submits");
     assert_eq!(h.depth(), 2, "…and the dialog stays up");
 
-    // Whitespace only is still empty — and still paints no enabled submit.
+    // Whitespace only is still empty.
     h.tap(field);
     h.type_text("   ");
     let scene = h.settle();
@@ -354,9 +340,8 @@ fn name_input_dialog_blocks_an_empty_submit() {
 /// settled frame.
 fn open_sheet(h: &mut Harness) -> RecScene {
     show_sheet(&h.controller, |_sheet| {
-        // A filled button, not bare text: it paints a rect (which is what
-        // "the body rendered" is observed through here) and its press is the
-        // proof that events reach the body at all.
+        // A filled button, not bare text: paints a rect ("rendered"), and its press proves
+        // events reach the body at all.
         any(button("Split pane right", |state: &mut State| {
             state.confirmed += 1
         }))
@@ -385,15 +370,12 @@ fn handle_point(scene: &RecScene) -> Point {
     Point::new(origin.x + size.width / 2.0, origin.y + 10.0)
 }
 
-/// How far below its resting place the panel is painting this frame.
-///
-/// The Glyph sheet slides by pushing **one** translate around its panel and
-/// painting its scrim outside it (that split is the whole point of the
-/// staging), so the recorded panel rect never moves and this transform *is*
-/// the slide — see `support::RecScene`'s own docs.
-/// The largest y translation of the frame, rather than "the only one": a page
-/// still inside its own push is wrapped in the navigator's transform too, which
-/// is the identity here (the sheet is pushed with no page transition at all).
+/// How far below its resting place the panel is painting this frame. The Glyph sheet slides by
+/// pushing **one** translate around its panel and painting its scrim outside it, so the recorded
+/// panel rect never moves and this transform *is* the slide (`support::RecScene`'s docs). Takes
+/// the largest y translation rather than "the only one": a page still inside its own push is
+/// wrapped in the navigator's transform too (identity here, since the sheet has no page
+/// transition).
 fn panel_offset(scene: &RecScene) -> f64 {
     scene
         .transforms
@@ -421,14 +403,12 @@ fn sheet_opens_renders_its_body_and_dismisses_on_a_scrim_tap() {
         "the body renders inside the panel, inset by its gutter: body {body:?}, \
          panel {panel_origin:?}/{panel_size:?}"
     );
-    // Edge to edge: a Glyph sheet's panel spans the viewport (the 640dp
-    // Material cap went with the app's own hand-rolled chrome).
+    // Edge to edge: a Glyph sheet's panel spans the viewport.
     assert!(
         (panel_size.width - support::W).abs() < EPSILON && panel_origin.x.abs() < EPSILON,
         "the panel spans the whole width: {panel_origin:?}/{panel_size:?}"
     );
-    // Bottom-anchored, and flush: only the panel's top corners are rounded, so
-    // nothing is painted past the bottom edge to hide a rounding with.
+    // Bottom-anchored and flush: only the panel's top corners are rounded.
     assert!(
         (panel_origin.y + panel_size.height - support::H).abs() < EPSILON,
         "…anchored to the bottom edge: {panel_origin:?}/{panel_size:?}"
@@ -452,17 +432,16 @@ fn a_tap_on_the_sheet_panel_never_dismisses_it() {
 
     let scene = open_sheet(&mut h);
 
-    // First: the body's own button fires — which is what proves this test
-    // isn't passing vacuously on a navigator that swallowed every event.
+    // First: the body's own button fires — proves this test isn't passing vacuously on a
+    // navigator that swallowed every event.
     h.tap(center(content_child(&scene)));
     h.flush();
     assert_eq!(h.state.confirmed, 1, "the body's button is live");
     assert_eq!(h.depth(), 2, "pressing the body doesn't close the sheet");
 
-    // Then the regression a plain `Align`-in-`Stack` composition has: a press
-    // on the panel's own *background* falling through to the scrim behind it.
-    // The drag-handle strip is panel with no control under it, and a press
-    // that goes nowhere (no travel before its release) leaves the sheet up.
+    // The regression a plain `Align`-in-`Stack` composition has: a press on the panel's own
+    // background falling through to the scrim behind it. The drag-handle strip has no control
+    // under it, and a press with no travel before release leaves the sheet up.
     let scene = h.settle();
     h.tap(handle_point(&scene));
     h.flush();
@@ -479,8 +458,7 @@ fn a_drag_down_from_the_handle_dismisses_the_sheet() {
     let scene = open_sheet(&mut h);
     let (_, panel_size) = panel(&scene);
     let start = handle_point(&scene);
-    // Past the half-panel-height threshold the Glyph sheet dismisses on: the
-    // release is what decides, so the drag is Down → Move → Up.
+    // Past the half-panel-height dismiss threshold; the release decides, so Down → Move → Up.
     let end = Point::new(start.x, start.y + panel_size.height * 0.75);
 
     h.root
@@ -528,9 +506,8 @@ fn escape_dismisses_the_sheet() {
     let mut h = Harness::mount();
 
     let scene = open_sheet(&mut h);
-    // A press on the handle strip claims focus for the sheet itself (and hits
-    // no control), which is the chain `Escape` then travels: content holding
-    // the deeper focus path would get first crack at the key instead.
+    // A press on the handle strip claims focus for the sheet itself (no control hit), the chain
+    // `Escape` then travels — content holding the deeper focus path would get first crack instead.
     h.tap(handle_point(&scene));
     h.press(NamedKey::Escape);
     h.flush();
@@ -544,8 +521,7 @@ fn a_duplicate_close_pops_the_sheet_once_and_leaves_the_page_under_it_alone() {
     let _ambient = setup();
     let mut h = Harness::mount();
 
-    // A page under the sheet to be wrongly popped — in the app that is
-    // whatever overlay (or route) the sheet went up over.
+    // A page under the sheet to be wrongly popped — the overlay/route the sheet went up over.
     h.controller.push(|| any(text("under the sheet")));
     h.settle();
     assert_eq!(h.depth(), 2);
@@ -553,8 +529,8 @@ fn a_duplicate_close_pops_the_sheet_once_and_leaves_the_page_under_it_alone() {
     let sheet = open_sheet_with_handle(&mut h);
     assert_eq!(h.depth(), 3, "the sheet is pushed over it");
 
-    // The defect the gate exists for: a pop lands a rebuild after it is
-    // enqueued, so for one whole frame a second closer can still fire.
+    // The defect this gate exists for: a pop lands a rebuild after it's enqueued, so a second
+    // closer can still fire for one whole frame.
     assert!(sheet.close(), "the first close is the one that closes it");
     assert!(!sheet.close(), "…and the second is a no-op");
     h.flush();
@@ -573,9 +549,8 @@ fn a_close_after_the_sheet_is_already_gone_pops_nothing() {
     let sheet = open_sheet_with_handle(&mut h);
     assert_eq!(h.depth(), 3);
 
-    // The sheet leaves by its own staged exit (a scrim tap), which the app's
-    // handle never sees — the completion latch is what stops a close still in
-    // flight from landing on the page underneath.
+    // The sheet leaves by its own staged exit (a scrim tap), which the app's handle never sees —
+    // the completion latch stops a close still in flight from landing on the page underneath.
     h.tap(SCRIM_POINT);
     h.flush();
     assert_eq!(h.depth(), 2, "the scrim tap took the sheet");
@@ -599,11 +574,10 @@ const MID_STAGING_MS: f64 = 60.0;
 /// resolves both of its timings to when a theme asks for reduced motion).
 const REDUCE_MOTION_MS: f64 = 120.0;
 
-/// The sheet's scrim in `scene`: every plain fill covering the **whole**
-/// surface, which is where the Glyph sheet puts it on every frame regardless of
-/// staging. A scrim found anywhere else would be the defect this section exists
-/// for — a whole-page `SlideUp` translates it with the panel, so it wipes up the
-/// screen instead of fading in place.
+/// The sheet's scrim in `scene`: every plain fill covering the **whole** surface, where the
+/// Glyph sheet puts it every frame regardless of staging. A scrim anywhere else is the defect
+/// this section exists for — a whole-page `SlideUp` would translate it with the panel, wiping up
+/// the screen instead of fading in place.
 fn scrim(scene: &RecScene) -> Vec<Color> {
     fills_at(scene, Point::ZERO, support::surface())
 }
@@ -660,10 +634,9 @@ fn the_panel_rises_while_the_scrim_fades_in_place() {
         "…and rests flush once it arrives ({})",
         panel_offset(&settled)
     );
-    // …while the scrim is *already* partially dimmed at FULL coverage. That
-    // pair is the whole point: under a whole-page `PageTransition::SlideUp` the
-    // scrim is part of the page and so is displaced by exactly the same amount
-    // as the panel — a black rectangle wiping up the screen.
+    // …while the scrim is *already* partially dimmed at FULL coverage. The pair is the whole
+    // point: under a whole-page `PageTransition::SlideUp` the scrim would be displaced by exactly
+    // the same amount as the panel — a black rectangle wiping up the screen.
     assert!(
         mid_scrim > 0.0 && mid_scrim < SCRIM_ALPHA - 1e-6,
         "mid-entrance the scrim is partly faded in ({mid_scrim} of \
@@ -681,11 +654,9 @@ fn the_scrims_rect_never_moves() {
     let _g = serial();
     let _ambient = setup();
 
-    // The regression, stated as geometry rather than as a feeling: across the
-    // whole entrance the scrim's rect is byte-identical — origin at zero,
-    // size the full surface — and only its alpha differs. `scrim_alpha`
-    // panics unless exactly one full-bleed fill exists, so every probe below
-    // is an assertion.
+    // The regression, stated as geometry: across the whole entrance the scrim's rect is
+    // byte-identical (origin zero, full surface) and only alpha differs. `scrim_alpha` panics
+    // unless exactly one full-bleed fill exists, so every probe below is an assertion.
     let mut h = Harness::themed(Some(frust_glyph::baseline()));
     show_sheet(&h.controller, |_sheet| any(text("pair a host")));
     h.frame_at(0.0);
@@ -712,10 +683,9 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
     assert!(panel_offset(&settled).abs() < EPSILON);
     assert_eq!(h.depth(), 2);
 
-    // A scrim tap stages the exit; the pop is deferred until it has played.
-    // Two frames: the first *starts* the driver (which epochs on its own first
-    // advance — a `PaintCtx` is the only pass carrying a clock), the second
-    // catches it in flight, comfortably inside the 150ms modal exit.
+    // A scrim tap stages the exit; the pop is deferred until it has played. Two frames: the first
+    // *starts* the driver (epochs on its own first advance), the second catches it in flight,
+    // comfortably inside the 150ms modal exit.
     h.tap(SCRIM_POINT);
     h.frame_at(support::SETTLE_MS);
     let mid = h.frame_at(support::SETTLE_MS + 60.0);
@@ -732,7 +702,7 @@ fn a_dismissal_slides_the_panel_back_down_while_the_scrim_fades_out() {
         "…while the scrim fades out with it ({mid_scrim})"
     );
 
-    // And it really does go.
+    // It really does go.
     h.flush();
     assert_eq!(h.depth(), 1, "the exit popped the page when it finished");
 }
@@ -746,10 +716,8 @@ fn reduce_motion_collapses_the_sheet_to_the_frameworks_linear_staging() {
     theme.motion.reduce_motion = true;
     let (mut h, mid) = mid_entrance(theme);
 
-    // Both channels run the framework's reduced timeline: one collapsed
-    // duration, **linear** — which is what the probe below discriminates, the
-    // authored `spatial`/`effects` easings being well past linear at this
-    // point in the entrance.
+    // Both channels run the framework's reduced timeline: one collapsed duration, **linear** —
+    // the authored `spatial`/`effects` easings are well past linear at this point.
     let progress = (MID_STAGING_MS / REDUCE_MOTION_MS) as f32;
     assert!(
         (scrim_alpha(&mid) - SCRIM_ALPHA * progress).abs() < 0.02,
@@ -758,8 +726,7 @@ fn reduce_motion_collapses_the_sheet_to_the_frameworks_linear_staging() {
         SCRIM_ALPHA * progress
     );
 
-    // …and it is over by that duration, where the full entrance still has
-    // 100ms to run.
+    // …and over by that duration, where the full entrance still has 100ms to run.
     let collapsed = h.frame_at(REDUCE_MOTION_MS + 5.0);
     assert!(
         panel_offset(&collapsed).abs() < EPSILON,
@@ -780,11 +747,9 @@ fn reduce_motion_collapses_the_sheet_to_the_frameworks_linear_staging() {
 /// must never show.
 const INTERNAL_DETAIL: &str = "tls handshake to 10.0.0.4:50051 timed out";
 
-/// The toast layer alone (the same view `shell::root_view` stacks at index 2,
-/// over the navigator and the floating bar) over its own root: this asserts
-/// the bridge, not the shell wiring — and it keeps the host out of a
-/// navigator, whose missing `semantics` would otherwise hide the toast's own
-/// node.
+/// The toast layer alone (the view `shell::root_view` stacks at index 2, over the navigator and
+/// floating bar) over its own root: asserts the bridge, not the shell wiring, and keeps the host
+/// out of a navigator whose missing `semantics` would otherwise hide the toast's own node.
 struct ToastHarness {
     root: RenderRoot<State, AnyView<State>>,
     logic: ToastLogic,
@@ -834,7 +799,7 @@ fn a_raised_failure_surfaces_its_user_message_and_never_its_internals() {
         !labels.iter().any(|l| l.contains(INTERNAL_DETAIL)),
         "the internal detail is for logs only, never the screen: {labels:?}"
     );
-    // The queue holds the mapped message, not the raw `Display` string either.
+    // The queue holds the mapped message too, not the raw `Display` string.
     let pending = app_toasts().pending_untracked();
     assert_eq!(pending.len(), 1);
     assert!(!pending[0].contains(INTERNAL_DETAIL));
@@ -845,10 +810,8 @@ fn the_shell_mounts_the_toast_layer_over_the_navigator() {
     let _g = serial();
     let _ambient = setup();
 
-    // The real composition root this time (as `tests/routes.rs` mounts it):
-    // a failure raised anywhere in the app must surface through the layer
-    // `shell::root_view` stacks at index 2 (over the navigator and the
-    // floating bar), with no per-screen wiring.
+    // The real composition root this time: a failure raised anywhere in the app must surface
+    // through the layer `shell::root_view` stacks at index 2, with no per-screen wiring.
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     let mut state = MuxrApp.init();
     let mut logic = |s: &mut AppState| MuxrApp.build(s);
@@ -875,9 +838,8 @@ fn the_toast_layer_is_input_transparent() {
     app_toasts().show("saved");
     h.frame();
 
-    // The shell stacks this layer *over* the navigator; if the host ever
-    // started handling pointer events, every tap on every screen would be
-    // swallowed. A press on the toast's own resting spot must go unhandled.
+    // The shell stacks this layer *over* the navigator; if the host ever handled pointer events,
+    // every tap on every screen would be swallowed.
     let outcome = h.root.event(
         &mut h.state,
         &pointer(PointerPhase::Down, Point::new(support::W / 2.0, 560.0)),

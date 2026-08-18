@@ -1,17 +1,14 @@
-//! Route smoke tests: each of the 4 routes' placeholder page renders text
-//! headlessly (no GPU, no window) — driven through the full `MuxrApp` shell
-//! via `tests/support/mod.rs` (lifted from `examples/huddle`'s own harness of
-//! the same shape). The middle section proves the session guard's behavior
-//! directly against `Router::resolve` (pure — no navigator side effects), so no
-//! scene inspection is needed to tell Connect apart from a guarded route's own
-//! placeholder; the last section proves the same guard applies to the handle
-//! screens actually push through (`muxr::routes::app_nav`), and that the handle
-//! drives the app's own navigator rather than a copy of it.
+//! Route smoke tests: each of the 4 routes' placeholder page renders text headlessly (no GPU, no
+//! window) — driven through the full `MuxrApp` shell via `tests/support/mod.rs`. The middle
+//! section proves the session guard's behavior directly against `Router::resolve` (pure — no
+//! navigator side effects), so no scene inspection is needed to tell Connect apart from a
+//! guarded route's own placeholder; the last section proves the same guard applies to the handle
+//! screens actually push through (`muxr::routes::app_nav`), and that the handle drives the app's
+//! own navigator rather than a copy of it.
 //!
-//! The shell's persistent top bar is deliberately **not** exercised here: these
-//! tests navigate with a bare `Router::go`, which is the one navigation entry
-//! point that never records the bar's route-meta mirror (only
-//! `muxr::routes::Nav` does). `tests/navigation_motion.rs` owns the bar.
+//! The shell's persistent top bar is deliberately **not** exercised here: these tests navigate
+//! with a bare `Router::go`, the one navigation entry point that never records the bar's
+//! route-meta mirror (only `muxr::routes::Nav` does). `tests/navigation_motion.rs` owns the bar.
 
 use frust::{AnyView, Component, Resolution};
 use frust_core::RenderRoot;

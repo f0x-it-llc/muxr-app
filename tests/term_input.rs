@@ -1,28 +1,24 @@
-//! Headless end-to-end coverage for the terminal **keystroke source**: the grid
-//! widget as an IME client, the last-known-state diff behind it, the one-shot
-//! Ctrl/Alt/Shift latch, and the key bar — no GPU, no window, no device.
+//! Headless end-to-end coverage for the terminal **keystroke source**: the grid widget as an
+//! IME client, the last-known-state diff behind it, the one-shot Ctrl/Alt/Shift latch, and the
+//! key bar — no GPU, no window, no device.
 //!
-//! Every test drives the **real seam**: a `RenderRoot` with the grid mounted, a tap
-//! that claims focus, then `InputEvent::Ime`/`InputEvent::Key` events shaped exactly
-//! as each platform bridge delivers them (`ApplyEditingState` snapshots on mobile,
-//! `Key::Named(Enter)` for Android's `IME_ACTION_DONE`, `Commit`/`Compose` on
-//! desktop). What it asserts on is the other end of the pipe: the **bytes that
-//! arrived in the session**, read back out of `DemoFeed`'s PTY-style echo and
-//! compared as hex. The pure half is unit-tested next to the code; this suite proves
-//! the wiring.
+//! Every test drives the **real seam**: a `RenderRoot` with the grid mounted, a tap that claims
+//! focus, then `InputEvent::Ime`/`InputEvent::Key` events shaped exactly as each platform bridge
+//! delivers them (`ApplyEditingState` snapshots on mobile, `Key::Named(Enter)` for Android's
+//! `IME_ACTION_DONE`, `Commit`/`Compose` on desktop). It asserts on the other end of the pipe:
+//! the **bytes that arrived in the session**, read back out of `DemoFeed`'s PTY-style echo and
+//! compared as hex. The pure half is unit-tested next to the code; this suite proves the wiring.
 //!
-//! It also pins the buffer **security contracts** where they are wired: a Return
-//! leaves no `\n` in the buffers and the next keystroke diffs against an empty
-//! baseline; a **stale** snapshot arriving into that baseline replays nothing, with
-//! or without the Return, word-shaped or not, and on **every** frame of that window
-//! rather than only the first; a whole-buffer replacement sends nothing and
-//! re-publishes; the buffers scrub on a blur and on unmount but *not* on a key bar
-//! hand-off, which is the same session still being typed into; and read-only is a
-//! property of the session, so a cap over one is inert too.
+//! It also pins the buffer **security contracts** where they're wired: a Return leaves no `\n`
+//! in the buffers and the next keystroke diffs against an empty baseline; a **stale** snapshot
+//! arriving into that baseline replays nothing, with or without the Return, word-shaped or not,
+//! and on **every** frame of that window rather than only the first; a whole-buffer replacement
+//! sends nothing and re-publishes; the buffers scrub on a blur and on unmount but *not* on a key
+//! bar hand-off (same session still being typed into); and read-only is a property of the
+//! session, so a cap over one is inert too.
 //!
-//! One thing here is **geometry** rather than bytes: the bar's row budget is only
-//! true of a laid-out row, so the twelve caps are measured at the narrowest phone
-//! width they must fit.
+//! One thing here is **geometry** rather than bytes: the bar's row budget is only true of a
+//! laid-out row, so the twelve caps are measured at the narrowest phone width they must fit.
 
 use std::cell::RefCell;
 use std::rc::Rc;
