@@ -5,26 +5,24 @@
 //! production: plain HTTPS `GET`s over `reqwest`. [`OfflineFontSource`]
 //! answers every fetch with a network failure and is what
 //! [`use_offline_font_source_for_tests`] installs — the same process-static
-//! override shape every feature's `di.rs` uses for its own repositories.
-//! `tests/support::setup` installs it for every headless suite, so no test
-//! reaches the network by omission; a suite that wants a catalog installs its
-//! own fixture source over the top.
+//! override shape every feature's `di.rs` uses. `tests/support::setup`
+//! installs it for every headless suite, so no test reaches the network by
+//! omission; a suite that wants a catalog installs its own fixture source.
 //!
 //! **Fetch policy.** Every fetch is bounded three ways: a request timeout
 //! ([`FETCH_TIMEOUT`]), a response size cap (checked against `Content-Length`
 //! *and* while streaming, since the header is only a claim), and — for a
-//! font — the caller's own mandatory SHA-256 check downstream ([`super::store`]).
-//! Transport failures (connect, stall, mid-stream read) retry up to
-//! [`FETCH_ATTEMPTS`] times with [`RETRY_BACKOFF`]; deterministic refusals
-//! (HTTP error status, cap violation) never do.
-//! Redirects are followed (`reqwest`'s default) because a font download's
-//! release-asset URL answers with a 302 chain; that is acceptable for the
-//! *font* path only because its SHA-256 is re-verified after the fetch,
-//! regardless of how many hops the bytes traveled. The *manifest* fetch has
-//! no hash — its anchors are TLS to the pinned manifest URL plus the size
-//! cap. `reqwest` here runs the `rustls`
-//! (not platform-native-TLS) backend — see `Cargo.toml`'s dependency comment
-//! for why that pin is load-bearing, not taste.
+//! font — the caller's own mandatory SHA-256 check downstream
+//! ([`super::store`]). Transport failures (connect, stall, mid-stream read)
+//! retry up to [`FETCH_ATTEMPTS`] times with [`RETRY_BACKOFF`]; deterministic
+//! refusals (HTTP error status, cap violation) never do. Redirects are
+//! followed (`reqwest`'s default) because a font download's release-asset URL
+//! answers with a 302 chain — acceptable for the *font* path only because its
+//! SHA-256 is re-verified after the fetch regardless of hop count. The
+//! *manifest* fetch has no hash — its anchors are TLS to the pinned URL plus
+//! the size cap. `reqwest` runs the `rustls` (not platform-native-TLS)
+//! backend — see `Cargo.toml`'s dependency comment for why that pin is
+//! load-bearing, not taste.
 //!
 //! The streaming half is [`get_with_progress`]: it reads via
 //! `reqwest::Response::chunk()` rather than buffering the body whole, so an
@@ -46,12 +44,11 @@ use super::manifest::MANIFEST_URL;
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Total attempts per fetch (1 + retries). Transport failures are retried —
-/// the CDN's origin path intermittently stalls whole requests (~1 in 5
-/// origin-bound fetches at the worst measured burst, 2026-08-15), and mobile
-/// networks add their own blips; without a retry, one stalled file failed the
-/// whole multi-file family install. Deterministic refusals (an HTTP error
-/// status, a size-cap violation) never retry — re-fetching a refused or
-/// oversized body can't succeed and, for the cap, would re-stream megabytes.
+/// the CDN's origin path intermittently stalls whole requests (~1 in 5 at
+/// the worst measured burst, 2026-08-15), and mobile networks add their own
+/// blips; without a retry, one stalled file failed the whole multi-file
+/// install. Deterministic refusals (HTTP error, size-cap violation) never
+/// retry — re-fetching a refused/oversized body can't succeed.
 const FETCH_ATTEMPTS: u32 = 3;
 
 /// Delay before retry N (1-indexed); the last entry repeats if attempts ever
@@ -70,18 +67,16 @@ pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_FONT_BYTES: u64 = 50 * 1024 * 1024;
 
 /// A [`FontSource::fetch_font_with_progress`] progress sink: called after
-/// every chunk with the cumulative bytes received for that one file's fetch
-/// so far (never above the download cap — a chunk that would cross it aborts
-/// the read before the sink runs). `Send` because the future carrying it
-/// crosses onto the background runtime (`frust::spawn`, see
-/// `super::catalog`'s module docs).
+/// every chunk with the cumulative bytes received so far (never above the
+/// cap — a chunk that would cross it aborts the read first). `Send` because
+/// the future carrying it crosses onto the background runtime
+/// (`frust::spawn`, see `super::catalog`'s module docs).
 pub type ProgressSink<'a> = &'a mut (dyn FnMut(u64) + Send);
 
 /// Where the catalog's bytes come from. The manifest fetch answers a whole
-/// body — tens of kilobytes, no streaming API needed — and the SHA-256 check
-/// downstream needs a font's whole body in hand anyway; streaming only buys
-/// the font path early cap enforcement and live progress (see the
-/// [module docs](self)).
+/// body — no streaming API needed — and the SHA-256 check downstream needs a
+/// font's whole body in hand anyway; streaming only buys the font path early
+/// cap enforcement and live progress (see the [module docs](self)).
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 pub trait FontSource: Send + Sync {
@@ -94,9 +89,9 @@ pub trait FontSource: Send + Sync {
     /// [`Self::fetch_font`], reporting the cumulative bytes received to
     /// `progress` as the body streams in.
     ///
-    /// Default: no progress at all — a single opaque [`Self::fetch_font`]
-    /// call — so [`OfflineFontSource`] and every test double implementing
-    /// only [`Self::fetch_font`]/[`Self::fetch_manifest`] keep compiling
+    /// Default: a single opaque [`Self::fetch_font`] call, no progress — so
+    /// [`OfflineFontSource`] and every test double implementing only
+    /// [`Self::fetch_font`]/[`Self::fetch_manifest`] keep compiling
     /// untouched; only [`HttpFontSource`] overrides it.
     async fn fetch_font_with_progress(
         &self,
@@ -131,8 +126,8 @@ pub fn font_source() -> SharedFontSource {
 
 /// Point every later [`font_source`] call at `source` for the rest of this
 /// process's life. **Test-only** (the `use_mock_*_for_tests` idiom): callable
-/// from a `tests/*.rs` integration binary, which links the ordinary build of
-/// this crate and so cannot reach a `#[cfg(test)]` item.
+/// from a `tests/*.rs` integration binary, which cannot reach a `#[cfg(test)]`
+/// item.
 pub fn use_font_source_for_tests(source: SharedFontSource) {
     *OVERRIDE
         .lock()
@@ -149,11 +144,9 @@ pub fn use_offline_font_source_for_tests() {
 /// The production source: HTTPS over `reqwest`.
 pub struct HttpFontSource;
 
-/// The one client, built lazily on first use.
-///
-/// Lazy on purpose: building it needs a live tokio runtime context (hyper's
-/// pooled connector spawns onto it), and app startup is not one — every fetch
-/// runs inside `frust::spawn`, which is.
+/// The one client, built lazily: it needs a live tokio runtime context
+/// (hyper's pooled connector spawns onto it) and app startup is not one —
+/// every fetch runs inside `frust::spawn`, which is.
 static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
 /// What this client calls itself. Load-bearing, not cosmetic: GitHub's
@@ -162,8 +155,7 @@ static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 /// outright, while `raw.githubusercontent.com` tolerates them — so without
 /// this, the manifest loads and every font download fails on the spot.
 /// `reqwest` sends no User-Agent unless told to; the original Flutter client
-/// never hit this only because Dart's `HttpClient` always sends its own
-/// (`Dart/<sdk> (dart:io)`).
+/// never hit this only because Dart's `HttpClient` always sends its own.
 const USER_AGENT: &str = concat!("muxr/", env!("CARGO_PKG_VERSION"));
 
 /// The shared client, or the construction error that keeps recurring.
@@ -186,10 +178,10 @@ async fn get(url: &str, max_bytes: u64) -> Result<Vec<u8>, AppFailure> {
     get_with_progress(url, max_bytes, None).await
 }
 
-/// A single attempt's failure, split by whether trying again could help:
+/// A single attempt's failure, split by whether retrying could help:
 /// `Transient` is the transport (connect/stall/read) class the retry loop
-/// re-attempts; `Fatal` is a deterministic refusal (HTTP error status,
-/// size-cap violation) answered as-is.
+/// re-attempts; `Fatal` is a deterministic refusal (HTTP error, cap
+/// violation) answered as-is.
 enum FetchError {
     Transient(AppFailure),
     Fatal(AppFailure),
@@ -208,10 +200,9 @@ fn retry_delay(failed_attempt: u32) -> Option<std::time::Duration> {
 
 /// `GET url`, bounded by `max_bytes`, read one chunk at a time
 /// (`reqwest::Response::chunk()`) so the cap is enforced **while the body
-/// arrives** rather than only after it is fully buffered — the module docs'
-/// "and while streaming" clause. `progress`, when given, is called after
-/// every chunk that keeps the running total under the cap with that
-/// cumulative total.
+/// arrives**, not only once fully buffered. `progress`, when given, is
+/// called with the cumulative total after every chunk that keeps it under
+/// the cap.
 ///
 /// Transport failures retry per [`FETCH_ATTEMPTS`]/[`RETRY_BACKOFF`]; each
 /// new attempt reports `0` to the sink first, so a picker bar honestly drops
@@ -261,8 +252,8 @@ async fn get_once(
             "HTTP {status} for {url}"
         ))));
     }
-    // The advertised length first (cheap refusal), then the stream itself —
-    // a server's `Content-Length` is a claim, not a fact.
+    // Advertised length first (cheap refusal), then the stream itself — a
+    // server's `Content-Length` is a claim, not a fact.
     if response.content_length().is_some_and(|len| len > max_bytes) {
         return Err(FetchError::Fatal(AppFailure::Network(format!(
             "{url} advertises more than the {max_bytes}-byte cap"
@@ -284,8 +275,8 @@ async fn get_once(
 }
 
 /// Enforces a byte cap against a body arriving one chunk at a time — the
-/// pure core of [`get_with_progress`]'s streaming read, network-free and so
-/// exercised directly by a unit test.
+/// pure core of [`get_with_progress`]'s streaming read, exercised directly
+/// by a unit test.
 struct CappedAccumulator<'a> {
     url: &'a str,
     max_bytes: u64,
@@ -302,9 +293,8 @@ impl<'a> CappedAccumulator<'a> {
     }
 
     /// Append one chunk. `Err` the instant the running total exceeds the
-    /// cap — the caller must stop reading; nothing already pushed is ever
-    /// handed back once this returns an error. `Ok` answers the cumulative
-    /// byte count so far.
+    /// cap — the caller must stop reading. `Ok` answers the cumulative byte
+    /// count so far.
     fn push(&mut self, chunk: &[u8]) -> Result<u64, AppFailure> {
         self.bytes.extend_from_slice(chunk);
         let total = self.bytes.len() as u64;
@@ -365,8 +355,6 @@ mod tests {
 
     #[test]
     fn the_offline_source_fails_every_fetch_as_a_network_error() {
-        // Retryable, and its user message says "connection problem" — which is
-        // exactly what an unreachable catalog is.
         let source = OfflineFontSource;
         let manifest = futures_block_on(source.fetch_manifest());
         assert!(matches!(manifest, Err(AppFailure::Network(_))));
@@ -376,9 +364,7 @@ mod tests {
 
     #[test]
     fn the_default_progress_method_never_touches_the_sink() {
-        // OfflineFontSource implements neither override — its
-        // `fetch_font_with_progress` is the trait's default, which must
-        // answer through `fetch_font` alone and call the sink zero times.
+        // OfflineFontSource relies on the trait's default `fetch_font_with_progress`.
         let source = OfflineFontSource;
         let calls = std::sync::atomic::AtomicU64::new(0);
         let mut sink: Box<dyn FnMut(u64) + Send> = Box::new(|_| {

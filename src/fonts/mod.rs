@@ -17,12 +17,11 @@
 //! frame thereafter, so a **downloaded** face installs mid-session, no relaunch.
 //!
 //! **Family names are fontique's, not ours** — resolved from a registered
-//! font's own name-table preference, not asserted here; see
-//! [`installed_families`]'s unit test for the tripwire against silent
-//! TTF-name drift, and [`store`] for why a downloaded family is read back
-//! from a real registration, never taken from the manifest. **Call order:
-//! register, then re-theme** — [`register_bundled_fonts`] must run before
-//! [`apply_app_wide_theme`] (see that function's own doc for why).
+//! font's own name-table preference, not asserted here (see
+//! [`installed_families`]'s unit test for the drift tripwire, and [`store`]
+//! for why a downloaded family is read back from a real registration, never
+//! taken from the manifest). **Call order: register, then re-theme** —
+//! [`register_bundled_fonts`] must run before [`apply_app_wide_theme`].
 
 pub mod catalog;
 mod json;
@@ -125,15 +124,10 @@ pub fn installed_families() -> Vec<String> {
 
 /// What a family is *called* in the UI: the catalog's own label for a
 /// downloaded face (`BlexMono Nerd Font Mono` → `IBM Plex Mono Nerd Font
-/// Mono`), or the family name itself for a bundled one (whose two names are
-/// the same) and for anything this device has never installed.
-///
-/// The label survives a relaunch without a catalog: it is recorded in the
-/// cache's own sidecar (see [`store::display_name_for`]).
-///
-/// A bundled family answers its own name unconditionally — it is not the
-/// cache's to rename, even if a catalog entry's bytes once happened to
-/// register under it.
+/// Mono`), else the family name itself. Survives a relaunch without a
+/// catalog — recorded in the cache's own sidecar (see
+/// [`store::display_name_for`]). A bundled family always answers its own
+/// name — not the cache's to rename.
 pub fn display_name(family: &str) -> String {
     if BUNDLED_FAMILIES.contains(&family) {
         return family.to_string();
@@ -154,12 +148,10 @@ pub fn pickable_terminal_families() -> Vec<String> {
 
 /// The terminal grid's default font stack — [`DEFAULT_TERMINAL_FAMILY`] then
 /// [`SYMBOLS_FALLBACK_FAMILY`], ending in the `Monospace` generic slot so a
-/// host missing both bundled faces still shapes *some* monospace face rather
-/// than falling back to a proportional one. What [`resolve_terminal_family`]
-/// falls back to for an unknown/not-installed stored family, and what
-/// `TerminalController::font_family`
-/// (`crate::features::terminal::presentation::controller`) is seeded with
-/// before the live pane's first appearance-preference read lands.
+/// host missing both bundled faces still shapes *some* monospace face. What
+/// [`resolve_terminal_family`] falls back to, and what
+/// `TerminalController::font_family` is seeded with before the live pane's
+/// first appearance-preference read lands.
 pub fn default_terminal_family() -> FontFamily {
     FontFamily::stack_with_generic(
         [DEFAULT_TERMINAL_FAMILY, SYMBOLS_FALLBACK_FAMILY],
@@ -169,18 +161,15 @@ pub fn default_terminal_family() -> FontFamily {
 
 /// Resolve a persisted `AppearancePrefs::font_family` string into the grid's
 /// primary+fallback stack: `stored` itself when it names an
-/// [`installed_families`] entry (trailed by [`SYMBOLS_FALLBACK_FAMILY`] and
-/// the `Monospace` generic, same shape as [`default_terminal_family`]); the
-/// default stack for anything else — a value persisted before this bundling
-/// existed (`docs/redesign.html`'s own `Hack Nerd Font Mono` mock), or a
+/// [`installed_families`] entry (same shape as [`default_terminal_family`]);
+/// the default stack for anything else — a pre-bundling persisted value, or a
 /// downloaded family whose cache has since been cleared.
 ///
-/// **This is the app's one unknown-family grace, and it lives here on
-/// purpose.** The data layer stores whatever family the user picked without
-/// judging it (a downloaded name is not in any compile-time list, and `data`
-/// is framework-free — it cannot know what is installed); this resolution, at
-/// the presentation edge, is what turns a family that no longer resolves into
-/// the shipped default rather than a blank or broken stack.
+/// **The app's one unknown-family grace, and it lives here on purpose.** The
+/// data layer stores whatever the user picked without judging it (framework-
+/// free, so it cannot know what is installed); this presentation-edge
+/// resolution is what turns an unresolvable family into the shipped default
+/// rather than a blank/broken stack.
 pub fn resolve_terminal_family(stored: &str) -> FontFamily {
     if installed_families().iter().any(|family| family == stored) {
         FontFamily::stack_with_generic([stored, SYMBOLS_FALLBACK_FAMILY], GenericSlot::Monospace)
@@ -189,16 +178,14 @@ pub fn resolve_terminal_family(stored: &str) -> FontFamily {
     }
 }
 
-/// [`DEFAULT_TERMINAL_FAMILY`] with a `Monospace` generic tail, so a host
-/// missing the bundled face still shapes some monospace font rather than
-/// falling back to a proportional one.
+/// [`DEFAULT_TERMINAL_FAMILY`] with a `Monospace` generic tail (see
+/// [`default_terminal_family`] for why).
 fn app_wide_family() -> FontFamily {
     FontFamily::stack_with_generic([DEFAULT_TERMINAL_FAMILY], GenericSlot::Monospace)
 }
 
-/// `style` with its family swapped to [`app_wide_family`] — every other
-/// field (`size`/`weight`/`style`/`color`/`letter_spacing`/`line_height`/
-/// `align`) carried over unchanged.
+/// `style` with its family swapped to [`app_wide_family`]; every other field
+/// carried over unchanged.
 fn with_app_family(style: TextStyle) -> TextStyle {
     TextStyle {
         family: app_wide_family(),
@@ -207,10 +194,8 @@ fn with_app_family(style: TextStyle) -> TextStyle {
 }
 
 /// Map every one of [`TypeScale`]'s 30 slots (15 M3 baseline roles + 15
-/// M3-Expressive `_emphasized` siblings) onto [`app_wide_family`]. Sizes,
-/// weights, colors, and every other token are untouched — family only (see
-/// [`with_app_family`]). Glyph's Space Mono display slots are weight 700;
-/// they become JetBrains Mono Bold, the same weight, new family.
+/// M3-Expressive `_emphasized` siblings) onto [`app_wide_family`] — family
+/// only, every other token untouched (see [`with_app_family`]).
 fn jetbrains_type_scale(scale: TypeScale) -> TypeScale {
     TypeScale {
         display_large: with_app_family(scale.display_large),
@@ -248,16 +233,14 @@ fn jetbrains_type_scale(scale: TypeScale) -> TypeScale {
 
 /// Force the app-wide theme to [`frust_glyph::baseline`] with every
 /// type-scale slot's family swapped to JetBrains Mono (see
-/// [`jetbrains_type_scale`]). Call once, from the app's setup block, after
-/// [`register_bundled_fonts`] (see the [module docs](self) for the ordering
-/// contract). `frust_glyph::baseline()` — the canonical no-theme-installed
-/// fallback — is deliberately untouched everywhere else; this only ever
-/// forces the *active* theme via `frust::set_app_theme`.
+/// [`jetbrains_type_scale`]). Call once, after [`register_bundled_fonts`]
+/// (see the [module docs](self) for the ordering contract).
+/// `frust_glyph::baseline()` itself stays untouched — this only forces the
+/// *active* theme via `frust::set_app_theme`.
 ///
-/// **Only the bundled face is ever the app-wide one.** A downloaded font is a
-/// *terminal* face, never the chrome's: the catalog is monospace Nerd Fonts,
-/// and re-theming the whole app onto one would re-shape every screen from a
-/// picker row.
+/// **Only the bundled face is ever the app-wide one** — a downloaded font is
+/// a *terminal* face, never the chrome's, or a picker row would re-theme the
+/// whole app.
 pub fn apply_app_wide_theme() {
     let theme = Theme::builder(frust_glyph::baseline())
         .map_type_scale(jetbrains_type_scale)
@@ -292,9 +275,7 @@ mod tests {
     #[test]
     fn every_jetbrains_mono_face_registers_under_the_one_family() {
         // Guards the fontique typographic-family-preference fact the module
-        // docs describe: Light/Medium's own family-name-table entries would
-        // otherwise split them off from Regular/Bold/Italic into their own
-        // families ("JetBrains Mono Light"/"JetBrains Mono Medium").
+        // docs describe.
         let mut cx = TextContext::new();
         for bytes in [
             JETBRAINS_MONO_LIGHT,
@@ -315,9 +296,7 @@ mod tests {
 
     #[test]
     fn installed_families_starts_from_the_two_bundled_faces() {
-        // Downloaded families are appended to these two, never instead of them
-        // (a suite that installed one runs under its own cache root — see
-        // `store`'s own tests).
+        // Downloaded families are appended to these two, never instead.
         let families = installed_families();
         assert_eq!(
             &families[..2],
@@ -374,9 +353,7 @@ mod tests {
 
     #[test]
     fn resolve_terminal_family_falls_back_for_an_unknown_stored_value() {
-        // A persisted value naming a face this device does not have — a
-        // pre-bundling default (`docs/redesign.html`'s own mock), or a
-        // downloaded family whose cache was cleared.
+        // A persisted value naming a face this device does not have.
         assert_eq!(
             resolve_terminal_family("Hack Nerd Font Mono"),
             default_terminal_family()
@@ -432,7 +409,7 @@ mod tests {
         let themed = Theme::builder(baseline.clone())
             .map_type_scale(jetbrains_type_scale)
             .build();
-        // Sizes/weights/colors/every other token: unchanged — family only.
+        // Family only — every other token unchanged.
         assert_eq!(
             themed.type_scale.title_large_emphasized.size,
             baseline.type_scale.title_large_emphasized.size

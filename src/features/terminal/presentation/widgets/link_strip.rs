@@ -19,18 +19,15 @@ const LINK_LEAVE: &str = "Back to sessions";
 
 /// The card's link strip for `link`, or `None` when there is nothing to say.
 ///
-/// Four of the feed's five states are silent: `Idle` and `Connected` are a
-/// session behaving, and a screen with no live `muxrd` session behind it
-/// (`None` — the mock transcript, the demo replay) has no link at all. The
-/// three that show speak in the same order of severity the affordance beside
-/// them does: reconnecting says only that (the session is coming back on its
-/// own, and a button would invite interrupting it), a disconnected one offers
-/// the retry that re-arms it, and a session the server *ended* offers the only
-/// thing left — the way back to the list.
+/// `Idle`/`Connected` and no live session at all (`None`) are silent. The
+/// three shown states speak in severity order: reconnecting says only that
+/// (a button would invite interrupting it), disconnected offers the retry
+/// that re-arms it, and a server-ended session offers the way back to the
+/// list.
 ///
-/// Every callback here takes `&mut TerminalState`, which is exactly why the
-/// strip belongs to the card rather than to the sheet: `retry` needs the live
-/// session, and the live session is screen state.
+/// Every callback here takes `&mut TerminalState` — why the strip belongs to
+/// the card, not the sheet: `retry` needs the live session, which is screen
+/// state.
 pub(crate) fn link_strip(
     link: Option<FeedStatus>,
     colors: &Palette,
@@ -54,8 +51,7 @@ pub(crate) fn link_strip(
             }))),
         ),
     };
-    // Resolved only once there is a strip to build — a `build` that has
-    // nothing to say must stay as cheap as it was before this existed.
+    // Resolved only once there is a strip to build — a silent `build` stays cheap.
     let style = inked(&active_theme().type_scale.label_medium, colors.fg_muted);
     Some(status_strip(message, style, ink.head, action))
 }

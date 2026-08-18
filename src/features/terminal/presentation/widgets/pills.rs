@@ -22,23 +22,18 @@ const PILL_PAD_X: f64 = 13.0;
 const PILL_PAD_Y: f64 = spacing::SM;
 pub(crate) const PILL_GAP: f64 = spacing::SM;
 
-/// The trailing edit affordance's drawn vector size, in logical px — smaller than
-/// every other mark this screen draws, so it reads as *subordinate* to the label it
-/// sits beside rather than competing with it.
+/// The trailing edit affordance's drawn vector size, in logical px — smaller
+/// than every other mark this screen draws, so it reads as *subordinate* to
+/// the label beside it.
 const EDIT_ICON_SIZE: f64 = 16.0;
-/// The pill chip's own edit tap box — [`icon_button`]'s fixed-box seam, expressed
-/// as an actual layout box rather than a beyond-bounds hit-test inflate: this
-/// chip's edit icon is a row *sibling* of its main tap surface (see [`pill`]), and
-/// every sibling's hit region is exactly its own laid-out rect, checked before its
-/// `event` ever runs.
-///
-/// A pill's rounded fill is 33px tall (`PILL_PAD_Y * 2` plus `body_small`'s
-/// rendered line box), driven entirely by its label, and this box stays under that
-/// ceiling so every pill — an "add" pill with no edit icon included — keeps sharing
-/// one height, which is what `tests/terminal.rs`'s `pills()` locator groups all
-/// nine of them by. Hence 30px, short of the 40–44px a comfortable thumb target
-/// asks for elsewhere. See [`super::panes::PANE_EDIT_TAP_BOX`] for the row this
-/// ceiling does not bind.
+/// The pill chip's own edit tap box — [`icon_button`]'s fixed-box seam, as
+/// an actual layout box (the edit icon is a row *sibling* of the main tap
+/// surface, see [`pill`], so its hit region is exactly its own laid-out
+/// rect). 30px, under the pill's own 33px fill height, so every pill —
+/// including an "add" pill with no edit icon — keeps sharing one height
+/// (`tests/terminal.rs`'s `pills()` locator groups all nine by it); short of
+/// the 40–44px comfortable-thumb-target norm elsewhere. See
+/// [`super::panes::PANE_EDIT_TAP_BOX`] for the row this ceiling doesn't bind.
 const PILL_EDIT_TAP_BOX: f64 = 30.0;
 /// Gap between a chip's main content and its trailing edit icon.
 const EDIT_GAP: f64 = spacing::XS;
@@ -58,11 +53,11 @@ pub(crate) enum PillState {
     Idle,
     /// `.pill.sel` — the amber trio.
     Selected,
-    /// The tab the **session** is on while the sheet is browsing another one — the
-    /// one state with no `terminal.html` counterpart, since the mock's sheet had a
-    /// single notion of "the tab". Deliberately the *smallest* thing that keeps the
-    /// two distinguishable: the selected pill's amber edge and ink over an ordinary
-    /// raised fill, so the browsed pill is still the only full amber wash.
+    /// The tab the **session** is on while the sheet browses another one —
+    /// no `terminal.html` counterpart (its mock had one notion of "the
+    /// tab"). Deliberately minimal: the selected pill's amber edge/ink over
+    /// an ordinary raised fill, so the browsed pill stays the only full
+    /// amber wash.
     Active,
     /// `.pill.add` — a dashed hairline and the dimmest ink.
     Add,
@@ -80,10 +75,9 @@ fn pill_tones(state: PillState, colors: &Palette) -> (Color, Color, Color) {
 }
 
 /// The chip affordance's trailing edit icon — [`icons::EDIT`], a vector
-/// (chrome-icon rule), its own independent tap region via [`icon_button`]'s
-/// fire-on-up-inside contract and a fixed `tap_box` the caller picks. No fill, no
-/// border: unlike the sheet's close button this is deliberately unadorned, so it
-/// reads as subordinate to the label beside it.
+/// (chrome-icon rule), its own tap region via [`icon_button`]'s
+/// fire-on-up-inside contract and a fixed `tap_box`. No fill, no border —
+/// deliberately unadorned, reading as subordinate to the label beside it.
 pub(crate) fn edit_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
     colors: &Palette,
     tap_box: f64,
@@ -96,19 +90,18 @@ pub(crate) fn edit_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
         .radius(tap_box / 2.0))
 }
 
-/// One `.pill`. The label is content text, which is why the add pills' `+` is a
-/// **run** rather than a vector: it is inside the sentence, not chrome.
+/// One `.pill`. The label is content text — the add pills' `+` is a **run**,
+/// not a vector, since it sits inside the sentence, not chrome.
 ///
-/// `on_edit`, when `Some`, adds a trailing [`icons::EDIT`] vector as its **own**
-/// independent tap region — never wired for [`PillState::Add`] or for a read-only
+/// `on_edit`, when `Some`, adds a trailing [`icons::EDIT`] vector as its
+/// **own** tap region — never wired for [`PillState::Add`] or a read-only
 /// credential (the caller's job).
 ///
-/// **Two siblings in one row, not one detector nested inside the other.**
-/// [`GestureDetector`] is a *transparent* wrapper: every event still reaches its
-/// child, and it fires its own callback off its own recorded press regardless — so
-/// nesting the icon's detector inside the label's would fire both callbacks on an
-/// icon tap. Row siblings, each hit-tested independently, is what keeps them
-/// disjoint.
+/// **Two row siblings, not one detector nested in the other.**
+/// [`GestureDetector`] is *transparent* — every event still reaches its
+/// child and fires its own callback regardless — so nesting the icon's
+/// detector inside the label's would fire both on an icon tap. Independent
+/// siblings keep them disjoint.
 pub(crate) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
     label: impl Into<String>,
     state: PillState,
@@ -165,9 +158,8 @@ mod tests {
 
     #[test]
     fn every_pill_state_is_visibly_a_different_pill() {
-        // The sheet can show a browsed tab *and* the tab the session is on at
-        // once, so no two states may resolve to the same trio — an `Active`
-        // pill that painted like an `Idle` one would hide where the session is.
+        // The sheet can show a browsed tab and the session's tab at once, so
+        // no two states may resolve to the same trio.
         let colors = Palette::from_theme(&frust_glyph::baseline());
         let tones: Vec<(Color, Color, Color)> = [
             PillState::Idle,
@@ -183,7 +175,7 @@ mod tests {
                 assert_ne!(a, b, "two pill states paint the same");
             }
         }
-        // …and the browsed pill is the only one wearing the full amber wash.
+        // The browsed pill is the only one wearing the full amber wash.
         assert_eq!(tones[1].0, colors.amber_faint);
         assert_eq!(tones[2].0, colors.raised);
         assert_eq!(
@@ -194,8 +186,7 @@ mod tests {
 
     #[test]
     fn a_selected_pill_wears_the_themes_own_accent() {
-        // The sheet's selection ink is the theme's accent, not a hex out of
-        // the mock — the shared palette's `amber` family, resolved once.
+        // The theme's accent, not a mock hex.
         let theme = frust_glyph::baseline();
         let colors = Palette::from_theme(&theme);
         let (fill, border, ink) = pill_tones(PillState::Selected, &colors);
