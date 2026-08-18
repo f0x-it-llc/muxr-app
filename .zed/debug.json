@@ -1,0 +1,11 @@
+[
+  {
+    "adapter": "CodeLLDB",
+    "label": "Frust (TUI DAP)",
+    "request": "launch",
+    "tcp_connection": {
+      "host": "127.0.0.1",
+      "port": 4849
+    }
+  }
+]
