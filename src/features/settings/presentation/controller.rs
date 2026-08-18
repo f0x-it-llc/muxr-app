@@ -4,41 +4,36 @@
 //! Hosted through `clean_signals_frust::use_controller`, created on route
 //! mount and disposed on unmount.
 //!
-//! [`tokens`](Self::tokens)/[`appearance`](Self::appearance)/
-//! [`poll`](Self::poll)/[`loaded`](Self::loaded) are `RwSignal`s; the
-//! connection facts the first group prints are **not** here at all — they
-//! live on [`crate::connection::ConnectionController`], since more than one
+//! The connection facts the first group prints live on
+//! [`crate::connection::ConnectionController`] instead, since more than one
 //! feature reads them. Both preference signals start seeded with
 //! [`Preferences::defaults`] rather than an `Option`, so the first frame
-//! paints the same rows the loaded frame does rather than blank values that
-//! fill in a beat later; [`loaded`](Self::loaded) still records whether the
-//! real read has landed.
+//! paints the same rows the loaded frame does; [`loaded`](Self::loaded)
+//! still records whether the real read has landed.
 //!
 //! **Every mutation re-reads**: a create/revoke ends with a fresh
-//! [`refresh_tokens`](Self::refresh_tokens) rather than a local patch, so the
-//! screen always renders what the store actually holds. A preference save is
-//! the exception — the repository *returns* the stored record, so the signal
-//! takes that value directly.
+//! [`refresh_tokens`](Self::refresh_tokens) rather than a local patch. A
+//! preference save is the exception — the repository *returns* the stored
+//! record, so the signal takes that value directly.
 //!
 //! **`saved`** is the `saved servers` group's rows, over `connect`'s own two
-//! stores (the saved-server list and its credential service), resolved
-//! through that feature's own `di::expect_*` — the same cross-feature
-//! widening the terminal screen makes. It lives here because deleting a
-//! credential is *also* a token revocation, which this feature owns.
-//! Deleting is deliberately **ungated** (forgetting a secret is not a use of
-//! it, so no biometric prompt); the token revoke that rides along is
-//! best-effort — attempted, its failure unshown, the local credential removed
-//! either way, since a token that can't be reached must not leave a
-//! credential the user asked to be rid of on the device.
+//! stores, resolved through that feature's own `di::expect_*` (the same
+//! cross-feature widening the terminal screen makes). It lives here because
+//! deleting a credential is *also* a token revocation, which this feature
+//! owns. Deleting is deliberately **ungated** (forgetting a secret is not a
+//! use of it); the token revoke that rides along is best-effort — its
+//! failure unshown, the local credential removed either way, since a token
+//! that can't be reached must not leave a credential the user asked to be
+//! rid of on the device.
 //!
 //! **The one-time secret**: [`pending_token_secret`](Self::pending_token_secret)
 //! is what the reveal sheet reads — a landed [`create_token`](Self::create_token)
 //! parks the daemon's one-time [`MintedToken`] there, and
 //! [`clear_pending_secret`](Self::clear_pending_secret) is the reveal's own
 //! "dismissed, gone forever" (the cleared `Option`'s dropped `Zeroizing`
-//! secret scrubs its buffer right there). No auto-clear on a scrim dismissal
-//! (`ui::sheet` hands no such hook): the value sits until the next mint
-//! overwrites it or an explicit dismissal clears it.
+//! secret scrubs its buffer right there). No auto-clear on a scrim dismissal:
+//! the value sits until the next mint overwrites it or an explicit dismissal
+//! clears it.
 
 use std::sync::Arc;
 
@@ -67,12 +62,9 @@ pub struct SettingsController {
     load_preferences: LoadPreferences,
     update_appearance: UpdateAppearance,
     update_poll_prefs: UpdatePollPrefs,
-    /// The `connect` feature's saved-server list — the `saved servers` group's
-    /// source, and where a deleted credential's metadata is cleared (see the
-    /// [module docs](self)).
+    /// The `connect` feature's saved-server list (see the [module docs](self)).
     saved_servers: SavedServers,
-    /// …and its credential store, for the one ungated operation this screen
-    /// performs.
+    /// …and its credential store.
     credentials: Credentials,
     /// The token set as last read from the repository — the `auth tokens`
     /// group's rows.
@@ -92,9 +84,9 @@ pub struct SettingsController {
 }
 
 impl SettingsController {
-    /// A fresh controller over the four injected stores (the composition root
-    /// built them once — see [`crate::features::settings::di`] and, for the two
-    /// from `connect`, that feature's own `di`).
+    /// A fresh controller over the four injected stores — built once by the
+    /// composition root (see [`crate::features::settings::di`] and, for the
+    /// two from `connect`, that feature's own `di`).
     pub fn new(
         tokens: Arc<dyn AuthTokensRepository + Send + Sync>,
         preferences: Arc<dyn PreferencesRepository + Send + Sync>,
@@ -147,13 +139,11 @@ impl SettingsController {
         self.loaded.set(true);
     }
 
-    /// Re-read the saved-server list. Synchronous, because that store is (see
-    /// its own contract) — every credential mutation below ends with one, the
-    /// same re-read-rather-than-patch discipline the token list follows.
-    ///
-    /// A failure leaves the previous list in place and raises nothing: the
-    /// group is a management affordance, and a screen that cannot list saved
-    /// servers is still a screen whose other four groups work.
+    /// Re-read the saved-server list — the same re-read-rather-than-patch
+    /// discipline the token list follows; every credential mutation below
+    /// ends with one. A failure leaves the previous list in place and raises
+    /// nothing: a screen that cannot list saved servers is still a screen
+    /// whose other four groups work.
     pub fn refresh_saved_servers(&self) {
         if let Ok(servers) = self.saved_servers.list() {
             self.saved.set(servers);
@@ -161,17 +151,13 @@ impl SettingsController {
     }
 
     /// Delete the stored credential for `endpoint`, and the server-side token
-    /// behind it.
-    ///
-    /// No biometric prompt (see the [module docs](self)). Order: revoke the
-    /// token best-effort *first* while the session that can revoke it is still
-    /// up, then drop the secret, then clear the row's credential fields —
-    /// which happens even if the secure-store delete failed, since a row that
-    /// claims a credential the user just deleted would offer a prompt that can
-    /// only refuse.
-    ///
-    /// Answers whether the whole thing succeeded, which the screen's
-    /// confirmation toast keys off.
+    /// behind it. No biometric prompt (see the [module docs](self)). Order:
+    /// revoke the token best-effort first (while the session that can revoke
+    /// it is still up), then drop the secret, then clear the row's
+    /// credential fields — the last step runs even if the secure-store
+    /// delete failed, since a row still claiming a deleted credential would
+    /// offer a prompt that can only refuse. Answers whether the whole thing
+    /// succeeded, which the screen's confirmation toast keys off.
     pub async fn delete_credential(&self, endpoint: String) -> bool {
         let Some(server) = self.saved_row(&endpoint) else {
             return false;
@@ -188,12 +174,8 @@ impl SettingsController {
     }
 
     /// Remove the saved server at `endpoint` entirely — its stored credential
-    /// with it.
-    ///
-    /// A row's credential is part of the row: forgetting the server without
-    /// forgetting the secret would leave an unreachable entry in the secure
-    /// store forever, since the key it is filed under is the endpoint that just
-    /// stopped being listed.
+    /// with it, since it's filed under this same endpoint key and would
+    /// otherwise be unreachable forever once the row stops being listed.
     pub async fn forget_server(&self, endpoint: String) -> bool {
         let Some(server) = self.saved_row(&endpoint) else {
             return false;
@@ -258,16 +240,12 @@ impl SettingsController {
     }
 
     /// Mint a token named `name` (already trimmed by the dialog) with the
-    /// requested `read_only` scope, then refresh. A failed mint leaves the
-    /// list untouched and surfaces through
-    /// [`failures`](ControllerCore::failures) — the screen's toast bridge. A
-    /// landed one parks the daemon's one-time secret on
-    /// [`Self::pending_token_secret`] — see the [module docs](self).
-    ///
-    /// **Answers whether it landed**, which the two mutating call sites need:
-    /// the screen raises its own confirmation toast afterwards, and a
-    /// "Created …" beside the failure toast for the same call would be a
-    /// straight lie.
+    /// requested `read_only` scope, then refresh. A landed mint parks the
+    /// daemon's one-time secret on [`Self::pending_token_secret`] (see the
+    /// [module docs](self)); a failed one leaves the list untouched and
+    /// surfaces through [`failures`](ControllerCore::failures). Answers
+    /// whether it landed, since a "Created …" toast beside a failure toast
+    /// for the same call would be a straight lie.
     pub async fn create_token(&self, name: String, read_only: bool) -> bool {
         let request = CreateTokenRequest { name, read_only };
         let Ok(minted) = self

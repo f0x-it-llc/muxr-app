@@ -1,8 +1,8 @@
 //! The `auth tokens` group's revoke animation: a token's name locks
 //! left-to-right through deterministic noise, then the whole two-line row
 //! collapses away. Transcribed from `examples/glyph-catalog`'s "token revoke
-//! — scramble" interaction moment; that crate is a standalone workspace and
-//! unreachable as a dependency, so the noise source
+//! — scramble" interaction moment; that crate is unreachable as a dependency
+//! (standalone workspace), so the noise source
 //! ([`lcg_next`]/[`scramble_char`]/[`scramble_text`]), the four timing
 //! constants and the [`FrameTicker`] escape hatch are **copied**, not
 //! imported.
@@ -10,25 +10,22 @@
 //! **Mechanism only**: the clock, the noise, the per-token timeline state
 //! ([`RevokeAnimations`]) and the two custom widgets. The row itself is
 //! `widgets::tokens`' (`scrambling_token_item`, sharing one row builder with
-//! the live `token_item` so the two cannot drift a pixel apart); the decision
-//! to start one is `pages`'.
+//! the live `token_item`); the decision to start one is `pages`'.
 //!
 //! **The clock**: elapsed time reads off a wall clock ([`now_ms`]) behind a
 //! [`set_animation_clock_for_tests`] override, so a headless suite drives the
-//! timeline deterministically. A signal write wakes exactly one rebuild, so
-//! [`FrameTicker`] (an unconditional `PaintCtx::request_frame` in its own
-//! `paint`) is what keeps `build` re-invoked while a timeline runs — mounted
-//! **inside the collapsing row**, so it is visible exactly when the row it
-//! drives is: scroll the row out of view and the scroller's paint culling
-//! stops both together.
+//! timeline deterministically. [`FrameTicker`] (an unconditional
+//! `PaintCtx::request_frame` in its own `paint`) is what keeps `build`
+//! re-invoked while a timeline runs — mounted **inside the collapsing row**,
+//! so a row scrolled out of view stops requesting frames along with the
+//! scroller's own paint culling.
 //!
 //! **The collapse** can't be a fixed-height `SizedBox(row_h * ratio)`: a real
-//! `.token-item`'s height depends on the resolved type scale and the
-//! platform's own font metrics, so any transcribed number would jump the row
-//! the moment the animation starts. [`CollapseView`] lays the row out at its
-//! **natural** height and reports `height * ratio` as its own — no constant,
-//! no jump — and the [`AnimatedOpacity`] wrapped around it clips the
-//! overflow.
+//! `.token-item`'s height depends on the resolved type scale and platform
+//! font metrics, so a transcribed number would jump the row the moment the
+//! animation starts. [`CollapseView`] lays the row out at its **natural**
+//! height and reports `height * ratio` as its own; the [`AnimatedOpacity`]
+//! wrapped around it clips the overflow.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -258,17 +255,17 @@ impl RevokeScramble {
 /// The screen's live revoke timelines, keyed by token name.
 ///
 /// A signal rather than plain retained state: it is written from *outside*
-/// the screen's own `build` (a confirmation dialog's action, which never
-/// sees `SettingsState`; the revoke future's completion) and each of those
-/// writes wakes the rebuild that renders it. Screen-scoped rather than
-/// controller-owned, since nothing here is repository state.
+/// the screen's own `build` (a confirmation dialog's action; the revoke
+/// future's completion), and each write wakes the rebuild that renders it.
+/// Screen-scoped rather than controller-owned, since nothing here is
+/// repository state.
 ///
 /// Every write reads through `try_get_untracked`, never `get_untracked`: two
-/// of the three run from a future that can outlive the screen (leave
-/// `/settings` mid-revoke and the component's owner disposes this signal out
-/// from under it), and reading a disposed signal panics where writing one
-/// merely no-ops. Only [`live`](Self::live) reads outright, since a build
-/// cannot run after the component that owns it is gone.
+/// of the three run from a future that can outlive the screen (leaving
+/// `/settings` mid-revoke disposes this signal out from under it), and
+/// reading a disposed signal panics where writing one merely no-ops. Only
+/// [`live`](Self::live) reads outright, since a build cannot run after the
+/// component that owns it is gone.
 #[derive(Clone, Copy)]
 pub(super) struct RevokeAnimations {
     entries: RwSignal<Vec<RevokeScramble>>,

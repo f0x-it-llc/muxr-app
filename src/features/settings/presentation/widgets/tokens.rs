@@ -65,9 +65,7 @@ const SECRET_DONE_LABEL: &str = "Done";
 /// Flutter parity's "you won't see this again" warning, spelled out.
 const SECRET_CAPTION: &str =
     "This is the only time this secret is shown. Copy it now — it can't be viewed again.";
-/// The vanishingly unlikely race where the pending secret was already
-/// cleared by the time this body re-ran (the sheet is on its way down
-/// anyway — see [`secret_reveal_sheet`]).
+/// The unlikely race [`secret_reveal_sheet`] falls back to.
 const SECRET_ALREADY_DISMISSED: &str = "This secret has already been dismissed.";
 /// The terminal Copy chip's own wording, duplicated since a feature never
 /// imports a sibling's `presentation`.
