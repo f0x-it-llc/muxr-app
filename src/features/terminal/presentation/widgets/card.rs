@@ -1,24 +1,20 @@
 //! The terminal card's own colour vocabulary ([`CardInk`]) and its body —
 //! `.term-body`, the scrollable, staggered, caret-terminated transcript.
 //!
-//! **The canonical token wins over the mock's hex.** The card's ink is
-//! **`GlyphInk`**, not `terminal.html`'s `--term-*` variables: `terminal_bg` for the
-//! body, `terminal_head` for the status band, `terminal_prompt` for the prompt runs,
-//! the caret and the pane title, `terminal_out`/`terminal_comment` for the two
-//! dimmer tiers. That is the framework's own brightness-invariant terminal palette,
-//! so this screen matches `frust_glyph::term_block` wherever the two share a page.
-//! (`GlyphInk::terminal_fg`, the *untyped* body tone, is the one field [`CardInk`]
-//! does not resolve: v2 types every line it prints.)
+//! **The canonical token wins over the mock's hex** — `GlyphInk`, not
+//! `terminal.html`'s `--term-*` variables: `terminal_bg`/`terminal_head`/
+//! `terminal_prompt` for body/status-band/prompt+caret+title,
+//! `terminal_out`/`terminal_comment` for the two dimmer tiers — the
+//! framework's brightness-invariant terminal palette, matching
+//! `frust_glyph::term_block` wherever the two share a page. (`terminal_fg`
+//! is the one field [`CardInk`] skips: v2 types every line it prints.)
 //!
-//! Two card tones have **no** token and so are local constants:
-//! [`TERMINAL_BORDER_RGB`] and the expand button's resting wash. `GlyphInk` carries
-//! no border/hairline field, and the nearest `ColorScheme` outline is
-//! brightness-swapped while this card is not.
+//! [`TERMINAL_BORDER_RGB`] and the expand button's wash have **no** token
+//! and stay local constants — `GlyphInk` carries no border/hairline field.
 //!
-//! This struct stays terminal-local for the same reason `term::style`'s
-//! `TerminalPalette` does: it tints one screen's fixed-tone card, not a role any
-//! other screen shares. Everything *outside* the card resolves
-//! [`crate::ui::palette::Palette`] instead — see the [directory docs](super).
+//! Terminal-local, like `term::style`'s `TerminalPalette`: it tints one
+//! fixed-tone card, not a shared role. Everything outside the card resolves
+//! [`crate::ui::palette::Palette`] instead (see the [directory docs](super)).
 
 use frust::authoring::Color;
 use frust::{AnyView, EdgeInsets, Padding, Theme, any, scroll_view};
@@ -47,32 +43,25 @@ const TERMINAL_BORDER_ALPHA: f32 = 0.07;
 /// fainter, and the same gap.
 const EXPAND_FILL_ALPHA: f32 = 0.06;
 
-/// The card's own ink: the five `GlyphInk` tones plus the two hairlines no
-/// token carries. Resolved once per build from the active theme, beside — never
-/// inside — the app's shared [`Palette`](crate::ui::palette::Palette).
+/// The card's own ink — five `GlyphInk` tones plus the two hairlines no
+/// token carries — resolved beside, never inside, the app's shared
+/// [`Palette`](crate::ui::palette::Palette).
 #[derive(Clone, Copy)]
 pub(crate) struct CardInk {
-    /// `GlyphInk::terminal_bg` — the card body.
     pub(crate) card: Color,
-    /// `GlyphInk::terminal_head` — the status row's band.
     pub(crate) head: Color,
-    /// `GlyphInk::terminal_prompt` — the pane title, the prompt runs, the
-    /// caret, and the expand button's on-state ink.
     pub(crate) prompt: Color,
-    /// `GlyphInk::terminal_out` / `terminal_comment` — the two dimmer tiers.
     pub(crate) out: Color,
     pub(crate) comment: Color,
     /// `--term-border`, local (see [`TERMINAL_BORDER_RGB`]).
     pub(crate) card_border: Color,
-    /// `.expand-btn`'s resting wash.
     pub(crate) expand_fill: Color,
 }
 
 impl CardInk {
     /// Resolve [`CardInk`] from `theme`.
     pub(crate) fn from_theme(theme: &Theme) -> CardInk {
-        // The terminal's own ink is brightness-invariant and lives in a theme
-        // *extension*, exactly as `frust_glyph::term_block` resolves it.
+        // Brightness-invariant, resolved via the theme extension (matches `term_block`).
         let ink = theme
             .extension::<GlyphInk>()
             .copied()
@@ -113,9 +102,7 @@ mod tests {
 
     #[test]
     fn the_card_takes_its_ink_from_glyph_and_not_from_the_mocks_hexes() {
-        // The canonical-token rule, as a tripwire: every card tone is the
-        // theme extension's, never `terminal.html`'s `--term-body`/`--term-out`
-        // literals (which differ from Glyph's by a shade).
+        // Tripwire for the canonical-token rule (module docs).
         let theme = frust_glyph::baseline();
         let ink = theme
             .extension::<GlyphInk>()
@@ -135,8 +122,7 @@ mod tests {
 
     #[test]
     fn the_cards_hairline_is_the_mocks_own_since_no_token_carries_it() {
-        // The documented gap: `GlyphInk` has no border field, so this one tone
-        // stays a local constant — and stays *exactly* the mock's rgba.
+        // No border token — stays a local constant, exactly the mock's rgba.
         let colors = CardInk::from_theme(&frust_glyph::baseline());
         let (r, g, b) = TERMINAL_BORDER_RGB;
         assert_eq!((r, g, b), (0xff, 0xee, 0xd2));

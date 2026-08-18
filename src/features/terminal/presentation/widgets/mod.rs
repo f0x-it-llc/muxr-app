@@ -1,30 +1,22 @@
 //! The `/terminal` screen's widgets, transcribed from `docs/terminal.html` v2.
-//! One module per cluster, one fn per visual element, so
-//! [`pages`](super::pages)' `Component::build` and the sheet builder read as
-//! arrangements rather than walls of nesting: [`card`] owns the card's own
-//! `GlyphInk` ink and `.term-body`, [`status`] the `.term-statusrow`,
-//! [`link_strip`] the live link band between them, [`pills`] the `.pill` family and
-//! its trailing edit affordance, [`panes`] `.pane-item`/`.new-pane-btn`,
-//! [`sheet_bits`] the sheet's top row, section labels and scroll region,
-//! [`panes_sheet`] `#pickerSheet` itself, [`new_tab_dialog`] the add-tab row's
-//! hand-rolled prompt, and [`util`] the row/column/gap/`TextStyle` helpers.
+//! One module per cluster, one fn per visual element: [`card`] the card's
+//! `GlyphInk` ink and `.term-body`, [`status`] `.term-statusrow`,
+//! [`link_strip`] the live link band, [`pills`] `.pill` plus its edit
+//! affordance, [`panes`] `.pane-item`/`.new-pane-btn`, [`sheet_bits`] the
+//! sheet's top row/labels/scroll region, [`panes_sheet`] `#pickerSheet`
+//! itself, [`new_tab_dialog`] the add-tab prompt, [`util`] the
+//! row/column/gap/`TextStyle` helpers.
 //!
-//! **Not every module here is independently composable.** Most take only
-//! already-resolved colours/callbacks and know nothing of `pages`; two are
-//! **page-coupled**, for two different reasons: [`panes_sheet`] imports
-//! `super::super::pages::Actions` because the sheet is a page of the root
-//! overlay host whose callbacks run over `&mut AppState` (the
-//! `features::sessions` `sheet_action` precedent), while [`link_strip`] is
-//! an inline card child importing `pages::TerminalState` because its Retry
-//! callback needs direct screen-state access. Both forms are sanctioned —
-//! see `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph.
+//! **Page-coupled exceptions** (see `docs/FEATURES_ARCHITECTURE.md`'s
+//! widgets/ paragraph): [`panes_sheet`] imports `pages::Actions` (an
+//! overlay-host page, callbacks run over `&mut AppState`); [`link_strip`]
+//! imports `pages::TerminalState` directly (its Retry callback needs screen
+//! state). Everything else takes only resolved colours/callbacks.
 //!
-//! **Two colour vocabularies**: the **card** inks from the framework's
-//! brightness-invariant terminal palette ([`card::CardInk`], over `GlyphInk`) plus
-//! the two hairline tones no token carries, while everything *outside* it resolves
-//! [`crate::ui::palette::Palette`], since that is ordinary app chrome that happens
-//! to be about a terminal. The grid's third vocabulary, the ANSI `TerminalPalette`,
-//! stays with the emulator (`super::term::style`).
+//! **Two colour vocabularies**: the card inks from the brightness-invariant
+//! [`card::CardInk`] (over `GlyphInk`); everything else resolves
+//! [`crate::ui::palette::Palette`]. The grid's ANSI `TerminalPalette` stays
+//! with the emulator (`super::term::style`).
 
 pub(crate) mod card;
 pub(crate) mod link_strip;

@@ -11,14 +11,14 @@
 //!
 //! **Integrity: SHA-256, mandatory, before anything is written.**
 //! [`install_downloaded`] verifies every downloaded file — size cap, sfnt
-//! magic, then the manifest's SHA-256 — while the bytes are still in memory
-//! (the sfnt magic check is a cheap format sanity check that rejects garbage
-//! early; it is **not** the integrity mechanism and must never be treated as
-//! one — the SHA-256 is what actually proves the bytes are what the manifest
-//! promised); a mismatch fails the install with nothing left on disk, as the generic
-//! [`AppFailure::Internal`] "Something went wrong" (not a detail for a user).
-//! [`scan_cache_and_register`] re-verifies the same hashes at startup and
-//! deletes any family that no longer matches, dropped but never fatal.
+//! magic, then the manifest's SHA-256 — while the bytes are still in memory.
+//! The sfnt magic check is a cheap format probe only; it is **not** the
+//! integrity mechanism — the SHA-256 is what proves the bytes are what the
+//! manifest promised. A mismatch fails the install with nothing left on
+//! disk, as a generic [`AppFailure::Internal`] (no detail shown to the
+//! user). [`scan_cache_and_register`] re-verifies the same hashes at
+//! startup and deletes any family that no longer matches, dropped but never
+//! fatal.
 //!
 //! **The family name is fontique's, not the manifest's.** The string a
 //! `FontFamily` stack must carry is whatever fontique resolves the bytes
@@ -122,10 +122,9 @@ fn cache_root() -> Result<PathBuf, AppFailure> {
 ///
 /// Off Android this is `frust-paths`' own resolution (`$XDG_DATA_HOME`/
 /// `$HOME/.local/share`, `%APPDATA%`), namespaced per binary by
-/// `frust_paths::app_stem` exactly as `frust-shared-preferences`' own file
-/// backend does — so two Frust apps on one desktop never share a cache. On
-/// iOS that resolves inside the app's own sandbox container, which is what
-/// makes it durable there too.
+/// `frust_paths::app_stem` — same as `frust-shared-preferences`' file
+/// backend — so two Frust apps on one desktop never share a cache. On iOS
+/// that resolves inside the app's own sandbox container.
 #[cfg(not(target_os = "android"))]
 fn platform_data_dir() -> Option<PathBuf> {
     frust_paths::data_dir().map(|dir| dir.join(frust_paths::app_stem()))
@@ -133,18 +132,16 @@ fn platform_data_dir() -> Option<PathBuf> {
 
 /// Android's own app-private files directory (`Context.getFilesDir()`).
 ///
-/// `frust-paths` cannot answer this: its Unix branch resolves `$XDG_DATA_HOME`
-/// or `$HOME`, and an Android app process has neither pointing anywhere it may
-/// write — so a download would fail with a permission error on the one
-/// platform this feature is most used on. The `Context` comes from
-/// `frust_plugin::android::with_jni_env`, the sanctioned platform-handle
-/// accessor `src/net/tls.rs` already uses for the TLS verifier's own JNI
-/// initialization. No per-binary namespacing: the directory is already
-/// app-private.
+/// `frust-paths` cannot answer this: its Unix branch resolves
+/// `$XDG_DATA_HOME`/`$HOME`, and an Android app process has neither pointing
+/// anywhere writable — a download would EPERM otherwise. The `Context` comes
+/// from `frust_plugin::android::with_jni_env`, the same accessor
+/// `src/net/tls.rs` uses for the TLS verifier's own JNI init. No per-binary
+/// namespacing needed — the directory is already app-private.
 ///
-/// Falls back to `frust-paths` if the handles are not installed (a call
-/// racing the shell's own `nativeInitPlatform`), so the ladder is never a hard
-/// failure on a platform where the fallback might still work.
+/// Falls back to `frust-paths` if the handles aren't installed yet (a call
+/// racing the shell's `nativeInitPlatform`), so the ladder is never a hard
+/// failure where the fallback might still work.
 #[cfg(target_os = "android")]
 fn platform_data_dir() -> Option<PathBuf> {
     android_files_dir()
@@ -425,11 +422,9 @@ fn family_key(family: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// One family's sidecar: the two names, the manifest's own claim, and one
-/// `<sha256> <filename>` line per cached file.
-///
-/// A hand-written line format rather than JSON: this app writes no JSON
-/// anywhere (`super::json` is parse-only), and a sidecar with three keys and a
-/// file list does not justify an encoder.
+/// `<sha256> <filename>` line per cached file. Hand-written line format
+/// rather than JSON: this app writes no JSON anywhere (`super::json` is
+/// parse-only), and three keys plus a file list doesn't justify an encoder.
 fn encode_meta(entry: &FontEntry, family: &str, files: &[(FontFile, Vec<u8>)]) -> String {
     let mut out = String::new();
     out.push_str(&format!("family={family}\n"));

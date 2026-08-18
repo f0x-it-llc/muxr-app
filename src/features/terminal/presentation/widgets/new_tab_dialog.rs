@@ -17,8 +17,7 @@ const NEW_TAB_TITLE: &str = "New tab";
 /// `crate::ui::dialogs`' private ones.
 const NEW_TAB_CANCEL_LABEL: &str = "Cancel";
 const NEW_TAB_SUBMIT_LABEL: &str = "Create";
-/// Vertical gap between the field and its button row, and the horizontal gap between
-/// Cancel and Create — the shared scale's own tiers, matching
+/// Field-to-buttons and Cancel-to-Create gaps — matching
 /// `crate::ui::dialogs::name_input_dialog`'s own (both private there).
 const NEW_TAB_FIELD_GAP: f64 = spacing::XL;
 const NEW_TAB_ACTION_GAP: f64 = spacing::MD;
@@ -26,21 +25,21 @@ const NEW_TAB_ACTION_GAP: f64 = spacing::MD;
 /// The tab-naming dialog's page body: a field over a Cancel/Create row.
 ///
 /// Hand-rolled rather than
-/// [`name_input_dialog`](crate::ui::dialogs::name_input_dialog): that helper's whole
-/// contract is "a blank field cannot submit", which is right for every other name
-/// prompt in this app and exactly wrong for this one, where blank is this create's
-/// own valid default — the server's own naming — rather than a disabled state.
-/// Mirrors that helper's construction otherwise, so `tests/terminal.rs`'s existing
-/// dialog-panel idiom still finds the field the identical way.
+/// [`name_input_dialog`](crate::ui::dialogs::name_input_dialog): that
+/// helper's whole contract is "a blank field cannot submit", exactly wrong
+/// here — blank is this create's own valid default, the server's own
+/// naming. Mirrors that helper's construction otherwise, so
+/// `tests/terminal.rs`'s dialog-panel idiom still finds the field the same
+/// way.
 ///
-/// `value` is the page's own live buffer: a keystroke's `value.set` rebuilds this
-/// body, and the trimmed string is what both `Enter` and **Create** pop with. `nav`
-/// is the overlay host this page was pushed onto.
+/// `value` is the page's own live buffer: a keystroke's `value.set` rebuilds
+/// this body, and the trimmed string is what both `Enter` and **Create** pop
+/// with.
 pub(crate) fn new_tab_dialog(
     value: RwSignal<String>,
     nav: &NavigatorController<AppState>,
 ) -> GlyphDialogView<AppState> {
-    // Tracked read: a keystroke's `value.set` is what rebuilds this page.
+    // Tracked: a keystroke's `value.set` rebuilds this page.
     let current = value.get();
     let enter_nav = nav.clone();
     let submit_nav = nav.clone();
