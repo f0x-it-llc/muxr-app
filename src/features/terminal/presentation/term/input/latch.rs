@@ -18,15 +18,15 @@ use super::bytes::ESC;
 /// | `shift` | never touches it, but is consumed | selects the shifted sequence ([`shifted_sequence`](super::bytes::shifted_sequence)) and is consumed by that |
 ///
 /// `shift` leaves characters alone because the IME's own Shift has **already**
-/// delivered the case: the app is handed `"A"`, and rewriting a byte it was handed
-/// is precisely what this module does not do. What a terminal is missing without it
-/// is the *sequences* — back-tab, a shifted arrow.
+/// delivered the case: the app is handed `"A"`, and rewriting a byte it was
+/// handed is precisely what this module does not do. What a terminal is
+/// missing without it is the *sequences* — back-tab, a shifted arrow.
 ///
-/// `ctrl`/`alt` staying armed across a sequence key is the incumbent's pinned
-/// behaviour (`Ctrl` then `↑` then `c` still sends `0x03`). The consequence,
-/// recorded rather than papered over: **there is no combination arithmetic**. xterm
-/// encodes a chord as one parameter, so a real Ctrl+Shift+`↑` is `\x1b[1;6A` — this
-/// module sends `\x1b[1;2A` and leaves the `Ctrl` armed for the next character.
+/// `ctrl`/`alt` staying armed across a sequence key is pinned behaviour
+/// (`Ctrl` then `↑` then `c` still sends `0x03`), so **there is no
+/// combination arithmetic**: xterm encodes a chord as one parameter (a real
+/// Ctrl+Shift+`↑` is `\x1b[1;6A`), but this module sends `\x1b[1;2A` and
+/// leaves `Ctrl` armed for the next character.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModifierLatch {
     /// `Ctrl` is armed for the next single-code-unit emission.
@@ -85,17 +85,17 @@ pub fn single_unit(data: &[u8]) -> Option<u32> {
     Some(ch as u32)
 }
 
-/// Apply `latch` to one outgoing emission. The rules, verbatim from the incumbent:
+/// Apply `latch` to one outgoing emission:
 ///
-/// 1. **Only a single-code-unit emission is transformed.** Anything longer (an arrow
-///    sequence, a swipe-typed word, a backspace run) passes through **unmodified** —
-///    and, at the call site, leaves the latch armed.
-/// 2. **Ctrl** uppercases a lowercase ASCII letter and then masks `& 0x1f` **only
-///    if** the uppercased code lands in `0x40..=0x5f`. Outside that window there is
-///    no Ctrl transform at all — `Ctrl+2` sends `'2'` — though Alt may still apply.
+/// 1. **Only a single-code-unit emission is transformed.** Anything longer (an
+///    arrow sequence, a swipe-typed word, a backspace run) passes through
+///    **unmodified**, and leaves the latch armed at the call site.
+/// 2. **Ctrl** uppercases a lowercase ASCII letter, then masks `& 0x1f`
+///    **only if** the uppercased code lands in `0x40..=0x5f` — outside that
+///    window, `Ctrl+2` sends `'2'`, though Alt may still apply.
 /// 3. **Alt** prefixes [`ESC`], the convention every mainstream terminal uses.
-/// 4. **Shift is not in this transform at all** — see [`ModifierLatch`]. It selects
-///    a different *sequence* upstream.
+/// 4. **Shift is not in this transform at all** — see [`ModifierLatch`]. It
+///    selects a different *sequence* upstream.
 pub fn apply_latch(latch: ModifierLatch, data: &[u8]) -> Vec<u8> {
     let Some(unit) = single_unit(data) else {
         return data.to_vec();

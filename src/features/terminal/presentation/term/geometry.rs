@@ -1,24 +1,22 @@
-//! Width-derived cell geometry: how many cells fit the box the grid was given, and
-//! how big each one is.
+//! Width-derived cell geometry: how many cells fit the box the grid was given,
+//! and how big each one is.
 //!
-//! **The inversion against S9.** The benchmark this renderer was measured in
-//! (`benchmarks/frust_bench`'s `s9_terminal`) fixed the grid at 80x45 and *solved
-//! for the font size*, because the point there was that frust and the Flutter
-//! incumbent rasterize the same cell count over the same pixels. An app is the
-//! other way round: the user picks a font size (Settings owns it) and the **grid**
-//! resizes, so [`solve_cell_geometry`] measures the face's real cell box at that
-//! size and divides the available content box by it.
+//! **Inverted from the `s9_terminal` benchmark**, which fixed the grid at
+//! 80x45 and *solved for the font size* (to compare frust and the Flutter
+//! incumbent rasterizing the same cell count over the same pixels). An app
+//! runs the other way: the user picks a font size (Settings owns it) and the
+//! **grid** resizes, so [`solve_cell_geometry`] measures the face's real cell
+//! box at that size and divides the available content box by it.
 //!
-//! What survives from S9 unchanged: **measure, never assume** (the cell advance
-//! comes from shaping a probe string, [`CELL_PROBE`], through the engine's own
-//! monospace face — injected as a closure, so every line of arithmetic below is
-//! unit-testable with no font, no `TextContext` and no window); **bounded shrink
-//! iterations** for the one case the app inherits, a box too small to show a usable
-//! grid ([`MIN_COLS`]/[`MIN_ROWS`]), where the solver shrinks the type up to
-//! [`FIT_ITERATIONS`] times with a geometric [`FIT_BACKOFF`]; and **a float-jitter
-//! tolerance**, since a shaper returns advances through `f32` and a grid that
-//! divides exactly can measure back a hundred-thousandth of a pixel over
-//! ([`FIT_TOLERANCE`]).
+//! Carried over unchanged: **measure, never assume** (the cell advance comes
+//! from shaping a probe string, [`CELL_PROBE`], through the engine's own
+//! monospace face, injected as a closure, so the arithmetic below is
+//! unit-testable with no font/`TextContext`/window); **bounded shrink
+//! iterations** for a box too small to show a usable grid
+//! ([`MIN_COLS`]/[`MIN_ROWS`]), up to [`FIT_ITERATIONS`] times with a
+//! geometric [`FIT_BACKOFF`]; and **a float-jitter tolerance**
+//! ([`FIT_TOLERANCE`]), since an `f32` shaper can measure back a
+//! hundred-thousandth of a pixel over an exact division.
 
 use frust::authoring::text::{FontFamily, TextContext, TextStyle};
 use frust::authoring::{Color, LayoutCtx, Size};
@@ -38,7 +36,7 @@ pub const FALLBACK_ROWS: u16 = 24;
 
 /// The narrowest grid the solver will hand back before it starts shrinking the
 /// type instead. **App-chosen, not a published minimum**: below ~20 columns a
-/// terminal stops being one, and the honest response to a box that small is
+/// terminal stops being one, so the honest response to a box that small is
 /// smaller type, not a narrower grid.
 pub const MIN_COLS: u16 = 20;
 /// The shortest grid, for the same reason as [`MIN_COLS`]. Four rows is a
@@ -50,9 +48,9 @@ pub const MIN_ROWS: u16 = 4;
 /// overflows its box (and the clip trims it) rather than shipping a 2px font.
 pub const MIN_FONT_SIZE: f32 = 4.0;
 
-/// Ceiling on cells per axis. A guard, not a design limit: 512 columns is twice the
-/// widest realistic desktop terminal, and the cap stops a degenerate measurement (a
-/// face reporting a near-zero advance) from asking the emulator for a
+/// Ceiling on cells per axis. A guard, not a design limit: 512 columns is
+/// twice the widest realistic desktop terminal, and stops a degenerate
+/// measurement (a near-zero advance) from asking the emulator for a
 /// multi-million-cell allocation on the layout pass.
 pub const MAX_CELLS_PER_AXIS: u16 = 512;
 
@@ -60,14 +58,14 @@ pub const MAX_CELLS_PER_AXIS: u16 = 512;
 /// whatever it has.
 const FIT_ITERATIONS: usize = 8;
 
-/// Multiplicative backoff applied from the second shrink pass onward. A face that
-/// quantizes its advance reports the *same* cell width across a band of sizes, so a
-/// ratio-derived step lands on a fixed point it can never escape.
+/// Multiplicative backoff applied from the second shrink pass onward. A face
+/// that quantizes its advance reports the *same* cell width across a band of
+/// sizes, so a ratio-derived step lands on a fixed point it can't escape.
 const FIT_BACKOFF: f64 = 0.9;
 
-/// Overflow, in logical px per axis, treated as a fit. One hundredth of a logical
-/// pixel is sub-pixel rounding on the last column's right edge, not a clipped
-/// column — and chasing it would cost a whole column.
+/// Overflow, in logical px per axis, treated as a fit. One hundredth of a
+/// logical pixel is sub-pixel rounding on the last column's right edge, not a
+/// clipped column, and chasing it would cost a whole column.
 const FIT_TOLERANCE: f64 = 0.01;
 
 /// The cell box the grid paints on, the font size it was measured at, and the
@@ -188,11 +186,11 @@ fn axis_cells(available: f64, cell: f64, fallback: u16) -> u16 {
     count.clamp(1.0, f64::from(MAX_CELLS_PER_AXIS)) as u16
 }
 
-/// Measure the monospace cell box at `font_size` in `family`: shape [`CELL_PROBE`]
-/// and divide its advance by its length (its height is the shaped line box,
-/// [`LINE_HEIGHT`] x `font_size`). `family` matters here, not just at paint time:
-/// two monospace faces can measure a different cell advance at the same size, so
-/// the grid re-solves its geometry whenever the resolved family changes.
+/// Measure the monospace cell box at `font_size` in `family`: shape
+/// [`CELL_PROBE`] and divide its advance by its length (height is the shaped
+/// line box, [`LINE_HEIGHT`] x `font_size`). `family` matters here, not just
+/// at paint time — two monospace faces can measure a different advance at the
+/// same size, so the grid re-solves whenever the resolved family changes.
 pub fn measure_cell(ctx: &mut LayoutCtx, font_size: f32, family: &FontFamily) -> (f64, f64) {
     // The ink is irrelevant to a measurement; the family/line-height are not,
     // which is why this goes through the same `CellStyle` every run shapes with.

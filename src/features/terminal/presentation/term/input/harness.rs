@@ -29,10 +29,10 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 /// each snapshot is **the mirror the source currently publishes** plus one
 /// character.
 ///
-/// Re-reading the mirror per keystroke is not a shortcut — it is the contract.
-/// Both bridges apply a re-anchor synchronously inside the same round trip that
-/// delivered the keystroke (see [`source`](super::source)'s docs), so the
-/// snapshot after a trim is built on the *trimmed* buffer.
+/// Re-reading the mirror per keystroke is not a shortcut, it's the contract:
+/// both bridges apply a re-anchor synchronously inside the same round trip
+/// that delivered the keystroke (see [`source`](super::source)'s docs), so
+/// the snapshot after a trim is built on the *trimmed* buffer.
 pub(super) fn type_text(source: &mut KeystrokeSource, text: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for ch in text.chars() {

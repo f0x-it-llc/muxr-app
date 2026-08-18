@@ -49,13 +49,13 @@ pub(super) fn utf16_prefix(s: &str, units: usize) -> &str {
     &s[..end]
 }
 
-/// Drop leading characters from `s` until it is at most `units` UTF-16 code units
-/// long, character-aligned — [`utf16_suffix`] as an in-place truncation. **In place,
-/// deliberately**: the obvious spelling (`*s = utf16_suffix(s, units).to_string()`)
-/// leaves the user's typing in a freed allocation nobody scrubs. `drain` shifts the
-/// tail down inside the same allocation, so the only copy of the dropped head is the
-/// stale bytes past the new length — which `scrub` and `Zeroizing`'s own drop both
-/// zero across the buffer's **whole capacity**.
+/// Drop leading characters from `s` until at most `units` UTF-16 units long,
+/// character-aligned — [`utf16_suffix`] as an in-place truncation. **In
+/// place, deliberately**: `*s = utf16_suffix(s, units).to_string()` would
+/// leave the user's typing in a freed allocation nobody scrubs. `drain`
+/// shifts the tail down in place, so the only copy of the dropped head is
+/// stale bytes past the new length, zeroed (with the rest) by
+/// `scrub`/`Zeroizing`'s drop across the buffer's **whole capacity**.
 pub(super) fn clamp_front(s: &mut String, units: usize) {
     if len_utf16(s) <= units {
         return;
@@ -71,13 +71,13 @@ pub(super) fn clamp_index(index: i32, len: i32) -> i32 {
     if index < 0 { -1 } else { index.min(len) }
 }
 
-/// The minimal `(removed, added)` edit turning `old` into `new`: the common prefix
-/// and common suffix are cancelled, `removed` counts the UTF-16 units the middle of
-/// `old` held, and `added` is the middle of `new`. Both boundaries are
-/// **character**-aligned, so a surrogate pair can never be split across a diff
-/// boundary — the emoji case a naive UTF-16-indexed diff gets wrong. The returned
-/// `added` is a fresh allocation holding the user's own text: `on_snapshot` takes
-/// ownership inside a `Zeroizing` so its drop scrubs, and any other caller must too.
+/// The minimal `(removed, added)` edit turning `old` into `new`: common
+/// prefix/suffix cancelled, `removed` counting the UTF-16 units the middle of
+/// `old` held, `added` the middle of `new`. Both boundaries are
+/// **character**-aligned, so a surrogate pair can never split across a diff
+/// boundary. `added` is a fresh allocation holding the user's own text:
+/// `on_snapshot` takes ownership inside a `Zeroizing` so its drop scrubs, and
+/// any other caller must too.
 pub fn diff(old: &str, new: &str) -> (usize, String) {
     let mut prefix = 0usize;
     for (a, b) in old.chars().zip(new.chars()) {
