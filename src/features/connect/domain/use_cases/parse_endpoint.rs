@@ -1,44 +1,36 @@
 //! [`parse_endpoint`] — the `host:port` validation behind the connect CTA.
 //!
-//! A plain function rather than a `clean_signals::UseCase`: that trait's `execute`
-//! is `async` so `ControllerCore::run` can own an in-flight lifecycle, and this is
-//! a pure synchronous parse with no I/O, no latency and nothing to cancel —
-//! wrapping it would buy an `await`, a `spawn_local` and a pump-poll in every test,
-//! and no behavior.
+//! A plain function rather than a `clean_signals::UseCase`: this is a pure
+//! synchronous parse with no I/O, nothing to cancel — wrapping it would buy an
+//! `await` and a pump-poll in every test, and no behavior.
 //!
-//! **Mock-grade**: no DNS, no IDN, no IPv6 bracket syntax, no scheme stripping —
-//! the rules are exactly what the form's placeholder promises
-//! (`zelli.example.com:50051`): a non-empty host, a `:`, and a port in `1..=65535`.
+//! Mock-grade: no DNS, no IDN, no IPv6 bracket syntax, no scheme stripping —
+//! just a non-empty host, a `:`, and a port in `1..=65535`.
 
 use crate::failure::AppFailure;
 
 /// The lowest legal TCP port — `0` is "any port" to the OS, never a dial target.
 const MIN_PORT: u16 = 1;
 
-/// A parsed `host:port` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
-    /// The host half, trimmed.
     pub host: String,
-    /// The port half.
     pub port: u16,
 }
 
 /// Parse `raw` as `host:port`.
 ///
-/// **Failure vocabulary, a documented gap**: every rejection maps to
-/// [`AppFailure::Network`], because `AppFailure` has no validation variant and
-/// `Internal` means "a bug, an invariant violation", which a typo in a text field
-/// is not. `Network` is the closest honest fit — the user typed something muxr
-/// cannot reach. A `Validation` arm on `AppFailure` is the real fix. The internal
-/// detail (never shown) names the offending input so a log tells the whole story.
+/// Documented gap: every rejection maps to [`AppFailure::Network`], since
+/// `AppFailure` has no validation variant and `Internal` means a bug, not a
+/// typo. The internal detail (never shown to the user) names the offending
+/// input so a log tells the whole story.
 pub fn parse_endpoint(raw: &str) -> Result<Endpoint, AppFailure> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(AppFailure::Network("server url is empty".to_string()));
     }
-    // `rsplit_once` rather than `split_once`: a future IPv6 literal has colons
-    // of its own, and the port is always the last one.
+    // `rsplit_once`, not `split_once`: a future IPv6 literal has colons of its
+    // own, and the port is always the last one.
     let Some((host, port)) = raw.rsplit_once(':') else {
         return Err(AppFailure::Network(format!(
             "server url {raw:?} has no ':port'"
@@ -116,7 +108,7 @@ mod tests {
 
         let failure = parse_endpoint("nope").expect_err("a host with no port is rejected");
         assert!(!failure.user_message().contains("nope"));
-        // …but the log-facing Display does carry it.
+        // The log-facing Display does carry it.
         assert!(failure.to_string().contains("nope"));
     }
 }

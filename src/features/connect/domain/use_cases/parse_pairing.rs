@@ -2,9 +2,8 @@
 //! typed [`PairingPayload`].
 //!
 //! A pure parse, verified against both `muxrctl`'s generator and the Flutter
-//! client's own `PairingPayload.tryParse`. Every rejection is `None` rather than a
-//! failure: a malformed code has no single-field detail worth showing, and the
-//! camera screen's retry loop — not a toast — is its failure UX.
+//! client's own `PairingPayload.tryParse`. Every rejection is `None`, never a
+//! failure: the camera screen's retry loop, not a toast, is the failure UX.
 //!
 //! # Grammar
 //!
@@ -13,25 +12,22 @@
 //! v2: muxr://pair?v=2&h=<host>&p=<port>&t=<base64url>&ro=<0|1>&n=<pct-encoded>&tm=<pin|ca>[&fp=<hex>]
 //! ```
 //!
-//! - Scheme `muxr`, authority `pair`, both matched case-sensitively — the
-//!   generator only ever emits this exact casing.
+//! - Scheme `muxr`, authority `pair`, matched case-sensitively.
 //! - `v` selects the grammar: `"1"` or `"2"`; anything else rejects.
 //! - `h` must be non-empty; `p` must parse as `1..=65535`.
-//! - `t` is base64url with **no** padding, decoded to raw bytes and then to a UTF-8
-//!   string. [`URL_SAFE_NO_PAD`]'s `RequireNone` config enforces that half: a `t`
-//!   carrying a trailing `=` is rejected by the decode itself, so this only ever
-//!   rejects malformed/foreign input.
-//! - `ro` is `true` only for the literal `"1"`; anything else, an absent key
-//!   included, is `false` — never a reject case.
-//! - `n` is the QR's human label, percent-decoded per RFC 3986 §2.3. It is
-//!   required, and decoded bytes that aren't valid UTF-8 reject.
-//! - v1 always requires `fp`, matching `^[0-9a-f]{64}$`, and trusts via
+//! - `t` is base64url with **no** padding, decoded to raw bytes then UTF-8;
+//!   [`URL_SAFE_NO_PAD`]'s `RequireNone` config rejects a trailing `=` outright.
+//! - `ro` is `true` only for the literal `"1"`; anything else, absent included,
+//!   is `false` — never a reject case.
+//! - `n` is the QR's human label, percent-decoded per RFC 3986 §2.3, required;
+//!   invalid UTF-8 rejects.
+//! - v1 always requires `fp` matching `^[0-9a-f]{64}$`, trusted via
 //!   [`PairingTrust::Pin`]. v2's `tm` selects the posture: `"pin"` requires `fp`
-//!   under the same rule, `"ca"` ignores a present `fp` entirely; any other value,
-//!   or a missing `tm`, rejects.
-//! - Query-param order is arbitrary — [`split_query`] indexes by key. It is
-//!   hand-rolled (no URL crate is a dependency): split on `&`, then each pair on
-//!   its first `=`; a key with no `=` is dropped, and the grammar has no bare keys.
+//!   under the same rule, `"ca"` ignores a present `fp`; any other value, or a
+//!   missing `tm`, rejects.
+//! - Query-param order is arbitrary — [`split_query`] indexes by key, hand-rolled
+//!   (no URL crate dependency): split on `&`, then each pair on its first `=`; a
+//!   key with no `=` is dropped.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,8 +46,7 @@ const SCHEME_PREFIX: &str = "muxr://";
 const AUTHORITY: &str = "pair";
 
 /// Parse `raw` as a `muxr://pair` QR payload. See the [module docs](self) for
-/// the full grammar and every rejection rule; every rejection is `None`,
-/// never a panic.
+/// the full grammar; every rejection is `None`, never a panic.
 pub fn parse_pairing_uri(raw: &str) -> Option<PairingPayload> {
     let rest = raw.strip_prefix(SCHEME_PREFIX)?;
     let (authority, query) = rest.split_once('?')?;
@@ -84,8 +79,8 @@ pub fn parse_pairing_uri(raw: &str) -> Option<PairingPayload> {
     })
 }
 
-/// Split `query` into `(key, value)` pairs — see the [module docs](self)' last
-/// grammar bullet for the exact rule.
+/// Splits `query` into `(key, value)` pairs — see the [module docs](self)'
+/// last grammar bullet.
 fn split_query(query: &str) -> Vec<(&str, &str)> {
     query
         .split('&')
@@ -93,23 +88,22 @@ fn split_query(query: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// The first value for `key` in `pairs`. Query-param order is arbitrary per the
-/// grammar, so this never depends on it; a repeated key (which the grammar never
-/// has) resolves to its first occurrence.
+/// The first value for `key` in `pairs`. Order-independent; a repeated key
+/// (never in the grammar) resolves to its first occurrence.
 fn find_param<'a>(pairs: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
     pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
 
-/// Decode `raw` as base64url with no padding, then as UTF-8 — the auth token. A
-/// padded `raw` rejects rather than decodes (the grammar's `t` rule).
+/// Decodes `raw` as base64url with no padding, then UTF-8 — the auth token. A
+/// padded `raw` rejects (the grammar's `t` rule).
 fn decode_token(raw: &str) -> Option<Zeroizing<String>> {
     let bytes = URL_SAFE_NO_PAD.decode(raw).ok()?;
     let token = String::from_utf8(bytes).ok()?;
     Some(Zeroizing::new(token))
 }
 
-/// Percent-decode `raw` into the QR's human label. Malformed UTF-8 rejects rather
-/// than lossily replacing — no rejection here is a best-effort guess.
+/// Percent-decodes `raw` into the QR's human label. Malformed UTF-8 rejects
+/// rather than lossily replacing.
 fn decode_label(raw: &str) -> Option<String> {
     percent_decode_str(raw)
         .decode_utf8()
@@ -117,8 +111,8 @@ fn decode_label(raw: &str) -> Option<String> {
         .map(|label| label.into_owned())
 }
 
-/// Resolve `version` (`v`'s value) plus whatever else `pairs` carries into a
-/// [`PairingTrust`], per the [module docs](self)' grammar section.
+/// Resolves `version` (`v`'s value) plus `pairs` into a [`PairingTrust`], per
+/// the [module docs](self)' grammar section.
 fn decode_trust(version: &str, pairs: &[(&str, &str)]) -> Option<PairingTrust> {
     match version {
         "1" => pinned_trust(pairs),
@@ -140,8 +134,7 @@ fn pinned_trust(pairs: &[(&str, &str)]) -> Option<PairingTrust> {
     })
 }
 
-/// `^[0-9a-f]{64}$`, hand-rolled — no `regex` dependency for one fixed-shape
-/// check.
+/// `^[0-9a-f]{64}$`, hand-rolled — no `regex` dependency for one fixed check.
 fn valid_fingerprint(fp: &str) -> bool {
     fp.len() == 64
         && fp
@@ -153,8 +146,7 @@ fn valid_fingerprint(fp: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// `czNjcjN0LXRva2Vu` is `"s3cr3t-token"`, base64url-encoded with no
-    /// padding — the token every happy-path fixture below carries.
+    /// `czNjcjN0LXRva2Vu` is `"s3cr3t-token"`, base64url-encoded with no padding.
     const TOKEN_B64: &str = "czNjcjN0LXRva2Vu";
     const TOKEN_PLAIN: &str = "s3cr3t-token";
     const FP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -201,7 +193,7 @@ mod tests {
         let uri = format!("muxr://pair?v=2&h=rig.example.com&p=50051&t={TOKEN_B64}&n=Cloud&tm=ca");
         let payload = parse_pairing_uri(&uri).expect("well-formed v2 tm=ca URI (no fp) parses");
         assert_eq!(payload.trust, PairingTrust::Ca);
-        // `ro` absent — defaults false.
+        // `ro` absent defaults false.
         assert!(!payload.read_only);
     }
 
@@ -255,18 +247,14 @@ mod tests {
 
     #[test]
     fn a_padded_base64_token_is_rejected_not_tolerated() {
-        // `"hi"` base64url-encoded WITH padding is `"aGk="`; the generator's
-        // own no-pad form is `"aGk"`. See the module docs' padding-
-        // tolerance note: `URL_SAFE_NO_PAD` rejects the padded form outright.
+        // `"hi"` base64url-encoded WITH padding is `"aGk="`; the no-pad form is `"aGk"`.
         let uri = "muxr://pair?v=2&h=h&p=1&t=aGk%3D&n=n&tm=ca";
-        // `%3D` decodes the literal `=` through percent-encoding too, so
-        // this exercises the raw, unencoded `=` form directly instead.
+        // Raw, unencoded `=`, rather than percent-encoded.
         let uri_raw_pad = "muxr://pair?v=2&h=h&p=1&t=aGk=&n=n&tm=ca";
         assert!(parse_pairing_uri(uri).is_none());
         assert!(parse_pairing_uri(uri_raw_pad).is_none());
 
-        // The no-pad form of the same token parses cleanly, confirming the
-        // rejection above is padding-specific, not a fixture typo.
+        // Confirms the rejection above is padding-specific, not a fixture typo.
         let uri_nopad = "muxr://pair?v=2&h=h&p=1&t=aGk&n=n&tm=ca";
         let payload = parse_pairing_uri(uri_nopad).expect("no-pad token parses");
         assert_eq!(payload.token.as_str(), "hi");
@@ -327,19 +315,15 @@ mod tests {
         }
     }
 
-    /// `muxr`'s pairing-QR payload shape, copied verbatim from the frust camera
-    /// plugin's own QR decode-conformance fixture. Its `t` value
-    /// is a 43-char string of plain letters chosen only to stress that plugin's
-    /// pixel-decode path at the protocol's maximum field width — not itself
-    /// produced by base64url-encoding real UTF-8 text.
+    /// Copied verbatim from the frust camera plugin's own QR decode-conformance
+    /// fixture; its `t` value stresses that plugin's pixel-decode path but
+    /// isn't itself valid base64url-encoded UTF-8.
     const PAYLOAD_DENSE: &str = "muxr://pair?v=2&h=192.168.1.100&p=50051&t=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ&fp=\
 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&tm=pin&n=Test%20Server";
 
     #[test]
     fn the_camera_plugins_dense_conformance_fixture_is_rejected_on_its_non_utf8_token() {
-        // Every other field is well-formed; `t`'s 43-char span decodes to bytes
-        // that are not valid UTF-8, so this module's `t` rule rejects it — a fact
-        // about the shared fixture, not a defect in either module.
+        // A fact about the shared fixture, not a defect in either module.
         assert!(parse_pairing_uri(PAYLOAD_DENSE).is_none());
     }
 }

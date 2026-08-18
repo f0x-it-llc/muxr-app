@@ -1,31 +1,31 @@
-//! The QR-pairing sheet: a live scanning viewfinder, or the copy that explains
-//! why there isn't one.
+//! The QR-pairing sheet: a live scanning viewfinder, or the copy that
+//! explains why there isn't one.
 //!
-//! A `Component` rather than a plain builder because it owns a **camera session**,
-//! and therefore a lifecycle: opened on mount, torn down on every way out through
-//! `Component::init`'s `on_cleanup` — never a `Drop` impl. Permission is already
-//! granted by the time this mounts (the FAB gate, [`super::qr_affordance`]).
+//! A `Component` rather than a plain builder because it owns a camera
+//! session, and therefore a lifecycle: opened on mount, torn down on every
+//! way out through `Component::init`'s `on_cleanup` — never a `Drop` impl.
+//! Permission is already granted by the time this mounts (the FAB gate,
+//! [`super::qr_affordance`]).
 //!
-//! **No signal write from inside the detection callback**, which runs on a
-//! plugin-owned thread: it copies the raw value into [`Detections`]' plain mutex
-//! cell, and the UI-thread [`spawn_detection_pump`] loop parses it, applies it and
-//! closes the sheet. First parseable payload wins; an unparseable one is dropped
-//! silently, since a QR that is not a pairing code is not a failure worth
-//! interrupting a scan for. No scanned text is ever formatted into a message, a
-//! label or a log line — the raw value is a bearer token in the clear, and it lives
-//! in a [`Zeroizing`] holder until the parse consumes it.
+//! No signal write from inside the detection callback, which runs on a
+//! plugin-owned thread: it copies the raw value into [`Detections`]' plain
+//! mutex cell, and the UI-thread [`spawn_detection_pump`] loop parses it,
+//! applies it, and closes the sheet. First parseable payload wins; an
+//! unparseable one is dropped silently. No scanned text is ever formatted
+//! into a message, a label or a log line — the raw value is a bearer token
+//! in the clear, and it lives in a [`Zeroizing`] holder until the parse
+//! consumes it.
 //!
-//! A stream start is accepted, not confirmed, on iOS: the platform can still reject
-//! the attach after [`start_scan`] returned `Ok`, so [`spawn_stream_error_poller`]
-//! routes a late failure into the same `camera_failed` signal a synchronous one
-//! sets. Every [`CameraSession::close`] call runs off the UI thread, since it
-//! blocks on Apple.
+//! A stream start is accepted, not confirmed, on iOS: the platform can
+//! still reject the attach after [`start_scan`] returned `Ok`, so
+//! [`spawn_stream_error_poller`] routes a late failure into the same
+//! `camera_failed` signal a synchronous one sets. Every
+//! [`CameraSession::close`] call runs off the UI thread, since it blocks on Apple.
 //!
-//! **The camera is a phone/tablet affordance** ([`camera_backend_available`]):
-//! every other target renders the unavailable state instead. That keeps a desktop
-//! preview — and every headless test on a developer's Mac — from asking
-//! AVFoundation for a capture device it has no usage-description string to
-//! justify.
+//! The camera is a phone/tablet affordance ([`camera_backend_available`]):
+//! every other target renders the unavailable state, keeping a desktop
+//! preview (and every headless test) from asking AVFoundation for a capture
+//! device it has no usage-description string to justify.
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,50 +50,42 @@ use crate::features::connect::domain::use_cases::parse_pairing::parse_pairing_ur
 use crate::ui::palette::{active_theme, inked};
 use crate::ui::spacing;
 
-/// The sheet's own title — the same words the affordance that opened it is
-/// named by.
 const SHEET_TITLE: &str = FAB_LABEL;
-/// The live viewfinder's copy.
 const SCAN_HINT: &str = "Point the camera at the QR code shown by muxrctl on your server.";
-/// The copy for a build with no camera backend: pairing by hand is the whole path,
-/// so this is a plain instruction rather than an error.
+/// Pairing by hand is the whole path with no camera backend, so this is a
+/// plain instruction rather than an error.
 pub const NO_CAMERA: &str =
     "Camera pairing needs a phone or tablet — enter the server URL and token by hand instead.";
-/// …when the camera exists but refused, or the permission check failed outright.
+/// The camera exists but refused, or the permission check failed outright.
 /// The plugin's own detail is never shown (`crate::failure`'s rule).
 pub(super) const CAMERA_UNAVAILABLE: &str = "Camera unavailable.";
-/// The retry action's label.
 const RETRY_LABEL: &str = "try again";
-/// What a screen reader announces over the live preview slot — a platform view
-/// carries no frust-visible semantics of its own.
+/// A platform view carries no frust-visible semantics of its own.
 const VIEWFINDER_LABEL: &str = "Camera viewfinder";
 
-/// The viewfinder square, in logical px: the largest that still leaves the sheet's
-/// caption room on a 340px-wide phone.
+/// The largest viewfinder square that still leaves the sheet's caption room
+/// on a 340px-wide phone.
 const VIEWFINDER: f64 = 220.0;
-/// The scan mark drawn inside the placeholder viewfinder, in logical px.
 const VIEWFINDER_MARK: f64 = 44.0;
 
-/// How often the UI thread checks the detection cell — well under the reaction
-/// time of pointing a phone at a code, and far above an uncontended lock's cost.
-/// The scan itself runs at the camera's rate, not this one.
+/// Well under the reaction time of pointing a phone at a code, and far
+/// above an uncontended lock's cost. The scan itself runs at the camera's
+/// rate, not this one.
 const SCAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// How often [`spawn_stream_error_poller`] checks
-/// [`CameraSession::take_stream_error`] — modest, since it only has to notice a
-/// deferred attach failure before the user gives up on a dead viewfinder.
+/// Modest — only has to notice a deferred attach failure before the user
+/// gives up on a dead viewfinder.
 const STREAM_ERROR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The QR sheet's body. `close` is the one-shot dismissal, fired exactly once by
-/// the scan pump when a payload has been applied; every *other* way out tears this
-/// component down, which is what closes the camera. `pub` so `tests/connect.rs`
-/// can mount it directly — a navigator's pages contribute no semantics.
+/// `close` is the one-shot dismissal, fired exactly once by the scan pump
+/// when a payload has been applied; every other way out tears this
+/// component down, which is what closes the camera. `pub` so
+/// `tests/connect.rs` can mount it directly.
 pub fn qr_sheet_body(close: Rc<dyn Fn()>, controller: Arc<ConnectController>) -> AnyView<AppState> {
     any(component(QrScanSheet { close, controller }))
 }
 
-/// The QR sheet `Component`. Stateless; everything retained lives in
-/// [`QrSheetState`].
+/// Stateless; everything retained lives in [`QrSheetState`].
 struct QrScanSheet {
     /// See [`qr_sheet_body`].
     close: Rc<dyn Fn()>,
@@ -101,42 +93,39 @@ struct QrScanSheet {
     controller: Arc<ConnectController>,
 }
 
-/// The QR sheet's retained state.
 pub struct QrSheetState {
-    /// The open session. `Arc<Mutex<..>>` only because [`on_cleanup`] takes a
-    /// `Send + Sync` closure.
+    /// `Arc<Mutex<..>>` only because [`on_cleanup`] takes a `Send + Sync` closure.
     session: Arc<Mutex<Option<Arc<CameraSession>>>>,
     /// Where the plugin thread leaves what it decoded.
     detections: Arc<Detections>,
-    /// Whether the camera has been opened for this mount — so a refusal is not
-    /// retried on every rebuild.
+    /// Whether the camera has been opened for this mount, so a refusal is
+    /// not retried on every rebuild.
     opened: bool,
-    /// Whether an open, a stream start, or a deferred stream failure means there
-    /// is nothing to show. An [`RwSignal`] because the poller writes it from
-    /// outside `build`, and a tracked read wakes the rebuild that switches stage.
+    /// An [`RwSignal`] because the poller writes it from outside `build`,
+    /// and a tracked read wakes the rebuild that switches stage.
     camera_failed: RwSignal<bool>,
 }
 
 /// The one-slot hand-off between the camera's decode thread and the UI thread.
 ///
-/// A plain mutex, never a signal: `on_detect` runs on a plugin-owned thread with
-/// the platform's buffer borrowed, where writing a signal is forbidden outright.
-/// The held value is [`Zeroizing`] because a pairing QR's text *is* a token.
+/// A plain mutex, never a signal: `on_detect` runs on a plugin-owned thread
+/// with the platform's buffer borrowed, where writing a signal is forbidden
+/// outright. The held value is [`Zeroizing`] because a pairing QR's text is
+/// a token.
 #[derive(Default)]
 struct Detections {
-    /// The most recent decoded value, or `None` once the pump has taken it.
     last: Mutex<Option<Zeroizing<String>>>,
 }
 
 impl Detections {
-    /// Record `raw` as the newest detection, replacing (and scrubbing) any the
-    /// pump has not taken yet. Runs on the plugin's thread.
+    /// Records `raw` as the newest detection, replacing (and scrubbing) any
+    /// the pump has not taken yet. Runs on the plugin's thread.
     fn publish(&self, raw: &str) {
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) =
             Some(Zeroizing::new(raw.to_string()));
     }
 
-    /// Take the newest detection, if any. Runs on the UI thread.
+    /// Runs on the UI thread.
     fn take(&self) -> Option<Zeroizing<String>> {
         self.last
             .lock()
@@ -152,9 +141,8 @@ impl Component for QrScanSheet {
         let session: Arc<Mutex<Option<Arc<CameraSession>>>> = Arc::new(Mutex::new(None));
         {
             // The mandatory teardown: this sheet holds the device's single
-            // image-stream claim, and `close` stops the running stream, so this
-            // one call is the whole teardown — off the UI thread, since it blocks
-            // on Apple.
+            // image-stream claim, so `close` is the whole teardown — off the
+            // UI thread, since it blocks on Apple.
             let cell = Arc::clone(&session);
             on_cleanup(move || {
                 let session = cell.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -196,26 +184,24 @@ impl Component for QrScanSheet {
 
 /// What the sheet is showing this frame.
 enum Stage {
-    /// A session is open: the live viewfinder.
     Live,
-    /// No viewfinder — the copy that says why, its ink, and whether a retry could
-    /// plausibly change the answer.
+    /// No viewfinder — the copy that says why, its ink, and whether a retry
+    /// could plausibly change the answer.
     Unavailable(&'static str, MessageTone, bool),
 }
 
 /// Whether a message reads as an ordinary instruction or as a failure.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MessageTone {
-    /// `on_surface_variant` — nothing went wrong (the no-backend path).
+    /// Nothing went wrong (the no-backend path).
     Muted,
-    /// `error` — the camera is there and refused.
+    /// The camera is there and refused.
     Failed,
 }
 
-/// The error→stage decision [`sheet_stage`] wraps. `has_backend` is a parameter
-/// rather than a direct [`camera_backend_available`] read because that gate is a
-/// compile-time constant, always `false` on a test host, and would short-circuit
-/// every branch below it.
+/// The error→stage decision [`sheet_stage`] wraps. `has_backend` is a
+/// parameter rather than a direct [`camera_backend_available`] read since
+/// that gate is a compile-time constant, always `false` on a test host.
 fn stage_for(has_backend: bool, state: &QrSheetState) -> Stage {
     if !has_backend {
         return Stage::Unavailable(NO_CAMERA, MessageTone::Muted, false);
@@ -226,24 +212,21 @@ fn stage_for(has_backend: bool, state: &QrSheetState) -> Stage {
     if has_session(state) {
         return Stage::Live;
     }
-    // Unreachable in practice: `open_camera_once` either opens a session or sets
-    // `camera_failed`. A safe fallback rather than an `unreachable!`.
+    // Unreachable in practice: `open_camera_once` either opens a session or
+    // sets `camera_failed`. A safe fallback rather than an `unreachable!`.
     Stage::Unavailable(CAMERA_UNAVAILABLE, MessageTone::Failed, true)
 }
 
-/// Which [`Stage`] `state` is in — [`stage_for`] with this build's real
-/// [`camera_backend_available`] answer plugged in.
+/// [`stage_for`] with this build's real [`camera_backend_available`] answer
+/// plugged in.
 fn sheet_stage(state: &QrSheetState) -> Stage {
     stage_for(camera_backend_available(), state)
 }
 
-/// Whether this build has a real camera backend to open a session on (see the
-/// [module docs](self)'s gating note).
 pub(super) const fn camera_backend_available() -> bool {
     cfg!(any(target_os = "android", target_os = "ios"))
 }
 
-/// Whether a session is open right now.
 fn has_session(state: &QrSheetState) -> bool {
     state
         .session
@@ -252,8 +235,8 @@ fn has_session(state: &QrSheetState) -> bool {
         .is_some()
 }
 
-/// Open the camera and start scanning — once per mount, from `build`. A no-op with
-/// no camera backend: [`sheet_stage`] renders [`NO_CAMERA`] instead.
+/// Once per mount, from `build`. A no-op with no camera backend:
+/// [`sheet_stage`] renders [`NO_CAMERA`] instead.
 fn open_camera_once(state: &mut QrSheetState) {
     if state.opened || !camera_backend_available() {
         return;
@@ -265,8 +248,8 @@ fn open_camera_once(state: &mut QrSheetState) {
     };
     let session = Arc::new(session);
     if start_scan(&session, &state.detections).is_err() {
-        // A session that cannot stream is a viewfinder with nothing behind it:
-        // let it go rather than hold the device open behind an error state.
+        // A session that cannot stream is a viewfinder with nothing behind
+        // it — let it go rather than hold the device open behind an error state.
         spawn_blocking(move || session.close());
         state.camera_failed.set(true);
         return;
@@ -274,10 +257,10 @@ fn open_camera_once(state: &mut QrSheetState) {
     *state.session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session);
 }
 
-/// Start the barcode stream, wiring `on_detect` to `detections` and nothing else.
-/// `Ok(())` is accepted, not confirmed, on iOS (see the [module docs](self)).
-/// [`DetectionPolicy::NoDuplicates`] because a code sits in frame for as long as
-/// it takes to focus; QR only, since `muxrctl` emits nothing else.
+/// Wires `on_detect` to `detections` and nothing else. `Ok(())` is accepted,
+/// not confirmed, on iOS (see the [module docs](self)).
+/// [`DetectionPolicy::NoDuplicates`] because a code sits in frame for as
+/// long as it takes to focus; QR only, since `muxrctl` emits nothing else.
 fn start_scan(session: &CameraSession, detections: &Arc<Detections>) -> Result<(), CameraError> {
     let detections = Arc::clone(detections);
     session.start_barcode_stream(
@@ -287,8 +270,7 @@ fn start_scan(session: &CameraSession, detections: &Arc<Detections>) -> Result<(
         },
         move |found: &[Barcode]| {
             // Never empty (the plugin's contract) — `first` is the
-            // one-code-per-frame convenience, not a defensive check. The whole
-            // callback is one copy into the hand-off cell.
+            // one-code-per-frame convenience, not a defensive check.
             if let Some(barcode) = found.first() {
                 detections.publish(&barcode.raw_value);
             }
@@ -296,10 +278,8 @@ fn start_scan(session: &CameraSession, detections: &Arc<Detections>) -> Result<(
     )
 }
 
-/// Start the deferred-stream-error poller. Gated like every other camera path, so
-/// a build with no backend never calls [`use_interval`] at all; its
-/// stopped-on-unmount contract covers the rest. A `None` session on a tick is a
-/// no-op.
+/// Gated like every other camera path, so a build with no backend never
+/// calls [`use_interval`] at all. A `None` session on a tick is a no-op.
 fn spawn_stream_error_poller(
     session: Arc<Mutex<Option<Arc<CameraSession>>>>,
     camera_failed: RwSignal<bool>,
@@ -316,8 +296,7 @@ fn spawn_stream_error_poller(
             return;
         };
         if current.take_stream_error().is_some() {
-            // Same treatment `open_camera_once` gives a synchronous failure, off
-            // the UI thread this callback runs on.
+            // Same treatment `open_camera_once` gives a synchronous failure.
             *session.lock().unwrap_or_else(PoisonError::into_inner) = None;
             spawn_blocking(move || current.close());
             camera_failed.set(true);
@@ -325,9 +304,9 @@ fn spawn_stream_error_poller(
     });
 }
 
-/// Poll the detection cell on the **UI thread**, apply the first parseable payload,
-/// and close the sheet. The loop checks its cancel flag before every read, so a
-/// sheet torn down between two wakes never touches the controller again.
+/// Polls the detection cell on the UI thread, applies the first parseable
+/// payload, and closes the sheet. Checks its cancel flag before every read,
+/// so a sheet torn down between two wakes never touches the controller again.
 fn spawn_detection_pump(
     detections: Arc<Detections>,
     controller: Arc<ConnectController>,
@@ -355,14 +334,14 @@ fn spawn_detection_pump(
     });
 }
 
-/// The live sheet: the platform preview inside the same framed viewfinder the
-/// placeholder draws, and the scan hint.
+/// The platform preview inside the same framed viewfinder the placeholder
+/// draws, and the scan hint.
 fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     let scheme = theme.scheme();
     let guard = state.session.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(session) = guard.as_ref() else {
-        // Unreachable: `Stage::Live` is what a held session means. Rendering the
-        // instruction beats an `expect` on a lock a rebuild could race.
+        // Unreachable: `Stage::Live` is what a held session means. Rendering
+        // the instruction beats an `expect` on a lock a rebuild could race.
         drop(guard);
         return message_body(theme, CAMERA_UNAVAILABLE, MessageTone::Failed, true);
     };
@@ -399,8 +378,7 @@ fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
 }
 
-/// The sheet with no live camera: the placeholder viewfinder over `message`, and
-/// a retry where one could help.
+/// The placeholder viewfinder over `message`, and a retry where one could help.
 fn message_body(
     theme: &Theme,
     message: &str,
@@ -411,7 +389,6 @@ fn message_body(
     let viewfinder = panel(
         SizedBox::<QrSheetState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(Align(
             Alignment::CENTER,
-            // The same vector the FAB draws, at viewfinder size.
             icon(SCAN_MARK).size(VIEWFINDER_MARK).color(scheme.primary),
         )),
         scheme.surface_container_lowest,
@@ -448,16 +425,15 @@ fn message_body(
     any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
 }
 
-/// Ask again: clear the failure and let `build`'s own open branch — not a second
-/// one — reopen on the next rebuild. Permission is not re-asked; it was confirmed
-/// before this sheet mounted.
+/// Clears the failure and lets `build`'s own open branch reopen on the next
+/// rebuild. Permission is not re-asked; it was confirmed before this sheet mounted.
 fn retry_camera(state: &mut QrSheetState) {
     state.camera_failed.set(false);
     state.opened = false;
 }
 
-/// Open the back camera, or refuse with no camera backend — this app's product
-/// line, not the plugin's fail-soft.
+/// Opens the back camera, or refuses with no camera backend — this app's
+/// product line, not the plugin's fail-soft.
 fn open_camera() -> Result<CameraSession, CameraError> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -473,12 +449,11 @@ fn open_camera() -> Result<CameraSession, CameraError> {
 mod tests {
     use super::*;
 
-    // The real deferred-failure path needs a real `CameraSession`, which no host
-    // test target can construct. What headless testing *can* pin: the error→stage
-    // mapping both failure paths share, and that the poller never touches
-    // `use_interval` without a camera backend.
+    // The real deferred-failure path needs a real `CameraSession`, which no
+    // host test target can construct. What headless testing can pin: the
+    // error→stage mapping both failure paths share, and that the poller
+    // never touches `use_interval` without a camera backend.
 
-    /// A bare [`QrSheetState`] with no open session.
     fn bare_state(camera_failed: bool) -> QrSheetState {
         QrSheetState {
             session: Arc::new(Mutex::new(None)),
@@ -490,7 +465,6 @@ mod tests {
 
     #[test]
     fn a_camera_failure_maps_to_the_unavailable_stage_regardless_of_cause() {
-        // `camera_failed` is the one signal both failure paths funnel into.
         let state = bare_state(true);
         assert!(
             matches!(
@@ -504,7 +478,6 @@ mod tests {
 
     #[test]
     fn no_backend_wins_over_a_stale_camera_failed_flag() {
-        // The precedence is what keeps `NO_CAMERA` on the desktop path.
         let state = bare_state(true);
         assert!(matches!(
             stage_for(false, &state),
@@ -514,8 +487,8 @@ mod tests {
 
     #[test]
     fn the_stream_error_poller_never_touches_use_interval_without_a_camera_backend() {
-        // No ambient owner here on purpose: reaching `use_interval` would spawn a
-        // task this bare process cannot stop, or panic with no runtime installed.
+        // No ambient owner here on purpose: reaching `use_interval` would
+        // spawn a task this bare process cannot stop, or panic with no runtime installed.
         assert!(!camera_backend_available());
         spawn_stream_error_poller(Arc::new(Mutex::new(None)), RwSignal::new(false));
     }

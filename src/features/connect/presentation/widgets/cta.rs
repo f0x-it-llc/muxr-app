@@ -14,34 +14,28 @@ use crate::ui::spacing;
 /// its accessibility label.
 pub const CONNECT_LABEL: &str = "→ connect";
 
-/// The CTA's forced height, in logical px: the platform minimum tap target.
-/// `ButtonWidget`'s own vertical padding (unthemed and un-overridable) lands short
-/// of it at this label's size, so a [`SizedBox`] forces the floor.
+/// The platform minimum tap target: `ButtonWidget`'s own vertical padding
+/// lands short of it at this label's size, so a [`SizedBox`] forces the floor.
 const CTA_HEIGHT: f64 = 44.0;
 
-/// Piece 6 — the full-bleed CTA firing [`Live::on_connect`], plus the pairing pair
-/// above it while a scanned pairing is stashed. The layer's stretch cross-axis
-/// already forces the width, so only the height is set here;
-/// `.label_alignment(Alignment::CENTER)` is what centers the label on **both**
-/// axes, since the widget's stretch default only auto-centers horizontally.
+/// Piece 6 — the full-bleed CTA firing [`Live::on_connect`], plus the pairing
+/// pair above it while a scanned pairing is stashed.
+/// `.label_alignment(Alignment::CENTER)` centers the label on both axes,
+/// since the widget's stretch default only auto-centers horizontally.
 ///
-/// **Known gap**: `ButtonView` has no per-instance color or text-style override,
-/// so the label shapes at `TextStyle::default()` rather than the mock's
-/// `label_large_emphasized` role, and `ButtonStyle::Primary` resolves fill/ink
-/// from `primary`/`on_primary` — byte-identical to the container pair every other
-/// piece paints with under this app's canonical dark brightness, divergent under
-/// Glyph *light*.
+/// Known gap: `ButtonView` has no per-instance color/text-style override, so
+/// the label shapes at `TextStyle::default()` rather than the mock's role,
+/// and `ButtonStyle::Primary`'s fill/ink diverges from other pieces under
+/// Glyph light (byte-identical under this app's canonical dark brightness).
 ///
-/// The pairing rows live here rather than as a ninth piece because the stagger
-/// table has exactly eight slots; the splash never sees them, since it composes
-/// with no [`Live`].
+/// The pairing rows live here rather than as a ninth piece because the
+/// stagger table has exactly eight slots; the splash never sees them.
 pub fn connect_button<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     live: Option<&Live>,
 ) -> AnyView<S> {
-    // Read once and shared by every CTA this piece renders; the splash reads
-    // `false`, same as every other signal here.
+    // Shared by every CTA this piece renders; the splash reads `false`.
     let busy = live.is_some_and(|live| live.controller.busy());
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
     let cta = any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
@@ -51,16 +45,13 @@ pub fn connect_button<S: 'static>(
             }
         })
         .label_alignment(Alignment::CENTER)
-        // `busy` spans the offer's held redirect too: after the dialog closes on
-        // accept, the mint → gate → store → revoke chain runs with the form still
-        // looking live and this CTA the only thing between the user and a re-tap.
+        // `busy` spans the offer's held redirect too, since the save chain runs
+        // with the form still looking live and this CTA the only guard against a re-tap.
         .loading(busy),
     ));
     let Some(pairing) = pairing_chrome(live) else {
         return cta;
     };
-    // `live` is `Some(..)` whenever `pairing_chrome` answered, so the CTA below
-    // always has a real action behind it.
     let on_connect_pinned = live.map(|live| Rc::clone(&live.on_connect_pinned));
     any(column::<S>(vec![
         pairing_banner(theme, colors, pairing),
@@ -72,8 +63,7 @@ pub fn connect_button<S: 'static>(
                 }
             })
             .label_alignment(Alignment::CENTER)
-            // One in-flight connect, one spinner: the same connection-controller
-            // signal the manual CTA reads, over the same single-flight guard.
+            // Same connection-controller signal the manual CTA reads.
             .loading(busy),
         )),
         v_gap::<S>(spacing::MD),
@@ -87,9 +77,6 @@ mod tests {
 
     #[test]
     fn the_cta_clears_the_minimum_tap_target() {
-        // The forced height is the platform minimum tap target regardless of the
-        // button's own shorter padding; a future drop below the floor is the
-        // regression this catches.
         const { assert!(CTA_HEIGHT >= 44.0) };
     }
 }

@@ -1,26 +1,21 @@
 //! [`MockSavedServersRepository`] — the in-memory
 //! [`SavedServersRepository`] every headless suite runs on, in place of the
-//! real, preferences-backed [`super::prefs_saved_servers`] store (whose own
-//! module docs explain the split, and `di`'s the seam that chooses).
+//! real, preferences-backed [`super::prefs_saved_servers`] store.
 //!
 //! The store is a plain [`Mutex`]-guarded [`Vec`], not an `RwSignal` — the
-//! controller owns the reactive copy and re-reads this one, so the data layer
-//! never has to know a UI exists. The lock is a `Send + Sync` obligation (the
-//! handle is an `Arc<dyn .. + Send + Sync>`, since `use_controller` requires its
-//! controller to be both), not a concurrency design: muxr is single-UI-threaded
-//! and it is never contended. A poisoned lock is recovered rather than propagated
-//! — a panic on the UI thread has already failed the frame, and handing back a
-//! usable guard keeps a later frame renderable.
+//! controller owns the reactive copy and re-reads this one. The lock is a
+//! `Send + Sync` obligation, not a concurrency design (muxr is
+//! single-UI-threaded and it's never contended). A poisoned lock is recovered
+//! rather than propagated — a panic on the UI thread has already failed the
+//! frame, and a usable guard keeps a later frame renderable.
 //!
-//! **Seed data**: three plausible rigs, most-recently-used first — the mock's own
-//! `100.71.31.57:50051` plus a CA-verified public host and a read-only rig, so the
-//! row's badge/trust rendering has something to show. Their recency stamps are
-//! relative to the seeding call, so the rows read "2 hours ago"/"yesterday"/"last
-//! week" whenever a suite runs rather than drifting to a fixed date.
+//! Seed data: three plausible rigs, most-recently-used first, covering every
+//! [`TrustMode`] and one read-only row so badge/trust rendering has something
+//! to show. Recency stamps are relative to the seeding call, so rows read
+//! "2 hours ago"/etc. whenever a suite runs rather than drifting to a fixed date.
 //!
-//! Ordering is not this store's own rule: [`super::prefs_saved_servers::upsert`]
-//! is what both implementations sort through, so a `list()` answers in the same
-//! order whichever one is wired.
+//! Ordering isn't this store's own rule: [`super::prefs_saved_servers::upsert`]
+//! is what both implementations sort through.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -29,7 +24,6 @@ use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::{SavedServer, TrustMode, epoch_millis};
 use crate::features::connect::domain::repositories::SavedServersRepository;
 
-/// Milliseconds in an hour — the seed's own recency arithmetic.
 const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// The in-memory saved-server store. See the [module docs](self).
@@ -38,7 +32,7 @@ pub struct MockSavedServersRepository {
 }
 
 impl MockSavedServersRepository {
-    /// A store holding the three seeded rigs (see the [module docs](self)).
+    /// See the [module docs](self) for the seeded rigs.
     pub fn seeded() -> Self {
         Self {
             servers: Mutex::new(seed()),
@@ -53,7 +47,6 @@ impl MockSavedServersRepository {
     }
 }
 
-/// The seeded rows, most-recently-used first (see the [module docs](self)).
 fn seed() -> Vec<SavedServer> {
     let now = epoch_millis();
     vec![

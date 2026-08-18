@@ -1,18 +1,14 @@
 //! [`MockCredentialService`] — the in-memory [`CredentialService`] every
-//! headless suite runs on, and the only way to exercise the gate's outcome table
-//! without a device.
+//! headless suite runs on, and the only way to exercise the gate's outcome
+//! table without a device.
 //!
-//! The real service answers whatever the platform's biometric gate says, which
-//! off-device is always "unavailable" and on-device is whatever a human does to a
-//! prompt. Neither is a test. This one answers a **scripted**
-//! [`CredentialStatus`], so a suite can drive every branch of the outcome table in
-//! one process with no hardware at all, and records the prompts it was asked to
-//! raise ([`MockCredentialService::prompts`]) — "exactly one biometric prompt per
-//! successful pairing" is a contract this app makes, and a count is the only way
-//! to check it.
+//! Answers a scripted [`CredentialStatus`] rather than a real biometric
+//! result, and records the prompts it was asked to raise
+//! ([`MockCredentialService::prompts`]) so a suite can check "exactly one
+//! prompt per successful pairing".
 //!
-//! Selected by `di`'s headless-test seam, never in a real app run. A poisoned lock
-//! is recovered rather than propagated, for the reason
+//! Selected by `di`'s headless-test seam, never in a real app run. A poisoned
+//! lock is recovered rather than propagated, for the reason
 //! [`super::mock_saved_servers`] records.
 
 use std::collections::BTreeMap;
@@ -38,10 +34,9 @@ pub struct MockCredentialService {
 /// Everything the mock remembers.
 #[derive(Default)]
 struct MockState {
-    /// The outcome every gated call answers with. `Success` lets the call
-    /// through to the store below.
+    /// Outcome every gated call answers with. `Success` lets the call through
+    /// to the store below.
     gate: Option<CredentialStatus>,
-    /// The stored secrets, by server key.
     secrets: BTreeMap<String, Zeroizing<String>>,
     /// Every prompt rationale a gated call was asked to raise, in order.
     prompts: Vec<String>,
@@ -55,8 +50,8 @@ impl MockCredentialService {
         Self::default()
     }
 
-    /// Script `status` as the answer to every later gated call.
-    /// [`CredentialStatus::Success`] restores the pass-through behaviour.
+    /// Scripts `status` for every later gated call.
+    /// [`CredentialStatus::Success`] restores pass-through behavior.
     pub fn set_gate(&self, status: CredentialStatus) {
         self.state().gate = Some(status);
     }
@@ -68,8 +63,6 @@ impl MockCredentialService {
             .insert(server_key.to_string(), Zeroizing::new(token.to_string()));
     }
 
-    /// The token stored for `server_key`, if any — how a suite checks that a
-    /// save actually wrote (and a delete actually removed) the secret.
     pub fn stored(&self, server_key: &str) -> Option<String> {
         self.state()
             .secrets
@@ -77,23 +70,19 @@ impl MockCredentialService {
             .map(|token| token.to_string())
     }
 
-    /// Every prompt rationale raised so far, in order.
     pub fn prompts(&self) -> Vec<String> {
         self.state().prompts.clone()
     }
 
-    /// Make every later delete fail with a storage error.
     pub fn set_delete_failure(&self, fails: bool) {
         self.state().delete_fails = fails;
     }
 
-    /// The state, recovering a poisoned lock.
     fn state(&self) -> std::sync::MutexGuard<'_, MockState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Record `reason` as a raised prompt and answer what the gate is scripted
-    /// to say.
+    /// Records `reason` as a raised prompt and answers what the gate is scripted to say.
     fn run_gate(&self, reason: &str) -> CredentialStatus {
         let mut state = self.state();
         state.prompts.push(reason.to_string());
@@ -140,8 +129,6 @@ impl CredentialService for MockCredentialService {
 mod tests {
     use super::*;
 
-    /// Drive one call to completion on a current-thread runtime — the shape
-    /// every async unit test in this app uses.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .build()

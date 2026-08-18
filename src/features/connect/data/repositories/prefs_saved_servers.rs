@@ -2,10 +2,9 @@
 //! [`SavedServersRepository`]: the saved-server list as one JSON array in
 //! `frust-shared-preferences`, under the Flutter client's own key.
 //!
-//! The **metadata** half of the two-store split: host, port, trust posture, label,
-//! recency, and whether a credential exists — never the credential itself, which
-//! lives in [`super::secure_credential_service`]'s gated store under the same
-//! `host:port` key.
+//! The metadata half of the two-store split: never the credential itself,
+//! which lives in [`super::secure_credential_service`]'s gated store under the
+//! same `host:port` key.
 //!
 //! # Storage shape
 //!
@@ -27,34 +26,29 @@
 //!
 //! # Never fails the load
 //!
-//! A malformed payload decodes to an **empty list**, never a panic and never a
-//! failed boot; inside a well-formed array one unusable entry is skipped rather
-//! than failing its neighbours, unknown fields are ignored, and every absent field
-//! falls back to its default.
+//! A malformed payload decodes to an empty list, never a panic; inside a
+//! well-formed array one unusable entry is skipped without failing its
+//! neighbours, unknown fields are ignored, and absent fields default.
 //!
-//! **Legacy records migrate**: an entry with no `trustMode` derives one —
-//! `insecure: true` becomes [`TrustMode::NoVerification`], a bare `fingerprint`
-//! becomes [`TrustMode::Pinned`], anything else [`TrustMode::System`] — and an
-//! unrecognised `trustMode` falls back to that same derivation rather than a guess.
-//! The stored string for `NoVerification` is and remains `"insecure"`: that
-//! variant's Rust rename touched no byte on disk, and this module's round-trip
-//! tests are the proof.
+//! Legacy records migrate: no `trustMode` derives one — `insecure: true`
+//! becomes [`TrustMode::NoVerification`], a bare `fingerprint` becomes
+//! [`TrustMode::Pinned`], anything else [`TrustMode::System`]; an unrecognised
+//! `trustMode` falls back to the same derivation. The stored string for
+//! `NoVerification` remains `"insecure"` — that variant's Rust rename touched
+//! no byte on disk.
 //!
-//! A fingerprint is kept **only** for [`TrustMode::Pinned`], and only when it is 64
-//! lowercase hex characters: a weaker posture must never carry a stale pin, and a
-//! `Pinned` entry whose fingerprint is missing or malformed stays `Pinned`
-//! *without* one, so it fails closed at connect time rather than downgrading.
+//! A fingerprint is kept only for [`TrustMode::Pinned`], and only when it's 64
+//! lowercase hex characters; a `Pinned` entry with a missing/malformed one
+//! stays `Pinned` without one, failing closed at connect time.
 //!
 //! # Reads are a mirror; writes are fire-and-forget
 //!
-//! The list is loaded once at construction and every read answers from that
-//! mirror, which is what lets [`SavedServersRepository`]'s synchronous contract
-//! stay honest: a save followed immediately by a list must see the save, and a disk
-//! round trip cannot promise that. The write is spawned on
-//! [`frust::spawn_blocking`] (this module's one sanctioned `frust::` reach) and its
-//! failure is logged, never surfaced. The payload is encoded **inside** that task,
-//! from the shared mirror, so two writes landing out of order both persist the
-//! *current* list instead of one restoring a stale one.
+//! The list loads once at construction; every read answers from that mirror,
+//! keeping [`SavedServersRepository`]'s synchronous contract honest (a save
+//! followed by a list must see the save). The write is spawned on
+//! [`frust::spawn_blocking`] and its failure is logged, never surfaced. The
+//! payload is encoded inside that task, from the shared mirror, so two writes
+//! landing out of order both persist the current list.
 
 use std::cmp::Reverse;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -77,19 +71,18 @@ const FINGERPRINT_LEN: usize = 64;
 /// The real [`SavedServersRepository`]. See the [module docs](self).
 pub struct PrefsSavedServersRepository {
     store: SharedPreferences,
-    /// The authoritative list for this process — see the module docs' mirror
-    /// note. Shared with each in-flight write task, which re-encodes from it.
+    /// The authoritative list for this process (see the module docs' mirror
+    /// note); shared with each in-flight write task, which re-encodes from it.
     servers: Arc<Mutex<Vec<SavedServer>>>,
 }
 
 impl PrefsSavedServersRepository {
-    /// Open the platform's standard preferences store and load the saved-server
-    /// list out of it.
+    /// Opens the platform's standard preferences store and loads the
+    /// saved-server list out of it.
     ///
     /// # Errors
-    /// [`SharedPreferences::standard`]'s own contract: an unresolvable data
-    /// directory, or a host shell that never installed the platform handles this
-    /// backend needs. A *malformed* payload is not an error — it loads as empty.
+    /// [`SharedPreferences::standard`]'s own contract. A malformed payload is
+    /// not an error — it loads as empty.
     pub fn standard() -> Result<Self, PrefsError> {
         let store = SharedPreferences::standard()?;
         let servers = store
@@ -102,12 +95,12 @@ impl PrefsSavedServersRepository {
         })
     }
 
-    /// The mirror, recovering a poisoned lock rather than propagating it.
+    /// Recovers a poisoned lock rather than propagating it.
     fn mirror(&self) -> MutexGuard<'_, Vec<SavedServer>> {
         self.servers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Persist the current mirror, off the UI thread. See the module docs.
+    /// Persists the current mirror, off the UI thread. See the module docs.
     fn persist(&self) {
         let store = self.store.clone();
         let servers = Arc::clone(&self.servers);
@@ -151,11 +144,10 @@ impl SavedServersRepository for PrefsSavedServersRepository {
 // The list's shared ordering rule
 // ---------------------------------------------------------------------------
 
-/// Insert `server`, replacing any row with the same [`SavedServer::endpoint`], and
-/// re-establish the most-recently-used-first order. `host:port` is the identity, so
-/// a re-save is a replacement; the new row goes in **first** under a stable sort,
-/// so the freshest write wins a tie. Shared by both implementations of the
-/// contract, so the two cannot answer a `list()` in different orders.
+/// Inserts `server`, replacing any row with the same endpoint, and
+/// re-establishes the most-recently-used-first order (new row goes in first
+/// under a stable sort, so it wins any tie). Shared by both implementations
+/// of the contract, so they can't answer a `list()` in different orders.
 pub(super) fn upsert(servers: &mut Vec<SavedServer>, server: SavedServer) {
     let endpoint = server.endpoint();
     servers.retain(|existing| existing.endpoint() != endpoint);
@@ -167,12 +159,10 @@ pub(super) fn upsert(servers: &mut Vec<SavedServer>, server: SavedServer) {
 // The schema
 // ---------------------------------------------------------------------------
 
-/// The stored list, encoded (see the [module docs](self)' table).
 pub(super) fn encode_list(servers: &[SavedServer]) -> String {
     Json::Array(servers.iter().map(encode_entry).collect()).encode()
 }
 
-/// One record.
 fn encode_entry(server: &SavedServer) -> Json {
     Json::Object(vec![
         ("host".to_string(), Json::String(server.host.clone())),
@@ -181,8 +171,8 @@ fn encode_entry(server: &SavedServer) -> Json {
             "trustMode".to_string(),
             Json::String(trust_mode_name(server.trust_mode).to_string()),
         ),
-        // Written for one reason: an older build knows this field and not
-        // `trustMode`, and would read an insecure rig as a CA-verified one.
+        // An older build knows this field, not `trustMode`, and would
+        // otherwise read an insecure rig as CA-verified.
         (
             "insecure".to_string(),
             Json::Bool(server.trust_mode == TrustMode::NoVerification),
@@ -190,8 +180,7 @@ fn encode_entry(server: &SavedServer) -> Json {
         ("label".to_string(), Json::String(server.label.clone())),
         (
             "lastUsedMs".to_string(),
-            // An epoch millisecond count is well inside the range an `f64` holds
-            // exactly (see `json`'s own docs).
+            // Well inside the range an `f64` holds exactly (see `json`'s own docs).
             Json::Number(server.last_used_ms as f64),
         ),
         ("readOnly".to_string(), Json::Bool(server.read_only)),
@@ -202,7 +191,7 @@ fn encode_entry(server: &SavedServer) -> Json {
         ("tokenName".to_string(), optional(server.token_name.clone())),
         (
             "fingerprint".to_string(),
-            // Only a pinned posture pins, so only a pinned row stores one.
+            // Only a pinned row stores one.
             optional(match server.trust_mode {
                 TrustMode::Pinned => server.fingerprint.clone(),
                 _ => None,
@@ -211,13 +200,11 @@ fn encode_entry(server: &SavedServer) -> Json {
     ])
 }
 
-/// `Some(text)` as a string, `None` as JSON `null`.
 fn optional(value: Option<String>) -> Json {
     value.map_or(Json::Null, Json::String)
 }
 
-/// The whole stored payload, decoded. Malformed → empty (see the
-/// [module docs](self)).
+/// Malformed → empty (see the [module docs](self)).
 pub(super) fn decode_list(raw: &str) -> Vec<SavedServer> {
     let Some(Json::Array(entries)) = json::parse(raw) else {
         return Vec::new();
@@ -227,7 +214,7 @@ pub(super) fn decode_list(raw: &str) -> Vec<SavedServer> {
     servers
 }
 
-/// One record, or `None` when it names no dialable endpoint.
+/// `None` when the entry names no dialable endpoint.
 fn decode_entry(entry: &Json) -> Option<SavedServer> {
     let host = entry.get("host").and_then(Json::as_str)?;
     if host.is_empty() {
@@ -240,8 +227,7 @@ fn decode_entry(entry: &Json) -> Option<SavedServer> {
         .and_then(Json::as_str)
         .filter(|value| is_fingerprint(value))
         .map(str::to_string);
-    // The back-compat derivation, for an entry stored before `trustMode` existed
-    // (or carrying one this build doesn't know).
+    // Back-compat derivation for an entry stored before `trustMode` existed.
     let legacy_insecure = entry
         .get("insecure")
         .and_then(Json::as_bool)
@@ -286,7 +272,7 @@ fn decode_entry(entry: &Json) -> Option<SavedServer> {
             .and_then(Json::as_str)
             .filter(|name| !name.is_empty())
             .map(str::to_string),
-        // A pin belongs to the posture that pins, and to no other.
+        // A pin belongs only to the posture that pins.
         fingerprint: match trust_mode {
             TrustMode::Pinned => fingerprint,
             _ => None,
@@ -294,8 +280,8 @@ fn decode_entry(entry: &Json) -> Option<SavedServer> {
     })
 }
 
-/// Whether `value` is a certificate fingerprint: 64 lowercase hex characters, the
-/// same shape `crate::net::tls` accepts at dial time.
+/// 64 lowercase hex characters — the same shape `crate::net::tls` accepts at
+/// dial time.
 fn is_fingerprint(value: &str) -> bool {
     value.len() == FINGERPRINT_LEN
         && value
@@ -303,8 +289,8 @@ fn is_fingerprint(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// A posture's stored name — the Flutter client's spellings, so the two clients'
-/// records agree on what a mode is called.
+/// The Flutter client's spellings, so the two clients' records agree on what
+/// a mode is called.
 fn trust_mode_name(mode: TrustMode) -> &'static str {
     match mode {
         TrustMode::System => "systemCa",
@@ -313,8 +299,8 @@ fn trust_mode_name(mode: TrustMode) -> &'static str {
     }
 }
 
-/// [`trust_mode_name`]'s inverse; `None` for an unknown name, which sends the
-/// caller to the legacy derivation rather than to a guess.
+/// [`trust_mode_name`]'s inverse; `None` for an unknown name, sending the
+/// caller to the legacy derivation rather than a guess.
 fn trust_mode_from_name(name: &str) -> Option<TrustMode> {
     match name {
         "systemCa" => Some(TrustMode::System),
@@ -328,7 +314,6 @@ fn trust_mode_from_name(name: &str) -> Option<TrustMode> {
 mod tests {
     use super::*;
 
-    /// A fingerprint-shaped value.
     fn fingerprint() -> String {
         "ab".repeat(32)
     }
@@ -388,8 +373,6 @@ mod tests {
 
     #[test]
     fn the_legacy_insecure_bool_is_still_written_beside_the_trust_mode() {
-        // Storage-safety proof for the `NoVerification` rename: the encoded
-        // string is `"insecure"` either way.
         let mut unverified = server("rig.example", 50051, 0);
         unverified.trust_mode = TrustMode::NoVerification;
         let payload = encode_list(&[unverified]);
@@ -437,9 +420,6 @@ mod tests {
 
     #[test]
     fn a_legacy_insecure_record_migrates_to_the_no_verification_posture() {
-        // Storage-safety proof, the decode half: a row an older build wrote
-        // (or a stored `"insecure":true` written before `NoVerification` was
-        // named that) still maps onto the renamed variant.
         let decoded = decode_list(r#"[{"host":"rig","port":50051,"insecure":true}]"#);
         assert_eq!(decoded[0].trust_mode, TrustMode::NoVerification);
     }

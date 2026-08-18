@@ -1,45 +1,39 @@
 //! A minimal JSON value, encoder and parser — the saved-server store's wire
 //! format, and nothing else.
 //!
-//! Hand-rolled because this app's manifest carries no JSON dependency and adding
-//! one to spell a ten-field record is not the trade
+//! Hand-rolled: this app's manifest carries no JSON dependency and adding one
+//! to spell a ten-field record is not the trade
 //! (`docs/CODE_STANDARDS.md`'s hand-roll-JSON-at-the-FFI-seam rule).
 //!
-//! [`parse`] answers `None` for anything that is not well-formed JSON, and the
-//! store above treats that as an empty list rather than a failure — a corrupt
-//! payload must never take a boot down. [`Json::encode`] emits the subset this
-//! module can read back, so a round trip is lossless for every value the store
-//! writes. Numbers are `f64`: the largest value this schema stores is an epoch
-//! millisecond stamp, far inside the 2^53 range an `f64` represents exactly, and
-//! [`Json::as_i64`] refuses a fractional part rather than rounding.
+//! [`parse`] answers `None` for anything malformed; the store above treats
+//! that as an empty list rather than a failure — a corrupt payload must never
+//! take a boot down. Numbers are `f64`; the largest value this schema stores
+//! (an epoch millisecond stamp) is far inside the 2^53 range `f64` represents
+//! exactly, and [`Json::as_i64`] refuses a fractional part rather than rounding.
 
 use std::fmt::Write as _;
 
-/// How deep a nested array/object may go before [`parse`] gives up — the limit
-/// exists so a hostile payload cannot recurse the parser into a stack overflow.
+/// How deep a nested array/object may go before [`parse`] gives up — so a
+/// hostile payload cannot recurse the parser into a stack overflow.
 const MAX_DEPTH: usize = 32;
 
 /// One JSON value.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Json {
-    /// `null`.
     Null,
-    /// `true`/`false`.
     Bool(bool),
-    /// Any JSON number (see the [module docs](self)' note on `f64`).
     Number(f64),
-    /// A string, with every escape already resolved.
+    /// With every escape already resolved.
     String(String),
-    /// An array, in source order.
+    /// In source order.
     Array(Vec<Json>),
-    /// An object, in source order. A `Vec` rather than a map: insertion order is
-    /// what makes an encoded record diffable, and a duplicate key resolves
-    /// last-wins through [`Json::get`] either way.
+    /// In source order. `Vec` rather than a map: insertion order makes an
+    /// encoded record diffable; a duplicate key resolves last-wins through
+    /// [`Json::get`] either way.
     Object(Vec<(String, Json)>),
 }
 
 impl Json {
-    /// This value as a string, or `None` if it is not one.
     pub(super) fn as_str(&self) -> Option<&str> {
         match self {
             Json::String(value) => Some(value),
@@ -47,7 +41,6 @@ impl Json {
         }
     }
 
-    /// This value as a bool, or `None` if it is not one.
     pub(super) fn as_bool(&self) -> Option<bool> {
         match self {
             Json::Bool(value) => Some(*value),
@@ -55,23 +48,20 @@ impl Json {
         }
     }
 
-    /// This value as a whole number, or `None` if it is not a number or carries
-    /// a fractional part (which this schema never writes, and which rounding
-    /// would silently accept).
+    /// `None` if not a number, or if it carries a fractional part (which this
+    /// schema never writes, and which rounding would silently accept).
     pub(super) fn as_i64(&self) -> Option<i64> {
         match self {
             Json::Number(value) if value.fract() == 0.0 && value.is_finite() => {
-                // `as` saturates at the i64 bounds in Rust, so an out-of-range
-                // stamp clamps rather than wrapping into a negative one.
+                // `as` saturates at the i64 bounds, so an out-of-range stamp
+                // clamps rather than wrapping negative.
                 Some(*value as i64)
             }
             _ => None,
         }
     }
 
-    /// The value stored under `key`, or `None` when this is not an object or
-    /// carries no such key. A duplicate key resolves **last-wins**, matching
-    /// how every mainstream parser reads one.
+    /// A duplicate key resolves last-wins, matching how mainstream parsers read one.
     pub(super) fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Object(fields) => fields
@@ -83,8 +73,8 @@ impl Json {
         }
     }
 
-    /// This value, encoded. Compact (no whitespace) — the payload is machine
-    /// state, not something a human reads out of the store.
+    /// Compact (no whitespace) — the payload is machine state, not something
+    /// a human reads out of the store.
     pub(super) fn encode(&self) -> String {
         let mut out = String::new();
         self.write(&mut out);
@@ -98,9 +88,8 @@ impl Json {
             Json::Bool(true) => out.push_str("true"),
             Json::Bool(false) => out.push_str("false"),
             Json::Number(value) => {
-                // A non-finite float has no JSON spelling; this schema never
-                // produces one, and writing `null` keeps the payload parseable
-                // if some later field ever does.
+                // A non-finite float has no JSON spelling; writing `null` keeps
+                // the payload parseable if some later field ever produces one.
                 if value.is_finite() {
                     let _ = write!(out, "{value}");
                 } else {
@@ -146,8 +135,8 @@ fn write_string(value: &str, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
-            // Every other C0 control needs the `\u` form; everything above it
-            // is legal verbatim in a JSON string, including non-ASCII.
+            // Every other C0 control needs the `\u` form; everything above it is
+            // legal verbatim, including non-ASCII.
             c if (c as u32) < 0x20 => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
@@ -157,8 +146,7 @@ fn write_string(value: &str, out: &mut String) {
     out.push('"');
 }
 
-/// Parse `raw` as one JSON value, or `None` if it is malformed (including
-/// trailing content after the value).
+/// Parse `raw` as one JSON value, or `None` if malformed (trailing content included).
 pub(super) fn parse(raw: &str) -> Option<Json> {
     let mut parser = Parser {
         input: raw.as_bytes(),
@@ -169,16 +157,14 @@ pub(super) fn parse(raw: &str) -> Option<Json> {
     parser.at.eq(&parser.input.len()).then_some(value)
 }
 
-/// A position in the input. Byte-indexed: every structural character JSON uses
-/// is ASCII, and the one place multi-byte text appears (inside a string) is
-/// copied out through `str::from_utf8`.
+/// Byte-indexed: every structural JSON character is ASCII; multi-byte text
+/// (inside a string) is copied out through `str::from_utf8`.
 struct Parser<'a> {
     input: &'a [u8],
     at: usize,
 }
 
 impl Parser<'_> {
-    /// One value at `depth`, consuming leading whitespace.
     fn value(&mut self, depth: usize) -> Option<Json> {
         if depth > MAX_DEPTH {
             return None;
@@ -195,12 +181,10 @@ impl Parser<'_> {
         }
     }
 
-    /// The byte at the cursor, without consuming it.
     fn peek(&self) -> Option<u8> {
         self.input.get(self.at).copied()
     }
 
-    /// Consume `byte` if it is next.
     fn eat(&mut self, byte: u8) -> bool {
         if self.peek() == Some(byte) {
             self.at += 1;
@@ -215,7 +199,6 @@ impl Parser<'_> {
         }
     }
 
-    /// One of the three bare keywords.
     fn literal(&mut self, word: &[u8], value: Json) -> Option<Json> {
         if self.input[self.at..].starts_with(word) {
             self.at += word.len();
@@ -284,9 +267,7 @@ impl Parser<'_> {
                 // A raw control character is illegal inside a JSON string.
                 0x00..=0x1f => return None,
                 _ => {
-                    // Copy the whole UTF-8 sequence at once: `from_utf8` on the
-                    // remainder validates it, and the first character of a
-                    // valid remainder is the one at the cursor.
+                    // Copy the whole UTF-8 sequence at once via `from_utf8` on the remainder.
                     let rest = std::str::from_utf8(&self.input[self.at..]).ok()?;
                     let ch = rest.chars().next()?;
                     self.at += ch.len_utf8();
@@ -296,7 +277,6 @@ impl Parser<'_> {
         }
     }
 
-    /// One escape sequence, already past its backslash.
     fn escape(&mut self, out: &mut String) -> Option<()> {
         let byte = self.peek()?;
         self.at += 1;
@@ -319,8 +299,7 @@ impl Parser<'_> {
     /// A `\uXXXX` escape, joining a surrogate pair when one follows.
     fn unicode_escape(&mut self, out: &mut String) -> Option<()> {
         let first = self.hex4()?;
-        // A high surrogate is only meaningful paired with the low one that
-        // follows it; JSON has no other way to spell an astral character.
+        // A high surrogate only means something paired with the low one that follows.
         if (0xd800..0xdc00).contains(&first) {
             if !(self.eat(b'\\') && self.eat(b'u')) {
                 return None;
@@ -337,7 +316,6 @@ impl Parser<'_> {
         Some(())
     }
 
-    /// Four hex digits, as a code unit.
     fn hex4(&mut self) -> Option<u32> {
         let digits = self.input.get(self.at..self.at + 4)?;
         let text = std::str::from_utf8(digits).ok()?;
@@ -346,7 +324,6 @@ impl Parser<'_> {
         Some(value)
     }
 
-    /// A number token, handed to `f64`'s own parser once its span is known.
     fn number(&mut self) -> Option<Json> {
         let start = self.at;
         if self.peek() == Some(b'-') {
@@ -367,9 +344,8 @@ impl Parser<'_> {
         text.parse::<f64>().ok().map(Json::Number)
     }
 
-    /// A number's integer part: a bare `0`, or a non-zero digit and whatever
-    /// follows it. The grammar's no-leading-zeros rule, enforced so a
-    /// hand-edited `01` reads as the malformed payload it is rather than as 1.
+    /// Enforces the grammar's no-leading-zeros rule, so a hand-edited `01`
+    /// reads as malformed rather than as `1`.
     fn integer_part(&mut self) -> Option<()> {
         if self.eat(b'0') {
             if matches!(self.peek(), Some(b'0'..=b'9')) {
@@ -380,7 +356,6 @@ impl Parser<'_> {
         self.digits()
     }
 
-    /// At least one digit.
     fn digits(&mut self) -> Option<()> {
         let start = self.at;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
@@ -501,7 +476,6 @@ mod tests {
 
     #[test]
     fn an_exponent_form_still_reads_as_a_whole_number() {
-        // Nothing here writes one, but a hand-edited store can hold one.
         assert_eq!(parse("1e3").and_then(|v| v.as_i64()), Some(1000));
     }
 }

@@ -1,13 +1,9 @@
-//! [`provide`] is called exactly once, from `crate::MuxrApp::init`, and is the
-//! **only** place `connect`'s repositories are constructed — the screen resolves
-//! them with `use_context`, so construction stays single-site even though the
-//! screen remounts on every navigation back to `/`. Two contracts, one per store
-//! of the two-store split: [`SavedServers`] and [`Credentials`]. A repository owns
-//! no signals and has no `ControllerCore` to dispose, so it goes in as a plain
-//! context value rather than a controller.
+//! [`provide`] is called exactly once, from `crate::MuxrApp::init` — the only
+//! place `connect`'s repositories are constructed; the screen resolves them with
+//! `use_context`, so construction stays single-site across remounts.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
