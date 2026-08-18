@@ -13,11 +13,9 @@
 //! overlay lives on it.
 //!
 //! **Minting a token**: [`Actions::open_create_token_dialog`] is gated by
-//! [`Actions::tokens_blocked`] (a read-only connected session cannot mint or
-//! revoke — `ConnectionController::is_read_only`'s primary defence); on a
-//! landed mint it opens [`open_secret_reveal`], the one-time secret sheet —
-//! shown exactly once, then gone for good, per
-//! [`SettingsController::pending_token_secret`]'s own contract.
+//! [`Actions::tokens_blocked`] (`ConnectionController::is_read_only`'s
+//! primary defence); a landed mint opens [`open_secret_reveal`], shown
+//! exactly once per [`SettingsController::pending_token_secret`]'s contract.
 //!
 //! **Revoking**: a confirmed revoke starts the row's scramble-then-collapse
 //! ([`super::scramble`]) and fires the RPC on the same tap
@@ -26,7 +24,7 @@
 //!
 //! **Disconnecting** clears [`ConnectionController`] then `go`es to `/` —
 //! both halves deliberate, since the router's session guard only fires at
-//! *navigation* time, never reactively.
+//! navigation time, never reactively.
 
 use std::sync::Arc;
 
@@ -566,11 +564,11 @@ impl Actions {
     }
 
     /// Revoke the token called `name`: the row's scramble-then-collapse and
-    /// the RPC start on the same tap — concurrent on purpose, since the
-    /// animation is not a pre-roll and a revoke that lands in 20ms must not
-    /// make the row vanish before the eye has seen it go. The row's snapshot
-    /// is taken here, ahead of the refresh that call ends with, because that
-    /// refresh is exactly what takes the token out of `tokens` mid-animation.
+    /// the RPC start on the same tap, concurrently — a revoke that lands in
+    /// 20ms must not make the row vanish before the eye has seen it go. The
+    /// row's snapshot is taken here, ahead of the refresh the call ends
+    /// with, since that refresh is what takes the token out of `tokens`
+    /// mid-animation.
     fn revoke(&self, name: &str) {
         let controller = Arc::clone(&self.controller);
         let scrambles = self.scrambles;

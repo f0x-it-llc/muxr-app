@@ -5,31 +5,28 @@
 //! names 1:1 (`pref_layout_refresh_seconds`/`pref_font_size`/
 //! `pref_cursor_style`/`pref_bell_notifications`/`pref_font_family`) — name
 //! parity only, not on-disk compatibility. Every default **is**
-//! [`Preferences::defaults`], read at each call site rather than
-//! re-declared. `pref_option_as_meta` (Flutter's desktop-only "Option as
-//! Meta" toggle) is deliberately not modeled — [`Preferences`] has no field
-//! for it.
+//! [`Preferences::defaults`]. `pref_option_as_meta` (Flutter's desktop-only
+//! "Option as Meta" toggle) is deliberately not modeled.
 //!
-//! **Never fails the load**: a missing key, a wrong-typed value, or an
-//! out-of-range one each fall back to *that field's own* default rather than
-//! failing the whole read — a corrupt `pref_cursor_style` must not blank out
-//! an otherwise-fine font size. Ints are clamped too:
-//! `pref_layout_refresh_seconds` to [`MIN_LAYOUT_REFRESH_SECS`],
-//! `pref_font_size` to [`AppearancePrefs::FONT_SIZES_PX`]'s own range.
+//! **Never fails the load**: a missing/wrong-typed/out-of-range value falls
+//! back to *that field's own* default rather than failing the whole read —
+//! a corrupt `pref_cursor_style` must not blank out an otherwise-fine font
+//! size. Ints are clamped too: `pref_layout_refresh_seconds` to
+//! [`MIN_LAYOUT_REFRESH_SECS`], `pref_font_size` to
+//! [`AppearancePrefs::FONT_SIZES_PX`]'s own range.
 //!
 //! **`pref_font_family` is stored as given**, the one field not validated
 //! against a list: the picker offers whatever faces are installed — bundled
-//! *or downloaded* — so the legal set is a runtime fact this framework-free
-//! layer can't know. Only a non-empty string is required; grace for a
-//! family no longer installed lives at the presentation edge instead
-//! (`crate::fonts::resolve_terminal_family`).
+//! *or downloaded* — a runtime fact this framework-free layer can't know.
+//! Only non-empty is required; grace for a since-uninstalled family lives at
+//! the presentation edge (`crate::fonts::resolve_terminal_family`).
 //!
 //! **Saves are synchronous state, fire-and-forget disk**: both savers clamp
-//! like a load, hand the clamped value back `Ok` synchronously — so the
+//! like a load and hand the clamped value back `Ok` synchronously — so the
 //! controller's signal updates the same tick a picker fires — then spawn the
-//! actual write via [`frust::spawn_blocking`] (this module's one sanctioned
-//! `frust::` reach in an otherwise framework-free file). A write failure is
-//! logged and swallowed, never surfaced to the UI.
+//! write via [`frust::spawn_blocking`] (this module's one sanctioned
+//! `frust::` reach). A write failure is logged and swallowed, never surfaced
+//! to the UI.
 
 use frust::spawn_blocking;
 use frust_shared_preferences::{PrefsError, SharedPreferences};
@@ -40,15 +37,10 @@ use crate::features::settings::domain::entities::{
 };
 use crate::features::settings::domain::repositories::PreferencesRepository;
 
-/// `pref_layout_refresh_seconds`.
 const KEY_LAYOUT_REFRESH_SECONDS: &str = "pref_layout_refresh_seconds";
-/// `pref_font_size`.
 const KEY_FONT_SIZE: &str = "pref_font_size";
-/// `pref_cursor_style`.
 const KEY_CURSOR_STYLE: &str = "pref_cursor_style";
-/// `pref_bell_notifications`.
 const KEY_BELL_NOTIFICATIONS: &str = "pref_bell_notifications";
-/// `pref_font_family`.
 const KEY_FONT_FAMILY: &str = "pref_font_family";
 
 /// The floor a stored/saved `pref_layout_refresh_seconds` is clamped to — a
@@ -94,24 +86,19 @@ fn cursor_style_to_key(style: CursorStyle) -> &'static str {
     style.label()
 }
 
-/// The inverse of [`cursor_style_to_key`]; `None` for anything that isn't
-/// one of the three labels (a hand-edited store, a future removed variant)
-/// — the caller falls back to the domain default rather than failing the
-/// load.
+/// The inverse of [`cursor_style_to_key`]; `None` for anything that isn't one
+/// of the three labels (a hand-edited store, a removed variant) — the caller
+/// falls back to the domain default rather than failing the load.
 fn cursor_style_from_key(key: &str) -> Option<CursorStyle> {
     CursorStyle::ALL
         .into_iter()
         .find(|style| style.label() == key)
 }
 
-/// Clamp/validate a caller-supplied [`AppearancePrefs`] against the domain's
-/// own choice sets — the same contract a load applies to whatever this store
-/// already holds, applied here too so a screen can never persist a value
-/// neither this store nor the picker sheets that produce it would recognize
-/// as valid.
-///
-/// The font family is the exception, and only an empty one is corrected — see
-/// the [module docs](self)' `pref_font_family` section.
+/// Clamps a caller-supplied [`AppearancePrefs`] against the domain's own
+/// choice sets — the same contract a load applies, so a screen can never
+/// persist a value the store/pickers wouldn't recognize as valid. The font
+/// family is the exception (see the [module docs](self)).
 fn clamp_appearance(prefs: AppearancePrefs) -> AppearancePrefs {
     let (min, max) = font_size_bounds();
     let defaults = Preferences::defaults();
@@ -123,9 +110,8 @@ fn clamp_appearance(prefs: AppearancePrefs) -> AppearancePrefs {
 }
 
 /// `family` if it names anything at all, else `fallback` — the whole of this
-/// store's font-family validation (see the [module docs](self)). An empty
-/// string is the one value that could never name a face, and would leave a
-/// terminal shaping with the generic monospace tail forever.
+/// store's font-family validation (see the [module docs](self)); an empty
+/// string could never name a face.
 fn sane_family(family: String, fallback: String) -> String {
     if family.trim().is_empty() {
         fallback
@@ -150,9 +136,8 @@ impl PreferencesRepository for PrefsRepository {
         let defaults = Preferences::defaults();
         let (min_size, max_size) = font_size_bounds();
 
-        // Whatever was stored, as long as it names something (see the module
-        // docs): a downloaded family is legal here and appears in no
-        // compile-time list.
+        // Whatever was stored, as long as it names something — a downloaded
+        // family is legal here (see module docs).
         let font_family = self
             .store
             .get_string(KEY_FONT_FAMILY)
