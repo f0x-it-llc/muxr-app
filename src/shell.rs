@@ -2,7 +2,7 @@
 //! three bar-bearing routes off.
 
 use frust::{AnyView, Location, NavigatorController, Stack, any, icons, navigator};
-use frust_glyph::{TitleDirection, app_bar};
+use frust_glyph::{TitleDirection, TitlePosition, app_bar};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
@@ -62,6 +62,7 @@ pub(crate) fn shell_page(
 }
 
 /// The Glyph app bar for whatever route the inner navigator has on top.
+/// Titles [`TitlePosition::Center`] — this app's own design.
 ///
 /// Two things resolve to the same absent slot: a route with no
 /// [`crate::routes::RouteMeta`], and the terminal screen's **fullscreen**
@@ -79,7 +80,9 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<AnyView<App
         BarDirection::Forward => TitleDirection::Forward,
         BarDirection::Back => TitleDirection::Back,
     };
-    let mut bar = app_bar::<AppState>(meta.resolve_title(connection)).title_direction(direction);
+    let mut bar = app_bar::<AppState>(meta.resolve_title(connection))
+        .title_direction(direction)
+        .title_position(TitlePosition::Center);
     bar = match meta.leading {
         BarLeading::Brand => bar.leading(brand_leading()),
         BarLeading::Back => {
