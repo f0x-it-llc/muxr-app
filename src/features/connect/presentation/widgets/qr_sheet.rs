@@ -35,18 +35,18 @@ use std::time::Duration;
 use clean_signals_frust::use_interval;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, FlexView, Get,
-    RwSignal, Set, SizedBox, Theme, any, button, component, icon, inflexible, on_cleanup,
-    platform_view, spawn_blocking, spawn_local, text,
+    RwSignal, Set, SizedBox, Theme, any, button, component, container, icon, icons, inflexible,
+    on_cleanup, platform_view, spawn_blocking, spawn_local, text,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat};
 use frust_camera::{BarcodeStreamOptions, CameraError, CameraSession, DetectionPolicy};
 use zeroize::Zeroizing;
 
-use super::super::chrome::panel;
 use super::super::controller::ConnectController;
-use super::qr_affordance::{FAB_LABEL, SCAN_MARK};
+use super::qr_affordance::FAB_LABEL;
 use crate::AppState;
 use crate::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
+use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{active_theme, inked};
 use crate::ui::spacing;
 
@@ -350,17 +350,17 @@ fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     let params = session.params_json();
     drop(guard);
 
-    let viewfinder = panel(
+    let viewfinder = container(
         SizedBox::<QrSheetState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(
             platform_view(view_type)
                 .size(VIEWFINDER, VIEWFINDER)
                 .params_json(params)
                 .semantics_label(VIEWFINDER_LABEL),
         ),
-        scheme.surface_container_lowest,
-        theme.shape.medium,
     )
-    .border(scheme.outline);
+    .fill(scheme.surface_container_lowest)
+    .radius(theme.shape.medium)
+    .border(scheme.outline, HAIRLINE);
 
     let children = vec![
         inflexible(any(Align(Alignment::CENTER, viewfinder))),
@@ -386,15 +386,17 @@ fn message_body(
     retryable: bool,
 ) -> AnyView<QrSheetState> {
     let scheme = theme.scheme();
-    let viewfinder = panel(
+    let viewfinder = container(
         SizedBox::<QrSheetState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(Align(
             Alignment::CENTER,
-            icon(SCAN_MARK).size(VIEWFINDER_MARK).color(scheme.primary),
+            icon(icons::SCAN_MARK)
+                .size(VIEWFINDER_MARK)
+                .color(scheme.primary),
         )),
-        scheme.surface_container_lowest,
-        theme.shape.medium,
     )
-    .border(scheme.outline);
+    .fill(scheme.surface_container_lowest)
+    .radius(theme.shape.medium)
+    .border(scheme.outline, HAIRLINE);
     let message_ink = match tone {
         MessageTone::Muted => scheme.on_surface_variant,
         MessageTone::Failed => scheme.error,

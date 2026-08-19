@@ -1,17 +1,18 @@
 //! `.new-sess-btn` and the empty state — the screen's only two create entry
 //! points now that the stock app bar's own `+` is gone.
 
+use frust::authoring::DashPattern;
 use frust::motion::AnimatedOpacity;
 use frust::{
-    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, GestureDetector, Padding, any, button,
-    inflexible, text,
+    Align, Alignment, AnyView, BorderStyle, ButtonStyle, EdgeInsets, GestureDetector, Padding, any,
+    button, container, inflexible, text,
 };
 use frust_glyph::empty_state;
 
+use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
-use super::super::chrome::dashed_box;
 use super::super::pages::{self, SessionsState};
 use super::session_card::IDLE_OPACITY;
 use super::{active_theme, h_gap, row};
@@ -29,8 +30,7 @@ const NEW_SESSION_PLUS: &str = "+";
 const NEW_SESSION_LABEL: &str = "new session";
 
 /// The dashed, centre-aligned row that closes the list. The `+` is amber
-/// because it is the call to action; the label beside it is muted. See
-/// [`super::super::chrome::dashed_box`] for why the outline is hand-drawn.
+/// because it is the call to action; the label beside it is muted.
 ///
 /// `read_only` "disables" it the way `ui::dialogs`' submit button does
 /// (frust's `Button` has no disabled variant): a no-op `on_tap` is the
@@ -48,14 +48,15 @@ pub(in crate::features::sessions::presentation) fn new_session_row(
             text(NEW_SESSION_LABEL).style(inked(&theme.type_scale.body_small, colors.fg_muted)),
         ),
     ]);
-    let dashed = GestureDetector(dashed_box(
-        Padding(
+    let dashed = GestureDetector(
+        container(Padding(
             EdgeInsets::all(NEW_ROW_PAD),
             Align(Alignment::CENTER, label),
-        ),
-        colors.outline,
-        theme.shape.medium,
-    ))
+        ))
+        .border(colors.outline, HAIRLINE)
+        .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF)))
+        .radius(theme.shape.medium),
+    )
     .on_tap(move |state: &mut SessionsState| {
         if !read_only {
             pages::open_create_dialog(state);

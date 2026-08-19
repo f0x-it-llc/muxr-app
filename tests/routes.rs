@@ -23,8 +23,11 @@ use support::{frame, serial, setup};
 
 type Root = RenderRoot<AppState, AnyView<AppState>>;
 
-/// Mounts `MuxrApp`, navigates to `route`, and renders one frame.
-fn render_route(route: &str) -> support::RecScene {
+/// Mounts `MuxrApp`, navigates to `route`, and renders one frame. `connected`
+/// mounts behind the mock connection first — every in-shell route needs it now
+/// that the session guard covers the shell's whole subtree, `/settings`
+/// included.
+fn render(route: &str, connected: bool) -> support::RecScene {
     let _g = serial();
     let _ambient = setup();
 
@@ -33,13 +36,16 @@ fn render_route(route: &str) -> support::RecScene {
     let mut logic = |s: &mut AppState| MuxrApp.build(s);
     let mut tcx = TextContext::new();
 
+    if connected {
+        expect_connection_controller().connect(mock_target());
+    }
     state.nav.go(route);
     frame(&mut root, &mut logic, &mut state, &mut tcx)
 }
 
 #[test]
 fn connect_route_renders_its_placeholder() {
-    let scene = render_route("/");
+    let scene = render("/", false);
     assert!(
         scene.glyph_runs > 0,
         "the Connect placeholder (app bar title + centered page text) renders text"
@@ -48,7 +54,7 @@ fn connect_route_renders_its_placeholder() {
 
 #[test]
 fn sessions_route_renders_its_placeholder() {
-    let scene = render_route("/sessions");
+    let scene = render("/sessions", true);
     assert!(
         scene.glyph_runs > 0,
         "the Sessions placeholder (app bar title + centered page text) renders text"
@@ -57,7 +63,7 @@ fn sessions_route_renders_its_placeholder() {
 
 #[test]
 fn terminal_route_renders_its_placeholder() {
-    let scene = render_route("/terminal");
+    let scene = render("/terminal", true);
     assert!(
         scene.glyph_runs > 0,
         "the Terminal placeholder (centered page text — its bar is the shell's \
@@ -67,7 +73,7 @@ fn terminal_route_renders_its_placeholder() {
 
 #[test]
 fn settings_route_renders_its_placeholder() {
-    let scene = render_route("/settings");
+    let scene = render("/settings", true);
     assert!(
         scene.glyph_runs > 0,
         "the Settings placeholder (centered page text — its bar is the shell's \
@@ -183,10 +189,11 @@ fn sessions_and_terminal_resolve_normally_once_connected() {
     );
 }
 
-/// `/` and `/settings` are never redirected, authenticated or not — the guard
-/// only ever matches `/sessions`/`/terminal`.
+/// `/` is never redirected — it is what the guard bounces *to*. `/settings` is:
+/// it lives inside the shell, so resolving it while unauthenticated would place
+/// the whole connected scaffold.
 #[test]
-fn root_and_settings_are_never_redirected() {
+fn root_is_never_redirected_and_settings_is_guarded_with_the_rest_of_the_shell() {
     let _g = serial();
     let _ambient = setup();
     let state = MuxrApp.init();
@@ -194,8 +201,8 @@ fn root_and_settings_are_never_redirected() {
     assert_eq!(resolved_path(&state, "/"), "/", "/ is never redirected");
     assert_eq!(
         resolved_path(&state, "/settings"),
-        "/settings",
-        "/settings is never redirected while unauthenticated"
+        "/",
+        "/settings bounces while unauthenticated"
     );
 
     expect_connection_controller().connect(mock_target());
@@ -208,7 +215,7 @@ fn root_and_settings_are_never_redirected() {
     assert_eq!(
         resolved_path(&state, "/settings"),
         "/settings",
-        "/settings is never redirected once connected either"
+        "…and /settings resolves normally once connected"
     );
 }
 
@@ -266,8 +273,9 @@ fn a_push_through_the_app_nav_handle_lands_on_the_apps_own_navigator() {
     frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(state.nav.controller().depth(), 1, "only the start location");
 
-    // `/settings` is unguarded, so this asserts the plumbing rather than the
-    // redirect the test above covers.
+    // Connected, so this asserts the plumbing rather than the redirect the test
+    // above covers; the outer op it lands is the shell placement.
+    expect_connection_controller().connect(mock_target());
     app_nav().push("/settings");
     frame(&mut root, &mut logic, &mut state, &mut tcx);
 

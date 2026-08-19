@@ -6,16 +6,16 @@ use std::rc::Rc;
 use frust::authoring::Size;
 use frust::{
     Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Theme, any,
-    flexible, icon, icons, inflexible, text,
+    colored_box, flexible, icon, icons, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, badge};
 
-use super::super::chrome::swatch;
 use super::pairing::READ_ONLY_CHIP;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
+use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
@@ -59,10 +59,10 @@ fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
             text("SAVED SERVERS").style(inked(&theme.type_scale.label_small, colors.fg_dim))
         )),
         inflexible(h_gap::<S>(spacing::SM)),
-        // A zero-width swatch under a flexible slot gets the remaining width.
+        // A zero-width box under a flexible slot gets the remaining width.
         flexible(
             1,
-            any(swatch(Size::new(0.0, RULE_HEIGHT), colors.rule, 0.0)),
+            any(colored_box::<S>().size(0.0, RULE_HEIGHT).fill(colors.rule)),
         ),
     ]))
 }
@@ -101,9 +101,11 @@ fn saved_row<S: 'static>(
     );
     let mut items = vec![
         // The glow is part of the dot, not decoration — it's what reads as "live" at 7px.
-        inflexible(any(
-            swatch(Size::new(DOT, DOT), colors.success, DOT / 2.0).glow(colors.success)
-        )),
+        inflexible(any(colored_box::<S>()
+            .size(DOT, DOT)
+            .radius(DOT / 2.0)
+            .fill(colors.success)
+            .glow(colors.success, GLOW_STD_DEV, GLOW_SPREAD))),
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,

@@ -42,9 +42,10 @@ pub mod trust;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::{AnyView, Axis, CrossAxisAlignment, FlexView, SizedBox, Theme, any, inflexible};
+use frust::{
+    AnyView, Axis, CrossAxisAlignment, FlexView, SizedBox, Theme, any, container, inflexible,
+};
 
-use super::chrome::panel;
 use super::controller::ConnectController;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::ui::palette::Palette;
@@ -111,7 +112,7 @@ fn row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
 /// A full-width piece backing in the page tone — invisible over the route's
 /// backdrop, while giving the splash something opaque behind its assembling text.
 fn backed<S: 'static>(child: impl frust::View<S>, colors: &Palette) -> AnyView<S> {
-    any(panel(child, colors.page, 0.0))
+    any(container(child).fill(colors.page))
 }
 
 /// `live` is `Some(..)` for the screen and `None` for the splash (the parity

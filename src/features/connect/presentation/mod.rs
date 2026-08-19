@@ -8,7 +8,6 @@
 //! a controller itself — the splash has none to read (see [`widgets`]' parity
 //! contract).
 
-pub mod chrome;
 pub mod controller;
 pub mod pages;
 pub mod widgets;

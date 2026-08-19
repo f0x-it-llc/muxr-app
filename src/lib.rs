@@ -10,7 +10,6 @@ pub mod ui;
 mod shell;
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
 
@@ -29,8 +28,6 @@ const SPLASH_SEED: u64 = 0x6D75_7872; // "muxr"
 pub struct AppState {
     pub nav: Rc<Router<AppState>>,
     pub overlays: NavigatorController<AppState>,
-    nav_handle: routes::Nav,
-    connection: Arc<connection::ConnectionController>,
     splash: Option<SplashPlan>,
     icon: Option<IconArt>,
     saved: Option<Rc<[SavedServer]>>,
@@ -112,14 +109,15 @@ impl Component for MuxrApp {
 
         let controller = NavigatorController::new();
         let overlays = NavigatorController::new();
-        let router = routes::install_app_router(&controller, &overlays, Arc::clone(&connection));
-        router.handle_location(START_LOCATION);
+        let router = routes::install_app_router(&controller, &overlays, connection);
+        // Through the handle rather than `Router::handle_location`: a start
+        // location inside the shell has to place the scaffold the way every
+        // other navigation does (see `routes::Nav::go`).
+        routes::app_nav().go(START_LOCATION);
 
         AppState {
             nav: router,
             overlays,
-            nav_handle: routes::app_nav(),
-            connection,
             splash: None,
             icon: None,
             saved: None,
@@ -130,8 +128,6 @@ impl Component for MuxrApp {
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
         let controller = state.nav.controller().clone();
         let overlays = state.overlays.clone();
-        let nav_handle = state.nav_handle.clone();
-        let connection = Arc::clone(&state.connection);
         let cue = state.splash_cue();
 
         any(overlay_host(&state.overlays, move || {
@@ -140,8 +136,6 @@ impl Component for MuxrApp {
                 &controller,
                 move || routes::home_page(initial_overlays.clone()),
                 cue.as_ref().and_then(splash_overlay),
-                &nav_handle,
-                &connection,
             )
         }))
     }

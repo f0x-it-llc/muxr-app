@@ -43,7 +43,6 @@ use crate::ui::palette::Palette;
 use crate::ui::sheet::show_sheet;
 use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
-use crate::ui::topbar::topbar_clearance;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
 use super::heartbeat::{self, HeartbeatState};
@@ -406,12 +405,12 @@ impl Component for SessionsScreen {
         if beat.animating() {
             bands.push(heartbeat::frame_ticker());
         }
-        // Outside the clearance so it fills the whole surface, bar band
-        // included — the bar slides in over it.
+        // The shell scaffold's app-bar slot already reserves the bar's own
+        // band above this screen's body — no clearance to add here (a
+        // one-time double-inset bug: the scaffold owns the band, this page
+        // used to as well).
         any(widgets::page_tone(
-            topbar_clearance(
-                FlexView::new(Axis::Vertical, bands).cross_axis(CrossAxisAlignment::Stretch),
-            ),
+            FlexView::new(Axis::Vertical, bands).cross_axis(CrossAxisAlignment::Stretch),
             &colors,
         ))
     }
