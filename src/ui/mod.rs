@@ -11,7 +11,7 @@
 //! | [`spacing`] | Named spacing tokens on the measured de-facto scale — not yet adopted |
 //! | [`splash`] | The cold-start splash sequence (design reference: `docs/splash.html`/`docs/muxr-app-icons`) |
 //! | [`toasts`] | The failure→toast queue handle and the toast layer the shell mounts |
-//! | [`topbar`] | The branded `muxr` top bar (brand-or-back leading slot + crossfading centered title + one icon slot) |
+//! | [`topbar`] | The app's bar furniture: the brand row and icon slot Glyph's own app bar wears, plus `icon_button` and the page clearance |
 
 pub mod backdrop;
 pub mod dialogs;
