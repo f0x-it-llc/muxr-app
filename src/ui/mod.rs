@@ -6,6 +6,7 @@
 //! |---|---|
 //! | [`backdrop`] | Full-bleed page background the Connect screen and splash overlay paint |
 //! | [`dialogs`] | Confirm / name-input modal helpers over `frust_glyph`'s dialog |
+//! | [`paint`] | Cross-feature paint-primitive tokens (hairline, full-pill radius, status-dot glow, dashed-border step) shared by every feature's hand-rolled chrome |
 //! | [`palette`] | The app's one theme-derived colour vocabulary, union of the four per-feature `Palette`s — not yet adopted |
 //! | [`sheet`] | The modal bottom-sheet adapter over `frust_glyph`'s own sheet (`show_sheet` + its dismissal gate) |
 //! | [`spacing`] | Named spacing tokens on the measured de-facto scale — not yet adopted |
@@ -15,6 +16,7 @@
 
 pub mod backdrop;
 pub mod dialogs;
+pub mod paint;
 pub mod palette;
 pub mod sheet;
 pub mod spacing;

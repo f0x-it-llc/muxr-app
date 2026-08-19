@@ -49,24 +49,13 @@ use frust::{
 use crate::features::terminal::domain::entities::{TermLine, TermLineKind};
 use crate::ui::topbar::BAR_HEIGHT;
 
+pub(super) use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
+
 // Shared paint helpers.
 
-/// Hairline border width in logical px (`1px solid` on every bordered rule in
-/// `docs/terminal.html`). Matches `frust-widgets`' own `BORDER_WIDTH`.
-pub(super) const HAIRLINE: f64 = 1.0;
-/// `--radius-full: 999px` — clamped to half the shorter side at paint time, so
-/// a caller can spell "pill" without knowing the box's measured height.
-pub(super) const RADIUS_FULL: f64 = 999.0;
 /// Flattening tolerance for a rounded-rect border path — the value
 /// `frust-widgets`' own border strokes use.
 const BORDER_TOLERANCE: f64 = 0.1;
-/// `border-style:dashed` — the on/off step of a [`frust::authoring::DashPattern`]
-/// border, in logical px. CSS leaves the period to the UA; 4/4 is the common
-/// rendering. Shared here so every dashed `frust::container` border on this
-/// screen (`.pill.add`, `.new-pane-btn`, the sheet's add-tab row) agrees on the
-/// same period.
-pub(super) const DASH_ON: f64 = 4.0;
-pub(super) const DASH_OFF: f64 = 4.0;
 
 /// The effective corner radius for a box of `size` — [`RADIUS_FULL`] (or any
 /// over-large value) collapses to a true pill rather than overshooting.

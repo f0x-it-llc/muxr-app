@@ -39,6 +39,8 @@ use crate::ui::spacing;
 
 use super::pickers::PickerKind;
 
+pub(super) use crate::ui::paint::{HAIRLINE, RADIUS_FULL};
+
 /// `.settings-scroll{padding:6px 0 30px}`.
 pub(in super::super) const SCROLL_PAD_TOP: f64 = 6.0;
 pub(in super::super) const SCROLL_PAD_BOTTOM: f64 = spacing::HERO;
@@ -57,15 +59,6 @@ const MARK_ICON: f64 = spacing::LG;
 pub(super) const ROW_LINE_GAP: f64 = spacing::MICRO;
 /// `.set-chev{font-size:13px}`.
 const CHEVRON: f64 = 13.0;
-/// Hairline width in logical px (`1px solid` on every bordered rule in
-/// `docs/redesign.html`) — [`rounded_fill`]'s own bottom rule, and a chip's
-/// optional border at each call site. Matches `frust-widgets`' own
-/// `BORDER_WIDTH`.
-pub(super) const HAIRLINE: f64 = 1.0;
-/// `--radius-full: 999px` — kurbo's own `RoundedRect` clamps an oversized
-/// radius to half the shorter side, so a caller can spell "pill" without
-/// knowing the box's measured height.
-pub(super) const RADIUS_FULL: f64 = 999.0;
 
 /// A `gap`-wide horizontal spacer.
 pub(super) fn h_gap<S: 'static>(gap: f64) -> FlexChild<S> {

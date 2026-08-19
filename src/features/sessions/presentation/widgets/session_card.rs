@@ -20,6 +20,7 @@ use frust::{
 use frust_glyph::{BadgeVariant, avatar, badge};
 
 use crate::features::sessions::domain::entities::{Session, SessionStatus};
+use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
@@ -31,9 +32,6 @@ use super::{active_theme, h_gap, row};
 const AVATAR_SIZE: f64 = 26.0;
 /// `.sess-card{padding:14px}`.
 const CARD_PAD: f64 = spacing::LG;
-/// Hairline border width in logical px (`1px solid` on every bordered rule in
-/// `docs/redesign.html`).
-const HAIRLINE: f64 = 1.0;
 /// `.sess-card{border-left:2px solid}` — the status accent's weight.
 const ACCENT_WIDTH: f64 = 2.0;
 /// `.sess-top{gap:10px}` — avatar to name.

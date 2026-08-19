@@ -4,12 +4,9 @@ use frust::authoring::text::TextAlign;
 use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, container, text};
 
 use super::{backed, column, hugging_column, v_gap};
+use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
-
-/// Hairline border width in logical px (`1px solid` on every bordered rule in
-/// `docs/splash.html`).
-const HAIRLINE: f64 = 1.0;
 
 /// `.connect .sub` — the heading's explanatory paragraph. `pub` because
 /// `tests/connect.rs`'s line-centering suite reads the very lines this string

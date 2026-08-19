@@ -26,6 +26,7 @@ use crate::AppState;
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
 use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::features::settings::presentation::scramble::{self, ScramblePose};
+use crate::ui::paint::{DASH_OFF, DASH_ON};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
@@ -48,12 +49,6 @@ const ADD_PAD: f64 = spacing::MD;
 /// create` is one text node whose space is the gap; composed as two runs it
 /// needs a real one.
 const ADD_GAP: f64 = spacing::XS;
-/// `.add-token-btn{border:1px dashed}` — the on/off step, in logical px. CSS
-/// leaves `dashed`'s period to the UA; 4/4 is the common rendering and reads
-/// correctly at this scale (the same pair `features::sessions`' own dashed
-/// row picked).
-const DASH_ON: f64 = 4.0;
-const DASH_OFF: f64 = 4.0;
 /// Vertical gap inside the create dialog's `.content()` column, and between
 /// the secret-reveal sheet's own stacked rows.
 const DIALOG_FIELD_GAP: f64 = spacing::XL;

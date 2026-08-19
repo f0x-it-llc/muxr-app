@@ -9,6 +9,7 @@ use frust::{
 };
 use frust_glyph::empty_state;
 
+use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
@@ -27,13 +28,6 @@ const NEW_SESSION_PLUS: &str = "+";
 /// The new-session row's label — one spelling, shared by the row and the
 /// empty state's own action.
 const NEW_SESSION_LABEL: &str = "new session";
-/// `.new-sess-btn{border:1px dashed}` — the stroke width.
-const HAIRLINE: f64 = 1.0;
-/// `.new-sess-btn{border:1px dashed}` — the on/off step of the dash, in
-/// logical px. CSS leaves `dashed`'s period to the UA; 4/4 is the common
-/// rendering and reads correctly at this scale.
-const DASH_ON: f64 = 4.0;
-const DASH_OFF: f64 = 4.0;
 
 /// The dashed, centre-aligned row that closes the list. The `+` is amber
 /// because it is the call to action; the label beside it is muted.

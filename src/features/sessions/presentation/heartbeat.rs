@@ -38,14 +38,7 @@ use frust::{
 
 use super::pages::SessionsState;
 use super::widgets::DOT;
-
-/// `--radius-full: 999px`, clamped to a pill by `kurbo::RoundedRect` at paint time.
-const RADIUS_FULL: f64 = 999.0;
-/// `1px solid` hairline width, `docs/redesign.html`'s scale.
-const HAIRLINE: f64 = 1.0;
-/// `.dot-ok{box-shadow:0 0 5px var(--success)}` — glow std-dev and spread.
-const GLOW_STD_DEV: f64 = 2.5;
-const GLOW_SPREAD: f64 = 2.0;
+use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV, HAIRLINE, RADIUS_FULL};
 
 /// How long one ping ring takes to expand and fade out.
 const RING_MS: f64 = 1600.0;
