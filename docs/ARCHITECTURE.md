@@ -29,8 +29,8 @@ feature's own `di::provide()` (every feature wires its own repositories the same
 default, mock behind a process-static test-only seam), and builds the app's route `Router` alongside a
 second navigator, the root overlay host (`AppState::overlays`, see Navigation). `build` mounts
 `shell::root_view` unchanged — its body and stable three-slot `Stack` invariant (see Shell, below)
-untouched — then wraps that whole output, as its caller, in `frust::overlay_host(&state.overlays, ..)`,
-so every menu/sheet/dialog renders above all chrome. Each screen resolves `overlays` once in its own
+untouched — then wraps that whole output, as its caller, in `frust::overlay_host(&state.overlays, ..)`
+(arbitration covered under Navigation). Each screen resolves `overlays` once in its own
 `Component::init`, exactly like `nav`.
 
 `AppState` holds the `Router` handle plus the splash's own state; the plan is resolved lazily on the
@@ -97,8 +97,11 @@ publishes through the identical channel as one it drove. `Nav::set_fullscreen` p
 terminal's fullscreen request the same way (Shell, above, covers how `shell_bar` reads it), and every
 path push carries a themed Glyph transition, collapsed to a linear cross-fade under `reduce_motion`.
 
-`session_guard_with(Arc<ConnectionController>)` is the router's one redirect: bounces an
-unauthenticated push to `/sessions`/`/terminal` back to `/` (`/`/`/settings` never guarded), closing
+`session_guard_with(Arc<ConnectionController>)` is the router's one redirect: the guarded set is the
+shell's whole subtree, asked of `route_meta` — so `/settings` bounces while disconnected too, its only
+entry point the in-shell bar gear — leaving `/` the one never-guarded route. A bounce taken with the
+shell placed **unwinds** it (`Nav::unwind_shell` pops the shell page, retaining nothing authenticated
+beneath Connect) rather than pushing over it; a bounce with nothing placed applies no op. It closes
 over `ConnectionController` (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)) **by capture, not
 context**, safe from any call stack, and navigation-time only — a connection dropping mid-screen does
 not reactively bounce it back.
@@ -107,8 +110,7 @@ not reactively bounce it back.
 `frust::overlay_host` (`AppState::overlays`, see Composition Root), never of either route stack: it
 routes input and publishes accessibility nodes for its top page only, so the app underneath an open
 overlay — the bar included — is genuinely inert rather than merely dimmed. An Android back press
-reaches the host before either navigator, and a page's pop-completion callback — a menu popping
-itself into `show_sheet` — delivers on the pop's own frame, not the next input pass.
+reaches the host before either navigator.
 
 ## UI Substrate — `src/ui/`
 
@@ -119,21 +121,22 @@ itself into `show_sheet` — delivers on the pop's own frame, not the next input
 - **`spacing`** — eleven named spacing constants (`MICRO`..`HERO`) on the app's measured de-facto
   scale, adopted by every feature in place of its own local padding/gap constants; an odd one-off
   value stays feature-local rather than earning a token of its own.
+- **`paint`** — shared paint-primitive tokens (hairline width, pill radius, glow blur/spread, dash
+  on/off step), one declaration each so no feature's hand-rolled chrome can drift from another's.
 - **`backdrop`** — the app's full-bleed page background, shared by Connect and the splash overlay.
 - **`topbar`** — bar *furniture*, not the bar itself: `brand_leading`/`bar_icon`, the two slot
   contents `shell_bar`'s `RouteMeta` adapter feeds to `frust_glyph::AppBarView` (mounted in the shell
   scaffold's `app_bar` slot — the bar's own surface, inset consumption and title crossfade are all
-  Glyph's); `icon_button`, the app's one vector press-target primitive, now well past the four call
-  sites its promotion out of `ui::topbar` was gated on (see Planned); and `BAR_HEIGHT`, Glyph's own
-  private compact-bar height, transcribed as the one anchor `features::terminal`'s chrome still needs
-  it as a number for.
+  Glyph's); `icon_button`, the app's one vector press-target primitive (promotion out of this module
+  is Planned, below); and `BAR_HEIGHT`, Glyph's own private compact-bar height, transcribed as the
+  one anchor `features::terminal`'s chrome still needs it as a number for.
 - **`sheet`** — `show_sheet`, a thin app-facing adapter over `frust::glyph`'s `glyph_sheet`/
   `show_glyph_sheet` (the panel, its scrim, the drag handle, and every dismissal gesture belong to
   Glyph itself). This module owns only the app's own full-content-width body gutter (Glyph's
   content slot lays out under loose width) and the dismissal gate below: a `SheetHandle`
-  `show_sheet` mints per instance, whose `close`/`close_then` fire **at most once** per instance,
-  since a duplicate close used to pop the route under the sheet instead. `show_sheet` and
-  `dialogs`' helpers take only the navigator — nothing else about app state crosses that boundary.
+  `show_sheet` mints per instance, whose `close`/`close_then` fire **at most once**, so a duplicate
+  close cannot pop the route under the sheet. `show_sheet` and `dialogs`' helpers take only the
+  navigator — nothing else about app state crosses that boundary.
 - **`dialogs`** — Flutter-parity confirm/name-input modals (`confirm_dialog`/`name_input_dialog`)
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
@@ -172,15 +175,17 @@ saved-servers and credential-service), each flipped by its own module's `use_moc
 same module is also the shared paint/frame/pump harness (a recording paint scene, sized-frame/pump
 helpers, event builders, value and rect-diff readers). `routes.rs` smoke-tests the route table's shape
 and the session guard in isolation — no reactive owner on the stack at all, the tripwire for
-`session_guard_with`'s capture-not-context contract; `sequence.rs`/`splash.rs` exercise the splash
-timeline; `navigation_motion.rs` mounts the *whole* app (only `MuxrApp` places the scaffold, and so
-the bar) to exercise the `RouteMeta` adapter, shell behavior (bar-less Connect, a titled route,
-direction on back, terminal fullscreen suppression, the settings → sessions → connect round trip) and
-overlay-host arbitration (R44-back, a modal dimming the bar) — read off the accessibility tree, since
-a navigator's own pages are otherwise invisible to it; `shell_handoff.rs` is the widget-identity
-regression test for the root `Stack`'s fixed indices. `layering.rs` is a source-scan
-conformance test enforcing that owner-dependent context lookups appear only at DI/presentation-
-sanctioned sites, and never inside a spawned async block's body regardless of directory.
+`session_guard_with`'s capture-not-context contract; `guard_shell.rs` is its shell-boundary
+counterpart, pinning the bounce-unwind, the reconnect loop, and dismiss-cell freshness.
+`sequence.rs`/`splash.rs` exercise the splash timeline; `navigation_motion.rs` mounts the *whole*
+app (only `MuxrApp` places the scaffold, and so the bar) to exercise the `RouteMeta` adapter, shell
+behavior (bar-less Connect, a titled route, direction on back, terminal fullscreen suppression, the
+settings → sessions → connect round trip) and overlay-host arbitration (R44-back, a modal dimming
+the bar) — read off the accessibility tree, since a navigator's own pages are otherwise invisible to
+it; `shell_handoff.rs` is the widget-identity regression test for the root `Stack`'s fixed indices.
+`layering.rs` is a source-scan conformance test enforcing that owner-dependent context lookups appear
+only at DI/presentation-sanctioned sites, and never inside a spawned async block's body regardless of
+directory.
 `comment_residue.rs` is a source-scan ratchet locking the frust checkout's Comment Conventions shut
 for this app's own `src/`/`tests/` — a slimmed port of frust's own conformance scan, plus a
 gate/G-ledger citation detector for this repo's device-gate review shorthand. `comment_density.rs`
@@ -191,9 +196,9 @@ the same `src/`/`tests/` roots. Per-feature and net-transport suites are covered
 
 ## Design References
 
-`docs/` also holds non-code design material: `splash.html`/`redesign.html`/`terminal.html`
-(interactive HTML mocks; `splash.html` is the timing/geometry source of truth above), plus
-`docs/muxr-app-icons/`, the Android/iOS icon masters the build pipelines consume.
+`docs/` also holds non-code design material: `splash.html`/`redesign.html`/`terminal.html` (interactive
+HTML mocks; `splash.html` is the timing/geometry source of truth above), plus `docs/muxr-app-icons/`,
+the Android/iOS icon masters the build pipelines consume.
 
 ## Planned
 
@@ -204,16 +209,12 @@ the same `src/`/`tests/` roots. Per-feature and net-transport suites are covered
 - The scroll RPC is unwired too — there is no scroll gesture on the terminal grid to drive it from.
 - Background pause/reattach: a backgrounded app keeps its `AttachTerminal` stream open rather than
   detaching and reattaching on resume, pending a frust app-lifecycle seam this app can hook into.
-- The live terminal feed's inbound flow control (`grpc_feed.rs`) pauses reading the `AttachTerminal`
-  stream once its byte or frame high-water mark trips; since every RPC shares the app's one HTTP/2
-  connection (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)), a long pause can in principle
-  backpressure that connection's flow-control window and stall the other in-flight streams
-  (sessions polls, token RPCs). A dedicated
-  channel for the attach stream is the designed remedy, deliberately deferred past the device gate.
-- The login-token field's controller-held buffer is cleared and zeroized on both connect and
-  disconnect today; transient copies on the render pass and the platform IME surface (suggestions,
-  recents capture) still hold plaintext until platform-level masking plumbing lands.
+- The live terminal feed's inbound flow control can, in principle, backpressure the app's one shared
+  HTTP/2 connection and stall other in-flight RPCs (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md));
+  a dedicated channel for the attach stream is the designed remedy, deferred past the device gate.
+- The login-token field's buffer is zeroized on connect/disconnect; transient copies on the render
+  pass and platform IME surface (suggestions, recents) still hold plaintext until masking lands.
 - Structural (side-by-side, two-column) responsive layouts, once frust's responsive primitive and a
   design mock exist.
-- Promoting `icon_button` out of `ui::topbar` into its own `crate::ui` module — the fourth-call-site
-  trigger has fired (`pills`/`sheet_bits`/`saved`/`qr_affordance` all import it now); still deferred.
+- Promoting `icon_button` out of `ui::topbar` into its own module — its fourth-call-site trigger has
+  fired; still deferred.
