@@ -9,15 +9,30 @@
 //! Shapes only) for the two backend initials and the mock's literal glyphs —
 //! **never an emoji**, which resolves through platform font fallback (the
 //! tofu-on-iPhone defect this app has hit before).
+//!
+//! [`rounded_fill`] is this module's own primitive — the sliver of the
+//! former `chrome::panel` `frust::container` cannot reach: a paint-only
+//! bleed (`.pick-row.sel{margin:0 -20px}`, `widgets::pickers`' own row) and a
+//! zero-radius fill that stays classified as a plain rect rather than a
+//! rounded one, which [`page_tone`] below needs. Every other option that
+//! module used to carry — fill/border/radius, a dashed border, a fixed
+//! centered size — is `frust::container` directly at each call site now; a
+//! bottom hairline composes as a trailing `frust::divider` instead, except on
+//! `widgets::pickers`' own rows, whose uniform row-to-row pitch depends on
+//! the rule staying a paint overlay rather than added layout height (see
+//! [`rounded_fill`]'s own doc).
 
-use frust::authoring::{Color, Size};
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, build_child,
+    rebuild_child, route_event_single, teardown_child,
+};
 use frust::icons::{CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH};
 use frust::{
     AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    IconSource, Padding, SizedBox, any, flexible, icon, inflexible, text,
+    IconSource, Padding, SizedBox, any, container, divider, flexible, icon, inflexible, text,
 };
 
-use crate::features::settings::presentation::chrome::panel;
 use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
@@ -42,6 +57,15 @@ const MARK_ICON: f64 = spacing::LG;
 pub(super) const ROW_LINE_GAP: f64 = spacing::MICRO;
 /// `.set-chev{font-size:13px}`.
 const CHEVRON: f64 = 13.0;
+/// Hairline width in logical px (`1px solid` on every bordered rule in
+/// `docs/redesign.html`) — [`rounded_fill`]'s own bottom rule, and a chip's
+/// optional border at each call site. Matches `frust-widgets`' own
+/// `BORDER_WIDTH`.
+pub(super) const HAIRLINE: f64 = 1.0;
+/// `--radius-full: 999px` — kurbo's own `RoundedRect` clamps an oversized
+/// radius to half the shorter side, so a caller can spell "pill" without
+/// knowing the box's measured height.
+pub(super) const RADIUS_FULL: f64 = 999.0;
 
 /// A `gap`-wide horizontal spacer.
 pub(super) fn h_gap<S: 'static>(gap: f64) -> FlexChild<S> {
@@ -69,12 +93,175 @@ pub(super) fn column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
 }
 
 /// The screen's page tone behind `body` — `--bg-base`, which the shell's own
-/// clear colour (`--bg-surface`) is not.
+/// clear colour (`--bg-surface`) is not. Zero radius: [`rounded_fill`] keeps
+/// this out of every rounded-rect probe (see its own doc).
 pub(in super::super) fn page_tone(
-    body: impl frust::View<SettingsState>,
+    body: impl View<SettingsState>,
     colors: &Palette,
 ) -> AnyView<SettingsState> {
-    any(panel(body, colors.base, 0.0))
+    any(rounded_fill(body, colors.base, 0.0))
+}
+
+// ---------------------------------------------------------------------------
+// `rounded_fill` — the one primitive `frust::container` cannot quite reach
+// ---------------------------------------------------------------------------
+
+/// A rounded fill behind a child it hugs exactly (the container's own size is
+/// always the child's), with two options `frust::container` has no knob for:
+///
+/// - [`RoundedFillView::bleed`] widens the *painted* fill by `bleed` logical
+///   px on each side without moving layout — `.pick-row.sel{margin:0 -20px}`.
+///   `frust::Padding` clamps a negative inset, and `Container` carries no
+///   bleed knob; its own module doc names this the deferred v1 boundary and
+///   says to compose it as app-side layering over a plain `Container`
+///   instead, which is exactly what this is.
+/// - At `radius == 0.0`, paint goes through [`PaintScene::fill_rect`] rather
+///   than [`PaintScene::fill_rounded_rect`]. `Container` always emits the
+///   rounded call regardless of radius, so a zero-radius `Container` fill
+///   still reads as *rounded* to a paint-recording test scene — this
+///   screen's own [`page_tone`] must not, since `tests/navigation_motion.rs`'s
+///   `leaving_page_x` finds the *largest rounded rect* on screen to track a
+///   leaving page, and this screen's full-bleed tone would out-measure it.
+///
+/// [`RoundedFillView::bottom_rule`] is the third option: a hairline painted
+/// along the bottom edge, *overlapping* the last logical px rather than
+/// adding to the box's own height. `widgets::pickers`' rows need this
+/// distinction specifically — every `.pick-row` must stay exactly one line
+/// tall regardless of whether it rules, since `tests/settings.rs` locates an
+/// unopened row by that uniform pitch. Everywhere else a bottom hairline
+/// composes as a trailing `frust::divider` instead (see this module's own
+/// doc).
+pub(super) struct RoundedFillView<State: 'static> {
+    child: AnyView<State>,
+    fill: Color,
+    radius: f64,
+    bleed: f64,
+    bottom_rule: Option<Color>,
+}
+
+/// Wrap `child` in a `fill`-filled box with corner `radius`, no bleed and no
+/// bottom rule. See [`RoundedFillView`].
+pub(super) fn rounded_fill<State: 'static, V: View<State>>(
+    child: V,
+    fill: Color,
+    radius: f64,
+) -> RoundedFillView<State> {
+    RoundedFillView {
+        child: any(child),
+        fill,
+        radius,
+        bleed: 0.0,
+        bottom_rule: None,
+    }
+}
+
+impl<State: 'static> RoundedFillView<State> {
+    /// See [`RoundedFillView`].
+    pub(super) fn bleed(mut self, bleed: f64) -> Self {
+        self.bleed = bleed;
+        self
+    }
+
+    /// See [`RoundedFillView`].
+    pub(super) fn bottom_rule(mut self, color: Color) -> Self {
+        self.bottom_rule = Some(color);
+        self
+    }
+}
+
+/// The retained half of a [`RoundedFillView`].
+pub(super) struct RoundedFillWidget {
+    child: ChildPod,
+    fill: Color,
+    radius: f64,
+    bleed: f64,
+    bottom_rule: Option<Color>,
+}
+
+impl<State: 'static> View<State> for RoundedFillView<State> {
+    type Element = RoundedFillWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> RoundedFillWidget {
+        RoundedFillWidget {
+            child: build_child(&self.child, ctx),
+            fill: self.fill,
+            radius: self.radius,
+            bleed: self.bleed,
+            bottom_rule: self.bottom_rule,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut RoundedFillWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if prev.fill != self.fill
+            || prev.radius != self.radius
+            || prev.bleed != self.bleed
+            || prev.bottom_rule != self.bottom_rule
+        {
+            element.fill = self.fill;
+            element.radius = self.radius;
+            element.bleed = self.bleed;
+            element.bottom_rule = self.bottom_rule;
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut RoundedFillWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for RoundedFillWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.child.set_origin(Point::ZERO);
+        bc.constrain(size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let origin = ctx.origin();
+        let size = ctx.size();
+        if self.fill != Color::TRANSPARENT {
+            // The bleed widens only what is painted — this widget's own
+            // bounds (and its child's origin) are untouched, so nothing
+            // reflows when a selection moves (see [`RoundedFillView`]).
+            let fill_origin = Point::new(origin.x - self.bleed, origin.y);
+            let fill_size = Size::new(size.width + 2.0 * self.bleed, size.height);
+            if self.radius == 0.0 {
+                scene.fill_rect(fill_origin, fill_size, self.fill);
+            } else {
+                scene.fill_rounded_rect(fill_origin, fill_size, self.radius, self.fill);
+            }
+        }
+        if let Some(rule) = self.bottom_rule {
+            let y = origin.y + size.height - HAIRLINE / 2.0;
+            scene.stroke_line(
+                Point::new(origin.x, y),
+                Point::new(origin.x + size.width, y),
+                HAIRLINE,
+                rule,
+            );
+        }
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A decorative single-child container still MUST route, or everything
+        // it backs is silently unreachable.
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A transparent container still MUST forward, or the child's whole
+        // subtree drops out of the accessibility tree.
+        self.child.semantics_child(ctx);
+    }
 }
 
 /// The band above each group — 10px dim, letter-spaced, uppercased here since
@@ -156,12 +343,16 @@ pub(super) fn settings_row(
         children.push(inflexible(trailing));
     }
 
-    let box_ = panel(
-        Padding(EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y), row(children)),
-        Color::TRANSPARENT,
-        0.0,
-    )
-    .bottom_rule(colors.rule);
+    // No fill, so this composes as plain content over a trailing
+    // `frust::divider` — the row's own `border-bottom` — rather than reaching
+    // for `rounded_fill` at all (see this module's own doc).
+    let box_ = column(vec![
+        any(Padding(
+            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+            row(children),
+        )),
+        any(divider(colors.rule)),
+    ]);
 
     match action {
         RowAction::Static => any(box_),
@@ -181,7 +372,10 @@ pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> AnyView<SettingsStat
             any(text(glyph).style(inked(&theme.type_scale.label_small, colors.fg_muted)))
         }
     };
-    any(panel(content, colors.raised, theme.shape.extra_small).fixed(Size::new(MARK_BOX, MARK_BOX)))
+    any(container(content)
+        .fill(colors.raised)
+        .radius(theme.shape.extra_small)
+        .size_centered(MARK_BOX, MARK_BOX))
 }
 
 /// A row's trailing slot: the faintest chevron for anything that leads
@@ -226,6 +420,120 @@ pub(super) const MARK_BELL: RowMark = RowMark::Vector(NOTIFICATIONS);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recording scene distinguishing plain fills from rounded ones — the
+    /// distinction [`RoundedFillView`]'s zero-radius branch exists to control.
+    #[derive(Default)]
+    struct RecScene {
+        rects: Vec<(Point, Size)>,
+        rounded: Vec<(Point, Size, f64)>,
+        lines: Vec<(Point, Point)>,
+    }
+
+    impl PaintScene for RecScene {
+        fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
+            self.rects.push((origin, size));
+        }
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, _color: Color) {
+            self.rounded.push((origin, size, radius));
+        }
+        fn stroke_line(&mut self, p0: Point, p1: Point, _width: f64, _color: Color) {
+            self.lines.push((p0, p1));
+        }
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+    }
+
+    /// The smallest possible leaf — lays out to `size`, paints nothing, so a
+    /// paint test measures the fill's own chrome rather than whatever it
+    /// wraps.
+    struct StandIn(Size);
+
+    impl Widget for StandIn {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.0)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    fn empty_fill(fill: Color, radius: f64, bleed: f64) -> RoundedFillWidget {
+        RoundedFillWidget {
+            child: ChildPod::new(Box::new(StandIn(Size::ZERO))),
+            fill,
+            radius,
+            bleed,
+            bottom_rule: None,
+        }
+    }
+
+    #[test]
+    fn a_zero_radius_fill_paints_a_plain_rect_not_a_rounded_one() {
+        // The invariant `page_tone` depends on: `tests/navigation_motion.rs`'s
+        // `leaving_page_x` finds the *largest rounded rect* on screen, and
+        // this screen's own full-page tone must never be a candidate.
+        let mut widget = empty_fill(Color::from_rgb8(0x10, 0x13, 0x1a), 0.0, 0.0);
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(800.0, 1700.0));
+        widget.paint(&mut ctx, &mut scene);
+
+        assert_eq!(scene.rects, vec![(Point::ZERO, Size::new(800.0, 1700.0))]);
+        assert!(scene.rounded.is_empty(), "{:?}", scene.rounded);
+    }
+
+    #[test]
+    fn a_nonzero_radius_fill_paints_a_rounded_rect() {
+        let mut widget = empty_fill(Color::from_rgb8(0xff, 0xb6, 0x27), 6.0, 0.0);
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::new(20.0, 100.0), Size::new(300.0, 44.0));
+        widget.paint(&mut ctx, &mut scene);
+
+        assert!(scene.rects.is_empty(), "{:?}", scene.rects);
+        assert_eq!(
+            scene.rounded,
+            vec![(Point::new(20.0, 100.0), Size::new(300.0, 44.0), 6.0)]
+        );
+    }
+
+    #[test]
+    fn a_bleeding_fill_paints_wider_than_it_measures() {
+        // `.pick-row.sel{margin:0 -20px}` — the fill escapes the sheet's
+        // content gutter on both sides while layout stays put.
+        let mut widget = empty_fill(Color::from_rgb8(0xff, 0xb6, 0x27), 6.0, 20.0);
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::new(20.0, 100.0), Size::new(300.0, 44.0));
+        widget.paint(&mut ctx, &mut scene);
+
+        assert_eq!(scene.rounded.len(), 1, "one fill: {:?}", scene.rounded);
+        assert_eq!(scene.rounded[0].0, Point::new(0.0, 100.0), "20px left");
+        assert_eq!(scene.rounded[0].1, Size::new(340.0, 44.0), "…and right");
+    }
+
+    #[test]
+    fn an_unbled_fill_paints_exactly_its_own_box() {
+        let mut widget = empty_fill(Color::from_rgb8(0x1e, 0x23, 0x30), 6.0, 0.0);
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::new(20.0, 100.0), Size::new(300.0, 44.0));
+        widget.paint(&mut ctx, &mut scene);
+
+        assert_eq!(scene.rounded[0].0, Point::new(20.0, 100.0));
+        assert_eq!(scene.rounded[0].1, Size::new(300.0, 44.0));
+    }
+
+    #[test]
+    fn a_transparent_fill_paints_only_its_bottom_rule() {
+        // Every `.set-row` composing through `rounded_fill` directly (rather
+        // than a trailing `divider`) would be one of these: transparent, with
+        // only the rule. A fill would show as a seam over the page tone.
+        let mut widget = empty_fill(Color::TRANSPARENT, 0.0, 0.0);
+        widget.bottom_rule = Some(Color::WHITE);
+        let mut scene = RecScene::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(300.0, 44.0));
+        widget.paint(&mut ctx, &mut scene);
+
+        assert!(scene.rects.is_empty(), "{:?}", scene.rects);
+        assert!(scene.rounded.is_empty(), "{:?}", scene.rounded);
+        assert_eq!(scene.lines.len(), 1, "just the rule");
+        assert_eq!(scene.lines[0].0.y, scene.lines[0].1.y, "…and it is level");
+    }
 
     #[test]
     fn no_mark_is_an_emoji() {
