@@ -21,7 +21,7 @@ use frust::authoring::{Rect, WindowInsets};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
     NavigatorController, Padding, PopResult, RwSignal, SystemUiMode, WindowMetrics, any, component,
-    flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
+    container, flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
 };
 use frust_glyph::{MenuEntry, menu_item, show_glyph_dialog, show_glyph_menu};
 
@@ -41,7 +41,7 @@ use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
-use super::chrome::{WRAP_PAD, term_box};
+use super::chrome::WRAP_PAD;
 use super::controller::{LiveSession, TerminalController};
 use super::keybar;
 use super::term;
@@ -563,7 +563,7 @@ impl Component for TerminalScreen {
         // The page tone stays **outside** the stage so it fills the whole surface,
         // bar band included: the bar slides in over it, and a page that stopped at
         // the clearance would flash the shell's clear colour through the gap.
-        let page: AnyView<TerminalState> = any(term_box(stage, colors.void, 0.0));
+        let page: AnyView<TerminalState> = any(container(stage).fill(colors.void));
 
         // Key bar mount: a fixed slot beneath the card, live-mode only. The `None`
         // arm returns `page` unwrapped rather than adding an always-zero sibling.

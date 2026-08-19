@@ -8,10 +8,10 @@
 
 use std::rc::Rc;
 
-use frust::authoring::Color;
+use frust::authoring::{Color, DashPattern};
 use frust::{
-    Align, Alignment, AnyView, Axis, EdgeInsets, FlexView, GestureDetector, Get, Padding, SizedBox,
-    WindowMetrics, any, inflexible, text, use_context,
+    Align, Alignment, AnyView, Axis, BorderStyle, EdgeInsets, FlexView, GestureDetector, Get,
+    Padding, SizedBox, WindowMetrics, any, container, inflexible, text, use_context,
 };
 
 use crate::AppState;
@@ -19,7 +19,7 @@ use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::SheetHandle;
 use crate::ui::spacing;
 
-use super::super::chrome::{term_box, wrap_row};
+use super::super::chrome::{DASH_OFF, DASH_ON, HAIRLINE, wrap_row};
 // A sanctioned pages -> widgets back-edge (see `widgets`' own module docs and
 // `docs/FEATURES_ARCHITECTURE.md`'s widgets/ paragraph) — this module is not
 // independently composable from `pages` the way most of its siblings are.
@@ -269,13 +269,14 @@ fn add_row<F: Fn(&mut AppState) + 'static>(
         ],
     );
     any(GestureDetector(
-        term_box(
-            Padding(EdgeInsets::all(ADD_ROW_PAD), Align(Alignment::CENTER, row)),
-            Color::TRANSPARENT,
-            theme.shape.small,
-        )
-        .border(colors.outline)
-        .dashed(true),
+        container(Padding(
+            EdgeInsets::all(ADD_ROW_PAD),
+            Align(Alignment::CENTER, row),
+        ))
+        .fill(Color::TRANSPARENT)
+        .radius(theme.shape.small)
+        .border(colors.outline, HAIRLINE)
+        .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF))),
     )
     .on_tap(on_tap))
 }

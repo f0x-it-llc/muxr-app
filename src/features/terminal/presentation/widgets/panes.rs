@@ -1,17 +1,17 @@
 //! `.pane-item` and `.new-pane-btn` — the two rows the "panes & tabs" sheet's
 //! pane section is built from.
 
-use frust::authoring::Color;
+use frust::authoring::{Color, DashPattern};
 use frust::{
-    Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon,
-    inflexible, text,
+    Align, Alignment, AnyView, BorderStyle, EdgeInsets, GestureDetector, Padding, SizedBox, any,
+    container, flexible, icon, icons, inflexible, text,
 };
 
 use crate::features::terminal::domain::entities::PaneEntry;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 
-use super::super::chrome::{PANE_MARK, RADIUS_FULL, term_box};
+use super::super::chrome::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
 use super::pills::{OnEdit, PILL_SIZE, edit_icon_button};
 use super::util::{column, h_gap, row, sized};
 
@@ -48,8 +48,10 @@ const NEW_PANE_GAP: f64 = spacing::XS;
 pub(crate) const PANE_EDIT_TAP_BOX: f64 = 44.0;
 
 /// `.pane-item` — one pane's mark box, its title/cwd pair, and the `focused` chip
-/// when it is the one the session is on. The mark is [`PANE_MARK`], an app-supplied
-/// vector: the mock sets `▤` as text, which is not in the bundled Glyph faces.
+/// when it is the one the session is on. The mark is
+/// [`icons::PANE_MARK`](frust::icons::PANE_MARK): the mock sets `▤` as text,
+/// which is not in the bundled Glyph faces, and the catalog's own mark (two
+/// rounded panels) is not a transcription of that glyph either.
 ///
 /// **`focused` is the caller's answer, not the pane's own flag.** A pane in a tab
 /// the sheet is merely *browsing* carries whatever the last load recorded, which is
@@ -99,33 +101,33 @@ pub(crate) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
     ]);
 
     let mut children = vec![
-        inflexible(term_box(
-            SizedBox::<State>(Some(PANE_ICON_BOX), Some(PANE_ICON_BOX)).child(Align(
-                Alignment::CENTER,
-                icon(PANE_MARK).size(PANE_ICON).color(mark_ink),
-            )),
-            mark_fill,
-            theme.shape.extra_small,
-        )),
+        inflexible(
+            container(
+                SizedBox::<State>(Some(PANE_ICON_BOX), Some(PANE_ICON_BOX)).child(Align(
+                    Alignment::CENTER,
+                    icon(icons::PANE_MARK).size(PANE_ICON).color(mark_ink),
+                )),
+            )
+            .fill(mark_fill)
+            .radius(theme.shape.extra_small),
+        ),
         h_gap(PANE_GAP),
         flexible(1, info),
     ];
     if focused {
         children.push(h_gap(PANE_GAP));
         children.push(inflexible(
-            term_box(
-                Padding(
-                    EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
-                    text(FOCUSED_CHIP).style(sized(
-                        &theme.type_scale.label_small,
-                        CHIP_SIZE,
-                        colors.amber,
-                    )),
-                ),
-                colors.amber_faint,
-                RADIUS_FULL,
-            )
-            .border(colors.amber_border),
+            container(Padding(
+                EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
+                text(FOCUSED_CHIP).style(sized(
+                    &theme.type_scale.label_small,
+                    CHIP_SIZE,
+                    colors.amber,
+                )),
+            ))
+            .fill(colors.amber_faint)
+            .radius(RADIUS_FULL)
+            .border(colors.amber_border, HAIRLINE),
         ));
     }
 
@@ -158,7 +160,10 @@ pub(crate) fn pane_item<State: 'static, F: Fn(&mut State) + 'static>(
         ])),
     };
 
-    any(term_box(tile, colors.base, theme.shape.small).border(border))
+    any(container(tile)
+        .fill(colors.base)
+        .radius(theme.shape.small)
+        .border(border, HAIRLINE))
 }
 
 /// `.new-pane-btn` — the dashed, centred row that closes the sheet's pane section.
@@ -189,16 +194,14 @@ pub(crate) fn new_pane_row<
         ))),
     ]);
     any(GestureDetector(
-        term_box(
-            Padding(
-                EdgeInsets::all(NEW_PANE_PAD),
-                Align(Alignment::CENTER, label),
-            ),
-            Color::TRANSPARENT,
-            theme.shape.small,
-        )
-        .border(colors.outline)
-        .dashed(true),
+        container(Padding(
+            EdgeInsets::all(NEW_PANE_PAD),
+            Align(Alignment::CENTER, label),
+        ))
+        .fill(Color::TRANSPARENT)
+        .radius(theme.shape.small)
+        .border(colors.outline, HAIRLINE)
+        .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF))),
     )
     .on_tap(on_tap)
     .on_long_press(on_long_press))
