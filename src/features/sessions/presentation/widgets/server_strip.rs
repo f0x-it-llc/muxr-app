@@ -15,15 +15,16 @@
 //! session guard makes it unreachable in practice, but a silent gap would be
 //! the worse failure if it ever were.
 
-use frust::authoring::Color;
-use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, any, flexible, inflexible, text};
+use frust::{
+    AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, any, divider, flexible, inflexible,
+    text,
+};
 use frust_glyph::{BadgeVariant, badge};
 
 use crate::connection::{ServerInfo, TrustMode};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
-use super::super::chrome::panel;
 use super::super::heartbeat::{self, HeartbeatVisual};
 use super::super::pages::SessionsState;
 use super::{active_theme, h_gap, row};
@@ -85,15 +86,18 @@ pub(in crate::features::sessions::presentation) fn server_strip(
             row(children)
         }
     };
-    any(panel(
-        Padding(
+    // `.conn-row`'s bottom hairline is a plain `divider` stacked under the
+    // padded row rather than a knob on the container — `Container` carries no
+    // bottom-rule option by design (see `frust-widgets::container`'s module
+    // docs), so the rule composes as an ordinary second child instead of a
+    // paint-time overlay.
+    any(Column(vec![
+        any(Padding(
             EdgeInsets::symmetric(STRIP_PAD_X, STRIP_PAD_Y),
             content.cross_axis(CrossAxisAlignment::Center),
-        ),
-        Color::TRANSPARENT,
-        0.0,
-    )
-    .bottom_rule(colors.rule))
+        )),
+        any(divider(colors.rule)),
+    ]))
 }
 
 /// The strip's dim meta text: every backend the handshake detected, as

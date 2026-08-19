@@ -8,10 +8,12 @@
 //!
 //! Amber is brand/CTA only, never a health/selection signal — liveness is
 //! always `success`; a running session must never read as "selected". Every
-//! element with a Glyph catalog counterpart uses it; [`super::chrome`] covers
-//! what the catalog doesn't (card accent, pane pills, `.conn-row` rule,
-//! dashed outline). `frust_glyph::baseline()` wins where it and the HTML
-//! disagree.
+//! element with a Glyph catalog counterpart uses it; the rest (card accent,
+//! pane pills, `.conn-row` rule, dashed outline) composes `frust::container`/
+//! `colored_box`/`divider` directly, each in the widget module that needs it
+//! — the feature-local `chrome` primitives that used to cover the gap are
+//! gone now that frust's own baseline carries them. `frust_glyph::baseline()`
+//! wins where it and the HTML disagree.
 
 mod list;
 mod manage_sheet;
@@ -19,11 +21,10 @@ mod server_strip;
 mod session_card;
 
 use frust::AnyView;
-use frust::{Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, any, inflexible};
+use frust::{Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, any, container, inflexible};
 
 use crate::ui::palette::Palette;
 
-use super::chrome::panel;
 use super::pages::SessionsState;
 
 pub(crate) use server_strip::host_of;
@@ -41,7 +42,7 @@ pub(in crate::features::sessions::presentation) fn page_tone(
     body: impl frust::View<SessionsState>,
     colors: &Palette,
 ) -> AnyView<SessionsState> {
-    any(panel(body, colors.base, 0.0))
+    any(container(body).fill(colors.base))
 }
 
 pub(super) fn h_gap(gap: f64) -> FlexChild<SessionsState> {

@@ -15,7 +15,7 @@ use frust::authoring::Color;
 use frust::motion::AnimatedOpacity;
 use frust::{
     AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector, Padding,
-    SizedBox, any, flexible, inflexible, text,
+    SizedBox, View, any, container, flexible, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, avatar, badge};
 
@@ -23,7 +23,6 @@ use crate::features::sessions::domain::entities::{Session, SessionStatus};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
-use super::super::chrome::panel;
 use super::super::pages::{self, SessionsState};
 use super::{active_theme, h_gap, row};
 
@@ -32,6 +31,11 @@ use super::{active_theme, h_gap, row};
 const AVATAR_SIZE: f64 = 26.0;
 /// `.sess-card{padding:14px}`.
 const CARD_PAD: f64 = spacing::LG;
+/// Hairline border width in logical px (`1px solid` on every bordered rule in
+/// `docs/redesign.html`).
+const HAIRLINE: f64 = 1.0;
+/// `.sess-card{border-left:2px solid}` — the status accent's weight.
+const ACCENT_WIDTH: f64 = 2.0;
 /// `.sess-top{gap:10px}` — avatar to name.
 const ROW_GAP: f64 = spacing::MD;
 /// `.sess-badges{gap:6px}` / `.sess-panes{gap:6px}`.
@@ -50,6 +54,48 @@ const PILL_PAD_Y: f64 = spacing::SM;
 pub(super) const IDLE_OPACITY: f64 = 0.55;
 /// How many `.pane-pill` previews a card shows (the redesign draws two).
 const MAX_PREVIEW_PILLS: usize = 2;
+
+/// `.sess-card`'s surface (`fill`/`border`/`radius`) plus, for a live
+/// session, the 2px `success` left status accent — an accent-filled
+/// `container` behind an `ACCENT_WIDTH`-inset surface `container`, since
+/// `frust::container` carries no left-accent knob by design (deferred: see
+/// `frust-widgets::container`'s module docs' "Sizing + a child" section, "app
+/// side layering over a plain `Container`"). The outer accent paints the
+/// *whole* card's rounded rect first; the inner surface, offset right by
+/// [`ACCENT_WIDTH`], paints on top of it — reproducing `border-left`'s
+/// curved ends without a per-edge radius.
+///
+/// The inset is unconditional (`Padding` always reserves [`ACCENT_WIDTH`]),
+/// independent of `accent` carrying a colour — `.sess-card{border-left:2px
+/// solid transparent}` — so an idle card's content still starts exactly
+/// where a running card's does and the list's left edge never jogs by 2px
+/// row to row.
+fn accented_card<State: 'static>(
+    body: impl View<State>,
+    fill: Color,
+    radius: f64,
+    border: Color,
+    accent: Option<Color>,
+) -> AnyView<State> {
+    let surface = container(body)
+        .fill(fill)
+        .border(border, HAIRLINE)
+        .radius(radius);
+    let inset = Padding(
+        EdgeInsets {
+            left: ACCENT_WIDTH,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        },
+        surface,
+    );
+    let mut outer = container(inset).radius(radius);
+    if let Some(accent) = accent {
+        outer = outer.fill(accent);
+    }
+    any(outer)
+}
 
 /// See the [module docs](self).
 pub(in crate::features::sessions::presentation) fn session_card(
@@ -107,13 +153,13 @@ pub(in crate::features::sessions::presentation) fn session_card(
     let body = FlexView::new(Axis::Vertical, interleave(lines, CARD_LINE_GAP))
         .cross_axis(CrossAxisAlignment::Stretch);
 
-    let card = panel(
+    let card = accented_card(
         Padding(EdgeInsets::all(CARD_PAD), body),
         colors.surface,
         theme.shape.medium,
-    )
-    .border(colors.outline)
-    .left_accent(live.then_some(colors.success));
+        colors.outline,
+        live.then_some(colors.success),
+    );
 
     let attach_id = session.id.clone();
     let manage_id = session.id.clone();
@@ -155,15 +201,13 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
         }
         children.push(flexible(
             1,
-            panel(
-                Padding(
-                    EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
-                    text(title.clone()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
-                ),
-                colors.base,
-                theme.shape.extra_small,
-            )
-            .border(colors.rule),
+            container(Padding(
+                EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
+                text(title.clone()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+            ))
+            .fill(colors.base)
+            .border(colors.rule, HAIRLINE)
+            .radius(theme.shape.extra_small),
         ));
     }
     row(children)
