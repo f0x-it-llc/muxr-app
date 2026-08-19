@@ -1,12 +1,16 @@
 //! Piece 0 — `.connect-mark`.
 
-use frust::authoring::Size;
-use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, inflexible};
+use frust::{
+    Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, colored_box, container, inflexible,
+};
 
-use super::super::chrome::{panel, swatch};
 use super::{h_gap, hugging_column, row, v_gap};
 use crate::ui::palette::Palette;
 use crate::ui::spacing;
+
+/// Hairline border width in logical px (`1px solid` on every bordered rule in
+/// `docs/splash.html`).
+const HAIRLINE: f64 = 1.0;
 
 const MARK_SIZE: f64 = 60.0;
 /// Off the app's spacing scale, so it stays local.
@@ -18,11 +22,21 @@ const MARK_CELL: f64 = (MARK_SIZE - 2.0 * spacing::BASE - MARK_GAP) / 2.0;
 /// amber and whose off-diagonal is the faint amber wash, centered in the layer
 /// (`margin:0 auto`). Pure decoration — no [`Live`](super::Live).
 pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
-    let cell = Size::new(MARK_CELL, MARK_CELL);
     let cell_radius = theme.shape.extra_small;
     // Diagonal is a hairline-bordered faint wash; off-diagonal is solid accent fill.
-    let faint = || any(swatch(cell, colors.amber_faint, cell_radius).border(colors.amber_border));
-    let solid = || any(swatch(cell, colors.amber, cell_radius));
+    let faint = || {
+        any(colored_box::<S>()
+            .size(MARK_CELL, MARK_CELL)
+            .fill(colors.amber_faint)
+            .radius(cell_radius)
+            .border(colors.amber_border, HAIRLINE))
+    };
+    let solid = || {
+        any(colored_box::<S>()
+            .size(MARK_CELL, MARK_CELL)
+            .fill(colors.amber)
+            .radius(cell_radius))
+    };
     let grid = hugging_column::<S>(vec![
         any(row::<S>(vec![
             inflexible(faint()),
@@ -36,12 +50,10 @@ pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
             inflexible(faint()),
         ])),
     ]);
-    let tile = panel(
-        Padding(EdgeInsets::all(spacing::BASE), grid),
-        colors.page,
-        theme.shape.medium,
-    )
-    .border(colors.outline);
+    let tile = container(Padding(EdgeInsets::all(spacing::BASE), grid))
+        .fill(colors.page)
+        .radius(theme.shape.medium)
+        .border(colors.outline, HAIRLINE);
     any(Align(Alignment::CENTER, tile))
 }
 

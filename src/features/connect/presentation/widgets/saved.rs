@@ -6,11 +6,10 @@ use std::rc::Rc;
 use frust::authoring::Size;
 use frust::{
     Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Theme, any,
-    flexible, icon, icons, inflexible, text,
+    colored_box, flexible, icon, icons, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, badge};
 
-use super::super::chrome::swatch;
 use super::pairing::READ_ONLY_CHIP;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
@@ -29,6 +28,12 @@ const DELETE_TARGET: f64 = 44.0;
 /// The mark inside it, smaller than the icon's own 24px design box: quiet
 /// chrome beside the row's content, not a second action button.
 const DELETE_MARK: f64 = 18.0;
+
+/// `.dot-ok{box-shadow:0 0 5px var(--success)}` — the blur radius as a
+/// gaussian std-dev for `container(..).glow(..)`, plus how far the glow
+/// bleeds past the status dot on each side.
+const GLOW_STD_DEV: f64 = 2.5;
+const GLOW_SPREAD: f64 = 2.0;
 
 /// The chip a saved row carries when a gated credential is stored for it — also
 /// what says a tap will raise a prompt rather than refill the form.
@@ -59,10 +64,10 @@ fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
             text("SAVED SERVERS").style(inked(&theme.type_scale.label_small, colors.fg_dim))
         )),
         inflexible(h_gap::<S>(spacing::SM)),
-        // A zero-width swatch under a flexible slot gets the remaining width.
+        // A zero-width box under a flexible slot gets the remaining width.
         flexible(
             1,
-            any(swatch(Size::new(0.0, RULE_HEIGHT), colors.rule, 0.0)),
+            any(colored_box::<S>().size(0.0, RULE_HEIGHT).fill(colors.rule)),
         ),
     ]))
 }
@@ -101,9 +106,11 @@ fn saved_row<S: 'static>(
     );
     let mut items = vec![
         // The glow is part of the dot, not decoration — it's what reads as "live" at 7px.
-        inflexible(any(
-            swatch(Size::new(DOT, DOT), colors.success, DOT / 2.0).glow(colors.success)
-        )),
+        inflexible(any(colored_box::<S>()
+            .size(DOT, DOT)
+            .radius(DOT / 2.0)
+            .fill(colors.success)
+            .glow(colors.success, GLOW_STD_DEV, GLOW_SPREAD))),
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,
