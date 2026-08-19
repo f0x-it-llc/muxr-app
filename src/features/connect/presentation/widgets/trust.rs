@@ -2,13 +2,11 @@
 
 use std::sync::Arc;
 
-use frust::authoring::{Color, Size};
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Get, Padding, Theme, any, flexible, inflexible, text,
+    AnyView, EdgeInsets, Get, Padding, Theme, any, colored_box, flexible, inflexible, text,
 };
-use frust_glyph::{BadgeVariant, badge, toggle};
+use frust_glyph::{BadgeVariant, badge, radio, toggle};
 
-use super::super::chrome::{radio_semantics, swatch};
 use super::pairing::pairing_chrome;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
@@ -90,10 +88,13 @@ pub fn remember_row<S: 'static>(
 /// nothing behind it. When neither row owns the current mode, both read
 /// unselected and a caption names where the pin came from.
 ///
-/// Hand-composed rather than `frust::radio`: `RadioWidget` shapes its label
-/// at `TextStyle::default()` and fixes its ring/dot metrics, neither
-/// reachable from the design's row; `chrome::radio_semantics` contributes
-/// the `Role::RadioButton` node the composition would otherwise lose.
+/// The live row renders through [`frust_glyph::radio`], whose ring/dot
+/// geometry ([`RADIO_RING`]/[`RADIO_RING_BORDER`]/[`RADIO_DOT_INSET`]/
+/// [`RADIO_GAP`]) was transcribed *from* this row (see that widget's own
+/// module docs), so the swap-in matches pixel-for-pixel. The splash's inert
+/// copy still hand-composes its ring+dot from [`frust::colored_box`] (see
+/// [`radio_dot`]): `frust_glyph::radio` always wires a working press and a
+/// `Role::RadioButton` node, which the splash's static art must never carry.
 fn trust_selector<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Live>) -> AnyView<S> {
     let selected = live.map_or(TrustMode::System, |live| live.controller.trust_mode.get());
     let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS
@@ -124,7 +125,10 @@ fn trust_option_label(mode: TrustMode) -> &'static str {
 }
 
 /// The ring, the label, and — on the risky posture — a trailing warning
-/// chip, pressable across its whole width.
+/// chip. Live, the ring+label pair is one [`frust_glyph::radio`], pressable
+/// across its own bounds only (the `Role::RadioButton` node covers exactly
+/// that, so the chip keeps its own separate `Role::Status` node — a radio
+/// around the whole row would swallow it).
 fn trust_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -133,19 +137,22 @@ fn trust_row<S: 'static>(
     live: Option<&Live>,
 ) -> AnyView<S> {
     let label = trust_option_label(mode);
-    let option = row::<S>(vec![
-        inflexible(radio_dot::<S>(colors, selected)),
-        inflexible(h_gap::<S>(RADIO_GAP)),
-        inflexible(any(
-            text(label).style(inked(&theme.type_scale.body_medium, colors.fg))
-        )),
-    ]);
-    // The `Role::RadioButton` node covers the ring and label only, so the
-    // chip keeps its own `Role::Status` node — a leaf radio around the whole
-    // row would swallow it.
     let option: AnyView<S> = match live {
-        None => any(option),
-        Some(_) => any(radio_semantics(option, label, selected)),
+        // Splash: static art with no recognizer and no node — nothing to operate.
+        None => any(row::<S>(vec![
+            inflexible(radio_dot::<S>(colors, selected)),
+            inflexible(h_gap::<S>(RADIO_GAP)),
+            inflexible(any(
+                text(label).style(inked(&theme.type_scale.body_medium, colors.fg))
+            )),
+        ])),
+        Some(live) => {
+            let controller = Arc::clone(&live.controller);
+            any(radio::<S, _>(selected, move |_state: &mut S| {
+                controller.select_trust_mode(mode)
+            })
+            .label(label))
+        }
     };
     // The flexible option pushes the chip to the trailing edge.
     let mut items = vec![flexible(1, option)];
@@ -156,31 +163,25 @@ fn trust_row<S: 'static>(
         items.push(inflexible(h_gap::<S>(spacing::MD)));
         items.push(inflexible(any(badge("insecure", BadgeVariant::Warning))));
     }
-    let body = Padding(EdgeInsets::symmetric(0.0, RADIO_PAD_Y), row::<S>(items));
-    match live {
-        // Splash: static art with no recognizer and no node — nothing to operate.
-        None => any(body),
-        Some(live) => {
-            let controller = Arc::clone(&live.controller);
-            // Pressable across the whole row, chip included.
-            any(GestureDetector(body)
-                .on_tap(move |_state: &mut S| controller.select_trust_mode(mode)))
-        }
-    }
+    any(Padding(
+        EdgeInsets::symmetric(0.0, RADIO_PAD_Y),
+        row::<S>(items),
+    ))
 }
 
 /// A 16px ring whose selected state re-inks it amber and drops an inset amber
-/// dot into it.
+/// dot into it — the splash's inert copy of [`frust_glyph::radio`]'s own
+/// art (see [`trust_selector`]'s docs); never used for the live row.
 fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
-    let ring_size = Size::new(RADIO_RING, RADIO_RING);
     let ring_ink = if selected {
         colors.amber
     } else {
         colors.outline
     };
-    let ring = swatch(ring_size, Color::TRANSPARENT, RADIO_RING / 2.0)
-        .border(ring_ink)
-        .border_width(RADIO_RING_BORDER);
+    let ring = colored_box::<S>()
+        .size(RADIO_RING, RADIO_RING)
+        .radius(RADIO_RING / 2.0)
+        .border(ring_ink, RADIO_RING_BORDER);
     if !selected {
         return any(ring);
     }
@@ -189,7 +190,10 @@ fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
         any(ring),
         any(Padding(
             EdgeInsets::all(RADIO_DOT_INSET),
-            swatch(Size::new(dot, dot), colors.amber, dot / 2.0),
+            colored_box::<S>()
+                .size(dot, dot)
+                .radius(dot / 2.0)
+                .fill(colors.amber),
         )),
     ]))
 }

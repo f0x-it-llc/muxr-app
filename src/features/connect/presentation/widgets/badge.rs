@@ -1,11 +1,15 @@
 //! Pieces 1 and 2 — `.connect-badge` and `.heading`.
 
-use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, text};
+use frust::authoring::text::TextAlign;
+use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, container, text};
 
-use super::super::chrome::{centered_paragraph, panel};
 use super::{backed, column, hugging_column, v_gap};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
+
+/// Hairline border width in logical px (`1px solid` on every bordered rule in
+/// `docs/splash.html`).
+const HAIRLINE: f64 = 1.0;
 
 /// `.connect .sub` — the heading's explanatory paragraph. `pub` because
 /// `tests/connect.rs`'s line-centering suite reads the very lines this string
@@ -21,12 +25,13 @@ pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
         v_gap::<S>(spacing::MICRO),
         any(text("zellij · herdr").style(inked(&theme.type_scale.label_small, colors.fg_dim))),
     ]);
-    let box_ = panel(
-        Padding(EdgeInsets::symmetric(spacing::BASE, spacing::SM), lines),
-        colors.page,
-        theme.shape.small,
-    )
-    .border(colors.outline);
+    let box_ = container(Padding(
+        EdgeInsets::symmetric(spacing::BASE, spacing::SM),
+        lines,
+    ))
+    .fill(colors.page)
+    .radius(theme.shape.small)
+    .border(colors.outline, HAIRLINE);
     any(Align(Alignment::CENTER, box_))
 }
 
@@ -34,8 +39,8 @@ pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
 /// copy — no [`Live`](super::Live).
 ///
 /// The title centers as a block ([`Align`]); the subtitle wraps on a phone
-/// and centers per line, which no composition can express — see
-/// [`centered_paragraph`](super::super::chrome::centered_paragraph).
+/// and centers per line via `TextView`'s own `.align(TextAlign::Center)`, now
+/// that `text` carries a paragraph alignment.
 pub fn heading<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
     backed(
         column::<S>(vec![
@@ -44,10 +49,9 @@ pub fn heading<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
                 text("Connect to server").style(inked(&theme.type_scale.title_medium, colors.fg)),
             )),
             v_gap::<S>(spacing::XS),
-            any(centered_paragraph(
-                SUBTITLE,
-                inked(&theme.type_scale.body_small, colors.fg_muted),
-            )),
+            any(text(SUBTITLE)
+                .style(inked(&theme.type_scale.body_small, colors.fg_muted))
+                .align(TextAlign::Center)),
         ]),
         colors,
     )
