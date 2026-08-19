@@ -17,11 +17,10 @@ use frust::{
 };
 
 use crate::AppState;
-use crate::features::settings::presentation::chrome::panel;
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
-use super::rows::{ROW_GAP, column, h_gap, row};
+use super::rows::{ROW_GAP, column, h_gap, rounded_fill, row};
 
 /// `.pick-row{padding:13px 4px}`.
 pub(super) const PICK_PAD_X: f64 = spacing::TIGHT;
@@ -102,9 +101,9 @@ pub(in super::super) fn picker_sheet(
 }
 
 /// One `.pick-row`. The selected one fills `--amber-faint` past the sheet's
-/// own gutter (reproduced via [`super::chrome`]'s bleed, since frust has no
-/// negative padding), inks its label amber, and carries the `CHECK` vector;
-/// every row but the last closes with a hairline.
+/// own gutter (reproduced via [`super::rows::rounded_fill`]'s bleed, since
+/// frust has no negative padding), inks its label amber, and carries the
+/// `CHECK` vector; every row but the last closes with a hairline.
 fn pick_row(
     option: &str,
     selected: bool,
@@ -127,7 +126,7 @@ fn pick_row(
     } else {
         Color::TRANSPARENT
     };
-    let mut box_ = panel(
+    let mut box_ = rounded_fill(
         Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
         fill,
         theme.shape.small,

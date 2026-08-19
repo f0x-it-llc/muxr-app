@@ -15,13 +15,14 @@ use frust::{
 };
 
 use crate::AppState;
-use crate::features::settings::presentation::chrome::panel;
 use crate::fonts::catalog::{CatalogStatus, FontState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
 use super::pickers::{CHECK_SIZE, PICK_BLEED, PICK_PAD_X, PICK_PAD_Y, PickerKind};
-use super::rows::{GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, column, h_gap, row};
+use super::rows::{
+    GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, column, h_gap, rounded_fill, row,
+};
 
 /// The sheet's caption, under its title.
 const FONT_SHEET_CAPTION: &str = "Downloads are kept on this device.";
@@ -220,7 +221,7 @@ fn font_pick_row(
     } else {
         Color::TRANSPARENT
     };
-    let mut box_ = panel(
+    let mut box_ = rounded_fill(
         Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
         fill,
         theme.shape.small,
