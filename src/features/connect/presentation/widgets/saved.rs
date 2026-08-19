@@ -15,6 +15,7 @@ use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
+use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
@@ -28,12 +29,6 @@ const DELETE_TARGET: f64 = 44.0;
 /// The mark inside it, smaller than the icon's own 24px design box: quiet
 /// chrome beside the row's content, not a second action button.
 const DELETE_MARK: f64 = 18.0;
-
-/// `.dot-ok{box-shadow:0 0 5px var(--success)}` — the blur radius as a
-/// gaussian std-dev for `container(..).glow(..)`, plus how far the glow
-/// bleeds past the status dot on each side.
-const GLOW_STD_DEV: f64 = 2.5;
-const GLOW_SPREAD: f64 = 2.0;
 
 /// The chip a saved row carries when a gated credential is stored for it — also
 /// what says a tap will raise a prompt rather than refill the form.

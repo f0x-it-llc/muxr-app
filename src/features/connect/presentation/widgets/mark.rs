@@ -5,12 +5,9 @@ use frust::{
 };
 
 use super::{h_gap, hugging_column, row, v_gap};
+use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::Palette;
 use crate::ui::spacing;
-
-/// Hairline border width in logical px (`1px solid` on every bordered rule in
-/// `docs/splash.html`).
-const HAIRLINE: f64 = 1.0;
 
 const MARK_SIZE: f64 = 60.0;
 /// Off the app's spacing scale, so it stays local.

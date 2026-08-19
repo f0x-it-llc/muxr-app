@@ -46,6 +46,7 @@ use super::super::controller::ConnectController;
 use super::qr_affordance::FAB_LABEL;
 use crate::AppState;
 use crate::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
+use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{active_theme, inked};
 use crate::ui::spacing;
 
@@ -66,10 +67,6 @@ const VIEWFINDER_LABEL: &str = "Camera viewfinder";
 /// on a 340px-wide phone.
 const VIEWFINDER: f64 = 220.0;
 const VIEWFINDER_MARK: f64 = 44.0;
-
-/// Hairline border width in logical px (`1px solid` on every bordered rule in
-/// `docs/splash.html`).
-const HAIRLINE: f64 = 1.0;
 
 /// Well under the reaction time of pointing a phone at a code, and far
 /// above an uncontended lock's cost. The scan itself runs at the camera's
