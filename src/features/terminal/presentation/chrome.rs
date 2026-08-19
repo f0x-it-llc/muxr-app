@@ -541,6 +541,72 @@ const SHADOW_ALPHA: f32 = 0.4;
 const BAR_PAD_X: f64 = 6.0;
 const BAR_SLOT: f64 = 40.0;
 
+/// How far below the window's own top edge this widget's box begins: the app
+/// bar's whole band while the shell has one mounted, nothing once it hasn't.
+///
+/// The scaffold's bar slot self-sizes to the status-bar inset plus
+/// [`BAR_HEIGHT`] (`frust_widgets::scaffold`'s R-B4-inset contract), and
+/// `crate::shell::shell_bar` resolves to the *absent* slot for exactly as long
+/// as this screen is fullscreen — one synchronous pair of writes in
+/// `super::pages::Actions::toggle_fullscreen`, so the band leaves (and comes
+/// back) in the very rebuild that flips `fullscreen` here.
+fn chrome_band(fullscreen: bool, inset_top: f64) -> f64 {
+    if fullscreen {
+        0.0
+    } else {
+        inset_top + BAR_HEIGHT
+    }
+}
+
+/// The card's top edge in **window** coordinates at eased progress `p`: the
+/// windowed position — the status-bar inset, the bar's whole band and the
+/// page's own top gutter — eased to the fullscreen one, that inset alone. Both
+/// ends keep the inset: the pane title must never sit under a notch.
+fn card_top(p: f64, inset_top: f64, gutter_top: f64) -> f64 {
+    inset_top + (BAR_HEIGHT + gutter_top) * (1.0 - p)
+}
+
+/// Where the card sits inside this widget's box for one frame of the
+/// transition: its top edge, and the gutters around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StageBox {
+    /// The card's top edge in the widget's own local coordinates —
+    /// **negative** through a collapse, whose every frame has the bar mounted
+    /// again above a card still covering its band. The scaffold paints its bar
+    /// over the body, so the card slides down out from under it.
+    top: f64,
+    /// The gutters either side of the card…
+    left: f64,
+    right: f64,
+    /// …and the inset its bottom edge keeps from the box's own bottom.
+    bottom: f64,
+}
+
+/// The card's placement at eased progress `p` — the screen's whole animated
+/// geometry, pure so it can be stepped frame by frame without a render root.
+///
+/// **Placed in window space, then localized.** This widget's box is the shell
+/// scaffold's body, whose top edge moves by the bar's whole band the frame the
+/// bar unmounts ([`chrome_band`]) — so a path expressed in that box's own
+/// coordinates jumps by the band on that one frame, however smooth its own
+/// progress is. [`card_top`] interpolates the two window-space endpoints
+/// instead, and whatever band the box currently sits below is taken back out.
+fn stage_box(
+    p: f64,
+    inset_top: f64,
+    inset_bottom: f64,
+    gutters: EdgeInsets,
+    fullscreen: bool,
+) -> StageBox {
+    let rest = 1.0 - p;
+    StageBox {
+        top: card_top(p, inset_top, gutters.top) - chrome_band(fullscreen, inset_top),
+        left: (WRAP_PAD + gutters.left) * rest,
+        right: (WRAP_PAD + gutters.right) * rest,
+        bottom: (WRAP_PAD + gutters.bottom) * rest + inset_bottom,
+    }
+}
+
 /// One in-flight fullscreen transition: a linear `0→1` driver, the curve that
 /// eases its progress, and the `from..to` range that eased progress is then
 /// interpolated across. The range is what makes an *interrupted* transition
@@ -606,13 +672,19 @@ impl FullscreenStage {
 ///
 /// One widget rather than three nested ones because all three animate off the
 /// **same** progress in one gesture, and because an animated padding is a *layout*
-/// fact. It also records the app bar's trailing-slot rect into
+/// fact. `gutters` — the page's own responsive breathing room outside the card's
+/// [`WRAP_PAD`] — is an input rather than an outer `Padding` for that same
+/// reason: a wrapper could only *flip* between its windowed and fullscreen
+/// values, and a flip mid-transition is a jump.
+///
+/// It also records the app bar's trailing-slot rect into
 /// [`anchor`](TerminalStageView::anchor): the overflow menu anchors to a slot
 /// inside a sibling widget this page cannot query, so the one widget that knows
 /// both the window box and the top inset computes it.
 pub(super) struct TerminalStageView<State: 'static> {
     child: AnyView<State>,
     fullscreen: bool,
+    gutters: EdgeInsets,
     card: Color,
     border: Color,
     anchor: Rc<Cell<Rect>>,
@@ -622,6 +694,7 @@ pub(super) struct TerminalStageView<State: 'static> {
 pub(super) fn terminal_stage<State: 'static, V: View<State>>(
     child: V,
     fullscreen: bool,
+    gutters: EdgeInsets,
     card: Color,
     border: Color,
     anchor: Rc<Cell<Rect>>,
@@ -629,6 +702,7 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
     TerminalStageView {
         child: any(child),
         fullscreen,
+        gutters,
         card,
         border,
         anchor,
@@ -639,6 +713,7 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
 pub(super) struct TerminalStageWidget {
     child: ChildPod,
     fullscreen: bool,
+    gutters: EdgeInsets,
     card: Color,
     border: Color,
     anchor: Rc<Cell<Rect>>,
@@ -665,6 +740,7 @@ impl<State: 'static> View<State> for TerminalStageView<State> {
         TerminalStageWidget {
             child: build_child(&self.child, ctx),
             fullscreen: self.fullscreen,
+            gutters: self.gutters,
             card: self.card,
             border: self.border,
             anchor: Rc::clone(&self.anchor),
@@ -691,6 +767,12 @@ impl<State: 'static> View<State> for TerminalStageView<State> {
             element.pending = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        // A rotation (or a window resize past the wide breakpoint) is the only
+        // thing that moves these, and it moves them under a settled card.
+        if prev.gutters != self.gutters {
+            element.gutters = self.gutters;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         if prev.card != self.card || prev.border != self.border {
             element.card = self.card;
             element.border = self.border;
@@ -711,32 +793,22 @@ impl Widget for TerminalStageWidget {
         let height = finite_or_zero(bc.max().height);
         let p = self.progress.clamp(0.0, 1.0);
 
-        // The shell scaffold's app-bar slot (`crate::shell::shell_page`)
-        // already reserves the bar's own band above this widget's box when
-        // the bar is mounted — adding it again here would double-pad the
-        // card. The one clearance this widget still owes is the status-bar
-        // inset itself, phased in as the card grows toward fullscreen: at
-        // `p = 0` the scaffold has already placed this box below the bar (no
-        // extra offset needed), and at `p = 1` the bar is unmounted and the
-        // box starts at the window's own top edge, so the card alone must
-        // keep the pane title out from under a notch.
-        let top = insets.top * p;
-        let pad = WRAP_PAD * (1.0 - p);
-        let bottom = pad + insets.bottom;
-
-        let card_w = (width - 2.0 * pad).max(0.0);
-        let card_h = (height - top - bottom).max(0.0);
+        // The card's whole placement, window-space path and all — see
+        // [`stage_box`] for why the box's own coordinates can't carry it.
+        let card = stage_box(p, insets.top, insets.bottom, self.gutters, self.fullscreen);
+        let card_w = (width - card.left - card.right).max(0.0);
+        let card_h = (height - card.top - card.bottom).max(0.0);
         self.child
             .layout_child(ctx, &BoxConstraints::tight(Size::new(card_w, card_h)));
-        self.child.set_origin(Point::new(pad, top));
-        self.card_rect = Rect::new(pad, top, pad + card_w, top + card_h);
+        self.child.set_origin(Point::new(card.left, card.top));
+        self.card_rect = Rect::new(card.left, card.top, card.left + card_w, card.top + card_h);
         // Recorded off the same `p` the box was built from: paint has already
         // advanced the driver, so a radius read there runs one frame ahead.
         self.card_radius = CARD_RADIUS * (1.0 - p);
 
-        // The bar's trailing `⋮` slot, in window coordinates — this page is
-        // laid out at the full surface, so local and window coordinates
-        // coincide here.
+        // The bar's trailing `⋮` slot, in window coordinates — read straight
+        // off the window's own insets and the bar's band rather than off this
+        // widget's box, which sits below that band whenever the bar is up.
         let slot_x = width - BAR_PAD_X - BAR_SLOT;
         let slot_y = insets.top + (BAR_HEIGHT - BAR_SLOT) / 2.0;
         self.anchor.set(Rect::new(
@@ -759,6 +831,11 @@ impl Widget for TerminalStageWidget {
             if theme.is_some_and(|theme| theme.motion.reduce_motion) {
                 self.progress = target;
                 self.stage = None;
+                // The pass that staged this flip laid the card out at the
+                // progress it was leaving, so the snap owes itself the layout
+                // that turns it into a box — the same debt the animated branch
+                // settles every frame below.
+                ctx.request_layout();
             } else {
                 self.stage = Some(FullscreenStage::start(self.progress, target, theme));
             }
@@ -1269,6 +1346,161 @@ mod tests {
             assert!((0.0..=1.0).contains(&eased), "{eased}");
             assert!(WRAP_PAD * (1.0 - eased) >= 0.0);
         }
+    }
+
+    /// A phone-shaped window for the geometry below: a status-bar inset, a
+    /// home indicator, and the portrait gutter `super::super::pages` hands in.
+    const INSET_TOP: f64 = 44.0;
+    const INSET_BOTTOM: f64 = 34.0;
+    const GUTTER_TOP: f64 = 8.0;
+    /// The wide branch's extra gutter, on all four edges.
+    const WIDE_GUTTER: f64 = 8.0;
+
+    fn portrait_gutters() -> EdgeInsets {
+        EdgeInsets {
+            left: 0.0,
+            top: GUTTER_TOP,
+            right: 0.0,
+            bottom: 0.0,
+        }
+    }
+
+    /// Where the card's top edge actually lands **on screen**: the scaffold's
+    /// own body origin plus the local top [`stage_box`] places the card at.
+    ///
+    /// The body origin is transcribed rather than read from [`chrome_band`] —
+    /// it is the other side of the contract (`frust_widgets::scaffold` puts
+    /// its body under a bar that self-sized to `inset + BAR_HEIGHT`, and
+    /// `crate::shell::shell_bar` mounts no bar at all while fullscreen), so a
+    /// test asserting against it catches the stage drifting from the shell.
+    fn on_screen_top(p: f64, fullscreen: bool) -> f64 {
+        let body_top = if fullscreen {
+            0.0
+        } else {
+            INSET_TOP + BAR_HEIGHT
+        };
+        body_top + stage_box(p, INSET_TOP, INSET_BOTTOM, portrait_gutters(), fullscreen).top
+    }
+
+    /// The card's resting top in each state — the two endpoints the whole
+    /// transition runs between.
+    const WINDOWED_TOP: f64 = INSET_TOP + BAR_HEIGHT + GUTTER_TOP;
+    const FULLSCREEN_TOP: f64 = INSET_TOP;
+
+    /// Every on-screen card top one direction of the transition paints: the
+    /// flip's own frame (laid out at the progress it inherited, in the box the
+    /// flip just changed) and then 16ms steps out past the 340ms duration.
+    fn painted_tops(fullscreen: bool, theme: &Theme) -> Vec<f64> {
+        let (from, to) = if fullscreen { (0.0, 1.0) } else { (1.0, 0.0) };
+        let mut stage = FullscreenStage::start(from, to, Some(theme));
+        let mut tops = vec![on_screen_top(from, fullscreen)];
+        for frame in 0..30u64 {
+            stage
+                .driver
+                .advance(FrameTime::from_nanos(frame * 16_000_000));
+            tops.push(on_screen_top(stage.value(), fullscreen));
+        }
+        tops
+    }
+
+    #[test]
+    fn the_bar_leaving_moves_the_box_but_never_the_card() {
+        // The frame a flip lands, the scaffold hands this widget a box a whole
+        // bar band taller (or shorter) while the transition still sits at the
+        // progress it inherited — and a card that has not animated yet must
+        // not have moved.
+        assert_eq!(on_screen_top(0.0, false), on_screen_top(0.0, true));
+        assert_eq!(on_screen_top(1.0, true), on_screen_top(1.0, false));
+        assert_eq!(on_screen_top(0.0, false), WINDOWED_TOP);
+        assert_eq!(on_screen_top(1.0, true), FULLSCREEN_TOP);
+        // The bottom edge is measured from the window's own bottom, which no
+        // bar ever moves, so it is band-independent by construction.
+        let inset_of = |fullscreen| {
+            stage_box(0.0, INSET_TOP, INSET_BOTTOM, portrait_gutters(), fullscreen).bottom
+        };
+        assert_eq!(inset_of(false), inset_of(true));
+    }
+
+    #[test]
+    fn entering_fullscreen_walks_the_card_up_without_a_step_back() {
+        let tops = painted_tops(true, &frust_glyph::baseline());
+        assert_eq!(tops[0], WINDOWED_TOP, "the flip frame has not moved yet");
+        for pair in tops.windows(2) {
+            assert!(
+                pair[1] <= pair[0] + 1e-9,
+                "the card dropped back down: {pair:?}"
+            );
+            assert!(
+                (FULLSCREEN_TOP..=WINDOWED_TOP).contains(&pair[1]),
+                "{pair:?}"
+            );
+        }
+        assert!(
+            tops.iter()
+                .any(|top| (FULLSCREEN_TOP..WINDOWED_TOP).contains(top)),
+            "…and it travelled rather than snapped: {tops:?}"
+        );
+        assert_eq!(tops.last().copied(), Some(FULLSCREEN_TOP));
+    }
+
+    #[test]
+    fn leaving_fullscreen_walks_it_back_down_the_same_way() {
+        let tops = painted_tops(false, &frust_glyph::baseline());
+        assert_eq!(tops[0], FULLSCREEN_TOP, "the flip frame has not moved yet");
+        for pair in tops.windows(2) {
+            assert!(
+                pair[1] >= pair[0] - 1e-9,
+                "the card climbed back up: {pair:?}"
+            );
+            assert!(
+                (FULLSCREEN_TOP..=WINDOWED_TOP).contains(&pair[1]),
+                "{pair:?}"
+            );
+        }
+        assert_eq!(tops.last().copied(), Some(WINDOWED_TOP));
+    }
+
+    #[test]
+    fn a_reduced_motion_flip_lands_on_the_endpoint_the_animation_walks_to() {
+        // `reduce_motion` stages no driver: paint snaps `progress` to the
+        // target and asks for the layout that turns it into a box, so the very
+        // next frame is where an animated flip would have finished.
+        let theme = frust_glyph::baseline();
+        assert_eq!(
+            on_screen_top(1.0, true),
+            painted_tops(true, &theme).last().copied().expect("stepped")
+        );
+        assert_eq!(
+            on_screen_top(0.0, false),
+            painted_tops(false, &theme)
+                .last()
+                .copied()
+                .expect("stepped")
+        );
+    }
+
+    #[test]
+    fn the_gutters_ride_the_same_progress_the_card_does() {
+        let windowed = stage_box(0.0, INSET_TOP, INSET_BOTTOM, portrait_gutters(), false);
+        assert_eq!(windowed.left, WRAP_PAD);
+        assert_eq!(windowed.bottom, WRAP_PAD + INSET_BOTTOM);
+        let full = stage_box(1.0, INSET_TOP, INSET_BOTTOM, portrait_gutters(), true);
+        assert_eq!((full.left, full.right), (0.0, 0.0));
+        // Both insets are kept in both states: "edge to edge" must not mean
+        // "the last output line is under the home bar".
+        assert_eq!(full.bottom, INSET_BOTTOM);
+
+        // A wide window's extra gutter animates with the rest rather than
+        // flipping outside it.
+        let wide = EdgeInsets::all(WIDE_GUTTER);
+        assert_eq!(
+            stage_box(0.0, INSET_TOP, INSET_BOTTOM, wide, false).left,
+            WRAP_PAD + WIDE_GUTTER
+        );
+        assert_eq!(
+            stage_box(1.0, INSET_TOP, INSET_BOTTOM, wide, true).left,
+            0.0
+        );
     }
 
     #[test]
