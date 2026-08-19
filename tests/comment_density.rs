@@ -196,7 +196,7 @@ const ALLOWLIST: &[AllowlistEntry] = &[
     },
     AllowlistEntry {
         path: "src/features/connect/presentation/widgets/mod.rs",
-        cap_pct: 36.6,
+        cap_pct: 36.4,
         reason: "contract-heavy: the eight-piece stagger order and the splash parity contract \
                  live in this header",
     },
@@ -291,13 +291,13 @@ const ALLOWLIST: &[AllowlistEntry] = &[
     },
     AllowlistEntry {
         path: "src/features/terminal/presentation/widgets/pills.rs",
-        cap_pct: 26.9,
+        cap_pct: 25.9,
         reason: "contract-heavy for its size: short file, header on the shared chip/edit \
                  affordance shape",
     },
     AllowlistEntry {
         path: "src/features/settings/presentation/widgets/rows.rs",
-        cap_pct: 26.5,
+        cap_pct: 25.8,
         reason: "contract-heavy: documents the never-an-emoji mark rule and the defect it fixes",
     },
     AllowlistEntry {

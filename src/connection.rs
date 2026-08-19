@@ -1,5 +1,21 @@
 //! [`ConnectionController`] — muxr's one app-scoped connection handle — and
 //! the [`ConnectionBackend`] seam it drives.
+//!
+//! ## Token Hygiene
+//!
+//! The bearer token crossing this module lives only as long as it has a job:
+//! [`ConnectTarget::token`] rides `Zeroizing`-wrapped from Connect's form to
+//! [`open_session`]'s `Login` request, which drops (and so scrubs) the
+//! app's own copy the instant that request is built — before the dial even
+//! answers. The session token `Login` mints is installed onto the client via
+//! [`crate::net::client::MuxrClient::set_session_token`] and the wire
+//! response's own copy is `zeroize`d immediately after. From there it lives
+//! behind [`crate::net::auth::SessionToken`]'s `ArcSwapOption<Zeroizing<_>>`,
+//! scrubbed on every `set`/`clear` and read fresh per call, never cached
+//! longer. [`NetConnectionBackend::disconnect`] clears the session token
+//! before dropping its client handle — since every [`MuxrClient`] clone
+//! shares one token store, that clear closes the authenticated surface for
+//! every clone at once, not just the one being torn down.
 
 use std::collections::BTreeSet;
 use std::fmt;

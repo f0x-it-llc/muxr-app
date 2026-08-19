@@ -3323,7 +3323,8 @@ fn subtitle_lines() -> (Vec<(f64, f64)>, Rect) {
 fn the_subtitle_centers_every_line_it_wraps_onto() {
     // `TextContext::layout` hardcodes `parley::Alignment::Start`, so a plain
     // `Align(CENTER, text(..))` only centers the *block* — the second line
-    // hugs the leading edge. See `chrome::centered_paragraph`.
+    // hugs the leading edge; `badge::heading` centers the subtitle per line
+    // instead, via `TextView`'s own `.align(TextAlign::Center)`.
     let (lines, box_) = subtitle_lines();
     assert!(
         lines.len() >= 2,
