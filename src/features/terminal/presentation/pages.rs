@@ -20,7 +20,7 @@ use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::{Rect, WindowInsets};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, RwSignal, SystemUiMode, WindowMetrics, any, component,
+    NavigatorController, PopResult, RwSignal, SystemUiMode, WindowMetrics, any, component,
     container, flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
 };
 use frust_glyph::{MenuEntry, menu_item, show_glyph_dialog, show_glyph_menu};
@@ -87,13 +87,13 @@ const SESSION_QUERY_KEY: &str = "session";
 /// The wrap padding's wide-window target — `WRAP_PAD`'s 14px scaled up past
 /// [`WIDE_BREAKPOINT_PX`]. Bespoke geometry, not a `crate::ui::spacing` tier.
 /// The card stays full-bleed at any width (more breathing room, no
-/// content-column clamp), applied as an *extra* outside [`Padding`] rather
-/// than by widening `WRAP_PAD`, which also drives the fullscreen animation.
+/// content-column clamp), carried as a *gutter* the stage adds to `WRAP_PAD`
+/// and animates to zero with it rather than by widening `WRAP_PAD` itself.
 const WIDE_WRAP_PAD_PX: f64 = 22.0;
 
-/// The portrait window's **top-only** bar-to-card gap, at the same
-/// outside-the-stage site as [`WIDE_WRAP_PAD_PX`] — a narrow window sat
-/// flush otherwise. Sides keep [`WRAP_PAD`]; fullscreen takes neither.
+/// The portrait window's **top-only** bar-to-card gap, the same gutter input
+/// as [`WIDE_WRAP_PAD_PX`] — a narrow window sat flush otherwise. Sides keep
+/// [`WRAP_PAD`]; fullscreen takes neither.
 const PORTRAIT_TOP_GAP_PX: f64 = WIDE_WRAP_PAD_PX - WRAP_PAD;
 
 const _: () = {
@@ -472,23 +472,23 @@ impl Component for TerminalScreen {
         let colors = Palette::from_theme(&theme);
         let ink = CardInk::from_theme(&theme);
 
-        // Responsive width-clamp: read metrics once, branch once. Fullscreen's
-        // zero is insets, not *no* `Padding` wrapper — a `Padding` that comes
-        // and goes reconciles as a different child and tears the stage
-        // (its fullscreen-transition driver included) down mid-flight.
+        // Responsive width-clamp: read metrics once, branch once. These are the
+        // card's windowed gutters only — the stage animates them to zero itself
+        // (`super::chrome::terminal_stage`), which is why they are handed to it
+        // rather than wrapped around it.
         let metrics = use_context::<WindowMetrics>();
         let is_wide = metrics
             .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
             .unwrap_or(false);
-        let extra_wrap_pad = match (fullscreen, is_wide) {
-            (true, _) => EdgeInsets::all(0.0),
-            (false, true) => EdgeInsets::all(WIDE_WRAP_PAD_PX - WRAP_PAD),
-            (false, false) => EdgeInsets {
+        let gutters = if is_wide {
+            EdgeInsets::all(WIDE_WRAP_PAD_PX - WRAP_PAD)
+        } else {
+            EdgeInsets {
                 left: 0.0,
                 top: PORTRAIT_TOP_GAP_PX,
                 right: 0.0,
                 bottom: 0.0,
-            },
+            }
         };
 
         // The card's body: the mock transcript, or the live grid once entered.
@@ -549,16 +549,14 @@ impl Component for TerminalScreen {
         let card =
             FlexView::new(Axis::Vertical, card_children).cross_axis(CrossAxisAlignment::Stretch);
 
-        let stage = super::chrome::terminal_stage(
+        let stage: AnyView<TerminalState> = any(super::chrome::terminal_stage(
             card,
             fullscreen,
+            gutters,
             ink.card,
             ink.card_border,
             Rc::clone(&state.actions.anchor),
-        );
-        // Wrapped from the outside rather than by widening `terminal_stage`'s own
-        // animated padding, which fullscreen must still animate to exactly zero.
-        let stage: AnyView<TerminalState> = any(Padding(extra_wrap_pad, stage));
+        ));
 
         // The page tone stays **outside** the stage so it fills the whole surface,
         // bar band included: the bar slides in over it, and a page that stopped at
