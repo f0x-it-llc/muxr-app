@@ -12,9 +12,11 @@
 //! session guard.
 //!
 //! No top bar is mounted (that's shell chrome now, `tests/navigation_motion.rs`'
-//! job); this suite only owes the negative, that the screen grew none back —
-//! it still reserves the bar's clearance band, so every geometric probe here is
-//! relative rather than absolute.
+//! job, mounted through the real shell scaffold that reserves the bar's own
+//! band); this suite only owes the negative, that the screen grew no bar of
+//! its own back — this screen reserves no clearance either any more (the
+//! scaffold's `app_bar` slot owns that in the real app), so every geometric
+//! probe here is relative rather than absolute.
 //!
 //! Cards carry no buttons: a tap attaches, a long-press opens the management
 //! sheet. Every repository call is real async work on the UI-thread queue, so

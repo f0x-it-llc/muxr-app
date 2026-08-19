@@ -1,11 +1,13 @@
 //! The app's bar furniture: the pieces `crate::shell`'s route-meta adapter
 //! feeds to Glyph's own `AppBarView` (the brand row, a bar icon slot), plus
-//! `icon_button`, the app's one vector press-target primitive, and the top
-//! clearance a page reserves for the bar.
+//! `icon_button`, the app's one vector press-target primitive.
 //!
 //! The bar itself is Glyph's — its surface, its inset consumption, its title
 //! crossfade and its layout all belong to `frust_glyph::app_bar`, mounted in
-//! the shell scaffold's `app_bar` slot.
+//! the shell scaffold's `app_bar` slot. The scaffold's `body` slot self-sizes
+//! *around* that mounted bar (`frust_widgets::scaffold`'s own R-B4-inset
+//! contract), so a bar-bearing page reserves no clearance of its own —
+//! there is no `topbar_clearance` here to call.
 use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
@@ -15,17 +17,18 @@ use frust::authoring::{
     PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
     rebuild_child, teardown_child,
 };
-use frust::{
-    Axis, CrossAxisAlignment, EdgeInsets, FlexView, IconData, Padding, SizedBox, icon, inflexible,
-    safe_area, text,
-};
+use frust::{Axis, CrossAxisAlignment, FlexView, IconData, SizedBox, icon, inflexible, text};
 
 use crate::ui::palette::active_theme;
 
-/// The top clearance a bar-bearing page reserves for itself
-/// ([`topbar_clearance`]) — and the band `crate::features::terminal`'s own
-/// chrome measures against.
-pub const BAR_HEIGHT: f64 = 46.0;
+/// Glyph's own compact app bar content height (`.appbar{height:52px}`,
+/// `frust_glyph::appbar`'s own `BAR_HEIGHT` — private, so transcribed here),
+/// **not including** the top window inset the bar self-sizes for on top of
+/// it. `crate::features::terminal`'s own chrome measures against this to
+/// locate the bar's trailing `⋮` slot in window coordinates, the one place
+/// this app still needs the bar's own height as a number rather than letting
+/// the scaffold derive it.
+pub const BAR_HEIGHT: f64 = 52.0;
 const MARK_SIZE: f64 = 16.0;
 const MARK_GAP: f64 = 2.0;
 const MARK_CELL: f64 = (MARK_SIZE - MARK_GAP) / 2.0;
@@ -81,23 +84,6 @@ pub fn bar_icon<State: 'static, F: Fn(&mut State) + 'static>(
         .icon_size(BAR_ICON_SIZE)
         .box_size(Size::new(BAR_ICON_SLOT, BAR_ICON_SLOT))
         .radius(theme.shape.small)
-}
-
-/// `body` with the top clearance a bar-bearing page owes reserved above it:
-/// the status-bar inset **plus** [`BAR_HEIGHT`].
-pub fn topbar_clearance<State: 'static, V: View<State>>(body: V) -> AnyView<State> {
-    any(safe_area(Padding(
-        EdgeInsets {
-            left: 0.0,
-            top: BAR_HEIGHT,
-            right: 0.0,
-            bottom: 0.0,
-        },
-        body,
-    ))
-    .left(false)
-    .right(false)
-    .bottom(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -408,23 +394,6 @@ mod tests {
         // A tripwire on the derived cell size: two cells plus the gap must be
         // the 16px mark, or the grid drifts off `.brand-mark`'s box.
         assert!((2.0 * MARK_CELL + MARK_GAP - MARK_SIZE).abs() < 1e-9);
-    }
-
-    #[test]
-    fn the_clearance_reserves_exactly_the_bars_own_box() {
-        // What a bar-bearing page pads at its top must be exactly the band the
-        // bar occupies. At a zero window inset that is the 46px band and
-        // nothing else — the inset half of the sum is the *same*
-        // `WindowInsets::padding().top` both sides resolve, which
-        // `LayoutCtx::new` cannot fake here (the setter is `pub(crate)`).
-        const CHILD: f64 = 100.0;
-        let view: AnyView<()> = topbar_clearance(SizedBox::<()>(Some(CHILD), Some(CHILD)));
-        let mut next_id = 0u64;
-        let mut widget = view.build(&mut BuildCtx::new(&mut next_id));
-        let mut ctx = LayoutCtx::new();
-        let size = widget.layout(&mut ctx, &BoxConstraints::loose(Size::new(390.0, 844.0)));
-
-        assert_eq!(size, Size::new(CHILD, CHILD + BAR_HEIGHT));
     }
 
     #[test]

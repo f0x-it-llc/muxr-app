@@ -835,12 +835,14 @@ const SHADOW_DY: f64 = 20.0;
 const SHADOW_STD_DEV: f64 = 25.0;
 const SHADOW_ALPHA: f32 = 0.4;
 
-/// `.topbar{padding:0 16px}`/`.topbar-icon{width:30px}`, transcribed from
-/// `crate::ui::topbar` (whose own constants are private) so this screen can hand
-/// `frust_glyph::show_glyph_menu` the window-coordinate rect of the bar slot its
-/// `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is imported.
-const BAR_PAD_X: f64 = 16.0;
-const BAR_SLOT: f64 = 30.0;
+/// `.appbar{padding:0 6px}`/`.ab-icon{width:40px;height:40px}`, transcribed
+/// from `frust_glyph::appbar` (whose own copies are private) so this screen
+/// can hand `frust_glyph::show_glyph_menu` the window-coordinate rect of the
+/// bar slot its `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is
+/// imported — one shared source for the bar's own content height, the one
+/// dimension `crate::ui::topbar` already needs to transcribe too.
+const BAR_PAD_X: f64 = 6.0;
+const BAR_SLOT: f64 = 40.0;
 
 /// One in-flight fullscreen transition: a linear `0→1` driver, the curve that
 /// eases its progress, and the `from..to` range that eased progress is then
@@ -1012,11 +1014,16 @@ impl Widget for TerminalStageWidget {
         let height = finite_or_zero(bc.max().height);
         let p = self.progress.clamp(0.0, 1.0);
 
-        // The clearance the floating bar occupies, shrinking to the status-bar
-        // inset as the bar animates away. Both insets are kept in **both**
-        // states: the pane title must never sit under a notch, and "edge to
-        // edge" must not mean "the last output line is under the home bar".
-        let top = insets.top + BAR_HEIGHT * (1.0 - p);
+        // The shell scaffold's app-bar slot (`crate::shell::shell_page`)
+        // already reserves the bar's own band above this widget's box when
+        // the bar is mounted — adding it again here would double-pad the
+        // card. The one clearance this widget still owes is the status-bar
+        // inset itself, phased in as the card grows toward fullscreen: at
+        // `p = 0` the scaffold has already placed this box below the bar (no
+        // extra offset needed), and at `p = 1` the bar is unmounted and the
+        // box starts at the window's own top edge, so the card alone must
+        // keep the pane title out from under a notch.
+        let top = insets.top * p;
         let pad = WRAP_PAD * (1.0 - p);
         let bottom = pad + insets.bottom;
 

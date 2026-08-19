@@ -49,7 +49,6 @@ use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
-use crate::ui::topbar::topbar_clearance;
 
 use super::controller::SettingsController;
 use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
@@ -237,11 +236,11 @@ impl Component for SettingsScreen {
         } else {
             scroller
         };
-        // The page tone stays **outside** the clearance so it fills the
-        // whole surface, bar band included: the bar slides in over it, and a
-        // page that stopped at the clearance would flash the shell's own
-        // clear colour through the gap for the length of that entrance.
-        widgets::page_tone(topbar_clearance(scroller), &colors)
+        // The shell scaffold's app-bar slot already reserves the bar's own
+        // band above this screen's body — no clearance to add here (a
+        // one-time double-inset bug: the scaffold owns the band, this page
+        // used to as well).
+        widgets::page_tone(scroller, &colors)
     }
 }
 
