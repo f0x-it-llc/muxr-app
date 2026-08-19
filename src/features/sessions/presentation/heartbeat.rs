@@ -17,7 +17,7 @@
 //! would clip it away past `1.0x` scale. [`RING_SLOT`] is sized to the
 //! ring's extent at [`RING_SCALE_MAX`] instead.
 //!
-//! The ring is a `success`-hued hairline border ([`super::chrome::panel`]),
+//! The ring is a `success`-hued hairline border (a plain `frust::container`),
 //! not `circular_progress` — that widget inks from the theme's `primary`
 //! (brand amber here, never a health signal) and has the wrong stroke shape.
 //!
@@ -33,12 +33,19 @@ use frust::authoring::{
 use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
     Align, Alignment, AnyView, Curve, FlexChild, Get, RwSignal, Set, SizedBox, Stack, Timing, any,
-    inflexible,
+    colored_box, container, inflexible,
 };
 
-use super::chrome::{RADIUS_FULL, panel, swatch};
 use super::pages::SessionsState;
 use super::widgets::DOT;
+
+/// `--radius-full: 999px`, clamped to a pill by `kurbo::RoundedRect` at paint time.
+const RADIUS_FULL: f64 = 999.0;
+/// `1px solid` hairline width, `docs/redesign.html`'s scale.
+const HAIRLINE: f64 = 1.0;
+/// `.dot-ok{box-shadow:0 0 5px var(--success)}` — glow std-dev and spread.
+const GLOW_STD_DEV: f64 = 2.5;
+const GLOW_SPREAD: f64 = 2.0;
 
 /// How long one ping ring takes to expand and fade out.
 const RING_MS: f64 = 1600.0;
@@ -208,7 +215,11 @@ pub(super) fn pinging_dot(ring: Option<RingPose>, ink: Color) -> AnyView<Session
             ring_layer(ring, ink),
             any(Align(
                 Alignment::CENTER,
-                swatch(Size::new(DOT, DOT), ink, RADIUS_FULL).glow(ink),
+                colored_box::<SessionsState>()
+                    .size(DOT, DOT)
+                    .radius(RADIUS_FULL)
+                    .fill(ink)
+                    .glow(ink, GLOW_STD_DEV, GLOW_SPREAD),
             )),
         ])),
     )
@@ -227,12 +238,9 @@ fn ring_layer(pose: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
             Alignment::CENTER,
             AnimatedScale(
                 pose.scale,
-                panel(
-                    SizedBox::<SessionsState>(Some(DOT), Some(DOT)),
-                    Color::TRANSPARENT,
-                    RADIUS_FULL,
-                )
-                .border(ink),
+                container(SizedBox::<SessionsState>(Some(DOT), Some(DOT)))
+                    .border(ink, HAIRLINE)
+                    .radius(RADIUS_FULL),
             )
             .timing(ZERO),
         )),
