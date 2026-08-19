@@ -1307,8 +1307,10 @@ fn probe_push_transition(reduce_motion: bool) -> (f64, f64, usize) {
     let settled = h.frame();
     let base_x = leaving_page_x(&settled);
 
-    // `/settings` is unguarded, so this needs no connection — which keeps the
-    // probe on the one screen that paints plenty of trackable chrome.
+    // Pushed off `/`, so the leaving page is Connect — the one screen that
+    // paints plenty of trackable chrome. The connection is what the session
+    // guard wants of every in-shell route.
+    expect_connection_controller().connect(mock_target());
     app_nav().push("/settings");
     h.frame_at(0.0);
     let mid = h.frame_at(MID_TRANSITION_MS);
@@ -1336,6 +1338,7 @@ fn a_route_push_slides_the_leaving_page_and_paints_both() {
     // …and both pages paint while it does, which an un-animated push would
     // never do (a `PageTransition::None` push swaps in one frame).
     let mut settled = Harness::mount();
+    expect_connection_controller().connect(mock_target());
     settled.push("/settings");
     let after = settled.frame();
     assert!(
