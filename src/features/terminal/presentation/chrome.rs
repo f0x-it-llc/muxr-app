@@ -1,9 +1,21 @@
-//! The Terminal screen's hand-rolled primitives — the boxes, the animated
-//! terminal card, the body's own text pipeline, and the three vector marks
-//! `frust::icons` does not carry: [`term_box`] (`.pill`/`.pane-item`/
-//! `.term-statusrow`), [`clipped_label`] (`.term-pane-title`), [`status_strip`]
+//! The Terminal screen's remaining hand-rolled primitives: [`status_strip`]
 //! (the link notice), [`expand_button`] (`.expand-btn`), [`terminal_stage`]
-//! (`.term-wrap` + `.term-card`, animated) and [`term_body`] (`.term-body`).
+//! (`.term-wrap` + `.term-card`, animated), [`term_body`] (`.term-body`, its own
+//! text pipeline) and [`wrap_row`] (a wrapping row, since `frust::Flex` has
+//! none).
+//!
+//! **Dissolved into the framework since this module first shipped**: the
+//! `.pill`/`.pane-item`/`.term-statusrow` box (now every caller's own
+//! `frust::container`, `.border_style(BorderStyle::Dashed(..))` for the dashed
+//! edges) and the `.term-pane-title` single-line ellipsis (now
+//! `frust::text(..).max_lines(1).overflow(TextOverflow::Ellipsis)`, in
+//! [`super::widgets::status`]) — both closed the framework gaps their own prior
+//! doc comments named (no dash pattern on `PaintScene`, no text
+//! overflow/ellipsis vocabulary). The three vector marks this module used to
+//! author (`⛶`/`⤡`/`▤`) are now [`frust::icons`]'
+//! `FULLSCREEN_EXPAND`/`FULLSCREEN_EXIT`/`PANE_MARK` — the catalog's own art,
+//! not a transcription of `docs/terminal.html`'s marks (Ed device-gates the
+//! swap).
 //!
 //! **Feature-local, and knowingly parallel to `features::sessions`' own
 //! `chrome`**: a feature never imports a sibling's `presentation`, so promoting
@@ -15,10 +27,6 @@
 //! the motion tokens from the **paint-time** theme, the only pass where a theme
 //! is in scope when a transition starts (the deferred-driver idiom
 //! `crate::ui::topbar` documents).
-//!
-//! Three frust gaps these work around: no dash pattern on `PaintScene`, no text
-//! overflow/ellipsis vocabulary, and no per-corner radius (so the stage clips its
-//! child to its own rounded rect rather than compositing two radii).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -35,47 +43,11 @@ use frust::authoring::{
 };
 use frust::{
     AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
-    IconData, IconSource, Padding, Theme, flexible, icon, inflexible, text,
+    IconData, Padding, Theme, container, flexible, icon, inflexible, text,
 };
 
 use crate::features::terminal::domain::entities::{TermLine, TermLineKind};
 use crate::ui::topbar::BAR_HEIGHT;
-
-// App-supplied vector marks (the "chrome icons are vectors" rule).
-
-/// The side length of the square design box every mark here is authored
-/// against — Material Symbols' own 24, which [`frust::icons`]' generated
-/// entries all carry.
-const ICON_DESIGN_BOX: f64 = 24.0;
-
-/// `.expand-btn`'s resting mark (the mock's `⛶`): the four corner brackets of
-/// Material Icons' `fullscreen`, transcribed so its stroke weight and corner cuts
-/// match the vendored set. App-supplied because `frust::icons`' starter set
-/// carries no fullscreen pair and `⛶` (`U+26F6`) is absent from the bundled Glyph
-/// faces — the font-fallback trap the "chrome icons are vectors" rule closes.
-pub const FULLSCREEN_EXPAND: IconSource = IconSource {
-    d: "M 7 14 H 5 v 5 h 5 v -2 H 7 v -3 Z M 5 10 h 2 V 7 h 3 V 5 H 5 v 5 Z \
-        M 17 17 h -3 v 2 h 5 v -5 h -2 v 3 Z M 14 5 v 2 h 3 v 3 h 2 V 5 h -5 Z",
-    design: ICON_DESIGN_BOX,
-};
-
-/// `.expand-btn`'s on-state mark (the mock's `⤡`): Material Icons 24px
-/// `fullscreen_exit`, the brackets turned inward. See [`FULLSCREEN_EXPAND`].
-pub const FULLSCREEN_EXIT: IconSource = IconSource {
-    d: "M 5 16 h 3 v 3 h 2 v -5 H 5 v 2 Z M 8 8 H 5 v 2 h 5 V 5 H 8 v 3 Z \
-        M 14 19 h 2 v -3 h 3 v -2 h -5 v 5 Z M 16 8 V 5 h -2 v 5 h 5 V 8 h -3 Z",
-    design: ICON_DESIGN_BOX,
-};
-
-/// The pane mark (the mock's `▤`): three stacked bars in the 24px box, authored
-/// here since the vendored Material set has no counterpart. Drawn rather than set
-/// as text for the same reason as the pair above: `▤` (`U+25A4`) is absent from
-/// IBM Plex Mono, so on device it resolves through each platform's own fallback
-/// chain, or not at all.
-pub const PANE_MARK: IconSource = IconSource {
-    d: "M 4 5 h 16 v 4 H 4 V 5 Z M 4 10 h 16 v 4 H 4 v -4 Z M 4 15 h 16 v 4 H 4 v -4 Z",
-    design: ICON_DESIGN_BOX,
-};
 
 // Shared paint helpers.
 
@@ -88,10 +60,13 @@ pub(super) const RADIUS_FULL: f64 = 999.0;
 /// Flattening tolerance for a rounded-rect border path — the value
 /// `frust-widgets`' own border strokes use.
 const BORDER_TOLERANCE: f64 = 0.1;
-/// `border-style:dashed` — the on/off step of the hand-drawn dash, in logical px.
-/// CSS leaves the period to the UA; 4/4 is the common rendering.
-const DASH_ON: f64 = 4.0;
-const DASH_OFF: f64 = 4.0;
+/// `border-style:dashed` — the on/off step of a [`frust::authoring::DashPattern`]
+/// border, in logical px. CSS leaves the period to the UA; 4/4 is the common
+/// rendering. Shared here so every dashed `frust::container` border on this
+/// screen (`.pill.add`, `.new-pane-btn`, the sheet's add-tab row) agrees on the
+/// same period.
+pub(super) const DASH_ON: f64 = 4.0;
+pub(super) const DASH_OFF: f64 = 4.0;
 
 /// The effective corner radius for a box of `size` — [`RADIUS_FULL`] (or any
 /// over-large value) collapses to a true pill rather than overshooting.
@@ -120,165 +95,9 @@ fn stroke_border(scene: &mut dyn PaintScene, origin: Point, size: Size, radius: 
     scene.stroke_path(origin, &path, HAIRLINE, &Brush::Solid(color));
 }
 
-/// Stroke `from`→`to` as a dashed run, `segment` mapping each `(start, end)`
-/// scalar pair onto one dash's endpoints.
-fn dash_run(
-    scene: &mut dyn PaintScene,
-    from: f64,
-    to: f64,
-    color: Color,
-    segment: impl Fn((f64, f64)) -> (Point, Point),
-) {
-    let mut at = from;
-    while at < to {
-        let end = (at + DASH_ON).min(to);
-        let (p0, p1) = segment((at, end));
-        scene.stroke_line(p0, p1, HAIRLINE, color);
-        at = end + DASH_OFF;
-    }
-}
-
 /// Whether `pos` (widget-local) falls inside a `size`-sized box.
 fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
-}
-
-/// A rounded fill plus an optional hairline border, painted *behind* a child
-/// it sizes itself to. Every tile on this screen is one of these.
-pub(super) struct TermBoxView<State: 'static> {
-    child: AnyView<State>,
-    fill: Color,
-    radius: f64,
-    border: Option<Color>,
-    dashed: bool,
-}
-
-/// Wrap `child` in a `fill`-filled box with corner `radius`.
-pub(super) fn term_box<State: 'static, V: View<State>>(
-    child: V,
-    fill: Color,
-    radius: f64,
-) -> TermBoxView<State> {
-    TermBoxView {
-        child: any(child),
-        fill,
-        radius,
-        border: None,
-        dashed: false,
-    }
-}
-
-impl<State: 'static> TermBoxView<State> {
-    /// Stroke a hairline border in `color` just inside the box's bounds.
-    pub(super) fn border(mut self, color: Color) -> Self {
-        self.border = Some(color);
-        self
-    }
-
-    /// Draw that border dashed (`.pill.add`, `.new-pane-btn`).
-    pub(super) fn dashed(mut self, dashed: bool) -> Self {
-        self.dashed = dashed;
-        self
-    }
-}
-
-/// The retained half of a [`TermBoxView`].
-pub(super) struct TermBoxWidget {
-    child: ChildPod,
-    fill: Color,
-    radius: f64,
-    border: Option<Color>,
-    dashed: bool,
-}
-
-impl<State: 'static> View<State> for TermBoxView<State> {
-    type Element = TermBoxWidget;
-
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> TermBoxWidget {
-        TermBoxWidget {
-            child: build_child(&self.child, ctx),
-            fill: self.fill,
-            radius: self.radius,
-            border: self.border,
-            dashed: self.dashed,
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut TermBoxWidget,
-        ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
-        if prev.fill != self.fill
-            || prev.radius != self.radius
-            || prev.border != self.border
-            || prev.dashed != self.dashed
-        {
-            element.fill = self.fill;
-            element.radius = self.radius;
-            element.border = self.border;
-            element.dashed = self.dashed;
-            flags |= ChangeFlags::PAINT;
-        }
-        flags
-    }
-
-    fn teardown(&self, element: &mut TermBoxWidget, ctx: &mut BuildCtx<'_>) {
-        teardown_child(&self.child, &mut element.child, ctx);
-    }
-}
-
-impl Widget for TermBoxWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let size = self.child.layout_child(ctx, bc);
-        self.child.set_origin(Point::ZERO);
-        bc.constrain(size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let origin = ctx.origin();
-        let size = ctx.size();
-        let radius = effective_radius(self.radius, size);
-        if self.fill != Color::TRANSPARENT {
-            scene.fill_rounded_rect(origin, size, radius, self.fill);
-        }
-        if let Some(border) = self.border {
-            if self.dashed {
-                let half = HAIRLINE / 2.0;
-                let (left, top) = (origin.x + half, origin.y + half);
-                let (right, bottom) = (origin.x + size.width - half, origin.y + size.height - half);
-                // The corner arcs stay undashed (dashing a curve needs pattern
-                // support frust lacks); at a 4px period a corner reads as a gap.
-                for y in [top, bottom] {
-                    dash_run(scene, left + radius, right - radius, border, |x| {
-                        (Point::new(x.0, y), Point::new(x.1, y))
-                    });
-                }
-                for x in [left, right] {
-                    dash_run(scene, top + radius, bottom - radius, border, |y| {
-                        (Point::new(x, y.0), Point::new(x, y.1))
-                    });
-                }
-            } else {
-                stroke_border(scene, origin, size, radius, border);
-            }
-        }
-        self.child.paint_child(ctx, scene);
-    }
-
-    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A decorative single-child container still MUST route, or everything it
-        // backs is silently unreachable.
-        route_event_single(&mut self.child, ctx, event)
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // A transparent container still MUST forward, or the child's whole
-        // subtree drops out of the accessibility tree.
-        self.child.semantics_child(ctx);
-    }
 }
 
 /// The strip's own gutters — the status row's 18px lead/14px trail, transcribed a
@@ -310,19 +129,16 @@ pub(super) fn status_strip<State: 'static>(
         children.push(inflexible(frust::SizedBox::<State>(Some(STRIP_GAP), None)));
         children.push(inflexible(action));
     }
-    any(term_box(
-        Padding(
-            EdgeInsets {
-                left: STRIP_PAD_LEFT,
-                top: STRIP_PAD_Y,
-                right: STRIP_PAD_RIGHT,
-                bottom: STRIP_PAD_Y,
-            },
-            FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
-        ),
-        fill,
-        0.0,
+    any(container(Padding(
+        EdgeInsets {
+            left: STRIP_PAD_LEFT,
+            top: STRIP_PAD_Y,
+            right: STRIP_PAD_RIGHT,
+            bottom: STRIP_PAD_Y,
+        },
+        FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
     ))
+    .fill(fill))
 }
 
 /// A row of children that wraps onto further lines when it runs out of width, with
@@ -444,11 +260,12 @@ impl Widget for WrapRowWidget {
     }
 }
 
-/// The mark appended to a truncated run (`text-overflow:ellipsis`).
-const ELLIPSIS: char = '\u{2026}';
-
 /// A minimal retained text run — `frust-widgets`' own per-module `GlyphLabel`
-/// helper, re-derived here because it is crate-private.
+/// helper, re-derived here because it is crate-private. [`term_body`]'s own
+/// per-line shaping is this module's one remaining consumer: the ellipsized
+/// single-line run this type used to *also* back (`.term-pane-title`) is now
+/// `frust::text(..).max_lines(1).overflow(TextOverflow::Ellipsis)`, in
+/// [`super::widgets::status`].
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
@@ -481,121 +298,12 @@ impl GlyphLabel {
         size
     }
 
-    /// Measure `content` at `style` without disturbing the cached layout.
-    fn measure(ctx: &mut LayoutCtx, content: &str, style: &TextStyle) -> Size {
-        ctx.text_context::<TextContext>()
-            .layout(content, style, None)
-            .size()
-    }
-
     fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
         if let Some(layout) = &self.layout {
             for run in layout.to_scene_runs(origin) {
                 scene.draw_glyph_run(run);
             }
         }
-    }
-}
-
-/// A single-line run truncated with an ellipsis when it does not fit —
-/// `.term-pane-title`'s `white-space:nowrap; text-overflow:ellipsis`. Hand-rolled
-/// because `frust::text` carries no overflow vocabulary: left to it, a long pane
-/// title wraps and grows the card's status row.
-pub(super) struct ClippedLabelView {
-    content: String,
-    style: TextStyle,
-}
-
-/// A single-line, ellipsized run of `content` in `style`.
-pub(super) fn clipped_label(content: impl Into<String>, style: TextStyle) -> ClippedLabelView {
-    ClippedLabelView {
-        content: content.into(),
-        style,
-    }
-}
-
-/// The retained half of a [`ClippedLabelView`].
-pub(super) struct ClippedLabelWidget {
-    /// The full text, for semantics — a screen reader gets the whole title
-    /// even when the pixels are cut short.
-    content: String,
-    style: TextStyle,
-    /// The run actually shaped this layout (possibly truncated).
-    run: GlyphLabel,
-}
-
-impl<State: 'static> View<State> for ClippedLabelView {
-    type Element = ClippedLabelWidget;
-
-    fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClippedLabelWidget {
-        ClippedLabelWidget {
-            content: self.content.clone(),
-            style: self.style.clone(),
-            run: GlyphLabel::new(self.content.clone()),
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut ClippedLabelWidget,
-        _ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        if prev.content != self.content || prev.style != self.style {
-            element.content = self.content.clone();
-            element.style = self.style.clone();
-            element.run = GlyphLabel::new(self.content.clone());
-            return ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
-        ChangeFlags::NONE
-    }
-}
-
-impl ClippedLabelWidget {
-    /// The longest prefix of `content` that fits `max_width` once an ellipsis
-    /// is appended, or the whole string when it already fits. A linear walk
-    /// over character boundaries rather than a binary search: a pane title is a
-    /// handful of characters, and each step is a cached shaping call.
-    fn fitted(&self, ctx: &mut LayoutCtx, max_width: f64) -> String {
-        if GlyphLabel::measure(ctx, &self.content, &self.style).width <= max_width {
-            return self.content.clone();
-        }
-        let mut fitted = String::new();
-        for (index, _) in self.content.char_indices() {
-            let candidate = format!("{}{ELLIPSIS}", &self.content[..index]);
-            if GlyphLabel::measure(ctx, &candidate, &self.style).width > max_width {
-                break;
-            }
-            fitted = candidate;
-        }
-        if fitted.is_empty() {
-            fitted.push(ELLIPSIS);
-        }
-        fitted
-    }
-}
-
-impl Widget for ClippedLabelWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let max_width = finite_or_zero(bc.max().width);
-        let fitted = self.fitted(ctx, max_width);
-        if self.run.content != fitted {
-            self.run = GlyphLabel::new(fitted);
-        }
-        let size = self.run.layout(ctx, &self.style, None);
-        bc.constrain(size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.run.paint(ctx.origin(), scene);
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // The **untruncated** text, in `value` — frust's own `text` widget's
-        // convention (accesskit guidance for `Role::Label`).
-        ctx.push_node(Role::Label, |node| {
-            node.set_value(self.content.as_str());
-        });
     }
 }
 
@@ -1583,29 +1291,11 @@ mod tests {
         assert_eq!(FALLBACK_EFFECTS, motion.easing.effects);
     }
 
-    #[test]
-    fn every_app_supplied_mark_parses_and_fits_its_design_box() {
-        use frust::authoring::Shape;
-
-        for (name, source) in [
-            ("FULLSCREEN_EXPAND", FULLSCREEN_EXPAND),
-            ("FULLSCREEN_EXIT", FULLSCREEN_EXIT),
-            ("PANE_MARK", PANE_MARK),
-        ] {
-            let path = BezPath::from_svg(source.d).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let bounds = path.bounding_box();
-            assert_eq!(source.design, ICON_DESIGN_BOX, "{name}");
-            assert!(bounds.x0 >= 0.0 && bounds.y0 >= 0.0, "{name}: {bounds:?}");
-            assert!(
-                bounds.x1 <= source.design && bounds.y1 <= source.design,
-                "{name}: {bounds:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_two_fullscreen_marks_are_distinct_shapes() {
-        // The swap is the button's whole feedback beyond its tone change.
-        assert_ne!(FULLSCREEN_EXPAND.d, FULLSCREEN_EXIT.d);
-    }
+    // The three app-supplied marks this module used to author
+    // (`FULLSCREEN_EXPAND`/`FULLSCREEN_EXIT`/`PANE_MARK`, plus their
+    // parse/design-box/distinct-shapes coverage) moved to
+    // `frust::icons::{FULLSCREEN_EXPAND, FULLSCREEN_EXIT, PANE_MARK}` — the
+    // catalog's own generated set carries the equivalent conformance tests
+    // (`frust-widgets`' `icon.rs`), so there is nothing app-local left to
+    // assert here.
 }

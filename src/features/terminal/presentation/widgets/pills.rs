@@ -4,16 +4,17 @@
 
 use std::rc::Rc;
 
-use frust::authoring::{Color, Size};
+use frust::authoring::{Color, DashPattern, Size};
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Padding, any, flexible, icons, inflexible, text,
+    AnyView, BorderStyle, EdgeInsets, GestureDetector, Padding, any, container, flexible, icons,
+    inflexible, text,
 };
 
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
-use super::super::chrome::{RADIUS_FULL, term_box};
+use super::super::chrome::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
 use super::util::{row, sized};
 
 /// `.pill{font-size:11px; padding:8px 13px}` and `.pill-row{gap:8px}`.
@@ -147,9 +148,16 @@ pub(crate) fn pill<State: 'static, F: Fn(&mut State) + 'static>(
         ])),
     };
 
-    any(term_box(content, fill, RADIUS_FULL)
-        .border(border)
-        .dashed(state == PillState::Add))
+    let pill = container(content)
+        .fill(fill)
+        .radius(RADIUS_FULL)
+        .border(border, HAIRLINE);
+    let pill = if state == PillState::Add {
+        pill.border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF)))
+    } else {
+        pill
+    };
+    any(pill)
 }
 
 #[cfg(test)]
