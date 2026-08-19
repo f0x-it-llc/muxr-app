@@ -481,6 +481,38 @@ fn selecting_a_trust_mode_sticks() {
     );
 }
 
+#[test]
+fn tapping_the_insecure_rows_own_warning_chip_still_selects_it() {
+    // The regression a node-center tap on the `Role::RadioButton` node alone
+    // cannot prove: `widgets::trust::trust_row` used to swap its full-row
+    // press for `frust_glyph::radio`'s own ring+label bounds only, shrinking
+    // the row's live tap target away from the chip entirely. The chip's own
+    // `Role::Status` node sits *outside* the radio node's bounds, so tapping
+    // at the chip's own center exercises exactly the region the review
+    // proved untestable via `tap_node`-on-the-radio alone (see
+    // `selecting_a_trust_mode_sticks`, which already covers the radio's own
+    // bounds and must keep passing unchanged).
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    assert!(!harness.trust_selected(INSECURE_TRUST));
+
+    harness.tap_node("the insecure row's warning chip", |node| {
+        node.role() == Role::Status && node.label() == Some(INSECURE_CHIP)
+    });
+
+    assert!(
+        harness.trust_selected(INSECURE_TRUST),
+        "a tap on the chip — outside the radio's own bounds, inside the \
+         row's restored full-row press target — still selects the row"
+    );
+    assert!(
+        !harness.trust_selected(SYSTEM_TRUST),
+        "the selection is exclusive"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The saved-server list
 // ---------------------------------------------------------------------------
