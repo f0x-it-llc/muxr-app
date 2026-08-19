@@ -191,8 +191,8 @@ struct AllowlistEntry {
 const ALLOWLIST: &[AllowlistEntry] = &[
     AllowlistEntry {
         path: "src/routes.rs",
-        cap_pct: 41.6,
-        reason: "slated for deletion by the routing-package adoption; entry dies with it",
+        cap_pct: 38.6,
+        reason: "contract-heavy nav adapter; shell/observer derivation",
     },
     AllowlistEntry {
         path: "src/features/connect/presentation/widgets/mod.rs",
@@ -397,7 +397,7 @@ mod scan_behavior {
     fn allowlisted_cap_looks_up_by_exact_relative_path() {
         assert_eq!(
             allowlisted_cap("src/routes.rs").map(|e| e.cap_pct),
-            Some(41.6)
+            Some(38.6)
         );
         assert!(allowlisted_cap("src/lib.rs").is_none());
     }

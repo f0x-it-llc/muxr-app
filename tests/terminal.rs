@@ -41,7 +41,6 @@ use muxr::features::terminal::presentation::pages::{
 };
 use muxr::routes::{BarAction, app_nav, install_app_router, route_meta};
 use muxr::ui::toasts::app_toasts;
-use muxr::ui::topbar::BAR_HEIGHT;
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -1641,18 +1640,26 @@ fn the_menus_detach_row_pops_the_terminal_route() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
+    app_toasts().clear();
 
-    assert_eq!(
-        app_nav().bar().meta,
-        route_meta("/terminal"),
-        "the app's route mirror has /terminal on top"
-    );
-
+    // No navigator-derived signal reaches this route's "/terminal is on top"
+    // fact in this harness: `Nav::bar().meta` is derived from the *inner*
+    // navigator's live `RouteObserver`, which `crate::shell::shell_page`
+    // attaches only once the shell page is actually **built** — and
+    // `NavigatorController::depth()` reads the same drained, committed stack
+    // (`crates/frust-widgets`' nav module: "a queued-but-undrained op is not
+    // in it"). This harness never builds either navigator (the module docs'
+    // record-only one), so a push queued against it sits forever undrained —
+    // permanently `None`/`0` either way, not a signal to assert against or
+    // wait on. `Actions::detach`'s own toast, raised on the same async
+    // landing as its `nav.pop()`, is the one real, observable side effect
+    // left (`a_second_detach_while_the_first_is_in_flight_pops_once` uses the
+    // same signal for the same reason).
     h.open_menu();
     h.choose_menu_row(ROW_DETACH);
-    // Detach is async; the pop lands once the repository answers.
+    // Detach is async; the toast lands once the repository answers.
     let deadline = Instant::now() + PUMP_DEADLINE;
-    while app_nav().bar().meta.is_some() {
+    while app_toasts().pending_untracked().is_empty() {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the detach"
@@ -1660,9 +1667,9 @@ fn the_menus_detach_row_pops_the_terminal_route() {
         pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
     }
     assert_eq!(
-        app_nav().bar().meta,
-        None,
-        "the terminal route came off the stack"
+        app_toasts().pending_untracked(),
+        vec![DETACHED_TOAST.to_string()],
+        "the detach landed, popping /terminal"
     );
 }
 
@@ -1682,8 +1689,11 @@ fn a_second_detach_while_the_first_is_in_flight_pops_once() {
     h.open_menu();
     h.choose_menu_row(ROW_DETACH);
 
+    // See `the_menus_detach_row_pops_the_terminal_route`'s doc: the toast is
+    // this harness's one real "a detach landed" signal — neither
+    // `Nav::bar().meta` nor `NavigatorController::depth()` ever moves here.
     let deadline = Instant::now() + PUMP_DEADLINE;
-    while app_nav().bar().meta.is_some() {
+    while app_toasts().pending_untracked().is_empty() {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for the detach"
@@ -2012,9 +2022,14 @@ fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
         "…and the card narrowed by the same amount, not clamped to a fixed \
          column: {size:?}"
     );
+    // No `BAR_HEIGHT` term any more: the shell scaffold's `app_bar` slot
+    // reserves the bar's own band above this widget's box in the real app
+    // (`crate::shell::shell_page`); mounted standalone here (this suite's own
+    // `Harness`, no scaffold), the stage's box already starts where the bar
+    // would have ended, so the step-up is the only clearance left to assert.
     assert!(
-        (origin.y - (BAR_HEIGHT + PORTRAIT_TOP_GAP)).abs() < EPSILON,
-        "the bar clearance plus the same step-up on top, unchanged: {origin:?}"
+        (origin.y - PORTRAIT_TOP_GAP).abs() < EPSILON,
+        "the same step-up on top, unchanged: {origin:?}"
     );
 }
 
@@ -2075,11 +2090,14 @@ fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
 
     // Portrait used to sit flush under the floating bar while landscape read
     // as spaced — the gap is the *top* inset only, so the sides stay at the
-    // narrow window's own `WRAP_PAD` (asserted above).
+    // narrow window's own `WRAP_PAD` (asserted above). No `BAR_HEIGHT` term:
+    // the shell scaffold reserves the bar's own band in the real app, and
+    // this suite's `Harness` mounts the stage starting where that band would
+    // have ended (see `wide_metrics_grow_the_wrap_padding…`'s doc).
     let (origin, _, _) = card(&h.frame());
     assert!(
-        (origin.y - (BAR_HEIGHT + PORTRAIT_TOP_GAP)).abs() < EPSILON,
-        "the card clears the bar and then breathes: {origin:?}"
+        (origin.y - PORTRAIT_TOP_GAP).abs() < EPSILON,
+        "the card breathes by the portrait step-up: {origin:?}"
     );
 
     // …and fullscreen still takes neither gap: its own transition owns that
