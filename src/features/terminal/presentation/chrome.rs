@@ -1,9 +1,21 @@
-//! The Terminal screen's hand-rolled primitives — the boxes, the animated
-//! terminal card, the body's own text pipeline, and the three vector marks
-//! `frust::icons` does not carry: [`term_box`] (`.pill`/`.pane-item`/
-//! `.term-statusrow`), [`clipped_label`] (`.term-pane-title`), [`status_strip`]
+//! The Terminal screen's remaining hand-rolled primitives: [`status_strip`]
 //! (the link notice), [`expand_button`] (`.expand-btn`), [`terminal_stage`]
-//! (`.term-wrap` + `.term-card`, animated) and [`term_body`] (`.term-body`).
+//! (`.term-wrap` + `.term-card`, animated), [`term_body`] (`.term-body`, its own
+//! text pipeline) and [`wrap_row`] (a wrapping row, since `frust::Flex` has
+//! none).
+//!
+//! **Dissolved into the framework since this module first shipped**: the
+//! `.pill`/`.pane-item`/`.term-statusrow` box (now every caller's own
+//! `frust::container`, `.border_style(BorderStyle::Dashed(..))` for the dashed
+//! edges) and the `.term-pane-title` single-line ellipsis (now
+//! `frust::text(..).max_lines(1).overflow(TextOverflow::Ellipsis)`, in
+//! [`super::widgets::status`]) — both closed the framework gaps their own prior
+//! doc comments named (no dash pattern on `PaintScene`, no text
+//! overflow/ellipsis vocabulary). The three vector marks this module used to
+//! author (`⛶`/`⤡`/`▤`) are now [`frust::icons`]'
+//! `FULLSCREEN_EXPAND`/`FULLSCREEN_EXIT`/`PANE_MARK` — the catalog's own art,
+//! not a transcription of `docs/terminal.html`'s marks (Ed device-gates the
+//! swap).
 //!
 //! **Feature-local, and knowingly parallel to `features::sessions`' own
 //! `chrome`**: a feature never imports a sibling's `presentation`, so promoting
@@ -15,10 +27,6 @@
 //! the motion tokens from the **paint-time** theme, the only pass where a theme
 //! is in scope when a transition starts (the deferred-driver idiom
 //! `crate::ui::topbar` documents).
-//!
-//! Three frust gaps these work around: no dash pattern on `PaintScene`, no text
-//! overflow/ellipsis vocabulary, and no per-corner radius (so the stage clips its
-//! child to its own rounded rect rather than compositing two radii).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -35,63 +43,19 @@ use frust::authoring::{
 };
 use frust::{
     AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
-    IconData, IconSource, Padding, Theme, flexible, icon, inflexible, text,
+    IconData, Padding, Theme, container, flexible, icon, inflexible, text,
 };
 
 use crate::features::terminal::domain::entities::{TermLine, TermLineKind};
 use crate::ui::topbar::BAR_HEIGHT;
 
-// App-supplied vector marks (the "chrome icons are vectors" rule).
-
-/// The side length of the square design box every mark here is authored
-/// against — Material Symbols' own 24, which [`frust::icons`]' generated
-/// entries all carry.
-const ICON_DESIGN_BOX: f64 = 24.0;
-
-/// `.expand-btn`'s resting mark (the mock's `⛶`): the four corner brackets of
-/// Material Icons' `fullscreen`, transcribed so its stroke weight and corner cuts
-/// match the vendored set. App-supplied because `frust::icons`' starter set
-/// carries no fullscreen pair and `⛶` (`U+26F6`) is absent from the bundled Glyph
-/// faces — the font-fallback trap the "chrome icons are vectors" rule closes.
-pub const FULLSCREEN_EXPAND: IconSource = IconSource {
-    d: "M 7 14 H 5 v 5 h 5 v -2 H 7 v -3 Z M 5 10 h 2 V 7 h 3 V 5 H 5 v 5 Z \
-        M 17 17 h -3 v 2 h 5 v -5 h -2 v 3 Z M 14 5 v 2 h 3 v 3 h 2 V 5 h -5 Z",
-    design: ICON_DESIGN_BOX,
-};
-
-/// `.expand-btn`'s on-state mark (the mock's `⤡`): Material Icons 24px
-/// `fullscreen_exit`, the brackets turned inward. See [`FULLSCREEN_EXPAND`].
-pub const FULLSCREEN_EXIT: IconSource = IconSource {
-    d: "M 5 16 h 3 v 3 h 2 v -5 H 5 v 2 Z M 8 8 H 5 v 2 h 5 V 5 H 8 v 3 Z \
-        M 14 19 h 2 v -3 h 3 v -2 h -5 v 5 Z M 16 8 V 5 h -2 v 5 h 5 V 8 h -3 Z",
-    design: ICON_DESIGN_BOX,
-};
-
-/// The pane mark (the mock's `▤`): three stacked bars in the 24px box, authored
-/// here since the vendored Material set has no counterpart. Drawn rather than set
-/// as text for the same reason as the pair above: `▤` (`U+25A4`) is absent from
-/// IBM Plex Mono, so on device it resolves through each platform's own fallback
-/// chain, or not at all.
-pub const PANE_MARK: IconSource = IconSource {
-    d: "M 4 5 h 16 v 4 H 4 V 5 Z M 4 10 h 16 v 4 H 4 v -4 Z M 4 15 h 16 v 4 H 4 v -4 Z",
-    design: ICON_DESIGN_BOX,
-};
+pub(super) use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
 
 // Shared paint helpers.
 
-/// Hairline border width in logical px (`1px solid` on every bordered rule in
-/// `docs/terminal.html`). Matches `frust-widgets`' own `BORDER_WIDTH`.
-pub(super) const HAIRLINE: f64 = 1.0;
-/// `--radius-full: 999px` — clamped to half the shorter side at paint time, so
-/// a caller can spell "pill" without knowing the box's measured height.
-pub(super) const RADIUS_FULL: f64 = 999.0;
 /// Flattening tolerance for a rounded-rect border path — the value
 /// `frust-widgets`' own border strokes use.
 const BORDER_TOLERANCE: f64 = 0.1;
-/// `border-style:dashed` — the on/off step of the hand-drawn dash, in logical px.
-/// CSS leaves the period to the UA; 4/4 is the common rendering.
-const DASH_ON: f64 = 4.0;
-const DASH_OFF: f64 = 4.0;
 
 /// The effective corner radius for a box of `size` — [`RADIUS_FULL`] (or any
 /// over-large value) collapses to a true pill rather than overshooting.
@@ -120,165 +84,9 @@ fn stroke_border(scene: &mut dyn PaintScene, origin: Point, size: Size, radius: 
     scene.stroke_path(origin, &path, HAIRLINE, &Brush::Solid(color));
 }
 
-/// Stroke `from`→`to` as a dashed run, `segment` mapping each `(start, end)`
-/// scalar pair onto one dash's endpoints.
-fn dash_run(
-    scene: &mut dyn PaintScene,
-    from: f64,
-    to: f64,
-    color: Color,
-    segment: impl Fn((f64, f64)) -> (Point, Point),
-) {
-    let mut at = from;
-    while at < to {
-        let end = (at + DASH_ON).min(to);
-        let (p0, p1) = segment((at, end));
-        scene.stroke_line(p0, p1, HAIRLINE, color);
-        at = end + DASH_OFF;
-    }
-}
-
 /// Whether `pos` (widget-local) falls inside a `size`-sized box.
 fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
-}
-
-/// A rounded fill plus an optional hairline border, painted *behind* a child
-/// it sizes itself to. Every tile on this screen is one of these.
-pub(super) struct TermBoxView<State: 'static> {
-    child: AnyView<State>,
-    fill: Color,
-    radius: f64,
-    border: Option<Color>,
-    dashed: bool,
-}
-
-/// Wrap `child` in a `fill`-filled box with corner `radius`.
-pub(super) fn term_box<State: 'static, V: View<State>>(
-    child: V,
-    fill: Color,
-    radius: f64,
-) -> TermBoxView<State> {
-    TermBoxView {
-        child: any(child),
-        fill,
-        radius,
-        border: None,
-        dashed: false,
-    }
-}
-
-impl<State: 'static> TermBoxView<State> {
-    /// Stroke a hairline border in `color` just inside the box's bounds.
-    pub(super) fn border(mut self, color: Color) -> Self {
-        self.border = Some(color);
-        self
-    }
-
-    /// Draw that border dashed (`.pill.add`, `.new-pane-btn`).
-    pub(super) fn dashed(mut self, dashed: bool) -> Self {
-        self.dashed = dashed;
-        self
-    }
-}
-
-/// The retained half of a [`TermBoxView`].
-pub(super) struct TermBoxWidget {
-    child: ChildPod,
-    fill: Color,
-    radius: f64,
-    border: Option<Color>,
-    dashed: bool,
-}
-
-impl<State: 'static> View<State> for TermBoxView<State> {
-    type Element = TermBoxWidget;
-
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> TermBoxWidget {
-        TermBoxWidget {
-            child: build_child(&self.child, ctx),
-            fill: self.fill,
-            radius: self.radius,
-            border: self.border,
-            dashed: self.dashed,
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut TermBoxWidget,
-        ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
-        if prev.fill != self.fill
-            || prev.radius != self.radius
-            || prev.border != self.border
-            || prev.dashed != self.dashed
-        {
-            element.fill = self.fill;
-            element.radius = self.radius;
-            element.border = self.border;
-            element.dashed = self.dashed;
-            flags |= ChangeFlags::PAINT;
-        }
-        flags
-    }
-
-    fn teardown(&self, element: &mut TermBoxWidget, ctx: &mut BuildCtx<'_>) {
-        teardown_child(&self.child, &mut element.child, ctx);
-    }
-}
-
-impl Widget for TermBoxWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let size = self.child.layout_child(ctx, bc);
-        self.child.set_origin(Point::ZERO);
-        bc.constrain(size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        let origin = ctx.origin();
-        let size = ctx.size();
-        let radius = effective_radius(self.radius, size);
-        if self.fill != Color::TRANSPARENT {
-            scene.fill_rounded_rect(origin, size, radius, self.fill);
-        }
-        if let Some(border) = self.border {
-            if self.dashed {
-                let half = HAIRLINE / 2.0;
-                let (left, top) = (origin.x + half, origin.y + half);
-                let (right, bottom) = (origin.x + size.width - half, origin.y + size.height - half);
-                // The corner arcs stay undashed (dashing a curve needs pattern
-                // support frust lacks); at a 4px period a corner reads as a gap.
-                for y in [top, bottom] {
-                    dash_run(scene, left + radius, right - radius, border, |x| {
-                        (Point::new(x.0, y), Point::new(x.1, y))
-                    });
-                }
-                for x in [left, right] {
-                    dash_run(scene, top + radius, bottom - radius, border, |y| {
-                        (Point::new(x, y.0), Point::new(x, y.1))
-                    });
-                }
-            } else {
-                stroke_border(scene, origin, size, radius, border);
-            }
-        }
-        self.child.paint_child(ctx, scene);
-    }
-
-    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A decorative single-child container still MUST route, or everything it
-        // backs is silently unreachable.
-        route_event_single(&mut self.child, ctx, event)
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // A transparent container still MUST forward, or the child's whole
-        // subtree drops out of the accessibility tree.
-        self.child.semantics_child(ctx);
-    }
 }
 
 /// The strip's own gutters — the status row's 18px lead/14px trail, transcribed a
@@ -310,19 +118,16 @@ pub(super) fn status_strip<State: 'static>(
         children.push(inflexible(frust::SizedBox::<State>(Some(STRIP_GAP), None)));
         children.push(inflexible(action));
     }
-    any(term_box(
-        Padding(
-            EdgeInsets {
-                left: STRIP_PAD_LEFT,
-                top: STRIP_PAD_Y,
-                right: STRIP_PAD_RIGHT,
-                bottom: STRIP_PAD_Y,
-            },
-            FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
-        ),
-        fill,
-        0.0,
+    any(container(Padding(
+        EdgeInsets {
+            left: STRIP_PAD_LEFT,
+            top: STRIP_PAD_Y,
+            right: STRIP_PAD_RIGHT,
+            bottom: STRIP_PAD_Y,
+        },
+        FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
     ))
+    .fill(fill))
 }
 
 /// A row of children that wraps onto further lines when it runs out of width, with
@@ -444,11 +249,12 @@ impl Widget for WrapRowWidget {
     }
 }
 
-/// The mark appended to a truncated run (`text-overflow:ellipsis`).
-const ELLIPSIS: char = '\u{2026}';
-
 /// A minimal retained text run — `frust-widgets`' own per-module `GlyphLabel`
-/// helper, re-derived here because it is crate-private.
+/// helper, re-derived here because it is crate-private. [`term_body`]'s own
+/// per-line shaping is this module's one remaining consumer: the ellipsized
+/// single-line run this type used to *also* back (`.term-pane-title`) is now
+/// `frust::text(..).max_lines(1).overflow(TextOverflow::Ellipsis)`, in
+/// [`super::widgets::status`].
 struct GlyphLabel {
     content: String,
     layout: Option<TextLayout>,
@@ -481,121 +287,12 @@ impl GlyphLabel {
         size
     }
 
-    /// Measure `content` at `style` without disturbing the cached layout.
-    fn measure(ctx: &mut LayoutCtx, content: &str, style: &TextStyle) -> Size {
-        ctx.text_context::<TextContext>()
-            .layout(content, style, None)
-            .size()
-    }
-
     fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
         if let Some(layout) = &self.layout {
             for run in layout.to_scene_runs(origin) {
                 scene.draw_glyph_run(run);
             }
         }
-    }
-}
-
-/// A single-line run truncated with an ellipsis when it does not fit —
-/// `.term-pane-title`'s `white-space:nowrap; text-overflow:ellipsis`. Hand-rolled
-/// because `frust::text` carries no overflow vocabulary: left to it, a long pane
-/// title wraps and grows the card's status row.
-pub(super) struct ClippedLabelView {
-    content: String,
-    style: TextStyle,
-}
-
-/// A single-line, ellipsized run of `content` in `style`.
-pub(super) fn clipped_label(content: impl Into<String>, style: TextStyle) -> ClippedLabelView {
-    ClippedLabelView {
-        content: content.into(),
-        style,
-    }
-}
-
-/// The retained half of a [`ClippedLabelView`].
-pub(super) struct ClippedLabelWidget {
-    /// The full text, for semantics — a screen reader gets the whole title
-    /// even when the pixels are cut short.
-    content: String,
-    style: TextStyle,
-    /// The run actually shaped this layout (possibly truncated).
-    run: GlyphLabel,
-}
-
-impl<State: 'static> View<State> for ClippedLabelView {
-    type Element = ClippedLabelWidget;
-
-    fn build(&self, _ctx: &mut BuildCtx<'_>) -> ClippedLabelWidget {
-        ClippedLabelWidget {
-            content: self.content.clone(),
-            style: self.style.clone(),
-            run: GlyphLabel::new(self.content.clone()),
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut ClippedLabelWidget,
-        _ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        if prev.content != self.content || prev.style != self.style {
-            element.content = self.content.clone();
-            element.style = self.style.clone();
-            element.run = GlyphLabel::new(self.content.clone());
-            return ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
-        ChangeFlags::NONE
-    }
-}
-
-impl ClippedLabelWidget {
-    /// The longest prefix of `content` that fits `max_width` once an ellipsis
-    /// is appended, or the whole string when it already fits. A linear walk
-    /// over character boundaries rather than a binary search: a pane title is a
-    /// handful of characters, and each step is a cached shaping call.
-    fn fitted(&self, ctx: &mut LayoutCtx, max_width: f64) -> String {
-        if GlyphLabel::measure(ctx, &self.content, &self.style).width <= max_width {
-            return self.content.clone();
-        }
-        let mut fitted = String::new();
-        for (index, _) in self.content.char_indices() {
-            let candidate = format!("{}{ELLIPSIS}", &self.content[..index]);
-            if GlyphLabel::measure(ctx, &candidate, &self.style).width > max_width {
-                break;
-            }
-            fitted = candidate;
-        }
-        if fitted.is_empty() {
-            fitted.push(ELLIPSIS);
-        }
-        fitted
-    }
-}
-
-impl Widget for ClippedLabelWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let max_width = finite_or_zero(bc.max().width);
-        let fitted = self.fitted(ctx, max_width);
-        if self.run.content != fitted {
-            self.run = GlyphLabel::new(fitted);
-        }
-        let size = self.run.layout(ctx, &self.style, None);
-        bc.constrain(size)
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.run.paint(ctx.origin(), scene);
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // The **untruncated** text, in `value` — frust's own `text` widget's
-        // convention (accesskit guidance for `Role::Label`).
-        ctx.push_node(Role::Label, |node| {
-            node.set_value(self.content.as_str());
-        });
     }
 }
 
@@ -835,12 +532,80 @@ const SHADOW_DY: f64 = 20.0;
 const SHADOW_STD_DEV: f64 = 25.0;
 const SHADOW_ALPHA: f32 = 0.4;
 
-/// `.topbar{padding:0 16px}`/`.topbar-icon{width:30px}`, transcribed from
-/// `crate::ui::topbar` (whose own constants are private) so this screen can hand
-/// `frust_glyph::show_glyph_menu` the window-coordinate rect of the bar slot its
-/// `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is imported.
-const BAR_PAD_X: f64 = 16.0;
-const BAR_SLOT: f64 = 30.0;
+/// `.appbar{padding:0 6px}`/`.ab-icon{width:40px;height:40px}`, transcribed
+/// from `frust_glyph::appbar` (whose own copies are private) so this screen
+/// can hand `frust_glyph::show_glyph_menu` the window-coordinate rect of the
+/// bar slot its `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is
+/// imported — one shared source for the bar's own content height, the one
+/// dimension `crate::ui::topbar` already needs to transcribe too.
+const BAR_PAD_X: f64 = 6.0;
+const BAR_SLOT: f64 = 40.0;
+
+/// How far below the window's own top edge this widget's box begins: the app
+/// bar's whole band while the shell has one mounted, nothing once it hasn't.
+///
+/// The scaffold's bar slot self-sizes to the status-bar inset plus
+/// [`BAR_HEIGHT`] (`frust_widgets::scaffold`'s R-B4-inset contract), and
+/// `crate::shell::shell_bar` resolves to the *absent* slot for exactly as long
+/// as this screen is fullscreen — one synchronous pair of writes in
+/// `super::pages::Actions::toggle_fullscreen`, so the band leaves (and comes
+/// back) in the very rebuild that flips `fullscreen` here.
+fn chrome_band(fullscreen: bool, inset_top: f64) -> f64 {
+    if fullscreen {
+        0.0
+    } else {
+        inset_top + BAR_HEIGHT
+    }
+}
+
+/// The card's top edge in **window** coordinates at eased progress `p`: the
+/// windowed position — the status-bar inset, the bar's whole band and the
+/// page's own top gutter — eased to the fullscreen one, that inset alone. Both
+/// ends keep the inset: the pane title must never sit under a notch.
+fn card_top(p: f64, inset_top: f64, gutter_top: f64) -> f64 {
+    inset_top + (BAR_HEIGHT + gutter_top) * (1.0 - p)
+}
+
+/// Where the card sits inside this widget's box for one frame of the
+/// transition: its top edge, and the gutters around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StageBox {
+    /// The card's top edge in the widget's own local coordinates —
+    /// **negative** through a collapse, whose every frame has the bar mounted
+    /// again above a card still covering its band. The scaffold paints its bar
+    /// over the body, so the card slides down out from under it.
+    top: f64,
+    /// The gutters either side of the card…
+    left: f64,
+    right: f64,
+    /// …and the inset its bottom edge keeps from the box's own bottom.
+    bottom: f64,
+}
+
+/// The card's placement at eased progress `p` — the screen's whole animated
+/// geometry, pure so it can be stepped frame by frame without a render root.
+///
+/// **Placed in window space, then localized.** This widget's box is the shell
+/// scaffold's body, whose top edge moves by the bar's whole band the frame the
+/// bar unmounts ([`chrome_band`]) — so a path expressed in that box's own
+/// coordinates jumps by the band on that one frame, however smooth its own
+/// progress is. [`card_top`] interpolates the two window-space endpoints
+/// instead, and whatever band the box currently sits below is taken back out.
+fn stage_box(
+    p: f64,
+    inset_top: f64,
+    inset_bottom: f64,
+    gutters: EdgeInsets,
+    fullscreen: bool,
+) -> StageBox {
+    let rest = 1.0 - p;
+    StageBox {
+        top: card_top(p, inset_top, gutters.top) - chrome_band(fullscreen, inset_top),
+        left: (WRAP_PAD + gutters.left) * rest,
+        right: (WRAP_PAD + gutters.right) * rest,
+        bottom: (WRAP_PAD + gutters.bottom) * rest + inset_bottom,
+    }
+}
 
 /// One in-flight fullscreen transition: a linear `0→1` driver, the curve that
 /// eases its progress, and the `from..to` range that eased progress is then
@@ -907,13 +672,19 @@ impl FullscreenStage {
 ///
 /// One widget rather than three nested ones because all three animate off the
 /// **same** progress in one gesture, and because an animated padding is a *layout*
-/// fact. It also records the app bar's trailing-slot rect into
+/// fact. `gutters` — the page's own responsive breathing room outside the card's
+/// [`WRAP_PAD`] — is an input rather than an outer `Padding` for that same
+/// reason: a wrapper could only *flip* between its windowed and fullscreen
+/// values, and a flip mid-transition is a jump.
+///
+/// It also records the app bar's trailing-slot rect into
 /// [`anchor`](TerminalStageView::anchor): the overflow menu anchors to a slot
 /// inside a sibling widget this page cannot query, so the one widget that knows
 /// both the window box and the top inset computes it.
 pub(super) struct TerminalStageView<State: 'static> {
     child: AnyView<State>,
     fullscreen: bool,
+    gutters: EdgeInsets,
     card: Color,
     border: Color,
     anchor: Rc<Cell<Rect>>,
@@ -923,6 +694,7 @@ pub(super) struct TerminalStageView<State: 'static> {
 pub(super) fn terminal_stage<State: 'static, V: View<State>>(
     child: V,
     fullscreen: bool,
+    gutters: EdgeInsets,
     card: Color,
     border: Color,
     anchor: Rc<Cell<Rect>>,
@@ -930,6 +702,7 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
     TerminalStageView {
         child: any(child),
         fullscreen,
+        gutters,
         card,
         border,
         anchor,
@@ -940,6 +713,7 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
 pub(super) struct TerminalStageWidget {
     child: ChildPod,
     fullscreen: bool,
+    gutters: EdgeInsets,
     card: Color,
     border: Color,
     anchor: Rc<Cell<Rect>>,
@@ -966,6 +740,7 @@ impl<State: 'static> View<State> for TerminalStageView<State> {
         TerminalStageWidget {
             child: build_child(&self.child, ctx),
             fullscreen: self.fullscreen,
+            gutters: self.gutters,
             card: self.card,
             border: self.border,
             anchor: Rc::clone(&self.anchor),
@@ -992,6 +767,12 @@ impl<State: 'static> View<State> for TerminalStageView<State> {
             element.pending = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        // A rotation (or a window resize past the wide breakpoint) is the only
+        // thing that moves these, and it moves them under a settled card.
+        if prev.gutters != self.gutters {
+            element.gutters = self.gutters;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         if prev.card != self.card || prev.border != self.border {
             element.card = self.card;
             element.border = self.border;
@@ -1012,27 +793,22 @@ impl Widget for TerminalStageWidget {
         let height = finite_or_zero(bc.max().height);
         let p = self.progress.clamp(0.0, 1.0);
 
-        // The clearance the floating bar occupies, shrinking to the status-bar
-        // inset as the bar animates away. Both insets are kept in **both**
-        // states: the pane title must never sit under a notch, and "edge to
-        // edge" must not mean "the last output line is under the home bar".
-        let top = insets.top + BAR_HEIGHT * (1.0 - p);
-        let pad = WRAP_PAD * (1.0 - p);
-        let bottom = pad + insets.bottom;
-
-        let card_w = (width - 2.0 * pad).max(0.0);
-        let card_h = (height - top - bottom).max(0.0);
+        // The card's whole placement, window-space path and all — see
+        // [`stage_box`] for why the box's own coordinates can't carry it.
+        let card = stage_box(p, insets.top, insets.bottom, self.gutters, self.fullscreen);
+        let card_w = (width - card.left - card.right).max(0.0);
+        let card_h = (height - card.top - card.bottom).max(0.0);
         self.child
             .layout_child(ctx, &BoxConstraints::tight(Size::new(card_w, card_h)));
-        self.child.set_origin(Point::new(pad, top));
-        self.card_rect = Rect::new(pad, top, pad + card_w, top + card_h);
+        self.child.set_origin(Point::new(card.left, card.top));
+        self.card_rect = Rect::new(card.left, card.top, card.left + card_w, card.top + card_h);
         // Recorded off the same `p` the box was built from: paint has already
         // advanced the driver, so a radius read there runs one frame ahead.
         self.card_radius = CARD_RADIUS * (1.0 - p);
 
-        // The bar's trailing `⋮` slot, in window coordinates — this page is
-        // laid out at the full surface, so local and window coordinates
-        // coincide here.
+        // The bar's trailing `⋮` slot, in window coordinates — read straight
+        // off the window's own insets and the bar's band rather than off this
+        // widget's box, which sits below that band whenever the bar is up.
         let slot_x = width - BAR_PAD_X - BAR_SLOT;
         let slot_y = insets.top + (BAR_HEIGHT - BAR_SLOT) / 2.0;
         self.anchor.set(Rect::new(
@@ -1055,6 +831,11 @@ impl Widget for TerminalStageWidget {
             if theme.is_some_and(|theme| theme.motion.reduce_motion) {
                 self.progress = target;
                 self.stage = None;
+                // The pass that staged this flip laid the card out at the
+                // progress it was leaving, so the snap owes itself the layout
+                // that turns it into a box — the same debt the animated branch
+                // settles every frame below.
+                ctx.request_layout();
             } else {
                 self.stage = Some(FullscreenStage::start(self.progress, target, theme));
             }
@@ -1567,6 +1348,161 @@ mod tests {
         }
     }
 
+    /// A phone-shaped window for the geometry below: a status-bar inset, a
+    /// home indicator, and the portrait gutter `super::super::pages` hands in.
+    const INSET_TOP: f64 = 44.0;
+    const INSET_BOTTOM: f64 = 34.0;
+    const GUTTER_TOP: f64 = 8.0;
+    /// The wide branch's extra gutter, on all four edges.
+    const WIDE_GUTTER: f64 = 8.0;
+
+    fn portrait_gutters() -> EdgeInsets {
+        EdgeInsets {
+            left: 0.0,
+            top: GUTTER_TOP,
+            right: 0.0,
+            bottom: 0.0,
+        }
+    }
+
+    /// Where the card's top edge actually lands **on screen**: the scaffold's
+    /// own body origin plus the local top [`stage_box`] places the card at.
+    ///
+    /// The body origin is transcribed rather than read from [`chrome_band`] —
+    /// it is the other side of the contract (`frust_widgets::scaffold` puts
+    /// its body under a bar that self-sized to `inset + BAR_HEIGHT`, and
+    /// `crate::shell::shell_bar` mounts no bar at all while fullscreen), so a
+    /// test asserting against it catches the stage drifting from the shell.
+    fn on_screen_top(p: f64, fullscreen: bool) -> f64 {
+        let body_top = if fullscreen {
+            0.0
+        } else {
+            INSET_TOP + BAR_HEIGHT
+        };
+        body_top + stage_box(p, INSET_TOP, INSET_BOTTOM, portrait_gutters(), fullscreen).top
+    }
+
+    /// The card's resting top in each state — the two endpoints the whole
+    /// transition runs between.
+    const WINDOWED_TOP: f64 = INSET_TOP + BAR_HEIGHT + GUTTER_TOP;
+    const FULLSCREEN_TOP: f64 = INSET_TOP;
+
+    /// Every on-screen card top one direction of the transition paints: the
+    /// flip's own frame (laid out at the progress it inherited, in the box the
+    /// flip just changed) and then 16ms steps out past the 340ms duration.
+    fn painted_tops(fullscreen: bool, theme: &Theme) -> Vec<f64> {
+        let (from, to) = if fullscreen { (0.0, 1.0) } else { (1.0, 0.0) };
+        let mut stage = FullscreenStage::start(from, to, Some(theme));
+        let mut tops = vec![on_screen_top(from, fullscreen)];
+        for frame in 0..30u64 {
+            stage
+                .driver
+                .advance(FrameTime::from_nanos(frame * 16_000_000));
+            tops.push(on_screen_top(stage.value(), fullscreen));
+        }
+        tops
+    }
+
+    #[test]
+    fn the_bar_leaving_moves_the_box_but_never_the_card() {
+        // The frame a flip lands, the scaffold hands this widget a box a whole
+        // bar band taller (or shorter) while the transition still sits at the
+        // progress it inherited — and a card that has not animated yet must
+        // not have moved.
+        assert_eq!(on_screen_top(0.0, false), on_screen_top(0.0, true));
+        assert_eq!(on_screen_top(1.0, true), on_screen_top(1.0, false));
+        assert_eq!(on_screen_top(0.0, false), WINDOWED_TOP);
+        assert_eq!(on_screen_top(1.0, true), FULLSCREEN_TOP);
+        // The bottom edge is measured from the window's own bottom, which no
+        // bar ever moves, so it is band-independent by construction.
+        let inset_of = |fullscreen| {
+            stage_box(0.0, INSET_TOP, INSET_BOTTOM, portrait_gutters(), fullscreen).bottom
+        };
+        assert_eq!(inset_of(false), inset_of(true));
+    }
+
+    #[test]
+    fn entering_fullscreen_walks_the_card_up_without_a_step_back() {
+        let tops = painted_tops(true, &frust_glyph::baseline());
+        assert_eq!(tops[0], WINDOWED_TOP, "the flip frame has not moved yet");
+        for pair in tops.windows(2) {
+            assert!(
+                pair[1] <= pair[0] + 1e-9,
+                "the card dropped back down: {pair:?}"
+            );
+            assert!(
+                (FULLSCREEN_TOP..=WINDOWED_TOP).contains(&pair[1]),
+                "{pair:?}"
+            );
+        }
+        assert!(
+            tops.iter()
+                .any(|top| (FULLSCREEN_TOP..WINDOWED_TOP).contains(top)),
+            "…and it travelled rather than snapped: {tops:?}"
+        );
+        assert_eq!(tops.last().copied(), Some(FULLSCREEN_TOP));
+    }
+
+    #[test]
+    fn leaving_fullscreen_walks_it_back_down_the_same_way() {
+        let tops = painted_tops(false, &frust_glyph::baseline());
+        assert_eq!(tops[0], FULLSCREEN_TOP, "the flip frame has not moved yet");
+        for pair in tops.windows(2) {
+            assert!(
+                pair[1] >= pair[0] - 1e-9,
+                "the card climbed back up: {pair:?}"
+            );
+            assert!(
+                (FULLSCREEN_TOP..=WINDOWED_TOP).contains(&pair[1]),
+                "{pair:?}"
+            );
+        }
+        assert_eq!(tops.last().copied(), Some(WINDOWED_TOP));
+    }
+
+    #[test]
+    fn a_reduced_motion_flip_lands_on_the_endpoint_the_animation_walks_to() {
+        // `reduce_motion` stages no driver: paint snaps `progress` to the
+        // target and asks for the layout that turns it into a box, so the very
+        // next frame is where an animated flip would have finished.
+        let theme = frust_glyph::baseline();
+        assert_eq!(
+            on_screen_top(1.0, true),
+            painted_tops(true, &theme).last().copied().expect("stepped")
+        );
+        assert_eq!(
+            on_screen_top(0.0, false),
+            painted_tops(false, &theme)
+                .last()
+                .copied()
+                .expect("stepped")
+        );
+    }
+
+    #[test]
+    fn the_gutters_ride_the_same_progress_the_card_does() {
+        let windowed = stage_box(0.0, INSET_TOP, INSET_BOTTOM, portrait_gutters(), false);
+        assert_eq!(windowed.left, WRAP_PAD);
+        assert_eq!(windowed.bottom, WRAP_PAD + INSET_BOTTOM);
+        let full = stage_box(1.0, INSET_TOP, INSET_BOTTOM, portrait_gutters(), true);
+        assert_eq!((full.left, full.right), (0.0, 0.0));
+        // Both insets are kept in both states: "edge to edge" must not mean
+        // "the last output line is under the home bar".
+        assert_eq!(full.bottom, INSET_BOTTOM);
+
+        // A wide window's extra gutter animates with the rest rather than
+        // flipping outside it.
+        let wide = EdgeInsets::all(WIDE_GUTTER);
+        assert_eq!(
+            stage_box(0.0, INSET_TOP, INSET_BOTTOM, wide, false).left,
+            WRAP_PAD + WIDE_GUTTER
+        );
+        assert_eq!(
+            stage_box(1.0, INSET_TOP, INSET_BOTTOM, wide, true).left,
+            0.0
+        );
+    }
+
     #[test]
     fn the_unthemed_fallbacks_are_the_glyph_tokens_they_stand_in_for() {
         // A headless frame with no theme must stage on the device's numbers.
@@ -1576,29 +1512,11 @@ mod tests {
         assert_eq!(FALLBACK_EFFECTS, motion.easing.effects);
     }
 
-    #[test]
-    fn every_app_supplied_mark_parses_and_fits_its_design_box() {
-        use frust::authoring::Shape;
-
-        for (name, source) in [
-            ("FULLSCREEN_EXPAND", FULLSCREEN_EXPAND),
-            ("FULLSCREEN_EXIT", FULLSCREEN_EXIT),
-            ("PANE_MARK", PANE_MARK),
-        ] {
-            let path = BezPath::from_svg(source.d).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let bounds = path.bounding_box();
-            assert_eq!(source.design, ICON_DESIGN_BOX, "{name}");
-            assert!(bounds.x0 >= 0.0 && bounds.y0 >= 0.0, "{name}: {bounds:?}");
-            assert!(
-                bounds.x1 <= source.design && bounds.y1 <= source.design,
-                "{name}: {bounds:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_two_fullscreen_marks_are_distinct_shapes() {
-        // The swap is the button's whole feedback beyond its tone change.
-        assert_ne!(FULLSCREEN_EXPAND.d, FULLSCREEN_EXIT.d);
-    }
+    // The three app-supplied marks this module used to author
+    // (`FULLSCREEN_EXPAND`/`FULLSCREEN_EXIT`/`PANE_MARK`, plus their
+    // parse/design-box/distinct-shapes coverage) moved to
+    // `frust::icons::{FULLSCREEN_EXPAND, FULLSCREEN_EXIT, PANE_MARK}` — the
+    // catalog's own generated set carries the equivalent conformance tests
+    // (`frust-widgets`' `icon.rs`), so there is nothing app-local left to
+    // assert here.
 }

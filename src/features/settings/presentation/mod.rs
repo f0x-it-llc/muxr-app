@@ -5,12 +5,14 @@
 //! - [`controller`] — the hosted view model: the token list, both
 //!   preference groups, and the six mutations.
 //! - [`widgets`] — the screen's individual visual elements, arranged (never
-//!   resolved) by `pages` alone.
-//! - `chrome` — the hand-rolled panel primitive and the switch's
-//!   accessibility wrapper; private, only `widgets` paints with it.
+//!   resolved) by `pages` alone. Its own `rows` module carries the one
+//!   decorated-fill primitive `frust::container` doesn't quite reach (a
+//!   paint-only bleed, and a zero-radius fill kept out of every
+//!   rounded-rect probe) — the former `chrome` module's whole reason to
+//!   exist, dissolved onto `frust::container`/`frust::divider` everywhere
+//!   else.
 //! - [`scramble`] — the token-revoke animation's mechanism.
 
-mod chrome;
 pub mod controller;
 pub mod pages;
 pub mod scramble;

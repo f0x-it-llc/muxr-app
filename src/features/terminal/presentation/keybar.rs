@@ -20,7 +20,11 @@
 //!    cap requests focus, re-publishes the surface, and folds routed
 //!    `Key`/`Ime` events into the shared source via [`InputSeam::absorb`].
 //! 3. **Arrow caps are vectors** (`↑↓←→`), not font glyphs: no per-platform
-//!    fallback chain, and `frust::icons` has no arrow pair.
+//!    fallback chain. `frust::icons::{ARROW_UPWARD, ARROW_DOWNWARD, ARROW_BACK,
+//!    ARROW_FORWARD}` now carry the pair this module used to author locally —
+//!    the catalog's own outlined-arrowhead-on-a-shaft art, not a
+//!    transcription of the solid triangular marks this bar drew before (Ed
+//!    device-gates the swap).
 //!
 //! Row budget ([`cap_weight`], [`CAP_GAP`]) and colour rules (armed latch =
 //! selected-pill amber; `Del` = scheme `error`) are stated where enforced.
@@ -36,7 +40,7 @@ use frust::authoring::{
 };
 use frust::{
     Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, IconSource,
-    Padding, SizedBox, Theme, flexible, icon, inflexible, text,
+    Padding, SizedBox, Theme, flexible, icon, icons, inflexible, text,
 };
 
 use crate::ui::palette::{Palette, active_theme};
@@ -93,39 +97,14 @@ const FALLBACK_CAP_WIDTH: f64 = 32.0;
 /// the shared palette's own `--amber-border` derivation, at the same strength.
 const DANGER_BORDER_ALPHA: f32 = 0.35;
 
-/// The side length of the square design box the arrow marks are authored
-/// against — Material Symbols' own 24, matching every other vector in the app.
-const ICON_DESIGN_BOX: f64 = 24.0;
-
-/// The `↑` cap's mark: a solid triangular head over a shaft. The head and the
-/// shaft **touch** rather than overlap, so a non-zero fill cannot punch a hole.
-pub const ARROW_UP_MARK: IconSource = IconSource {
-    d: "M 12 3 L 19 11 H 5 Z M 10.5 11 h 3 v 10 h -3 Z",
-    design: ICON_DESIGN_BOX,
-};
-/// The `↓` cap's mark — see [`ARROW_UP_MARK`].
-pub const ARROW_DOWN_MARK: IconSource = IconSource {
-    d: "M 12 21 L 5 13 H 19 Z M 10.5 3 h 3 v 10 h -3 Z",
-    design: ICON_DESIGN_BOX,
-};
-/// The `←` cap's mark — see [`ARROW_UP_MARK`].
-pub const ARROW_LEFT_MARK: IconSource = IconSource {
-    d: "M 3 12 L 11 5 V 19 Z M 11 10.5 h 10 v 3 h -10 Z",
-    design: ICON_DESIGN_BOX,
-};
-/// The `→` cap's mark — see [`ARROW_UP_MARK`].
-pub const ARROW_RIGHT_MARK: IconSource = IconSource {
-    d: "M 21 12 L 13 5 V 19 Z M 3 10.5 h 10 v 3 h -10 Z",
-    design: ICON_DESIGN_BOX,
-};
-
-/// The arrow mark a key draws, or `None` for a text-labelled cap.
+/// The arrow mark a key draws, or `None` for a text-labelled cap. The catalog's
+/// own [`frust::icons`] arrow pair — see the [module docs](self)'s contract 3.
 fn arrow_mark(key: BarKey) -> Option<IconSource> {
     match key {
-        BarKey::Up => Some(ARROW_UP_MARK),
-        BarKey::Down => Some(ARROW_DOWN_MARK),
-        BarKey::Left => Some(ARROW_LEFT_MARK),
-        BarKey::Right => Some(ARROW_RIGHT_MARK),
+        BarKey::Up => Some(icons::ARROW_UPWARD),
+        BarKey::Down => Some(icons::ARROW_DOWNWARD),
+        BarKey::Left => Some(icons::ARROW_BACK),
+        BarKey::Right => Some(icons::ARROW_FORWARD),
         _ => None,
     }
 }
@@ -254,7 +233,8 @@ fn key_cap<State: 'static>(
 
 /// A filled rect behind one child, with an optional top hairline — the
 /// bar's band and (fill only) the group separators. Hand-rolled rather than
-/// [`super::chrome`]'s `term_box`, which strokes a full rounded border.
+/// `frust::container`, which strokes a full rounded border rather than one
+/// square top edge.
 struct BarBackdropView<State: 'static> {
     fill: Color,
     hairline: Color,

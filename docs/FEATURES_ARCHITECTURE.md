@@ -43,6 +43,24 @@ including `manage_sheet`; `settings`: including `groups`; `terminal`: including
 `Screen`/`State`, the `Component` impl, and action wiring). `pieces.rs` no longer exists in any
 feature.
 
+**The `chrome.rs` catch-all pattern is gone.** `connect`, `sessions` and `settings` no longer carry
+a feature-local `chrome` module at all: every box shape a widget needs — card accent, pane pills, a
+`.conn-row` rule, a dashed outline — composes `frust::container`/`colored_box`/`divider` directly,
+and a Glyph-catalog counterpart (`frust_glyph::radio`, the trust selector's live row) wins wherever
+one exists. `settings` keeps exactly one local decorated-fill primitive, `rows::rounded_fill`, for
+three gaps `frust::container` still doesn't reach: a paint-only *bleed* widening a fill past its
+child's own box (`Container`/`Padding` clamp a negative inset), a zero-radius fill that paints as a
+plain rect rather than a rounded one (so a paint-recording probe hunting the largest *rounded* rect
+— `tests/navigation_motion.rs`'s leaving-page tracker — can't mistake this screen's full-bleed tone
+for it), and a bottom hairline painted as a paint-time overlap rather than added layout height
+(`widgets::pickers`' rows must stay one uniform line tall whether or not they rule). `terminal`
+keeps a narrower `chrome` module too, scoped down to what has no frust counterpart at all: the
+link-status strip, the animated fullscreen card stage, its own text pipeline, and a wrapping row
+(`frust::Flex` has none). Everything else that module used to own — the pill/pane-item/status-row
+box and the pane-title's single-line ellipsis — dissolved the same way, onto
+`frust::container`/`.border_style(BorderStyle::Dashed(..))` and
+`TextView::max_lines(1).overflow(TextOverflow::Ellipsis)`.
+
 A `widgets/` file importing its own page's `Actions`/state type is a sanctioned same-layer,
 same-feature back-edge, not a violation, and it happens in two forms. **Overlay-host bodies** — a
 sheet or dialog widget pushed as a page of the root overlay host, outside the screen's own

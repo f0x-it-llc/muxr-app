@@ -17,7 +17,7 @@
 //! would clip it away past `1.0x` scale. [`RING_SLOT`] is sized to the
 //! ring's extent at [`RING_SCALE_MAX`] instead.
 //!
-//! The ring is a `success`-hued hairline border ([`super::chrome::panel`]),
+//! The ring is a `success`-hued hairline border (a plain `frust::container`),
 //! not `circular_progress` — that widget inks from the theme's `primary`
 //! (brand amber here, never a health signal) and has the wrong stroke shape.
 //!
@@ -33,12 +33,12 @@ use frust::authoring::{
 use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
     Align, Alignment, AnyView, Curve, FlexChild, Get, RwSignal, Set, SizedBox, Stack, Timing, any,
-    inflexible,
+    colored_box, container, inflexible,
 };
 
-use super::chrome::{RADIUS_FULL, panel, swatch};
 use super::pages::SessionsState;
 use super::widgets::DOT;
+use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV, HAIRLINE, RADIUS_FULL};
 
 /// How long one ping ring takes to expand and fade out.
 const RING_MS: f64 = 1600.0;
@@ -196,6 +196,24 @@ fn rolled(from: u32, to: u32, elapsed_ms: f64) -> Option<u32> {
     Some((from + (to - from) * progress).round() as u32)
 }
 
+/// The success dot's own shape and glow, generic over `State` so the
+/// glow-radius regression test below can paint it standalone rather than
+/// stand up a full `SessionsState`. [`pinging_dot`] fixes `State` to
+/// `SessionsState`.
+///
+/// [`RADIUS_FULL`] is a deliberately unclamped "fully rounded" sentinel —
+/// `frust_widgets::Container::glow` is what clamps it to the fill's own
+/// rendered corner before it reaches `draw_shadow`
+/// (`the_dots_glow_radius_clamps_to_the_dot_not_the_radius_full_sentinel`
+/// pins that clamp from this call site).
+fn glow_dot<State: 'static>(ink: Color) -> impl View<State> {
+    colored_box::<State>()
+        .size(DOT, DOT)
+        .radius(RADIUS_FULL)
+        .fill(ink)
+        .glow(ink, GLOW_STD_DEV, GLOW_SPREAD)
+}
+
 /// The strip's success dot with the ping ring expanding around it: a
 /// [`RING_SLOT`]-square cell, ring layer under the dot, both centered.
 ///
@@ -206,10 +224,7 @@ pub(super) fn pinging_dot(ring: Option<RingPose>, ink: Color) -> AnyView<Session
     any(
         SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)).child(Stack(vec![
             ring_layer(ring, ink),
-            any(Align(
-                Alignment::CENTER,
-                swatch(Size::new(DOT, DOT), ink, RADIUS_FULL).glow(ink),
-            )),
+            any(Align(Alignment::CENTER, glow_dot::<SessionsState>(ink))),
         ])),
     )
 }
@@ -227,12 +242,9 @@ fn ring_layer(pose: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
             Alignment::CENTER,
             AnimatedScale(
                 pose.scale,
-                panel(
-                    SizedBox::<SessionsState>(Some(DOT), Some(DOT)),
-                    Color::TRANSPARENT,
-                    RADIUS_FULL,
-                )
-                .border(ink),
+                container(SizedBox::<SessionsState>(Some(DOT), Some(DOT)))
+                    .border(ink, HAIRLINE)
+                    .radius(RADIUS_FULL),
             )
             .timing(ZERO),
         )),
@@ -341,5 +353,74 @@ mod tests {
             RING_SLOT >= widest,
             "a {RING_SLOT}px slot clips a ring drawn out to {widest}px"
         );
+    }
+
+    mod dot_glow_regression {
+        use frust::authoring::Point;
+        use frust_core::{FrameTime, RenderRoot};
+
+        use super::*;
+
+        /// A paint target recording only the shadow radii it sees — this dot
+        /// paints exactly one `draw_shadow` (the glow) and nothing else this
+        /// suite cares about.
+        #[derive(Default)]
+        struct ShadowRecorder {
+            radii: Vec<f64>,
+        }
+
+        impl PaintScene for ShadowRecorder {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn draw_shadow(
+                &mut self,
+                _origin: Point,
+                _size: Size,
+                radius: f64,
+                _std_dev: f64,
+                _color: Color,
+            ) {
+                self.radii.push(radius);
+            }
+        }
+
+        /// Regression for the frust-side `Container::glow` radius clamp: a
+        /// dot's `.radius(RADIUS_FULL)` (a deliberately unclamped "fully
+        /// rounded" sentinel) used to feed straight into `draw_shadow`,
+        /// ringing the dot in a dark blob far larger than the shape it was
+        /// supposed to halo — device-confirmed on the sessions strip. Paints
+        /// the exact same shape [`pinging_dot`]'s dot does and pins the
+        /// emitted glow radius to the dot's own clamped half-width plus
+        /// spread, never the raw sentinel.
+        #[test]
+        fn the_dots_glow_radius_clamps_to_the_dot_not_the_radius_full_sentinel() {
+            let ink = Color::from_rgb8(0x30, 0xd1, 0x5c);
+            let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+            let mut state = ();
+            root.rebuild(&mut |_state: &mut ()| any(glow_dot::<()>(ink)), &mut state);
+            root.layout(Size::new(DOT, DOT));
+            let mut scene = ShadowRecorder::default();
+            root.paint(&mut scene, FrameTime::ZERO);
+
+            assert_eq!(
+                scene.radii.len(),
+                1,
+                "exactly one glow — the dot's own: {:?}",
+                scene.radii
+            );
+            let expected = DOT / 2.0 + GLOW_SPREAD;
+            assert!(
+                (scene.radii[0] - expected).abs() < 1e-9,
+                "the dot's glow radius must clamp to DOT/2 + GLOW_SPREAD \
+                 ({expected}), not the RADIUS_FULL sentinel: got {:?}",
+                scene.radii
+            );
+            assert!(
+                scene.radii[0] < RADIUS_FULL,
+                "…and must never reach the unclamped RADIUS_FULL sentinel \
+                 ({RADIUS_FULL}): got {:?}",
+                scene.radii
+            );
+        }
     }
 }

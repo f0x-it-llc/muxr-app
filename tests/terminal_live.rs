@@ -979,13 +979,22 @@ fn a_closed_link_offers_the_only_thing_left_the_way_back_to_the_list() {
         "a session the server ended has nothing to retry"
     );
 
+    // `LINK_LEAVE`'s press is one line, `state.actions.app_nav.pop()`
+    // (`presentation::widgets::link_strip`) — the same `Nav::pop()` every
+    // bar `‹` in the app calls, which `tests/navigation_motion.rs` already
+    // proves pops an in-shell route end to end. What this harness *cannot*
+    // observe is where that pop landed: `Nav::pop()`/`Router::pop()` only
+    // **enqueue** an op on the outer `NavigatorController`
+    // (`crates/frust-widgets`'s nav module — "a queued-but-undrained op is
+    // not in it"), and this suite's `record_only` controller is never built
+    // as a live `navigator(...)` (mounting one would build a *second*
+    // terminal screen inside it, fighting the one under test — the module
+    // docs' whole reason for the split) — so `Nav::bar().meta` reads `None`
+    // whether or not the press fired at all. The tap itself is still the
+    // assertion that matters here: it must not panic reaching for a session
+    // the demo replay never had.
     h.tap_label(LINK_LEAVE);
     h.flush();
-    assert_eq!(
-        app_nav().bar().meta,
-        None,
-        "the terminal route came off the app's stack"
-    );
 }
 
 #[test]

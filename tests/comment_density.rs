@@ -191,12 +191,12 @@ struct AllowlistEntry {
 const ALLOWLIST: &[AllowlistEntry] = &[
     AllowlistEntry {
         path: "src/routes.rs",
-        cap_pct: 41.6,
-        reason: "slated for deletion by the routing-package adoption; entry dies with it",
+        cap_pct: 38.6,
+        reason: "contract-heavy nav adapter; shell/observer derivation",
     },
     AllowlistEntry {
         path: "src/features/connect/presentation/widgets/mod.rs",
-        cap_pct: 36.6,
+        cap_pct: 36.4,
         reason: "contract-heavy: the eight-piece stagger order and the splash parity contract \
                  live in this header",
     },
@@ -291,13 +291,13 @@ const ALLOWLIST: &[AllowlistEntry] = &[
     },
     AllowlistEntry {
         path: "src/features/terminal/presentation/widgets/pills.rs",
-        cap_pct: 26.9,
+        cap_pct: 25.9,
         reason: "contract-heavy for its size: short file, header on the shared chip/edit \
                  affordance shape",
     },
     AllowlistEntry {
         path: "src/features/settings/presentation/widgets/rows.rs",
-        cap_pct: 26.5,
+        cap_pct: 25.8,
         reason: "contract-heavy: documents the never-an-emoji mark rule and the defect it fixes",
     },
     AllowlistEntry {
@@ -397,7 +397,7 @@ mod scan_behavior {
     fn allowlisted_cap_looks_up_by_exact_relative_path() {
         assert_eq!(
             allowlisted_cap("src/routes.rs").map(|e| e.cap_pct),
-            Some(41.6)
+            Some(38.6)
         );
         assert!(allowlisted_cap("src/lib.rs").is_none());
     }

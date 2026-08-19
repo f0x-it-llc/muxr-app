@@ -13,25 +13,28 @@
 //! disabled state; the real gate is the caller's own guard, which raises the
 //! honest toast.
 
-use frust::authoring::Color;
+use frust::authoring::DashPattern;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexView,
-    GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult, RwSignal, Set,
-    SizedBox, any, button, flexible, inflexible, text, text_input,
+    Align, Alignment, AnyView, Axis, BorderStyle, ButtonStyle, CrossAxisAlignment, EdgeInsets,
+    FlexView, GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult,
+    RwSignal, Set, SizedBox, any, button, container, divider, flexible, inflexible, text,
+    text_input,
 };
 use frust_glyph::{glyph_dialog, show_glyph_dialog, toggle};
 
 use crate::AppState;
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
-use crate::features::settings::presentation::chrome::{RADIUS_FULL, panel};
 use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::features::settings::presentation::scramble::{self, ScramblePose};
+use crate::ui::paint::{DASH_OFF, DASH_ON};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
 
 use super::pickers::PICK_TITLE_GAP;
-use super::rows::{ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, column, h_gap, row, spacer};
+use super::rows::{
+    HAIRLINE, RADIUS_FULL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, column, h_gap, row, spacer,
+};
 
 /// `.token-top{margin-bottom:4px}`.
 const TOKEN_LINE_GAP: f64 = spacing::TIGHT;
@@ -157,12 +160,15 @@ fn token_row(
         any(meta),
     ];
     lines.extend(tail);
-    any(panel(
-        Padding(EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y), column(lines)),
-        Color::TRANSPARENT,
-        0.0,
-    )
-    .bottom_rule(colors.rule))
+    // No fill, so this composes as plain content over a trailing
+    // `frust::divider` — see `widgets::rows`' own doc.
+    any(column(vec![
+        any(Padding(
+            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+            column(lines),
+        )),
+        any(divider(colors.rule)),
+    ]))
 }
 
 /// `.token-scope` — the 9px pill naming what a token may do. Hand-composed
@@ -175,16 +181,14 @@ fn scope_chip(scope: TokenScope, colors: &Palette) -> AnyView<SettingsState> {
         TokenScope::ReadWrite => (colors.raised, colors.fg_muted, Some(colors.outline)),
         TokenScope::ReadOnly => (colors.cyan_faint, colors.cyan, None),
     };
-    let mut chip = panel(
-        Padding(
-            EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
-            text(scope.label()).style(inked(&theme.type_scale.label_small, ink)),
-        ),
-        fill,
-        RADIUS_FULL,
-    );
+    let mut chip = container(Padding(
+        EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
+        text(scope.label()).style(inked(&theme.type_scale.label_small, ink)),
+    ))
+    .fill(fill)
+    .radius(RADIUS_FULL);
     if let Some(border) = border {
-        chip = chip.border(border);
+        chip = chip.border(border, HAIRLINE);
     }
     any(chip)
 }
@@ -220,12 +224,13 @@ pub(in super::super) fn create_token_row(
             bottom: ADD_MARGIN_BOTTOM,
         },
         GestureDetector(
-            panel(
-                Padding(EdgeInsets::all(ADD_PAD), Align(Alignment::CENTER, label)),
-                Color::TRANSPARENT,
-                theme.shape.small,
-            )
-            .dashed_border(colors.outline),
+            container(Padding(
+                EdgeInsets::all(ADD_PAD),
+                Align(Alignment::CENTER, label),
+            ))
+            .radius(theme.shape.small)
+            .border(colors.outline, HAIRLINE)
+            .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF))),
         )
         .on_tap(|state: &mut SettingsState| pages::open_create_token_dialog(state)),
     ))
@@ -393,14 +398,12 @@ pub(in super::super) fn secret_reveal_sheet(
         any(SizedBox::<AppState>(None, Some(PICK_TITLE_GAP))),
         any(text(minted.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
         any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
-        any(panel(
-            Padding(
-                EdgeInsets::all(ROW_PAD_X),
-                text(secret).style(inked(&theme.type_scale.title_small, colors.fg)),
-            ),
-            colors.raised,
-            theme.shape.small,
-        )),
+        any(container(Padding(
+            EdgeInsets::all(ROW_PAD_X),
+            text(secret).style(inked(&theme.type_scale.title_small, colors.fg)),
+        ))
+        .fill(colors.raised)
+        .radius(theme.shape.small)),
         any(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
         any(button(COPY_SECRET_LABEL, move |_state: &mut AppState| {
             let copied = frust_clipboard::Clipboard::set_text_sensitive(&copy_secret).is_ok();

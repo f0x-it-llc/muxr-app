@@ -1,79 +1,116 @@
-use frust::{AnyView, NavigatorController, Stack, any, icons, navigator};
+//! The app's root composition, and the shell page the route table hangs the
+//! three bar-bearing routes off.
+
+use frust::{AnyView, Location, NavigatorController, Stack, any, icons, navigator};
+use frust_glyph::{TitleDirection, TitlePosition, app_bar};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::terminal::presentation::pages::open_terminal_menu;
-use crate::routes::{BarAction, BarDirection, BarLeading, Nav, SETTINGS_ROUTE};
+use crate::routes::{
+    BarAction, BarDirection, BarLeading, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
+    route_transition,
+};
 use crate::ui::toasts::toast_layer;
-use crate::ui::topbar::muxr_topbar;
+use crate::ui::topbar::{BACK_LABEL, bar_icon, brand_leading};
 
 const SETTINGS_LABEL: &str = "Settings";
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 
-/// The app's entire root content: a full-height navigator, the top bar
-/// floating over it, the app-wide toast layer over that, and `overlay` stacked
-/// over everything when there is one.
+/// The app's entire root content: the outer navigator, the app-wide toast layer
+/// over it, and `overlay` (the cold-start splash) stacked over both.
 ///
-/// # Why the bar floats instead of sharing a band with the navigator
-///
-/// Floating the bar over a full-height navigator (rather than sharing a
-/// layout band, where the bar's visibility becomes a layout fact that shoves
-/// the page during its own transition) means a page's box never depends on
-/// which route is on top; the bar instead animates its own entrance and exit
-/// ([`crate::ui::topbar`]) in the page transition's own Glyph timings. The
-/// cost is that a bar-bearing page owes itself the top clearance the band
-/// used to hand it — one shared wrapper,
-/// [`topbar_clearance`](crate::ui::topbar::topbar_clearance), so the three
-/// such screens cannot drift (`/`, bar-less, wraps nothing).
+/// The bar is no slot here — it belongs to [`shell_page`]'s scaffold, one page
+/// down, which is what keeps it off every in-shell navigation. `Stack`
+/// reconciles positionally and a child that changes index is torn down, so the
+/// two fixed children keep their indices for the process lifetime and only the
+/// overlay's pod is created and destroyed.
 pub fn root_view(
     controller: &NavigatorController<AppState>,
     initial: impl Fn() -> AnyView<AppState> + 'static,
     overlay: Option<AnyView<AppState>>,
-    nav: &Nav,
-    connection: &ConnectionController,
 ) -> AnyView<AppState> {
     let mut children = vec![
-        any(navigator(controller, initial)),
-        shell_bar(nav, connection),
+        any(navigator(controller, initial).root_route(Location::parse(CONNECT_LOCATION))),
         toast_layer(),
     ];
     children.extend(overlay);
     any(Stack(children))
 }
 
-fn shell_bar(nav: &Nav, connection: &ConnectionController) -> AnyView<AppState> {
-    let state = nav.bar();
-    let reverse = state.direction == BarDirection::Back;
-    let Some(meta) = state.meta else {
-        return any(muxr_topbar::<AppState>("").hidden(true).reverse(reverse));
-    };
+/// The shell route's own page: the app bar over the inner navigator the three
+/// bar-bearing routes land on.
+///
+/// Placed once and then **retained** (an in-shell navigation issues no outer
+/// op at all), so everything route-dependent is derived here per rebuild from
+/// the inner navigator's own published state. That navigator's **root** is the
+/// landing route of the navigation that placed this page: a back press there
+/// finds nothing to pop and falls through to the outer navigator, leaving the
+/// shell rather than popping to a placeholder under the landing screen.
+pub(crate) fn shell_page(
+    inner: &NavigatorController<AppState>,
+    connection: &ConnectionController,
+) -> AnyView<AppState> {
+    let nav = app_nav();
+    let bar = shell_bar(&nav, connection);
+    let landing = nav.clone();
+    let mut pages = navigator(inner, move || landing.landing_page()).transition(route_transition());
+    if let Some(route) = nav.landing_route() {
+        pages = pages.root_route(route);
+    }
+    any(frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar))
+}
 
-    let mut bar = muxr_topbar::<AppState>(meta.resolve_title(connection))
-        .reverse(reverse)
-        .hidden(state.fullscreen);
+/// The Glyph app bar for whatever route the inner navigator has on top.
+/// Titles [`TitlePosition::Center`] — this app's own design.
+///
+/// Two things resolve to the same absent slot: a route with no
+/// [`crate::routes::RouteMeta`], and the terminal screen's **fullscreen**
+/// request. Suppressing rather than hiding is the scaffold's own idiom —
+/// `app_bar_opt(None)` hands the body the bar's band, which is exactly what a
+/// fullscreen terminal is asking for.
+fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<AnyView<AppState>> {
+    let state = nav.bar();
+    let meta = state.meta?;
+    if state.fullscreen {
+        return None;
+    }
+
+    let direction = match state.direction {
+        BarDirection::Forward => TitleDirection::Forward,
+        BarDirection::Back => TitleDirection::Back,
+    };
+    let mut bar = app_bar::<AppState>(meta.resolve_title(connection))
+        .title_direction(direction)
+        .title_position(TitlePosition::Center);
     bar = match meta.leading {
-        BarLeading::Brand => bar,
+        BarLeading::Brand => bar.leading(brand_leading()),
         BarLeading::Back => {
             let nav = nav.clone();
-            bar.back(move |_state: &mut AppState| nav.pop())
+            bar.leading(any(bar_icon(
+                icons::CHEVRON_LEFT,
+                BACK_LABEL,
+                move |_state: &mut AppState| nav.pop(),
+            )))
         }
     };
-    bar = match meta.action {
+    let actions = match meta.action {
         Some(BarAction::Settings) => {
             let nav = nav.clone();
-            bar.action(
+            vec![any(bar_icon(
                 icons::SETTINGS,
                 SETTINGS_LABEL,
                 move |_state: &mut AppState| nav.push(SETTINGS_ROUTE),
-            )
+            ))]
         }
-        // Forward only: the terminal feature owns its own menu (its entries,
-        // its anchor rect and every action they run), exactly as `/settings`
-        // owns everything behind the `⚙`.
-        Some(BarAction::TerminalMenu) => {
-            bar.action(icons::MORE_VERT, TERMINAL_MENU_LABEL, open_terminal_menu)
-        }
-        None => bar,
+        // Forward only: the terminal feature owns its own menu — its entries,
+        // its anchor rect and every action they run.
+        Some(BarAction::TerminalMenu) => vec![any(bar_icon(
+            icons::MORE_VERT,
+            TERMINAL_MENU_LABEL,
+            open_terminal_menu,
+        ))],
+        None => Vec::new(),
     };
-    any(bar)
+    Some(any(bar.actions(actions)))
 }

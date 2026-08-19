@@ -3,11 +3,11 @@
 //! closing `Disconnect` action.
 
 use frust::{
-    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, flexible, inflexible, text,
+    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, divider, flexible,
+    inflexible, text,
 };
 use frust_glyph::toggle;
 
-use crate::features::settings::presentation::chrome::panel;
 use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
@@ -54,12 +54,15 @@ pub(super) fn bell_notifications_row(
         inflexible(toggle_view),
     ];
 
-    let box_ = panel(
-        Padding(EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y), row(children)),
-        frust::authoring::Color::TRANSPARENT,
-        0.0,
-    )
-    .bottom_rule(colors.rule);
+    // No fill, so this composes as plain content over a trailing
+    // `frust::divider` — see `widgets::rows`' own doc.
+    let box_ = column(vec![
+        any(Padding(
+            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+            row(children),
+        )),
+        any(divider(colors.rule)),
+    ]);
 
     any(box_)
 }

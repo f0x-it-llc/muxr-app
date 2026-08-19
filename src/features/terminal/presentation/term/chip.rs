@@ -19,8 +19,11 @@
 //! `request_redraw` is the mechanism.
 //!
 //! Both marks are filled vector paths (the "chrome icons are vectors" rule):
-//! [`CLOSE`](frust::icons::CLOSE) from the vendored set, and [`COPY_MARK`]
-//! authored here because the set carries no copy glyph.
+//! [`CLOSE`](frust::icons::CLOSE) and [`CONTENT_COPY`](frust::icons::CONTENT_COPY),
+//! both from the vendored set — this module used to author its own copy glyph
+//! (the set once carried none); the catalog's `content_copy` is a two-outlined-
+//! sheets mark, not a transcription of the solid two-filled-sheets shape drawn
+//! here before (Ed device-gates the swap).
 //!
 //! **The clipboard write is injected.** [`CopySink`] is the seam a test
 //! substitutes: the default ([`system_clipboard_sink`]) is
@@ -84,18 +87,6 @@ const BORDER_W: f64 = 1.0;
 /// needs to read as floating over a busy grid.
 const SHADOW_BLUR: f64 = 8.0;
 const SHADOW_ALPHA: f32 = 0.45;
-
-/// The side length of the square design box [`COPY_MARK`] is authored against —
-/// Material Symbols' own 24, matching every other vector in the app.
-const ICON_DESIGN_BOX: f64 = 24.0;
-
-/// The copy mark: a filled sheet with a second sheet's L-shaped edge behind it.
-/// Authored here — the vendored `frust::icons` set carries no copy glyph. The
-/// two subpaths are **disjoint**, so the mark reads as two sheets, not one blob.
-pub const COPY_MARK: IconSource = IconSource {
-    d: "M 3 7 h 3 v 11 h 11 v 3 H 3 Z M 9 3 h 12 v 13 H 9 Z",
-    design: ICON_DESIGN_BOX,
-};
 
 /// What a successful copy says.
 pub const COPIED_TOAST: &str = "Copied to clipboard";
@@ -234,7 +225,7 @@ impl<State: 'static> View<State> for CopyChipView {
             muted: self.muted,
             label_style: self.label.clone(),
             label: None,
-            copy_mark: mark(COPY_MARK, COPY_ICON),
+            copy_mark: mark(icons::CONTENT_COPY, COPY_ICON),
             close_mark: mark(icons::CLOSE, CLOSE_ICON),
             pressed: None,
             copies: 0,
@@ -563,7 +554,10 @@ mod tests {
 
     #[test]
     fn both_marks_are_vectors_that_parse_inside_their_design_box() {
-        for (name, source) in [("COPY_MARK", COPY_MARK), ("CLOSE", icons::CLOSE)] {
+        for (name, source) in [
+            ("CONTENT_COPY", icons::CONTENT_COPY),
+            ("CLOSE", icons::CLOSE),
+        ] {
             let path = BezPath::from_svg(source.d).unwrap_or_else(|e| panic!("{name}: {e}"));
             let bounds = path.bounding_box();
             assert!(bounds.x0 >= 0.0 && bounds.y0 >= 0.0, "{name}: {bounds:?}");
@@ -574,17 +568,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_copy_marks_two_sheets_do_not_merge_into_one_blob() {
-        // The back sheet's L-shaped arms must clear the front sheet's box, or the
-        // mark reads as a single filled rectangle at 16px. Sampled by winding
-        // rather than by bounding box — the boxes overlap; the fills must not.
-        let path = BezPath::from_svg(COPY_MARK.d).expect("parses");
-        let filled = |x: f64, y: f64| path.winding(Point::new(x, y)) != 0;
-        assert!(filled(4.5, 12.0), "the back sheet's vertical arm is inked");
-        assert!(filled(12.0, 19.5), "…and its horizontal one");
-        assert!(filled(15.0, 9.0), "the front sheet is inked");
-        assert!(!filled(7.5, 12.0), "a gap between the two sheets");
-        assert!(!filled(15.0, 17.0), "…and below the front one");
-    }
+    // The disjoint-sheets winding check this module used to carry for its own
+    // hand-authored copy mark no longer applies to `icons::CONTENT_COPY`'s
+    // different path (an outlined pair, not two filled sheets) — the catalog's
+    // own generated-icon coverage (`frust-widgets`' `icon.rs`) already asserts
+    // every entry, this one included, parses and fits its design box.
 }

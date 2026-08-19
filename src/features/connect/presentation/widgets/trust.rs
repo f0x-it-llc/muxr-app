@@ -2,13 +2,12 @@
 
 use std::sync::Arc;
 
-use frust::authoring::{Color, Size};
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Get, Padding, Theme, any, flexible, inflexible, text,
+    AnyView, EdgeInsets, GestureDetector, Get, Padding, Stack, Theme, any, colored_box, flexible,
+    inflexible, text,
 };
-use frust_glyph::{BadgeVariant, badge, toggle};
+use frust_glyph::{BadgeVariant, badge, radio, toggle};
 
-use super::super::chrome::{radio_semantics, swatch};
 use super::pairing::pairing_chrome;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
@@ -24,6 +23,16 @@ const RADIO_RING_BORDER: f64 = 1.5;
 /// The selected dot's inset inside the ring; the dot itself is
 /// `RADIO_RING - 2 * RADIO_DOT_INSET` wide.
 const RADIO_DOT_INSET: f64 = 3.0;
+
+/// A conservative floor for [`full_row_press`]'s background:
+/// [`RADIO_RING`] plus [`RADIO_PAD_Y`] on each edge — may fall short of an
+/// unusually tall label's own (unknown-here) shaped height, cosmetic only.
+///
+/// This app's other full-bleed targets clear the 44px platform floor
+/// (`qr_affordance::MIN_TAP_TARGET`/`saved::DELETE_TARGET`/
+/// `panes::PANE_EDIT_TAP_BOX`); this row's mock pins a slimmer ~34px
+/// instead, preserved here — growing to 44px is Ed's call, not this fix's.
+const ROW_PRESS_FLOOR: f64 = 2.0 * RADIO_PAD_Y + RADIO_RING;
 
 /// The remember row's copy — also the toggle's accessibility label, so the
 /// switch announces the thing the row is about rather than "switch".
@@ -90,10 +99,13 @@ pub fn remember_row<S: 'static>(
 /// nothing behind it. When neither row owns the current mode, both read
 /// unselected and a caption names where the pin came from.
 ///
-/// Hand-composed rather than `frust::radio`: `RadioWidget` shapes its label
-/// at `TextStyle::default()` and fixes its ring/dot metrics, neither
-/// reachable from the design's row; `chrome::radio_semantics` contributes
-/// the `Role::RadioButton` node the composition would otherwise lose.
+/// The live row renders through [`frust_glyph::radio`], whose ring/dot
+/// geometry ([`RADIO_RING`]/[`RADIO_RING_BORDER`]/[`RADIO_DOT_INSET`]/
+/// [`RADIO_GAP`]) was transcribed *from* this row (see that widget's own
+/// module docs), so the swap-in matches pixel-for-pixel. The splash's inert
+/// copy still hand-composes its ring+dot from [`frust::colored_box`] (see
+/// [`radio_dot`]): `frust_glyph::radio` always wires a working press and a
+/// `Role::RadioButton` node, which the splash's static art must never carry.
 fn trust_selector<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Live>) -> AnyView<S> {
     let selected = live.map_or(TrustMode::System, |live| live.controller.trust_mode.get());
     let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS
@@ -124,7 +136,9 @@ fn trust_option_label(mode: TrustMode) -> &'static str {
 }
 
 /// The ring, the label, and — on the risky posture — a trailing warning
-/// chip, pressable across its whole width.
+/// chip. Live, the ring+label pair is one [`frust_glyph::radio`] (its own
+/// node and press untouched), but the row's *press* target is the whole
+/// padded row via [`full_row_press`] — see that function's docs.
 fn trust_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -133,19 +147,22 @@ fn trust_row<S: 'static>(
     live: Option<&Live>,
 ) -> AnyView<S> {
     let label = trust_option_label(mode);
-    let option = row::<S>(vec![
-        inflexible(radio_dot::<S>(colors, selected)),
-        inflexible(h_gap::<S>(RADIO_GAP)),
-        inflexible(any(
-            text(label).style(inked(&theme.type_scale.body_medium, colors.fg))
-        )),
-    ]);
-    // The `Role::RadioButton` node covers the ring and label only, so the
-    // chip keeps its own `Role::Status` node — a leaf radio around the whole
-    // row would swallow it.
     let option: AnyView<S> = match live {
-        None => any(option),
-        Some(_) => any(radio_semantics(option, label, selected)),
+        // Splash: static art with no recognizer and no node — nothing to operate.
+        None => any(row::<S>(vec![
+            inflexible(radio_dot::<S>(colors, selected)),
+            inflexible(h_gap::<S>(RADIO_GAP)),
+            inflexible(any(
+                text(label).style(inked(&theme.type_scale.body_medium, colors.fg))
+            )),
+        ])),
+        Some(live) => {
+            let controller = Arc::clone(&live.controller);
+            any(radio::<S, _>(selected, move |_state: &mut S| {
+                controller.select_trust_mode(mode)
+            })
+            .label(label))
+        }
     };
     // The flexible option pushes the chip to the trailing edge.
     let mut items = vec![flexible(1, option)];
@@ -156,40 +173,70 @@ fn trust_row<S: 'static>(
         items.push(inflexible(h_gap::<S>(spacing::MD)));
         items.push(inflexible(any(badge("insecure", BadgeVariant::Warning))));
     }
-    let body = Padding(EdgeInsets::symmetric(0.0, RADIO_PAD_Y), row::<S>(items));
+    let content = any(Padding(
+        EdgeInsets::symmetric(0.0, RADIO_PAD_Y),
+        row::<S>(items),
+    ));
     match live {
-        // Splash: static art with no recognizer and no node — nothing to operate.
-        None => any(body),
+        // Splash: inert art — no press layer to add.
+        None => content,
         Some(live) => {
             let controller = Arc::clone(&live.controller);
-            // Pressable across the whole row, chip included.
-            any(GestureDetector(body)
-                .on_tap(move |_state: &mut S| controller.select_trust_mode(mode)))
+            full_row_press(content, move |_state: &mut S| {
+                controller.select_trust_mode(mode)
+            })
         }
     }
 }
 
+/// Wraps `content` (a padded [`trust_row`]) in a full-row press target
+/// covering what `content`'s own live [`frust_glyph::radio`] does **not**
+/// — chip, gap, [`RADIO_PAD_Y`] gutter — without `radio` firing twice.
+///
+/// Not a `GestureDetector` around `content`: it always forwards to its
+/// child *and* fires its own `on_tap` regardless of the child's own
+/// result, so it would double-fire on `radio`'s own bounds (the
+/// "siblings, not nested" hazard `pills::pill` also guards against).
+/// Instead `content` and an invisible background are [`Stack`] siblings,
+/// topmost-first hit-tested: a tap inside `radio`'s own bounds is
+/// `Handled` there and never reaches the background; every other tap
+/// falls through as `Ignored` and reaches it instead. Exactly one fires,
+/// by construction — see `full_row_press_mechanism` below.
+/// [`ROW_PRESS_FLOOR`] sizes the background's own height.
+fn full_row_press<S: 'static>(
+    content: AnyView<S>,
+    on_tap: impl Fn(&mut S) + 'static,
+) -> AnyView<S> {
+    let background =
+        GestureDetector(colored_box::<S>().size(f64::INFINITY, ROW_PRESS_FLOOR)).on_tap(on_tap);
+    any(Stack(vec![any(background), content]))
+}
+
 /// A 16px ring whose selected state re-inks it amber and drops an inset amber
-/// dot into it.
+/// dot into it — the splash's inert copy of [`frust_glyph::radio`]'s own
+/// art (see [`trust_selector`]'s docs); never used for the live row.
 fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
-    let ring_size = Size::new(RADIO_RING, RADIO_RING);
     let ring_ink = if selected {
         colors.amber
     } else {
         colors.outline
     };
-    let ring = swatch(ring_size, Color::TRANSPARENT, RADIO_RING / 2.0)
-        .border(ring_ink)
-        .border_width(RADIO_RING_BORDER);
+    let ring = colored_box::<S>()
+        .size(RADIO_RING, RADIO_RING)
+        .radius(RADIO_RING / 2.0)
+        .border(ring_ink, RADIO_RING_BORDER);
     if !selected {
         return any(ring);
     }
     let dot = RADIO_RING - 2.0 * RADIO_DOT_INSET;
-    any(frust::Stack(vec![
+    any(Stack(vec![
         any(ring),
         any(Padding(
             EdgeInsets::all(RADIO_DOT_INSET),
-            swatch(Size::new(dot, dot), colors.amber, dot / 2.0),
+            colored_box::<S>()
+                .size(dot, dot)
+                .radius(dot / 2.0)
+                .fill(colors.amber),
         )),
     ]))
 }
@@ -233,5 +280,68 @@ mod tests {
         // A wider inset than the ring's own radius would be a negative-size layout panic.
         const { assert!(2.0 * RADIO_DOT_INSET < RADIO_RING) };
         const { assert!(RADIO_RING_BORDER < RADIO_RING / 2.0) };
+    }
+
+    // Colocated widget-mechanism test for `full_row_press`'s press-routing
+    // (screen behavior tests live in `tests/connect.rs`).
+    mod full_row_press_mechanism {
+        use super::*;
+        use frust_core::{InputEvent, PointerButton, PointerEvent, PointerPhase, RenderRoot};
+        use kurbo::{Point, Size};
+
+        #[derive(Default)]
+        struct Counts {
+            radio: u32,
+            background: u32,
+        }
+
+        // A labelless `radio` (hit box = [`RADIO_RING`]) wrapped by
+        // `full_row_press` — reproduces a naive nested detector's double-fire.
+        fn logic(_state: &mut Counts) -> AnyView<Counts> {
+            let radio_view = any(radio::<Counts, _>(false, |state: &mut Counts| {
+                state.radio += 1;
+            }));
+            full_row_press(radio_view, |state: &mut Counts| {
+                state.background += 1;
+            })
+        }
+
+        fn dispatch(
+            root: &mut RenderRoot<Counts, AnyView<Counts>>,
+            state: &mut Counts,
+            phase: PointerPhase,
+            x: f64,
+            y: f64,
+        ) {
+            root.event(
+                state,
+                &InputEvent::Pointer(PointerEvent {
+                    phase,
+                    position: Point::new(x, y),
+                    button: PointerButton::Primary,
+                }),
+            );
+        }
+
+        fn tap(root: &mut RenderRoot<Counts, AnyView<Counts>>, state: &mut Counts, x: f64, y: f64) {
+            dispatch(root, state, PointerPhase::Down, x, y);
+            dispatch(root, state, PointerPhase::Up, x, y);
+        }
+
+        #[test]
+        fn radio_and_background_never_both_fire_for_the_same_tap() {
+            let mut root: RenderRoot<Counts, AnyView<Counts>> = RenderRoot::new();
+            let mut state = Counts::default();
+            root.rebuild(&mut logic, &mut state);
+            root.layout(Size::new(400.0, 200.0));
+
+            tap(&mut root, &mut state, 4.0, 4.0);
+            assert_eq!(state.radio, 1, "a tap on the ring fires radio exactly once");
+            assert_eq!(state.background, 0, "…never also the background");
+
+            tap(&mut root, &mut state, 300.0, 4.0);
+            assert_eq!(state.radio, 1, "the off-radio tap must not reach radio");
+            assert_eq!(state.background, 1, "…and fires the background once");
+        }
     }
 }

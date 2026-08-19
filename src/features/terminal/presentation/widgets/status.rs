@@ -3,18 +3,16 @@
 
 use std::rc::Rc;
 
-use frust::authoring::text::LineHeight;
+use frust::authoring::text::{LineHeight, TextOverflow};
 use frust::{
     Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Stack, any,
-    flexible, inflexible,
+    container, flexible, icons, inflexible, text,
 };
 
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 
-use super::super::chrome::{
-    EXPAND_SIZE, FULLSCREEN_EXIT, FULLSCREEN_EXPAND, clipped_label, expand_button, term_box,
-};
+use super::super::chrome::{EXPAND_SIZE, expand_button};
 use super::card::CardInk;
 use super::util::{h_gap, row, sized};
 
@@ -67,9 +65,9 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     title_style.line_height = LineHeight::Absolute(TITLE_LINE_HEIGHT);
 
     let (mark, label) = if fullscreen {
-        (FULLSCREEN_EXIT, COLLAPSE_LABEL)
+        (icons::FULLSCREEN_EXIT, COLLAPSE_LABEL)
     } else {
-        (FULLSCREEN_EXPAND, EXPAND_LABEL)
+        (icons::FULLSCREEN_EXPAND, EXPAND_LABEL)
     };
     // `.expand-btn.on{...}` — the same trio the `:hover` state uses, which a
     // touch screen has no notion of.
@@ -91,28 +89,28 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     let press_band = GestureDetector(SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)))
         .on_tap(move |state: &mut State| on_toggle(state));
 
-    any(term_box(
-        row(vec![
-            flexible(
-                1,
-                Padding(
-                    EdgeInsets {
-                        left: STATUS_PAD_LEFT,
-                        top: STATUS_PAD_TOP,
-                        right: 0.0,
-                        bottom: STATUS_PAD_TOP,
-                    },
-                    clipped_label(title, title_style),
-                ),
+    any(container(row(vec![
+        flexible(
+            1,
+            Padding(
+                EdgeInsets {
+                    left: STATUS_PAD_LEFT,
+                    top: STATUS_PAD_TOP,
+                    right: 0.0,
+                    bottom: STATUS_PAD_TOP,
+                },
+                text(title)
+                    .style(title_style)
+                    .max_lines(1)
+                    .overflow(TextOverflow::Ellipsis),
             ),
-            h_gap(spacing::SM),
-            inflexible(Stack(vec![any(press_band), any(button)])),
-            // Trailing padding as a spacer — the button column owns the vertical padding.
-            h_gap(STATUS_PAD_RIGHT),
-        ]),
-        ink.head,
-        0.0,
-    ))
+        ),
+        h_gap(spacing::SM),
+        inflexible(Stack(vec![any(press_band), any(button)])),
+        // Trailing padding as a spacer — the button column owns the vertical padding.
+        h_gap(STATUS_PAD_RIGHT),
+    ]))
+    .fill(ink.head))
 }
 
 #[cfg(test)]

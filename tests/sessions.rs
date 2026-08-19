@@ -12,9 +12,11 @@
 //! session guard.
 //!
 //! No top bar is mounted (that's shell chrome now, `tests/navigation_motion.rs`'
-//! job); this suite only owes the negative, that the screen grew none back —
-//! it still reserves the bar's clearance band, so every geometric probe here is
-//! relative rather than absolute.
+//! job, mounted through the real shell scaffold that reserves the bar's own
+//! band); this suite only owes the negative, that the screen grew no bar of
+//! its own back — this screen reserves no clearance either any more (the
+//! scaffold's `app_bar` slot owns that in the real app), so every geometric
+//! probe here is relative rather than absolute.
 //!
 //! Cards carry no buttons: a tap attaches, a long-press opens the management
 //! sheet. Every repository call is real async work on the UI-thread queue, so
@@ -633,20 +635,21 @@ fn a_card_tap_pushes_the_terminal_route_and_the_guard_still_applies() {
     // Sequential, not interleaved: each harness re-provides the app-scoped
     // connection controller, so only the most recently mounted one is the live
     // handle the route guard reads.
-    let (connected_depth, connected_rects) = tap_outcome(true);
+    let (connected_depth, _) = tap_outcome(true);
     let (guarded_depth, guarded_rects) = tap_outcome(false);
 
-    assert_eq!(connected_depth, 2, "a card tap pushes a page");
-    assert_eq!(guarded_depth, 2, "…and so does the bounce");
-    // The terminal placeholder is an app bar over centered text and paints no
-    // rounded chrome at all; the Connect screen the session guard bounces a
-    // disconnected attach to paints its eight pieces (mark tile, badge, two
-    // fields, the CTA). That gap is what identifies *which* route the push
-    // resolved to, without either count being hardcoded.
-    assert!(
-        connected_rects < guarded_rects,
-        "a connected tap lands on /terminal ({connected_rects} rects) while a \
-         disconnected one is bounced to Connect ({guarded_rects} rects)"
+    // `/terminal` resolves through the shell page, and only a route inside the
+    // shell places that scaffold — so the outer op identifies which route the
+    // push resolved to as exactly as any pixel would.
+    assert_eq!(connected_depth, 2, "a card tap places the shell");
+    // The bounce lands on the route the outer navigator's root already is, so
+    // it applies **no** op: pushing there would stack a second copy of that
+    // page over the live one. The whole observable is that the frame the tap
+    // started on is still the frame.
+    assert_eq!(guarded_depth, 1, "…and a bounced one pushes nothing");
+    assert_eq!(
+        guarded_rects, 0,
+        "…leaving the frame it was tapped on untouched"
     );
 }
 
