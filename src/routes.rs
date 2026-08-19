@@ -18,7 +18,9 @@
 //! `Arc<ConnectionController>` **by capture, not context** — it must stay safe
 //! to consult from a press handler's owner-less call stack, and fires only at
 //! navigation time (a connection dropping mid-screen does not reactively bounce
-//! it back).
+//! it back). It guards the shell's whole subtree and bounces *outside* it, so a
+//! bounce taken with the scaffold on the stack **unwinds** it rather than
+//! stacking Connect over a live navigator ([`Nav::unwind_shell`]).
 //!
 //! **One router, one handle.** [`Router`]/[`NavigatorController`] are
 //! `Rc`-backed (neither `Send` nor `Sync`), so the router cannot be threaded
@@ -219,6 +221,11 @@ pub struct Nav {
     /// self-invalidates on the very publish that makes the stack authoritative
     /// (frust's own `Router` keeps the same note for the same reason).
     pending_shell: Rc<Cell<Option<u64>>>,
+    /// The same note for the opposite op — the generation at which this handle
+    /// queued the shell page's **removal** ([`Self::unwind_shell`]), read first
+    /// by [`Self::shell_is_placed`] so a navigation back into the shell on that
+    /// same frame places a fresh scaffold rather than aiming at a dying one.
+    pending_unwind: Rc<Cell<Option<u64>>>,
 }
 
 /// A `Send + Sync` handle to just the bar's fullscreen flag — see
@@ -242,51 +249,74 @@ impl Nav {
     /// An in-shell push lands on the **inner** navigator and issues no outer op
     /// at all (frust's shell keep rule), carrying that navigator's default
     /// [`route_transition`] slide. The one push this handle applies itself is
-    /// the one that *places* the shell page, because the shell page needs
-    /// [`PushOptions`] the router builds no seam for: the Glyph slide, plus
-    /// [`BackPolicy::DismissAnimated`] and a freshly minted dismiss cell (the
-    /// back-confirm seam — see the module docs and [`sessions_back_signal`]).
+    /// the one that *places* the shell page — see
+    /// [`place_shell`](Self::place_shell) for the [`PushOptions`] the router
+    /// builds no seam for.
     pub fn push(&self, location: &str) {
         self.navigate(location, Verb::Push);
     }
 
     /// Reset the stack to `location`'s matched chain (replace semantics) — a
     /// `go` is a new stack, not a deeper one.
-    ///
     /// Unlike [`push`](Self::push) this carries **no** transition: the app's two
     /// `go`s are the launch location the splash hands off over and Settings'
     /// disconnect, and neither may animate a page that is already on screen.
     ///
-    /// A `go` that would have to *place* the shell (a cold link straight into
-    /// the connected subtree) is left to the router, and so lands without the
-    /// dismiss cell above: a replace carries no back policy for the app to
-    /// attach one to. Latent rather than live — every `go` in the app today
-    /// resolves to `/`.
+    /// A `go` that has to *place* the shell takes [`push`](Self::push)'s own
+    /// placement minus that transition, so it carries the back policy and
+    /// dismiss cell a replace has no seam for — and the leave-is-a-question
+    /// contract needs. Latent: every `go` in the app today resolves to `/`.
     pub fn go(&self, location: &str) {
         self.navigate(location, Verb::Go);
     }
 
     /// Resolve `location` once — recording where it landed for [`param`](Self::param)
-    /// — and apply the chain: this handle places the shell page itself, the
-    /// router applies everything else (including the in-shell leaf its keep rule
-    /// puts on the inner navigator).
+    /// — and apply the chain: this handle places and unwinds the shell page
+    /// itself, the router applies everything else (including the in-shell leaf
+    /// its keep rule puts on the inner navigator).
+    ///
+    /// A resolution's page count *is* the shell question (bar-bearing routes
+    /// resolve through the scaffold too; `/`, the one route outside it,
+    /// resolves flat), so crossing that boundary either way is what this
+    /// decides — and a **bounce** (the guard answering with another path)
+    /// never pushes at all.
     fn navigate(&self, location: &str, verb: Verb) {
-        let mut shell_chain = None;
+        let mut chain = None;
+        let mut bounced = false;
         if let Resolution::Matched {
-            location, pages, ..
+            location: resolved,
+            pages,
+            ..
         } = self.router.resolve(location)
         {
-            *self.last_location.borrow_mut() = Some(location);
-            if pages.len() > 1 {
-                shell_chain = Some(pages);
-            }
+            bounced = resolved.path != Location::parse(location).path;
+            *self.last_location.borrow_mut() = Some(resolved);
+            chain = Some(pages);
         }
-        if let (Verb::Push, Some(pages)) = (verb, shell_chain)
-            && !self.shell_is_placed()
-        {
-            self.place_shell(pages);
+        let Some(pages) = chain else {
+            // An unmatched location: the router raises its own error page.
+            self.apply(location, verb);
+            return;
+        };
+        let placed = self.shell_is_placed();
+        if pages.len() > 1 {
+            if !placed {
+                self.place_shell(pages, verb);
+                return;
+            }
+        } else if placed {
+            self.unwind_shell();
+            return;
+        } else if bounced {
+            // Already there: `/` is the outer root and the only route outside
+            // the shell, so a push would stack a second Connect on it.
             return;
         }
+        self.apply(location, verb);
+    }
+
+    /// Hand `location` to the router — the navigations this handle adds nothing to.
+    fn apply(&self, location: &str, verb: Verb) {
         match verb {
             Verb::Push => self.router.push(location),
             Verb::Go => self.router.go(location),
@@ -303,7 +333,10 @@ impl Nav {
     /// navigator with nothing to pop and falls through to the outer one — which
     /// is exactly "leave the shell" — and the scaffold's own slide-in is the
     /// only animation the entry plays, since a root page is built, not pushed.
-    fn place_shell(&self, pages: Vec<ResolvedPage<AppState>>) {
+    /// Both verbs *push* it, retaining the page below: the shell's back
+    /// contract ends in a pop ([`Self::pop`]'s outer branch), which needs a
+    /// page beneath to land on. `verb` picks only the entrance.
+    fn place_shell(&self, pages: Vec<ResolvedPage<AppState>>, verb: Verb) {
         let controller = self.router.controller();
         let mut pages = pages.into_iter();
         let Some(shell) = pages.next() else {
@@ -311,15 +344,43 @@ impl Nav {
         };
         *self.landing.borrow_mut() = pages.next_back();
         let route = shell.location().clone();
+        let transition = match verb {
+            Verb::Push => route_transition(),
+            Verb::Go => TransitionSpec::NONE,
+        };
         controller.push_with_options(
             move || shell.build(),
             PushOptions::opaque()
-                .transition(route_transition())
+                .transition(transition)
                 .back(BackPolicy::DismissAnimated)
                 .dismiss_signal(publish_sessions_back_signal())
                 .route(route),
         );
         self.pending_shell.set(Some(controller.route_generation()));
+        self.pending_unwind.set(None);
+    }
+
+    /// Take the shell page back off the outer stack — what a navigation
+    /// resolving **outside** the shell subtree does while the scaffold is still
+    /// on it: the guard bouncing a push made after the connection dropped, and
+    /// Settings' disconnect `go`.
+    ///
+    /// Pop, not push. Connect landed *over* a live shell page would retain the
+    /// authenticated subtree beneath it — frust's keep rule answers "on the
+    /// stack", not "on top" — leaving the next in-shell navigation to land on
+    /// that hidden navigator, and a platform back press (no router navigation,
+    /// so no guard) to walk back into it. The pop is the op the confirmed
+    /// disconnect already applies ([`Self::pop`]'s outer branch), and it tears
+    /// the page down, the inner navigator's pages with it, so the next
+    /// placement opens fresh. What it reveals is the outer **root**, Connect —
+    /// the one route outside the shell, and where the bounce was going.
+    /// [`Self::landing`] is left alone: the leaving page rebuilds through it
+    /// while the pop plays.
+    fn unwind_shell(&self) {
+        let controller = self.router.controller();
+        controller.pop();
+        self.pending_shell.set(None);
+        self.pending_unwind.set(Some(controller.route_generation()));
     }
 
     /// The landing page's own location — the inner navigator's root route
@@ -344,10 +405,15 @@ impl Nav {
 
     /// Whether the shell page is already on the outer stack — the app-side half
     /// of frust's keep rule, asked before [`place_shell`](Self::place_shell)
-    /// puts a second one there. Committed fact first (an outer page stamped
-    /// with an in-shell route), then this handle's own queued placement.
+    /// puts a second one there and [`unwind_shell`](Self::unwind_shell) takes
+    /// one off. This handle's queued *removal* first (the committed stack still
+    /// shows a page the pop has spoken for), then committed fact (an outer page
+    /// stamped with an in-shell route), then its queued placement.
     fn shell_is_placed(&self) -> bool {
         let stack = self.router.controller().route_stack();
+        if self.pending_unwind.get() == Some(stack.generation()) {
+            return false;
+        }
         let committed = stack
             .entries()
             .iter()
@@ -513,6 +579,7 @@ pub fn install_app_router(
             landing: Rc::new(RefCell::new(None)),
             last_location: Rc::new(RefCell::new(None)),
             pending_shell: Rc::new(Cell::new(None)),
+            pending_unwind: Rc::new(Cell::new(None)),
         });
     });
     router
@@ -541,8 +608,14 @@ pub fn app_nav() -> Nav {
 
 /// Muxr's session guard, closed over the app's one [`ConnectionController`]: a
 /// top-level redirect (see [`frust::Router::redirect`], wired on by
-/// [`install_app_router`]) bouncing an unauthenticated push to
-/// `/sessions`/`/terminal` back to `/`. `/` and `/settings` are never guarded.
+/// [`install_app_router`]) bouncing an unauthenticated navigation into the
+/// shell's subtree back to `/`, the one route outside it.
+///
+/// **The guarded set is that subtree, asked of [`route_meta`]** rather than
+/// spelled out, so a route added under the scaffold is guarded on arrival —
+/// `/settings` included, which stopped being reachable disconnected when it
+/// moved inside the shell (its one entry point is the bar's gear, and an
+/// unguarded resolution would *place* the scaffold for a dead connection).
 ///
 /// **Capture, never context.** The controller is handed in at construction —
 /// in the composition root, where it is already in hand — and read through the
@@ -556,15 +629,16 @@ pub fn app_nav() -> Nav {
 ///
 /// **Navigation-time only.** [`frust::Router::resolve`] (which this feeds)
 /// runs on `go`/`push`/`handle_location`, never on its own — so a connection
-/// that drops *while* `/sessions`/`/terminal` is already on-screen does not
-/// reactively bounce it back to `/`. A live, reactive bounce-on-disconnect is
-/// a functional-phase concern, deliberately out of scope here (this reads the
-/// signal `get_untracked`, establishing no reactive dependency at all).
+/// that drops *while* an in-shell route is on screen does not reactively
+/// bounce it back to `/`; the next navigation the user makes is what fires,
+/// and [`Nav::unwind_shell`] is what makes that bounce leave nothing
+/// authenticated behind. (This reads the signal `get_untracked`, establishing
+/// no reactive dependency at all.)
 pub(crate) fn session_guard_with(
     connection: Arc<ConnectionController>,
 ) -> impl Fn(&Location) -> Option<String> + 'static {
     move |loc: &Location| {
-        let guarded = matches!(loc.path.as_str(), SESSIONS_ROUTE | TERMINAL_ROUTE);
+        let guarded = route_meta(&loc.path).is_some();
         if guarded && !connection.connected.get_untracked() {
             Some(CONNECT_LOCATION.to_string())
         } else {
@@ -682,11 +756,6 @@ mod tests {
             "…and so does /terminal, query param and all"
         );
         assert_eq!(guard(&Location::parse("/")), None, "/ is never guarded");
-        assert_eq!(
-            guard(&Location::parse("/settings")),
-            None,
-            "/settings is never guarded"
-        );
 
         connection.connect(target());
 
@@ -696,6 +765,33 @@ mod tests {
             "a connected push is not redirected"
         );
         assert_eq!(guard(&Location::parse("/terminal")), None);
+    }
+
+    #[test]
+    fn the_guarded_set_is_exactly_the_shells_subtree() {
+        let connection = Arc::new(ConnectionController::detached());
+        let guard = session_guard_with(Arc::clone(&connection));
+
+        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE] {
+            assert!(route_meta(path).is_some(), "{path} is in the shell");
+            assert_eq!(
+                guard(&Location::parse(path)),
+                Some(CONNECT_LOCATION.to_string()),
+                "{path} bounces while unauthenticated"
+            );
+        }
+        assert_eq!(route_meta(CONNECT_LOCATION), None);
+        assert_eq!(guard(&Location::parse(CONNECT_LOCATION)), None);
+
+        connection.connect(target());
+
+        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE] {
+            assert_eq!(
+                guard(&Location::parse(path)),
+                None,
+                "{path} resolves normally once connected"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
