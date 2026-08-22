@@ -24,7 +24,8 @@
 //! [`browsed_space_tabs`](TerminalController::browsed_space_tabs) rather than
 //! duplicated onto [`tabs`](TerminalController::tabs), and committing a pane under one
 //! ([`commit_pane_in_space`](TerminalController::commit_pane_in_space)) switches to it
-//! first, unlike the peek itself.
+//! first — moving [`spaces`](TerminalController::spaces)' own selection with it — unlike
+//! the peek itself.
 //!
 //! [`is_herdr`] is the one backend discriminator: only herdr has spaces and a
 //! resume hint ([`ResumeSlot`]); the grid's content-tap hook is never wired there.
@@ -382,7 +383,12 @@ impl TerminalController {
     /// [`expanded_tab`](Self::expanded_tab): a tab only ever belongs to the space showing it,
     /// so one left expanded under a space just closed is no longer meaningful.
     pub async fn expand_space(&self, id: String) {
-        if self.expanded_space.get_untracked().as_deref() != Some(id.as_str()) {
+        // The press that got here only reaches this body a pump later, by which
+        // point the screen may already be gone — a disposed read panics.
+        let Some(expanded) = self.expanded_space.try_get_untracked() else {
+            return;
+        };
+        if expanded.as_deref() != Some(id.as_str()) {
             self.expanded_tab.set(None);
         }
         self.expanded_space.set(Some(id.clone()));
@@ -538,6 +544,17 @@ impl TerminalController {
     /// [`browsed_space_tabs`](Self::browsed_space_tabs) — promoted onto
     /// [`tabs`](Self::tabs)/[`active_tab`](Self::active_tab) rather than re-read: the
     /// sheet never draws a cross-space row without having already fetched it.
+    ///
+    /// **Fail-closed on a lost cache**: that promotion is read **before the first
+    /// await**, since the tapped row was rendered from it. With nothing cached for
+    /// `space_id` the commit answers `false` having sent nothing at all — resolving
+    /// `tab_key` against the space this connection is still on would focus a pane the
+    /// user never pointed at, and a half-landed `switch_space` would strand it there.
+    ///
+    /// **The selection follows the switch** ([`publish_space_switch`](Self::publish_space_switch)):
+    /// [`spaces`](Self::spaces) is what the tree keys its per-space tab world off and what
+    /// [`expand_space`](Self::expand_space) short-circuits on, so a landed switch that
+    /// left it naming the old space would misdraw every later open of the sheet.
     pub async fn commit_pane_in_space(
         &self,
         space_id: String,
@@ -551,6 +568,9 @@ impl TerminalController {
         let Some(_claim) = self.claim_commit() else {
             return false;
         };
+        let Some(cached_tabs) = self.browsed_tabs_for(&space_id) else {
+            return false;
+        };
         if !self
             .tell(self.terminal.switch_space(space_id.clone()))
             .await
@@ -560,20 +580,74 @@ impl TerminalController {
         if self.is_herdr_session() {
             self.resume.remember_space(space_id.clone());
         }
-        if let Some((cached_space, cached_tabs)) = self.browsed_space_tabs.get_untracked()
-            && cached_space == space_id
-        {
-            let active_key = cached_tabs
-                .iter()
-                .find(|tab| tab.active)
-                .or_else(|| cached_tabs.first())
-                .map(|tab| tab.key.clone())
-                .unwrap_or_default();
-            self.tabs.set(cached_tabs);
-            self.active_tab.set(active_key);
+        self.select_space_locally(&space_id);
+        self.promote_browsed_tabs(cached_tabs);
+        let landed = self
+            .commit_pane_unclaimed(tab_key, pane_id, is_plugin)
+            .await;
+        // Behind the pane steps, not ahead of them: the switch landed either
+        // way, so the space list converges either way — and a user waiting on a
+        // pane focus never waits on this read.
+        self.publish_space_switch(&space_id).await;
+        landed
+    }
+
+    /// The tabs the tree cached for `space_id`, if that peek is still the one on hand
+    /// — [`commit_pane_in_space`](Self::commit_pane_in_space)'s entry read, and the
+    /// only thing it trusts a cross-space `tab_key` against. `None` covers both a
+    /// cache cleared since the row was drawn ([`reset_browse`](Self::reset_browse))
+    /// and one that has since moved to another space.
+    fn browsed_tabs_for(&self, space_id: &str) -> Option<Vec<TabEntry>> {
+        match self.browsed_space_tabs.try_get_untracked()? {
+            Some((cached_space, cached_tabs)) if cached_space == space_id => Some(cached_tabs),
+            _ => None,
         }
-        self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
-            .await
+    }
+
+    /// Promote a browsed space's cached tab world onto [`tabs`](Self::tabs) and
+    /// [`active_tab`](Self::active_tab) — what a landed cross-space switch owes the
+    /// card and the sheet, without a re-read the browse already paid for.
+    fn promote_browsed_tabs(&self, tabs: Vec<TabEntry>) {
+        let active_key = tabs
+            .iter()
+            .find(|tab| tab.active)
+            .or_else(|| tabs.first())
+            .map(|tab| tab.key.clone())
+            .unwrap_or_default();
+        self.tabs.set(tabs);
+        self.active_tab.set(active_key);
+    }
+
+    /// Move the selection onto the space `id` in this screen's own state — the
+    /// optimistic half of a landed `switch_space`, the same posture
+    /// [`focus_pane_locally`](Self::focus_pane_locally) takes for a pane badge.
+    /// Read-compare-then-write, and a no-op on a disposed mount.
+    fn select_space_locally(&self, id: &str) {
+        let Some(spaces) = self.spaces.try_get_untracked() else {
+            return;
+        };
+        if spaces.iter().any(|space| space.selected && space.id == id) {
+            return;
+        }
+        self.spaces.set(select_by_id(spaces, id));
+    }
+
+    /// Publish a landed `switch_space`: the selection moves **now**
+    /// ([`select_space_locally`](Self::select_space_locally)), then the space list is
+    /// re-read to converge whatever else moved. The re-read keeps `id` selected —
+    /// `SwitchSpace` acks on enqueue, so a list can still answer from before the relay
+    /// applied it, and nothing else re-lists spaces to correct it afterwards (the 3s
+    /// poll reads tabs alone).
+    async fn publish_space_switch(&self, id: &str) {
+        self.select_space_locally(id);
+        match self.terminal.list_spaces().await {
+            Ok(spaces) => {
+                if self.signals_alive() {
+                    self.spaces.set(select_by_id(spaces, id));
+                }
+            }
+            Err(failure) => self.core.failures().emit(&failure),
+        }
     }
 
     /// Focus pane `pane_id` of the live session's active tab — the
@@ -632,19 +706,43 @@ impl TerminalController {
 
     /// Make the space `id` active and reload the tab world behind it — a
     /// space *is* a different set of tabs. `SwitchSpace` is wire-MUTATING, so
-    /// a read-only credential is turned back at the pill
-    /// (`pages::Actions::select_space`), not here.
+    /// a read-only credential is turned back before this is reached (the tree
+    /// withdraws every row that can call it), not here. Answers whether the
+    /// switch landed.
     ///
     /// A landed switch also becomes the resume hint's space rung — the one
-    /// part of it a muxrd restart cannot stale.
-    pub async fn select_space(&self, id: String) {
+    /// part of it a muxrd restart cannot stale — and moves
+    /// [`spaces`](Self::spaces)' own selected flag twice: once immediately, so
+    /// the sheet is right during the reload's round trips, and once behind
+    /// [`load`](Self::load) in case the list it read still answered from
+    /// before the relay applied the switch. Both are no-ops once the list
+    /// already agrees ([`select_space_locally`](Self::select_space_locally)).
+    pub async fn select_space(&self, id: String) -> bool {
         if !self.tell(self.terminal.switch_space(id.clone())).await {
-            return;
+            return false;
         }
         if self.is_herdr_session() {
-            self.resume.remember_space(id);
+            self.resume.remember_space(id.clone());
         }
+        self.select_space_locally(&id);
         self.load().await;
+        self.select_space_locally(&id);
+        true
+    }
+
+    /// Make `space_id` the space this connection is on, if it is not already —
+    /// what the tree's cross-space **create** rows take before creating
+    /// anything, since every create lands in the selected space. Answers
+    /// whether the screen is on that space now.
+    ///
+    /// This is also the one way an **empty** space is reached at all: it draws
+    /// no pane row to commit through, so its add-tab row's switch is its only
+    /// entry.
+    pub async fn adopt_space(&self, space_id: String) -> bool {
+        if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
+            return true;
+        }
+        self.select_space(space_id).await
     }
 
     /// Create a new space named `label` (already trimmed by the dialog) and pull the
@@ -684,6 +782,28 @@ impl TerminalController {
             self.settle_create().await;
             self.load().await;
         }
+    }
+
+    /// Open a new pane under the tab the tree's add-pane row sits on, wherever that
+    /// tab lives: switch to its space when it is not the selected one
+    /// ([`adopt_space`](Self::adopt_space)), move the session onto the tab
+    /// ([`switch_tab`](Self::switch_tab)), then create. Every create lands in the tab
+    /// the session is on, so a row under a merely-browsed tab has to move first or the
+    /// pane appears somewhere the user never pointed. `space_id` is `None` on a backend
+    /// with no spaces, and a step that does not land stops the rest.
+    pub async fn new_pane_in(&self, space_id: Option<String>, tab_key: String, floating: bool) {
+        if let Some(space_id) = space_id
+            && !self.adopt_space(space_id).await
+        {
+            return;
+        }
+        let Some(active) = self.active_tab.try_get_untracked() else {
+            return;
+        };
+        if tab_key != active && !self.switch_tab(tab_key).await {
+            return;
+        }
+        self.new_pane(floating).await;
     }
 
     /// Open a new pane in the tab the session is on — tiled (`floating = false`) or
@@ -857,7 +977,11 @@ impl TerminalController {
 
     /// Whether this controller's reactive state is still alive — `false` once the mount
     /// has been disposed. The signals share one owner, so one answer stands for all.
-    fn signals_alive(&self) -> bool {
+    ///
+    /// Untracked, so asking never subscribes. Public because the tree sheet is a page of
+    /// the **root** overlay host: it can outlive the screen that pushed it, and a build
+    /// reading a disposed signal panics.
+    pub fn signals_alive(&self) -> bool {
         self.tabs.try_with_untracked(|_| ()).is_some()
     }
 
@@ -1113,6 +1237,24 @@ pub type Reattach = Rc<dyn Fn()>;
 /// (`SessionInfo.id`), the same fact `sessions` reconciles a rename against.
 fn is_herdr(session: &str) -> bool {
     session.starts_with(HERDR_BACKEND)
+}
+
+/// Flag the space with [`Space::id`] `id` selected among `spaces`, clearing every other
+/// flag — the id-keyed twin of [`select_by_label`], and what a **landed** `switch_space`
+/// writes: the switch acked, so this client's own ask outranks a list that may still
+/// answer from before the relay applied it. A non-match changes nothing, which keeps a
+/// space list that has since dropped `id` from ending up with nothing selected at all.
+fn select_by_id(spaces: Vec<Space>, id: &str) -> Vec<Space> {
+    if !spaces.iter().any(|space| space.id == id) {
+        return spaces;
+    }
+    spaces
+        .into_iter()
+        .map(|space| Space {
+            selected: space.id == id,
+            ..space
+        })
+        .collect()
 }
 
 /// Flag the space named `label` selected among `spaces`, leaving every other one's flag
@@ -1782,7 +1924,14 @@ mod tests {
         /// client back the focus that client itself asked for, which is what makes an
         /// optimistic badge survive the reload behind a commit.
         focused: Mutex<Option<(u32, bool)>>,
+        /// Which space a landed [`switch_space`](TerminalRepository::switch_space) moved
+        /// the selection onto, flagged in every later `list_spaces` answer the way a real
+        /// server would. `None` is [`SEEDED_SPACE`], this world's own resting selection.
+        selected: Mutex<Option<String>>,
     }
+
+    /// The space [`RecordingRepository`] starts out selected on.
+    const SEEDED_SPACE: &str = "ws-1";
 
     impl RecordingRepository {
         /// Every call seen, oldest first.
@@ -1920,16 +2069,22 @@ mod tests {
         async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
             self.record("list_spaces".to_string())?;
             self.park().await;
+            let selected = self
+                .selected
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| SEEDED_SPACE.to_string());
             Ok(vec![
                 Space {
                     id: "ws-1".to_string(),
                     name: "one".to_string(),
-                    selected: true,
+                    selected: selected == "ws-1",
                 },
                 Space {
                     id: "ws-2".to_string(),
                     name: "two".to_string(),
-                    selected: false,
+                    selected: selected == "ws-2",
                 },
             ])
         }
@@ -1974,7 +2129,9 @@ mod tests {
         }
 
         async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
-            self.record(format!("switch_space({space_id})"))
+            self.record(format!("switch_space({space_id})"))?;
+            *self.selected.lock().unwrap_or_else(PoisonError::into_inner) = Some(space_id);
+            Ok(())
         }
 
         async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
@@ -2521,8 +2678,10 @@ mod tests {
                 "go_to_tab(2)",
                 "tab_lines(beta)",
                 "focus_pane(21,false)",
+                "list_spaces",
             ],
-            "switch_space, then commit_pane's own tab-then-pane steps"
+            "switch_space, then commit_pane's own tab-then-pane steps, and the \
+             space list converging behind all of them"
         );
         assert_eq!(c.active_tab.get_untracked(), "beta");
         assert_eq!(focused_pane(&c, "beta"), Some(21));
@@ -2534,6 +2693,78 @@ mod tests {
                 pane_id: Some(21),
             },
             "the resume hint is written exactly as select_space's own switch writes it"
+        );
+    }
+
+    #[test]
+    fn a_cross_space_commit_moves_the_selected_flag_with_the_connection() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        block_on(c.expand_space("ws-2".to_string()));
+
+        assert!(block_on(c.commit_pane_in_space(
+            "ws-2".to_string(),
+            "beta".to_string(),
+            21,
+            false
+        )));
+
+        assert_eq!(
+            c.selected_space_id().as_deref(),
+            Some("ws-2"),
+            "the sheet's own space list must name the space the connection is \
+             now on — every later open seeds its card from this flag"
+        );
+        // Reopening the sheet now seeds the space it actually landed on…
+        c.seed_expansion();
+        assert_eq!(c.expanded_space.get_untracked(), Some("ws-2".to_string()));
+
+        // …and a second commit inside it takes the same-space path, rather
+        // than switching to a space it is already on.
+        let after_first = repository.calls().len();
+        assert!(block_on(c.commit_pane_in_space(
+            "ws-2".to_string(),
+            "alpha".to_string(),
+            11,
+            false
+        )));
+        let since_first: Vec<String> = repository.calls().into_iter().skip(after_first).collect();
+        assert!(
+            !since_first
+                .iter()
+                .any(|call| call.starts_with("switch_space")),
+            "the second commit is inside the selected space: {since_first:?}"
+        );
+    }
+
+    #[test]
+    fn a_browse_reset_racing_a_cross_space_commit_fails_it_closed() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        block_on(c.expand_space("ws-2".to_string()));
+        let after_expand = repository.calls().len();
+        // What a dismissal running between the tap and the commit's first await
+        // does: the tab world the tapped row was drawn from is gone.
+        c.reset_browse();
+
+        assert!(!block_on(c.commit_pane_in_space(
+            "ws-2".to_string(),
+            "beta".to_string(),
+            21,
+            false
+        )));
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        assert!(
+            since_expand.is_empty(),
+            "no switch_space went out at all — a half-landed switch would strand \
+             the session in a space whose tabs this commit can no longer resolve \
+             against: {since_expand:?}"
+        );
+        assert_eq!(
+            c.selected_space_id().as_deref(),
+            Some("ws-1"),
+            "…and the connection stayed where it was"
         );
     }
 
@@ -2907,6 +3138,110 @@ mod tests {
 
         assert_eq!(repository.actions(), ["new_pane(false)"]);
         assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
+    }
+
+    // The tree's cross-space create rows: a create always lands where the
+    // session is, so the row under a browsed space/tab moves there first.
+
+    #[test]
+    fn an_add_tab_row_under_a_browsed_space_switches_to_it_before_creating() {
+        let (c, repository) = recorded("herdr:work");
+        block_on(c.expand_space("ws-2".to_string()));
+        let after_expand = repository.calls().len();
+
+        // The wiring's own two steps, with the naming dialog in between.
+        assert!(block_on(c.adopt_space("ws-2".to_string())));
+        block_on(c.new_tab("logs".to_string()));
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        let switched = since_expand
+            .iter()
+            .position(|call| call == "switch_space(ws-2)")
+            .expect("the browsed space was switched to");
+        let created = since_expand
+            .iter()
+            .position(|call| call == "new_tab(logs)")
+            .expect("…and the tab was created");
+        assert!(
+            switched < created,
+            "the switch has to precede the create or the tab lands in the space \
+             the user was only looking away from: {since_expand:?}"
+        );
+        assert_eq!(c.selected_space_id().as_deref(), Some("ws-2"));
+    }
+
+    #[test]
+    fn an_add_row_under_the_selected_space_switches_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        let after_load = repository.calls().len();
+
+        assert!(block_on(c.adopt_space("ws-1".to_string())));
+
+        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+        assert!(
+            since_load.is_empty(),
+            "already there — no RPC at all: {since_load:?}"
+        );
+    }
+
+    #[test]
+    fn an_add_pane_row_moves_to_its_own_space_and_tab_before_creating() {
+        let (c, repository) = recorded("herdr:work");
+        block_on(c.expand_space("ws-2".to_string()));
+        let after_expand = repository.calls().len();
+
+        block_on(c.new_pane_in(Some("ws-2".to_string()), "beta".to_string(), false));
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        let moves: Vec<&String> = since_expand
+            .iter()
+            .filter(|call| {
+                call.starts_with("switch_space")
+                    || call.starts_with("go_to_tab")
+                    || call.starts_with("new_pane")
+            })
+            .collect();
+        assert_eq!(
+            moves,
+            ["switch_space(ws-2)", "go_to_tab(2)", "new_pane(false)"],
+            "space, then tab, then the create — a pane only opens in the tab \
+             the session is on"
+        );
+    }
+
+    #[test]
+    fn an_add_pane_row_under_the_tab_the_session_is_on_creates_straight_away() {
+        let (c, repository) = recorded("zellij:dev");
+        let after_load = repository.calls().len();
+
+        block_on(c.new_pane_in(None, "alpha".to_string(), false));
+
+        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+        assert!(
+            !since_load.iter().any(|call| call.starts_with("go_to_tab")),
+            "nothing to move: {since_load:?}"
+        );
+        assert_eq!(
+            since_load.first().map(String::as_str),
+            Some("new_pane(false)")
+        );
+    }
+
+    #[test]
+    fn a_refused_switch_under_an_add_pane_row_creates_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        block_on(c.expand_space("ws-2".to_string()));
+        repository.refuse("switch_space");
+        let after_expand = repository.calls().len();
+
+        block_on(c.new_pane_in(Some("ws-2".to_string()), "beta".to_string(), false));
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        assert_eq!(
+            since_expand,
+            ["switch_space(ws-2)"],
+            "a pane must never land in the space the switch failed to leave"
+        );
     }
 
     #[test]

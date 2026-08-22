@@ -131,6 +131,10 @@ const NEW_PANE_LABEL: &str = "new pane";
 /// two create rows' dim label runs, found the same way [`NEW_PANE_LABEL`] is.
 const ADD_SPACE_LABEL: &str = "new space";
 const ADD_TAB_LABEL: &str = "new tab";
+/// `new_tab_dialog`'s own confirm label (private there). A button announces its
+/// text as an accessible **name**, not as a run, so this one is tapped through
+/// [`Harness::tap_label`] rather than the create rows' value lookup.
+const NEW_TAB_SUBMIT_LABEL: &str = "Create";
 
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
 /// card prints once a pane row inside it has been committed.
@@ -1557,6 +1561,76 @@ fn an_empty_non_selected_space_shows_the_hint_row_once_browsed() {
 }
 
 #[test]
+fn the_add_tab_row_under_an_empty_browsed_space_switches_onto_it_first() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    app_toasts().clear();
+
+    h.open_sheet();
+    let floor = h.depth();
+
+    // "cupline" is seeded with no tabs at all, so it draws no pane row to
+    // commit through: its add-tab row is the only way onto the space, and the
+    // switch that row performs is what makes an empty one reachable.
+    h.tap(h.value_point("cupline"));
+    h.pump_until("cupline to be read", |h| h.shows("no tabs yet"));
+    // Runs the collapsing/expanding reveals forward, so the row tapped below is
+    // where it looks (the same pinned-clock hazard the cross-space commit hits).
+    h.settle_motion(0.0);
+
+    // The first add-tab row in tree order is cupline's own — the seeded space
+    // list draws it first, and the two behind it are collapsed.
+    h.tap(h.add_tab_row_point());
+    h.pump_until("the switch to land and the new-tab dialog to open", |h| {
+        h.depth() == floor + 1
+    });
+
+    let selected: Vec<String> = debug_controller()
+        .expect("mounted")
+        .spaces
+        .get_untracked()
+        .into_iter()
+        .filter(|space| space.selected)
+        .map(|space| space.name)
+        .collect();
+    assert_eq!(
+        selected,
+        ["cupline"],
+        "the create row switched onto the space it sits under, so the tab it \
+         is about to name lands there rather than in the space left behind"
+    );
+
+    // …and the dialog a spawned switch pushed is a live one: confirming it
+    // reaches the repository (which refuses `new_tab`, hence the toast).
+    h.tap_label(NEW_TAB_SUBMIT_LABEL);
+    h.flush();
+    h.await_toast(INTERNAL_FAILURE_TOAST);
+}
+
+#[test]
+fn unmounting_mid_browse_leaves_the_auto_expansion_nothing_to_panic_on() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    h.open_sheet();
+    // The peek is still in flight and the auto-drill behind it still sleeping
+    // when the screen goes away — both resume against signals whose owner is
+    // gone. The assertion is the pump itself: a plain read there panics, and
+    // the panic surfaces on this thread's own frame pump.
+    h.tap(h.value_point("zelli_mobile"));
+    h.unmount_screen();
+    h.pump_for(Duration::from_millis(600));
+
+    assert!(
+        debug_controller().is_none(),
+        "the screen really did unmount, so the resumed task really did read a \
+         disposed owner"
+    );
+}
+
+#[test]
 fn a_cross_space_commit_switches_the_connection_and_closes_the_sheet_exactly_once() {
     let _g = serial();
     let _ambient = setup();
@@ -1602,17 +1676,27 @@ fn a_cross_space_commit_switches_the_connection_and_closes_the_sheet_exactly_onc
         "one close, and no double pop of the route under it"
     );
 
-    // `TerminalController::spaces`'s own `selected` flag isn't republished by
-    // this path (only a full `load()` re-lists spaces; the tree commit reuses
-    // the browse's own cached tab world instead) — `active_tab`/`tabs` are
-    // this commit's own write, and so the reliable proof `switch_space`
-    // actually landed: the connection's tab world is now zelli_mobile's own,
-    // not forgekit's.
+    // Three writes prove the `switch_space` landed and was published: the tab
+    // world is now zelli_mobile's own (promoted from the browse's cache rather
+    // than re-read), and the space list's own `selected` flag moved with it —
+    // the flag every later sheet open seeds its card from.
     let controller = debug_controller().expect("mounted");
     assert_eq!(
         controller.active_tab.get_untracked(),
         "logs",
         "the commit's own `switch_space` landed — the connection followed it"
+    );
+    let selected: Vec<String> = controller
+        .spaces
+        .get_untracked()
+        .into_iter()
+        .filter(|space| space.selected)
+        .map(|space| space.name)
+        .collect();
+    assert_eq!(
+        selected,
+        ["zelli_mobile"],
+        "…and the sheet's own space list followed it too"
     );
     let keys: Vec<String> = controller
         .tabs
