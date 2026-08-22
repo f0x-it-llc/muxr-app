@@ -257,12 +257,6 @@ const ALLOWLIST: &[AllowlistEntry] = &[
         reason: "contract-heavy: documents where each terminal-screen contract is enforced",
     },
     AllowlistEntry {
-        path: "src/features/terminal/presentation/widgets/sheet_bits.rs",
-        cap_pct: 27.8,
-        reason: "contract-heavy for its size: short file, dense header on the sheet's fixed \
-                 furniture",
-    },
-    AllowlistEntry {
         path: "src/features/sessions/presentation/heartbeat.rs",
         cap_pct: 27.5,
         reason: "contract-heavy: documents the shared live-resolved cadence with the \
@@ -288,12 +282,6 @@ const ALLOWLIST: &[AllowlistEntry] = &[
         cap_pct: 27.1,
         reason: "contract-heavy: documents the deliberate gRPC-status collapse and its known \
                  lossiness",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/widgets/pills.rs",
-        cap_pct: 25.9,
-        reason: "contract-heavy for its size: short file, header on the shared chip/edit \
-                 affordance shape",
     },
     AllowlistEntry {
         path: "src/features/settings/presentation/widgets/rows.rs",

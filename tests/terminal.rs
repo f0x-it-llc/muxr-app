@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, PopResult, Set, SizedBox, Stack, Theme,
+    AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, Theme,
     WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, WindowInsets};
@@ -40,6 +40,7 @@ use muxr::features::terminal::presentation::pages::{
     debug_controller, open_terminal_menu, terminal_page,
 };
 use muxr::routes::{BarAction, app_nav, install_app_router, route_meta};
+use muxr::ui::paint::RADIUS_FULL;
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
@@ -47,7 +48,7 @@ mod support;
 use support::{
     EPSILON, RecScene, added, by_width, center, char_key, frame, frame_at_sized, largest, ms,
     named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer,
-    pump_frames, rounded_in, serial, setup, tap,
+    pump_frames, rounded_in, same, serial, setup, tap,
 };
 
 /// The surface every frame in this suite lays out at. Wider and taller than
@@ -78,9 +79,6 @@ const EXPAND: &str = "Fullscreen";
 const COLLAPSE: &str = "Exit fullscreen";
 /// …and the sheet's close button's.
 const CLOSE: &str = "Close";
-/// `presentation::widgets::pills`' own `EDIT_LABEL` (private there) — every chip's
-/// trailing edit icon shares this one accessible name.
-const EDIT_LABEL: &str = "Rename";
 
 /// `.term-wrap{padding:14px}` and `.term-card{border-radius:22px}`,
 /// transcribed — the two numbers fullscreen animates to zero.
@@ -99,13 +97,6 @@ const STATUS_ROW_H: f64 = 40.0;
 /// `.cur{width:7px;height:13px}` — the caret's own box, which is how a frame
 /// is asked whether the caret is lit.
 const CARET: Size = Size::new(7.0, 13.0);
-
-/// Menu row indices into the built entry list — the contract `show_glyph_menu`
-/// pops with, transcribed for the same reason as the labels. The menu carries no
-/// separators, so a row's index is its position.
-const ROW_PANES: usize = 0;
-const ROW_RENAME: usize = 1;
-const ROW_DETACH: usize = 2;
 
 /// The mounted navigator's depth with no overlay up: its own (empty, full-bleed)
 /// initial page.
@@ -127,14 +118,17 @@ const READ_ONLY_TOAST: &str = "read-only session";
 /// this toast is this suite's proof an affordance actually reached the repository.
 const INTERNAL_FAILURE_TOAST: &str = "Something went wrong — please try again.";
 
-/// `presentation::widgets::panes`'s `NEW_PANE_LABEL` (private) — the new-pane row's label, and
-/// the only way this suite locates it: the row paints a **transparent**-filled, dashed-bordered
-/// box (shows up in neither [`RecScene::rounded`] nor [`RecScene::strokes`]), found by its
-/// accessible *value* instead.
-const NEW_PANE_LABEL: &str = "new pane \u{b7} long-press for floating";
+/// `presentation::widgets::side_sheet_tree`'s `ADD_PANE_LABEL` (private) — the
+/// tree's add-pane row label, and the only way this suite locates it: the row
+/// paints a **transparent**-filled, dashed-bordered box (shows up in neither
+/// [`RecScene::rounded`] nor [`RecScene::strokes`]), found by its accessible
+/// *value* instead. Unlike the flat sheet's row it replaced, this one carries
+/// no long-press affordance (`presentation::pages::Actions::new_pane`'s own
+/// doc records the gap).
+const NEW_PANE_LABEL: &str = "new pane";
 
-/// `presentation::pages`'s `ADD_SPACE_LABEL`/`ADD_TAB_LABEL` (private) — the two full-size
-/// create rows' dim label runs, found the same way [`NEW_PANE_LABEL`] is.
+/// `side_sheet_tree`'s `ADD_SPACE_LABEL`/`ADD_TAB_LABEL` (private) — the tree's
+/// two create rows' dim label runs, found the same way [`NEW_PANE_LABEL`] is.
 const ADD_SPACE_LABEL: &str = "new space";
 const ADD_TAB_LABEL: &str = "new tab";
 
@@ -142,16 +136,11 @@ const ADD_TAB_LABEL: &str = "new tab";
 /// card prints once a pane row inside it has been committed.
 const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
 
-/// The sheet's three section labels, transcribed from `presentation::pages`
-/// (private there). The third names the tab whose panes it is listing, which
-/// is the **browsed** tab — the sheet's own record of where the browse is.
-const SECTION_SPACES: &str = "spaces";
-const SECTION_TABS: &str = "tabs";
-const SECTION_PANES: &str = "panes \u{2014} ";
-
-/// `ui::palette`'s own `AMBER_FAINT_ALPHA` (private there) — the wash a
-/// selected pill and the `focused` chip share (see [`focused_chip`]).
-const AMBER_FAINT: f32 = 0.12;
+/// `presentation::pages`'s `FOOTER_RENAME_LABEL`/`FOOTER_DETACH_LABEL`
+/// (private there) — the side sheet's sticky footer, the exact rows the
+/// overflow menu used to carry.
+const FOOTER_RENAME_LABEL: &str = "Rename session";
+const FOOTER_DETACH_LABEL: &str = "Detach session";
 
 /// A **herdr** session id: the one prefix that turns the sheet's spaces section on.
 /// The sessions mock carries no session under this id, which is fine — only the
@@ -389,17 +378,6 @@ impl Harness {
         tap(&mut self.root, &mut self.state, point);
     }
 
-    /// Tap the open sheet's `index`-th pane row, top to bottom — the sheet's
-    /// one committing gesture (see [`pane_rows`]). Renders its own frame, so
-    /// the rows are the ones the *current* browse lists.
-    fn tap_pane_row(&mut self, index: usize) {
-        let rows = pane_rows(&self.frame());
-        let row = *rows
-            .get(index)
-            .unwrap_or_else(|| panic!("pane row {index}; the sheet lists {}", rows.len()));
-        self.tap(center(row));
-    }
-
     /// Tap the first node *labelled* `label` (the expand button, the sheet's
     /// close button).
     fn tap_label(&mut self, label: &str) {
@@ -415,11 +393,17 @@ impl Harness {
         self.tap(point);
     }
 
-    /// The new-pane row's own tap point — see [`NEW_PANE_LABEL`] for why this
+    /// The tree's add-pane row tap point — see [`NEW_PANE_LABEL`] for why this
     /// goes through its accessible *value* rather than painted geometry.
+    ///
+    /// **The last match, not the first**: every tab carries its own add-pane
+    /// row under the same label (`side_sheet_tree`'s `tab_group` builds one
+    /// per tab, collapsed ones included), so this suite's own session — whose
+    /// active, pre-expanded tab (`devbox`) is seeded *last* — needs the last
+    /// one, the only row genuinely on screen.
     fn new_pane_row_point(&self) -> Point {
         node_centers_by_value(&self.root, NEW_PANE_LABEL)
-            .first()
+            .last()
             .copied()
             .unwrap_or_else(|| {
                 panic!(
@@ -429,32 +413,16 @@ impl Harness {
             })
     }
 
-    /// The add-space row's own tap point — the identical [`ADD_SPACE_LABEL`]
+    /// The tree's add-space row tap point — the identical [`ADD_SPACE_LABEL`]
     /// value idiom [`new_pane_row_point`] uses, since it is a full-size row
-    /// rather than one of [`pills`]'s own rects.
+    /// rather than one of the tree's own card/pill shapes.
     fn add_space_row_point(&self) -> Point {
-        node_centers_by_value(&self.root, ADD_SPACE_LABEL)
-            .first()
-            .copied()
-            .unwrap_or_else(|| {
-                panic!(
-                    "no node valued {ADD_SPACE_LABEL:?}; values on screen: {:?}",
-                    node_values(&self.root)
-                )
-            })
+        self.value_point(ADD_SPACE_LABEL)
     }
 
-    /// …and the add-tab row's, the identical shape.
+    /// …and the tree's add-tab row's, the identical shape.
     fn add_tab_row_point(&self) -> Point {
-        node_centers_by_value(&self.root, ADD_TAB_LABEL)
-            .first()
-            .copied()
-            .unwrap_or_else(|| {
-                panic!(
-                    "no node valued {ADD_TAB_LABEL:?}; values on screen: {:?}",
-                    node_values(&self.root)
-                )
-            })
+        self.value_point(ADD_TAB_LABEL)
     }
 
     /// A full long-press at `point` — [`support::long_press`]'s sized-surface
@@ -513,27 +481,49 @@ impl Harness {
         self.frame_at(from_ms + 1_020.0)
     }
 
-    /// Open the app bar's overflow menu, exactly as `crate::shell` does.
-    fn open_menu(&mut self) -> RecScene {
+    /// Open the "panes & tabs" side sheet, exactly as `crate::shell` forwards
+    /// the app bar's menu-button press — directly, with no intervening
+    /// dropdown. Returns the frames before and after so the sheet's own
+    /// chrome can be isolated via `added`.
+    fn open_sheet(&mut self) -> (RecScene, RecScene) {
+        let before = self.frame();
         open_terminal_menu(&mut self.state);
+        let after = self.settle();
+        (before, after)
+    }
+
+    /// The first node valued `value`, panicking with what's on screen instead
+    /// — the shared lookup [`new_pane_row_point`]/[`add_space_row_point`]/
+    /// [`add_tab_row_point`]/the footer taps all build on.
+    fn value_point(&self, value: &str) -> Point {
+        node_centers_by_value(&self.root, value)
+            .first()
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no node valued {value:?}; values on screen: {:?}",
+                    node_values(&self.root)
+                )
+            })
+    }
+
+    /// Tap the sheet's footer "Rename session" row and settle the staged
+    /// close it chains its dialog push through
+    /// ([`crate::features::terminal::presentation::pages`]'s own doc on why
+    /// that footer action closes via `close_then`).
+    fn tap_footer_rename(&mut self) -> RecScene {
+        let point = self.value_point(FOOTER_RENAME_LABEL);
+        self.tap(point);
         self.settle()
     }
 
-    /// Choose menu row `index` — see the [module docs](self)'s note on why
-    /// this pops with the widget's own result rather than tapping a row.
-    fn choose_menu_row(&mut self, index: usize) {
-        self.nav.pop_with_result(PopResult::of(index));
+    /// Tap the sheet's footer "Detach session" row and flush the sheet's own
+    /// pop — the detach request itself is async and lands on its own pump
+    /// (see [`the_menus_detach_row_pops_the_terminal_route`]'s doc).
+    fn tap_footer_detach(&mut self) {
+        let point = self.value_point(FOOTER_DETACH_LABEL);
+        self.tap(point);
         self.flush();
-    }
-
-    /// Open the "panes & tabs" sheet through the menu, returning the frames
-    /// before and after so the sheet's own chrome can be isolated.
-    fn open_sheet(&mut self) -> (RecScene, RecScene) {
-        let before = self.frame();
-        self.open_menu();
-        self.choose_menu_row(ROW_PANES);
-        let after = self.settle();
-        (before, after)
     }
 
     /// Push a stand-in for the route a sheet floats over, and answer the depth
@@ -673,99 +663,64 @@ fn panel(added: &[(Point, Size)]) -> (Point, Size) {
     largest(added).expect("an overlay always paints its own panel")
 }
 
-/// The sheet's pane rows, top to bottom — the `--bg-base` tiles
-/// (`ui::palette::Palette::base`, the scheme's
-/// `surface_container_low`), which nothing else on this screen paints.
-fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
-    let base = frust_glyph::baseline().scheme().surface_container_low;
-    let mut rows: Vec<(Point, Size)> = rounded_in(scene, base)
-        .into_iter()
-        .map(|(origin, size, _)| (origin, size))
-        .collect();
-    rows.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
-    rows
-}
+/// `side_sheet_tree`'s own mid-level tab radius (private there, transcribed
+/// the same way this suite already transcribes other private module
+/// constants) — herdr's nested tab **rect**, never worn by a promoted zellij
+/// tab (`side_sheet_tree`'s own tests carry the identical fact for the tree
+/// body in isolation).
+const TREE_TAB_RADIUS: f64 = 7.0;
 
-/// Which pane row wears the focused mark (its amber mark box + `focused` chip), or `None`. A
-/// selected pill shares the same amber-faint wash, so the row is found by *containment*: the
-/// chip and mark box are the only amber-faint tiles inside a [`pane_rows`] rect.
-fn focused_row(scene: &RecScene) -> Option<usize> {
-    let theme = frust_glyph::baseline();
-    let faint = theme.scheme().primary.with_alpha(AMBER_FAINT);
-    let rows = pane_rows(scene);
-    rounded_in(scene, faint)
-        .into_iter()
-        .find_map(|(origin, size, _)| {
-            let point = center((origin, size));
-            rows.iter().position(|row| inside(*row, point))
-        })
-}
-
-/// Whether `point` sits inside `rect`.
-fn inside((origin, size): (Point, Size), point: Point) -> bool {
-    point.x >= origin.x
-        && point.x <= origin.x + size.width
-        && point.y >= origin.y
-        && point.y <= origin.y + size.height
-}
-
-/// The [`EDIT_LABEL`]-labelled icon whose center falls inside `rect` — a chip's trailing edit
-/// icon, located by *containment* rather than a fixed index (one "Rename" node per renamable chip).
-fn edit_icon_in(root: &RenderRoot<AppState, AnyView<AppState>>, rect: (Point, Size)) -> Point {
-    node_centers_by_label(root, EDIT_LABEL)
-        .into_iter()
-        .find(|point| inside(rect, *point))
-        .unwrap_or_else(|| panic!("no {EDIT_LABEL:?} icon inside {rect:?}"))
-}
-
-/// A point inside `rect`'s leading edge — reliably inside a chip's *main* tap region regardless
-/// of label width (`pills::pill` puts its icon at the trailing edge, where [`center`] could land
-/// for a short label).
-fn leading_point((origin, size): (Point, Size)) -> Point {
-    Point::new(origin.x + 8.0, origin.y + size.height / 2.0)
-}
-
-/// Focus a just-opened [`name_input_dialog`](muxr::ui::dialogs::name_input_dialog)'s one field,
-/// diffed against `under` (the frame painted before it opened) — an unfocused field routes
-/// neither a keystroke nor the submitting Enter.
-fn tap_dialog_field(h: &mut Harness, under: &RecScene) {
-    let dialog_frame = h.settle();
-    let dialog = added(&under.rounded, &dialog_frame.rounded);
-    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
-    let field = by_width(&dialog, content_w).expect("the name field");
-    h.tap(center(field));
-}
-
-/// The sheet's pill rects, in reading order (top to bottom, then left to right). Every pill is
-/// the same height, and there are nine of them, so the **most common height** among the sheet's
-/// rects is the pills' and nothing else's — independent of the type role's line box, a theme
-/// number rather than a mock one.
-fn pills(added: &[(Point, Size)]) -> Vec<(Point, Size)> {
-    let mut heights: Vec<(f64, usize)> = Vec::new();
-    for (_, size) in added {
-        match heights
-            .iter_mut()
-            .find(|(height, _)| (height - size.height).abs() < EPSILON)
-        {
-            Some((_, count)) => *count += 1,
-            None => heights.push((size.height, 1)),
-        }
-    }
-    let (pill_height, _) = heights
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .expect("the sheet paints something");
-    let mut pills: Vec<(Point, Size)> = added
+/// Every rounded fill in `scene` painted at exactly `radius`, as `(origin,
+/// size)` — the tree's own radius-per-level idiom
+/// (`side_sheet_tree`'s test module), reused here at the integration layer.
+fn rounded_fills_at(scene: &RecScene, radius: f64) -> Vec<(Point, Size)> {
+    scene
+        .rounded_fills
         .iter()
-        .copied()
-        .filter(|(_, size)| (size.height - pill_height).abs() < EPSILON)
+        .filter(|(_, _, r, _)| (*r - radius).abs() < EPSILON)
+        .map(|(origin, size, _, _)| (*origin, *size))
+        .collect()
+}
+
+/// The tree's pane rows in `scene`, top to bottom: every **non-transparent**
+/// [`muxr::ui::paint::RADIUS_FULL`] rect **wide enough to be a row** — the
+/// two filters together exclude both the pill-shaped mark box/focused dot
+/// each row also carries at the same radius (narrower) and the add-pane row
+/// (transparent-filled, but stretched to the same width by the tree's own
+/// column: `Container::paint` still calls `fill_rounded_rect_radii` for a
+/// `Some(Color::TRANSPARENT)` fill, so it paints at this radius too).
+fn tree_pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
+    let mut candidates: Vec<(Point, Size)> = scene
+        .rounded_fills
+        .iter()
+        .filter(|(_, _, r, color)| {
+            (*r - RADIUS_FULL).abs() < EPSILON && *color != Color::TRANSPARENT
+        })
+        .map(|(origin, size, _, _)| (*origin, *size))
         .collect();
-    pills.sort_by(|a, b| {
-        a.0.y
-            .total_cmp(&b.0.y)
-            .then_with(|| a.0.x.total_cmp(&b.0.x))
-    });
-    pills
+    let widest = candidates
+        .iter()
+        .map(|(_, size)| size.width)
+        .fold(0.0_f64, f64::max);
+    candidates.retain(|(_, size)| size.width > widest * 0.5);
+    candidates.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
+    candidates
+}
+
+/// Which of `scene`'s [`tree_pane_rows`] is focused, or `None` — a focused
+/// row's own fill is the theme's `amber_faint` wash (`side_sheet_tree`'s
+/// `pane_row`: the *whole* row tints, not a contained mark), so this is the
+/// tree's own counterpart of the flat sheet's now-removed `focused_row`.
+fn tree_focused_row(scene: &RecScene) -> Option<usize> {
+    let colors = muxr::ui::palette::Palette::from_theme(&frust_glyph::baseline());
+    let rows = tree_pane_rows(scene);
+    scene
+        .rounded_fills
+        .iter()
+        .filter(|(_, _, r, color)| {
+            (*r - RADIUS_FULL).abs() < EPSILON && *color == colors.amber_faint
+        })
+        .find_map(|(origin, size, _, _)| rows.iter().position(|row| same(row, &(*origin, *size))))
 }
 
 /// A theme with `reduce_motion` forced on.
@@ -1195,7 +1150,7 @@ fn interrupting_an_expand_with_a_collapse_never_lets_the_card_climb_back() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_terminal_route_carries_the_kebab_and_it_opens_a_menu() {
+fn the_terminal_route_carries_the_kebab_and_it_opens_the_sheet_directly() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -1203,63 +1158,45 @@ fn the_terminal_route_carries_the_kebab_and_it_opens_a_menu() {
     assert_eq!(
         route_meta("/terminal").and_then(|meta| meta.action),
         Some(BarAction::TerminalMenu),
-        "the shell's bar is what mounts the `⋮`"
+        "the shell's bar is what mounts the menu button"
     );
 
-    let before = h.frame();
-    let after = h.open_menu();
-    assert_eq!(h.depth(), REST_DEPTH + 1, "the menu is a pushed page");
+    let (before, after) = h.open_sheet();
+    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is a pushed page");
+    let fills = |scene: &RecScene| -> Vec<(Point, Size)> {
+        scene.fills.iter().map(|(o, s, _)| (*o, *s)).collect()
+    };
     assert!(
-        !added(&before.rounded, &after.rounded).is_empty(),
+        !added(&fills(&before), &fills(&after)).is_empty(),
         "…and it painted its own panel"
     );
 }
 
 // ---------------------------------------------------------------------------
-// 6 — the "panes & tabs" sheet
+// 6 — the "panes & tabs" side sheet
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_menus_first_row_opens_the_sheet_on_the_tab_row_and_the_browsed_tabs_panes() {
+fn opening_the_sheet_shows_the_tree_pre_expanded_on_the_sessions_own_tab() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
 
-    let (before, after) = h.open_sheet();
-    assert_eq!(
-        h.depth(),
-        REST_DEPTH + 1,
-        "the sheet replaced the menu rather than stacking over it"
+    let (_before, after) = h.open_sheet();
+    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is a pushed page");
+
+    // This session is zellij, which has no spaces at all — its tabs promote
+    // to the card shape, and nothing wears the mid-level tab rect
+    // (`side_sheet_tree`'s own test carries the same fact for the tree body
+    // in isolation).
+    assert!(
+        rounded_fills_at(&after, TREE_TAB_RADIUS).is_empty(),
+        "a zellij session's tabs never wear the nested tab rect"
     );
 
-    let sheet = added(&before.rounded, &after.rounded);
-    // The panel is a *path*, not a rounded rect: only its top corners are
-    // rounded, which `fill_rounded_rect` cannot express.
-    let (origin, size) = panel(&added(&before.paths, &after.paths));
-    assert!(
-        (origin.y + size.height - SURFACE.height).abs() < EPSILON,
-        "bottom-anchored, like every muxr sheet: {origin:?}/{size:?}"
-    );
-    // Four tabs, and **no** spaces row at all: this session is zellij, which has
-    // no spaces. The add-tab row is not one of these — it is a full-size row of
-    // its own, not a `.pill`-shaped one `pills` would pick up.
-    assert_eq!(
-        pills(&sheet).len(),
-        4,
-        "the tab row and nothing above it: {sheet:?}"
-    );
-    assert!(!h.shows(SECTION_SPACES), "no label, and no gap under one");
-    assert!(h.shows(SECTION_TABS));
-    // The sheet opens browsing the tab the session is on, and lists *its*
-    // panes — both of the mock's, not one hardcoded row.
-    assert!(h.shows(&format!("{SECTION_PANES}devbox")));
-    assert_eq!(pane_rows(&after).len(), 2, "every pane of the browsed tab");
-    // The pane rows' mark boxes, and the dashed new-pane row (which paints
-    // no fill at all, only strokes).
-    assert!(
-        !added(&before.strokes, &after.strokes).is_empty(),
-        "the dashed rows and hairlines"
-    );
+    // Opening seeds the tree's resting expansion on the session's own tab, so
+    // both of its panes print without a tap.
+    assert!(h.shows("ed@devbox zsh"), "devbox's second pane is visible");
 }
 
 #[test]
@@ -1268,38 +1205,33 @@ fn a_herdr_session_is_the_only_one_offered_spaces() {
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
+    let (_before, after) = h.open_sheet();
 
+    // herdr nests tabs a level in, under the space card — the fact this
+    // session (unlike the zellij one) wears the mid-level tab rect at all.
     assert!(
-        h.shows(SECTION_SPACES),
-        "herdr has spaces, so the sheet does"
-    );
-    // Three spaces, then four tabs — the two add rows paint full-size and
-    // dashed, so `pills` (a `.pill`-shaped-rect scan) no longer picks either up.
-    assert_eq!(
-        pills(&sheet).len(),
-        3 + 4,
-        "every pill row, the two full-size add rows excluded: {sheet:?}"
+        !rounded_fills_at(&after, TREE_TAB_RADIUS).is_empty(),
+        "herdr's tabs wear the nested tab rect, unlike a promoted zellij one"
     );
 }
 
 #[test]
-fn a_tab_pill_browses_locally_and_leaves_the_card_and_the_sheet_alone() {
+fn a_tab_row_browses_locally_and_leaves_the_card_and_the_sheet_alone() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-    // Reading order: the four tab pills, then `+`. `1 btop` is the first.
-    h.tap(center(pills(&sheet)[0]));
+    h.open_sheet();
+    // The active (devbox) tab opens pre-expanded; tapping its own header
+    // collapses it rather than browsing anything, so this taps the row for a
+    // *different*, still-collapsed tab instead — found by its own title.
+    let point = h.value_point("btop");
+    h.tap(point);
     h.settle();
 
-    // The pane section re-sliced to the browsed tab, out of the tab world the
-    // one load already carried…
-    assert!(h.shows(&format!("{SECTION_PANES}btop")));
-    assert_eq!(pane_rows(&h.frame()).len(), 2);
+    // Expanding a tab is a browse: it reveals that tab's own panes, out of
+    // the tab world the one load already carried…
+    assert!(h.shows("ed@precision zsh"), "btop's panes are now visible");
     // …while the card stayed exactly where the session is…
     assert!(
         h.shows(DEVBOX_TITLE),
@@ -1321,12 +1253,13 @@ fn a_pane_row_commits_the_browse_and_then_closes_the_sheet() {
     let _ambient = setup();
     let mut h = Harness::mount();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-    h.tap(center(pills(&sheet)[0]));
-    h.settle();
-    // The browsed tab's first pane — the one commit path there is.
-    h.tap_pane_row(0);
+    h.open_sheet();
+    // Browse to btop — its own collapsed header expands it (and, by the
+    // tree's own accordion, collapses devbox's).
+    h.tap(h.value_point("btop"));
+    let browsed = h.settle();
+    // …then commit its first pane — the tree's one committing gesture.
+    h.tap(center(tree_pane_rows(&browsed)[0]));
 
     // The commit is async (a tab move, then a pane focus), and the sheet
     // closes a beat after it lands.
@@ -1347,7 +1280,7 @@ fn a_landed_herdr_commit_closes_the_sheet_on_the_documented_beat() {
     let (_before, after) = h.open_sheet();
     // The second pane of the tab the session is on: `FocusPane` alone, which on
     // herdr is the whole move (the server re-points this connection's relay).
-    h.tap(center(pane_rows(&after)[1]));
+    h.tap(center(tree_pane_rows(&after)[1]));
     assert_eq!(
         h.depth(),
         REST_DEPTH + 1,
@@ -1361,7 +1294,7 @@ fn a_landed_herdr_commit_closes_the_sheet_on_the_documented_beat() {
 
     let (_, reopened) = h.open_sheet();
     assert_eq!(
-        focused_row(&reopened),
+        tree_focused_row(&reopened),
         Some(1),
         "the optimistic badge stands, and the layout read behind the reopen \
          confirms it rather than reverting it"
@@ -1376,47 +1309,21 @@ fn the_focused_badge_follows_a_commit_the_next_time_the_sheet_opens() {
 
     let (_, opened) = h.open_sheet();
     assert_eq!(
-        focused_row(&opened),
+        tree_focused_row(&opened),
         Some(0),
         "the mock seeds the first pane focused"
     );
 
     // Commit the *second* pane of the tab the session is already on — no tab
     // move, just the focus.
-    h.tap_pane_row(1);
+    h.tap(center(tree_pane_rows(&opened)[1]));
     h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
     let (_, reopened) = h.open_sheet();
     assert_eq!(
-        focused_row(&reopened),
+        tree_focused_row(&reopened),
         Some(1),
         "the badge moved with the commit, without waiting for a reload"
-    );
-}
-
-#[test]
-fn a_browsed_tab_shows_no_focused_badge_at_all() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::mount();
-
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-    assert_eq!(
-        focused_row(&after),
-        Some(0),
-        "the session's own tab has one"
-    );
-
-    h.tap(center(pills(&sheet)[0]));
-    let browsed = h.settle();
-
-    // The browsed tab's panes carry whatever the last load recorded, and the
-    // session is in none of them — so no row claims the badge.
-    assert_eq!(
-        focused_row(&browsed),
-        None,
-        "a stale focus flag must not read as where the session is"
     );
 }
 
@@ -1429,11 +1336,10 @@ fn a_pane_commit_replays_the_reveal_from_the_top() {
     // Settle the first reveal.
     let settled = runs_at(&mut h, 2_000.0);
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-    h.tap(center(pills(&sheet)[0]));
-    h.settle();
-    h.tap_pane_row(0);
+    h.open_sheet();
+    h.tap(h.value_point("btop"));
+    let browsed = h.settle();
+    h.tap(center(tree_pane_rows(&browsed)[0]));
     h.pump_until_values("the btop tab", |values| {
         values.iter().any(|v| v == BTOP_TITLE)
     });
@@ -1500,17 +1406,16 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     let mut h = Harness::mount();
     let floor = h.push_route_floor();
 
-    let (before, after) = h.open_sheet();
+    h.open_sheet();
     assert_eq!(h.depth(), floor + 1, "the sheet is up over the route");
-    let sheet = added(&before.rounded, &after.rounded);
-    // Browse `1 btop`, commit its first pane, then — inside the same close beat — browse
-    // `2 minefit-api` and commit its first pane too.
-    h.tap(center(pills(&sheet)[0]));
-    h.settle();
-    h.tap_pane_row(0);
-    h.tap(center(pills(&sheet)[1]));
-    h.settle();
-    h.tap_pane_row(0);
+    // Browse `btop`, commit its first pane, then — inside the same close beat — browse
+    // `minefit-api` and commit its first pane too.
+    h.tap(h.value_point("btop"));
+    let scene = h.settle();
+    h.tap(center(tree_pane_rows(&scene)[0]));
+    h.tap(h.value_point("minefit-api"));
+    let scene = h.settle();
+    h.tap(center(tree_pane_rows(&scene)[0]));
 
     // The commit is single-flight, so the second row is *dropped* rather than raced against the
     // first — the first selection is the one that lands…
@@ -1543,7 +1448,7 @@ fn a_scrim_dismissal_inside_the_close_beat_leaves_the_route_alone() {
     let floor = h.push_route_floor();
 
     let (_before, after) = h.open_sheet();
-    h.tap(center(pane_rows(&after)[0]));
+    h.tap(center(tree_pane_rows(&after)[0]));
     // The sheet is still up — and still dismissible — for the whole beat.
     h.tap(SCRIM_POINT);
     h.flush();
@@ -1565,7 +1470,7 @@ fn the_close_button_inside_the_close_beat_leaves_the_route_alone() {
     let floor = h.push_route_floor();
 
     let (_before, after) = h.open_sheet();
-    h.tap(center(pane_rows(&after)[0]));
+    h.tap(center(tree_pane_rows(&after)[0]));
     let close = h.close_disc();
     h.tap(close);
     h.flush();
@@ -1588,15 +1493,14 @@ fn the_close_button_inside_the_close_beat_leaves_the_route_alone() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_menus_rename_row_round_trips_into_the_sessions_repository() {
+fn the_footers_rename_row_round_trips_into_the_sessions_repository() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
 
     let before = h.frame();
-    h.open_menu();
-    h.choose_menu_row(ROW_RENAME);
-    let after = h.settle();
+    h.open_sheet();
+    let after = h.tap_footer_rename();
     assert_eq!(h.depth(), REST_DEPTH + 1, "the rename dialog is up");
 
     // The dialog's field is its one full-content-width child.
@@ -1636,7 +1540,7 @@ fn session_named(
 }
 
 #[test]
-fn the_menus_detach_row_pops_the_terminal_route() {
+fn the_footers_detach_row_pops_the_terminal_route() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -1655,8 +1559,8 @@ fn the_menus_detach_row_pops_the_terminal_route() {
     // landing as its `nav.pop()`, is the one real, observable side effect
     // left (`a_second_detach_while_the_first_is_in_flight_pops_once` uses the
     // same signal for the same reason).
-    h.open_menu();
-    h.choose_menu_row(ROW_DETACH);
+    h.open_sheet();
+    h.tap_footer_detach();
     // Detach is async; the toast lands once the repository answers.
     let deadline = Instant::now() + PUMP_DEADLINE;
     while app_toasts().pending_untracked().is_empty() {
@@ -1680,16 +1584,16 @@ fn a_second_detach_while_the_first_is_in_flight_pops_once() {
     let mut h = Harness::mount();
     app_toasts().clear();
 
-    // Detach is async and the menu can be reopened while it is in flight — two
-    // landings would pop `/sessions` off the stack as well as `/terminal`.
-    // Neither `choose_menu_row` nor `settle` pumps the task queue, so both
+    // Detach is async and the sheet can be reopened while it is in flight —
+    // two landings would pop `/sessions` off the stack as well as `/terminal`.
+    // Neither `tap_footer_detach` nor `settle` pumps the task queue, so both
     // requests are made before either can land.
-    h.open_menu();
-    h.choose_menu_row(ROW_DETACH);
-    h.open_menu();
-    h.choose_menu_row(ROW_DETACH);
+    h.open_sheet();
+    h.tap_footer_detach();
+    h.open_sheet();
+    h.tap_footer_detach();
 
-    // See `the_menus_detach_row_pops_the_terminal_route`'s doc: the toast is
+    // See `the_footers_detach_row_pops_the_terminal_route`'s doc: the toast is
     // this harness's one real "a detach landed" signal — neither
     // `Nav::bar().meta` nor `NavigatorController::depth()` ever moves here.
     let deadline = Instant::now() + PUMP_DEADLINE;
@@ -1727,43 +1631,44 @@ fn make_read_only(h: &mut Harness) {
 }
 
 #[test]
-fn a_read_only_credential_withdraws_the_sheets_three_create_affordances() {
+fn a_read_only_credential_withdraws_the_trees_three_create_rows() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
     make_read_only(&mut h);
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-
-    // Three spaces and four tabs, and neither `+ space` nor `+` beside them.
-    assert_eq!(
-        pills(&sheet).len(),
-        3 + 4,
-        "a read-only session is offered no create: {sheet:?}"
+    h.open_sheet();
+    // Neither add-space, add-tab nor add-pane row is offered at all.
+    assert!(
+        !h.shows(ADD_SPACE_LABEL) && !h.shows(ADD_TAB_LABEL) && !h.shows(NEW_PANE_LABEL),
+        "a read-only session is offered no create row: {:?}",
+        h.values()
     );
-    // The tab pills stay tappable — browsing one reads what is already loaded
-    // and moves nothing. A space pill paints too, but its switch is refused:
-    // see `a_read_only_credential_refuses_a_space_switch_and_says_why`.
-    h.tap(center(pills(&sheet)[3]));
+    // The tab rows stay tappable — browsing one reads what is already loaded
+    // and moves nothing.
+    h.tap(h.value_point("btop"));
     h.settle();
-    assert!(h.shows(&format!("{SECTION_PANES}btop")), "the browse moved");
+    assert!(h.shows("ed@precision zsh"), "the browse moved");
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_space_switch_and_says_why() {
+fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
     app_toasts().clear();
     make_read_only(&mut h);
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
-
-    // "cupline" is the first space pill and, per the seed, not the selected one
-    // (`forgekit` is) — so a switch that went through would be visible.
-    h.tap(center(pills(&sheet)[0]));
+    h.open_sheet();
+    // "zelli_mobile" is a herdr space other than the one this connection is
+    // on ("forgekit") — expanding it is a read-only-safe peek, and its own
+    // active tab cascades open on its own.
+    h.tap(h.value_point("zelli_mobile"));
+    h.pump_until("zelli_mobile's own tab to auto-expand", |h| {
+        h.shows("ed@zelli zsh")
+    });
+    let scene = h.frame();
+    h.tap(center(tree_pane_rows(&scene)[0]));
     h.pump_for(2 * CLOSE_DELAY);
 
     let selected: Vec<String> = debug_controller()
@@ -1777,7 +1682,7 @@ fn a_read_only_credential_refuses_a_space_switch_and_says_why() {
     assert_eq!(
         selected,
         ["forgekit"],
-        "`SwitchSpace` is MUTATING, so the pill is turned back here rather \
+        "`SwitchSpace` is MUTATING, so the commit is turned back here rather \
          than at the server"
     );
     assert!(
@@ -1785,7 +1690,7 @@ fn a_read_only_credential_refuses_a_space_switch_and_says_why() {
             .pending_untracked()
             .iter()
             .any(|message| message == READ_ONLY_TOAST),
-        "…and the pill says why: {:?}",
+        "…and it says why: {:?}",
         app_toasts().pending_untracked()
     );
 }
@@ -1798,12 +1703,11 @@ fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
     app_toasts().clear();
     make_read_only(&mut h);
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
+    let (_before, after) = h.open_sheet();
 
     // Committing inside the tab the session is on is `FocusPane` alone, which
     // the wire allows a read-only token — so it lands, and the sheet closes.
-    h.tap(center(pane_rows(&after)[1]));
+    h.tap(center(tree_pane_rows(&after)[1]));
     h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
     assert!(
         !app_toasts()
@@ -1817,9 +1721,9 @@ fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
     // A commit that has to move tabs first is `GoToTab`, which is MUTATING —
     // so the row stays on screen and says why, and nothing moves.
     h.open_sheet();
-    h.tap(center(pills(&sheet)[0]));
-    h.settle();
-    h.tap_pane_row(0);
+    h.tap(h.value_point("btop"));
+    let scene = h.settle();
+    h.tap(center(tree_pane_rows(&scene)[0]));
     h.pump_for(2 * CLOSE_DELAY);
 
     assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
@@ -1847,12 +1751,12 @@ fn a_read_only_credential_refuses_a_herdr_commit_inside_the_active_tab_too() {
     // Inside the browsed tab, so the wire call is `FocusPane` alone — which a
     // herdr relay drops for a read-only client without a word. The refusal is
     // the client's, ahead of that silence: the row stays up and says why.
-    h.tap(center(pane_rows(&after)[1]));
+    h.tap(center(tree_pane_rows(&after)[1]));
     h.pump_for(2 * CLOSE_DELAY);
 
     assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
     assert_eq!(
-        focused_row(&h.frame()),
+        tree_focused_row(&h.frame()),
         Some(0),
         "…and the focused pane never moved"
     );
@@ -1874,8 +1778,8 @@ fn a_read_only_credential_refuses_the_rename_dialog_and_says_why() {
     app_toasts().clear();
     make_read_only(&mut h);
 
-    h.open_menu();
-    h.choose_menu_row(ROW_RENAME);
+    h.open_sheet();
+    h.tap_footer_rename();
     h.flush();
 
     assert_eq!(
@@ -1953,9 +1857,8 @@ fn the_screen_reads_the_attached_session_off_the_route_it_was_pushed_with() {
     // attached session's *current* name, which the screen can only know from
     // `?session=s-1`. So delete one character and submit.
     let before = h.frame();
-    h.open_menu();
-    h.choose_menu_row(ROW_RENAME);
-    let after = h.settle();
+    h.open_sheet();
+    let after = h.tap_footer_rename();
     assert_eq!(
         h.depth(),
         REST_DEPTH + 1,
@@ -2276,25 +2179,6 @@ fn a_tap_on_the_new_pane_row_opens_no_dialog_and_leaves_the_sheet_up() {
     assert_eq!(h.depth(), floor, "…and the sheet stayed up");
 }
 
-#[test]
-fn a_long_press_on_the_new_pane_row_also_opens_no_dialog_and_leaves_the_sheet_up() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::mount();
-    app_toasts().clear();
-
-    h.open_sheet();
-    let floor = h.depth();
-    let point = h.new_pane_row_point();
-
-    h.long_press(point);
-    h.settle();
-
-    assert_eq!(h.depth(), floor, "no dialog on a long-press either");
-    h.await_toast(INTERNAL_FAILURE_TOAST);
-    assert_eq!(h.depth(), floor, "…and the sheet stayed up");
-}
-
 // Every chip's trailing edit icon. Request shapes and the settled reload are pinned at the
 // controller level (`MockTerminalRepository` leaves the three renames at the shared
 // "unsupported" default), so what these pin is *flow* and, above all, that the icon's tap
@@ -2302,138 +2186,77 @@ fn a_long_press_on_the_new_pane_row_also_opens_no_dialog_and_leaves_the_sheet_up
 // never also selects/browses/commits, while a plain tap on the rest of the chip still does.
 
 #[test]
-fn a_space_pills_edit_icon_renames_it_without_selecting_it() {
+fn holding_a_space_row_renames_it_without_toggling_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
     app_toasts().clear();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
+    h.open_sheet();
     let floor = h.depth();
+    let before = h.frame();
 
-    // "cupline" is the sheet's first space pill — and, per the seed, not the
-    // selected one (`forgekit` is).
-    let cupline = pills(&sheet)[0];
-    h.tap(edit_icon_in(&h.root, cupline));
-    tap_dialog_field(&mut h, &after);
+    // "cupline" is a collapsed, empty, non-selected space — the tree's own
+    // press-and-hold (`side_sheet_tree`'s `pressable`), not a trailing edit
+    // icon, is what opens its rename dialog now.
+    h.long_press(h.value_point("cupline"));
+    let after = h.settle();
 
     assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
-    assert!(h.shows("cupline"), "prefilled with the pill's current name");
+    assert!(
+        h.shows("cupline"),
+        "prefilled with the space's current name"
+    );
 
-    // The edit tap never reached the pill's own `on_tap`: submitting a change
-    // reaches the repository (proving the dialog's flow is live) without
-    // "cupline" ever having become selected.
+    let dialog = added(&before.rounded, &after.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
     h.type_text("renamed");
     h.press(NamedKey::Enter);
     h.flush();
     assert_eq!(h.depth(), floor, "the submit closed the dialog");
     h.await_toast(INTERNAL_FAILURE_TOAST);
-    // `await_toast` pumps the async task queue at a pinned paint clock, which is
-    // not the same as settling the dialog's own pop transition — `settle()`'s
-    // "required before tapping a pushed page" contract applies just as much to
-    // the page a pop just re-exposed.
     h.settle();
-    let selected: Vec<String> = debug_controller()
-        .expect("mounted")
-        .spaces
-        .get_untracked()
-        .into_iter()
-        .filter(|space| space.selected)
-        .map(|space| space.name)
-        .collect();
-    assert_eq!(
-        selected,
-        ["forgekit"],
-        "the edit tap and its dialog never selected the pill they renamed"
+    assert!(
+        !h.shows("no tabs yet"),
+        "the hold never also expanded the empty space: {:?}",
+        h.values()
     );
-
-    // …while a plain tap on the same pill still selects it — the two regions are
-    // disjoint, not one having swallowed the other's gesture. Its own leading
-    // edge, not its center: a short label's pill can center over the trailing
-    // icon, the exact overlap this rules out. `select_space` is async, so this
-    // waits for it to land rather than reading right away.
-    h.tap(leading_point(cupline));
-    h.pump_until("cupline to become selected", |_| {
-        debug_controller()
-            .expect("mounted")
-            .spaces
-            .get_untracked()
-            .iter()
-            .any(|space| space.selected && space.name == "cupline")
-    });
-    let selected: Vec<String> = debug_controller()
-        .expect("mounted")
-        .spaces
-        .get_untracked()
-        .into_iter()
-        .filter(|space| space.selected)
-        .map(|space| space.name)
-        .collect();
-    assert_eq!(selected, ["cupline"], "…and a plain tap still selects");
 }
 
 #[test]
-fn a_tab_pills_edit_icon_renames_it_without_browsing_it() {
+fn holding_a_tab_row_renames_it_without_toggling_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
     app_toasts().clear();
 
-    let (before, after) = h.open_sheet();
-    let sheet = added(&before.rounded, &after.rounded);
+    h.open_sheet();
     let floor = h.depth();
+    let before = h.frame();
 
-    // "btop" is the sheet's first tab pill — the session opens browsing
-    // `devbox` instead (see `DEVBOX_TITLE`).
-    let btop = pills(&sheet)[0];
-    h.tap(edit_icon_in(&h.root, btop));
-    tap_dialog_field(&mut h, &after);
+    // "btop" opens collapsed — devbox is the one the session is on, seeded
+    // pre-expanded.
+    h.long_press(h.value_point("btop"));
+    let after = h.settle();
 
     assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
     assert!(h.shows("btop"), "prefilled with the tab's current label");
-    assert_eq!(
-        debug_controller()
-            .expect("mounted")
-            .browsed_tab
-            .get_untracked(),
-        "devbox",
-        "the edit tap never browsed to the tab it names"
-    );
 
+    let dialog = added(&before.rounded, &after.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
     h.type_text("renamed");
     h.press(NamedKey::Enter);
     h.flush();
     assert_eq!(h.depth(), floor, "the submit closed the dialog");
     h.await_toast(INTERNAL_FAILURE_TOAST);
-    // See the space test's identical note: settle the pop's own transition
-    // before treating the sheet underneath as live again.
-    h.settle();
-    assert_eq!(
-        debug_controller()
-            .expect("mounted")
-            .browsed_tab
-            .get_untracked(),
-        "devbox",
-        "…still never browsed, even once the repository answered"
-    );
-
-    // A plain tap on the same pill still browses it — its leading edge, for
-    // the same reason the space test's own equivalent tap does.
-    h.tap(leading_point(btop));
-    h.settle();
-    assert_eq!(
-        debug_controller()
-            .expect("mounted")
-            .browsed_tab
-            .get_untracked(),
-        "btop",
-        "a plain tap still browses"
-    );
 }
 
 #[test]
-fn a_pane_rows_edit_icon_renames_it_without_committing_it() {
+fn holding_a_pane_row_renames_it_without_committing_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -2442,21 +2265,25 @@ fn a_pane_rows_edit_icon_renames_it_without_committing_it() {
     let (_, opened) = h.open_sheet();
     let floor = h.depth();
     // The second pane row ("ed@devbox zsh") — the mock seeds the first one
-    // focused, so committing the second is an observable move.
-    let unfocused_row = pane_rows(&opened)[1];
-    h.tap(edit_icon_in(&h.root, unfocused_row));
-    tap_dialog_field(&mut h, &opened);
+    // focused, so committing the second would be an observable move.
+    let point = center(tree_pane_rows(&opened)[1]);
+    h.long_press(point);
+    let after = h.settle();
 
     assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
     assert!(h.shows("ed@devbox zsh"), "prefilled with the pane's title");
 
+    let dialog = added(&opened.rounded, &after.rounded);
+    let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
+    let field = by_width(&dialog, content_w).expect("the name field");
+    h.tap(center(field));
     h.type_text("renamed");
     h.press(NamedKey::Enter);
     h.flush();
     assert_eq!(h.depth(), floor, "the submit closed the dialog");
     h.await_toast(INTERNAL_FAILURE_TOAST);
     // Give a commit's own close-beat every chance to fire before checking —
-    // the edit tap must not have started one.
+    // the hold must not have started one.
     h.pump_for(2 * CLOSE_DELAY);
     assert_eq!(
         h.depth(),
@@ -2464,13 +2291,14 @@ fn a_pane_rows_edit_icon_renames_it_without_committing_it() {
         "the edit tap never committed the pane it names — the sheet is still up"
     );
     assert_eq!(
-        focused_row(&h.frame()),
+        tree_focused_row(&h.frame()),
         Some(0),
         "…and the focused pane never moved"
     );
 
     // A plain tap on the same row still commits it.
-    h.tap_pane_row(1);
+    let scene = h.frame();
+    h.tap(center(tree_pane_rows(&scene)[1]));
     // `floor - 1`: depth is already `floor` (the sheet, still up) before this
     // tap — the wait has to watch for the sheet's own pop, not the level it is
     // already sitting at.
@@ -2479,15 +2307,23 @@ fn a_pane_rows_edit_icon_renames_it_without_committing_it() {
 }
 
 #[test]
-fn a_read_only_credential_withdraws_every_chips_edit_icon() {
+fn a_read_only_credential_withdraws_every_rows_press_and_hold() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
     make_read_only(&mut h);
 
     h.open_sheet();
-    assert!(
-        node_centers_by_label(&h.root, EDIT_LABEL).is_empty(),
+    let floor = h.depth();
+    // Holding any row — a promoted space's card, a tab, a pane — opens no
+    // dialog at all: `TreeMutations` is withdrawn wholesale for a read-only
+    // credential, so the tree wires no `on_long_press` in the first place.
+    h.long_press(h.value_point("btop"));
+    h.settle();
+
+    assert_eq!(
+        h.depth(),
+        floor,
         "a read-only session offers no rename affordance anywhere on the sheet"
     );
 }
