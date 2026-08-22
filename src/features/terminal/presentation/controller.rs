@@ -1,5 +1,5 @@
 //! [`TerminalController`] — the `/terminal` screen's view model: a
-//! [`ControllerCore`], four use cases over two repositories, and `settings`'
+//! [`ControllerCore`], five use cases over two repositories, and `settings`'
 //! preferences store, resolved once by `pages.rs`'s `use_controller` factory.
 //! Per-frame reveal progress lives off-signal in `super::chrome`; this
 //! publishes only the replay cue ([`reveal_epoch`](TerminalController::reveal_epoch)).
@@ -15,6 +15,16 @@
 //! [`publish_tabs`](TerminalController::publish_tabs), self-healing
 //! active/browsed keys, and single-flight claims on the poll, creates, and
 //! the sheet's commit.
+//!
+//! **The tree sheet's own browse state** is id-keyed and separate from the pill
+//! sheet's ([`expanded_space`](TerminalController::expanded_space)/
+//! [`expanded_tab`](TerminalController::expanded_tab), at most one of each): expanding a
+//! non-selected space is a read-only [`ListSpaceTabs`] peek
+//! ([`expand_space`](TerminalController::expand_space)), cached under
+//! [`browsed_space_tabs`](TerminalController::browsed_space_tabs) rather than
+//! duplicated onto [`tabs`](TerminalController::tabs), and committing a pane under one
+//! ([`commit_pane_in_space`](TerminalController::commit_pane_in_space)) switches to it
+//! first, unlike the peek itself.
 //!
 //! [`is_herdr`] is the one backend discriminator: only herdr has spaces and a
 //! resume hint ([`ResumeSlot`]); the grid's content-tap hook is never wired there.
@@ -43,7 +53,7 @@ use crate::features::terminal::domain::repositories::{
     PreferencesRepository, SessionsRepository, TerminalRepository,
 };
 use crate::features::terminal::domain::use_cases::{
-    DetachSession, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
+    DetachSession, ListSpaceTabs, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
 };
 use crate::fonts;
 
@@ -70,6 +80,25 @@ pub struct TerminalController {
     /// The key of the tab the sheet is *looking at*. Seeded from
     /// [`active_tab`](Self::active_tab) on every load and sheet open.
     pub browsed_tab: RwSignal<String>,
+    /// The tree sheet's one read-only peek use case — see
+    /// [`expand_space`](Self::expand_space).
+    list_space_tabs: ListSpaceTabs,
+    /// The tree sheet's expanded space, id-keyed (**never** index-keyed: the 3s
+    /// layout poll + generation guard may republish [`tabs`](Self::tabs) mid-open) — at
+    /// most one at a time, accordion semantics owned here rather than by the widget.
+    /// `None` on zellij, which has no spaces to expand at all.
+    pub expanded_space: RwSignal<Option<String>>,
+    /// The tree sheet's expanded tab, id-keyed like
+    /// [`expanded_space`](Self::expanded_space) — at most one at a time, against
+    /// whichever tab list the expanded space is showing: the selected space's
+    /// [`tabs`](Self::tabs), or a browsed space's
+    /// [`browsed_space_tabs`](Self::browsed_space_tabs).
+    pub expanded_tab: RwSignal<Option<String>>,
+    /// The lazily fetched tabs of a browsed **non-selected** space, keyed by the space
+    /// id they answer for — one slot is enough, since only one space is ever expanded
+    /// at a time. The *selected* space's tabs keep coming from
+    /// [`tabs`](Self::tabs); this never duplicates them.
+    pub browsed_space_tabs: RwSignal<Option<(String, Vec<TabEntry>)>>,
     /// The active tab's lines — what the card's body prints.
     pub lines: RwSignal<Vec<TermLine>>,
     /// The attached session's current name, for the rename dialog's seed.
@@ -228,12 +257,16 @@ impl TerminalController {
             switch: SwitchTab::new(Arc::clone(&terminal)),
             rename: RenameAttachedSession::new(sessions),
             detach: DetachSession::new(Arc::clone(&terminal)),
+            list_space_tabs: ListSpaceTabs::new(Arc::clone(&terminal)),
             terminal,
             session_id,
             spaces: RwSignal::new(Vec::new()),
             tabs: RwSignal::new(Vec::new()),
             active_tab: RwSignal::new(String::new()),
             browsed_tab: RwSignal::new(String::new()),
+            expanded_space: RwSignal::new(None),
+            expanded_tab: RwSignal::new(None),
+            browsed_space_tabs: RwSignal::new(None),
             lines: RwSignal::new(Vec::new()),
             session_name: RwSignal::new(None),
             loaded: RwSignal::new(false),
@@ -332,6 +365,91 @@ impl TerminalController {
         self.browsed_tab.set(self.active_tab.get_untracked());
     }
 
+    /// Expand the space `id` in the tree sheet — [`expanded_space`](Self::expanded_space)'s
+    /// one accordion writer. **Never `switch_space`**: browsing a space in the sheet must
+    /// never move this connection's own selection, unlike [`select_space`](Self::select_space).
+    ///
+    /// The selected space's own tabs already live in [`tabs`](Self::tabs) — expanding it
+    /// performs no RPC at all. Expanding any other space spawns a read-only
+    /// [`ListSpaceTabs`] fetch, caching the answer under
+    /// [`browsed_space_tabs`](Self::browsed_space_tabs). **Stale guard**: the answer is only
+    /// published if [`expanded_space`](Self::expanded_space) still names `id` when the fetch
+    /// lands — a user who has since expanded a different space (or collapsed this one) drops
+    /// it silently. **Failure** rides the existing `ControllerCore::run` failure sink (one
+    /// toast) and collapses the row back to nothing, itself guarded the same way.
+    ///
+    /// Switching which space is expanded also collapses
+    /// [`expanded_tab`](Self::expanded_tab): a tab only ever belongs to the space showing it,
+    /// so one left expanded under a space just closed is no longer meaningful.
+    pub async fn expand_space(&self, id: String) {
+        if self.expanded_space.get_untracked().as_deref() != Some(id.as_str()) {
+            self.expanded_tab.set(None);
+        }
+        self.expanded_space.set(Some(id.clone()));
+        if self.selected_space_id().as_deref() == Some(id.as_str()) {
+            return;
+        }
+        match self
+            .core
+            .run(&self.list_space_tabs, id.clone(), RunOptions::default())
+            .await
+        {
+            Ok(tabs) => {
+                if self.expanded_space.try_get_untracked() == Some(Some(id.clone())) {
+                    self.browsed_space_tabs.set(Some((id, tabs)));
+                }
+            }
+            Err(_) => {
+                if self.expanded_space.try_get_untracked() == Some(Some(id)) {
+                    self.expanded_space.set(None);
+                }
+            }
+        }
+    }
+
+    /// Collapse the tree sheet's expanded space — and the tab expanded under it, which
+    /// belongs to no other space's list.
+    pub fn collapse_space(&self) {
+        self.expanded_space.set(None);
+        self.expanded_tab.set(None);
+    }
+
+    /// Expand the pane list of the tab keyed `key` in the tree sheet. Synchronous and
+    /// RPC-free like [`browse_tab`](Self::browse_tab): every pane rode in with its own tab,
+    /// whichever list the expanded space is showing (the selected space's
+    /// [`tabs`](Self::tabs), or a browsed space's
+    /// [`browsed_space_tabs`](Self::browsed_space_tabs)) — picking the right one is the
+    /// widget's read, not this write's concern.
+    pub fn expand_tab(&self, key: String) {
+        self.expanded_tab.set(Some(key));
+    }
+
+    /// Collapse the tree sheet's expanded tab, leaving the expanded space as it was.
+    pub fn collapse_tab(&self) {
+        self.expanded_tab.set(None);
+    }
+
+    /// Seed the tree sheet's resting expansion on open: the selected space (herdr only —
+    /// zellij's top level is tabs, so it has none to expand) and the active tab both open
+    /// pre-expanded. Companion to [`begin_browsing`](Self::begin_browsing), which
+    /// re-points the tab browse the same way; playing no opening animation for either is
+    /// the widget's own concern, not this write's.
+    pub fn seed_expansion(&self) {
+        if self.is_herdr_session() {
+            self.expanded_space.set(self.selected_space_id());
+        }
+        self.expanded_tab.set(Some(self.active_tab.get_untracked()));
+    }
+
+    /// Clear the tree sheet's whole browse: expansion and the browsed-space cache. The
+    /// sheet's dismiss calls this, so nothing survives to the next open, which reseeds via
+    /// [`seed_expansion`](Self::seed_expansion) instead of resuming a stale browse.
+    pub fn reset_browse(&self) {
+        self.expanded_space.set(None);
+        self.expanded_tab.set(None);
+        self.browsed_space_tabs.set(None);
+    }
+
     /// Move the session to tab `key`: focus it, replace the body's lines,
     /// replay the reveal — the tab step of [`commit_pane`](Self::commit_pane)
     /// (its one caller). The stream stays open across it: herdr re-points
@@ -361,22 +479,33 @@ impl TerminalController {
     }
 
     /// Commit the sheet's browse: focus pane `pane_id` of tab `tab_key`
-    /// (`is_plugin` picks the wire namespace). Order: tab move first (a pane
-    /// only focuses inside the focused tab), then pane focus on every backend
-    /// — herdr wire-swaps this connection's relay in place, so a reconnect's
-    /// resume hint is only a best-effort ask. A refused pane focus after a
-    /// landed tab move still keeps that move. **Single-flight**
-    /// ([`claim_commit`](Self::claim_commit)): a tap in flight is dropped, not
-    /// queued. **Accepted residual**: no re-read behind the move — a racing
-    /// poll may transiently show the relay's own focus, self-correcting
-    /// within one [`LAYOUT_POLL_INTERVAL`] tick. A known remedy — bump
-    /// [`begin_layout_fetch`](Self::begin_layout_fetch) on the badge write,
-    /// so the commit outdates every older fetch — is deliberately not taken:
-    /// this counter's coupling has bitten before, and belongs in its own test round.
+    /// (`is_plugin` picks the wire namespace) — the same-space path, unchanged;
+    /// [`commit_pane_in_space`](Self::commit_pane_in_space) is the sibling for a row
+    /// under a space other than the one this connection is on. Order: tab move first (a
+    /// pane only focuses inside the focused tab), then pane focus on every backend —
+    /// herdr wire-swaps this connection's relay in place, so a reconnect's resume hint is
+    /// only a best-effort ask. A refused pane focus after a landed tab move still keeps
+    /// that move. **Single-flight** ([`claim_commit`](Self::claim_commit)): a tap in
+    /// flight is dropped, not queued. **Accepted residual**: no re-read behind the move —
+    /// a racing poll may transiently show the relay's own focus, self-correcting within
+    /// one [`LAYOUT_POLL_INTERVAL`] tick. A known remedy — bump
+    /// [`begin_layout_fetch`](Self::begin_layout_fetch) on the badge write, so the commit
+    /// outdates every older fetch — is deliberately not taken: this counter's coupling
+    /// has bitten before, and belongs in its own test round.
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
         let Some(_claim) = self.claim_commit() else {
             return false;
         };
+        self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
+            .await
+    }
+
+    /// [`commit_pane`](Self::commit_pane)'s body, without its claim —
+    /// [`commit_pane_in_space`](Self::commit_pane_in_space)'s cross-space branch holds
+    /// its own claim across the `switch_space` step ahead of this, so it calls straight
+    /// in rather than re-claiming what it already holds. See
+    /// [`commit_pane`](Self::commit_pane) for the tab/pane ordering contract.
+    async fn commit_pane_unclaimed(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
         if tab_key != self.active_tab.get_untracked() && !self.switch_tab(tab_key.clone()).await {
             return false;
         }
@@ -394,6 +523,57 @@ impl TerminalController {
         // and the layout poll converges on the server's own focus — a reload
         // here could land before the enqueue-ack applies and revert the badge.
         true
+    }
+
+    /// Commit the tree sheet's browse when the tapped pane's tab belongs to a space
+    /// other than the one this connection is on: [`switch_space`](TerminalRepository::switch_space)
+    /// first (recording the resume hint exactly as [`select_space`](Self::select_space)
+    /// does), then the same tab+pane steps [`commit_pane`](Self::commit_pane) takes. A
+    /// `space_id` that is already selected takes
+    /// [`commit_pane`](Self::commit_pane)'s own path, byte-identical — this is only the
+    /// sibling for a row under a **non-selected** space.
+    ///
+    /// The target space's tab world comes from the browse that got here in the first
+    /// place — [`expand_space`](Self::expand_space)'s cached
+    /// [`browsed_space_tabs`](Self::browsed_space_tabs) — promoted onto
+    /// [`tabs`](Self::tabs)/[`active_tab`](Self::active_tab) rather than re-read: the
+    /// sheet never draws a cross-space row without having already fetched it.
+    pub async fn commit_pane_in_space(
+        &self,
+        space_id: String,
+        tab_key: String,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> bool {
+        if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
+            return self.commit_pane(tab_key, pane_id, is_plugin).await;
+        }
+        let Some(_claim) = self.claim_commit() else {
+            return false;
+        };
+        if !self
+            .tell(self.terminal.switch_space(space_id.clone()))
+            .await
+        {
+            return false;
+        }
+        if self.is_herdr_session() {
+            self.resume.remember_space(space_id.clone());
+        }
+        if let Some((cached_space, cached_tabs)) = self.browsed_space_tabs.get_untracked()
+            && cached_space == space_id
+        {
+            let active_key = cached_tabs
+                .iter()
+                .find(|tab| tab.active)
+                .or_else(|| cached_tabs.first())
+                .map(|tab| tab.key.clone())
+                .unwrap_or_default();
+            self.tabs.set(cached_tabs);
+            self.active_tab.set(active_key);
+        }
+        self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
+            .await
     }
 
     /// Focus pane `pane_id` of the live session's active tab — the
@@ -727,6 +907,16 @@ impl TerminalController {
             .into_iter()
             .find(|tab| tab.key == key)
             .map(|tab| tab.tab_id)
+    }
+
+    /// The id of the currently selected space, from [`spaces`](Self::spaces) — `None`
+    /// on a backend with none (zellij), or before the first load has landed.
+    fn selected_space_id(&self) -> Option<String> {
+        self.spaces
+            .get_untracked()
+            .into_iter()
+            .find(|space| space.selected)
+            .map(|space| space.id)
     }
 
     /// Drive one repository call that hands nothing back, reporting whether it landed
@@ -2071,6 +2261,308 @@ mod tests {
         // …and the claim released with it, so the sheet still commits.
         assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
         assert_eq!(focused_pane(&c, "alpha"), Some(11));
+    }
+
+    // The tree sheet's own browse state: expansion, the browsed-space peek and its
+    // stale guard, and the cross-space commit.
+
+    #[test]
+    fn expanding_the_selected_space_performs_no_rpc_at_all() {
+        let (c, repository) = recorded("herdr:work");
+        let after_load = repository.calls();
+
+        block_on(c.expand_space("ws-1".to_string()));
+
+        assert_eq!(c.expanded_space.get_untracked(), Some("ws-1".to_string()));
+        assert_eq!(
+            repository.calls(),
+            after_load,
+            "the selected space's tabs already live in `tabs`"
+        );
+    }
+
+    #[test]
+    fn expanding_another_space_fetches_its_tabs_without_switching_selection() {
+        let c = controller(Some("herdr:work"));
+        block_on(c.load());
+        let selected_before: Vec<String> = c
+            .spaces
+            .get_untracked()
+            .into_iter()
+            .filter(|s| s.selected)
+            .map(|s| s.id)
+            .collect();
+
+        block_on(c.expand_space("zelli_mobile".to_string()));
+
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            Some("zelli_mobile".to_string())
+        );
+        let (cached_id, cached_tabs) = c
+            .browsed_space_tabs
+            .get_untracked()
+            .expect("the peek landed");
+        assert_eq!(cached_id, "zelli_mobile");
+        let keys: Vec<String> = cached_tabs.into_iter().map(|tab| tab.key).collect();
+        assert_eq!(keys, ["logs", "worker"]);
+        let selected_after: Vec<String> = c
+            .spaces
+            .get_untracked()
+            .into_iter()
+            .filter(|s| s.selected)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            selected_after, selected_before,
+            "browsing another space in the tree sheet must not switch to it"
+        );
+    }
+
+    #[test]
+    fn a_peek_that_lands_after_a_newer_expand_publishes_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        // The first expand's peek parks; the second answers immediately, so the
+        // expand that *started* first lands last.
+        repository.delay_calls([Duration::from_millis(60), Duration::ZERO]);
+
+        block_on(async {
+            tokio::join!(
+                c.expand_space("ws-2".to_string()),
+                c.expand_space("cupline".to_string()),
+            );
+        });
+
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            Some("cupline".to_string()),
+            "the later expand stands"
+        );
+        assert_eq!(
+            c.browsed_space_tabs.get_untracked().map(|(id, _)| id),
+            Some("cupline".to_string()),
+            "the earlier, now-stale peek's answer must not overwrite it"
+        );
+    }
+
+    #[test]
+    fn a_failed_peek_toasts_once_and_collapses_the_expanded_space() {
+        let (c, repository) = recorded("herdr:work");
+        repository.refuse("list_tabs");
+        let failures = Arc::new(Mutex::new(0u32));
+        let counted = Arc::clone(&failures);
+        c.core()
+            .failures()
+            .subscribe(move |_: &AppFailure| {
+                *counted.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+            })
+            .forget();
+
+        block_on(c.expand_space("ws-2".to_string()));
+
+        assert_eq!(
+            *failures.lock().unwrap_or_else(PoisonError::into_inner),
+            1,
+            "exactly one toast"
+        );
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            None,
+            "the row collapses back rather than showing a broken expansion"
+        );
+    }
+
+    #[test]
+    fn collapse_space_also_collapses_the_tab_expanded_under_it() {
+        let c = controller(Some("herdr:work"));
+        block_on(c.load());
+        block_on(c.expand_space("zelli_mobile".to_string()));
+        c.expand_tab("logs".to_string());
+
+        c.collapse_space();
+
+        assert_eq!(c.expanded_space.get_untracked(), None);
+        assert_eq!(c.expanded_tab.get_untracked(), None);
+    }
+
+    #[test]
+    fn collapse_tab_leaves_the_expanded_space_alone() {
+        let c = controller(Some("herdr:work"));
+        block_on(c.load());
+        block_on(c.expand_space("zelli_mobile".to_string()));
+        c.expand_tab("logs".to_string());
+
+        c.collapse_tab();
+
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            Some("zelli_mobile".to_string())
+        );
+        assert_eq!(c.expanded_tab.get_untracked(), None);
+    }
+
+    #[test]
+    fn expanding_a_different_space_collapses_the_tab_expanded_under_the_last_one() {
+        let c = controller(Some("herdr:work"));
+        block_on(c.load());
+        block_on(c.expand_space("zelli_mobile".to_string()));
+        c.expand_tab("logs".to_string());
+
+        block_on(c.expand_space("cupline".to_string()));
+
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            Some("cupline".to_string())
+        );
+        assert_eq!(
+            c.expanded_tab.get_untracked(),
+            None,
+            "a tab from the space just left is out of scope for the new one"
+        );
+    }
+
+    #[test]
+    fn seed_expansion_opens_the_selected_space_and_active_tab_on_herdr() {
+        let c = controller(Some("herdr:work"));
+        block_on(c.load());
+
+        c.seed_expansion();
+
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            Some("forgekit".to_string()),
+            "the resting state opens on the session's own space"
+        );
+        assert_eq!(c.expanded_tab.get_untracked(), Some("devbox".to_string()));
+    }
+
+    #[test]
+    fn seed_expansion_opens_only_the_active_tab_on_zellij() {
+        let c = controller(Some("zellij:dev"));
+        block_on(c.load());
+
+        c.seed_expansion();
+
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            None,
+            "zellij has no spaces — the top level is tabs"
+        );
+        assert_eq!(c.expanded_tab.get_untracked(), Some("devbox".to_string()));
+    }
+
+    #[test]
+    fn reset_browse_clears_expansion_and_the_browsed_space_cache() {
+        let c = controller(Some("herdr:work"));
+        block_on(c.load());
+        block_on(c.expand_space("zelli_mobile".to_string()));
+        c.expand_tab("logs".to_string());
+
+        c.reset_browse();
+
+        assert_eq!(c.expanded_space.get_untracked(), None);
+        assert_eq!(c.expanded_tab.get_untracked(), None);
+        assert_eq!(c.browsed_space_tabs.get_untracked(), None);
+    }
+
+    #[test]
+    fn expansion_survives_a_layout_poll_republish() {
+        let (c, _repository) = recorded("herdr:work");
+        block_on(c.expand_space("ws-2".to_string()));
+        c.expand_tab("beta".to_string());
+
+        block_on(c.refresh_layout_from_poll());
+
+        assert_eq!(c.expanded_space.get_untracked(), Some("ws-2".to_string()));
+        assert_eq!(c.expanded_tab.get_untracked(), Some("beta".to_string()));
+    }
+
+    #[test]
+    fn a_same_space_commit_via_the_cross_space_entry_takes_commit_panes_own_path() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        c.browse_tab("beta".to_string());
+
+        assert!(block_on(c.commit_pane_in_space(
+            "ws-1".to_string(),
+            "beta".to_string(),
+            21,
+            false
+        )));
+
+        assert_eq!(
+            repository.actions(),
+            ["go_to_tab(2)", "focus_pane(21,false)"],
+            "the selected space needs no switch_space — this is commit_pane's own path"
+        );
+        assert_eq!(c.active_tab.get_untracked(), "beta");
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+    }
+
+    #[test]
+    fn a_cross_space_commit_switches_space_then_moves_the_tab_then_the_pane() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        block_on(c.expand_space("ws-2".to_string()));
+        let after_expand = repository.calls().len();
+
+        assert!(block_on(c.commit_pane_in_space(
+            "ws-2".to_string(),
+            "beta".to_string(),
+            21,
+            false
+        )));
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        assert_eq!(
+            since_expand,
+            [
+                "switch_space(ws-2)",
+                "go_to_tab(2)",
+                "tab_lines(beta)",
+                "focus_pane(21,false)",
+            ],
+            "switch_space, then commit_pane's own tab-then-pane steps"
+        );
+        assert_eq!(c.active_tab.get_untracked(), "beta");
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: Some("ws-2".to_string()),
+                tab_id: Some(2),
+                pane_id: Some(21),
+            },
+            "the resume hint is written exactly as select_space's own switch writes it"
+        );
+    }
+
+    #[test]
+    fn a_refused_cross_space_switch_never_moves_the_tab_or_pane() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.refuse("switch_space");
+        block_on(c.expand_space("ws-2".to_string()));
+        let after_expand = repository.calls().len();
+
+        assert!(!block_on(c.commit_pane_in_space(
+            "ws-2".to_string(),
+            "beta".to_string(),
+            21,
+            false
+        )));
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        assert_eq!(
+            since_expand,
+            ["switch_space(ws-2)"],
+            "nothing past the refusal"
+        );
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget::default(),
+            "a switch the server refused never happened"
+        );
     }
 
     // The live grid's content-tap hook (`presentation::pages`' own wiring).
