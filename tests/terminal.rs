@@ -145,6 +145,9 @@ const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
 /// actions, the same session actions the overflow menu used to carry.
 const FOOTER_RENAME_LABEL: &str = "Rename session";
 const FOOTER_DETACH_LABEL: &str = "Detach session";
+/// `presentation::pages`'s `RENAME_TITLE` — the dialog that footer row opens,
+/// printed as a text **run**, unlike the icon row's own accessible label above.
+const RENAME_DIALOG_TITLE: &str = "Rename session";
 
 /// A **herdr** session id: the one prefix that turns the sheet's spaces section on.
 /// The sessions mock carries no session under this id, which is fine — only the
@@ -1725,6 +1728,41 @@ fn a_cross_space_commit_switches_the_connection_and_closes_the_sheet_exactly_onc
 }
 
 #[test]
+fn unmounting_mid_commit_leaves_the_switch_round_trip_nothing_to_panic_on() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    h.open_sheet();
+    h.tap(h.value_point("zelli_mobile"));
+    h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
+        debug_controller()
+            .expect("mounted")
+            .expanded_tab
+            .get_untracked()
+            .as_deref()
+            == Some("logs")
+    });
+    let scene = h.settle_motion(0.0);
+
+    // One pump starts the commit and parks it in its own `switch_space` round
+    // trip; the screen then goes away underneath it. Everything past that await
+    // — the tab resolve, the optimistic badge — resumes against signals whose
+    // owner is gone. The assertion is the pump itself: a plain read there
+    // panics, and the panic surfaces on this thread's own frame pump.
+    h.tap(center(tree_pane_rows(&scene)[0]));
+    pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    h.unmount_screen();
+    h.pump_for(Duration::from_millis(600));
+
+    assert!(
+        debug_controller().is_none(),
+        "the screen really did unmount, so the resumed commit really did read a \
+         disposed owner"
+    );
+}
+
+#[test]
 fn a_back_press_dismisses_the_sheet_once_and_resets_the_browse_for_the_next_open() {
     let _g = serial();
     let _ambient = setup();
@@ -2071,6 +2109,44 @@ fn a_read_only_credential_refuses_the_rename_dialog_and_says_why() {
             .iter()
             .any(|message| message == READ_ONLY_TOAST),
         "the row stays on screen and says why: {:?}",
+        app_toasts().pending_untracked()
+    );
+}
+
+#[test]
+fn an_orphaned_sheets_footer_presses_are_quiet_no_ops() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    app_toasts().clear();
+
+    h.open_sheet();
+    let floor = h.depth();
+    // The sheet is a page of the root overlay host, so it outlives the screen
+    // that pushed it — its tree body empties itself, but the footer rebuilds
+    // whole, and this press is what would seed a dialog off a disposed signal.
+    h.unmount_screen();
+    h.tap_footer_rename();
+    h.flush();
+
+    assert_eq!(h.depth(), floor, "no dialog over the orphaned sheet");
+    assert!(
+        !h.shows(RENAME_DIALOG_TITLE),
+        "…and nothing asking for a name that has no session left to write it \
+         to: {:?}",
+        h.values()
+    );
+
+    // Its neighbour is gated the same way: a detach here would pop a route
+    // stack that no longer carries `/terminal`, taking `/sessions` with it.
+    h.tap_footer_detach();
+    h.pump_for(2 * CLOSE_DELAY);
+    assert!(
+        !app_toasts()
+            .pending_untracked()
+            .iter()
+            .any(|message| message == DETACHED_TOAST),
+        "no detach went out either: {:?}",
         app_toasts().pending_untracked()
     );
 }

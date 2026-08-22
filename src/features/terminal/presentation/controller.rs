@@ -13,8 +13,9 @@
 //! reconciliation covers them all: a generation counter that commits only the
 //! newest fetch, read-compare-then-write in
 //! [`publish_tabs`](TerminalController::publish_tabs), a self-healing active
-//! key, and single-flight claims on the poll, creates, and the sheet's
-//! commit.
+//! key, and single-flight claims on the poll, on creates, and on every **move**
+//! — the sheet's commit and the space switches share one claim, since either
+//! can move the tab world out from under the other.
 //!
 //! **The tree sheet's own browse state** is id-keyed
 //! ([`expanded_space`](TerminalController::expanded_space)/
@@ -149,10 +150,12 @@ pub struct TerminalController {
     /// Whether a create verb is in flight — the coalescing claim
     /// [`claim_create`](Self::claim_create) takes. A dropped press stays dropped.
     create_in_flight: AtomicBool,
-    /// [`create_in_flight`](Self::create_in_flight)'s counterpart for the
-    /// sheet's commit ([`claim_commit`](Self::claim_commit)) — its own claim,
-    /// since a commit and a create move unrelated things.
-    commit_in_flight: AtomicBool,
+    /// [`create_in_flight`](Self::create_in_flight)'s counterpart for every
+    /// **move** ([`claim_move`](Self::claim_move)): the sheet's commit and the
+    /// space switches alike. One slot for all of them rather than one apiece —
+    /// two moves racing would leave the connection on one space with another
+    /// space's tab world published.
+    move_in_flight: AtomicBool,
     /// Whether the attached stream's handshake has settled —
     /// [`mirror_link`](Self::mirror_link) answers `true` on the wake that flips this.
     attach_settled: AtomicBool,
@@ -282,7 +285,7 @@ impl TerminalController {
             layout_generation: AtomicU64::new(0),
             layout_poll_in_flight: AtomicBool::new(false),
             create_in_flight: AtomicBool::new(false),
-            commit_in_flight: AtomicBool::new(false),
+            move_in_flight: AtomicBool::new(false),
             attach_settled: AtomicBool::new(false),
             layout_writes: AtomicU64::new(0),
             resume: Arc::new(ResumeSlot::default()),
@@ -472,15 +475,18 @@ impl TerminalController {
     /// pane only focuses inside the focused tab), then pane focus on every backend —
     /// herdr wire-swaps this connection's relay in place, so a reconnect's resume hint is
     /// only a best-effort ask. A refused pane focus after a landed tab move still keeps
-    /// that move. **Single-flight** ([`claim_commit`](Self::claim_commit)): a tap in
-    /// flight is dropped, not queued. **Accepted residual**: no re-read behind the move —
+    /// that move. **Single-flight** ([`claim_move`](Self::claim_move)): a tap in
+    /// flight is dropped, not queued — and so is one arriving while a space switch
+    /// holds that same claim. **Accepted residual**: no re-read behind the move —
     /// a racing poll may transiently show the relay's own focus, self-correcting within
-    /// one [`LAYOUT_POLL_INTERVAL`] tick. A known remedy — bump
-    /// [`begin_layout_fetch`](Self::begin_layout_fetch) on the badge write, so the commit
-    /// outdates every older fetch — is deliberately not taken: this counter's coupling
-    /// has bitten before, and belongs in its own test round.
+    /// one [`LAYOUT_POLL_INTERVAL`] tick. The badge write is deliberately *not* fenced
+    /// with [`begin_layout_fetch`](Self::begin_layout_fetch): a same-space commit leaves
+    /// the tab world itself alone, so an older fetch landing behind it republishes the
+    /// same tabs and only the focus flag wavers. A cross-space promotion is the opposite
+    /// case, and does fence — see
+    /// [`promote_browsed_tabs`](Self::promote_browsed_tabs).
     pub async fn commit_pane(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
-        let Some(_claim) = self.claim_commit() else {
+        let Some(_claim) = self.claim_move() else {
             return false;
         };
         self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
@@ -489,11 +495,21 @@ impl TerminalController {
 
     /// [`commit_pane`](Self::commit_pane)'s body, without its claim —
     /// [`commit_pane_in_space`](Self::commit_pane_in_space)'s cross-space branch holds
-    /// its own claim across the `switch_space` step ahead of this, so it calls straight
+    /// that claim across the `switch_space` step ahead of this, so it calls straight
     /// in rather than re-claiming what it already holds. See
     /// [`commit_pane`](Self::commit_pane) for the tab/pane ordering contract.
+    ///
+    /// **Teardown-safe**: every signal *read* on this path is `try_*`, here and in
+    /// [`tab_id_for`](Self::tab_id_for)/[`focus_pane_locally`](Self::focus_pane_locally).
+    /// The tap that got here resumes a pump later — on the cross-space path, a whole
+    /// switch round trip later — and reading a disposed owner panics (the writes
+    /// beside those reads are no-ops). A commit whose screen is gone answers `false`
+    /// and moves nothing.
     async fn commit_pane_unclaimed(&self, tab_key: String, pane_id: u32, is_plugin: bool) -> bool {
-        if tab_key != self.active_tab.get_untracked() && !self.switch_tab(tab_key.clone()).await {
+        let Some(active) = self.active_tab.try_get_untracked() else {
+            return false;
+        };
+        if tab_key != active && !self.switch_tab(tab_key.clone()).await {
             return false;
         }
         if !self
@@ -546,7 +562,7 @@ impl TerminalController {
         if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
             return self.commit_pane(tab_key, pane_id, is_plugin).await;
         }
-        let Some(_claim) = self.claim_commit() else {
+        let Some(_claim) = self.claim_move() else {
             return false;
         };
         let Some(cached_tabs) = self.browsed_tabs_for(&space_id) else {
@@ -588,7 +604,16 @@ impl TerminalController {
     /// Promote a browsed space's cached tab world onto [`tabs`](Self::tabs) and
     /// [`active_tab`](Self::active_tab) — what a landed cross-space switch owes the
     /// card and the sheet, without a re-read the browse already paid for.
+    ///
+    /// **Fenced** ([`begin_layout_fetch`](Self::begin_layout_fetch)): this promotion is
+    /// itself the newest word on the tab world, so it outdates every fetch already in
+    /// flight. A poll issued *before* the switch would otherwise still hold the newest
+    /// generation and heal these two signals straight back to the space just left —
+    /// while [`spaces`](Self::spaces) names the new one — leaving the sheet and the
+    /// card disagreeing until the next [`LAYOUT_POLL_INTERVAL`] tick, with every tap in
+    /// that window aimed at the wrong space's tabs.
     fn promote_browsed_tabs(&self, tabs: Vec<TabEntry>) {
+        self.begin_layout_fetch();
         let active_key = tabs
             .iter()
             .find(|tab| tab.active)
@@ -652,11 +677,13 @@ impl TerminalController {
     /// Move the focused flag onto the pane `pane_id` of the tab keyed `tab_key`, in
     /// this screen's own state — the optimistic half of
     /// [`commit_pane`](Self::commit_pane). One focused pane per tab whatever layer it
-    /// is on: the wire flags focus per layer, but the sheet shows one badge.
+    /// is on: the wire flags focus per layer, but the sheet shows one badge. A no-op
+    /// on a disposed mount, like every other read this commit path takes.
     fn focus_pane_locally(&self, tab_key: &str, pane_id: u32, is_plugin: bool) {
-        let tabs = self
-            .tabs
-            .get_untracked()
+        let Some(current) = self.tabs.try_get_untracked() else {
+            return;
+        };
+        let tabs = current
             .into_iter()
             .map(|tab| {
                 if tab.key != tab_key {
@@ -698,7 +725,24 @@ impl TerminalController {
     /// [`load`](Self::load) in case the list it read still answered from
     /// before the relay applied the switch. Both are no-ops once the list
     /// already agrees ([`select_space_locally`](Self::select_space_locally)).
+    ///
+    /// **Single-flight** ([`claim_move`](Self::claim_move)): a switch arriving while
+    /// another move — a switch or the sheet's commit — is in flight is dropped whole,
+    /// sending nothing at all, since a half-applied second switch is exactly how the
+    /// tab world and the space list come apart.
     pub async fn select_space(&self, id: String) -> bool {
+        let Some(_claim) = self.claim_move() else {
+            return false;
+        };
+        self.select_space_unclaimed(id).await
+    }
+
+    /// [`select_space`](Self::select_space)'s body, without its claim — the entries
+    /// already holding one ([`new_pane_in`](Self::new_pane_in) through
+    /// [`adopt_space_unclaimed`](Self::adopt_space_unclaimed)) call straight in rather
+    /// than re-claiming what they are holding, the same shape
+    /// [`commit_pane_unclaimed`](Self::commit_pane_unclaimed) takes.
+    async fn select_space_unclaimed(&self, id: String) -> bool {
         if !self.tell(self.terminal.switch_space(id.clone())).await {
             return false;
         }
@@ -719,11 +763,25 @@ impl TerminalController {
     /// This is also the one way an **empty** space is reached at all: it draws
     /// no pane row to commit through, so its add-tab row's switch is its only
     /// entry.
+    ///
+    /// A switch it actually has to make rides
+    /// [`select_space`](Self::select_space)'s own single-flight claim, and answers
+    /// `false` when another move holds it — so a losing tap opens no dialog either.
+    /// Already being on `space_id` needs no claim: there is nothing to move.
     pub async fn adopt_space(&self, space_id: String) -> bool {
         if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
             return true;
         }
         self.select_space(space_id).await
+    }
+
+    /// [`adopt_space`](Self::adopt_space) for a caller already holding the move claim
+    /// — see [`select_space_unclaimed`](Self::select_space_unclaimed).
+    async fn adopt_space_unclaimed(&self, space_id: String) -> bool {
+        if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
+            return true;
+        }
+        self.select_space_unclaimed(space_id).await
     }
 
     /// Create a new space named `label` (already trimmed by the dialog) and pull the
@@ -772,9 +830,19 @@ impl TerminalController {
     /// the session is on, so a row under a merely-browsed tab has to move first or the
     /// pane appears somewhere the user never pointed. `space_id` is `None` on a backend
     /// with no spaces, and a step that does not land stops the rest.
+    ///
+    /// **Single-flight over the whole sequence** ([`claim_move`](Self::claim_move)), not
+    /// just over the create at the end of it: a second row's tap that only lost
+    /// [`claim_create`](Self::claim_create) would still have moved the session to its
+    /// own space and tab first, stranding the pane the winning tap created somewhere the
+    /// user never pointed — and saying nothing about it. The losing tap now sends
+    /// nothing at all.
     pub async fn new_pane_in(&self, space_id: Option<String>, tab_key: String, floating: bool) {
+        let Some(_claim) = self.claim_move() else {
+            return;
+        };
         if let Some(space_id) = space_id
-            && !self.adopt_space(space_id).await
+            && !self.adopt_space_unclaimed(space_id).await
         {
             return;
         }
@@ -966,12 +1034,17 @@ impl TerminalController {
             .then(|| FlightClaim(&self.create_in_flight))
     }
 
-    /// [`claim_create`](Self::claim_create)'s counterpart for
-    /// [`commit_pane`](Self::commit_pane) — the same drop-not-queue idiom over the
-    /// commit's own slot.
-    fn claim_commit(&self) -> Option<FlightClaim<'_>> {
-        (!self.commit_in_flight.swap(true, Ordering::SeqCst))
-            .then(|| FlightClaim(&self.commit_in_flight))
+    /// [`claim_create`](Self::claim_create)'s counterpart for a **move** — the same
+    /// drop-not-queue idiom over one slot shared by the sheet's commit
+    /// ([`commit_pane`](Self::commit_pane)/[`commit_pane_in_space`](Self::commit_pane_in_space))
+    /// and every space switch ([`select_space`](Self::select_space)/
+    /// [`adopt_space`](Self::adopt_space)/[`new_pane_in`](Self::new_pane_in)). They
+    /// exclude each other, not just their own kind: a switch that landed while a
+    /// commit was mid-flight would strand that commit's tab/pane steps in a space
+    /// the user never pointed at.
+    fn claim_move(&self) -> Option<FlightClaim<'_>> {
+        (!self.move_in_flight.swap(true, Ordering::SeqCst))
+            .then(|| FlightClaim(&self.move_in_flight))
     }
 
     /// Wait out [`CREATE_SETTLE`] between a create's ack and the reload behind it.
@@ -998,20 +1071,24 @@ impl TerminalController {
         self.session_id.as_deref().is_some_and(is_herdr)
     }
 
-    /// The backend id of the tab keyed `key`, if the sheet is still showing it.
+    /// The backend id of the tab keyed `key`, if the sheet is still showing it —
+    /// `None` once the mount is gone too, so a resumed commit exits quietly rather
+    /// than panicking on a disposed owner.
     fn tab_id_for(&self, key: &str) -> Option<u64> {
         self.tabs
-            .get_untracked()
+            .try_get_untracked()?
             .into_iter()
             .find(|tab| tab.key == key)
             .map(|tab| tab.tab_id)
     }
 
     /// The id of the currently selected space, from [`spaces`](Self::spaces) — `None`
-    /// on a backend with none (zellij), or before the first load has landed.
+    /// on a backend with none (zellij), before the first load has landed, or once the
+    /// mount is gone (this is the entry read of a commit a spawned tap resumes, so a
+    /// screen can already have been torn down under it).
     fn selected_space_id(&self) -> Option<String> {
         self.spaces
-            .get_untracked()
+            .try_get_untracked()?
             .into_iter()
             .find(|space| space.selected)
             .map(|space| space.id)
@@ -1185,7 +1262,7 @@ impl TerminalController {
 }
 
 /// The in-flight claim [`TerminalController::claim_create`] and
-/// [`TerminalController::claim_commit`] hand out — released on drop, so it covers
+/// [`TerminalController::claim_move`] hand out — released on drop, so it covers
 /// the whole verb (for a create: its ack, settle and reload) however that verb
 /// returns.
 struct FlightClaim<'a>(&'a AtomicBool);
@@ -1517,14 +1594,17 @@ impl AttachSpec {
 
 /// Re-flagging the active tab in place, so the sheet's pills agree with the card.
 trait ActiveTab {
-    /// Mark `key`'s tab active and every other tab not.
+    /// Mark `key`'s tab active and every other tab not — a no-op once the mount is
+    /// gone, since this runs behind a tab switch's own round trip.
     fn update_active(&self, key: &str);
 }
 
 impl ActiveTab for RwSignal<Vec<TabEntry>> {
     fn update_active(&self, key: &str) {
-        let tabs = self
-            .get_untracked()
+        let Some(current) = self.try_get_untracked() else {
+            return;
+        };
+        let tabs = current
             .into_iter()
             .map(|tab| TabEntry {
                 active: tab.key == key,
@@ -2724,6 +2804,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_layout_fetch_issued_before_a_cross_space_commit_cannot_revert_its_tab_world() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.stamp_lists();
+        block_on(c.expand_space("ws-2".to_string()));
+        // The poll's round trip parks, so it lands *behind* the commit that
+        // started after it — carrying the tab world of the space this
+        // connection was still on when it asked.
+        repository.delay_calls([Duration::from_millis(60)]);
+
+        block_on(async {
+            tokio::join!(
+                c.refresh_layout_from_poll(),
+                c.commit_pane_in_space("ws-2".to_string(), "beta".to_string(), 21, false),
+            );
+        });
+
+        assert_eq!(
+            labels(&c),
+            ["alpha#2", "beta#2"],
+            "the browse's own promoted answer stands — the stamp names the round \
+             trip that published, and the poll's later one is outdated by the \
+             promotion rather than healing the tabs back to the space just left"
+        );
+        assert_eq!(
+            c.selected_space_id().as_deref(),
+            Some("ws-2"),
+            "…so the space list and the tab world still name the same space"
+        );
+    }
+
+    #[test]
+    fn a_commit_racing_a_space_switch_finds_the_same_claim_taken() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        // The switch's own reload parks, so the commit arrives while it is
+        // genuinely in flight.
+        repository.delay_calls([Duration::from_millis(60)]);
+        let after_load = repository.calls().len();
+
+        let (adopted, committed) = block_on(async {
+            tokio::join!(
+                c.adopt_space("ws-2".to_string()),
+                c.commit_pane("alpha".to_string(), 11, false),
+            )
+        });
+
+        assert!(adopted, "the switch holding the claim runs");
+        assert!(!committed, "…and the commit that found it taken is dropped");
+        let since_load: Vec<String> = repository.calls().into_iter().skip(after_load).collect();
+        assert!(
+            !since_load.iter().any(|call| call.starts_with("focus_pane")),
+            "a commit and a switch move the same two signals, so the loser sends \
+             nothing rather than focusing a pane in whichever space the switch \
+             leaves it in: {since_load:?}"
+        );
+
+        // …and the claim released with the switch, so the sheet still commits.
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+        assert_eq!(focused_pane(&c, "alpha"), Some(11));
+    }
+
     // The live grid's content-tap hook (`presentation::pages`' own wiring).
 
     #[test]
@@ -3151,6 +3294,43 @@ mod tests {
         assert_eq!(
             since_load.first().map(String::as_str),
             Some("new_pane(false)")
+        );
+    }
+
+    #[test]
+    fn a_second_add_pane_tap_racing_the_first_ones_switch_sends_nothing_at_all() {
+        let _override = SettleOverride::install(Duration::ZERO);
+        let (c, repository) = recorded("herdr:work");
+        block_on(c.expand_space("ws-2".to_string()));
+        // The winning row's own reload parks, so the second row is tapped while
+        // its switch-then-create sequence is genuinely mid-flight.
+        repository.delay_calls([Duration::from_millis(60)]);
+        let after_expand = repository.calls().len();
+
+        block_on(async {
+            tokio::join!(
+                c.new_pane_in(Some("ws-2".to_string()), "beta".to_string(), false),
+                c.new_pane_in(Some("ws-1".to_string()), "alpha".to_string(), false),
+            );
+        });
+
+        let since_expand: Vec<String> = repository.calls().into_iter().skip(after_expand).collect();
+        let moves: Vec<&String> = since_expand
+            .iter()
+            .filter(|call| call.starts_with("switch_space") || call.starts_with("new_pane"))
+            .collect();
+        assert_eq!(
+            moves,
+            ["switch_space(ws-2)", "new_pane(false)"],
+            "exactly one row drove the session: the tap that lost the claim \
+             created nothing AND switched nothing — a switch of its own would \
+             have moved the session out from under the pane the winner opened, \
+             with no toast to say so: {since_expand:?}"
+        );
+        assert_eq!(
+            c.selected_space_id().as_deref(),
+            Some("ws-2"),
+            "…so the session is on the space whose row actually created"
         );
     }
 
