@@ -141,8 +141,8 @@ const NEW_TAB_SUBMIT_LABEL: &str = "Create";
 const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
 
 /// `presentation::pages`'s `FOOTER_RENAME_LABEL`/`FOOTER_DETACH_LABEL`
-/// (private there) — the side sheet's sticky footer, the exact rows the
-/// overflow menu used to carry.
+/// (private there) — the side sheet's sticky footer's two icon-only
+/// actions, the same session actions the overflow menu used to carry.
 const FOOTER_RENAME_LABEL: &str = "Rename session";
 const FOOTER_DETACH_LABEL: &str = "Detach session";
 
@@ -515,7 +515,7 @@ impl Harness {
 
     /// The first node valued `value`, panicking with what's on screen instead
     /// — the shared lookup [`new_pane_row_point`]/[`add_space_row_point`]/
-    /// [`add_tab_row_point`]/the footer taps all build on.
+    /// [`add_tab_row_point`] all build on.
     fn value_point(&self, value: &str) -> Point {
         node_centers_by_value(&self.root, value)
             .first()
@@ -528,21 +528,38 @@ impl Harness {
             })
     }
 
-    /// Tap the sheet's footer "Rename session" row and settle the staged
+    /// The first node labelled `label`, panicking with what's on screen
+    /// instead — [`value_point`]'s label-side sibling, for an icon-only
+    /// affordance (`crate::ui::topbar::icon_button`'s own `Role::Button`
+    /// node) whose accessible name is a **label**, not a text run's
+    /// **value**. The footer's rename/detach taps build on this.
+    fn label_point(&self, label: &str) -> Point {
+        node_centers_by_label(&self.root, label)
+            .first()
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no node labelled {label:?}; labels on screen: {:?}",
+                    node_labels(&self.root)
+                )
+            })
+    }
+
+    /// Tap the sheet's footer "Rename session" icon and settle the staged
     /// close it chains its dialog push through
     /// ([`crate::features::terminal::presentation::pages`]'s own doc on why
     /// that footer action closes via `close_then`).
     fn tap_footer_rename(&mut self) -> RecScene {
-        let point = self.value_point(FOOTER_RENAME_LABEL);
+        let point = self.label_point(FOOTER_RENAME_LABEL);
         self.tap(point);
         self.settle()
     }
 
-    /// Tap the sheet's footer "Detach session" row and flush the sheet's own
+    /// Tap the sheet's footer "Detach session" icon and flush the sheet's own
     /// pop — the detach request itself is async and lands on its own pump
     /// (see [`the_menus_detach_row_pops_the_terminal_route`]'s doc).
     fn tap_footer_detach(&mut self) {
-        let point = self.value_point(FOOTER_DETACH_LABEL);
+        let point = self.label_point(FOOTER_DETACH_LABEL);
         self.tap(point);
         self.flush();
     }

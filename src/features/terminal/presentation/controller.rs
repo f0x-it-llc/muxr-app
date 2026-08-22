@@ -12,12 +12,12 @@
 //! **No server push for tabs/panes**, so every refresh races freely; one
 //! reconciliation covers them all: a generation counter that commits only the
 //! newest fetch, read-compare-then-write in
-//! [`publish_tabs`](TerminalController::publish_tabs), self-healing
-//! active/browsed keys, and single-flight claims on the poll, creates, and
-//! the sheet's commit.
+//! [`publish_tabs`](TerminalController::publish_tabs), a self-healing active
+//! key, and single-flight claims on the poll, creates, and the sheet's
+//! commit.
 //!
-//! **The tree sheet's own browse state** is id-keyed and separate from the pill
-//! sheet's ([`expanded_space`](TerminalController::expanded_space)/
+//! **The tree sheet's own browse state** is id-keyed
+//! ([`expanded_space`](TerminalController::expanded_space)/
 //! [`expanded_tab`](TerminalController::expanded_tab), at most one of each): expanding a
 //! non-selected space is a read-only [`ListSpaceTabs`] peek
 //! ([`expand_space`](TerminalController::expand_space)), cached under
@@ -78,9 +78,6 @@ pub struct TerminalController {
     pub tabs: RwSignal<Vec<TabEntry>>,
     /// The key of the tab the card is showing — the tab the *session* is on.
     pub active_tab: RwSignal<String>,
-    /// The key of the tab the sheet is *looking at*. Seeded from
-    /// [`active_tab`](Self::active_tab) on every load and sheet open.
-    pub browsed_tab: RwSignal<String>,
     /// The tree sheet's one read-only peek use case — see
     /// [`expand_space`](Self::expand_space).
     list_space_tabs: ListSpaceTabs,
@@ -264,7 +261,6 @@ impl TerminalController {
             spaces: RwSignal::new(Vec::new()),
             tabs: RwSignal::new(Vec::new()),
             active_tab: RwSignal::new(String::new()),
-            browsed_tab: RwSignal::new(String::new()),
             expanded_space: RwSignal::new(None),
             expanded_tab: RwSignal::new(None),
             browsed_space_tabs: RwSignal::new(None),
@@ -313,8 +309,7 @@ impl TerminalController {
 
     /// Load the whole screen (spaces, tabs, active tab's lines, session name)
     /// and play the reveal. Spaces are read only on a backend that has them
-    /// ([`has_spaces`](Self::has_spaces)); landing re-seeds
-    /// [`browsed_tab`](Self::browsed_tab).
+    /// ([`has_spaces`](Self::has_spaces)).
     ///
     /// **Tabs go through the layout staleness guard** like any other fetch
     /// ([`publish_tabs`](Self::publish_tabs)); everything else commits
@@ -351,19 +346,6 @@ impl TerminalController {
         self.session_name.set(session_name);
         self.loaded.set(true);
         self.replay_reveal();
-    }
-
-    /// Point the sheet at the tab keyed `key`. Deliberately **synchronous and
-    /// repository-free**: every tab's panes arrived with the load, so browsing one is a
-    /// signal write and nothing else — card, stream and server focus all stay put.
-    pub fn browse_tab(&self, key: String) {
-        self.browsed_tab.set(key);
-    }
-
-    /// Point the sheet back at the tab the session is on — what opening the
-    /// sheet does, so a browse never survives a dismissal.
-    pub fn begin_browsing(&self) {
-        self.browsed_tab.set(self.active_tab.get_untracked());
     }
 
     /// Expand the space `id` in the tree sheet — [`expanded_space`](Self::expanded_space)'s
@@ -437,9 +419,9 @@ impl TerminalController {
 
     /// Seed the tree sheet's resting expansion on open: the selected space (herdr only —
     /// zellij's top level is tabs, so it has none to expand) and the active tab both open
-    /// pre-expanded. Companion to [`begin_browsing`](Self::begin_browsing), which
-    /// re-points the tab browse the same way; playing no opening animation for either is
-    /// the widget's own concern, not this write's.
+    /// pre-expanded, so the sheet lands on the tab the session is on without the user
+    /// drilling to it; playing no opening animation for either is the widget's own
+    /// concern, not this write's.
     pub fn seed_expansion(&self) {
         if self.is_herdr_session() {
             self.expanded_space.set(self.selected_space_id());
@@ -477,7 +459,6 @@ impl TerminalController {
             return false;
         };
         self.active_tab.set(key.clone());
-        self.browsed_tab.set(key.clone());
         self.tabs.update_active(&key);
         self.lines.set(lines);
         self.replay_reveal();
@@ -927,8 +908,8 @@ impl TerminalController {
     }
 
     /// Publish a freshly read tab list, **read-compare-then-write** with the
-    /// active/browsed keys reconciled per `seed` — the one commit point
-    /// every layout fetch goes through.
+    /// active key reconciled per `seed` — the one commit point every layout
+    /// fetch goes through.
     ///
     /// Nothing unchanged is written: `tabs` is a tracked read polled for the
     /// mount's life, so an unconditional `set` would rebuild forever on an
@@ -957,13 +938,6 @@ impl TerminalController {
         };
         if current != active {
             self.active_tab.set(active.clone());
-            wrote = true;
-        }
-        // The browse follows on a load, and otherwise only when the tab it pointed
-        // at is gone: one naming a vanished tab would list no panes at all.
-        let browsed = self.browsed_tab.get_untracked();
-        if (seed == Seed::Fresh || !carries(&browsed)) && browsed != active {
-            self.browsed_tab.set(active);
             wrote = true;
         }
         if !unchanged {
@@ -1614,11 +1588,6 @@ mod tests {
         assert_eq!(c.tabs.get_untracked().len(), 4);
         assert_eq!(c.active_tab.get_untracked(), "devbox");
         assert_eq!(
-            c.browsed_tab.get_untracked(),
-            "devbox",
-            "the sheet opens on the tab the session is on"
-        );
-        assert_eq!(
             c.active_tab_entry().map(|t| t.pane_title),
             Some("ed@devbox: ~".to_string())
         );
@@ -1834,11 +1803,6 @@ mod tests {
         block_on(c.load());
         assert!(block_on(c.switch_tab("btop".to_string())));
         assert_eq!(c.active_tab.get_untracked(), "btop");
-        assert_eq!(
-            c.browsed_tab.get_untracked(),
-            "btop",
-            "the browse follows a move it drove itself"
-        );
     }
 
     #[test]
@@ -2219,38 +2183,6 @@ mod tests {
     }
 
     #[test]
-    fn browsing_a_tab_touches_no_repository_at_all() {
-        let (c, repository) = recorded("zellij:dev");
-        let after_load = repository.calls();
-        let lines = c.lines.get_untracked();
-        let epoch = c.reveal_epoch.get_untracked();
-
-        c.browse_tab("beta".to_string());
-        c.browse_tab("alpha".to_string());
-        c.browse_tab("beta".to_string());
-
-        assert_eq!(c.browsed_tab.get_untracked(), "beta");
-        assert_eq!(
-            c.active_tab.get_untracked(),
-            "alpha",
-            "browsing moves the sheet, never the session"
-        );
-        assert_eq!(repository.calls(), after_load, "no RPC, none at all");
-        assert_eq!(c.lines.get_untracked(), lines, "…and no card change");
-        assert_eq!(c.reveal_epoch.get_untracked(), epoch, "…and no replay");
-    }
-
-    #[test]
-    fn opening_the_sheet_points_the_browse_back_at_the_session() {
-        let (c, _repository) = recorded("zellij:dev");
-        c.browse_tab("beta".to_string());
-
-        c.begin_browsing();
-
-        assert_eq!(c.browsed_tab.get_untracked(), "alpha");
-    }
-
-    #[test]
     fn a_zellij_commit_inside_the_active_tab_focuses_the_pane_and_nothing_else() {
         let (c, repository) = recorded("zellij:dev");
 
@@ -2267,7 +2199,6 @@ mod tests {
     #[test]
     fn a_zellij_commit_across_tabs_moves_the_tab_first_then_the_pane() {
         let (c, repository) = recorded("zellij:dev");
-        c.browse_tab("beta".to_string());
 
         assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
 
@@ -2305,7 +2236,6 @@ mod tests {
     fn a_herdr_commit_across_tabs_moves_the_tab_first_then_the_pane_too() {
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
-        c.browse_tab("beta".to_string());
 
         assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
 
@@ -2342,7 +2272,6 @@ mod tests {
     fn a_refused_tab_step_stops_the_commit_before_the_pane_focus() {
         let (c, repository) = recorded("zellij:dev");
         repository.refuse("go_to_tab");
-        c.browse_tab("beta".to_string());
 
         assert!(!block_on(c.commit_pane("beta".to_string(), 21, false)));
 
@@ -2638,7 +2567,6 @@ mod tests {
     fn a_same_space_commit_via_the_cross_space_entry_takes_commit_panes_own_path() {
         let (c, repository) = recorded("herdr:work");
         c.attach_live();
-        c.browse_tab("beta".to_string());
 
         assert!(block_on(c.commit_pane_in_space(
             "ws-1".to_string(),
@@ -2881,7 +2809,7 @@ mod tests {
             "a space is a different set of tabs, so the switch re-reads them"
         );
         assert_eq!(
-            c.browsed_tab.get_untracked(),
+            c.active_tab.get_untracked(),
             "alpha",
             "…and the sheet lands on the new space's own active tab"
         );
@@ -2909,7 +2837,6 @@ mod tests {
     fn a_herdr_commit_records_the_move_as_the_reconnects_resume_hint() {
         let (c, _repository) = recorded("herdr:work");
         c.attach_live();
-        c.browse_tab("beta".to_string());
 
         assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
 
@@ -3082,9 +3009,9 @@ mod tests {
              is reads, filtered out of `actions`"
         );
         assert_eq!(
-            c.browsed_tab.get_untracked(),
+            c.active_tab.get_untracked(),
             "alpha",
-            "the reload re-seeded the browse onto the server-active tab"
+            "the reload re-seeded the active tab onto the server-active one"
         );
     }
 
@@ -3452,25 +3379,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_heals_an_empty_snapshot_without_moving_a_browse_the_user_chose() {
+    fn a_reload_heals_an_empty_active_tab_snapshot() {
         let (c, _repository) = recorded("zellij:dev");
-        c.browse_tab("beta".to_string());
 
-        block_on(c.reload_tabs());
-
-        assert_eq!(
-            c.browsed_tab.get_untracked(),
-            "beta",
-            "a browse the user chose survives a refresh"
-        );
-
-        // …and a snapshot that landed empty (what a load racing the attach
-        // handshake leaves) recovers on the next one.
+        // A snapshot that landed empty (what a load racing the attach
+        // handshake leaves) recovers on the next reload.
         c.active_tab.set(String::new());
-        c.browsed_tab.set(String::new());
         block_on(c.reload_tabs());
         assert_eq!(c.active_tab.get_untracked(), "alpha");
-        assert_eq!(c.browsed_tab.get_untracked(), "alpha");
     }
 
     #[test]
