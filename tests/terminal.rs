@@ -29,7 +29,7 @@ use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, Theme,
     WindowMetrics, any, navigator, provide_context,
 };
-use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, WindowInsets};
+use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP, WindowInsets};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -435,6 +435,23 @@ impl Harness {
         self.frame_at(support::HELD_MS);
         self.root
             .event(&mut self.state, &pointer(PointerPhase::Up, point));
+    }
+
+    /// [`long_press`](Self::long_press)'s cancelled twin: a press held past the
+    /// threshold, but dragged past [`TOUCH_SLOP`] first — `frust_widgets::gesture`'s
+    /// own conformance suite (`hold_then_drag_then_up_fires_neither`) proves the
+    /// primitive; this proves the tree's own composed row (a real dialog, a real
+    /// toggle behind it) inherits the contract rather than routing around it.
+    fn drag_past_slop_then_release(&mut self, point: Point) {
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Down, point));
+        self.frame_at(0.0);
+        let dragged = Point::new(point.x, point.y + TOUCH_SLOP + 2.0);
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Move, dragged));
+        self.frame_at(support::HELD_MS);
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Up, dragged));
     }
 
     /// Pump until a toast reading exactly `message` is pending — how this suite
@@ -1489,6 +1506,166 @@ fn the_close_button_inside_the_close_beat_leaves_the_route_alone() {
 }
 
 // ---------------------------------------------------------------------------
+// 6b — browsing a non-selected space, and committing across one
+// ---------------------------------------------------------------------------
+
+#[test]
+fn browsing_a_non_selected_space_lists_its_tabs_without_switching_the_connection() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    h.open_sheet();
+    // "zelli_mobile" is a space other than the one this connection is on
+    // ("forgekit") — expanding it is a read-only peek
+    // (`TerminalController::expand_space`'s own doc: "never switch_space").
+    h.tap(h.value_point("zelli_mobile"));
+    h.pump_until("zelli_mobile's own tab to auto-expand", |h| {
+        h.shows("ed@zelli zsh")
+    });
+
+    let selected: Vec<String> = debug_controller()
+        .expect("mounted")
+        .spaces
+        .get_untracked()
+        .into_iter()
+        .filter(|space| space.selected)
+        .map(|space| space.name)
+        .collect();
+    assert_eq!(
+        selected,
+        ["forgekit"],
+        "the browse read the space's tabs and moved nothing on the server"
+    );
+}
+
+#[test]
+fn an_empty_non_selected_space_shows_the_hint_row_once_browsed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    h.open_sheet();
+    assert!(
+        !h.shows("no tabs yet"),
+        "cupline is collapsed and unread before the tap"
+    );
+
+    // "cupline" is a herdr space seeded with no tabs at all.
+    h.tap(h.value_point("cupline"));
+    h.pump_until("cupline to be read", |h| h.shows("no tabs yet"));
+}
+
+#[test]
+fn a_cross_space_commit_switches_the_connection_and_closes_the_sheet_exactly_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    h.open_sheet();
+    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is up");
+
+    // Browse "zelli_mobile" — its own active tab ("logs") auto-drills open
+    // once its own cascade settles. Waited on through the controller's own
+    // signal (not painted geometry): the space this connection was already
+    // on ("forgekit") has its own settled reveal to collapse first, and a
+    // paint pinned at `FrameTime::ZERO` (every `pump_frames` call) never
+    // advances that tween — so its stale geometry would otherwise still be
+    // sitting exactly where a fresher browse's own rows are about to land.
+    h.tap(h.value_point("zelli_mobile"));
+    h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
+        debug_controller()
+            .expect("mounted")
+            .expanded_tab
+            .get_untracked()
+            .as_deref()
+            == Some("logs")
+    });
+    // Runs the collapsing/expanding reveals forward for real, so this frame
+    // paints the settled result rather than forgekit's own stale geometry
+    // (its own reveal needs elapsed paint-clock time to visually retract,
+    // which `pump_until`'s pinned-zero clock never advances).
+    let scene = h.settle_motion(0.0);
+
+    // Commit the tab's own (already-focused) pane — the browse already
+    // opened this exact tab, so the commit exercises `switch_space` then
+    // `focus_pane` without also needing a `go_to_tab` hop (that step, and the
+    // full three-call order, are pinned at the controller level over a
+    // repository this suite's own mock carries no matching tab-lines fixture
+    // for this space's own tabs).
+    h.tap(center(tree_pane_rows(&scene)[0]));
+
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert_eq!(
+        h.depth(),
+        REST_DEPTH,
+        "one close, and no double pop of the route under it"
+    );
+
+    // `TerminalController::spaces`'s own `selected` flag isn't republished by
+    // this path (only a full `load()` re-lists spaces; the tree commit reuses
+    // the browse's own cached tab world instead) — `active_tab`/`tabs` are
+    // this commit's own write, and so the reliable proof `switch_space`
+    // actually landed: the connection's tab world is now zelli_mobile's own,
+    // not forgekit's.
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        controller.active_tab.get_untracked(),
+        "logs",
+        "the commit's own `switch_space` landed — the connection followed it"
+    );
+    let keys: Vec<String> = controller
+        .tabs
+        .get_untracked()
+        .iter()
+        .map(|tab| tab.key.clone())
+        .collect();
+    assert_eq!(keys, ["logs", "worker"], "…onto zelli_mobile's own tabs");
+}
+
+#[test]
+fn a_back_press_dismisses_the_sheet_once_and_resets_the_browse_for_the_next_open() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    let floor = h.push_route_floor();
+
+    h.open_sheet();
+    assert_eq!(h.depth(), floor + 1, "the sheet is up over the route");
+
+    // Browse a space other than the one this connection is on — its own tab
+    // count caches under `TerminalController::browsed_space_tabs`.
+    h.tap(h.value_point("zelli_mobile"));
+    h.pump_until("zelli_mobile's own tab to auto-expand", |h| {
+        h.shows("ed@zelli zsh")
+    });
+    assert!(
+        h.shows("2 tabs"),
+        "the browse populated zelli_mobile's own tab count: {:?}",
+        h.values()
+    );
+
+    frust::push_back_press();
+    h.settle();
+
+    assert_eq!(
+        h.depth(),
+        floor,
+        "the back press staged-dismissed the sheet — and only the sheet, \
+         leaving the route under it alone"
+    );
+
+    // Reopening seeds fresh: nothing survives from the stale browse to leak
+    // onto a space row nobody has re-expanded yet.
+    h.open_sheet();
+    assert!(
+        !h.shows("2 tabs"),
+        "the dismissal reset the browse cache: {:?}",
+        h.values()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 7 — rename and detach
 // ---------------------------------------------------------------------------
 
@@ -2304,6 +2481,34 @@ fn holding_a_pane_row_renames_it_without_committing_it() {
     // already sitting at.
     h.pump_until_closed("the sheet to close", |h| h.depth() == floor - 1);
     assert_eq!(h.depth(), floor - 1, "a plain tap still commits and closes");
+}
+
+#[test]
+fn a_drag_past_slop_mid_hold_cancels_both_the_rename_and_the_toggle() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+
+    h.open_sheet();
+    let floor = h.depth();
+    // "cupline" is a collapsed, empty, non-selected space — a landed toggle
+    // would expand it and show its hint row, and a landed hold would open its
+    // rename dialog; a drag past slop must fire neither.
+    let point = h.value_point("cupline");
+
+    h.drag_past_slop_then_release(point);
+    h.settle();
+
+    assert_eq!(
+        h.depth(),
+        floor,
+        "no rename dialog opened over a hold the drag cancelled"
+    );
+    assert!(
+        !h.shows("no tabs yet"),
+        "…and the drag never toggled the row open either: {:?}",
+        h.values()
+    );
 }
 
 #[test]
