@@ -44,8 +44,8 @@ cross-compile: `protox` is a protobuf compiler written in Rust, and its
 install; `cargo build` is the whole story.
 
 `proto/muxr.proto` is a **vendored copy** of `muxrd/proto/muxr.proto` from the
-`muxr-core` repo at rev `ec6b032` (recorded in the file's own header). To
-refresh it against a newer server:
+`muxr-core` repo at rev `41c39e1` (branch `feat/space-scoped-layout`, recorded
+in the file's own header). To refresh it against a newer server:
 
 ```bash
 cp <muxr-core>/muxrd/proto/muxr.proto proto/muxr.proto   # then re-add the header block
@@ -54,11 +54,7 @@ cp <muxr-core>/muxrd/proto/muxr.proto proto/muxr.proto   # then re-add the heade
 
 Re-copy the file wholesale and never hand-patch a message: wire drift then shows up as a codegen
 or type error at the call sites that consumed the old shape, instead of a silent decode mismatch
-against a live server. **One recorded exception:** `AttachReq`'s three `resume_*` fields (4/5/6)
-are hand-patched ahead of rev `ec6b032`, sourced from muxr-core's unmerged
-`fix/herdr-resumable-attach` (`cf2154e`) — no merged rev exists yet to re-copy from (the vendored
-file's own header carries this as a tripwire). Retires at the next wholesale re-copy, once that
-branch merges or releases.
+against a live server.
 
 Because the gRPC stack brings TLS with a C-built crypto provider (**aws-lc-rs**,
 rustls' default and tonic's `tls-aws-lc` feature — the one provider in the tree,

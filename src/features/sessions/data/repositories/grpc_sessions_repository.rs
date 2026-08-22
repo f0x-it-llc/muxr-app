@@ -152,6 +152,7 @@ impl GrpcSessionsRepository {
         let request = SessionRef {
             session: id.to_string(),
             connection_id: String::new(),
+            space_id: String::new(),
         };
         match client.authed().get_layout(request).await {
             Ok(response) => Some(layout_derived_from(response.into_inner())),
@@ -249,6 +250,7 @@ impl SessionsRepository for GrpcSessionsRepository {
         let request = SessionRef {
             session: id,
             connection_id: String::new(),
+            space_id: String::new(),
         };
         let ack = client
             .authed()
