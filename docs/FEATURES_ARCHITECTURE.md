@@ -39,7 +39,7 @@ entirely: each feature's `di.rs` is composition-root wiring, so a page may resol
 Every feature's `presentation/` also carries a `widgets/` folder — one file per widget cluster
 (`connect`: 10 modules, including `qr_sheet`/`qr_affordance`/`credential_dialogs`; `sessions`:
 including `manage_sheet`; `settings`: including `groups`; `terminal`: including
-`panes_sheet`/`new_tab_dialog`/`link_strip`) — while `pages.rs` stays scaffold-only (route builder,
+`side_sheet_tree`/`new_tab_dialog`/`link_strip`) — while `pages.rs` stays scaffold-only (route builder,
 `Screen`/`State`, the `Component` impl, and action wiring). `pieces.rs` no longer exists in any
 feature.
 
@@ -64,13 +64,16 @@ box and the pane-title's single-line ellipsis — dissolved the same way, onto
 A `widgets/` file importing its own page's `Actions`/state type is a sanctioned same-layer,
 same-feature back-edge, not a violation, and it happens in two forms. **Overlay-host bodies** — a
 sheet or dialog widget pushed as a page of the root overlay host, outside the screen's own
-component tree — import `Actions` because their callbacks run over `&mut AppState` (`sessions`'
-`manage_sheet::sheet_action` was the first; `terminal`'s `panes_sheet` is the same shape).
-**Screen-state widgets** couple for direct state access instead: this is the *norm* in `sessions`
-and `settings` (their widget files read the page's state type or call its `pages::open_*`/`attach`
-shims directly), and `terminal`'s one instance is `link_strip` — an ordinary inline card child
-whose Retry callback needs `&mut TerminalState`, nothing to do with overlay hosting. Only
-`connect`'s widgets are fully page-agnostic, taking resolved colours and callbacks alone.
+component tree — import `Actions` because their callbacks run over `&mut AppState`; `sessions`'
+`manage_sheet::sheet_action` is the shape. **Screen-state widgets** couple for direct state access
+instead: this is the *norm* in `sessions` and `settings` (their widget files read the page's state
+type or call its `pages::open_*`/`attach` shims directly), and `terminal`'s one instance is
+`link_strip` — an ordinary inline card child whose Retry callback needs `&mut TerminalState`,
+nothing to do with overlay hosting. `connect`'s widgets, and `terminal`'s `side_sheet_tree`, are
+instead fully **page-agnostic**: the tree takes a data borrow plus an `Rc`-callback action bundle
+rather than `Actions` itself, so it composes identically headless and under the sheet that mounts
+it — its `Actions`-importing glue (building that bundle off the controller, and the sheet's own
+footer) lives in `pages.rs`, not in `widgets/`.
 
 - **`connect`** — the `/` route: the manual connect form, the saved-server list, and the QR-pairing
   sheet (camera scan → prefilled form → a pinned CTA the user still presses; a scan never dials by
@@ -88,8 +91,9 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   credential (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never
   Attach.
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
-  seam, the "panes & tabs" sheet, and the app bar's overflow menu (`frust::glyph::show_glyph_menu`,
-  forwarded from `crate::shell`). A second domain port, `domain::feed::TerminalFeed` — a byte-level
+  seam, and the "panes & tabs" tree side sheet the app bar's one action opens directly (spaces →
+  tabs → panes, zellij promoting its tabs to the top-level shape a space wears since it has none).
+  A second domain port, `domain::feed::TerminalFeed` — a byte-level
   stream, deliberately separate from `TerminalRepository`'s one-shot model calls — has two
   implementations: `data::feeds::DemoFeed` (an embedded fixture replay) and
   `data::feeds::GrpcTerminalFeed` (the real `AttachTerminal` stream, a fixed 1/2/4/8/16s reconnect
@@ -100,7 +104,11 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   it onto the target pane in place, and a `GetLayout` sent with the same connection_id echoes that
   per-connection focus back — so the card's poll confirms the optimistic badge once the relay has
   applied the verb (a tick answering from before that point can revert it for ≤ one tick; the
-  accepted residuals live on `commit_pane`'s doc). The feed also
+  accepted residuals live on `commit_pane`'s doc). The tree can also browse a **non-selected**
+  space's tabs without switching to it — a read-only peek (`TerminalRepository::list_tabs_in_space`)
+  — and commit a pane there through `commit_pane_in_space` (switch_space → go_to_tab → focus_pane)
+  instead. Accepted limitation: a `muxrd` predating the wire's `space_id` field silently answers
+  with the focused space's tabs instead of the one asked for, undetectably. The feed also
   carries a controller-owned `ResumeSlot` hint — the last user-driven space/tab/pane, written only by
   a landed herdr commit or space switch, never by the layout poll — on every `AttachTerminal`,
   including the feed's own backoff reconnects, so a reconnect restores the user's view instead of
@@ -112,11 +120,11 @@ whose Retry callback needs `&mut TerminalState`, nothing to do with overlay host
   long-press selection, a re-render loupe and a sensitive-clipboard Copy chip; `presentation::keybar`
   is the IME-active-only key bar, whose caps claim (and must re-claim, on every tap) focus. Three
   things can occupy the card: a real attached session (route carries `?session=<id>` and the app holds
-  a live client), the overflow menu's "Demo session" row (the fixture replay), or — a bare `/terminal`,
-  and every headless suite — the seeded mock transcript `widgets::card::card_body` renders. A
-  read-only credential mounts the grid in its own read-only mode, withdraws the panes sheet's
-  mutating rows, and refuses a space pill's switch client-side with a read-only toast, before any
-  RPC is sent.
+  a live client), the checked-in fixture replay (`TerminalController::enter_live`, a test-only seam
+  with no menu/UI entry point), or — a bare `/terminal`, and every headless suite — the seeded mock
+  transcript `widgets::card::card_body` renders. A read-only credential mounts the grid in its own
+  read-only mode, withdraws the tree side sheet's mutating rows, and refuses a space pill's switch
+  client-side with a read-only toast, before any RPC is sent.
 - **`settings`** — the connected server's settings screen: five groups (connection, auth tokens,
   saved servers, terminal appearance, session poll). `GrpcAuthTokensRepository` and `PrefsRepository`
   (the `frust-shared-preferences`-backed store) back the real run; token rows support create (with a
