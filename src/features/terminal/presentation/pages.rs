@@ -980,8 +980,10 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let actions = self.clone();
         spawn_local(async move {
-            // A refused switch says so through its own failure toast; opening
-            // the dialog anyway would create in the wrong space.
+            // A refused switch says so through its own failure toast, and one
+            // dropped at the controller's single-flight claim says nothing at
+            // all (first press wins); opening the dialog behind either would
+            // create in the wrong space.
             if controller.adopt_space(space_id).await {
                 actions.open_new_tab_dialog();
             }
@@ -1183,6 +1185,13 @@ fn tree_actions(actions: &Actions, sheet: &SheetHandle) -> TreeActions<AppState>
 /// the overflow menu used to carry (rename/detach) — icons rather than two
 /// full-width labelled rows, so the footer's own share of the sheet stays
 /// small against the tree above it.
+///
+/// Both presses are gated on [`TerminalController::signals_alive`], for the
+/// reason [`sheet_tree_body`] takes its own liveness check: this is a page of
+/// the **root** overlay host and outlives the screen that pushed it, so an
+/// orphaned footer's rename would seed itself off a disposed signal and its
+/// detach would pop a stack no longer carrying `/terminal`. Quiet no-ops
+/// instead — the tree above them has already emptied itself.
 fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
@@ -1198,6 +1207,9 @@ fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
             FOOTER_RENAME_LABEL,
             &colors,
             move |_app: &mut AppState| {
+                if !actions.controller.signals_alive() {
+                    return;
+                }
                 // Same reason `sessions::manage_sheet`'s own Rename/Kill rows
                 // chain through `close_then` rather than a bare `close`: this
                 // pushes a dialog onto the sheet's own overlay host, and an
@@ -1215,6 +1227,9 @@ fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
             FOOTER_DETACH_LABEL,
             &colors,
             move |_app: &mut AppState| {
+                if !actions.controller.signals_alive() {
+                    return;
+                }
                 // Detach pops the **route** stack, a different navigator than
                 // this sheet's overlay host — a plain `close` (not `close_then`)
                 // carries no ordering hazard, the same shape Attach takes there.
