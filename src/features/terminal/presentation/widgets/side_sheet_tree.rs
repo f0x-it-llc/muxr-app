@@ -13,7 +13,8 @@
 //!
 //! **Two backends, one tree.** herdr nests all three levels; zellij has no
 //! spaces at all, so its tabs are *promoted* to the card shape and its panes
-//! stay pills ([`TreeData::has_spaces`] picks).
+//! stay pills ([`TreeData::nested`] picks — and a herdr session reporting no
+//! spaces yet takes the promoted shape too, rather than drawing nothing).
 //!
 //! **Accordion semantics belong to the controller** — at most one space and one
 //! tab expanded. This module renders what the signals say and never flips them.
@@ -169,6 +170,18 @@ pub(crate) struct TreeData<'a> {
 }
 
 impl TreeData<'_> {
+    /// Whether the tree draws its three levels (space → tab → pane) or the
+    /// promoted two.
+    ///
+    /// A backend **with** spaces that reports **none at all** takes the
+    /// promoted shape too: nesting every tab under a space level that has no
+    /// rows would hide the whole session behind an empty header. Its own
+    /// create-space row survives that fallback (see [`tree_body`]) — it is the
+    /// one way back to a space level.
+    fn nested(&self) -> bool {
+        self.has_spaces && !self.spaces.is_empty()
+    }
+
     /// `space`'s tabs, or `None` when none have been read for it yet — a
     /// collapsed space nobody has browsed. `Some(&[])` is the different answer
     /// "read, and empty", which is what earns the hint and the tab count.
@@ -261,20 +274,10 @@ pub(crate) fn tree_body<State: 'static>(
     };
     let mut children: Vec<AnyView<State>> = Vec::new();
 
-    if data.has_spaces {
+    if data.nested() {
         for space in data.spaces {
             children.push(space_group(space, data, &tones, actions));
             children.push(v_gap(GROUP_GAP));
-        }
-        if let Some(mutations) = &actions.mutations {
-            let create = Rc::clone(&mutations.on_new_space);
-            children.push(add_row(
-                ADD_SPACE_LABEL,
-                CARD_RADIUS,
-                CARD_PAD,
-                &tones,
-                move |state: &mut State| create(state),
-            ));
         }
     } else {
         for tab in data.tabs {
@@ -292,6 +295,19 @@ pub(crate) fn tree_body<State: 'static>(
                 move |state: &mut State| create(state, None),
             ));
         }
+    }
+    // The space level's own create row closes the tree on either shape: nested,
+    // it follows the last space; promoted-because-empty, it is what puts the
+    // first space back.
+    if let Some(mutations) = actions.mutations.as_ref().filter(|_| data.has_spaces) {
+        let create = Rc::clone(&mutations.on_new_space);
+        children.push(add_row(
+            ADD_SPACE_LABEL,
+            CARD_RADIUS,
+            CARD_PAD,
+            &tones,
+            move |state: &mut State| create(state),
+        ));
     }
 
     any(column(children))
@@ -1120,6 +1136,50 @@ mod tests {
         // One top-level create row, and no space level for one to sit under.
         assert_eq!(rec.dashed_at(CARD_RADIUS).len(), 1, "+ new tab");
         assert!(rec.dashed_at(ADD_RADIUS).is_empty());
+    }
+
+    #[test]
+    fn a_backend_with_spaces_but_none_yet_promotes_its_tabs_too() {
+        // A herdr session whose space list came back empty: nesting every tab
+        // under a level with no rows would draw a session that looks empty.
+        let (spaces, tabs) = (Vec::new(), tabs());
+        let acts = actions(true);
+        let mut logic = |_state: &mut Log| {
+            tree_body(
+                &TreeData {
+                    spaces: &spaces,
+                    tabs: &tabs,
+                    browsed: None,
+                    expanded_space: None,
+                    expanded_tab: Some("devbox"),
+                    has_spaces: true,
+                },
+                &acts,
+            )
+        };
+        let mut rig = Rig::new();
+        let rec = rig.frame(&mut logic, 0.0);
+
+        assert_eq!(
+            rec.filled_at(CARD_RADIUS).len(),
+            2,
+            "both tabs are on screen, wearing the card"
+        );
+        assert!(rec.filled_at(TAB_RADIUS).is_empty(), "…and none is nested");
+        assert_eq!(
+            rec.dashed_at(CARD_RADIUS).len(),
+            2,
+            "+ new tab, and the + new space row that puts the level back"
+        );
+
+        // …and the create rows still report the level they were drawn under.
+        rig.tap(center(rec.dashed_at(CARD_RADIUS)[0]));
+        assert_eq!(rig.state.creates, vec!["tab:(none)".to_string()]);
+        rig.tap(center(rec.dashed_at(CARD_RADIUS)[1]));
+        assert_eq!(
+            rig.state.creates,
+            vec!["tab:(none)".to_string(), "space".to_string()]
+        );
     }
 
     #[test]

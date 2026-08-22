@@ -692,6 +692,13 @@ fn toggle_fullscreen(state: &mut TerminalState) {
     state.actions.toggle_fullscreen();
 }
 
+/// The tree's expanded space, read **teardown-safely** — `None` both for "none
+/// expanded" and for "this mount is gone", which
+/// [`Actions::toggle_tree_space`]'s post-await guards treat the same way.
+fn expanded_space(controller: &TerminalController) -> Option<String> {
+    controller.expanded_space.try_get_untracked().flatten()
+}
+
 /// Give the OS status/nav bars back ([`SystemUiMode::EdgeToEdge`]) — the
 /// one restore helper every fullscreen exit calls: the collapse branch of
 /// [`Actions::toggle_fullscreen`], and every other exit via `init`'s
@@ -767,20 +774,31 @@ impl Actions {
         let can_create = !self.connection.is_read_only.get_untracked();
         spawn_local(async move {
             controller.expand_space(id.clone()).await;
-            // The stale guard: a user who has since expanded a different
-            // space (or collapsed this one) leaves nothing to auto-drill.
-            if controller.expanded_space.get_untracked().as_deref() != Some(id.as_str()) {
+            // Every read here is `try_*`: this body spans two awaits (the peek,
+            // then the cascade's own settle), and the screen can unmount across
+            // either — a plain read of a disposed signal panics. A gone owner
+            // has nothing left to drill open, so each one returns quietly.
+            if expanded_space(&controller).as_deref() != Some(id.as_str()) {
+                // The stale guard, and the disposal guard in the same read: a
+                // user who has since expanded a different space (or collapsed
+                // this one) leaves nothing to auto-drill either.
                 return;
             }
-            let tabs = match controller.browsed_space_tabs.get_untracked() {
+            let Some(browsed) = controller.browsed_space_tabs.try_get_untracked() else {
+                return;
+            };
+            let tabs = match browsed {
                 Some((cached_id, cached_tabs)) if cached_id == id => cached_tabs,
-                _ => controller.tabs.get_untracked(),
+                _ => match controller.tabs.try_get_untracked() {
+                    Some(tabs) => tabs,
+                    None => return,
+                },
             };
             let Some((target, delay)) = auto_expand_after_cascade(&tabs, can_create) else {
                 return;
             };
             clean_signals::time::sleep(delay).await;
-            if controller.expanded_space.get_untracked().as_deref() == Some(id.as_str()) {
+            if expanded_space(&controller).as_deref() == Some(id.as_str()) {
                 controller.expand_tab(target);
             }
         });
@@ -943,6 +961,32 @@ impl Actions {
         );
     }
 
+    /// The tree's add-tab row: create in the space that row sits under.
+    ///
+    /// A row under a merely **browsed** space switches to it first — a real
+    /// `switch_space`, resume hint and all, exactly the move
+    /// [`TerminalController::commit_pane_in_space`] makes — and only then
+    /// opens the dialog, so the tab lands where the user pointed rather than
+    /// wherever the connection happened to be. That switch is also how an
+    /// **empty** space is reached at all: it draws no pane row to commit
+    /// through, so its add-tab row is its one way in. `None` (a backend with
+    /// no spaces) creates in the only space there is.
+    pub fn open_new_tab_dialog_in(&self, space_id: Option<&str>) {
+        let Some(space_id) = space_id.map(str::to_string) else {
+            self.open_new_tab_dialog();
+            return;
+        };
+        let controller = Arc::clone(&self.controller);
+        let actions = self.clone();
+        spawn_local(async move {
+            // A refused switch says so through its own failure toast; opening
+            // the dialog anyway would create in the wrong space.
+            if controller.adopt_space(space_id).await {
+                actions.open_new_tab_dialog();
+            }
+        });
+    }
+
     /// Open the tab-naming dialog — the add-tab row's press. Confirm creates: a
     /// typed name reaches the server as typed, and a blank field is a legitimate
     /// choice (the server's own default naming); cancel creates nothing. The body
@@ -1021,14 +1065,16 @@ impl Actions {
         );
     }
 
-    /// Open a new pane in the tab the session is on, `floating` or tiled. A
-    /// backend that ignores the flag still gets it. The tree's add-pane row
-    /// wires only the tiled path (`floating = false`) — it has no long-press
-    /// affordance, unlike the flat sheet's own row it replaced.
-    pub fn new_pane(&self, floating: bool) {
+    /// The tree's add-pane row: open a tiled pane under the tab `path` names,
+    /// moving the session onto that space and tab first when it is browsing
+    /// somewhere else ([`TerminalController::new_pane_in`] owns that order).
+    /// Only the tiled path is wired (`floating = false`) — this row has no
+    /// long-press affordance, unlike the flat sheet's own row it replaced.
+    pub(crate) fn new_tree_pane(&self, path: &TabPath) {
         let controller = Arc::clone(&self.controller);
+        let (space_id, tab_key) = (path.space_id.clone(), path.tab_key.clone());
         spawn_local(async move {
-            controller.new_pane(floating).await;
+            controller.new_pane_in(space_id, tab_key, false).await;
         });
     }
 }
@@ -1040,6 +1086,13 @@ impl Actions {
 /// locals across the call, which a method returning `AnyView` can't do.
 fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
     let controller = &actions.controller;
+    // This body is a page of the **root** overlay host, so it can outlive the
+    // screen that pushed it (a guard bounce off `/terminal` leaves the sheet
+    // up). One untracked liveness check ahead of the tracked reads below, which
+    // panic on a disposed owner; nothing follows it that could dispose one.
+    if !controller.signals_alive() {
+        return any(column(Vec::new()));
+    }
     let spaces = controller.spaces.get();
     let tabs = controller.tabs.get();
     let browsed = controller.browsed_space_tabs.get();
@@ -1096,18 +1149,14 @@ fn tree_actions(actions: &Actions, sheet: &SheetHandle) -> TreeActions<AppState>
             on_new_space: Rc::new(move |_app: &mut AppState| {
                 new_space_actions.open_create_space_dialog();
             }),
-            // The controller creates a tab in this connection's own selected
-            // space; the tree's per-space add-tab row carries no way to
-            // target a *different* one yet (the flat sheet it replaced had
-            // the same one-space limit).
-            on_new_tab: Rc::new(move |_app: &mut AppState, _space: Option<&str>| {
-                new_tab_actions.open_new_tab_dialog();
+            // Both create rows carry the level they were drawn under, and both
+            // move the session there before creating: a create always lands
+            // where the connection is, so targeting is a switch, not a flag.
+            on_new_tab: Rc::new(move |_app: &mut AppState, space: Option<&str>| {
+                new_tab_actions.open_new_tab_dialog_in(space);
             }),
-            // Likewise: the controller always creates in the tab the session
-            // is on, so a create row under a merely-browsed tab still lands
-            // there rather than at `path`.
-            on_new_pane: Rc::new(move |_app: &mut AppState, _path: &TabPath| {
-                new_pane_actions.new_pane(false);
+            on_new_pane: Rc::new(move |_app: &mut AppState, path: &TabPath| {
+                new_pane_actions.new_tree_pane(path);
             }),
         }
     });
