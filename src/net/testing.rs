@@ -34,8 +34,9 @@ use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::muxr_server::{Muxr, MuxrServer};
 use crate::net::proto::{
     ActionAck, AttachReq, ClientFrame, CloseSpaceReq, ControlEvent, CreateSessionReq,
-    CreateSpaceReq, CreateTokenReq, Empty, Layout, LoginRequest, LoginResponse, MouseInput,
-    MouseKind, NewPaneReq, NewTabReq, PaneTarget, RenamePaneReq, RenameSessionReq, RenameSpaceReq,
+    CreateSpaceReq, CreateTokenReq, Empty, Layout, ListPushTargetsReq, ListPushTargetsResp,
+    LoginRequest, LoginResponse, MouseInput, MouseKind, NewPaneReq, NewTabReq, PaneTarget,
+    RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq, RenameSessionReq, RenameSpaceReq,
     RenameTabReq, ResizePaneReq, RevokeTokenReq, ScrollDirection, ScrollReq, ServerFrame,
     SessionInfo, SessionList, SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
     ToggleFullscreenReq, TokenInfo, TokenList, VersionInfo, WriteToPaneReq, client_frame,
@@ -827,6 +828,27 @@ impl Muxr for FixtureService {
         _request: Request<RevokeTokenReq>,
     ) -> Result<Response<ActionAck>, Status> {
         Err(unsupported("RevokeToken"))
+    }
+
+    async fn register_push_target(
+        &self,
+        _request: Request<RegisterPushTargetReq>,
+    ) -> Result<Response<ActionAck>, Status> {
+        Err(unsupported("RegisterPushTarget"))
+    }
+
+    async fn list_push_targets(
+        &self,
+        _request: Request<ListPushTargetsReq>,
+    ) -> Result<Response<ListPushTargetsResp>, Status> {
+        Err(unsupported("ListPushTargets"))
+    }
+
+    async fn remove_push_target(
+        &self,
+        _request: Request<RemovePushTargetReq>,
+    ) -> Result<Response<ActionAck>, Status> {
+        Err(unsupported("RemovePushTarget"))
     }
 }
 
