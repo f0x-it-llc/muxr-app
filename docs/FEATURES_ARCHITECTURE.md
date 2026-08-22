@@ -92,7 +92,8 @@ footer) lives in `pages.rs`, not in `widgets/`.
   Attach.
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
   seam, and the "panes & tabs" tree side sheet the app bar's one action opens directly (spaces →
-  tabs → panes, zellij promoting its tabs to the top-level shape a space wears since it has none).
+  tabs → panes, zellij promoting its tabs to the top-level shape a space wears since it has none —
+  a herdr session reporting zero spaces renders that same promoted two-level tree too).
   A second domain port, `domain::feed::TerminalFeed` — a byte-level
   stream, deliberately separate from `TerminalRepository`'s one-shot model calls — has two
   implementations: `data::feeds::DemoFeed` (an embedded fixture replay) and
@@ -105,10 +106,15 @@ footer) lives in `pages.rs`, not in `widgets/`.
   per-connection focus back — so the card's poll confirms the optimistic badge once the relay has
   applied the verb (a tick answering from before that point can revert it for ≤ one tick; the
   accepted residuals live on `commit_pane`'s doc). The tree can also browse a **non-selected**
-  space's tabs without switching to it — a read-only peek (`TerminalRepository::list_tabs_in_space`)
-  — and commit a pane there through `commit_pane_in_space` (switch_space → go_to_tab → focus_pane)
-  instead. Accepted limitation: a `muxrd` predating the wire's `space_id` field silently answers
-  with the focused space's tabs instead of the one asked for, undetectably. The feed also
+  space's tabs without switching to it — a read-only peek (`TerminalRepository::list_tabs_in_space`),
+  fail-closed against a cache the sheet has since dropped — and commit a pane there through
+  `commit_pane_in_space` (switch_space → go_to_tab → focus_pane → list_spaces): the selection
+  publishes optimistically ahead of the pane steps and re-lists behind them to converge. The
+  tree's add-tab/add-pane rows take the same space/tab switch first, whichever level they are
+  drawn under (`TerminalController::adopt_space`/`new_pane_in`) — the one way an **empty** space
+  (no pane row to commit through) is reached at all. Accepted limitation: a `muxrd` predating the
+  wire's `space_id` field silently answers with the focused space's tabs instead of the one asked
+  for, undetectably. The feed also
   carries a controller-owned `ResumeSlot` hint — the last user-driven space/tab/pane, written only by
   a landed herdr commit or space switch, never by the layout poll — on every `AttachTerminal`,
   including the feed's own backoff reconnects, so a reconnect restores the user's view instead of
@@ -123,7 +129,7 @@ footer) lives in `pages.rs`, not in `widgets/`.
   a live client), the checked-in fixture replay (`TerminalController::enter_live`, a test-only seam
   with no menu/UI entry point), or — a bare `/terminal`, and every headless suite — the seeded mock
   transcript `widgets::card::card_body` renders. A read-only credential mounts the grid in its own
-  read-only mode, withdraws the tree side sheet's mutating rows, and refuses a space pill's switch
+  read-only mode, withdraws the tree side sheet's mutating rows, and refuses a space row's switch
   client-side with a read-only toast, before any RPC is sent.
 - **`settings`** — the connected server's settings screen: five groups (connection, auth tokens,
   saved servers, terminal appearance, session poll). `GrpcAuthTokensRepository` and `PrefsRepository`

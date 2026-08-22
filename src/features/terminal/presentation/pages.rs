@@ -18,13 +18,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
-use frust::authoring::WindowInsets;
 use frust::authoring::text::FontStyle;
+use frust::authoring::{Size, WindowInsets};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector, Get,
-    GetUntracked, IconData, NavigatorController, Padding, PopResult, RwSignal, SystemUiMode,
-    WindowMetrics, any, component, container, flexible, icon, icons, inflexible, on_cleanup,
-    scroll_view, set_system_ui_mode, spawn_local, text, use_context,
+    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
+    IconData, NavigatorController, PopResult, RwSignal, SystemUiMode, WindowMetrics, any,
+    component, container, flexible, icons, inflexible, on_cleanup, scroll_view, set_system_ui_mode,
+    spawn_local, text, use_context,
 };
 use frust_glyph::show_glyph_dialog;
 
@@ -45,6 +45,7 @@ use crate::ui::sheet::SheetHandle;
 use crate::ui::side_sheet::show_side_sheet;
 use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
+use crate::ui::topbar::icon_button;
 
 use super::chrome::WRAP_PAD;
 use super::controller::{LiveSession, TerminalController};
@@ -735,15 +736,15 @@ impl Actions {
     ///
     /// The tree's own body/footer builders re-invoke on every rebuild while
     /// the sheet is up, so a browse shows tracked with no hand-rolled
-    /// rebuild. Opening seeds the tree's resting expansion and re-points the
-    /// browse at the session's tab, then **refreshes the layout** (no server
-    /// push otherwise) without blocking the open: the answer patches in
+    /// rebuild. Opening seeds the tree's resting expansion
+    /// ([`TerminalController::seed_expansion`]: the selected space and the
+    /// active tab both open pre-drilled), then **refreshes the layout** (no
+    /// server push otherwise) without blocking the open: the answer patches in
     /// through the tree's tracked reads, so a slow link costs a late row,
     /// never a stuck sheet. Dismissal — whichever gesture drove it — resets
     /// the whole browse via [`TerminalController::reset_browse`], so nothing
     /// survives to the next open.
     pub fn open_sheet(&self) {
-        self.controller.begin_browsing();
         self.controller.seed_expansion();
         let body_actions = self.clone();
         let footer_actions = self.clone();
@@ -1177,12 +1178,17 @@ fn tree_actions(actions: &Actions, sheet: &SheetHandle) -> TreeActions<AppState>
     }
 }
 
-/// The side sheet's sticky footer: the two session actions the overflow menu
-/// used to carry (rename/detach) plus the hold-to-edit discoverability tip —
-/// see [`FOOTER_TIP`].
+/// The side sheet's sticky footer: the hold-to-edit discoverability tip (see
+/// [`FOOTER_TIP`]) first, then one icon-only row for the two session actions
+/// the overflow menu used to carry (rename/detach) — icons rather than two
+/// full-width labelled rows, so the footer's own share of the sheet stays
+/// small against the tree above it.
 fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
+
+    let mut tip_style = sized(&theme.type_scale.body_small, FOOTER_TIP_SIZE, colors.fg_dim);
+    tip_style.style = FontStyle::Italic;
 
     let rename = {
         let actions = actions.clone();
@@ -1217,45 +1223,42 @@ fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
             },
         )
     };
-    let mut tip_style = sized(&theme.type_scale.body_small, FOOTER_TIP_SIZE, colors.fg_dim);
-    tip_style.style = FontStyle::Italic;
 
     any(column(vec![
-        rename,
-        v_gap(spacing::XS),
-        detach,
-        v_gap(spacing::SM),
         any(text(FOOTER_TIP).style(tip_style)),
+        v_gap(spacing::SM),
+        any(row(vec![
+            inflexible(rename),
+            h_gap(spacing::MD),
+            inflexible(detach),
+        ])),
     ]))
 }
 
-/// The footer's icon size, in logical px — smaller than the tree's own row
-/// marks, since this is a two-line action stack, not a disclosure level.
-const FOOTER_ICON_SIZE: f64 = 16.0;
-/// The footer's action label / tip text sizes.
-const FOOTER_ACTION_SIZE: f32 = 12.0;
+/// The footer icon buttons' mark size, in logical px — `connect`'s saved-server
+/// delete affordance's own size, the app's other bare-icon press target.
+const FOOTER_ICON_SIZE: f64 = 18.0;
+/// The footer icon buttons' square tap target — the platform-minimum touch
+/// size, same as that delete affordance's own box.
+const FOOTER_TARGET: f64 = 44.0;
+/// The footer's tip text size.
 const FOOTER_TIP_SIZE: f32 = 10.0;
 
-/// One footer action: a leading vector mark (never a font glyph —
-/// `crate::ui::topbar`'s chrome-icon rule) plus a label, the whole row
-/// tappable.
+/// One footer action: `crate::ui::topbar::icon_button`, the app's one vector
+/// press-target primitive — dim at rest, washed by its own built-in pressed
+/// state, and labelled `label` for accessibility (never a font glyph —
+/// `crate::ui::topbar`'s chrome-icon rule).
 fn footer_action(
     mark: impl Into<IconData>,
     label: &'static str,
     colors: &Palette,
     on_press: impl Fn(&mut AppState) + 'static,
 ) -> AnyView<AppState> {
-    let theme = active_theme();
-    let content = row(vec![
-        inflexible(icon(mark).size(FOOTER_ICON_SIZE).color(colors.fg_dim)),
-        h_gap(spacing::SM),
-        inflexible(text(label).style(sized(
-            &theme.type_scale.label_large,
-            FOOTER_ACTION_SIZE,
-            colors.fg,
-        ))),
-    ]);
-    any(GestureDetector(Padding(EdgeInsets::symmetric(0.0, spacing::XS), content)).on_tap(on_press))
+    any(icon_button(mark, label, on_press)
+        .ink(colors.fg_dim)
+        .icon_size(FOOTER_ICON_SIZE)
+        .box_size(Size::new(FOOTER_TARGET, FOOTER_TARGET))
+        .radius(FOOTER_TARGET / 2.0))
 }
 
 #[cfg(test)]
