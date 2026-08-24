@@ -106,7 +106,7 @@ over `ConnectionController` (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)) **b
 context**, safe from any call stack, and navigation-time only — a connection dropping mid-screen does
 not reactively bounce it back.
 
-**A third navigator, outranking both.** Every sheet, dialog and menu is a page of the root
+**A third navigator, outranking both.** Every sheet and dialog is a page of the root
 `frust::overlay_host` (`AppState::overlays`, see Composition Root), never of either route stack: it
 routes input and publishes accessibility nodes for its top page only, so the app underneath an open
 overlay — the bar included — is genuinely inert rather than merely dimmed. An Android back press
@@ -132,11 +132,13 @@ reaches the host before either navigator.
   one anchor `features::terminal`'s chrome still needs it as a number for.
 - **`sheet`** — `show_sheet`, a thin app-facing adapter over `frust::glyph`'s `glyph_sheet`/
   `show_glyph_sheet` (the panel, its scrim, the drag handle, and every dismissal gesture belong to
-  Glyph itself). This module owns only the app's own full-content-width body gutter (Glyph's
-  content slot lays out under loose width) and the dismissal gate below: a `SheetHandle`
-  `show_sheet` mints per instance, whose `close`/`close_then` fire **at most once**, so a duplicate
-  close cannot pop the route under the sheet. `show_sheet` and `dialogs`' helpers take only the
-  navigator — nothing else about app state crosses that boundary.
+  Glyph itself); owns only the app's own full-content-width body gutter. `show_sheet` and
+  `dialogs`' helpers take only the navigator — nothing else about app state crosses that boundary.
+- **`side_sheet`** — `show_side_sheet`, the x-axis sibling adapter over `frust_glyph`'s own side
+  sheet: a sticky footer slot beside the body, and an `on_dismiss` fired once on any exit (scrim,
+  close affordance, back, or a programmatic close). Shares `sheet`'s one-shot dismissal gate,
+  `SheetHandle` (`ui/mod.rs`): `close`/`close_then` fire at most once, so a duplicate close cannot
+  pop the route or page under a sheet twice.
 - **`dialogs`** — Flutter-parity confirm/name-input modals (`confirm_dialog`/`name_input_dialog`)
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
@@ -145,10 +147,6 @@ reaches the host before either navigator.
   mountable/testable; plays once per process launch, collapsing to a brief static hold under
   `reduce_motion`. Every timing/geometry constant is transcribed once, in `ui/splash/mod.rs::spec`,
   from `docs/splash.html`.
-
-The terminal screen's app-bar overflow menu is `frust::glyph::show_glyph_menu`, not a `ui/` module —
-it belongs to the feature that owns its entries, forwarded from `crate::shell`; the framework's
-`MenuEntry` carries no icon slot, so every menu in the app today is icon-less.
 
 **Chrome icons are vectors; font glyphs are content text only.** A bar affordance, a FAB, or a row's
 trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` — never a font
@@ -204,8 +202,9 @@ the Android/iOS icon masters the build pipelines consume.
 
 - Scrollback-anchored selection: `term::selection` addresses only the rendered screen today and
   clears a held selection on new output rather than retarget it stale (its module docs record why).
-- Pane-management RPCs (new pane, close, resize) are unwired — v2's terminal UI has no affordance for
-  them yet; the dashed "new pane" row is a stand-in that reports "unavailable" rather than calling one.
+- Space/tab/pane create and rename RPCs are wired (the tree side sheet's add rows and
+  press-and-hold; new-pane creation is tap-only, with no floating-vs-tiled UI toggle). Close and
+  resize are not — v2's terminal UI has no affordance for either yet.
 - The scroll RPC is unwired too — there is no scroll gesture on the terminal grid to drive it from.
 - Background pause/reattach: a backgrounded app keeps its `AttachTerminal` stream open rather than
   detaching and reattaching on resume, pending a frust app-lifecycle seam this app can hook into.

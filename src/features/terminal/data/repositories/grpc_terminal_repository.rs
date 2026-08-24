@@ -110,12 +110,15 @@ impl GrpcTerminalRepository {
         }
     }
 
-    /// A [`SessionRef`] for the bound session, or `None` when nothing is bound.
+    /// A [`SessionRef`] for the bound session, or `None` when nothing is bound. `space_id` is
+    /// always empty here — [`list_tabs_in_space`](TerminalRepository::list_tabs_in_space) is the
+    /// one caller that overwrites it before sending.
     fn session_ref(&self) -> Option<SessionRef> {
         let binding = self.binding();
         binding.session.as_ref().map(|session| SessionRef {
             session: session.clone(),
             connection_id: binding.connection_id.clone(),
+            space_id: String::new(),
         })
     }
 
@@ -160,6 +163,21 @@ impl TerminalRepository for GrpcTerminalRepository {
         let Some(request) = self.session_ref() else {
             return Ok(Vec::new());
         };
+        let client = self.client()?;
+        let response = client
+            .authed()
+            .get_layout(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        Ok(map_tabs(response))
+    }
+
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        let Some(mut request) = self.session_ref() else {
+            return Ok(Vec::new());
+        };
+        request.space_id = space_id.to_string();
         let client = self.client()?;
         let response = client
             .authed()
@@ -812,6 +830,7 @@ mod tests {
             Some(SessionRef {
                 session: "herdr:work".to_string(),
                 connection_id: "conn-7".to_string(),
+                space_id: String::new(),
             })
         );
         assert_eq!(

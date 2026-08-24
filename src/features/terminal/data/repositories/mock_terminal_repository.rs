@@ -1,24 +1,33 @@
 //! [`MockTerminalRepository`] — the in-memory [`TerminalRepository`] every headless suite and
 //! the mock-era screen run on.
 //!
-//! Seeds exactly what `docs/terminal.html` v2 ships — three spaces, four tabs, each tab's
-//! title/name/path and its four `.term-line`s, transcribed rather than paraphrased. Framework-free:
-//! a [`Mutex`]-guarded space list plus immutable tab data; the mutex (not a `RefCell`) is what
-//! makes it `Send + Sync`, which the controller needs to hold it behind an `Arc`.
+//! Seeds exactly what `docs/terminal.html` v2 ships for its selected space (`forgekit`) — four
+//! tabs, each tab's title/name/path and its four `.term-line`s, transcribed rather than
+//! paraphrased — plus two more spaces so the sheet's space pill row has something to switch
+//! between: `zelli_mobile` (a second, smaller populated space) and `cupline` (empty, proving a
+//! space with no tabs is a reachable answer, not a bug). Framework-free: a `Mutex`-guarded space
+//! list plus a `Mutex`-guarded **per-space** tab store (`HashMap<space id, tabs>`); the mutex
+//! (not a `RefCell`) is what makes it `Send + Sync`, which the controller needs to hold it
+//! behind an `Arc`.
 //!
 //! **What mutates**: space selection, and pane focus — [`TerminalRepository::focus_pane`] moves
-//! the `focused` flag, so a later `list_tabs` agrees with the move a client just made. The tab
-//! set, its panes' identities and its lines are fixed.
+//! the `focused` flag within whichever space is currently selected, so a later `list_tabs` agrees
+//! with the move a client just made. Each space's own tab set, its panes' identities and its
+//! lines are fixed. [`TerminalRepository::list_tabs_in_space`] is the one read that never touches
+//! selection — it answers whatever space id it is asked for, selected or not.
 //!
 //! **Headless-test tab seam.** A tab world that never moves cannot exercise the screen's reason
 //! for re-reading one, so [`add_test_tab`]/[`clear_test_tabs`] append synthetic tabs to every
-//! later `list_tabs`. Process-global — belongs to a serialized suite, since a suite reaches this
-//! store only as the `Arc<dyn TerminalRepository>` its `di` published.
+//! later `list_tabs` answer for the *selected* space only (`list_tabs_in_space`'s per-key peek is
+//! untouched by it) — belongs to a serialized suite, since a suite reaches this store only as the
+//! `Arc<dyn TerminalRepository>` its `di` published, and is process-global.
 //!
-//! Failure mapping: an unknown tab key or blank session id maps to [`AppFailure::Internal`] — a
-//! bug, since the screen only addresses what it just rendered. [`MOCK_LATENCY`] is a short sleep
-//! before every call, so the screen's async path is the one the real client will take.
+//! Failure mapping: an unknown tab key, space id or blank session id maps to
+//! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just rendered.
+//! [`MOCK_LATENCY`] is a short sleep before every call, so the screen's async path is the one the
+//! real client will take.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -38,9 +47,9 @@ static TEST_TABS: Mutex<Vec<TabEntry>> = Mutex::new(Vec::new());
 /// the [module docs](self). Never called by production code.
 pub fn add_test_tab(key: &str) {
     let mut tabs = lock_test_tabs();
-    // Past the four seeded tabs, so an appended tab's index/id collides with
-    // nothing the seed already carries.
-    let index = seed_tabs().len() as u32 + tabs.len() as u32 + 1;
+    // Past the selected space's (`forgekit`'s) four seeded tabs, so an appended
+    // tab's index/id collides with nothing the seed already carries.
+    let index = seed_tabs_forgekit().len() as u32 + tabs.len() as u32 + 1;
     tabs.push(test_tab(index, key));
 }
 
@@ -58,7 +67,7 @@ fn lock_test_tabs() -> std::sync::MutexGuard<'static, Vec<TabEntry>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// One appended tab, shaped exactly like a seeded one (see [`seed_tabs`]) so
+/// One appended tab, shaped exactly like a seeded one (see [`seed_tabs_forgekit`]) so
 /// nothing downstream can tell the two apart.
 fn test_tab(index: u32, key: &str) -> TabEntry {
     TabEntry {
@@ -78,17 +87,18 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
 pub struct MockTerminalRepository {
     /// The space list — one of the two things this store lets move.
     spaces: Mutex<Vec<Space>>,
-    /// The tab world: a fixed set of tabs whose pane **focus** moves (see the
-    /// [module docs](self)' "What mutates").
-    tabs: Mutex<Vec<TabEntry>>,
+    /// The tab world, keyed by [`Space::id`]: a fixed per-space set of tabs whose pane
+    /// **focus** moves within the currently *selected* space (see the [module docs](self)'
+    /// "What mutates").
+    tabs_by_space: Mutex<HashMap<String, Vec<TabEntry>>>,
 }
 
 impl MockTerminalRepository {
-    /// A repository seeded with [`seed_spaces`]/[`seed_tabs`].
+    /// A repository seeded with [`seed_spaces`]/[`seed_tabs_by_space`].
     pub fn seeded() -> Self {
         Self {
             spaces: Mutex::new(seed_spaces()),
-            tabs: Mutex::new(seed_tabs()),
+            tabs_by_space: Mutex::new(seed_tabs_by_space()),
         }
     }
 
@@ -107,9 +117,23 @@ impl MockTerminalRepository {
         self.lock().clone()
     }
 
-    /// The seeded tabs plus whatever [`add_test_tab`] appended, cloned.
+    /// The id of the currently selected space, or `None` if somehow nothing is (never
+    /// true of [`seeded`](Self::seeded) — exactly one space is always selected).
+    fn selected_space_id(&self) -> Option<String> {
+        self.lock()
+            .iter()
+            .find(|space| space.selected)
+            .map(|space| space.id.clone())
+    }
+
+    /// The *selected* space's seeded tabs plus whatever [`add_test_tab`] appended, cloned. An
+    /// id [`seed_tabs_by_space`] carries no entry for (unreachable through [`seeded`](Self::seeded),
+    /// defensive otherwise) answers empty rather than panicking.
     fn tabs_snapshot(&self) -> Vec<TabEntry> {
-        let mut tabs = self.lock_tabs().clone();
+        let mut tabs = self
+            .selected_space_id()
+            .and_then(|id| self.lock_tabs().get(&id).cloned())
+            .unwrap_or_default();
         tabs.extend(lock_test_tabs().iter().cloned());
         tabs
     }
@@ -122,9 +146,9 @@ impl MockTerminalRepository {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The tab store, recovered the same way [`lock`](Self::lock) is.
-    fn lock_tabs(&self) -> std::sync::MutexGuard<'_, Vec<TabEntry>> {
-        self.tabs
+    /// The per-space tab store, recovered the same way [`lock`](Self::lock) is.
+    fn lock_tabs(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<TabEntry>>> {
+        self.tabs_by_space
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -153,13 +177,15 @@ fn seed_spaces() -> Vec<Space> {
     .collect()
 }
 
-/// The seeded tab world — `docs/terminal.html`'s `TABS` map, in the order its
+/// `forgekit`'s seeded tab world — `docs/terminal.html`'s `TABS` map, in the order its
 /// `#sheetTabRow` pills draw, with `devbox` active (`.pill.sel`). Each tab also
 /// carries the **pane list** the sheet lists and commits against: the mock's own
 /// `.pane-item` plus one unfocused sibling, so the browse-then-commit flow has more
 /// than one row to move a focus between. Pane ids are `<tab index>0`/`<tab index>1`
-/// — this store fronts no backend, so an id only has to be stable and unique.
-fn seed_tabs() -> Vec<TabEntry> {
+/// — this store fronts no backend, so an id only has to be stable and unique *within
+/// its own space* (see [`seed_tabs_by_space`] — `focus_pane` only ever searches the
+/// currently selected one, so nothing requires ids to be unique *across* spaces too).
+fn seed_tabs_forgekit() -> Vec<TabEntry> {
     let tab = |index: u32, key: &str, label: &str, title: &str, name: &str, path: &str| TabEntry {
         index,
         tab_id: u64::from(index),
@@ -207,8 +233,40 @@ fn seed_tabs() -> Vec<TabEntry> {
     ]
 }
 
+/// `zelli_mobile`'s seeded tab world — a second, smaller populated space so
+/// [`TerminalRepository::list_tabs_in_space`](super::super::domain::repositories::TerminalRepository::list_tabs_in_space)
+/// has a non-selected space to answer distinctly from `forgekit`'s. Two tabs, `logs` active.
+fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
+    let tab = |index: u32, key: &str, path: &str, active: bool| TabEntry {
+        index,
+        tab_id: u64::from(100 + index),
+        key: key.to_string(),
+        label: key.to_string(),
+        pane_title: format!("ed@zelli: {path}"),
+        pane_name: "ed@zelli".to_string(),
+        pane_path: path.to_string(),
+        panes: seed_panes(index, "ed@zelli", path),
+        active,
+    };
+    vec![
+        tab(1, "logs", "~/logs", true),
+        tab(2, "worker", "~/worker", false),
+    ]
+}
+
+/// Every seeded space's tab world, keyed by [`Space::id`] — `forgekit` (multi-tab, the
+/// default selection), `zelli_mobile` (a second, smaller populated space), and `cupline`
+/// (empty — a space with no tabs is a reachable answer, not a bug).
+fn seed_tabs_by_space() -> HashMap<String, Vec<TabEntry>> {
+    HashMap::from([
+        ("cupline".to_string(), Vec::new()),
+        ("zelli_mobile".to_string(), seed_tabs_zelli_mobile()),
+        ("forgekit".to_string(), seed_tabs_forgekit()),
+    ])
+}
+
 /// One tab's two panes: the mock's own focused `.pane-item`, and an unfocused `zsh` beside it
-/// — see [`seed_tabs`].
+/// — see [`seed_tabs_forgekit`]/[`seed_tabs_zelli_mobile`].
 ///
 /// Side by side, splitting a classic 80x24 grid down the middle, rather than sharing one
 /// full-grid rect: `presentation::pages`' content-tap hit test resolves a tapped cell against
@@ -283,6 +341,19 @@ impl TerminalRepository for MockTerminalRepository {
         Ok(self.tabs_snapshot())
     }
 
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        // A read-only peek: answers whatever `space_id` names — selected or not — and
+        // never touches `Space.selected` or appends the headless-test seam's tabs (those
+        // ride only on the *selected* space's own `list_tabs` answer).
+        if !self.lock().iter().any(|space| space.id == space_id) {
+            return Err(AppFailure::Internal(format!(
+                "list_tabs_in_space: no space {space_id}"
+            )));
+        }
+        Ok(self.lock_tabs().get(space_id).cloned().unwrap_or_default())
+    }
+
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
         seed_lines(&key).ok_or_else(|| AppFailure::Internal(format!("tab_lines: no tab {key}")))
@@ -325,9 +396,20 @@ impl TerminalRepository for MockTerminalRepository {
     async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
         // A pane no seeded tab carries is a bug worth surfacing, since the
-        // sheet only ever commits a row it just drew.
+        // sheet only ever commits a row it just drew. Scoped to the *selected*
+        // space, like every other write this store performs.
         let addressed = |pane: &PaneEntry| pane.id == pane_id && pane.is_plugin == is_plugin;
-        let mut tabs = self.lock_tabs();
+        let Some(space_id) = self.selected_space_id() else {
+            return Err(AppFailure::Internal(format!(
+                "focus_pane: no pane {pane_id}"
+            )));
+        };
+        let mut tabs_by_space = self.lock_tabs();
+        let Some(tabs) = tabs_by_space.get_mut(&space_id) else {
+            return Err(AppFailure::Internal(format!(
+                "focus_pane: no pane {pane_id}"
+            )));
+        };
         let Some(tab) = tabs.iter_mut().find(|tab| tab.panes.iter().any(addressed)) else {
             return Err(AppFailure::Internal(format!(
                 "focus_pane: no pane {pane_id}"
@@ -563,12 +645,14 @@ mod tests {
         assert_eq!(appended.pill_label(), "5 scratch");
         assert_eq!(appended.tab_id, 5);
         assert!(
-            !seed_tabs().iter().any(|tab| tab.tab_id == appended.tab_id),
+            !seed_tabs_forgekit()
+                .iter()
+                .any(|tab| tab.tab_id == appended.tab_id),
             "an appended tab's id collides with no seeded one"
         );
         assert_eq!(
             appended.panes.len(),
-            seed_tabs()[0].panes.len(),
+            seed_tabs_forgekit()[0].panes.len(),
             "…and it carries the same pane shape"
         );
     }
@@ -578,5 +662,93 @@ mod tests {
         let repo = MockTerminalRepository::seeded();
         assert!(block_on(repo.detach_session("s-1".to_string())).is_ok());
         assert!(block_on(repo.detach_session("  ".to_string())).is_err());
+    }
+
+    // -- space-scoped tab listing ---------------------------------------------
+
+    #[test]
+    fn list_tabs_in_space_answers_a_non_selected_spaces_own_snapshot() {
+        let repo = MockTerminalRepository::seeded();
+        let tabs = block_on(repo.list_tabs_in_space("zelli_mobile"))
+            .expect("zelli_mobile is a seeded space");
+
+        let keys: Vec<&str> = tabs.iter().map(|tab| tab.key.as_str()).collect();
+        assert_eq!(keys, ["logs", "worker"]);
+    }
+
+    #[test]
+    fn list_tabs_in_space_never_moves_selection_and_list_tabs_still_answers_the_selected_space() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(
+            block_on(repo.list_tabs_in_space("zelli_mobile")).is_ok(),
+            "a read-only peek at another space"
+        );
+
+        let selected: Vec<String> = repo
+            .spaces_snapshot()
+            .into_iter()
+            .filter(|space| space.selected)
+            .map(|space| space.id)
+            .collect();
+        assert_eq!(
+            selected,
+            ["forgekit"],
+            "the peek left the seeded selection untouched"
+        );
+
+        let pills: Vec<String> = block_on(repo.list_tabs())
+            .expect("the mock never fails to list")
+            .iter()
+            .map(TabEntry::pill_label)
+            .collect();
+        assert_eq!(
+            pills,
+            ["1 btop", "2 minefit-api", "3 gohora", "4 devbox"],
+            "list_tabs still answers the selected space (forgekit), unaffected by the peek"
+        );
+    }
+
+    #[test]
+    fn list_tabs_in_space_answers_an_empty_space_with_an_empty_snapshot() {
+        let repo = MockTerminalRepository::seeded();
+        assert_eq!(
+            block_on(repo.list_tabs_in_space("cupline")),
+            Ok(Vec::new()),
+            "a space with no tabs is a reachable answer, not a bug"
+        );
+    }
+
+    #[test]
+    fn list_tabs_in_space_fails_for_an_unknown_space_id() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(matches!(
+            block_on(repo.list_tabs_in_space("nope")),
+            Err(AppFailure::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn switch_space_still_moves_selection_the_way_list_tabs_in_space_never_does() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(block_on(repo.switch_space("zelli_mobile".to_string())).is_ok());
+
+        let selected: Vec<String> = repo
+            .spaces_snapshot()
+            .into_iter()
+            .filter(|space| space.selected)
+            .map(|space| space.id)
+            .collect();
+        assert_eq!(selected, ["zelli_mobile"]);
+
+        let pills: Vec<String> = block_on(repo.list_tabs())
+            .expect("the mock never fails to list")
+            .iter()
+            .map(TabEntry::pill_label)
+            .collect();
+        assert_eq!(
+            pills,
+            ["1 logs", "2 worker"],
+            "list_tabs now answers the newly-selected space"
+        );
     }
 }

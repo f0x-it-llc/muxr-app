@@ -1,7 +1,8 @@
 //! The `/terminal` route's page: muxr's terminal surface, a pixel copy of
 //! `docs/terminal.html` v2 — no tabs strip, path bar, cmd hint, or FAB. The
-//! overflow `⋮` lives on the *app* bar (`crate::shell` forwards it to
-//! [`open_terminal_menu`]); the pane title sits in the card's status row.
+//! app bar's menu button opens the "panes & tabs" side sheet directly
+//! (`crate::shell` forwards its press to [`open_terminal_menu`]); the pane
+//! title sits in the card's status row.
 //!
 //! [`terminal_page`] is what `crate::routes` mounts — a per-screen
 //! [`Component`] whose `init` hosts a [`TerminalController`] via
@@ -17,13 +18,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
-use frust::authoring::{Rect, WindowInsets};
+use frust::authoring::text::FontStyle;
+use frust::authoring::{Size, WindowInsets};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    NavigatorController, PopResult, RwSignal, SystemUiMode, WindowMetrics, any, component,
-    container, flexible, inflexible, on_cleanup, set_system_ui_mode, spawn_local, use_context,
+    IconData, NavigatorController, PopResult, RwSignal, SystemUiMode, WindowMetrics, any,
+    component, container, flexible, icons, inflexible, on_cleanup, scroll_view, set_system_ui_mode,
+    spawn_local, text, use_context,
 };
-use frust_glyph::{MenuEntry, menu_item, show_glyph_dialog, show_glyph_menu};
+use frust_glyph::show_glyph_dialog;
 
 use crate::AppState;
 use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};
@@ -38,8 +41,11 @@ use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
 use crate::ui::palette::{Palette, active_theme};
-use crate::ui::sheet::{SheetHandle, show_sheet};
+use crate::ui::sheet::SheetHandle;
+use crate::ui::side_sheet::show_side_sheet;
+use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
+use crate::ui::topbar::icon_button;
 
 use super::chrome::WRAP_PAD;
 use super::controller::{LiveSession, TerminalController};
@@ -48,22 +54,26 @@ use super::term;
 use super::widgets::card::{CardInk, card_body};
 use super::widgets::link_strip::link_strip;
 use super::widgets::new_tab_dialog::new_tab_dialog;
-use super::widgets::panes_sheet::sheet_body;
+use super::widgets::side_sheet_tree::{
+    TabPath, TreeActions, TreeData, TreeMutations, auto_expand_after_cascade, tree_body,
+};
 use super::widgets::status::status_row;
+use super::widgets::util::{column, h_gap, row, sized, v_gap};
 
 /// How long the sheet stays up after a **pane row** is tapped, so the selection
 /// visibly moves before it closes — `setTimeout(closeSheet, 260)` in the mock. A
 /// pane tap is the sheet's one dismissing gesture ([`Actions::commit_pane`]).
 const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(260);
 
-/// The overflow menu's rows, in order, plus their indices into the entry list
-/// [`show_glyph_menu`] hands back.
-const MENU_PANES: &str = "Panes & tabs";
-const MENU_RENAME: &str = "Rename session";
-const MENU_DETACH: &str = "Detach session";
-const MENU_PANES_INDEX: usize = 0;
-const MENU_RENAME_INDEX: usize = 1;
-const MENU_DETACH_INDEX: usize = 2;
+/// The side sheet's header label.
+const SHEET_TITLE: &str = "panes & tabs";
+/// The sticky footer's two session actions — the exact rows the overflow menu
+/// used to carry.
+const FOOTER_RENAME_LABEL: &str = "Rename session";
+const FOOTER_DETACH_LABEL: &str = "Detach session";
+/// The footer's hold-to-edit discoverability tip — the mandated affordance
+/// now that no row carries its own trailing edit icon.
+const FOOTER_TIP: &str = "hold a row to rename";
 
 /// The rename dialog's title.
 const RENAME_TITLE: &str = "Rename session";
@@ -76,7 +86,7 @@ const RENAME_PANE_TITLE: &str = "Rename pane";
 /// …and what a landed detach says on the way back to the list.
 const DETACHED_TOAST: &str = "detached";
 /// What a control a read-only credential may not use says when it is reached
-/// anyway — the overflow menu has no disabled row state, so the row refuses.
+/// anyway — the sheet has no disabled row state, so the row refuses.
 const READ_ONLY_TOAST: &str = "read-only session";
 
 /// The query key `/terminal?session=<id>` carries the attached session's id
@@ -132,13 +142,14 @@ pub struct TerminalState {
 /// need — the bundle crossing the component-state boundary.
 ///
 /// A `Component`'s subtree is bound to its `State`, so gestures take
-/// `&mut TerminalState`. Overlay pages (the root host, so the `⋮` menu
+/// `&mut TerminalState`. Overlay pages (the root host, so the side sheet
 /// doesn't clip under the floating bar) get `&mut AppState` instead and
 /// can't see [`TerminalState`] — hence one cloneable bundle both sides call
-/// through. The app bar's `⋮` is a step further out still: its handler sees
-/// only `&mut AppState`, so this publishes `Actions` in a `thread_local!`
-/// while mounted ([`open_terminal_menu`] reads it) — the `app_nav` idiom,
-/// since `provide_context` needs `Send + Sync`, which `Rc` isn't.
+/// through. The app bar's menu button is a step further out still: its
+/// handler sees only `&mut AppState`, so this publishes `Actions` in a
+/// `thread_local!` while mounted ([`open_terminal_menu`] reads it) — the
+/// `app_nav` idiom, since `provide_context` needs `Send + Sync`, which `Rc`
+/// isn't.
 #[derive(Clone)]
 pub struct Actions {
     /// Which mount of the screen this bundle belongs to — see [`TERMINAL_CHROME`].
@@ -154,9 +165,6 @@ pub struct Actions {
     /// The app's one connection handle — read for the live client the feed
     /// attaches with, and for the read-only posture gating this screen's controls.
     pub connection: Arc<ConnectionController>,
-    /// Where the app bar's trailing `⋮` slot is painting, in window coordinates —
-    /// written by `super::chrome::terminal_stage` on every layout.
-    pub anchor: Rc<Cell<Rect>>,
     /// Whether a detach has already claimed this screen's one pop — shared across
     /// every clone, so one mount leaves `/terminal` at most once.
     detaching: Rc<Cell<bool>>,
@@ -254,13 +262,14 @@ pub fn debug_controller() -> Option<Arc<TerminalController>> {
     })
 }
 
-/// Open the terminal's overflow menu — what `crate::shell` forwards the app bar's
-/// `⋮` press to. A press with no terminal screen mounted is silently ignored (the
-/// bar carries this action on `/terminal` alone).
+/// Open the terminal's "panes & tabs" side sheet — what `crate::shell` forwards
+/// the app bar's menu-button press to, directly (no intervening dropdown). A
+/// press with no terminal screen mounted is silently ignored (the bar carries
+/// this action on `/terminal` alone).
 pub fn open_terminal_menu(_state: &mut AppState) {
     let actions = TERMINAL_CHROME.with(|cell| cell.borrow().clone());
     if let Some(actions) = actions {
-        actions.open_menu();
+        actions.open_sheet();
     }
 }
 
@@ -308,7 +317,6 @@ impl Component for TerminalScreen {
             app_nav,
             controller,
             connection,
-            anchor: Rc::new(Cell::new(Rect::ZERO)),
             detaching: Rc::new(Cell::new(false)),
             live_probe: Rc::new(RefCell::new(None)),
             grid_hooks: Rc::new(RefCell::new(None)),
@@ -555,7 +563,6 @@ impl Component for TerminalScreen {
             gutters,
             ink.card,
             ink.card_border,
-            Rc::clone(&state.actions.anchor),
         ));
 
         // The page tone stays **outside** the stage so it fills the whole surface,
@@ -686,6 +693,13 @@ fn toggle_fullscreen(state: &mut TerminalState) {
     state.actions.toggle_fullscreen();
 }
 
+/// The tree's expanded space, read **teardown-safely** — `None` both for "none
+/// expanded" and for "this mount is gone", which
+/// [`Actions::toggle_tree_space`]'s post-await guards treat the same way.
+fn expanded_space(controller: &TerminalController) -> Option<String> {
+    controller.expanded_space.try_get_untracked().flatten()
+}
+
 /// Give the OS status/nav bars back ([`SystemUiMode::EdgeToEdge`]) — the
 /// one restore helper every fullscreen exit calls: the collapse branch of
 /// [`Actions::toggle_fullscreen`], and every other exit via `init`'s
@@ -717,58 +731,127 @@ impl Actions {
         }
     }
 
-    /// Open the app bar's overflow menu, anchored to the bar slot the `⋮`
-    /// actually paints in.
+    /// Open the "panes & tabs" side sheet — what the app bar's menu button
+    /// now opens directly, with no intervening dropdown.
     ///
-    /// `show_glyph_menu` needs a caller-reported window-coordinate rect (no
-    /// ancestor-bounds query exists), and this page can't reach the bar slot
-    /// owned by `crate::ui::topbar` — so `super::chrome::terminal_stage`
-    /// computes it during layout and drops it in [`anchor`](Self::anchor).
-    ///
-    /// A transparent push onto the **root overlay host**: paints over the
-    /// bar (rather than clipping under it) with no scrim of its own.
-    ///
-    /// **Claims root focus on every press** (a framework gap with no
-    /// opt-out) — summons no keyboard, and leaves with the menu.
-    pub fn open_menu(&self) {
-        let actions = self.clone();
-        show_glyph_menu(
-            &self.overlays,
-            self.anchor.get(),
-            menu_entries,
-            move |_app: &mut AppState, result: PopResult| {
-                match result.take::<usize>() {
-                    Some(MENU_PANES_INDEX) => actions.open_sheet(),
-                    Some(MENU_RENAME_INDEX) => actions.open_rename_dialog(),
-                    Some(MENU_DETACH_INDEX) => actions.detach(),
-                    // Every other dismissal (scrim, Escape, back) pops empty.
-                    _ => {}
-                }
-            },
-        );
-    }
-
-    /// Open the "panes & tabs" sheet — the menu's first row.
-    ///
-    /// The body builder re-invokes on every rebuild while up, so a browse
-    /// shows tracked with no hand-rolled rebuild. Opening re-points the
-    /// browse at the session's tab and **refreshes the layout** (no server
-    /// push otherwise) without blocking the open: the answer patches in
-    /// through [`sheet_body`]'s tracked reads, so a slow link costs a late
-    /// pill, never a stuck sheet.
+    /// The tree's own body/footer builders re-invoke on every rebuild while
+    /// the sheet is up, so a browse shows tracked with no hand-rolled
+    /// rebuild. Opening seeds the tree's resting expansion
+    /// ([`TerminalController::seed_expansion`]: the selected space and the
+    /// active tab both open pre-drilled), then **refreshes the layout** (no
+    /// server push otherwise) without blocking the open: the answer patches in
+    /// through the tree's tracked reads, so a slow link costs a late row,
+    /// never a stuck sheet. Dismissal — whichever gesture drove it — resets
+    /// the whole browse via [`TerminalController::reset_browse`], so nothing
+    /// survives to the next open.
     pub fn open_sheet(&self) {
-        self.controller.begin_browsing();
-        let actions = self.clone();
-        show_sheet(&self.overlays, move |sheet| sheet_body(&actions, sheet));
+        self.controller.seed_expansion();
+        let body_actions = self.clone();
+        let footer_actions = self.clone();
+        let reset_controller = Arc::clone(&self.controller);
+        show_side_sheet(
+            &self.overlays,
+            SHEET_TITLE,
+            move |sheet| sheet_tree_body(&body_actions, sheet),
+            move |sheet| sheet_footer(&footer_actions, sheet),
+            move || reset_controller.reset_browse(),
+        );
         let controller = Arc::clone(&self.controller);
         spawn_local(async move { controller.reload_tabs().await });
     }
 
-    /// Point the sheet at the tab keyed `key`: local, synchronous and RPC-free.
-    /// Nothing about the session moves and the sheet stays up — only
-    /// [`commit_pane`](Self::commit_pane) does either.
-    pub fn browse_tab(&self, key: &str) {
-        self.controller.browse_tab(key.to_string());
+    /// Toggle the tree sheet's space disclosure: collapse if `expanded` (the
+    /// row's own current state), else expand it — and, on a landed expand,
+    /// auto-drill the space's active tab open once its own cascade settles.
+    /// [`auto_expand_after_cascade`] gives the policy (target tab + delay);
+    /// this is the wiring that owns the controller and spawns the timer.
+    pub fn toggle_tree_space(&self, id: &str, expanded: bool) {
+        if expanded {
+            self.controller.collapse_space();
+            return;
+        }
+        let controller = Arc::clone(&self.controller);
+        let id = id.to_string();
+        let can_create = !self.connection.is_read_only.get_untracked();
+        spawn_local(async move {
+            controller.expand_space(id.clone()).await;
+            // Every read here is `try_*`: this body spans two awaits (the peek,
+            // then the cascade's own settle), and the screen can unmount across
+            // either — a plain read of a disposed signal panics. A gone owner
+            // has nothing left to drill open, so each one returns quietly.
+            if expanded_space(&controller).as_deref() != Some(id.as_str()) {
+                // The stale guard, and the disposal guard in the same read: a
+                // user who has since expanded a different space (or collapsed
+                // this one) leaves nothing to auto-drill either.
+                return;
+            }
+            let Some(browsed) = controller.browsed_space_tabs.try_get_untracked() else {
+                return;
+            };
+            let tabs = match browsed {
+                Some((cached_id, cached_tabs)) if cached_id == id => cached_tabs,
+                _ => match controller.tabs.try_get_untracked() {
+                    Some(tabs) => tabs,
+                    None => return,
+                },
+            };
+            let Some((target, delay)) = auto_expand_after_cascade(&tabs, can_create) else {
+                return;
+            };
+            clean_signals::time::sleep(delay).await;
+            if expanded_space(&controller).as_deref() == Some(id.as_str()) {
+                controller.expand_tab(target);
+            }
+        });
+    }
+
+    /// Toggle the tree sheet's tab disclosure — synchronous and RPC-free like
+    /// [`TerminalController::expand_tab`]/[`collapse_tab`](TerminalController::collapse_tab):
+    /// every pane rode in with its own tab.
+    pub fn toggle_tree_tab(&self, key: &str, expanded: bool) {
+        if expanded {
+            self.controller.collapse_tab();
+        } else {
+            self.controller.expand_tab(key.to_string());
+        }
+    }
+
+    /// Commit the tree sheet's browse: a row under the space this connection
+    /// is already on takes [`commit_pane`](Self::commit_pane) unchanged
+    /// (`path.space_id` is `None` on zellij, which has no spaces at all); a
+    /// row under any **other** space takes
+    /// [`TerminalController::commit_pane_in_space`] instead, which is
+    /// **always** herdr and so always mutating — refused up front for a
+    /// read-only credential, the same posture [`commit_pane`](Self::commit_pane)
+    /// takes for every herdr commit regardless of which tab it targets.
+    pub(crate) fn commit_tree_pane(
+        &self,
+        sheet: &SheetHandle,
+        path: &TabPath,
+        pane_id: u32,
+        is_plugin: bool,
+    ) {
+        let Some(space_id) = &path.space_id else {
+            self.commit_pane(sheet, &path.tab_key, pane_id, is_plugin);
+            return;
+        };
+        if self.connection.is_read_only.get_untracked() {
+            app_toasts().show(READ_ONLY_TOAST);
+            return;
+        }
+        let controller = Arc::clone(&self.controller);
+        let sheet = sheet.clone();
+        let space_id = space_id.clone();
+        let tab_key = path.tab_key.clone();
+        spawn_local(async move {
+            if !controller
+                .commit_pane_in_space(space_id, tab_key, pane_id, is_plugin)
+                .await
+            {
+                return;
+            }
+            sheet.close_after(SHEET_CLOSE_DELAY).await;
+        });
     }
 
     /// Commit the sheet's browse: focus pane `pane_id` of tab `tab_key`,
@@ -808,25 +891,8 @@ impl Actions {
         });
     }
 
-    /// Switch this connection's view to space `id`, reloading the tab world
-    /// behind it. The sheet stays up.
-    ///
-    /// `SwitchSpace` is wire-**MUTATING**, so a read-only credential is
-    /// refused here (not the server) — the pill stays and says why. Every
-    /// other refusal is the server's, via the controller's failure sink.
-    pub fn select_space(&self, id: &str) {
-        // Untracked: a press handler has no reactive owner on desktop.
-        if self.connection.is_read_only.get_untracked() {
-            app_toasts().show(READ_ONLY_TOAST);
-            return;
-        }
-        let controller = Arc::clone(&self.controller);
-        let id = id.to_string();
-        spawn_local(async move { controller.select_space(id).await });
-    }
-
     /// Open the rename dialog, seeded with the attached session's *current* name —
-    /// re-read from the controller rather than captured, so a menu opened several
+    /// re-read from the controller rather than captured, so a sheet opened several
     /// frames ago cannot seed a stale name. With no attached session the dialog
     /// does not open. A rename is **mutating**, so a read-only credential is
     /// refused here rather than at the server: the row stays and says why.
@@ -858,7 +924,7 @@ impl Actions {
     /// Detach from the attached session: pop back to the list, then say so.
     ///
     /// **One pop per mount**, latched through [`Actions::detaching`]: the detach is
-    /// async and the menu can be reopened while it is in flight, so a second
+    /// async and the sheet can be reopened while it is in flight, so a second
     /// landing pop would take `/sessions` off the stack too. A refusal re-arms it.
     pub fn detach(&self) {
         if self.detaching.replace(true) {
@@ -877,9 +943,10 @@ impl Actions {
         });
     }
 
-    /// Open the create-space dialog — the add-space row's press (herdr only;
-    /// [`sheet_body`] withdraws the row on a backend with no spaces, and for a
-    /// read-only credential). Its non-blank guard is the only client-side check.
+    /// Open the create-space dialog — the tree's add-space row press (herdr
+    /// only; [`tree_body`] withdraws the row on a backend with no spaces, and
+    /// for a read-only credential). Its non-blank guard is the only
+    /// client-side check.
     pub fn open_create_space_dialog(&self) {
         let controller = Arc::clone(&self.controller);
         name_input_dialog(
@@ -893,6 +960,34 @@ impl Actions {
                 });
             },
         );
+    }
+
+    /// The tree's add-tab row: create in the space that row sits under.
+    ///
+    /// A row under a merely **browsed** space switches to it first — a real
+    /// `switch_space`, resume hint and all, exactly the move
+    /// [`TerminalController::commit_pane_in_space`] makes — and only then
+    /// opens the dialog, so the tab lands where the user pointed rather than
+    /// wherever the connection happened to be. That switch is also how an
+    /// **empty** space is reached at all: it draws no pane row to commit
+    /// through, so its add-tab row is its one way in. `None` (a backend with
+    /// no spaces) creates in the only space there is.
+    pub fn open_new_tab_dialog_in(&self, space_id: Option<&str>) {
+        let Some(space_id) = space_id.map(str::to_string) else {
+            self.open_new_tab_dialog();
+            return;
+        };
+        let controller = Arc::clone(&self.controller);
+        let actions = self.clone();
+        spawn_local(async move {
+            // A refused switch says so through its own failure toast, and one
+            // dropped at the controller's single-flight claim says nothing at
+            // all (first press wins); opening the dialog behind either would
+            // create in the wrong space.
+            if controller.adopt_space(space_id).await {
+                actions.open_new_tab_dialog();
+            }
+        });
     }
 
     /// Open the tab-naming dialog — the add-tab row's press. Confirm creates: a
@@ -918,7 +1013,7 @@ impl Actions {
     }
 
     /// Open the rename dialog for the space `id`, prefilled with its current
-    /// `label` — the space pill's trailing edit icon (herdr only, withdrawn for a
+    /// `label` — the tree's space row press-and-hold (herdr only, withdrawn for a
     /// read-only credential). Reloads only the space list: a label touches no tab.
     pub fn open_rename_space_dialog(&self, id: &str, label: &str) {
         let controller = Arc::clone(&self.controller);
@@ -938,7 +1033,7 @@ impl Actions {
     }
 
     /// Open the rename dialog for the tab `tab_id`, prefilled with its current
-    /// `name` — the tab pill's trailing edit icon. Reloads only the tab list: a
+    /// `name` — the tree's tab row press-and-hold. Reloads only the tab list: a
     /// full load would replay the reveal for nothing.
     pub fn open_rename_tab_dialog(&self, tab_id: u64, name: &str) {
         let controller = Arc::clone(&self.controller);
@@ -956,7 +1051,7 @@ impl Actions {
     }
 
     /// Open the rename dialog for the pane `pane_id`, prefilled with its current
-    /// `title` — the pane row's trailing edit icon. Reloads only the tab list,
+    /// `title` — the tree's pane row press-and-hold. Reloads only the tab list,
     /// since a pane's title lives inside [`TabEntry::panes`].
     pub fn open_rename_pane_dialog(&self, pane_id: u32, is_plugin: bool, title: &str) {
         let controller = Arc::clone(&self.controller);
@@ -973,70 +1068,217 @@ impl Actions {
         );
     }
 
-    /// Open a new pane in the tab the session is on — tiled on a tap, floating on
-    /// a long-press. A backend that ignores the flag still gets it.
-    pub fn new_pane(&self, floating: bool) {
+    /// The tree's add-pane row: open a tiled pane under the tab `path` names,
+    /// moving the session onto that space and tab first when it is browsing
+    /// somewhere else ([`TerminalController::new_pane_in`] owns that order).
+    /// Only the tiled path is wired (`floating = false`) — this row has no
+    /// long-press affordance, unlike the flat sheet's own row it replaced.
+    pub(crate) fn new_tree_pane(&self, path: &TabPath) {
         let controller = Arc::clone(&self.controller);
+        let (space_id, tab_key) = (path.space_id.clone(), path.tab_key.clone());
         spawn_local(async move {
-            controller.new_pane(floating).await;
+            controller.new_pane_in(space_id, tab_key, false).await;
         });
     }
 }
 
-/// The overflow menu's entries. A free fn: `show_glyph_menu` takes a
-/// `Fn() -> Vec<MenuEntry>` it may re-invoke per rebuild.
+/// Build the tree sheet's read side from the controller's own tracked
+/// signals — the [`TreeData`] borrow [`tree_body`] renders from — and hand it
+/// straight to `tree_body` alongside [`tree_actions`]'s wiring. A free fn
+/// (rather than an `Actions` method) since it needs to borrow four owned
+/// locals across the call, which a method returning `AnyView` can't do.
+fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
+    let controller = &actions.controller;
+    // This body is a page of the **root** overlay host, so it can outlive the
+    // screen that pushed it (a guard bounce off `/terminal` leaves the sheet
+    // up). One untracked liveness check ahead of the tracked reads below, which
+    // panic on a disposed owner; nothing follows it that could dispose one.
+    if !controller.signals_alive() {
+        return any(column(Vec::new()));
+    }
+    let spaces = controller.spaces.get();
+    let tabs = controller.tabs.get();
+    let browsed = controller.browsed_space_tabs.get();
+    let expanded_space = controller.expanded_space.get();
+    let expanded_tab = controller.expanded_tab.get();
+    let has_spaces = controller.has_spaces();
+    let data = TreeData {
+        spaces: &spaces,
+        tabs: &tabs,
+        browsed: browsed.as_ref(),
+        expanded_space: expanded_space.as_deref(),
+        expanded_tab: expanded_tab.as_deref(),
+        has_spaces,
+    };
+    // The side sheet hands its body slot a tight extent and clips whatever
+    // overflows it — the tree itself scrolls no more than `tree_body` on its
+    // own does, so a session with many spaces/tabs/panes stays fully
+    // reachable rather than running off the bottom of the panel.
+    any(scroll_view(tree_body(&data, &tree_actions(actions, sheet))))
+}
+
+/// Wire the tree's [`TreeActions`]/[`TreeMutations`] onto this screen's
+/// existing dialog-opener/commit/new-pane handlers — every gesture the tree
+/// can fire, bridged from its view-only callbacks to `&mut AppState`
+/// (this sheet is a page of the root overlay host, like every other overlay
+/// this screen pushes).
+fn tree_actions(actions: &Actions, sheet: &SheetHandle) -> TreeActions<AppState> {
+    let read_only = actions.connection.is_read_only.get();
+
+    let toggle_space_actions = actions.clone();
+    let toggle_tab_actions = actions.clone();
+    let commit_actions = actions.clone();
+    let commit_sheet = sheet.clone();
+
+    let mutations = (!read_only).then(|| {
+        let rename_space_actions = actions.clone();
+        let rename_tab_actions = actions.clone();
+        let rename_pane_actions = actions.clone();
+        let new_space_actions = actions.clone();
+        let new_tab_actions = actions.clone();
+        let new_pane_actions = actions.clone();
+        TreeMutations {
+            on_rename_space: Rc::new(move |_app: &mut AppState, id: &str, label: &str| {
+                rename_space_actions.open_rename_space_dialog(id, label);
+            }),
+            on_rename_tab: Rc::new(move |_app: &mut AppState, tab_id: u64, label: &str| {
+                rename_tab_actions.open_rename_tab_dialog(tab_id, label);
+            }),
+            on_rename_pane: Rc::new(
+                move |_app: &mut AppState, pane_id: u32, is_plugin: bool, title: &str| {
+                    rename_pane_actions.open_rename_pane_dialog(pane_id, is_plugin, title);
+                },
+            ),
+            on_new_space: Rc::new(move |_app: &mut AppState| {
+                new_space_actions.open_create_space_dialog();
+            }),
+            // Both create rows carry the level they were drawn under, and both
+            // move the session there before creating: a create always lands
+            // where the connection is, so targeting is a switch, not a flag.
+            on_new_tab: Rc::new(move |_app: &mut AppState, space: Option<&str>| {
+                new_tab_actions.open_new_tab_dialog_in(space);
+            }),
+            on_new_pane: Rc::new(move |_app: &mut AppState, path: &TabPath| {
+                new_pane_actions.new_tree_pane(path);
+            }),
+        }
+    });
+
+    TreeActions {
+        on_space: Rc::new(move |_app: &mut AppState, id: &str, expanded: bool| {
+            toggle_space_actions.toggle_tree_space(id, expanded);
+        }),
+        on_tab: Rc::new(move |_app: &mut AppState, key: &str, expanded: bool| {
+            toggle_tab_actions.toggle_tree_tab(key, expanded);
+        }),
+        on_pane: Rc::new(
+            move |_app: &mut AppState, path: &TabPath, pane_id: u32, is_plugin: bool| {
+                commit_actions.commit_tree_pane(&commit_sheet, path, pane_id, is_plugin);
+            },
+        ),
+        mutations,
+    }
+}
+
+/// The side sheet's sticky footer: the hold-to-edit discoverability tip (see
+/// [`FOOTER_TIP`]) first, then one icon-only row for the two session actions
+/// the overflow menu used to carry (rename/detach) — icons rather than two
+/// full-width labelled rows, so the footer's own share of the sheet stays
+/// small against the tree above it.
 ///
-/// **No icons**: no icon slot on `MenuEntry`, and a glyph as label text is
-/// the font-fallback trap `crate::ui::topbar`'s vector rule forbids.
-/// *Detach* isn't the danger variant — it leaves the session running. **No
-/// separators**: nothing to punctuate, and the 11px band read as uneven spacing.
-fn menu_entries() -> Vec<MenuEntry> {
-    vec![
-        menu_item(MENU_PANES),
-        menu_item(MENU_RENAME),
-        menu_item(MENU_DETACH),
-    ]
+/// Both presses are gated on [`TerminalController::signals_alive`], for the
+/// reason [`sheet_tree_body`] takes its own liveness check: this is a page of
+/// the **root** overlay host and outlives the screen that pushed it, so an
+/// orphaned footer's rename would seed itself off a disposed signal and its
+/// detach would pop a stack no longer carrying `/terminal`. Quiet no-ops
+/// instead — the tree above them has already emptied itself.
+fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
+    let theme = active_theme();
+    let colors = Palette::from_theme(&theme);
+
+    let mut tip_style = sized(&theme.type_scale.body_small, FOOTER_TIP_SIZE, colors.fg_dim);
+    tip_style.style = FontStyle::Italic;
+
+    let rename = {
+        let actions = actions.clone();
+        let sheet = sheet.clone();
+        footer_action(
+            icons::EDIT,
+            FOOTER_RENAME_LABEL,
+            &colors,
+            move |_app: &mut AppState| {
+                if !actions.controller.signals_alive() {
+                    return;
+                }
+                // Same reason `sessions::manage_sheet`'s own Rename/Kill rows
+                // chain through `close_then` rather than a bare `close`: this
+                // pushes a dialog onto the sheet's own overlay host, and an
+                // unchained push would land ahead of the sheet's staged exit.
+                let actions = actions.clone();
+                sheet.close_then(move || actions.open_rename_dialog());
+            },
+        )
+    };
+    let detach = {
+        let actions = actions.clone();
+        let sheet = sheet.clone();
+        footer_action(
+            icons::LOGOUT,
+            FOOTER_DETACH_LABEL,
+            &colors,
+            move |_app: &mut AppState| {
+                if !actions.controller.signals_alive() {
+                    return;
+                }
+                // Detach pops the **route** stack, a different navigator than
+                // this sheet's overlay host — a plain `close` (not `close_then`)
+                // carries no ordering hazard, the same shape Attach takes there.
+                sheet.close();
+                actions.detach();
+            },
+        )
+    };
+
+    any(column(vec![
+        any(text(FOOTER_TIP).style(tip_style)),
+        v_gap(spacing::SM),
+        any(row(vec![
+            inflexible(rename),
+            h_gap(spacing::MD),
+            inflexible(detach),
+        ])),
+    ]))
+}
+
+/// The footer icon buttons' mark size, in logical px — `connect`'s saved-server
+/// delete affordance's own size, the app's other bare-icon press target.
+const FOOTER_ICON_SIZE: f64 = 18.0;
+/// The footer icon buttons' square tap target — the platform-minimum touch
+/// size, same as that delete affordance's own box.
+const FOOTER_TARGET: f64 = 44.0;
+/// The footer's tip text size.
+const FOOTER_TIP_SIZE: f32 = 10.0;
+
+/// One footer action: `crate::ui::topbar::icon_button`, the app's one vector
+/// press-target primitive — dim at rest, washed by its own built-in pressed
+/// state, and labelled `label` for accessibility (never a font glyph —
+/// `crate::ui::topbar`'s chrome-icon rule).
+fn footer_action(
+    mark: impl Into<IconData>,
+    label: &'static str,
+    colors: &Palette,
+    on_press: impl Fn(&mut AppState) + 'static,
+) -> AnyView<AppState> {
+    any(icon_button(mark, label, on_press)
+        .ink(colors.fg_dim)
+        .icon_size(FOOTER_ICON_SIZE)
+        .box_size(Size::new(FOOTER_TARGET, FOOTER_TARGET))
+        .radius(FOOTER_TARGET / 2.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_menu_is_three_uniformly_spaced_rows_and_nothing_else() {
-        let entries = menu_entries();
-        assert_eq!(entries.len(), 3, "three rows, no `.dd-sep`s");
-        assert!(
-            entries
-                .iter()
-                .all(|entry| matches!(entry, MenuEntry::Item(_))),
-            "a separator would space the rows unevenly"
-        );
-        let labels: Vec<String> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                MenuEntry::Item(item) => Some(item.label.clone()),
-                MenuEntry::Separator => None,
-            })
-            .collect();
-        assert_eq!(labels, [MENU_PANES, MENU_RENAME, MENU_DETACH]);
-    }
-
-    #[test]
-    fn the_named_menu_indices_address_the_rows_they_claim_to() {
-        // An off-by-one into the entry list runs the wrong action silently.
-        let entries = menu_entries();
-        for (index, label) in [
-            (MENU_PANES_INDEX, MENU_PANES),
-            (MENU_RENAME_INDEX, MENU_RENAME),
-            (MENU_DETACH_INDEX, MENU_DETACH),
-        ] {
-            match &entries[index] {
-                MenuEntry::Item(item) => assert_eq!(item.label, label),
-                MenuEntry::Separator => panic!("{label} landed on a separator"),
-            }
-        }
-    }
 
     #[test]
     fn the_active_title_is_the_active_tabs_pane_title() {
