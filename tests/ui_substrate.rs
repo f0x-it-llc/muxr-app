@@ -1,5 +1,6 @@
 //! Headless coverage for the shared presentation substrate (`src/ui/dialogs.rs`, `src/ui/sheet.rs`,
-//! `src/ui/toasts.rs`) — no GPU, no window: a `RenderRoot` over a bare navigator.
+//! `src/ui/side_sheet.rs`, `src/ui/toasts.rs`) — no GPU, no window: a `RenderRoot` over a bare
+//! navigator.
 //!
 //! Every dialog/sheet here is a **pushed navigator page**, so each test follows the same three
 //! beats: push it, [`support::settle`] it past the navigator's input-blocking transition, then
@@ -18,7 +19,8 @@
 //! the app state, each taking nothing but the navigator to push its page onto.
 
 use frust::{
-    AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator, text,
+    AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator,
+    spawn_local, text,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
@@ -28,17 +30,19 @@ use peniko::Color;
 use muxr::failure::AppFailure;
 use muxr::ui::dialogs::{confirm_dialog, name_input_dialog};
 use muxr::ui::sheet::{SCRIM_ALPHA, SheetHandle, show_sheet};
+use muxr::ui::side_sheet::show_side_sheet;
 use muxr::ui::toasts::{app_toasts, toast_layer};
 use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
     EPSILON, RecScene, alpha_of, by_width, center, char_key, fills_at, frame, frame_at, largest,
-    ms, named_key, node_labels, pointer, serial, settle, setup, smallest, tap,
+    ms, named_key, node_labels, pointer, pump_frames, serial, settle, setup, smallest, tap,
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// The panel gutter both overlays use, transcribed: `frust_glyph::dialog`'s
 /// `DIALOG_PADDING` and `ui::sheet`'s `PANEL_PAD` are both 20px, so a
@@ -737,6 +741,188 @@ fn reduce_motion_collapses_the_sheet_to_the_frameworks_linear_staging() {
         (scrim_alpha(&collapsed) - SCRIM_ALPHA).abs() < 1e-6,
         "…and the scrim is fully dimmed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// side_sheet
+// ---------------------------------------------------------------------------
+
+/// Open a side sheet whose body is one filled (primary) button and whose footer is plain content,
+/// and return the settled frame.
+fn open_side_sheet(h: &mut Harness) -> RecScene {
+    show_side_sheet(
+        &h.controller,
+        "panes & tabs",
+        |_sheet| {
+            any(button("Split pane right", |state: &mut State| {
+                state.confirmed += 1
+            }))
+        },
+        |_sheet| any(text("hold a row to rename")),
+        || {},
+    );
+    h.settle()
+}
+
+/// Open a side sheet and hand back the [`SheetHandle`] its body builder was given, plus a counter
+/// bumped once per `on_dismiss` firing — [`show_side_sheet`]'s own extra seam over
+/// [`show_sheet`]'s.
+fn open_side_sheet_with_handle(h: &mut Harness) -> (SheetHandle, Rc<Cell<usize>>) {
+    let captured: Rc<RefCell<Option<SheetHandle>>> = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&captured);
+    let dismissed = Rc::new(Cell::new(0usize));
+    let counted = Rc::clone(&dismissed);
+    show_side_sheet(
+        &h.controller,
+        "panes & tabs",
+        move |sheet| {
+            *sink.borrow_mut() = Some(sheet.clone());
+            any(text("panes & tabs"))
+        },
+        |_sheet| any(text("hold a row to rename")),
+        move || counted.set(counted.get() + 1),
+    );
+    h.settle();
+    let handle = captured
+        .borrow()
+        .clone()
+        .expect("the body builder ran, so it was handed a handle");
+    (handle, dismissed)
+}
+
+#[test]
+fn side_sheet_opens_renders_its_body_and_dismisses_on_a_scrim_tap() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let scene = open_side_sheet(&mut h);
+    assert_eq!(h.depth(), 2, "the side sheet is pushed as its own page");
+
+    // The body's own button — the biggest rounded fill on screen (the header's
+    // own close chip is a small fixed circle).
+    let body = largest(&scene.rounded).expect("the body's button painted a filled box");
+    h.tap(center(body));
+    h.flush();
+    assert_eq!(h.state.confirmed, 1, "the body is live");
+    assert_eq!(h.depth(), 2, "pressing the body doesn't close the sheet");
+
+    // The panel is pinned to the trailing edge, so the leading corner is
+    // always clear of it — the same scrim point the bottom sheet uses.
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 1, "a scrim tap dismisses the side sheet too");
+}
+
+#[test]
+fn a_dismissal_fires_on_dismiss_exactly_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let (_sheet, dismissed) = open_side_sheet_with_handle(&mut h);
+    assert_eq!(dismissed.get(), 0, "nothing has dismissed it yet");
+
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 1, "the scrim closed it");
+    assert_eq!(dismissed.get(), 1, "on_dismiss ran exactly once");
+
+    // Settling further frames must not re-fire it.
+    h.settle();
+    assert_eq!(dismissed.get(), 1);
+}
+
+#[test]
+fn a_duplicate_close_pops_the_side_sheet_once_and_leaves_the_page_under_it_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    // A page under the side sheet to be wrongly popped.
+    h.controller.push(|| any(text("under the side sheet")));
+    h.settle();
+    assert_eq!(h.depth(), 2);
+
+    let (sheet, dismissed) = open_side_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), 3, "the side sheet is pushed over it");
+
+    // The defect this gate exists for: a pop lands a rebuild after it's enqueued, so a second
+    // closer can still fire for one whole frame.
+    assert!(sheet.close(), "the first close is the one that closes it");
+    assert!(!sheet.close(), "…and the second is a no-op");
+    h.flush();
+
+    assert_eq!(
+        h.depth(),
+        2,
+        "exactly one page popped — the side sheet's own"
+    );
+    assert_eq!(dismissed.get(), 1, "on_dismiss still ran exactly once");
+}
+
+#[test]
+fn a_close_after_the_side_sheet_is_already_gone_pops_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    h.controller.push(|| any(text("under the side sheet")));
+    h.settle();
+    let (sheet, dismissed) = open_side_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), 3);
+
+    // The side sheet leaves by its own staged exit (a scrim tap), which the app's handle never
+    // sees — the completion latch stops a close still in flight from landing on the page
+    // underneath.
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 2, "the scrim tap took the side sheet");
+    assert_eq!(dismissed.get(), 1);
+
+    assert!(!sheet.close(), "the handle was latched when the page went");
+    h.flush();
+    assert_eq!(h.depth(), 2, "…so nothing else popped");
+    assert_eq!(
+        dismissed.get(),
+        1,
+        "…and on_dismiss never fires a second time"
+    );
+}
+
+#[test]
+fn a_later_close_after_call_re_times_the_pending_close_rather_than_stacking_a_second() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    let (sheet, dismissed) = open_side_sheet_with_handle(&mut h);
+    assert_eq!(h.depth(), 2);
+
+    // Two close_after calls close together: the first arms a longer delay, the
+    // second — a fresh row tap inside the same close beat — re-times it to
+    // its own, shorter one. Only the second may land.
+    let first = sheet.clone();
+    spawn_local(async move {
+        first.close_after(Duration::from_millis(400)).await;
+    });
+    let second = sheet.clone();
+    spawn_local(async move {
+        second.close_after(Duration::from_millis(20)).await;
+    });
+
+    // Ride out the real async timer behind `close_after` first — a plain pump loop at the zero
+    // paint clock, so nothing here nudges the sheet's own staged-exit animation early (mirrors
+    // `tests/terminal.rs`'s `Harness::pump_for`).
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    // …then let the staged exit itself play out and land the pop.
+    h.flush();
+
+    assert_eq!(dismissed.get(), 1, "exactly one close landed");
+    assert_eq!(h.depth(), 1, "…and it popped the side sheet");
 }
 
 // ---------------------------------------------------------------------------

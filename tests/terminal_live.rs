@@ -60,8 +60,8 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, added, center, char_key, largest, ms, node_labels, pointer, pump_frames,
-    rounded_in, serial, setup, tap,
+    EPSILON, RecScene, center, char_key, ms, node_labels, pointer, pump_frames, rounded_in, serial,
+    setup, tap,
 };
 
 /// Same oversized surface `tests/terminal.rs` lays out at — the sheet/menu
@@ -75,12 +75,7 @@ const SESSION_ID: &str = "s-1";
 /// moves first.
 const CLOSE_DELAY: Duration = Duration::from_millis(260);
 
-/// The overflow menu's first row, transcribed from `presentation::pages` (private
-/// there; a test that imported it could not catch it changing). The menu carries
-/// no separators, so a row's index is its position.
-const ROW_PANES: usize = 0;
-/// …and the sheet that row opens, by the label it prints — how section 10
-/// proves its pointer tap landed on the row it aimed at.
+/// The side sheet's header label — how section 10 proves the open landed.
 const SHEET_LABEL: &str = "panes & tabs";
 
 const EXPAND: &str = "Fullscreen";
@@ -384,29 +379,6 @@ fn card(scene: &RecScene) -> (Point, Size, f64) {
     let mut cards = rounded_in(scene, ink.terminal_bg);
     cards.sort_by(|a, b| (b.1.width * b.1.height).total_cmp(&(a.1.width * a.1.height)));
     cards.first().copied().expect("the card paints itself")
-}
-
-/// The overflow menu's **panel**, diffed out of the screen painting underneath it:
-/// an open `frust_glyph` menu adds exactly one rounded fill to the frame (its drop
-/// shadow is a blurred path and its border a stroke).
-fn menu_panel(before: &RecScene, after: &RecScene) -> (Point, Size) {
-    let new = added(&before.rounded, &after.rounded);
-    assert_eq!(new.len(), 1, "an open menu adds exactly its panel: {new:?}");
-    largest(&new).expect("the menu panel painted itself")
-}
-
-/// `frust_glyph::menu`'s row metrics (transcribed, private to that crate). Rows start
-/// [`MENU_PANEL_PAD`] below the panel's top edge and run one [`MENU_ITEM_ROW_H`] apiece, with
-/// no separator between any of them.
-const MENU_PANEL_PAD: f64 = 6.0;
-const MENU_ITEM_ROW_H: f64 = 34.0;
-
-/// Where a tap must land to hit menu row `index` — the *pointer* route through the
-/// menu, which is the only route this suite takes now that entering the live pane
-/// no longer goes through a row at all.
-fn menu_row_center((origin, size): (Point, Size), index: usize) -> Point {
-    let row_top = origin.y + MENU_PANEL_PAD + MENU_ITEM_ROW_H * index as f64;
-    Point::new(origin.x + size.width / 2.0, row_top + MENU_ITEM_ROW_H / 2.0)
 }
 
 /// The text a `vt100::Screen` cell holds, or an empty string for a blank one.
@@ -1353,88 +1325,51 @@ fn herdr_keeps_tap_to_keyboard_while_its_scroll_raises_nothing() {
     assert!(h.root.ime_state().expect("a surface is published").active);
 }
 
-/// A real **pointer** tap on a menu row (the device sequence, not the result-pop shortcut
-/// `tests/terminal.rs` drives rows' actions with) leaves no focus/IME session behind once the
-/// menu is gone, and leaves the live pane under it inert.
-///
-/// App-side end of a framework-side gap: `frust_glyph::menu` claims root focus on **any** pointer
-/// `Down` (so a subsequent Escape has a chain to travel), seeding `focus_active = true` with no
-/// IME surface behind it for as long as the menu's exit/pop take, with no opt-out seam. What this
-/// app *can* pin is the outcome: the transient claim is released by the pop, no IME surface is
-/// ever published, and the live pane stays inert until tapped. Row tapped: the first one, the
-/// menu's only remaining row whose action neither leaves the route nor opens a field.
-#[test]
-fn a_real_menu_row_tap_leaves_no_focus_session_behind() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::mount();
-    h.enter_demo();
-    let before = h.settle();
+// The "panes & tabs" side sheet over a live pane. The sheet's own tree-browse-then-commit
+// behaviour is pinned in `tests/terminal.rs`; what only *this* suite can say is what happens to
+// the **live pane** underneath it: a commit must move the session without tearing the grid, its
+// seams, or its feed down, and the tree's nested tab rect must follow the attached session's
+// backend (herdr only).
 
-    let after = h.open_menu();
-    let panel = menu_panel(&before, &after);
-    h.tap(menu_row_center(panel, ROW_PANES));
-    // Past the menu's own exit staging and the overlay pop that follows it.
-    h.flush();
-    h.frame();
+/// `side_sheet_tree`'s own mid-level tab radius (private there, transcribed the
+/// same way `tests/terminal.rs` does) — herdr's nested tab **rect**, never
+/// worn by a promoted zellij tab.
+const TREE_TAB_RADIUS: f64 = 7.0;
 
-    assert!(
-        support::node_values(&h.root)
-            .iter()
-            .any(|v| v == SHEET_LABEL),
-        "the tap landed on the row it aimed at: {:?}",
-        support::node_values(&h.root)
-    );
-    assert!(
-        debug_live_probe().is_some(),
-        "the live pane is still mounted"
-    );
-    assert_eq!(
-        h.session(),
-        (false, false),
-        "the menu's transient focus claim went away with the menu"
-    );
-}
-
-// The "panes & tabs" sheet over a live pane. The sheet's own browse-then-commit behaviour is
-// pinned in `tests/terminal.rs`; what only *this* suite can say is what happens to the **live
-// pane** underneath it: a commit must move the session without tearing the grid, its seams, or
-// its feed down, and the spaces section must follow the attached session's backend.
-
-/// The sheet's pane rows, top to bottom — the `--bg-base` tiles (`surface_container_low`), which
-/// nothing else on this screen paints.
-fn pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
-    let base = frust_glyph::baseline().scheme().surface_container_low;
-    let mut rows: Vec<(Point, Size)> = scene
+/// The tree's pane rows in `scene`, top to bottom — every
+/// [`muxr::ui::paint::RADIUS_FULL`] rect wide enough to be a row rather than
+/// the pill-shaped mark box or focused dot each row also carries at the same
+/// radius (`tests/terminal.rs`'s identical `tree_pane_rows` idiom).
+fn tree_pane_rows(scene: &RecScene) -> Vec<(Point, Size)> {
+    let mut candidates: Vec<(Point, Size)> = scene
         .rounded_fills
         .iter()
-        .filter(|(_, _, _, painted)| *painted == base)
+        .filter(|(_, _, r, color)| {
+            (*r - muxr::ui::paint::RADIUS_FULL).abs() < EPSILON
+                && *color != peniko::Color::TRANSPARENT
+        })
         .map(|(origin, size, _, _)| (*origin, *size))
         .collect();
-    rows.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
-    rows
+    let widest = candidates
+        .iter()
+        .map(|(_, size)| size.width)
+        .fold(0.0_f64, f64::max);
+    candidates.retain(|(_, size)| size.width > widest * 0.5);
+    candidates.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
+    candidates
 }
 
-/// Open the sheet the way a device does — the menu's first row, by pointer. Waits
-/// for the first workspace load first: this suite's own [`Harness::await_load`]
-/// only pumps long enough for the live pane's needs, and a sheet opened before the
-/// tab world lands has nothing to list.
+/// Open the sheet through the real app-bar entry point — the menu button now
+/// opens it directly. Waits for the first workspace load first: this suite's
+/// own [`Harness::await_load`] only pumps long enough for the live pane's
+/// needs, and a sheet opened before the tab world lands has nothing to list.
 fn open_sheet(h: &mut Harness) {
     h.pump_until("the workspace to load", |_| {
         debug_controller().is_some_and(|c| c.loaded.get_untracked())
     });
-    let before = h.settle();
-    let after = h.open_menu();
-    let panel = menu_panel(&before, &after);
-    h.tap(menu_row_center(panel, ROW_PANES));
-    h.flush();
-    h.frame();
+    h.settle();
+    h.open_menu();
 }
-
-/// The sheet's section labels, transcribed from `presentation::pages` (private
-/// there, like every other constant this suite names).
-const SECTION_SPACES: &str = "spaces";
-const SECTION_TABS: &str = "tabs";
 
 #[test]
 fn a_pane_commit_moves_the_session_without_disturbing_the_live_pane() {
@@ -1446,8 +1381,8 @@ fn a_pane_commit_moves_the_session_without_disturbing_the_live_pane() {
     let feed = demo_feed();
 
     open_sheet(&mut h);
-    let rows = pane_rows(&h.frame());
-    assert_eq!(rows.len(), 2, "the browsed tab's panes: {rows:?}");
+    let rows = tree_pane_rows(&h.frame());
+    assert_eq!(rows.len(), 2, "devbox's own panes, pre-expanded: {rows:?}");
     // The second pane of the tab the session is already on — a `FocusPane`
     // with no tab move behind it.
     h.tap(center(rows[1]));
@@ -1474,29 +1409,34 @@ fn a_pane_commit_moves_the_session_without_disturbing_the_live_pane() {
 }
 
 #[test]
-fn the_spaces_section_follows_the_attached_sessions_own_backend() {
+fn the_trees_nested_tab_rect_follows_the_attached_sessions_own_backend() {
     let _g = serial();
     let _ambient = setup();
 
     let mut zellij = Harness::mount();
     open_sheet(&mut zellij);
-    let values = support::node_values(&zellij.root);
+    let scene = zellij.frame();
     assert!(
-        values.iter().any(|v| v == SECTION_TABS),
-        "the sheet is up: {values:?}"
-    );
-    assert!(
-        !values.iter().any(|v| v == SECTION_SPACES),
-        "zellij has no spaces, so the section is absent entirely: {values:?}"
+        scene
+            .rounded_fills
+            .iter()
+            .filter(|(_, _, r, _)| (*r - TREE_TAB_RADIUS).abs() < EPSILON)
+            .count()
+            == 0,
+        "zellij has no spaces, so its tabs are promoted to the card shape \
+         instead of the nested tab rect"
     );
     drop(zellij);
 
     let mut herdr = Harness::mount_session("herdr:work");
     open_sheet(&mut herdr);
-    let values = support::node_values(&herdr.root);
+    let scene = herdr.frame();
     assert!(
-        values.iter().any(|v| v == SECTION_SPACES),
-        "herdr does, so the section is there: {values:?}"
+        scene
+            .rounded_fills
+            .iter()
+            .any(|(_, _, r, _)| (*r - TREE_TAB_RADIUS).abs() < EPSILON),
+        "herdr has spaces, so its tabs wear the nested tab rect"
     );
 }
 
@@ -1604,7 +1544,10 @@ fn invoking_the_wired_hooks_never_panics_on_a_hit_a_miss_or_either_wheel_route()
 /// The tab a test opens "from elsewhere", and the pill the sheet draws for it —
 /// `TabEntry::pill_label`'s `<index> <label>`, appended past the mock's four seeded tabs.
 const SCRATCH_TAB: &str = "scratch";
-const SCRATCH_PILL: &str = "5 scratch";
+/// The tree's own tab-row label for it — just [`SCRATCH_TAB`] itself
+/// (`side_sheet_tree`'s disclosure row prints `TabEntry::label` directly, not
+/// the flat sheet's index-prefixed `pill_label`).
+const SCRATCH_PILL: &str = SCRATCH_TAB;
 
 /// Drive one controller call to completion — the same local-runtime shape section 4
 /// uses, and for the same reason (this suite cannot fake the background runtime's

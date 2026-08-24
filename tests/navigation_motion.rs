@@ -859,21 +859,12 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     );
 }
 
-/// The terminal route's overflow affordance, by its accessible name —
+/// The terminal route's menu affordance, by its accessible name —
 /// transcribed from `crate::shell`, like [`BACK`]/[`GEAR`] above.
 const TERMINAL_MENU: &str = "Terminal menu";
-/// `frust_glyph::menu`'s own panel gutter and item-row height, transcribed
-/// (private to that module). Needed because this suite presses a menu row for
-/// real rather than popping it via `PopResult::of(index)` (`tests/terminal.rs`'
-/// way): the menu pops **itself from inside its paint**, and that self-pop is
-/// the unobserved depth fall this suite is testing. A row is reachable by
-/// neither semantics nor a rect of its own, leaving only its geometry: the
-/// first item is one [`MENU_PANEL_PAD`] into the panel, [`MENU_ROW_H`] tall.
-const MENU_PANEL_PAD: f64 = 6.0;
-const MENU_ROW_H: f64 = 34.0;
 
 #[test]
-fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
+fn the_terminal_menu_button_opens_its_side_sheet_directly_and_gives_the_bar_back_after_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::on_sessions();
@@ -881,61 +872,36 @@ fn the_terminal_menu_chains_into_its_sheet_and_gives_the_bar_back_after_it() {
 
     h.push("/terminal?session=s-1");
     let covered_depth = h.depth();
-    let before = h.park();
+    h.park();
     assert_titled(&h, "terminal");
 
-    // The real ⋮, opening the real `frust_glyph` menu — the one overlay whose
-    // dismissal the app never observes (it pops itself from inside its paint).
+    // The real menu button, opening the "panes & tabs" side sheet directly —
+    // no intervening dropdown.
     h.tap_label(TERMINAL_MENU);
-    let open = h.park();
+    h.park();
     assert_eq!(
         h.overlay_depth(),
         REST_DEPTH + 1,
-        "the menu is its own page on the host — above the bar it anchors to, \
-         rather than clipped under it"
+        "the side sheet is its own page on the host — above the bar it \
+         anchors to, rather than clipped under it"
     );
     assert_eq!(h.depth(), covered_depth, "…over an untouched route stack");
     assert!(
         !h.has_bar(),
-        "…and it takes the bar it is anchored to out of the tree with it — a \
-         menu paints no scrim, so inertness is the whole of its modality: {:?}",
+        "…and it takes the bar it anchors to out of the tree with it: {:?}",
         node_roles(&h.root)
     );
 
-    // "Panes & tabs" — the menu's first row, and the one that chains straight
-    // into another overlay.
-    let panel =
-        largest(&added(&before.rounded, &open.rounded)).expect("the menu paints its own panel");
-    let first_row = Point::new(
-        panel.0.x + panel.1.width / 2.0,
-        panel.0.y + MENU_PANEL_PAD + MENU_ROW_H / 2.0,
-    );
-    h.tap_parked(first_row);
-
-    // No hand-off pass, no gap: the rebuild that pops the menu also flushes
-    // its completion callback, so the `open_sheet` it carries runs on the
-    // pop's own frame — the sheet is already standing where the menu was.
-    assert_eq!(
-        h.overlay_depth(),
-        REST_DEPTH + 1,
-        "the sheet took the menu's place on the pop's own frame"
-    );
-    assert!(
-        !h.has_bar(),
-        "…and the bar is modal again under it: {:?}",
-        node_roles(&h.root)
-    );
-
-    // THE assertion: an overlay opened *out of another overlay* still has to
-    // give the bar back on the frames production actually runs, with no
-    // unrelated input to save it — the host owes no bookkeeping across the
-    // hand-off; it pops, and the app under it is live again.
+    // THE assertion: the overlay gives the bar back on the frames production
+    // actually runs, with no unrelated input to save it — the host owes no
+    // bookkeeping across the dismissal; it pops, and the app under it is live
+    // again.
     h.tap_parked(SHEET_SCRIM_POINT);
 
     assert_eq!(
         h.overlay_depth(),
         REST_DEPTH,
-        "the scrim tap popped the sheet"
+        "the scrim tap popped the side sheet"
     );
     assert_eq!(h.depth(), covered_depth, "…and the route stayed put");
     assert!(

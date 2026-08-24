@@ -2,11 +2,12 @@
 //! implements, framework-free like the rest of `domain`.
 //!
 //! [`TerminalRepository`] covers: read the attached session's spaces/tabs, read one tab's
-//! lines, switch space/tab, detach, plus the "panes & tabs" sheet's own mutations. Writing a
-//! session's *name* is deliberately not here — that belongs to `sessions`' repository, and this
-//! screen's rename delegates to it. Every method fails with [`AppFailure`] and is async
-//! regardless of whether an implementation ever awaits, so the real `muxrd` client drops in
-//! behind it additively.
+//! lines (or another space's, read-only, via [`list_tabs_in_space`](TerminalRepository::list_tabs_in_space)),
+//! switch space/tab, detach, plus the "panes & tabs" sheet's own mutations. Writing a session's
+//! *name* is deliberately not here — that belongs to `sessions`' repository, and this screen's
+//! rename delegates to it. Every method fails with [`AppFailure`] and is async regardless of
+//! whether an implementation ever awaits, so the real `muxrd` client drops in behind it
+//! additively.
 //!
 //! **Which session, which connection.** The read/detach methods take no session id (their
 //! signatures are load-bearing for `super::use_cases`) — [`TerminalRepository::bind`] is how a
@@ -47,6 +48,14 @@ pub trait TerminalRepository {
     /// Every tab in the attached session, in display order, with the active
     /// one flagged.
     async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure>;
+
+    /// The tabs of the space `space_id` names — a **read-only peek** that never moves
+    /// selection, unlike [`switch_space`](Self::switch_space). An old daemon predating the
+    /// wire's `space_id` field silently answers the focused space instead, undetectably.
+    /// Default: a bare [`list_tabs`](Self::list_tabs) call.
+    async fn list_tabs_in_space(&self, _space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        self.list_tabs().await
+    }
 
     /// The scrollback the tab keyed `key` currently shows.
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure>;
@@ -210,5 +219,11 @@ mod tests {
             block_on(repo.scroll_pane(1, false, ScrollStep::Up)),
             Err(AppFailure::Internal(_))
         ));
+    }
+
+    #[test]
+    fn list_tabs_in_space_defaults_to_a_bare_list_tabs_call() {
+        let repo = BareRepository;
+        assert_eq!(block_on(repo.list_tabs_in_space("s2")), Ok(Vec::new()));
     }
 }

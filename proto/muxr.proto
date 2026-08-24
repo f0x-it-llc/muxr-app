@@ -1,25 +1,17 @@
-// VENDORED COPY — the body below this block is byte-for-byte upstream, save for
-// the one sanctioned exception recorded at the end of this block.
+// VENDORED COPY — the body below this block is byte-for-byte upstream.
 //
 // Source: `muxrd/proto/muxr.proto` in the `f0x-it-llc/muxr-core` repo, rev
-// `ec6b032`. `build.rs` compiles this file (protox -> tonic-prost-build) into
-// the `muxr.v1` module `src/net/proto.rs` includes; it is the single
-// definition of the wire this app speaks, so nothing else in the tree may
-// restate a field number, an enum value or an RPC name.
+// `41c39e1` (branch `feat/space-scoped-layout`, PR #25). `build.rs` compiles
+// this file (protox -> tonic-prost-build) into the `muxr.v1` module
+// `src/net/proto.rs` includes; it is the single definition of the wire this
+// app speaks, so nothing else in the tree may restate a field number, an enum
+// value or an RPC name.
 //
 // Refresh recipe: re-copy the whole file from the newer muxr-core rev, keep
 // this block, and update the rev recorded above — never hand-patch a message
 // in place. A hand-patch makes this copy silently disagree with the server;
 // a wholesale re-copy makes any wire drift surface at build time instead, as a
 // codegen error or a type error at the call sites that consumed the old shape.
-//
-// ONE SANCTIONED EXCEPTION, to be reconciled by the next wholesale re-copy:
-// `AttachReq`'s three `resume_*` fields (4/5/6) are AHEAD of the rev above,
-// transcribed verbatim from muxr-core's unmerged `fix/herdr-resumable-attach`
-// (commit `cf2154e`) so this client can be built and reviewed against the
-// server change before it ships. They are purely additive — a server without
-// them ignores unknown fields, which is exactly the pre-change behavior — and
-// their numbers/types must stay identical to that branch's.
 
 syntax = "proto3";
 
@@ -129,6 +121,21 @@ service Muxr {
   rpc ListTokens(Empty) returns (TokenList);
   // Revoke an auth token by name.
   rpc RevokeToken(RevokeTokenReq) returns (ActionAck);
+
+  // ─── Push-notification device registry ────────────────────────────────────
+  // All require bearer auth and are ADMIN-gated: read-only session tokens are
+  // rejected with permission_denied (device names + handle prefixes are
+  // sensitive fleet metadata; registration/removal are mutating). Handles are
+  // opaque relay-issued capabilities — RegisterPushTargetReq.push_handle is
+  // never echoed back in full by any RPC.
+
+  // Register (or refresh) a device's push handle. Fails failed_precondition
+  // when the server has no push-notification relay configured.
+  rpc RegisterPushTarget(RegisterPushTargetReq) returns (ActionAck);
+  // List registered devices (metadata + handle prefix only — never the full handle).
+  rpc ListPushTargets(ListPushTargetsReq) returns (ListPushTargetsResp);
+  // Remove a registered device by name.
+  rpc RemovePushTarget(RemovePushTargetReq) returns (ActionAck);
 }
 
 message Empty {}
@@ -157,8 +164,14 @@ message VersionInfo {
   repeated Backend        available_backends = 4;
   // Additive server capability flags. Known values:
   //   "mouse-input" — ClientFrame.mouse is understood on AttachTerminal.
+  //   "push-notifications" — the server has a notify relay configured
+  //     (see notification_relay_url); present only when a relay is set.
   // Clients must ignore unknown values.
   repeated string capabilities = 5;
+  // The push-notification relay URL clients should register devices with.
+  // Empty (proto3 default) means the server has no relay configured — the
+  // client must treat push notifications as unsupported.
+  string notification_relay_url = 6;
 }
 
 message LoginRequest {
@@ -207,6 +220,45 @@ message CreateTokenReq {
 message RevokeTokenReq {
   // Name of the token to revoke.
   string name = 1;
+}
+
+// ─── Push-notification device registry messages ──────────────────────────────
+
+// RegisterPushTarget request.
+message RegisterPushTargetReq {
+  // Opaque handle minted by the notification relay for this device. Lowercase
+  // hex, 32-128 chars. Never logged or echoed back in full by any RPC.
+  string push_handle = 1;
+  // Client-chosen display name for the device. 1-64 chars, [A-Za-z0-9 _.-].
+  // Unique — re-registering the same name replaces the existing entry (the
+  // token-refresh / re-register path).
+  string device_name = 2;
+  // Client-reported platform (e.g. "android", "ios").
+  string platform = 3;
+}
+
+// ListPushTargets request (no fields — lists all devices for this server).
+message ListPushTargetsReq {}
+
+// Metadata for one registered device (never the full push_handle).
+message PushTargetInfo {
+  string device_name   = 1;
+  string platform      = 2;
+  uint64 registered_at = 3;
+  // First 8 hex characters of the device's push_handle — enough to
+  // disambiguate devices in a UI, never enough to reconstruct the handle.
+  string handle_prefix = 4;
+}
+
+// List of devices returned by ListPushTargets.
+message ListPushTargetsResp {
+  repeated PushTargetInfo targets = 1;
+}
+
+// RemovePushTarget request.
+message RemovePushTargetReq {
+  // device_name of the device to remove.
+  string device_name = 1;
 }
 
 // Client → Server frame on the AttachTerminal stream.
@@ -310,6 +362,14 @@ message SessionRef {
   string session = 1;
   // optional; echoed from AttachTerminal's minted id to route per-connection (empty = legacy/fallback routing)
   string connection_id = 2;
+  // optional; opaque herdr space id scoping a GetLayout READ to that space.
+  // herdr only: a non-empty value on a backend without spaces (zellij) is
+  // rejected with invalid_argument. empty ("") = today's behavior (the
+  // relay-focused space, or the backend's active-or-first workspace).
+  // Read-only peek: naming a space here returns THAT space's tabs/panes and
+  // never moves this connection's — or the daemon's — focus. Ignored by the
+  // other SessionRef RPCs (GetSpaces / KillSession / …).
+  string space_id = 3;
 }
 
 // List of sessions returned by ListSessions.

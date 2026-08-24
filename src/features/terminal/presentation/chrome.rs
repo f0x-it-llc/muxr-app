@@ -1,8 +1,7 @@
 //! The Terminal screen's remaining hand-rolled primitives: [`status_strip`]
 //! (the link notice), [`expand_button`] (`.expand-btn`), [`terminal_stage`]
-//! (`.term-wrap` + `.term-card`, animated), [`term_body`] (`.term-body`, its own
-//! text pipeline) and [`wrap_row`] (a wrapping row, since `frust::Flex` has
-//! none).
+//! (`.term-wrap` + `.term-card`, animated), and [`term_body`] (`.term-body`,
+//! its own text pipeline).
 //!
 //! **Dissolved into the framework since this module first shipped**: the
 //! `.pill`/`.pane-item`/`.term-statusrow` box (now every caller's own
@@ -28,7 +27,6 @@
 //! is in scope when a transition starts (the deferred-driver idiom
 //! `crate::ui::topbar` documents).
 
-use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -38,8 +36,7 @@ use frust::authoring::{
     Action, Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod,
     Color, ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene,
     Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget,
-    any, build_child, erase_callback, rebuild_child, route_event, route_event_single,
-    teardown_child,
+    any, build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
     AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
@@ -49,7 +46,7 @@ use frust::{
 use crate::features::terminal::domain::entities::{TermLine, TermLineKind};
 use crate::ui::topbar::BAR_HEIGHT;
 
-pub(super) use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
+use crate::ui::paint::{HAIRLINE, RADIUS_FULL};
 
 // Shared paint helpers.
 
@@ -128,125 +125,6 @@ pub(super) fn status_strip<State: 'static>(
         FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
     ))
     .fill(fill))
-}
-
-/// A row of children that wraps onto further lines when it runs out of width, with
-/// `gap` between neighbours on both axes. Hand-rolled because **frust's `Flex` has
-/// no wrap**: the sheet's five tab pills come to roughly 390 logical px, wider
-/// than the panel on every phone this app targets.
-pub(super) struct WrapRowView<State: 'static> {
-    children: Vec<AnyView<State>>,
-    gap: f64,
-}
-
-/// `children` laid out left to right, wrapping at the available width.
-pub(super) fn wrap_row<State: 'static>(children: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
-    any(WrapRowView { children, gap })
-}
-
-/// The retained half of a [`wrap_row`].
-pub(super) struct WrapRowWidget {
-    children: Vec<ChildPod>,
-    gap: f64,
-}
-
-impl<State: 'static> View<State> for WrapRowView<State> {
-    type Element = WrapRowWidget;
-
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> WrapRowWidget {
-        WrapRowWidget {
-            children: self
-                .children
-                .iter()
-                .map(|child| build_child(child, ctx))
-                .collect(),
-            gap: self.gap,
-        }
-    }
-
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut WrapRowWidget,
-        ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        let mut flags = ChangeFlags::NONE;
-        if prev.children.len() != self.children.len() {
-            // A changed child *count* cannot be reconciled positionally (the
-            // erased types no longer line up), so the row is rebuilt whole.
-            for (view, pod) in prev.children.iter().zip(element.children.iter_mut()) {
-                teardown_child(view, pod, ctx);
-            }
-            element.children = self
-                .children
-                .iter()
-                .map(|child| build_child(child, ctx))
-                .collect();
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        } else {
-            for ((prev_child, child), pod) in prev
-                .children
-                .iter()
-                .zip(self.children.iter())
-                .zip(element.children.iter_mut())
-            {
-                flags |= rebuild_child(prev_child, child, pod, ctx);
-            }
-        }
-        if prev.gap != self.gap {
-            element.gap = self.gap;
-            flags |= ChangeFlags::LAYOUT;
-        }
-        flags
-    }
-
-    fn teardown(&self, element: &mut WrapRowWidget, ctx: &mut BuildCtx<'_>) {
-        for (view, pod) in self.children.iter().zip(element.children.iter_mut()) {
-            teardown_child(view, pod, ctx);
-        }
-    }
-}
-
-impl Widget for WrapRowWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let max_width = finite_or_zero(bc.max().width);
-        // The **height** is passed through unclamped, infinity included: a vertical
-        // `Flex` hands its children an unbounded main axis, and coercing that to
-        // zero (as the width has to be, to wrap against it) would flatten them.
-        let child_bc = BoxConstraints::loose(Size::new(max_width, bc.max().height));
-        let (mut x, mut y) = (0.0f64, 0.0f64);
-        let mut line_height = 0.0f64;
-        let mut widest = 0.0f64;
-        for child in &mut self.children {
-            let size = child.layout_child(ctx, &child_bc);
-            if x > 0.0 && x + size.width > max_width {
-                x = 0.0;
-                y += line_height + self.gap;
-                line_height = 0.0;
-            }
-            child.set_origin(Point::new(x, y));
-            x += size.width + self.gap;
-            widest = widest.max(x - self.gap);
-            line_height = line_height.max(size.height);
-        }
-        bc.constrain(Size::new(widest.min(max_width), y + line_height))
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        for child in &mut self.children {
-            child.paint_child(ctx, scene);
-        }
-    }
-
-    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        route_event(&mut self.children, ctx, event)
-    }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        for child in &self.children {
-            child.semantics_child(ctx);
-        }
-    }
 }
 
 /// A minimal retained text run — `frust-widgets`' own per-module `GlyphLabel`
@@ -532,15 +410,6 @@ const SHADOW_DY: f64 = 20.0;
 const SHADOW_STD_DEV: f64 = 25.0;
 const SHADOW_ALPHA: f32 = 0.4;
 
-/// `.appbar{padding:0 6px}`/`.ab-icon{width:40px;height:40px}`, transcribed
-/// from `frust_glyph::appbar` (whose own copies are private) so this screen
-/// can hand `frust_glyph::show_glyph_menu` the window-coordinate rect of the
-/// bar slot its `⋮` lives in. [`BAR_HEIGHT`] itself *is* `pub` and is
-/// imported — one shared source for the bar's own content height, the one
-/// dimension `crate::ui::topbar` already needs to transcribe too.
-const BAR_PAD_X: f64 = 6.0;
-const BAR_SLOT: f64 = 40.0;
-
 /// How far below the window's own top edge this widget's box begins: the app
 /// bar's whole band while the shell has one mounted, nothing once it hasn't.
 ///
@@ -676,18 +545,12 @@ impl FullscreenStage {
 /// [`WRAP_PAD`] — is an input rather than an outer `Padding` for that same
 /// reason: a wrapper could only *flip* between its windowed and fullscreen
 /// values, and a flip mid-transition is a jump.
-///
-/// It also records the app bar's trailing-slot rect into
-/// [`anchor`](TerminalStageView::anchor): the overflow menu anchors to a slot
-/// inside a sibling widget this page cannot query, so the one widget that knows
-/// both the window box and the top inset computes it.
 pub(super) struct TerminalStageView<State: 'static> {
     child: AnyView<State>,
     fullscreen: bool,
     gutters: EdgeInsets,
     card: Color,
     border: Color,
-    anchor: Rc<Cell<Rect>>,
 }
 
 /// The `.term-wrap`/`.term-card` stage around `child`.
@@ -697,7 +560,6 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
     gutters: EdgeInsets,
     card: Color,
     border: Color,
-    anchor: Rc<Cell<Rect>>,
 ) -> TerminalStageView<State> {
     TerminalStageView {
         child: any(child),
@@ -705,7 +567,6 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
         gutters,
         card,
         border,
-        anchor,
     }
 }
 
@@ -716,7 +577,6 @@ pub(super) struct TerminalStageWidget {
     gutters: EdgeInsets,
     card: Color,
     border: Color,
-    anchor: Rc<Cell<Rect>>,
     /// The painted transition: `0.0` windowed, `1.0` fullscreen. Read by
     /// **layout** (the padding/clearance it produces) and written by paint.
     progress: f64,
@@ -743,7 +603,6 @@ impl<State: 'static> View<State> for TerminalStageView<State> {
             gutters: self.gutters,
             card: self.card,
             border: self.border,
-            anchor: Rc::clone(&self.anchor),
             // A first mount never animates: the card is simply already where
             // the screen says it belongs.
             progress: if self.fullscreen { 1.0 } else { 0.0 },
@@ -760,7 +619,6 @@ impl<State: 'static> View<State> for TerminalStageView<State> {
         element: &mut TerminalStageWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.anchor = Rc::clone(&self.anchor);
         let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         if prev.fullscreen != self.fullscreen {
             element.fullscreen = self.fullscreen;
@@ -805,18 +663,6 @@ impl Widget for TerminalStageWidget {
         // Recorded off the same `p` the box was built from: paint has already
         // advanced the driver, so a radius read there runs one frame ahead.
         self.card_radius = CARD_RADIUS * (1.0 - p);
-
-        // The bar's trailing `⋮` slot, in window coordinates — read straight
-        // off the window's own insets and the bar's band rather than off this
-        // widget's box, which sits below that band whenever the bar is up.
-        let slot_x = width - BAR_PAD_X - BAR_SLOT;
-        let slot_y = insets.top + (BAR_HEIGHT - BAR_SLOT) / 2.0;
-        self.anchor.set(Rect::new(
-            slot_x,
-            slot_y,
-            slot_x + BAR_SLOT,
-            slot_y + BAR_SLOT,
-        ));
 
         bc.constrain(Size::new(width, height))
     }
