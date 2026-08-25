@@ -23,15 +23,19 @@ use frust::authoring::text::{TextContext, TextStyle};
 use frust::authoring::{Point, any};
 use frust::{
     AnyView, Column, Component, Get, NavigatorController, RwSignal, SizedBox, Stack, Theme,
-    navigator, text,
+    navigator, spawn_local, text,
 };
 use frust_core::{FrameTime, InputEvent, PaintScene, PointerPhase, RenderRoot, ScrollDelta};
+use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
 use kurbo::{Rect, Size};
 use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::sessions::presentation::pages::{sessions_page, set_loading_rain_for_tests};
+use muxr::features::settings::di::expect_preferences_repository;
+use muxr::features::settings::domain::entities::Preferences;
 use muxr::routes::install_app_router;
 use muxr::ui::splash::loading::loading_sequence;
 use muxr::{AppState, MuxrApp};
@@ -631,6 +635,9 @@ const BAND_PIECES: usize = SEEDED.len() + 1;
 /// When the mounted band's last card has landed (see [`LANDED_MS`]).
 const BAND_LANDED_MS: f64 =
     MIN_DENSE_MS + ASSEMBLY_OFFSET_MS + PIECE_DELAYS_MS[BAND_PIECES - 1] + PIECE_IN_MS;
+/// [`seed_extra_session`]'s name — distinct from every [`SEEDED`] name and
+/// backend/status text, so [`occurrences`] counts it cleanly.
+const FOURTH_NAME: &str = "late-arrival";
 
 /// The glyph ids a card's name paints — `session_card` inks the theme's
 /// `label_large` slot, and inking replaces only the color.
@@ -649,6 +656,54 @@ fn mock_target() -> ConnectTarget {
         token: zeroize::Zeroizing::new(String::new()),
         remember: false,
         fingerprint: None,
+    }
+}
+
+/// Shortens the poll to its fastest offered choice before `band` ever
+/// mounts, so its first real wait is this one, not the three-second default.
+fn speed_up_the_poll() {
+    let preferences = expect_preferences_repository();
+    let done = Rc::new(Cell::new(false));
+    let flag = Rc::clone(&done);
+    spawn_local(async move {
+        let mut poll = Preferences::defaults().poll;
+        poll.layout_refresh_secs = 1;
+        preferences
+            .save_poll_prefs(poll)
+            .await
+            .expect("1s is one of PollPrefs::REFRESH_CHOICES_SECS");
+        flag.set(true);
+    });
+    let runtime = ReactiveRuntime::get().expect("ReactiveRuntime::init must have run");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !done.get() {
+        assert!(Instant::now() < deadline, "timed out speeding up the poll");
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Adds `name` straight to the shared mock repository — never through the
+/// mounted screen's own controller, so the overlay's frozen snapshot (taken
+/// at settle) cannot see it yet.
+fn seed_extra_session(name: &str) {
+    let repository = expect_sessions_repository();
+    let done = Rc::new(Cell::new(false));
+    let flag = Rc::clone(&done);
+    let owned = name.to_string();
+    spawn_local(async move {
+        repository
+            .create_session(owned)
+            .await
+            .expect("the mock never rejects a real name");
+        flag.set(true);
+    });
+    let runtime = ReactiveRuntime::get().expect("ReactiveRuntime::init must have run");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !done.get() {
+        assert!(Instant::now() < deadline, "timed out seeding {name:?}");
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -767,6 +822,25 @@ impl Band {
     fn showing_seeded_names(&self) -> bool {
         let values = node_values(&self.root);
         SEEDED.iter().all(|name| values.iter().any(|v| v == name))
+    }
+
+    /// Pumps toward real time — rebuild and layout only, never paint, so
+    /// this band's own clock holds still — until the live band prints
+    /// `name`: how a poll's real `sleep` is given the wall time it needs.
+    fn wait_for_poll(&mut self, name: &str) {
+        let runtime = ReactiveRuntime::get().expect("ReactiveRuntime::init must have run");
+        let deadline = Instant::now() + PUMP_DEADLINE;
+        loop {
+            self.root.rebuild(&mut self.logic, &mut self.state);
+            let text_any: &mut dyn Any = &mut self.tcx;
+            self.root.layout_with_text(surface(), text_any);
+            if node_values(&self.root).iter().any(|v| v == name) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {name:?}");
+            runtime.pump_local();
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn center_of(&self, value: &str) -> Point {
@@ -936,4 +1010,50 @@ fn mid_assembly_the_landing_copy_paints_over_the_live_one() {
             "both bands print {name} mid-assembly: the landing copy over the live one"
         );
     }
+}
+
+#[test]
+fn a_poll_landing_inside_the_tail_reaches_only_the_live_band() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut band = Band::mount();
+    speed_up_the_poll();
+    band.settle_first_load();
+    band.drive_to(BAND_LANDED_MS + 100.0);
+
+    seed_extra_session(FOURTH_NAME);
+    band.wait_for_poll(FOURTH_NAME);
+
+    let mid_tail = band.step();
+    for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
+        assert_eq!(
+            occurrences(&mid_tail.glyph_ids, &name_ids(name)),
+            2 * copies,
+            "the frozen assembly still prints {name} over the live band"
+        );
+    }
+    assert_eq!(
+        occurrences(&mid_tail.glyph_ids, &name_ids(FOURTH_NAME)),
+        1,
+        "the fourth name is the live band's alone — the assembly never mounted it"
+    );
+
+    let handed_over = band.drive_to(MIN_DENSE_MS + SEQUENCE_END_MS + 200.0);
+    assert!(
+        handed_over.glyph_runs < DENSE_RUNS,
+        "the rain is gone, leaving the band's own text: {} runs",
+        handed_over.glyph_runs
+    );
+    for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
+        assert_eq!(
+            occurrences(&handed_over.glyph_ids, &name_ids(name)),
+            copies,
+            "exactly one band prints {name} once the overlay has unmounted"
+        );
+    }
+    assert_eq!(
+        occurrences(&handed_over.glyph_ids, &name_ids(FOURTH_NAME)),
+        1,
+        "the live band shows every session once the handoff completes"
+    );
 }

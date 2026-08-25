@@ -18,7 +18,7 @@
 //! - **Read-only gating**: a read-only credential disables create/Rename/Kill
 //!   — never Attach (see [`Actions::open_manage_sheet`]).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,6 +137,9 @@ pub struct SessionsState {
     /// Whether the list band's loading rain is over — seeded `true` when the
     /// rain is off, and set once by the overlay itself when its sequence ends.
     pub(super) loading_done: RwSignal<bool>,
+    /// The overlay's own picture, fixed the moment `build` first sees the
+    /// release settled — a later data change reaches only the live band.
+    loading_snapshot: RefCell<Option<(Vec<Session>, bool)>>,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -352,6 +355,7 @@ impl Component for SessionsScreen {
             heartbeat,
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
+            loading_snapshot: RefCell::new(None),
         }
     }
 
@@ -405,10 +409,17 @@ impl Component for SessionsScreen {
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
         let mut children = vec![live_scroller];
         if !loading_done {
+            let overlay_pieces = if settled {
+                let mut snapshot = state.loading_snapshot.borrow_mut();
+                let frozen = snapshot.get_or_insert_with(|| (sessions.clone(), loaded));
+                list_pieces(&frozen.0, frozen.1, settled, read_only, &colors)
+            } else {
+                list_pieces(&sessions, loaded, settled, read_only, &colors)
+            };
             children.push(loading_sequence(
                 LOADING_RAIN_SEED,
                 colors.base,
-                list_pieces(&sessions, loaded, settled, read_only, &colors),
+                overlay_pieces,
                 move |pieces| list_band(padded_list(pieces), is_wide),
                 settled,
                 state.loading_done,
