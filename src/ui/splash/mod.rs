@@ -1,6 +1,6 @@
-//! The cold-start splash sequence's paint-driven building blocks — five
-//! beats off one master clock (see [`sequence`] for the timeline), each
-//! independently mountable/testable, plays once per process launch:
+//! The splash's paint-driven building blocks — five beats off one master
+//! clock (see [`sequence`] for the cold-start timeline), each independently
+//! mountable/testable, plus a second orchestrator for a loading band:
 //!
 //! | Module | What it paints |
 //! |---|---|
@@ -8,6 +8,7 @@
 //! | [`burst`] | 14 one-shot glyph particles flying out of the icon's center |
 //! | [`rain`] | The full-surface amber matrix rain, thinning column by column |
 //! | [`sequence`] | The orchestrator: all three over one clock, ending in the Connect screen's piece-by-piece assembly |
+//! | [`loading`] | The same rain and assembly, held over a still-loading band and released when its content settles |
 //!
 //! None of the first three widgets knows about the others — [`sequence`]
 //! owns the sequencing, cueing [`burst`]/[`rain`] at
@@ -29,6 +30,7 @@
 
 pub mod burst;
 pub mod icon_phase;
+pub mod loading;
 pub mod rain;
 pub mod sequence;
 
@@ -189,6 +191,15 @@ pub(crate) mod spec {
     /// accent at 35%, so it resolves from `ColorScheme::primary` rather than
     /// being a second amber constant.
     pub(crate) const AMBER_GLOW_ALPHA: f64 = 0.35;
+
+    /// Floor on the dense beat before a release takes effect. A tuning value
+    /// for this app, not a `docs/splash.html` transcription.
+    pub(crate) const LOADING_MIN_DENSE_MS: f64 = 600.0;
+    /// Hold ceiling: a load that never settles releases here anyway.
+    pub(crate) const LOADING_MAX_HOLD_MS: f64 = 8_000.0;
+    /// The gap the splash contract leaves between thinning onset and the first
+    /// landing; a literal on purpose — a cold-start change must not move it.
+    pub(crate) const LOADING_ASSEMBLY_OFFSET_MS: f64 = 100.0;
 
     // ---- Reduced motion (the source's `if(reduced)` branch) ---------------
 

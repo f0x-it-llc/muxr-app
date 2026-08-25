@@ -24,13 +24,16 @@
 //!
 //! Everything random comes from the widget's seeded [`SplashRng`], so a
 //! given seed replays exactly. The rain self-clocks from its first paint by
-//! default (mounting it is the cue); [`RainView::clock`] overrides that with
-//! an orchestrator-supplied rain-local clock. Fall speed is scaled by the
+//! default (mounting it is the cue); [`RainView::clock`] and the live
+//! [`RainView::clock_cell`] override that. Fall speed is scaled by the
 //! real frame delta ([`super::frame_factor`]) so the rain falls at the same
 //! speed on a 120Hz device as on a 60Hz one.
 //!
 //! Under `MotionScheme::reduce_motion` the rain never starts: nothing
 //! painted, no frames requested, no clock advanced.
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
@@ -162,6 +165,7 @@ pub fn rain<State: 'static>(seed: u64) -> RainView<State> {
     RainView {
         seed,
         clock_ms: None,
+        clock_cell: None,
         state: std::marker::PhantomData,
     }
 }
@@ -170,6 +174,7 @@ pub fn rain<State: 'static>(seed: u64) -> RainView<State> {
 pub struct RainView<State: 'static> {
     seed: u64,
     clock_ms: Option<f64>,
+    clock_cell: Option<Rc<Cell<f64>>>,
     /// `View<State>` is generic over the app state even though a decorative
     /// leaf never touches it.
     state: std::marker::PhantomData<fn() -> State>,
@@ -184,6 +189,26 @@ impl<State: 'static> RainView<State> {
     pub fn clock(mut self, elapsed_ms: f64) -> Self {
         self.clock_ms = Some(elapsed_ms);
         self
+    }
+
+    /// Drive the rain-local clock from a cell the orchestrator writes each
+    /// frame, read at paint. Outranks [`clock`](Self::clock) and the
+    /// self-clock: `clock` only carries a value known at *build* time, so a
+    /// clock derived from the orchestrator's own paint needs this instead.
+    pub fn clock_cell(mut self, cell: Rc<Cell<f64>>) -> Self {
+        self.clock_cell = Some(cell);
+        self
+    }
+}
+
+/// Whether two optional clock cells are the *same* cell — identity, not
+/// value: a rebuild that hands over a different cell holding an equal
+/// reading has still moved the rain onto a new writer.
+fn same_clock_cell(left: Option<&Rc<Cell<f64>>>, right: Option<&Rc<Cell<f64>>>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+        _ => false,
     }
 }
 
@@ -204,6 +229,8 @@ pub struct RainWidget {
     elapsed_ms: f64,
     /// An orchestrator-supplied clock, when there is one.
     clock_ms: Option<f64>,
+    /// A live orchestrator-supplied clock, read at paint. Outranks both.
+    clock_cell: Option<Rc<Cell<f64>>>,
     /// The previous frame's clock, for differencing.
     last_frame: Option<FrameTime>,
 }
@@ -240,6 +267,7 @@ impl<State: 'static> View<State> for RainView<State> {
             style: None,
             elapsed_ms: 0.0,
             clock_ms: self.clock_ms,
+            clock_cell: self.clock_cell.clone(),
             last_frame: None,
         }
     }
@@ -251,6 +279,8 @@ impl<State: 'static> View<State> for RainView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.clock_ms = self.clock_ms;
+        let same_cell = same_clock_cell(prev.clock_cell.as_ref(), self.clock_cell.as_ref());
+        element.clock_cell = self.clock_cell.clone();
         // A genuinely new seed restarts the rain; the ordinary rebuild
         // re-passes the same one and changes nothing.
         if prev.seed != self.seed {
@@ -258,7 +288,7 @@ impl<State: 'static> View<State> for RainView<State> {
             element.reset_columns();
             return ChangeFlags::PAINT;
         }
-        if prev.clock_ms != self.clock_ms {
+        if prev.clock_ms != self.clock_ms || !same_cell {
             return ChangeFlags::PAINT;
         }
         ChangeFlags::NONE
@@ -294,9 +324,10 @@ impl Widget for RainWidget {
         }
 
         let delta = delta_ms(&mut self.last_frame, ctx.frame_time());
-        self.elapsed_ms = match self.clock_ms {
-            Some(external) => external,
-            None => self.elapsed_ms + delta,
+        self.elapsed_ms = match (self.clock_cell.as_ref(), self.clock_ms) {
+            (Some(cell), _) => cell.get(),
+            (None, Some(external)) => external,
+            (None, None) => self.elapsed_ms + delta,
         };
         if rain_finished(self.elapsed_ms) {
             return;
@@ -514,6 +545,7 @@ mod tests {
             style: None,
             elapsed_ms: 0.0,
             clock_ms: None,
+            clock_cell: None,
             last_frame: None,
         };
         widget.reset_columns();
@@ -550,6 +582,7 @@ mod tests {
                 style: None,
                 elapsed_ms: 0.0,
                 clock_ms: None,
+                clock_cell: None,
                 last_frame: None,
             };
             widget.reset_columns();
@@ -557,5 +590,34 @@ mod tests {
         };
         assert_eq!(field(77), field(77));
         assert_ne!(field(77), field(78));
+    }
+
+    #[test]
+    fn a_clock_cell_repaints_only_when_the_cell_itself_changes() {
+        let mut ids = 0u64;
+        let mut ctx = BuildCtx::new(&mut ids);
+        let cell = Rc::new(Cell::new(0.0));
+
+        let first = rain::<()>(9).clock_cell(Rc::clone(&cell));
+        let mut widget = View::<()>::build(&first, &mut ctx);
+        assert!(widget.clock_cell.is_some(), "the cell reaches the widget");
+
+        // The ordinary rebuild re-passes the same cell: nothing to repaint.
+        let same = rain::<()>(9).clock_cell(Rc::clone(&cell));
+        assert_eq!(
+            View::<()>::rebuild(&same, &first, &mut widget, &mut ctx),
+            ChangeFlags::NONE
+        );
+
+        // A different cell — even holding an equal reading — is a new writer.
+        let moved = rain::<()>(9).clock_cell(Rc::new(Cell::new(0.0)));
+        assert_eq!(
+            View::<()>::rebuild(&moved, &same, &mut widget, &mut ctx),
+            ChangeFlags::PAINT
+        );
+        assert!(
+            same_clock_cell(widget.clock_cell.as_ref(), moved.clock_cell.as_ref()),
+            "the widget must adopt the cell it was just repainted for"
+        );
     }
 }
