@@ -1,15 +1,13 @@
 //! The loading rain: the splash's rain→assembly beats re-clocked to an
 //! external `released` edge, for a band whose content is still loading.
 //!
-//! [`sequence`](super::sequence) plays a cold-start schedule whose length is
-//! known in advance; this plays the same picture over a wait nobody can time.
-//!
 //! | Rain-local clock | Beat |
 //! |---|---|
 //! | `0..`[`spec::DENSE_END_MS`] | dense, already mid-fall |
 //! | held at [`spec::DENSE_END_MS`] | still loading — the *clock* stops here, not the rain |
 //! | release `r` | the clock resumes from that hold; thinning starts |
 //! | `r +` [`spec::LOADING_ASSEMBLY_OFFSET_MS`] | the first piece lands ([`assembly_open_ms`]) |
+//! | the last piece landed | this picture and the band's are one ([`assembly_landed_ms`]) |
 //! | `r + 1800` | rain tail and last piece both done ([`sequence_end_ms`]) |
 //!
 //! `r` is the observed settle instant, floored at
@@ -18,8 +16,19 @@
 //! Mount this as the **last** child of an always-present
 //! [`Stack`](frust::Stack), the live band beneath it: the erased child type
 //! must not flip when the overlay goes, or the pod underneath loses its
-//! identity. Pointer events stop here (a tap must not reach an unseen card);
-//! semantics do not forward (the band beneath already publishes them).
+//! identity.
+//!
+//! **Input rule.** Hit-tested input — pointer *and* scroll — stops here only
+//! while this shows something the route beneath does not: from mount until
+//! the last piece has landed. From there events fall through (`Ignored`) to
+//! the live band, whose picture is the same one. Key/IME and the housekeeping
+//! broadcast never stop here at all.
+//!
+//! **A settle inside the tail.** [`auto_release_ms`] can open the assembly
+//! before the band has settled. When that settle lands, the rain clock stays
+//! where it is and both instants re-base onto the current frame — where the
+//! pieces that rebuild mounts take their first paint — so `done` is never
+//! written while a piece is still un-landed.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -34,10 +43,6 @@ use frust::{FrameTime, RwSignal, Set, Theme};
 use super::sequence::piece_entry;
 use super::{delta_ms, fill_size, reduce_motion, spec};
 
-// ---------------------------------------------------------------------------
-// The timeline, as pure functions of the release instant
-// ---------------------------------------------------------------------------
-
 /// The instant a release takes effect. The floor is the point: a band that
 /// resolves from cache in 20ms would otherwise flash the rain for one frame.
 pub fn release_instant(observed_ms: f64, min_dense_ms: f64) -> f64 {
@@ -47,9 +52,9 @@ pub fn release_instant(observed_ms: f64, min_dense_ms: f64) -> f64 {
 /// The rain's own clock at `elapsed_ms` (`release_at` is `None` while the
 /// band is still loading).
 ///
-/// Before release the clock holds at [`spec::DENSE_END_MS`], where density
-/// and fade are both still 1.0 — the rain reads as indefinitely dense rather
-/// than frozen, since the columns fall on the frame delta, not this clock.
+/// Before release it holds at [`spec::DENSE_END_MS`], where density and fade
+/// are both still 1.0 — the rain reads as indefinitely dense rather than
+/// frozen: the columns fall on the frame delta, not on this clock.
 pub fn rain_local_ms(elapsed_ms: f64, release_at: Option<f64>) -> f64 {
     match release_at {
         None => elapsed_ms.min(spec::DENSE_END_MS),
@@ -63,6 +68,13 @@ pub fn assembly_open_ms(release_at: f64) -> f64 {
     release_at + spec::LOADING_ASSEMBLY_OFFSET_MS
 }
 
+/// When the last of `piece_count` pieces has landed, on the widget's clock.
+pub fn assembly_landed_ms(open_ms: f64, piece_count: usize) -> f64 {
+    open_ms
+        + spec::piece_delay_ms(piece_count.saturating_sub(1))
+        + spec::PIECE_IN_MS.max(spec::LAND_FLASH_MS)
+}
+
 /// When the whole sequence is over: the later of the rain's remaining tail
 /// and the last piece's landing, both measured from the release.
 pub fn sequence_end_ms(release_at: f64) -> f64 {
@@ -73,8 +85,8 @@ pub fn sequence_end_ms(release_at: f64) -> f64 {
     release_at + rain_tail.max(last_landing)
 }
 
-/// The self-release deadline. Nothing below this widget times the wait out —
-/// the gRPC layer sets no per-call deadline, only a transport keepalive — so
+/// The self-release deadline: nothing below this widget times the wait out
+/// (the gRPC layer sets no per-call deadline, only a transport keepalive), so
 /// a first load that never settles would otherwise rain forever.
 pub fn auto_release_ms() -> f64 {
     spec::LOADING_MAX_HOLD_MS
@@ -84,9 +96,9 @@ pub fn auto_release_ms() -> f64 {
 ///
 /// - `seed` — fixes the whole rain field, so a test replays it exactly.
 /// - `tone` — the opaque fill behind the rain: the band's own page tone.
-/// - `pieces`/`assemble` — the loaded content in stagger order and its
-///   layout, both the *same* builders the live band uses, or the handoff
-///   crosses two different pictures.
+/// - `pieces`/`assemble` — the loaded content in stagger order and its layout,
+///   both the *same* builders the live band uses (or the handoff crosses two
+///   different pictures); the count fixes when the assembly has landed.
 /// - `released` — `false` while loading, `true` once settled; monotonic.
 /// - `done` — set `true` exactly once, when the sequence is over.
 pub fn loading_sequence<State: 'static>(
@@ -98,6 +110,7 @@ pub fn loading_sequence<State: 'static>(
     done: RwSignal<bool>,
 ) -> AnyView<State> {
     let cell = Rc::new(Cell::new(0.0));
+    let piece_count = pieces.len();
     let staggered = pieces
         .into_iter()
         .enumerate()
@@ -107,6 +120,7 @@ pub fn loading_sequence<State: 'static>(
         rain: any(super::rain::rain::<State>(seed).clock_cell(Rc::clone(&cell))),
         assembly: assemble(staggered),
         cell,
+        piece_count,
         tone,
         released,
         done,
@@ -119,6 +133,7 @@ pub struct LoadingView<State: 'static> {
     assembly: AnyView<State>,
     /// The rain-local clock this widget writes and the rain pod reads.
     cell: Rc<Cell<f64>>,
+    piece_count: usize,
     tone: Color,
     released: bool,
     done: RwSignal<bool>,
@@ -129,11 +144,17 @@ pub struct LoadingWidget {
     rain: ChildPod,
     assembly: ChildPod,
     cell: Rc<Cell<f64>>,
+    piece_count: usize,
     tone: Color,
     /// The latest `released` the view carried; acted on at paint, not build.
     released: bool,
     /// The instant the release took effect, once one has.
     release_at: Option<f64>,
+    /// Whether a `released` edge — not the hold ceiling — has been acted on.
+    settled: bool,
+    /// Fixed when the release takes effect, re-based by a late settle.
+    landed_at: Option<f64>,
+    end_at: Option<f64>,
     elapsed_ms: f64,
     last_frame: Option<FrameTime>,
     /// Set once, so a frame painted after the write doesn't write again.
@@ -149,9 +170,13 @@ impl<State: 'static> View<State> for LoadingView<State> {
             rain: build_child(&self.rain, ctx),
             assembly: build_child(&self.assembly, ctx),
             cell: Rc::clone(&self.cell),
+            piece_count: self.piece_count,
             tone: self.tone,
             released: self.released,
             release_at: None,
+            settled: false,
+            landed_at: None,
+            end_at: None,
             elapsed_ms: 0.0,
             last_frame: None,
             fired: false,
@@ -166,6 +191,7 @@ impl<State: 'static> View<State> for LoadingView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.released = self.released;
+        element.piece_count = self.piece_count;
         element.tone = self.tone;
         element.done = self.done;
         // A per-frame channel, not retained state: every rebuild mints a fresh
@@ -173,12 +199,30 @@ impl<State: 'static> View<State> for LoadingView<State> {
         element.cell = Rc::clone(&self.cell);
         let rain = rebuild_child(&prev.rain, &self.rain, &mut element.rain, ctx);
         let assembly = rebuild_child(&prev.assembly, &self.assembly, &mut element.assembly, ctx);
-        rain | assembly
+        // Neither moves a child, yet both are read at paint.
+        let repaint = if self.released == prev.released && self.tone == prev.tone {
+            ChangeFlags::NONE
+        } else {
+            ChangeFlags::PAINT
+        };
+        rain | assembly | repaint
     }
 
     fn teardown(&self, element: &mut LoadingWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.rain, &mut element.rain, ctx);
         teardown_child(&self.assembly, &mut element.assembly, ctx);
+    }
+}
+
+impl LoadingWidget {
+    fn blocking(&self) -> bool {
+        !self.fired && self.landed_at.is_none_or(|landed| self.elapsed_ms < landed)
+    }
+
+    /// Both ends: the tail runs from `from_ms`, the pieces from `open_ms`.
+    fn schedule(&mut self, from_ms: f64, open_ms: f64) {
+        self.end_at = Some(sequence_end_ms(from_ms));
+        self.landed_at = Some(assembly_landed_ms(open_ms, self.piece_count));
     }
 }
 
@@ -195,10 +239,12 @@ impl Widget for LoadingWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         if reduce_motion(Theme::from_paint_ctx(ctx)) {
-            // No motion means no timeline: end on the first frame.
+            // No motion, no timeline: the tone, the end, and the frame that acts on the write.
+            scene.fill_rect(ctx.origin(), ctx.size(), self.tone);
             if !self.fired {
                 self.fired = true;
                 self.done.set(true);
+                ctx.request_frame();
             }
             return;
         }
@@ -208,11 +254,18 @@ impl Widget for LoadingWidget {
 
         if self.release_at.is_none() {
             if self.released {
-                self.release_at =
-                    Some(release_instant(self.elapsed_ms, spec::LOADING_MIN_DENSE_MS));
+                let release = release_instant(self.elapsed_ms, spec::LOADING_MIN_DENSE_MS);
+                self.release_at = Some(release);
+                self.settled = true;
+                self.schedule(release, assembly_open_ms(release));
             } else if self.elapsed_ms >= auto_release_ms() {
                 self.release_at = Some(auto_release_ms());
+                self.schedule(auto_release_ms(), assembly_open_ms(auto_release_ms()));
             }
+        } else if self.released && !self.settled {
+            // Settled inside the tail: the rain keeps its clock, the ends re-base.
+            self.settled = true;
+            self.schedule(self.elapsed_ms, self.elapsed_ms);
         }
 
         scene.fill_rect(ctx.origin(), ctx.size(), self.tone);
@@ -220,16 +273,18 @@ impl Widget for LoadingWidget {
             .set(rain_local_ms(self.elapsed_ms, self.release_at));
         self.rain.paint_child(ctx, scene);
 
-        if let Some(release) = self.release_at {
-            // Withheld rather than laid out late: the pieces self-clock from
-            // this first paint.
-            if self.elapsed_ms >= assembly_open_ms(release) {
-                self.assembly.paint_child(ctx, scene);
-            }
-            if self.elapsed_ms >= sequence_end_ms(release) && !self.fired {
-                self.fired = true;
-                self.done.set(true);
-            }
+        if self
+            .release_at
+            .is_some_and(|at| self.elapsed_ms >= assembly_open_ms(at))
+        {
+            // Clipped like the live scroller beneath: no painting past the band.
+            scene.push_clip(ctx.origin(), ctx.size());
+            self.assembly.paint_child(ctx, scene);
+            scene.pop_clip();
+        }
+        if !self.fired && self.end_at.is_some_and(|end| self.elapsed_ms >= end) {
+            self.fired = true;
+            self.done.set(true);
         }
 
         // One more frame while waiting, and one on the firing frame so the
@@ -240,9 +295,7 @@ impl Widget for LoadingWidget {
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Pointer events only: a key/IME event is focus-routed, never
-        // hit-tested, so it cannot reach an overlay that never takes focus.
-        if matches!(event, InputEvent::Pointer(_)) {
+        if self.blocking() && matches!(event, InputEvent::Pointer(_) | InputEvent::Scroll { .. }) {
             return EventResult::Handled;
         }
         EventResult::Ignored
@@ -256,11 +309,26 @@ impl Widget for LoadingWidget {
 
 #[cfg(test)]
 mod tests {
+    use frust::SizedBox;
+
     use super::*;
 
-    /// Late enough that the held clock has already reached the dense
-    /// boundary — the case the continuity claim is exact for.
+    /// Late enough that the held clock has already reached the dense boundary.
     const LATE_RELEASE: f64 = 2_000.0;
+
+    /// A view whose children answer nothing, so a rebuild's flags are the
+    /// overlay's own and not a child's.
+    fn inert_view(released: bool, tone: Color) -> LoadingView<()> {
+        LoadingView {
+            rain: any(SizedBox::<()>(None, None)),
+            assembly: any(SizedBox::<()>(None, None)),
+            cell: Rc::new(Cell::new(0.0)),
+            piece_count: 1,
+            tone,
+            released,
+            done: RwSignal::new(false),
+        }
+    }
 
     #[test]
     fn the_clock_holds_at_the_dense_boundary_while_loading() {
@@ -319,8 +387,7 @@ mod tests {
 
     #[test]
     fn the_sequence_ends_eighteen_hundred_after_the_release() {
-        // The rain's own tail is the longer arm today; this pins the
-        // arithmetic so a constant change shows up here.
+        // The rain's own tail is the longer arm today; a constant change shows up here.
         assert_eq!(sequence_end_ms(0.0), 1_800.0);
         assert_eq!(sequence_end_ms(LATE_RELEASE), LATE_RELEASE + 1_800.0);
     }
@@ -347,6 +414,80 @@ mod tests {
         assert!(
             auto_release_ms() > spec::LOADING_MIN_DENSE_MS,
             "the ceiling must sit above the floor"
+        );
+    }
+
+    #[test]
+    fn the_assembly_lands_one_entrance_after_its_last_piece_starts() {
+        let open = assembly_open_ms(LATE_RELEASE);
+        let entrance = spec::PIECE_IN_MS.max(spec::LAND_FLASH_MS);
+        assert_eq!(assembly_landed_ms(open, 0), open + entrance);
+        assert_eq!(assembly_landed_ms(open, 1), open + entrance);
+        assert_eq!(
+            assembly_landed_ms(open, 3),
+            open + spec::PIECE_DELAYS_MS[2] + entrance
+        );
+        let last = spec::PIECE_DELAYS_MS[spec::PIECE_DELAYS_MS.len() - 1];
+        assert_eq!(assembly_landed_ms(open, 20), open + last + entrance);
+        assert!(
+            assembly_landed_ms(open, 20) <= sequence_end_ms(LATE_RELEASE),
+            "the block must lift no later than the unmount that would lift it anyway"
+        );
+    }
+
+    #[test]
+    fn input_stops_here_only_until_the_assembly_has_landed() {
+        let mut next_id = 0;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let mut widget = inert_view(false, spec::AMBER_FALLBACK).build(&mut ctx);
+        assert!(
+            widget.blocking(),
+            "a band still loading is behind a picture of itself"
+        );
+
+        widget.landed_at = Some(1_000.0);
+        widget.elapsed_ms = 999.0;
+        assert!(widget.blocking(), "a piece is still dropping");
+        widget.elapsed_ms = 1_000.0;
+        assert!(
+            !widget.blocking(),
+            "from the landing the two pictures are the same one"
+        );
+
+        widget.fired = true;
+        widget.landed_at = None;
+        widget.elapsed_ms = 0.0;
+        assert!(
+            !widget.blocking(),
+            "a fired overlay blocks nothing, reduced motion included"
+        );
+    }
+
+    #[test]
+    fn a_release_or_a_tone_change_repaints_though_no_child_moved() {
+        let mut next_id = 0;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let held = inert_view(false, spec::AMBER_FALLBACK);
+        let mut element = held.build(&mut ctx);
+        assert!(
+            !held.rebuild(&held, &mut element, &mut ctx).needs_paint(),
+            "an unchanged rebuild owes no paint"
+        );
+
+        let released = inert_view(true, spec::AMBER_FALLBACK);
+        assert!(
+            released
+                .rebuild(&held, &mut element, &mut ctx)
+                .contains(ChangeFlags::PAINT),
+            "the release is read at paint, so it must ask for one"
+        );
+
+        let retoned = inert_view(true, spec::ON_AMBER_FALLBACK);
+        assert!(
+            retoned
+                .rebuild(&released, &mut element, &mut ctx)
+                .contains(ChangeFlags::PAINT),
+            "so is the tone this widget fills with"
         );
     }
 }
