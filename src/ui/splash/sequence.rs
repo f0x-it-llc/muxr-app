@@ -10,9 +10,12 @@
 //! | 1600 ([`burst_end_ms`]) | The last particle has flown out and faded |
 //! | 2360 ([`assembly_end_ms`], [`sequence_end_ms`]) | The last piece has landed and its flash has faded — the overlay unmounts |
 //!
-//! [`sequence_end_ms`] is the later of the assembly's and the burst's own
-//! end, so unmounting never cuts a particle's flight short. The amber rain
-//! is no beat of this timeline: it belongs to [`loading`](super::loading),
+//! [`sequence_end_ms`] is the later of the assembly's and the burst's own end,
+//! so unmounting never cuts a particle's flight short — and it is *nominal*:
+//! the end cue rides the assembly's gate, so the overlay's last frame is the
+//! first at or after gate-open + 1360ms and a frame gap straddling that gate
+//! delays the unmount by the gap rather than cutting a piece short. The amber
+//! rain is no beat of this timeline: it belongs to [`loading`](super::loading),
 //! which re-clocks it to a band still loading its own content.
 //!
 //! # The handoff
@@ -48,10 +51,9 @@
 //! [`spec::REDUCED_HOLD_MS`], then straight to the finished screen — no
 //! burst, no assembly. Each widget re-checks the theme at paint time
 //! anyway, so `reduce_motion` turning on after the mount decision still
-//! collapses to a terminal state. The hold itself must not collapse the same
-//! way — it is only ever mounted under `reduce_motion`, so [`Cue`] takes the
-//! short-circuit as an opt-out ([`CueView::honor_reduce_motion`]) rather
-//! than applying it unconditionally.
+//! collapses to a terminal state. The hold itself must not — [`Cue`] takes the
+//! short-circuit as an opt-out ([`CueView::honor_reduce_motion`]); see
+//! [`reduced_splash`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -112,9 +114,8 @@ pub fn splash_plan(already_played: bool, start_route: &str, reduce_motion: bool)
 /// [`splash_plan`] against `flag`, which this call **always** claims.
 ///
 /// Claiming even when the plan is [`SplashPlan::Skip`] is the point: the
-/// decision is taken exactly once per process, at launch, so a cold start on
-/// a non-`/` route also spends the launch — a later navigation to `/` is a
-/// warm one and must not play a launch animation.
+/// decision is spent once per process, so a cold start on a non-`/` route also
+/// spends the launch — a later navigation to `/` is warm, and warm never plays.
 fn claim(flag: &AtomicBool, start_route: &str, reduce_motion: bool) -> SplashPlan {
     let already_played = flag.swap(true, Ordering::SeqCst);
     splash_plan(already_played, start_route, reduce_motion)
@@ -200,16 +201,28 @@ pub fn splash_sequence<State: 'static>(
 
     // Bottom-to-top, matching the source's z-index ladder: the ui-layer (5)
     // under the burst particles (8), under the icon (10). The backdrop is
-    // below all of it, and the cue is a zero-size leaf.
+    // below all of it.
     any(Stack(vec![
         any(page_backdrop::<State>().block_input(true)),
-        any(delayed(assembly_start_ms(), assembly)),
+        // The end cue rides the assembly's gate, clocking from the pieces' own
+        // first frame: a gap straddling the gate delays both together, so the
+        // overlay never unmounts over a piece still dropping. Legitimate only
+        // while `dissolve_cue_ms() == assembly_start_ms()` and the assembly is
+        // the end's later arm — if those ever diverge, the cue moves to
+        // whichever gate opens last. Zero-size, so the nested `Stack` still
+        // sizes to the assembly alone.
+        any(delayed(
+            assembly_start_ms(),
+            Stack(vec![
+                assembly,
+                any(cue::<State>(sequence_end_ms() - assembly_start_ms(), done)),
+            ]),
+        )),
         any(delayed(
             dissolve_cue_ms(),
             super::burst::burst::<State>(seed),
         )),
         any(icon_phase::<State>(art)),
-        any(cue::<State>(sequence_end_ms(), done)),
     ]))
 }
 
@@ -220,10 +233,9 @@ pub fn splash_sequence<State: 'static>(
 /// [`SplashPlan::Reduced`] — no burst or assembly to collapse, since
 /// mounting them only to self-collapse would flash a frame of nothing.
 ///
-/// [`IconArt::Vector`] (the decode-failure fallback) shows the backdrop
-/// alone: the vector stand-in is a motion affordance of
-/// [`icon_phase`](super::icon_phase), inert under reduced motion by
-/// contract, and a 200ms glimpse doesn't justify a second copy here.
+/// [`IconArt::Vector`] (the decode-failure fallback) shows the backdrop alone:
+/// the vector stand-in is a motion affordance of `icon_phase`, inert under
+/// reduced motion by contract, and a 200ms glimpse doesn't justify a copy here.
 ///
 /// Its cue opts out of the reduced-motion short-circuit: this overlay is
 /// only ever mounted when `reduce_motion` is on, so honoring it would fire
@@ -329,9 +341,8 @@ impl Widget for DelayedWidget {
             // Open: the child owns its own frame requests from here.
             self.child.paint_child(ctx, scene);
         } else {
-            // Closed: nothing is painted, but the gate has to keep the frames
-            // coming or its own clock stops advancing. A transition with a
-            // visible endpoint, so the unpaced class is the right one.
+            // Closed: nothing painted, but the gate must keep frames coming
+            // or its clock stops — a transition with a visible endpoint.
             ctx.request_frame();
         }
     }
@@ -340,10 +351,9 @@ impl Widget for DelayedWidget {
     // (`.ui-layer{pointer-events:none}`); its backdrop swallows the rest.
 
     fn semantics(&self, _ctx: &mut SemanticsCtx) {
-        // Deliberately does not forward, breaking the usual rule: the live
-        // route mounted underneath already contributes the Connect screen's
-        // nodes, so forwarding would publish them twice. Gated children are
-        // otherwise decorative (the burst).
+        // Deliberately does not forward, breaking the usual rule: the route
+        // underneath already publishes the Connect screen's nodes, and gated
+        // children are otherwise decorative (the burst).
     }
 }
 
@@ -394,11 +404,9 @@ pub struct CueView<State: 'static> {
 
 impl<State: 'static> CueView<State> {
     /// Whether `reduce_motion` short-circuits this cue to its first painted
-    /// frame (default `true`). Right for [`splash_sequence`]'s end cue
-    /// (defense in depth behind a timeline reduced motion should never be
-    /// held behind); wrong for [`reduced_splash`]'s hold, which is only
-    /// mounted under `reduce_motion` already — pass `false` there, or the
-    /// hold ends on the frame it starts.
+    /// frame (default `true`). Right for [`splash_sequence`]'s end cue; wrong
+    /// for [`reduced_splash`]'s hold, which is only ever mounted under
+    /// `reduce_motion` — pass `false` there, or the hold ends as it starts.
     pub fn honor_reduce_motion(mut self, honor: bool) -> Self {
         self.honor_reduce_motion = honor;
         self
@@ -468,11 +476,10 @@ impl Widget for CueWidget {
             self.fired = true;
             self.signal.set(true);
         }
-        // Either way, ask for one more frame: while waiting it keeps this
-        // widget's clock advancing; on the firing frame it's the frame that
-        // acts on the write, rather than leaning on the reactive waker to
-        // schedule a repaint from inside a paint pass. The early return
-        // above makes it the last frame either way.
+        // Either way, ask for one more frame: while waiting it advances this
+        // widget's clock; on the firing frame it is the frame that acts on the
+        // write, rather than waking a repaint from inside a paint pass. The
+        // early return above makes it the last frame either way.
         ctx.request_frame();
     }
 }
@@ -684,8 +691,7 @@ impl Widget for PieceEntryWidget {
         let size = ctx.size();
         let pivot = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         // `transform: translateY(…) rotate(…) scale(…)` about the box's own
-        // center — spelled out in that order so the composition is visible:
-        // move the pivot to the origin, apply the three terms, move it back.
+        // center: pivot to the origin, apply the three terms, move it back.
         scene.push_transform(
             Affine::translate(pivot.to_vec2())
                 * Affine::translate((0.0, motion.dy))
@@ -798,6 +804,15 @@ mod tests {
             assembly_end_ms(),
             "the assembly is the later of the two"
         );
+        // And the window the gated cue waits out, on the assembly's own clock.
+        let window = end - assembly_start_ms();
+        assert_eq!(window, 1_360.0);
+        assert_eq!(
+            window,
+            spec::piece_delay_ms(spec::PIECE_DELAYS_MS.len() - 1)
+                + spec::PIECE_IN_MS.max(spec::LAND_FLASH_MS),
+            "the cue waits the last stagger plus the piece's own window"
+        );
     }
 
     #[test]
@@ -855,16 +870,14 @@ mod tests {
     #[test]
     fn reduced_motion_ends_the_full_timeline_on_its_first_frame() {
         // Defense in depth: the shell mounts `reduced_splash` instead, but a
-        // theme flipping `reduce_motion` on after the mount decision must not
-        // be held behind the whole four-second sequence.
+        // theme flipping `reduce_motion` on later must not hold the sequence.
         assert!(cue_due(0.0, sequence_end_ms(), true, true));
     }
 
     #[test]
     fn the_reduced_holds_own_cue_is_not_short_circuited_by_reduced_motion() {
-        // `reduced_splash` is ONLY mounted when `reduce_motion` is on, so a
-        // cue honoring it there would fire on the overlay's first painted
-        // frame and unmount the hold before it was ever seen.
+        // `reduced_splash` is ONLY mounted when `reduce_motion` is on: a cue
+        // honoring it would unmount the hold on its first painted frame.
         assert!(!cue_due(0.0, spec::REDUCED_HOLD_MS, true, false));
         assert!(!cue_due(
             spec::REDUCED_HOLD_MS - 0.1,
