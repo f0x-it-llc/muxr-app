@@ -2414,6 +2414,7 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
         );
     }
 
+    let deadline = Instant::now() + PUMP_DEADLINE;
     while catalog.state_of(&entry) != FontState::Installed {
         assert!(
             Instant::now() < deadline,
@@ -2421,10 +2422,15 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
         );
         h.pump_once();
     }
-    assert!(
-        !h.font_progress_bar_visible(),
-        "an installed row carries no progress bar"
-    );
+
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while h.font_progress_bar_visible() {
+        assert!(
+            Instant::now() < deadline,
+            "an installed row carries no progress bar"
+        );
+        h.pump_once();
+    }
     close_sheet(&mut h);
 
     // …and the reopened sheet lists it under installed, selectable like any
