@@ -58,12 +58,14 @@ impl SessionsController {
 
     pub async fn refresh(&self) {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Ok(sessions) = self
+        let result = self
             .core
             .run(&self.list, NoParams, RunOptions::default())
-            .await
-            && self.generation.load(Ordering::SeqCst) == my_generation
-        {
+            .await;
+        if self.generation.load(Ordering::SeqCst) != my_generation {
+            return;
+        }
+        if let Ok(sessions) = result {
             self.sessions.set(sessions);
             self.loaded.set(true);
         }
@@ -179,6 +181,9 @@ impl AsRef<ControllerCore<AppFailure>> for SessionsController {
 mod tests {
     use super::*;
     use crate::features::sessions::data::repositories::MockSessionsRepository;
+    use crate::features::sessions::domain::entities::{
+        LayoutSummary, SessionBackend, SessionStatus, ThirdMetric,
+    };
 
     /// How many sessions the mock repository seeds (the redesign's three
     /// cards) — named here so a reseed moves one constant, not six literals.
@@ -379,5 +384,120 @@ mod tests {
             c.first_load_settled.get_untracked(),
             "still true after second refresh"
         );
+    }
+
+    struct GatedSessionsRepository {
+        calls: AtomicUsize,
+        gates: Vec<(tokio::sync::Notify, tokio::sync::Notify)>,
+    }
+
+    impl GatedSessionsRepository {
+        fn new(gated_calls: usize) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                gates: (0..gated_calls)
+                    .map(|_| (tokio::sync::Notify::new(), tokio::sync::Notify::new()))
+                    .collect(),
+            }
+        }
+
+        async fn wait_for_call(&self, call: usize) {
+            self.gates[call].0.notified().await;
+        }
+
+        fn release_call(&self, call: usize) {
+            self.gates[call].1.notify_one();
+        }
+    }
+
+    fn gated_session(call: usize) -> Session {
+        Session {
+            id: format!("race-{call}"),
+            name: format!("call-{call}"),
+            status: SessionStatus::Running,
+            backend: SessionBackend::Zellij,
+            layout: LayoutSummary {
+                tabs: 0,
+                panes: 0,
+                third: ThirdMetric::Clients(0),
+                preview: Vec::new(),
+            },
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+    impl SessionsRepository for GatedSessionsRepository {
+        async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some((started, release)) = self.gates.get(call) {
+                started.notify_one();
+                release.notified().await;
+            }
+            Ok(vec![gated_session(call)])
+        }
+
+        async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+            Err(AppFailure::Internal("not implemented".to_string()))
+        }
+
+        async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+            Err(AppFailure::Internal("not implemented".to_string()))
+        }
+
+        async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+            Err(AppFailure::Internal("not implemented".to_string()))
+        }
+    }
+
+    #[test]
+    fn a_superseded_refresh_does_not_overwrite_the_winning_generation() {
+        let repo = Arc::new(GatedSessionsRepository::new(1));
+        let c =
+            SessionsController::new(Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>);
+
+        let after_second = block_on(async {
+            let refresh1 = c.refresh();
+            let refresh2 = c.refresh();
+            let orchestrate = async {
+                repo.wait_for_call(0).await;
+                assert!(c.first_load_settled.get_untracked());
+                let after_second = c.sessions.get_untracked();
+                repo.release_call(0);
+                after_second
+            };
+            let (_, _, after_second) = tokio::join!(refresh1, refresh2, orchestrate);
+            after_second
+        });
+
+        assert_eq!(after_second, vec![gated_session(1)]);
+        assert_eq!(c.sessions.get_untracked(), after_second);
+    }
+
+    #[test]
+    fn a_superseded_refresh_that_finishes_before_the_winner_does_not_settle_yet() {
+        let repo = Arc::new(GatedSessionsRepository::new(2));
+        let c =
+            SessionsController::new(Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>);
+        let first_done = tokio::sync::Notify::new();
+
+        block_on(async {
+            let refresh1 = async {
+                c.refresh().await;
+                first_done.notify_one();
+            };
+            let refresh2 = c.refresh();
+            let orchestrate = async {
+                repo.wait_for_call(0).await;
+                repo.wait_for_call(1).await;
+                repo.release_call(0);
+                first_done.notified().await;
+                assert!(!c.first_load_settled.get_untracked());
+                repo.release_call(1);
+            };
+            tokio::join!(refresh1, refresh2, orchestrate);
+        });
+
+        assert!(c.first_load_settled.get_untracked());
     }
 }
