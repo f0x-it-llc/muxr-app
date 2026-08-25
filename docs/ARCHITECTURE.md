@@ -42,9 +42,8 @@ there would always see the fallback baseline.
 Two page builders, not one floating chrome layer. `root_view` is the app's whole root content: the
 **outer** navigator (`/` and, once placed, the shell page) plus the app-wide toast layer, both fixed
 `Stack` indices `Stack`'s positional reconciliation never tears down, and an optional overlay tail
-(the cold-start splash) that alone grows or shrinks. The bar is no slot here at all — it belongs one
-page down, to `shell_page`'s own scaffold, which is what keeps it off `/` and off every in-shell
-navigation.
+(the cold-start splash) that alone grows or shrinks. The bar is no slot here — it belongs one page
+down, to `shell_page`'s own scaffold, keeping it off `/` and off every in-shell navigation.
 
 `shell_page` is the shell route's own page (see Navigation, below, for how it gets placed):
 `frust::scaffold` over a **second, inner** navigator carrying the three bar-bearing routes, its
@@ -114,9 +113,10 @@ reaches the host before either navigator.
 
 ## UI Substrate — `src/ui/`
 
-- **`palette`** — `Palette`, the app's one theme-derived colour vocabulary, adopted by all four
-  features' widgets in place of each's own former per-feature `Palette` struct (terminal's
-  `GlyphInk`-sourced tones and ANSI palette stay local by design).
+- **`palette`** — `Palette`, the app's one theme-derived colour vocabulary (`Palette::from_theme`,
+  `active_theme()`, `inked()` for tinting a `TextStyle`), adopted by all four features' widgets in
+  place of each's own former per-feature `Palette` struct (terminal's `GlyphInk`-sourced tones and
+  ANSI palette stay local by design).
 - **`spacing`** — eleven named spacing constants (`MICRO`..`HERO`) on the app's measured de-facto
   scale, adopted by every feature in place of its own local padding/gap constants; an odd one-off
   value stays feature-local rather than earning a token of its own.
