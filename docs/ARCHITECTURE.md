@@ -140,11 +140,11 @@ reaches the host before either navigator.
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
   `shell::root_view` mounts permanently.
-- **`splash`** — the cold-start sequence: five beats off one master clock, each independently
-  mountable/testable, playing once per process launch and collapsing to a static hold under
-  `reduce_motion`. A second orchestrator, `loading`, replays the same rain→assembly picture over a band
-  still loading its own content (Sessions' first load, today): dense until that content settles, floored
-  at 600ms and capped at an 8s self-release, then thin plus a staggered assembly before unmounting onto
+- **`splash`** — the cold-start sequence — icon → dissolve (+burst) → assembly, unmount — off one
+  master clock, each independently mountable/testable, once per process launch, collapsing to a static
+  hold under `reduce_motion`. A second orchestrator, `loading`, plays the rain into that same assembly
+  over a band still loading its own content (Sessions' first load): dense until it settles, floored at
+  600ms and capped at an 8s self-release, then thin plus a staggered assembly before unmounting onto
   the live content — blocking every pointer event, publishing no semantics. Both orchestrators'
   timing/geometry constants transcribe once, in `ui/splash/mod.rs::spec`, from `docs/splash.html`;
   `loading`'s own hold/ceiling/offset constants are this app's tuning, not part of that transcription.
