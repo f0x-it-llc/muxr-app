@@ -25,6 +25,9 @@ pub struct SessionsController {
     kill: KillSession,
     pub sessions: RwSignal<Vec<Session>>,
     pub loaded: RwSignal<bool>,
+    /// Signals when the first `refresh()` has settled (completed, whether
+    /// success or failure), releasing the overlay that holds the loading rain.
+    pub first_load_settled: RwSignal<bool>,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
@@ -41,6 +44,7 @@ impl SessionsController {
             kill: KillSession::new(repository),
             sessions: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
+            first_load_settled: RwSignal::new(false),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
@@ -63,6 +67,7 @@ impl SessionsController {
             self.sessions.set(sessions);
             self.loaded.set(true);
         }
+        self.first_load_settled.set(true);
     }
 
     pub async fn refresh_from_poll(&self) {
@@ -308,5 +313,71 @@ mod tests {
 
         c.observe_depth(1);
         assert!(c.is_polling());
+    }
+
+    /// A test repository whose list_sessions returns an error.
+    struct FailingSessionsRepository;
+
+    #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+    impl SessionsRepository for FailingSessionsRepository {
+        async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+            Err(AppFailure::Network("simulated network error".to_string()))
+        }
+
+        async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+            Err(AppFailure::Internal("not implemented".to_string()))
+        }
+
+        async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+            Err(AppFailure::Internal("not implemented".to_string()))
+        }
+
+        async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+            Err(AppFailure::Internal("not implemented".to_string()))
+        }
+    }
+
+    #[test]
+    fn refresh_flips_both_loaded_and_first_load_settled() {
+        let c = controller();
+        assert!(!c.loaded.get_untracked());
+        assert!(!c.first_load_settled.get_untracked());
+
+        block_on(c.refresh());
+
+        assert!(c.loaded.get_untracked());
+        assert!(c.first_load_settled.get_untracked());
+    }
+
+    #[test]
+    fn failed_first_load_leaves_loaded_false_but_flips_first_load_settled() {
+        let c = SessionsController::new(Arc::new(FailingSessionsRepository));
+        assert!(!c.loaded.get_untracked());
+        assert!(!c.first_load_settled.get_untracked());
+
+        block_on(c.refresh());
+
+        assert!(!c.loaded.get_untracked(), "loaded stays false on error");
+        assert!(c.sessions.get_untracked().is_empty());
+        assert!(
+            c.first_load_settled.get_untracked(),
+            "first_load_settled flips to true"
+        );
+    }
+
+    #[test]
+    fn a_second_refresh_leaves_first_load_settled_true() {
+        let c = controller();
+
+        block_on(c.refresh());
+        assert!(c.first_load_settled.get_untracked());
+
+        block_on(c.refresh());
+
+        assert!(
+            c.first_load_settled.get_untracked(),
+            "still true after second refresh"
+        );
     }
 }
