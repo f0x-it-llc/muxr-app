@@ -440,7 +440,7 @@ pub fn serial() -> MutexGuard<'static, ()> {
 /// - `sessions`/`terminal` `di`: mock repositories — a real one would fail "not connected"
 ///   against the mock-only connection above.
 /// - `sessions` `pages`: the list band's loading rain, which would hold the band over a pinned
-///   [`frame`] clock it never advances past.
+///   `frame` clock it never advances past.
 /// - `fonts`: offline download source (no suite reaches the network by omission) and a throwaway
 ///   temp cache dir (nothing writes into this machine's real app data).
 pub fn setup() -> Owner {
