@@ -1,4 +1,4 @@
-//! The splash's paint-driven building blocks — five beats off one master
+//! The splash's paint-driven building blocks — four beats off one master
 //! clock (see [`sequence`] for the cold-start timeline), each independently
 //! mountable/testable, plus a second orchestrator for a loading band:
 //!
@@ -6,14 +6,13 @@
 //! |---|---|
 //! | [`icon_phase`] | The real app icon springing in, holding, then dissolving outward |
 //! | [`burst`] | 14 one-shot glyph particles flying out of the icon's center |
-//! | [`rain`] | The full-surface amber matrix rain, thinning column by column |
-//! | [`sequence`] | The orchestrator: all three over one clock, ending in the Connect screen's piece-by-piece assembly |
-//! | [`loading`] | The same rain and assembly, held over a still-loading band and released when its content settles |
+//! | [`rain`] | The full-surface amber matrix rain, thinning column by column — cued by [`loading`] alone |
+//! | [`sequence`] | The cold-start orchestrator: icon then burst over one clock, ending in the Connect screen's piece-by-piece assembly |
+//! | [`loading`] | The rain and that same assembly, held over a still-loading band and released when its content settles |
 //!
-//! None of the first three widgets knows about the others — [`sequence`]
-//! owns the sequencing, cueing [`burst`]/[`rain`] at
-//! [`spec::ICON_DELAY_MS`] and the assembly at [`spec::ASSEMBLY_START_MS`]
-//! after that.
+//! No widget here knows about the others — its orchestrator owns the
+//! sequencing, [`sequence`] cueing [`burst`] and the assembly together at
+//! [`spec::ICON_DELAY_MS`].
 //!
 //! `docs/splash.html` is the design reference; its `<script>` constants are
 //! the timing contract, transcribed exactly once, here, into [`spec`] —
@@ -54,8 +53,8 @@ pub(crate) mod spec {
     pub(crate) const ICON_IN_MS: f64 = 350.0;
     /// Hold-at-rest duration (`ICON_HOLD = 650`).
     pub(crate) const ICON_HOLD_MS: f64 = 650.0;
-    /// When the icon dissolves and the rain takes over (`ICON_DELAY =
-    /// ICON_IN + ICON_HOLD`); also the orchestrator's cue for burst + rain.
+    /// When the icon dissolves (`ICON_DELAY = ICON_IN + ICON_HOLD`); also
+    /// the cold-start cue for the burst and the assembly.
     pub(crate) const ICON_DELAY_MS: f64 = ICON_IN_MS + ICON_HOLD_MS;
     /// Dissolve duration (`.app-icon.dissolve{transition:… .38s …}`).
     pub(crate) const ICON_DISSOLVE_MS: f64 = 380.0;
@@ -94,7 +93,7 @@ pub(crate) mod spec {
     /// The particle alphabet (`BURST_CHARS`).
     pub(crate) const BURST_CHARS: &[&str] = &["▣", "◧", "◎", "▤", "0", "1", "#"];
 
-    // ---- Matrix rain (`frame`) -------------------------------------------
+    // ---- Matrix rain (the loading-rain reference block's `frame`) --------
 
     /// Rain glyph size in logical px (`var fontSize = 14`).
     pub(crate) const RAIN_FONT_SIZE: f32 = 14.0;
@@ -157,9 +156,6 @@ pub(crate) mod spec {
 
     // ---- Assembly (`.piece` + `landPieces`) ------------------------------
 
-    /// How long after the rain is cued the first piece lands, rain-local
-    /// clock (`landPieces`: `data-delay + ICON_DELAY + 1500`).
-    pub(crate) const ASSEMBLY_START_MS: f64 = 1500.0;
     /// Per-piece stagger in source order (each `.piece`'s `data-delay`), from
     /// the assembly start. Eight entries, one per Connect-screen piece.
     pub(crate) const PIECE_DELAYS_MS: [f64; 8] =
