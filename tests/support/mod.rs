@@ -439,12 +439,15 @@ pub fn serial() -> MutexGuard<'static, ()> {
 ///   these suites assert on (e.g. the sessions strip's `zellij 0.44.3 · 36ms`).
 /// - `sessions`/`terminal` `di`: mock repositories — a real one would fail "not connected"
 ///   against the mock-only connection above.
+/// - `sessions` `pages`: the list band's loading rain, which would hold the band over a pinned
+///   [`frame`] clock it never advances past.
 /// - `fonts`: offline download source (no suite reaches the network by omission) and a throwaway
 ///   temp cache dir (nothing writes into this machine's real app data).
 pub fn setup() -> Owner {
     muxr::features::settings::di::use_mock_preferences_for_tests();
     muxr::connection::use_mock_connection_for_tests();
     muxr::features::sessions::di::use_mock_sessions_for_tests();
+    muxr::features::sessions::presentation::pages::set_loading_rain_for_tests(false);
     muxr::features::settings::di::use_mock_auth_tokens_for_tests();
     muxr::features::terminal::di::use_mock_terminal_for_tests();
     muxr::features::connect::di::use_mock_saved_servers_for_tests();
