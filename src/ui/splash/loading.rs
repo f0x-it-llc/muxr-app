@@ -1,5 +1,5 @@
-//! The loading rain: the splash's rain→assembly beats re-clocked to an
-//! external `released` edge, for a band whose content is still loading.
+//! The loading rain: the splash's assembly played behind a rain and re-clocked
+//! to an external `released` edge, for a band whose content is still loading.
 //!
 //! | Rain-local clock | Beat |
 //! |---|---|
