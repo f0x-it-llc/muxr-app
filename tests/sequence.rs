@@ -11,7 +11,7 @@
 //! **Frame cadence.** Every helper takes the cadence in nanoseconds ([`drive_at`],
 //! [`frame_at_cadence`]); the plain [`drive`]/[`frame_at`] wrappers pin [`FRAME_NS`] (60Hz). The
 //! splash is clock-driven, not frame-driven, so the same wall-clock timeline must come out of a
-//! [`FRAME_NS_120`] run too — see [`the_timeline_lands_on_the_same_wall_clock_at_120hz`].
+//! [`FRAME_NS_120`] run too, and out of an uneven one ([`janked_clock`]) with a frame dropped.
 //!
 //! **Reading a widget's text out of a paint pass.** A painted `GlyphRun` carries glyph *ids*, not
 //! a string. [`glyph_ids`] shapes an expected string through the same [`TextContext`] the widgets
@@ -45,26 +45,27 @@ use support::{serial, setup};
 /// The design reference's phone screen (`.screen{height:650px}` inside a
 /// 340px-wide frame) — the same surface `tests/splash.rs` uses.
 const SURFACE: Size = Size::new(340.0, 650.0);
-/// One 60Hz frame, in nanoseconds — `spec::REFERENCE_FRAME_MS`'s cadence, and
-/// the default every helper here pins.
+/// One 60Hz frame — `spec::REFERENCE_FRAME_MS`'s cadence, and the default every helper pins.
 const FRAME_NS: u64 = 16_666_667;
-/// One 120Hz frame, in nanoseconds — the cadence the splash's `frame_factor`
-/// normalization exists for.
+/// One 120Hz frame — the cadence the clock-driven timeline must land identically on.
 const FRAME_NS_120: u64 = 8_333_333;
 /// The reduced-motion hold (`spec::REDUCED_HOLD_MS`, which is `pub(crate)`).
 const REDUCED_HOLD_MS: f64 = 200.0;
 /// The heading piece's stagger (`spec::PIECE_DELAYS_MS[2]`, likewise).
 const HEADING_DELAY_MS: f64 = 260.0;
 /// How many blurred halos a **settled** Connect screen paints, land flashes excluded: one per
-/// saved-server row's `.dot-ok` glow. Three because piece 7 now renders the **real** repository's
-/// list (it used to invent a vanishing stand-in row), and every headless suite runs on
-/// `MockSavedServersRepository::seeded`'s three rigs. Asserting the exact residue rather than
-/// zero keeps the original claim — every *land flash* has faded — intact: a flash left running
-/// would push this above three.
+/// saved-server row's `.dot-ok` glow — three, since piece 7 renders the real repository's list and
+/// every headless suite runs on `MockSavedServersRepository::seeded`'s three rigs. Asserting that
+/// exact residue rather than zero keeps the claim that every *land flash* has faded: one still
+/// running would push the count above three.
 const RESTING_SHADOWS: usize = 3;
+/// Every frame of a rain-less run stays under this many glyph runs: a settled Connect screen's own
+/// 24 (measured, seeded store) plus slack — the burst adds 14 over it, a rain field hundreds.
+const RAIN_FREE_CEILING: usize = 44;
+/// The burst's particle count (`spec::BURST_COUNT`, also `pub(crate)`).
+const BURST_COUNT: usize = 14;
 
-/// A recording paint target: the flattened glyph-id stream (for text
-/// assertions), plus a count of every other draw kind the splash emits.
+/// A recording paint target: the flattened glyph-id stream, plus a count of every other draw kind.
 #[derive(Default)]
 struct Recorder {
     glyph_ids: Vec<u32>,
@@ -116,9 +117,8 @@ fn frame_ms(frame: usize, cadence_ns: u64) -> f64 {
     frame as f64 * cadence_ms(cadence_ns)
 }
 
-/// The frame index by which `ms` of animation has elapsed at `cadence_ns`.
-/// Frame 0 seeds the clock (zero delta), so `ms` of motion is in by frame
-/// `ms/cadence + 1`.
+/// The frame index by which `ms` of animation has elapsed at `cadence_ns`. Frame 0 seeds the
+/// clock (zero delta), so `ms` of motion is in by frame `ms/cadence + 1`.
 fn frame_at_cadence(ms: f64, cadence_ns: u64) -> usize {
     (ms / cadence_ms(cadence_ns)).round() as usize + 1
 }
@@ -128,10 +128,50 @@ fn frame_at(ms: f64) -> usize {
     frame_at_cadence(ms, FRAME_NS)
 }
 
-/// Drive `frames` frames of the real shell loop at `cadence_ns` — rebuild, lay out shaping real
-/// text, paint — returning each frame's recording and whether it asked for another one.
-/// Rebuilding *every* frame (rather than once up front) is what makes the overlay's own unmount
-/// observable: the sequence ends by writing a signal the root component reads.
+/// Drive the real shell loop once per entry in `clock` (wall-clock instants, in nanoseconds) —
+/// rebuild, lay out shaping real text, paint — returning each frame's recording and whether it
+/// asked for another one. Rebuilding *every* frame (rather than once up front) is what makes the
+/// overlay's own unmount observable: the sequence ends by writing a signal the root reads.
+fn drive_clock<V: View<AppState>>(
+    clock: &[u64],
+    logic: &mut impl FnMut(&mut AppState) -> V,
+    state: &mut AppState,
+    theme: Theme,
+) -> Vec<(Recorder, bool)> {
+    let mut root: RenderRoot<AppState, V> = RenderRoot::new();
+    let mut text_ctx = TextContext::new();
+    root.set_theme(Box::new(theme));
+
+    clock
+        .iter()
+        .map(|at| {
+            root.rebuild(logic, state);
+            let text_any: &mut dyn Any = &mut text_ctx;
+            root.layout_with_text(SURFACE, text_any);
+            let mut scene = Recorder::default();
+            let outcome = root.paint(&mut scene, FrameTime::from_nanos(*at));
+            (scene, outcome.needs_frame)
+        })
+        .collect()
+}
+
+/// A steady `frames`-long clock at `cadence_ns`.
+fn steady_clock(cadence_ns: u64, frames: usize) -> Vec<u64> {
+    (0..frames as u64).map(|frame| frame * cadence_ns).collect()
+}
+
+/// A 60Hz clock with one long frame `gap_ms` wide straddling `straddling_ms` — the cold-start jank
+/// (a GC pause, a late first layout) that opens a gate well past its nominal instant.
+fn janked_clock(gap_ms: f64, straddling_ms: f64, frames: usize) -> Vec<u64> {
+    let gap_ns = (gap_ms * 1_000_000.0) as u64;
+    let straddled_ns = (straddling_ms * 1_000_000.0) as u64;
+    steady_clock(FRAME_NS, frames)
+        .into_iter()
+        .map(|at| if at >= straddled_ns { at + gap_ns } else { at })
+        .collect()
+}
+
+/// [`drive_clock`] over a steady `frames`-long run at `cadence_ns`.
 fn drive_at<V: View<AppState>>(
     cadence_ns: u64,
     logic: &mut impl FnMut(&mut AppState) -> V,
@@ -139,20 +179,7 @@ fn drive_at<V: View<AppState>>(
     theme: Theme,
     frames: usize,
 ) -> Vec<(Recorder, bool)> {
-    let mut root: RenderRoot<AppState, V> = RenderRoot::new();
-    let mut text_ctx = TextContext::new();
-    root.set_theme(Box::new(theme));
-
-    (0..frames)
-        .map(|frame| {
-            root.rebuild(logic, state);
-            let text_any: &mut dyn Any = &mut text_ctx;
-            root.layout_with_text(SURFACE, text_any);
-            let mut scene = Recorder::default();
-            let outcome = root.paint(&mut scene, FrameTime::from_nanos(frame as u64 * cadence_ns));
-            (scene, outcome.needs_frame)
-        })
-        .collect()
+    drive_clock(&steady_clock(cadence_ns, frames), logic, state, theme)
 }
 
 /// [`drive_at`] at 60Hz.
@@ -165,8 +192,7 @@ fn drive<V: View<AppState>>(
     drive_at(FRAME_NS, logic, state, theme, frames)
 }
 
-/// The index of the first frame satisfying `beat`, panicking with `what` if no
-/// frame in the run did.
+/// The index of the first frame satisfying `beat`; panics with `what` if no frame did.
 fn first_frame(
     frames: &[(Recorder, bool)],
     what: &str,
@@ -189,8 +215,7 @@ fn glyph_ids(text: &str, style: &TextStyle) -> Vec<u32> {
         .collect()
 }
 
-/// How many times `needle` appears in `haystack` — one per copy of the string
-/// on screen (the splash's assembling copy and the route's live one are two).
+/// How many times `needle` appears in `haystack` — one per copy of that string on screen.
 fn occurrences(haystack: &[u32], needle: &[u32]) -> usize {
     if needle.is_empty() || haystack.len() < needle.len() {
         return 0;
@@ -201,15 +226,33 @@ fn occurrences(haystack: &[u32], needle: &[u32]) -> usize {
         .count()
 }
 
-/// The heading piece's exact style, so its shaped ids match what
-/// `widgets::badge::heading` paints.
+/// The heading piece's exact style, so its shaped ids match what `widgets::badge::heading` paints.
 fn heading_ids() -> Vec<u32> {
     let theme = frust_glyph::baseline();
     glyph_ids("Connect to server", &theme.type_scale.title_medium)
 }
 
-/// The decoded app icon, asserted to be the bitmap (not the fallback) so a
-/// test that counts `images` is testing what it thinks it is.
+/// How many of `scene`'s glyphs came from the burst's particle alphabet (`spec::BURST_CHARS`).
+fn burst_glyphs(scene: &Recorder) -> usize {
+    // `spec::BURST_CHARS` at `spec::BURST_FONT_SIZE` (`pub(crate)`), on the mono face `burst` uses.
+    let theme = frust_glyph::baseline();
+    let style = TextStyle {
+        family: theme.type_scale.body_medium.family.clone(),
+        size: 13.0,
+        ..TextStyle::default()
+    };
+    let alphabet: Vec<u32> = ["▣", "◧", "◎", "▤", "0", "1", "#"]
+        .iter()
+        .flat_map(|glyph| glyph_ids(glyph, &style))
+        .collect();
+    scene
+        .glyph_ids
+        .iter()
+        .filter(|id| alphabet.contains(id))
+        .count()
+}
+
+/// The decoded app icon, asserted to be the bitmap so an `images` count means what it claims.
 fn decoded_icon() -> IconArt {
     let art = splash_icon_art();
     assert!(
@@ -223,14 +266,13 @@ fn decoded_icon() -> IconArt {
 // The sequence, mounted on its own
 // ---------------------------------------------------------------------------
 
-/// Mount the orchestrator alone (no navigator underneath) at `cadence_ns`, so every draw recorded
+/// Mount the orchestrator alone (no navigator underneath) on `clock`, so every draw recorded
 /// belongs to the splash. `saved` is piece 7's rows: `None` reads them exactly as the app does
 /// (resolved *after* `MuxrApp::init` publishes the repository, `AppState::splash_plan`'s
 /// ordering), `Some(..)` pins a list so a test can mount the store state it wants.
-fn mount_sequence_at(
-    cadence_ns: u64,
+fn mount_sequence_on(
+    clock: &[u64],
     reduce_motion: bool,
-    frames: usize,
     saved: Option<Vec<SavedServer>>,
 ) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
     let mut state = MuxrApp.init();
@@ -246,19 +288,22 @@ fn mount_sequence_at(
             done,
         )
     };
-    let frames = drive_at(
-        cadence_ns,
-        &mut logic,
-        &mut state,
-        theme(reduce_motion),
-        frames,
-    );
+    let frames = drive_clock(clock, &mut logic, &mut state, theme(reduce_motion));
     (frames, done)
 }
 
-/// [`mount_sequence_at`] at 60Hz, over the repository's real list — what the
-/// app itself assembles, which under every headless suite is the seeded mock's
-/// three rigs.
+/// [`mount_sequence_on`] over a steady `frames`-long run at `cadence_ns`.
+fn mount_sequence_at(
+    cadence_ns: u64,
+    reduce_motion: bool,
+    frames: usize,
+    saved: Option<Vec<SavedServer>>,
+) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
+    mount_sequence_on(&steady_clock(cadence_ns, frames), reduce_motion, saved)
+}
+
+/// [`mount_sequence_at`] at 60Hz, over the repository's real list — what the app itself
+/// assembles, which under every headless suite is the seeded mock's three rigs.
 fn mount_sequence(reduce_motion: bool, frames: usize) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
     mount_sequence_at(FRAME_NS, reduce_motion, frames, None)
 }
@@ -280,12 +325,16 @@ fn the_sequence_walks_icon_then_burst_and_assembly_off_one_clock() {
         icon_beat.glyph_runs
     );
 
-    // Dissolve cue: the burst flies, the assembly is under way, the staggered heading is not.
+    // Dissolve cue: the burst flies, the assembly is under way, the staggered heading is not. No
+    // piece paints text this early, so the particles account for every glyph on the frame.
     let burst_beat = &frames[frame_at(dissolve_cue_ms() + 100.0)].0;
-    assert!(
-        burst_beat.glyph_runs >= 14,
-        "all 14 particles fly out of the dissolve, got {} runs",
-        burst_beat.glyph_runs
+    assert_eq!(
+        (burst_glyphs(burst_beat), burst_beat.glyph_ids.len()),
+        (BURST_COUNT, BURST_COUNT),
+        "the dissolve must paint {BURST_COUNT} burst particles and no other text: {} of {} \
+         glyphs came from the particle alphabet",
+        burst_glyphs(burst_beat),
+        burst_beat.glyph_ids.len()
     );
     assert_eq!(
         occurrences(&burst_beat.glyph_ids, &heading),
@@ -293,17 +342,15 @@ fn the_sequence_walks_icon_then_burst_and_assembly_off_one_clock() {
         "the heading has not reached its stagger yet"
     );
 
-    // And no rain at any instant: the dense field painted hundreds of runs a frame; the burst 14.
+    // No rain at any instant: every frame stays under the settled screen's own runs plus slack.
     for (index, (scene, _)) in frames.iter().enumerate() {
-        if occurrences(&scene.glyph_ids, &heading) == 0 {
-            assert!(
-                scene.glyph_runs <= 100,
-                "frame {index} ({:.0}ms) painted {} runs before the screen had \
-                 assembled — that is a rain field, and the cold start has none",
-                frame_ms(index, FRAME_NS),
-                scene.glyph_runs
-            );
-        }
+        assert!(
+            scene.glyph_runs <= RAIN_FREE_CEILING,
+            "frame {index} ({:.0}ms) painted {} runs against a {RAIN_FREE_CEILING}-run ceiling — \
+             that is a rain field, and the cold start has none",
+            frame_ms(index, FRAME_NS),
+            scene.glyph_runs
+        );
     }
 
     // Assembly: staggered, piece by piece.
@@ -348,11 +395,10 @@ fn a_store_with_no_saved_servers_assembles_no_saved_card_at_all() {
     let _g = serial();
     let _ambient = setup();
 
-    // Regression: the splash used to paint one hardcoded "Home rig" row whatever the store held,
-    // so an empty-store user watched a card assemble then vanish at the route handoff. Piece 7's
-    // rows are an input now — empty list in, empty list out. Each row's status dot is a glowing
-    // swatch (`draw_shadow`), and the settled overlay paints no other blurred rect
-    // (`RESTING_SHADOWS`), so the shadow count *is* the row count.
+    // Regression: the splash used to paint one hardcoded "Home rig" row whatever the store held, so
+    // an empty-store user watched a card assemble then vanish at the route handoff. Piece 7's rows
+    // are an input now — empty list in, empty list out. Each row's status dot is a glowing swatch
+    // (`draw_shadow`) and nothing else blurs on a settled overlay, so the count *is* the rows.
     let end = frame_at(sequence_end_ms() + 200.0);
     let (empty, _) = mount_sequence_at(FRAME_NS, false, end, Some(Vec::new()));
     let (last, _) = empty.last().expect("frames were painted");
@@ -385,12 +431,70 @@ fn the_completion_cue_fires_once_the_whole_timeline_has_run() {
     assert!(done.get());
 }
 
+#[test]
+fn a_frame_gap_straddling_the_gate_delays_the_unmount_rather_than_cutting_it_short() {
+    let _g = serial();
+    let _ambient = setup();
+
+    // The nominal run's settled last frame is what the janked run's own last frame must match.
+    let (nominal, _) = mount_sequence(false, frame_at(sequence_end_ms() + 200.0));
+    let settled = &nominal.last().expect("frames were painted").0;
+    let heading = heading_ids();
+
+    let gap_ms = 200.0;
+    let clock = janked_clock(
+        gap_ms,
+        assembly_start_ms(),
+        frame_at(sequence_end_ms() + gap_ms + 200.0),
+    );
+    let (frames, done) = mount_sequence_on(&clock, false, None);
+    let at = |frame: usize| clock[frame] as f64 / 1_000_000.0;
+    assert!(done.get(), "the janked run still cues its own unmount");
+
+    // The gate opens on the long frame's far side; a fired cue stops asking for frames, so the
+    // last frame that asked for one is the frame it fired on — the overlay's last painted frame.
+    let gate_open = first_frame(&frames, "the assembly gate opening", |(scene, _)| {
+        scene.glyph_runs > 0
+    });
+    let quiet = first_frame(&frames, "the sequence settling", |(_, needs_frame)| {
+        !needs_frame
+    });
+    let firing = &frames[quiet - 1].0;
+    assert!(
+        at(gate_open) >= assembly_start_ms() + gap_ms,
+        "the long frame must straddle the gate, which opened at {:.0}ms",
+        at(gate_open)
+    );
+
+    assert_eq!(
+        firing.shadows, settled.shadows,
+        "a piece was still flashing on the overlay's last frame: {} blurred rects against the \
+         settled screen's {}",
+        firing.shadows, settled.shadows
+    );
+    assert_eq!(
+        (firing.glyph_runs, occurrences(&firing.glyph_ids, &heading)),
+        (
+            settled.glyph_runs,
+            occurrences(&settled.glyph_ids, &heading)
+        ),
+        "the overlay must unmount onto the settled screen, never a mid-assembly one"
+    );
+    assert!(
+        at(quiet - 1) - at(gate_open) >= sequence_end_ms() - assembly_start_ms(),
+        "the cue fired {:.0}ms after the gate opened at {:.0}ms — short of the assembly's own \
+         {:.0}ms window",
+        at(quiet - 1) - at(gate_open),
+        at(gate_open),
+        sequence_end_ms() - assembly_start_ms()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Frame cadence
 // ---------------------------------------------------------------------------
 
-/// The three timeline beats a paint stream can witness, as wall-clock ms since the overlay's
-/// first frame.
+/// The timeline beats a paint stream can witness, in wall-clock ms since the overlay's first frame.
 #[derive(Debug)]
 struct Beats {
     /// First frame drawing any glyph at all (the icon beat before it draws only the bitmap).
@@ -461,7 +565,8 @@ fn the_timeline_lands_on_the_same_wall_clock_at_120hz() {
             sixty.end,
             one_twenty.end,
             sequence_end_ms(),
-            1.0,
+            // Two quantizations again: the assembly gate opening, then the cue riding it.
+            2.0,
         ),
     ] {
         assert!(
@@ -516,9 +621,8 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
     let mut state = MuxrApp.init();
     let art = decoded_icon();
     let done = RwSignal::new(false);
-    // Mirrors the shell (`AppState::splash_overlay`): the cue's write is what *unmounts* the
-    // overlay, so this closure drops it once `done` is set — a harness that re-mounted
-    // `reduced_splash` unconditionally could never see the hold end, or end too early.
+    // Mirrors the shell (`AppState::splash_overlay`): the cue's write *unmounts* the overlay, so
+    // this closure drops it once `done` is set — re-mounting it would never see the hold end.
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
         if done.get() {
             any(page_backdrop::<AppState>())
@@ -533,9 +637,8 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
         frame_at(REDUCED_HOLD_MS + 100.0),
     );
 
-    // The whole hold shows the icon. `reduce_motion` is on for every frame here (why the path was
-    // chosen), so a cue short-circuiting on it would fire on frame 0, leaving a ~16ms flicker
-    // instead of a 200ms beat.
+    // The whole hold shows the icon. `reduce_motion` is on for every frame here (why this path was
+    // chosen), so a cue short-circuiting on it would fire on frame 0 — a ~16ms flicker, not a beat.
     for (index, (scene, _)) in frames
         .iter()
         .take(frame_at(REDUCED_HOLD_MS) - 1)
@@ -617,9 +720,8 @@ fn a_second_launch_decision_in_the_same_process_never_replays_the_splash() {
     let _ambient = setup();
 
     // Whichever of these claimed the process's splash, the *second* must not play — the
-    // once-per-process rule, observed end to end. Both are actually *built*: the claim is spent
-    // on a launch's first build, not `init` (`AppState::splash_plan`), so an unbuilt app never
-    // spends one.
+    // once-per-process rule, observed end to end. Both are actually *built*: the claim is spent on
+    // a launch's first build, not `init` (`AppState::splash_plan`), so an unbuilt app spends none.
     let mut logic = |s: &mut AppState| MuxrApp.build(s);
     let mut first = MuxrApp.init();
     drive(&mut logic, &mut first, theme(false), 2);
