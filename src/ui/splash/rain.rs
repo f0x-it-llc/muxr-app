@@ -1,8 +1,8 @@
 //! The amber matrix rain: full-surface columns of falling glyphs that start
 //! mid-fall at full density, then drain away column by column.
 //!
-//! Three beats on the **rain-local** clock (which starts when the icon
-//! dissolves, not when the app launched):
+//! Three beats on the **rain-local** clock, which its orchestrator starts (`loading`
+//! from the band's own hold/release schedule; a standalone mount from its first paint):
 //!
 //! | Beat | Window | Behavior |
 //! |---|---|---|
@@ -184,8 +184,8 @@ impl<State: 'static> RainView<State> {
     /// Drive the rain-local clock externally (milliseconds since the rain was
     /// cued) instead of letting the widget self-clock from its first paint.
     ///
-    /// The orchestrator uses this when it wants one clock across the whole
-    /// sequence; a standalone mount can ignore it.
+    /// Tests and standalone mounts pin a fixed clock with this; an orchestrator
+    /// whose clock comes from its own paint needs [`clock_cell`](Self::clock_cell).
     pub fn clock(mut self, elapsed_ms: f64) -> Self {
         self.clock_ms = Some(elapsed_ms);
         self

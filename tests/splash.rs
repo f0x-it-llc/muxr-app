@@ -1,4 +1,4 @@
-//! Headless smoke tests for the splash sequence's three paint-driven widgets
+//! Headless smoke tests for the splash module's three paint-driven widgets
 //! (`muxr::ui::splash`), driven through `RenderRoot` with a real frame clock — no GPU, no window,
 //! no orchestrator. The pure math (phase machines, rain density/alpha, particle kinematics) is
 //! unit-tested next to the code; this file covers what only a real paint pass can show: what

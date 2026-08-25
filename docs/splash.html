@@ -210,7 +210,9 @@ canvas.show{ opacity:1; }
 
   var overallStart = null;
   var running = false;
-  var TOTAL_MS = ICON_DELAY + 860 + 500; // last piece's data-delay + its .5s spring/flash window
+  var PIECE_IN = 500; // .piece's .5s spring transition, and landFlash's own window
+  var LAST_DELAY = Math.max.apply(null, pieces.map(function(p){ return parseInt(p.getAttribute('data-delay'),10); }));
+  var TOTAL_MS = ICON_DELAY + LAST_DELAY + PIECE_IN;
 
   function frame(ts){
     if(!running) return;
@@ -237,21 +239,22 @@ canvas.show{ opacity:1; }
   // Not a cold-start beat any more. This is the rain the app plays over a band
   // whose content is still loading (the sessions list's first load), clocked by
   // that wait rather than by the icon — kept live here because it is the source
-  // `src/ui/splash/rain.rs` and the DENSE_END/THIN_END/+400 constants are
-  // transcribed from. Press "loading rain" to run it over the settled screen.
+  // `src/ui/splash/mod.rs::spec` transcribes the DENSE_END/THIN_END/+400
+  // constants from. Press "loading rain" to run it over the settled screen.
   var rainStart = null;
   var raining = false;
+  var rainGen = 0; // a frame queued by an earlier run is stale, and must not drive drops[]
   var DENSE_END = 1400;
   var THIN_END = 2800;
 
-  function rainFrame(ts){
-    if(!raining) return;
+  function rainFrame(ts, gen){
+    if(!raining || gen !== rainGen) return;
     if(rainStart===null) rainStart = ts;
     var t = ts - rainStart; // rain-local clock, unchanged math below
 
-    var rainPhase = t < DENSE_END ? 'loading rain'
+    var rainPhase = t < DENSE_END ? 'dense'
       : t < THIN_END ? 'thinning' : 'settled';
-    phaseLabel.innerHTML = 'phase: <b>' + rainPhase + '</b>';
+    phaseLabel.innerHTML = 'phase: <b>loading rain — ' + rainPhase + '</b>';
 
     // fade previous frame
     ctx.fillStyle = 'rgba(10,12,17,0.16)';
@@ -296,31 +299,31 @@ canvas.show{ opacity:1; }
       drops[c] += rand(0.35,0.75);
     }
 
-    if(t > 200 && Math.random() < 0.002 * (1-globalDensity)){
-      // occasional respawn of a stopped column at very low density to keep faint ambience briefly
-    }
+    // a stopped column stays stopped: no low-density ambient respawn here
 
     if(t < THIN_END + 400){
-      requestAnimationFrame(rainFrame);
+      requestAnimationFrame(function(next){ rainFrame(next, gen); });
     } else {
       // ambient near-empty tail for a short bit then stop drawing (leave last cleared frame)
       ctx.fillStyle = 'rgba(10,12,17,0.4)';
       ctx.fillRect(0,0,W,H);
       raining = false;
       canvas.classList.remove('show');
-      phaseLabel.innerHTML = 'phase: <b>settled</b>';
+      phaseLabel.innerHTML = 'phase: <b>loading rain — settled</b>';
     }
   }
 
   function playRain(){
+    running = false; // the cold-start loop owns the phase label and ticks; stop it first
     raining = false;
+    var gen = ++rainGen;
     initCols();
     rainStart = null;
     ctx.fillStyle = '#0a0c11';
     ctx.fillRect(0,0,W,H);
     canvas.classList.add('show');
     raining = true;
-    requestAnimationFrame(rainFrame);
+    requestAnimationFrame(function(ts){ rainFrame(ts, gen); });
   }
 
   function landPieces(){

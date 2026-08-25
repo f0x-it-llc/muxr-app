@@ -202,9 +202,8 @@ const ALLOWLIST: &[AllowlistEntry] = &[
     },
     AllowlistEntry {
         path: "src/ui/splash/mod.rs",
-        cap_pct: 36.2,
-        reason: "contract-heavy: the five-beat module-index table is load-bearing prose, not \
-                 decoration",
+        cap_pct: 35.1,
+        reason: "contract-heavy: the module-index table is load-bearing prose, not decoration",
     },
     AllowlistEntry {
         path: "src/features/terminal/presentation/term/mod.rs",
@@ -224,7 +223,7 @@ const ALLOWLIST: &[AllowlistEntry] = &[
     },
     AllowlistEntry {
         path: "src/ui/splash/sequence.rs",
-        cap_pct: 30.1,
+        cap_pct: 29.0,
         reason: "contract-heavy: the master-clock timeline table is load-bearing prose, not \
                  decoration",
     },
