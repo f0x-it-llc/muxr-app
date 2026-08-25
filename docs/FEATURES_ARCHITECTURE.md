@@ -86,10 +86,15 @@ footer) lives in `pages.rs`, not in `widgets/`.
   before that unlock even starts — the manual form's own "Trust anyway" radio stays ungated, since
   picking it is its own consent), ungated delete (owned by Settings), and an upsert on every
   successful login (keeps the saved row's credential fields current).
-- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every
-  mutation by `Session::id` (the backend-qualified routing key) rather than display name. A read-only
-  credential (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never
-  Attach.
+- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every mutation
+  by `Session::id` (the backend-qualified routing key) rather than display name. A read-only credential
+  (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never Attach. The
+  first load is covered by the shared `loading` rain overlay, the last child of the always-present
+  `Stack` in the scroller band (the server strip above stays live and uncovered throughout) —
+  released by `SessionsController::first_load_settled` (set on either `Ok` or `Err`); until it settles,
+  the list's trailing row is `widgets::loading_view` rather than the create row, and
+  `set_loading_rain_for_tests` is the process-static seam a test binary opts out with (see
+  [ARCHITECTURE.md](ARCHITECTURE.md) for the shared orchestrator).
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
   seam, and the "panes & tabs" tree side sheet the app bar's one action opens directly (spaces →
   tabs → panes, zellij promoting its tabs to the top-level shape a space wears since it has none —
@@ -177,12 +182,14 @@ example, every frust app author) should copy. Normative, not aspirational; huddl
 
 ## Tests
 
-`connect.rs`/`sessions.rs`/`terminal.rs`/`settings.rs`/`ui_substrate.rs` exercise the four screens
-and the shared `ui/` modules, each mounting its screen beside its own navigator (so it stays
-visible to accessibility) and installing the app's real router over that navigator; `connect.rs`
-also scripts the credential mock's recorded prompt count to assert "exactly one biometric prompt"
-per flow. `term_widget.rs`/`term_input.rs`/`term_selection.rs` drive the real terminal grid, its
-keystroke source and its selection/copy model directly, headless against the real `vt100`
-emulator; `terminal_live.rs` mounts the whole `/terminal` screen and drives the same grid's
-link-status signal through the "Demo session" cutover. See
-[ARCHITECTURE.md](ARCHITECTURE.md#tests) for the shared harness and cross-cutting suites.
+`connect.rs`/`sessions.rs`/`terminal.rs`/`settings.rs`/`ui_substrate.rs` exercise the four screens and
+the shared `ui/` modules, each mounting its screen beside its own navigator (so it stays visible to
+accessibility) and installing the app's real router over that navigator; `connect.rs` also scripts the
+credential mock's recorded prompt count to assert "exactly one biometric prompt" per flow.
+`sessions_loading.rs` is the clock-driven suite proving the sessions loading-rain overlay, both
+standalone and mounted under the real `/sessions` screen (see [ARCHITECTURE.md](ARCHITECTURE.md#tests)
+for the shared orchestrator-level half). `term_widget.rs`/`term_input.rs`/`term_selection.rs` drive the
+real terminal grid, its keystroke source and its selection/copy model directly, headless against the
+real `vt100` emulator; `terminal_live.rs` mounts the whole `/terminal` screen and drives the same grid's
+link-status signal through the "Demo session" cutover. See [ARCHITECTURE.md](ARCHITECTURE.md#tests) for
+the shared harness and cross-cutting suites.
