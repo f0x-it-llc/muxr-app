@@ -114,9 +114,8 @@ reaches the host before either navigator.
 ## UI Substrate — `src/ui/`
 
 - **`palette`** — `Palette`, the app's one theme-derived colour vocabulary (`Palette::from_theme`,
-  `active_theme()`, `inked()` for tinting a `TextStyle`), adopted by all four features' widgets in
-  place of each's own former per-feature `Palette` struct (terminal's `GlyphInk`-sourced tones and
-  ANSI palette stay local by design).
+  `active_theme()`, `inked()` for tinting a `TextStyle`), adopted by all four features' widgets
+  (terminal's `GlyphInk`-sourced tones and ANSI palette stay local by design).
 - **`spacing`** — eleven named spacing constants (`MICRO`..`HERO`) on the app's measured de-facto
   scale, adopted by every feature in place of its own local padding/gap constants; an odd one-off
   value stays feature-local rather than earning a token of its own.
@@ -140,14 +139,15 @@ reaches the host before either navigator.
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
   `shell::root_view` mounts permanently.
-- **`splash`** — the cold-start sequence — icon → dissolve (+burst) → assembly, unmount — off one
-  master clock, each independently mountable/testable, once per process launch, collapsing to a static
+- **`splash`** — the cold-start sequence (icon → dissolve (+burst) → assembly, unmount) off one master
+  clock, each beat independently mountable/testable, once per process launch, collapsing to a static
   hold under `reduce_motion`. A second orchestrator, `loading`, plays the rain into that same assembly
   over a band still loading its own content (Sessions' first load): dense until it settles, floored at
-  600ms and capped at an 8s self-release, then thin plus a staggered assembly before unmounting onto
-  the live content — blocking every pointer event, publishing no semantics. Both orchestrators'
-  timing/geometry constants transcribe once, in `ui/splash/mod.rs::spec`, from `docs/splash.html`;
-  `loading`'s own hold/ceiling/offset constants are this app's tuning, not part of that transcription.
+  600ms and capped at an 8s self-release, then thin plus a staggered assembly clipped to the band,
+  unmounting onto the live content. Pointer and scroll stop only until the last piece lands, then fall
+  through to the identical live band; it publishes no semantics. Both orchestrators' timing/geometry
+  constants transcribe once, in `ui/splash/mod.rs::spec`, from `docs/splash.html`; `loading`'s own
+  hold/ceiling/offset constants are this app's tuning, not part of that transcription.
 
 **Chrome icons are vectors; font glyphs are content text only.** A bar affordance, a FAB, or a row's
 trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` — never a font
@@ -197,9 +197,8 @@ covered in [FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests) and
 
 ## Design References
 
-`docs/` also holds non-code design material: `splash.html`/`redesign.html`/`terminal.html` (interactive
-HTML mocks; `splash.html` is the timing/geometry source of truth above), plus `docs/muxr-app-icons/`,
-the Android/iOS icon masters the build pipelines consume.
+`docs/` also holds design material: the `splash.html`/`redesign.html`/`terminal.html` interactive
+mocks, plus `docs/muxr-app-icons/`, the Android/iOS icon masters the build pipelines consume.
 
 ## Planned
 
@@ -216,5 +215,4 @@ the Android/iOS icon masters the build pipelines consume.
 - The login-token field's buffer is zeroized on connect/disconnect; transient copies on the render
   pass and platform IME surface (suggestions, recents) still hold plaintext until masking lands.
 - Structural (side-by-side, two-column) layouts, pending frust's WIP responsive primitive and a design mock.
-- Promoting `icon_button` out of `ui::topbar` into its own module — its fourth-call-site trigger has
-  fired; still deferred.
+- Promoting `icon_button` out of `ui::topbar` into its own module — the fourth-call-site trigger fired.
