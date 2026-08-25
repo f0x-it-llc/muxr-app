@@ -27,14 +27,16 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, GetUntracked, NavigatorController, Padding, SizedBox, WindowMetrics, any,
-    component, flexible, inflexible, on_cleanup, safe_area, scroll_view, spawn_local, use_context,
+    FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox, Stack,
+    WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area, scroll_view,
+    spawn_local, use_context,
 };
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
+use crate::features::sessions::domain::entities::Session;
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
 use crate::responsive::WIDE_BREAKPOINT_PX;
 use crate::routes::{Nav, app_nav, sessions_back_signal};
@@ -42,6 +44,7 @@ use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::palette::Palette;
 use crate::ui::sheet::show_sheet;
 use crate::ui::spacing;
+use crate::ui::splash::loading::loading_sequence;
 use crate::ui::toasts::app_toasts;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
@@ -75,6 +78,20 @@ const LIST_GAP: f64 = spacing::BASE;
 /// The conn-row strip stays full-bleed on purpose (screen chrome, not a
 /// list item); this is a plain scroller clamp, not a layout switch.
 const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
+
+/// Fixes the loading rain's whole field, so a replay of the band's sequence
+/// paints the identical drops frame for frame.
+const LOADING_RAIN_SEED: u64 = 0x6D75_7872;
+
+/// The list band's loading rain, on by default (see [`set_loading_rain_for_tests`]).
+static LOADING_RAIN: AtomicBool = AtomicBool::new(true);
+
+/// Opts the process out of the loading rain for its remaining life — every
+/// page-level suite taps under a pinned frame clock an overlay never advances.
+/// Same process-static shape as [`crate::features::sessions::di::use_mock_sessions_for_tests`].
+pub fn set_loading_rain_for_tests(enabled: bool) {
+    LOADING_RAIN.store(enabled, Ordering::Relaxed);
+}
 
 /// The Sessions screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner` that
@@ -117,6 +134,9 @@ pub struct SessionsState {
     /// The back press's observer — see [`BackConfirm`]; screen-internal
     /// like the heartbeat.
     pub(super) back: BackConfirm,
+    /// Whether the list band's loading rain is over — seeded `true` when the
+    /// rain is off, and set once by the overlay itself when its sequence ends.
+    pub(super) loading_done: RwSignal<bool>,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -317,6 +337,10 @@ impl Component for SessionsScreen {
             });
         });
 
+        // Read once per mount — a process-wide test opt-out, not observed
+        // state, so never from `build` or a spawned block.
+        let rain = LOADING_RAIN.load(Ordering::Relaxed);
+
         SessionsState {
             actions: Actions {
                 nav: self.nav.clone(),
@@ -327,6 +351,7 @@ impl Component for SessionsScreen {
             connection,
             heartbeat,
             back: BackConfirm::new(),
+            loading_done: RwSignal::new(!rain),
         }
     }
 
@@ -343,6 +368,8 @@ impl Component for SessionsScreen {
         // wakes this rebuild.
         let sessions = state.actions.controller.sessions.get();
         let loaded = state.actions.controller.loaded.get();
+        let settled = state.actions.controller.first_load_settled.get();
+        let loading_done = state.loading_done.get();
         let info = state.connection.server_info.get();
         // Gates create/rename/kill (never attach) — see
         // `widgets::new_session_row`'s doc for the disabled-state pattern.
@@ -366,39 +393,30 @@ impl Component for SessionsScreen {
             .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
             .unwrap_or(false);
 
-        // Either the empty state, or every card plus the dashed create row.
-        let mut list = Vec::new();
-        if loaded && sessions.is_empty() {
-            list.push(widgets::empty_view(read_only));
-        } else {
-            list.extend(
-                sessions
-                    .iter()
-                    .map(|session| widgets::session_card(session, &colors)),
-            );
-            list.push(widgets::new_session_row(&colors, read_only));
+        // Both renderings assemble the same pieces through the same band; the
+        // live one adds `scroll_view`, a pass-through at offset 0.
+        let live_scroller = list_band(
+            any(scroll_view(padded_list(list_pieces(
+                &sessions, loaded, settled, read_only, &colors,
+            )))),
+            is_wide,
+        );
+        // Always a `Stack`, overlay or not: an erased child type that flips
+        // Some→None tears the pod under it down (`shell::root_view`'s rule).
+        let mut children = vec![live_scroller];
+        if !loading_done {
+            children.push(loading_sequence(
+                LOADING_RAIN_SEED,
+                colors.base,
+                list_pieces(&sessions, loaded, settled, read_only, &colors),
+                move |pieces| list_band(padded_list(pieces), is_wide),
+                settled,
+                state.loading_done,
+            ));
         }
-
-        // The shell's bar consumes the top window inset, so the body's safe
-        // area disables its top edge to avoid double-padding it.
-        let scroller = any(safe_area(scroll_view(Padding(
-            EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
-            FlexView::new(Axis::Vertical, gapped(list)).cross_axis(CrossAxisAlignment::Stretch),
-        )))
-        .top(false));
-        // Clamp/center the list column only — the conn-row strip beside it
-        // stays full-bleed (see `SESSIONS_CLAMP_WIDTH`'s doc).
-        let scroller = if is_wide {
-            any(Align(
-                Alignment::CENTER,
-                SizedBox::<SessionsState>(Some(SESSIONS_CLAMP_WIDTH), None).child(scroller),
-            ))
-        } else {
-            scroller
-        };
         let mut bands = vec![
             inflexible(widgets::server_strip(info.as_ref(), beat, &colors)),
-            flexible(1, scroller),
+            flexible(1, any(Stack(children))),
         ];
         // Mounted only while ring/roll still owe a frame; kept at the
         // list's end so the two real bands keep positional identity.
@@ -425,6 +443,53 @@ fn disconnect_message(host: &str) -> String {
         "You will be disconnected from {host}. Saved servers and credentials stay on this \
          device."
     )
+}
+
+/// The list's children in stagger order: the empty state, or a card per
+/// session closed by the dashed create row — closed by [`widgets::loading_view`]
+/// instead until the first load settles, failure included (before it, no cards).
+fn list_pieces(
+    sessions: &[Session],
+    loaded: bool,
+    settled: bool,
+    read_only: bool,
+    colors: &Palette,
+) -> Vec<AnyView<SessionsState>> {
+    if loaded && sessions.is_empty() {
+        return vec![widgets::empty_view(read_only)];
+    }
+    let mut pieces: Vec<AnyView<SessionsState>> = sessions
+        .iter()
+        .map(|session| widgets::session_card(session, colors))
+        .collect();
+    pieces.push(if settled {
+        widgets::new_session_row(colors, read_only)
+    } else {
+        widgets::loading_view(colors)
+    });
+    pieces
+}
+
+/// `pieces` as the screen's padded, [`LIST_GAP`]-spaced, stretched column.
+fn padded_list(pieces: Vec<AnyView<SessionsState>>) -> AnyView<SessionsState> {
+    any(Padding(
+        EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
+        FlexView::new(Axis::Vertical, gapped(pieces)).cross_axis(CrossAxisAlignment::Stretch),
+    ))
+}
+
+/// The band `content` occupies: safe-area inset with its top edge off (the
+/// shell's bar already consumed that window inset), clamped and centered past
+/// [`SESSIONS_CLAMP_WIDTH`] while the strip beside it stays full-bleed.
+fn list_band(content: AnyView<SessionsState>, is_wide: bool) -> AnyView<SessionsState> {
+    let band = any(safe_area(content).top(false));
+    if !is_wide {
+        return band;
+    }
+    any(Align(
+        Alignment::CENTER,
+        SizedBox::<SessionsState>(Some(SESSIONS_CLAMP_WIDTH), None).child(band),
+    ))
 }
 
 /// The list's children with a [`LIST_GAP`] spacer between consecutive ones.
