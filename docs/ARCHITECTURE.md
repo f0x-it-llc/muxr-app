@@ -177,9 +177,10 @@ recording paint scene, sized-frame/pump helpers, event builders, value and rect-
 `routes.rs` smoke-tests the route table's shape and the session guard in isolation — no reactive owner
 on the stack at all, the tripwire for `session_guard_with`'s capture-not-context contract;
 `guard_shell.rs` is its shell-boundary counterpart, pinning the bounce-unwind, the reconnect loop, and
-dismiss-cell freshness. `sequence.rs`/`splash.rs` exercise the splash timeline; `sessions_loading.rs`
-drives the `loading` orchestrator's release/hold/stagger standalone, then the mounted `/sessions` band's
-hand-over to live cards (see [FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests)).
+dismiss-cell freshness. `sequence.rs`/`splash.rs` exercise the splash timeline and `splash_contract.rs`
+pins `ui/splash/mod.rs::spec` to `docs/splash.html`; `sessions_loading.rs` drives the `loading`
+orchestrator's release/hold/stagger standalone, then the mounted `/sessions` band's hand-over to live
+cards (see [FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests)).
 `navigation_motion.rs` mounts the *whole* app (only `MuxrApp` places the scaffold, and so the bar) to
 exercise the `RouteMeta` adapter, shell behavior (bar-less Connect, a titled route, direction on back,
 terminal fullscreen suppression, the settings → sessions → connect round trip) and overlay-host

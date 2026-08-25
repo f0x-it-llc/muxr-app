@@ -86,14 +86,15 @@ footer) lives in `pages.rs`, not in `widgets/`.
   before that unlock even starts — the manual form's own "Trust anyway" radio stays ungated, since
   picking it is its own consent), ungated delete (owned by Settings), and an upsert on every
   successful login (keeps the saved row's credential fields current).
-- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every
-  mutation by `Session::id` (the backend-qualified routing key) rather than display name. A read-only
-  credential (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never
-  Attach. The first load is covered by the shared `loading` rain overlay, the last child of the
-  always-present `Stack` in the scroller band (the server strip above stays live and uncovered
-  throughout) — released by `SessionsController::first_load_settled` (set on either `Ok` or `Err`),
-  with input falling through to the live band from the last piece's landing, not the unmount; until it
-  settles, the list's trailing row is `widgets::loading_view` rather than the create row, and
+- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every mutation
+  by `Session::id` (the backend-qualified routing key) rather than display name. A read-only credential
+  (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never Attach. The
+  first load is covered by the shared `loading` rain overlay, the last child of the always-present
+  `Stack` in the scroller band (the server strip above stays live and uncovered throughout) — released
+  by `SessionsController::first_load_settled` (set on either `Ok` or `Err`), with input falling through
+  to the live band from the last piece's landing, not the unmount; the overlay's picture is frozen at
+  that settle, so a poll landing inside its tail reaches only the live band. Until it settles, the
+  list's trailing row is `widgets::loading_view` rather than the create row, and
   `set_loading_rain_for_tests` is the process-static seam a test binary opts out with (see
   [ARCHITECTURE.md](ARCHITECTURE.md) for the shared orchestrator).
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
