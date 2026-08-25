@@ -1,22 +1,19 @@
-//! The splash orchestrator: five beats — icon, burst, rain, the Connect
-//! screen's piece-by-piece assembly, and the unmount — sequenced over one
-//! master clock (starts on the overlay's first painted frame) plus a
-//! rain-local clock (`t = tOverall - ICON_DELAY`) that starts when the icon
-//! dissolves. Plays once per process launch. Every value below derives from
-//! [`spec`], never re-typed.
+//! The splash orchestrator: four beats — icon, burst, the Connect screen's
+//! piece-by-piece assembly, and the unmount — sequenced over one master
+//! clock that starts on the overlay's first painted frame. Plays once per
+//! process launch. Every value below derives from [`spec`], never re-typed.
 //!
-//! | Master | Rain-local | Beat |
-//! |---|---|---|
-//! | 0 | — | The icon springs in ([`icon_phase`](super::icon_phase)) |
-//! | 1000 ([`rain_cue_ms`]) | 0 | Icon dissolves; [`burst`](super::burst) fires and [`rain`](super::rain) starts, already mid-fall |
-//! | 2400 | 1400 | The rain begins thinning column by column |
-//! | 2500 ([`assembly_start_ms`]) | 1500 | The first piece drops in; the rest stagger 130…860ms behind it |
-//! | 3860 ([`assembly_end_ms`]) | 2860 | The last piece has landed and its flash has faded |
-//! | 4200 ([`sequence_end_ms`]) | 3200 | The rain's own tail ends — the overlay unmounts |
+//! | Master | Beat |
+//! |---|---|
+//! | 0 | The icon springs in ([`icon_phase`](super::icon_phase)) |
+//! | 1000 ([`dissolve_cue_ms`]) | The icon dissolves as [`burst`](super::burst) fires and the first piece drops ([`assembly_start_ms`]); the rest stagger 130…860ms behind it |
+//! | 1600 ([`burst_end_ms`]) | The last particle has flown out and faded |
+//! | 2360 ([`assembly_end_ms`], [`sequence_end_ms`]) | The last piece has landed and its flash has faded — the overlay unmounts |
 //!
-//! [`sequence_end_ms`] is the later of the assembly's and the rain's own
-//! end, so unmounting never cuts the rain's drain short (popping the few
-//! columns still falling out of existence).
+//! [`sequence_end_ms`] is the later of the assembly's and the burst's own
+//! end, so unmounting never cuts a particle's flight short. The amber rain
+//! is no beat of this timeline: it belongs to [`loading`](super::loading),
+//! which re-clocks it to a band still loading its own content.
 //!
 //! # The handoff
 //!
@@ -35,9 +32,9 @@
 //! # Clocking, without a per-frame rebuild
 //!
 //! [`Delayed`] gates its child by its own accumulated clock and simply
-//! doesn't paint it until its window opens; every gated child (`rain`,
-//! `burst`, each [`piece_entry`]) self-clocks from its own first paint —
-//! mounting is the cue, painting is the mount. The only signal write in the
+//! doesn't paint it until its window opens; every gated child (`burst`,
+//! each [`piece_entry`]) self-clocks from its own first paint — mounting
+//! is the cue, painting is the mount. The only signal write in the
 //! whole sequence is the one that ends it. The icon's own
 //! [`IconPhase`](super::icon_phase::IconPhase) publication is deliberately
 //! not used as the cue: both it and this schedule derive from
@@ -48,8 +45,8 @@
 //!
 //! [`splash_plan`] resolves to [`SplashPlan::Reduced`] and the shell mounts
 //! [`reduced_splash`] instead: the static icon for
-//! [`spec::REDUCED_HOLD_MS`], then straight to the finished screen — no rain,
-//! no burst, no assembly. Each widget re-checks the theme at paint time
+//! [`spec::REDUCED_HOLD_MS`], then straight to the finished screen — no
+//! burst, no assembly. Each widget re-checks the theme at paint time
 //! anyway, so `reduce_motion` turning on after the mount decision still
 //! collapses to a terminal state. The hold itself must not collapse the same
 //! way — it is only ever mounted under `reduce_motion`, so [`Cue`] takes the
@@ -85,7 +82,7 @@ static COLD_START_RESOLVED: AtomicBool = AtomicBool::new(false);
 /// What the composition root should mount for this launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplashPlan {
-    /// The whole sequence: icon → burst + rain → assembly.
+    /// The whole sequence: icon → dissolve + burst → assembly.
     Full,
     /// The reduced-motion fallback: a brief static icon, then the finished
     /// screen ([`reduced_splash`]).
@@ -140,15 +137,16 @@ pub fn claim_cold_start(start_route: &str, reduce_motion: bool) -> SplashPlan {
 // The timeline, derived from `spec`
 // ---------------------------------------------------------------------------
 
-/// Master-clock instant the icon dissolves and the burst + rain are cued —
-/// also the rain-local clock's zero.
-pub fn rain_cue_ms() -> f64 {
+/// Master-clock instant the icon dissolves and the burst is cued.
+pub fn dissolve_cue_ms() -> f64 {
     spec::ICON_DELAY_MS
 }
 
-/// Master-clock instant the assembly begins (its first piece has no stagger).
+/// Master-clock instant the assembly begins (its first piece has no
+/// stagger): the same instant, so a piece is already dropping as the icon
+/// scales out rather than after a beat of empty backdrop.
 pub fn assembly_start_ms() -> f64 {
-    rain_cue_ms() + spec::ASSEMBLY_START_MS
+    dissolve_cue_ms()
 }
 
 /// Master-clock instant the last piece has finished landing (its stagger,
@@ -158,16 +156,15 @@ pub fn assembly_end_ms() -> f64 {
     assembly_start_ms() + last + spec::PIECE_IN_MS.max(spec::LAND_FLASH_MS)
 }
 
-/// Master-clock instant the rain stops painting entirely (see
-/// [`rain_finished`](super::rain::rain_finished)).
-pub fn rain_end_ms() -> f64 {
-    rain_cue_ms() + spec::THIN_END_MS + spec::RAIN_TAIL_MS
+/// Master-clock instant the last burst particle has finished flying out.
+pub fn burst_end_ms() -> f64 {
+    dissolve_cue_ms() + spec::BURST_MS
 }
 
 /// Master-clock instant the whole sequence is over and the overlay unmounts:
-/// the later of [`assembly_end_ms`] and [`rain_end_ms`] (see the module docs).
+/// the later of [`assembly_end_ms`] and [`burst_end_ms`] (see the module docs).
 pub fn sequence_end_ms() -> f64 {
-    assembly_end_ms().max(rain_end_ms())
+    assembly_end_ms().max(burst_end_ms())
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +177,7 @@ pub fn sequence_end_ms() -> f64 {
 ///   ([`splash_icon_art`](super::icon_phase::splash_icon_art), from the
 ///   composition root's `init`) and clone the handle in; this runs on every
 ///   rebuild.
-/// - `seed` — fixes the burst's particles and the rain's whole field.
+/// - `seed` — fixes the burst's particles: their glyphs and flight paths.
 /// - `pieces` — the screen to assemble, in stagger order, built with the
 ///   same builder the route uses (see the module docs' handoff note) — or
 ///   there are two different pictures to cross.
@@ -201,14 +198,16 @@ pub fn splash_sequence<State: 'static>(
         .collect();
     let assembly = assemble(staggered);
 
-    // Bottom-to-top, matching the source's z-index ladder: the canvas (1)
-    // under the ui-layer (5), under the burst particles (8), under the icon
-    // (10). The backdrop is below all of it, and the cue is a zero-size leaf.
+    // Bottom-to-top, matching the source's z-index ladder: the ui-layer (5)
+    // under the burst particles (8), under the icon (10). The backdrop is
+    // below all of it, and the cue is a zero-size leaf.
     any(Stack(vec![
         any(page_backdrop::<State>().block_input(true)),
-        any(delayed(rain_cue_ms(), super::rain::rain::<State>(seed))),
         any(delayed(assembly_start_ms(), assembly)),
-        any(delayed(rain_cue_ms(), super::burst::burst::<State>(seed))),
+        any(delayed(
+            dissolve_cue_ms(),
+            super::burst::burst::<State>(seed),
+        )),
         any(icon_phase::<State>(art)),
         any(cue::<State>(sequence_end_ms(), done)),
     ]))
@@ -218,7 +217,7 @@ pub fn splash_sequence<State: 'static>(
 /// for [`spec::REDUCED_HOLD_MS`], then the finished screen directly.
 ///
 /// Mounted instead of [`splash_sequence`] when [`splash_plan`] resolves to
-/// [`SplashPlan::Reduced`] — no rain, burst or assembly to collapse, since
+/// [`SplashPlan::Reduced`] — no burst or assembly to collapse, since
 /// mounting them only to self-collapse would flash a frame of nothing.
 ///
 /// [`IconArt::Vector`] (the decode-failure fallback) shows the backdrop
@@ -344,7 +343,7 @@ impl Widget for DelayedWidget {
         // Deliberately does not forward, breaking the usual rule: the live
         // route mounted underneath already contributes the Connect screen's
         // nodes, so forwarding would publish them twice. Gated children are
-        // otherwise decorative (rain, burst).
+        // otherwise decorative (the burst).
     }
 }
 
@@ -779,31 +778,33 @@ mod tests {
     #[test]
     fn the_timeline_matches_the_sources_own_arithmetic() {
         // ICON_IN + ICON_HOLD.
-        assert_eq!(rain_cue_ms(), 1_000.0);
-        // `landPieces`: data-delay + ICON_DELAY + 1500.
-        assert_eq!(assembly_start_ms(), 2_500.0);
+        assert_eq!(dissolve_cue_ms(), 1_000.0);
+        // `landPieces`: data-delay + ICON_DELAY.
+        assert_eq!(assembly_start_ms(), 1_000.0);
         // Last stagger (860) + the 500ms spring/flash window.
-        assert_eq!(assembly_end_ms(), 3_860.0);
-        // ICON_DELAY + THIN_END + 400.
-        assert_eq!(rain_end_ms(), 4_200.0);
+        assert_eq!(assembly_end_ms(), 2_360.0);
+        // ICON_DELAY + the .6s fly-out.
+        assert_eq!(burst_end_ms(), 1_600.0);
+        assert_eq!(sequence_end_ms(), 2_360.0);
     }
 
     #[test]
-    fn the_sequence_outlasts_both_the_assembly_and_the_rain() {
+    fn the_sequence_outlasts_both_the_assembly_and_the_burst() {
         let end = sequence_end_ms();
         assert!(end >= assembly_end_ms(), "the last piece must have landed");
-        assert!(end >= rain_end_ms(), "the rain must have stopped painting");
+        assert!(end >= burst_end_ms(), "every particle must have faded");
         assert_eq!(
             end,
-            rain_end_ms(),
-            "the rain's tail is the later of the two"
+            assembly_end_ms(),
+            "the assembly is the later of the two"
         );
     }
 
     #[test]
-    fn the_beats_are_strictly_ordered() {
-        assert!(rain_cue_ms() < assembly_start_ms());
-        assert!(assembly_start_ms() < assembly_end_ms());
+    fn the_beats_are_ordered_with_the_assembly_riding_the_dissolve() {
+        assert_eq!(dissolve_cue_ms(), assembly_start_ms());
+        assert!(assembly_start_ms() < burst_end_ms());
+        assert!(burst_end_ms() < assembly_end_ms());
         assert!(assembly_end_ms() <= sequence_end_ms());
     }
 

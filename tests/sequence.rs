@@ -35,7 +35,7 @@ use muxr::features::connect::presentation::widgets::saved::splash_saved_servers;
 use muxr::ui::backdrop::page_backdrop;
 use muxr::ui::splash::icon_phase::{IconArt, splash_icon_art};
 use muxr::ui::splash::sequence::{
-    assembly_start_ms, rain_cue_ms, reduced_splash, sequence_end_ms, splash_sequence,
+    assembly_start_ms, dissolve_cue_ms, reduced_splash, sequence_end_ms, splash_sequence,
 };
 use muxr::{AppState, MuxrApp};
 
@@ -264,14 +264,14 @@ fn mount_sequence(reduce_motion: bool, frames: usize) -> (Vec<(Recorder, bool)>,
 }
 
 #[test]
-fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
+fn the_sequence_walks_icon_then_burst_and_assembly_off_one_clock() {
     let _g = serial();
     let _ambient = setup();
 
     let (frames, done) = mount_sequence(false, frame_at(sequence_end_ms() + 200.0));
     let heading = heading_ids();
 
-    // Icon beat: bitmap up, rain not started.
+    // Icon beat: bitmap up, nothing else started.
     let icon_beat = &frames[frame_at(500.0)].0;
     assert_eq!(icon_beat.images, 1, "the app icon paints on its own first");
     assert_eq!(
@@ -280,18 +280,31 @@ fn the_sequence_walks_icon_then_rain_then_assembly_off_one_clock() {
         icon_beat.glyph_runs
     );
 
-    // Rain cue: hundreds of glyphs, still no assembled screen.
-    let rain_beat = &frames[frame_at(rain_cue_ms() + 200.0)].0;
+    // Dissolve cue: the burst flies, the assembly is under way, the staggered heading is not.
+    let burst_beat = &frames[frame_at(dissolve_cue_ms() + 100.0)].0;
     assert!(
-        rain_beat.glyph_runs > 100,
-        "the rain starts dense at the cue, got {} runs",
-        rain_beat.glyph_runs
+        burst_beat.glyph_runs >= 14,
+        "all 14 particles fly out of the dissolve, got {} runs",
+        burst_beat.glyph_runs
     );
     assert_eq!(
-        occurrences(&rain_beat.glyph_ids, &heading),
+        occurrences(&burst_beat.glyph_ids, &heading),
         0,
-        "the assembly has not begun yet"
+        "the heading has not reached its stagger yet"
     );
+
+    // And no rain at any instant: the dense field painted hundreds of runs a frame; the burst 14.
+    for (index, (scene, _)) in frames.iter().enumerate() {
+        if occurrences(&scene.glyph_ids, &heading) == 0 {
+            assert!(
+                scene.glyph_runs <= 100,
+                "frame {index} ({:.0}ms) painted {} runs before the screen had \
+                 assembled — that is a rain field, and the cold start has none",
+                frame_ms(index, FRAME_NS),
+                scene.glyph_runs
+            );
+        }
+    }
 
     // Assembly: staggered, piece by piece.
     let before_heading = &frames[frame_at(assembly_start_ms() + HEADING_DELAY_MS - 60.0)].0;
@@ -381,7 +394,7 @@ fn the_completion_cue_fires_once_the_whole_timeline_has_run() {
 #[derive(Debug)]
 struct Beats {
     /// First frame drawing any glyph at all (the icon beat before it draws only the bitmap).
-    rain_cue: f64,
+    dissolve_cue: f64,
     /// First frame the staggered heading piece paints.
     heading: f64,
     /// The frame the completion cue fired on — the last one that asked for another, since a
@@ -399,7 +412,9 @@ fn observed_beats(cadence_ns: u64) -> Beats {
         None,
     );
 
-    let rain_cue = first_frame(&frames, "the rain cue", |(scene, _)| scene.glyph_runs > 0);
+    let dissolve_cue = first_frame(&frames, "the dissolve cue", |(scene, _)| {
+        scene.glyph_runs > 0
+    });
     let heading_frame = first_frame(&frames, "the heading piece", |(scene, _)| {
         occurrences(&scene.glyph_ids, &heading) > 0
     });
@@ -407,7 +422,7 @@ fn observed_beats(cadence_ns: u64) -> Beats {
         !needs_frame
     });
     Beats {
-        rain_cue: frame_ms(rain_cue, cadence_ns),
+        dissolve_cue: frame_ms(dissolve_cue, cadence_ns),
         heading: frame_ms(heading_frame, cadence_ns),
         end: frame_ms(quiet - 1, cadence_ns),
     }
@@ -422,16 +437,15 @@ fn the_timeline_lands_on_the_same_wall_clock_at_120hz() {
     let one_twenty = observed_beats(FRAME_NS_120);
     let frame = cadence_ms(FRAME_NS);
 
-    // Twice the frames, same wall clock: the splash is clock-driven, and
-    // `spec::REFERENCE_FRAME_MS`/`frame_factor` exist so the rain's per-frame row advance
-    // doesn't turn cadence into speed. Each beat is quantized to its own cadence, so two runs
-    // can differ by at most the coarser frame.
+    // Twice the frames, same wall clock: every beat is driven by its widget's own accumulated
+    // clock rather than by a per-frame step, so cadence never turns into speed. Each beat is
+    // quantized to its own cadence, so two runs can differ by at most the coarser frame.
     for (what, at_60, at_120, expected, gates) in [
         (
-            "the rain cue",
-            sixty.rain_cue,
-            one_twenty.rain_cue,
-            rain_cue_ms(),
+            "the dissolve cue",
+            sixty.dissolve_cue,
+            one_twenty.dissolve_cue,
+            dissolve_cue_ms(),
             1.0,
         ),
         (
