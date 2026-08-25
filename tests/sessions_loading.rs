@@ -20,12 +20,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use frust::authoring::text::{TextContext, TextStyle};
-use frust::authoring::{Point, View, any};
+use frust::authoring::{Point, any};
 use frust::{
     AnyView, Column, Component, Get, NavigatorController, RwSignal, SizedBox, Stack, Theme,
     navigator, text,
 };
-use frust_core::{FrameTime, PaintScene, RenderRoot};
+use frust_core::{FrameTime, InputEvent, PaintScene, PointerPhase, RenderRoot, ScrollDelta};
 use frust_scene::GlyphRun;
 use kurbo::{Rect, Size};
 use peniko::Color;
@@ -37,7 +37,9 @@ use muxr::ui::splash::loading::loading_sequence;
 use muxr::{AppState, MuxrApp};
 
 mod support;
-use support::{node_centers_by_value, node_values, pump_frames, serial, setup, surface, tap};
+use support::{
+    char_key, node_centers_by_value, node_values, pointer, pump_frames, serial, setup, surface, tap,
+};
 
 /// The design reference's phone screen, as `tests/sequence.rs` drives it.
 const SURFACE: Size = Size::new(340.0, 650.0);
@@ -59,6 +61,10 @@ const PIECE_IN_MS: f64 = 500.0;
 const PIECE_DELAYS_MS: [f64; 8] = [0.0, 130.0, 260.0, 390.0, 480.0, 580.0, 720.0, 860.0];
 /// Release to the end of the whole sequence (`loading::sequence_end_ms`).
 const SEQUENCE_END_MS: f64 = 1_800.0;
+/// When the standalone rig's last piece has landed and the overlay stops
+/// swallowing input (`loading::assembly_landed_ms` over [`PIECES`] pieces).
+const LANDED_MS: f64 =
+    MIN_DENSE_MS + ASSEMBLY_OFFSET_MS + PIECE_DELAYS_MS[PIECES - 1] + PIECE_IN_MS;
 
 /// Glyph runs a frame must beat to count as "the rain is up": the dense field
 /// paints one run per glyph, where the band's own text is a few dozen.
@@ -67,17 +73,25 @@ const PIECES: usize = 3;
 /// Fixes the standalone rain's field, so a run replays exactly.
 const SEED: u64 = 0x6C6F_6164;
 
-/// A recording paint target: the glyph-id stream, its run count, its fills.
+/// A recording paint target: the glyph-id stream, its run count, and the boxes
+/// it filled and clipped to.
 #[derive(Default)]
 struct Recorder {
     glyph_ids: Vec<u32>,
     glyph_runs: usize,
-    fills: usize,
+    /// Every `fill_rect`, paint order — the overlay's tone is the only fill the
+    /// standalone rig paints at all.
+    fills: Vec<(Point, Size)>,
+    /// Every `push_clip`, paint order.
+    clips: Vec<(Point, Size)>,
 }
 
 impl PaintScene for Recorder {
-    fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {
-        self.fills += 1;
+    fn fill_rect(&mut self, origin: Point, size: Size, _color: Color) {
+        self.fills.push((origin, size));
+    }
+    fn push_clip(&mut self, origin: Point, size: Size) {
+        self.clips.push((origin, size));
     }
     fn fill_rounded_rect(&mut self, _origin: Point, _size: Size, _radius: f64, _color: Color) {}
     fn draw_text(&mut self, _origin: Point, _text: &str) {}
@@ -97,6 +111,14 @@ fn theme(reduce_motion: bool) -> Theme {
 
 fn tone() -> Color {
     frust_glyph::baseline().scheme().surface
+}
+
+/// A wheel notch at `at` — hit-tested by position, exactly like a pointer.
+fn wheel(at: Point) -> InputEvent {
+    InputEvent::Scroll {
+        position: at,
+        delta: ScrollDelta::Lines(0.0, -3.0),
+    }
 }
 
 fn cadence_ms(cadence_ns: u64) -> f64 {
@@ -171,43 +193,96 @@ fn lands_on(what: &str, fired: f64, expected: f64, cadence_ns: u64) {
 // Part A — the orchestrator mounted alone
 // ---------------------------------------------------------------------------
 
-/// Drive `frames` frames of the real shell loop at `cadence_ns` — rebuild, lay
-/// out shaping real text, paint — returning each frame's recording and whether
-/// it asked for another. `tick`, run before each rebuild, is where a test flips
-/// the release flag its `logic` reads.
-fn drive_at<V: View<AppState>>(
-    cadence_ns: u64,
-    logic: &mut impl FnMut(&mut AppState) -> V,
-    state: &mut AppState,
-    theme: Theme,
-    frames: usize,
-    tick: &mut impl FnMut(usize),
-) -> Vec<(Recorder, bool)> {
-    let mut root: RenderRoot<AppState, V> = RenderRoot::new();
-    let mut text_ctx = TextContext::new();
-    root.set_theme(Box::new(theme));
-
-    (0..frames)
-        .map(|frame| {
-            tick(frame);
-            root.rebuild(logic, state);
-            let text_any: &mut dyn Any = &mut text_ctx;
-            root.layout_with_text(SURFACE, text_any);
-            let mut scene = Recorder::default();
-            let outcome = root.paint(&mut scene, FrameTime::from_nanos(frame as u64 * cadence_ns));
-            (scene, outcome.needs_frame)
-        })
-        .collect()
-}
-
 /// The `index`th piece's text — a plain leaf, so what the assembly proves is
 /// the stagger rather than any one screen's widgets.
 fn piece_name(index: usize) -> String {
     format!("card-{index}")
 }
 
-fn pieces() -> Vec<AnyView<AppState>> {
-    (0..PIECES).map(|i| any(text(piece_name(i)))).collect()
+fn pieces_for(count: usize) -> Vec<AnyView<AppState>> {
+    (0..count).map(|i| any(text(piece_name(i)))).collect()
+}
+
+type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
+
+/// The orchestrator alone on its own root, driven a frame at a time through the
+/// real shell loop — rebuild, lay out shaping real text, paint. Nothing else is
+/// mounted, so an event's `handled` is the overlay's own answer.
+struct Rig {
+    root: RenderRoot<AppState, AnyView<AppState>>,
+    logic: Logic,
+    state: AppState,
+    tcx: TextContext,
+    released: Rc<Cell<bool>>,
+    done: RwSignal<bool>,
+    cadence_ns: u64,
+    /// The frame the `released` flag flips on; `None` never settles, leaving
+    /// the hold ceiling to release it.
+    release_frame: Option<usize>,
+    frame: usize,
+}
+
+impl Rig {
+    /// `count` is how many pieces a rebuild mounts, asked with the release flag
+    /// it is rebuilding under — a band settling inside the tail mounts more of
+    /// them than the one that was there when the ceiling fired.
+    fn mount(
+        cadence_ns: u64,
+        reduce_motion: bool,
+        release_frame: Option<usize>,
+        count: fn(bool) -> usize,
+    ) -> Rig {
+        let released = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&released);
+        let done = RwSignal::new(false);
+        let logic: Logic = Box::new(move |_: &mut AppState| {
+            let settled = flag.get();
+            loading_sequence(
+                SEED,
+                tone(),
+                pieces_for(count(settled)),
+                |pieces| any(Column(pieces)),
+                settled,
+                done,
+            )
+        });
+        let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
+        root.set_theme(Box::new(theme(reduce_motion)));
+        Rig {
+            root,
+            logic,
+            state: MuxrApp.init(),
+            tcx: TextContext::new(),
+            released,
+            done,
+            cadence_ns,
+            release_frame,
+            frame: 0,
+        }
+    }
+
+    fn step(&mut self) -> (Recorder, bool) {
+        if self.release_frame.is_some_and(|at| self.frame >= at) {
+            self.released.set(true);
+        }
+        self.root.rebuild(&mut self.logic, &mut self.state);
+        let text_any: &mut dyn Any = &mut self.tcx;
+        self.root.layout_with_text(SURFACE, text_any);
+        let mut scene = Recorder::default();
+        let at = FrameTime::from_nanos(self.frame as u64 * self.cadence_ns);
+        let outcome = self.root.paint(&mut scene, at);
+        self.frame += 1;
+        (scene, outcome.needs_frame)
+    }
+
+    fn drive(&mut self, frames: usize) -> Vec<(Recorder, bool)> {
+        (0..frames).map(|_| self.step()).collect()
+    }
+
+    /// Whether the overlay consumed `event`, dispatched between two frames.
+    fn swallows(&mut self, event: &InputEvent) -> bool {
+        self.root.event(&mut self.state, event).handled
+    }
 }
 
 /// The glyph ids the `index`th piece paints — a plain `text` shapes at
@@ -216,43 +291,30 @@ fn piece_ids(index: usize) -> Vec<u32> {
     glyph_ids(&piece_name(index), &TextStyle::default())
 }
 
-/// Mount the loading rain alone over [`pieces`] at `cadence_ns`, so every draw
-/// recorded belongs to it. `release_frame` is the frame the `released` flag
-/// flips on; `None` never settles, leaving the hold ceiling to release it.
+/// Mount the loading rain alone over [`PIECES`] pieces at `cadence_ns`, so
+/// every draw recorded belongs to it, and drive `frames` frames of it.
 fn mount_loading_at(
     cadence_ns: u64,
     reduce_motion: bool,
     frames: usize,
     release_frame: Option<usize>,
 ) -> (Vec<(Recorder, bool)>, RwSignal<bool>) {
-    let mut state = MuxrApp.init();
-    let released = Rc::new(Cell::new(false));
-    let flag = Rc::clone(&released);
-    let done = RwSignal::new(false);
-    let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
-        loading_sequence(
-            SEED,
-            tone(),
-            pieces(),
-            |pieces| any(Column(pieces)),
-            flag.get(),
-            done,
-        )
-    };
-    let mut tick = |frame: usize| {
-        if release_frame.is_some_and(|at| frame >= at) {
-            released.set(true);
-        }
-    };
-    let frames = drive_at(
-        cadence_ns,
-        &mut logic,
-        &mut state,
-        theme(reduce_motion),
-        frames,
-        &mut tick,
-    );
-    (frames, done)
+    let mut rig = Rig::mount(cadence_ns, reduce_motion, release_frame, |_| PIECES);
+    let recorded = rig.drive(frames);
+    (recorded, rig.done)
+}
+
+/// The overlay's own answer to `event`, asked one frame past `ms` into a run
+/// released at the floor.
+fn swallowed_at(ms: f64, reduce_motion: bool, event: &InputEvent) -> bool {
+    let mut rig = Rig::mount(FRAME_NS, reduce_motion, Some(0), |_| PIECES);
+    rig.drive(frame_at(ms) + 1);
+    rig.swallows(event)
+}
+
+/// The middle of the surface — over a piece, wherever the assembly put it.
+fn mid_surface() -> Point {
+    Point::new(SURFACE.width / 2.0, SURFACE.height / 2.0)
 }
 
 /// Release mid-hold at `cadence_ns`: when the cue fired, and the release
@@ -421,11 +483,29 @@ fn reduced_motion_ends_the_sequence_on_its_first_frame() {
 
     let (frames, done) = mount_loading_at(FRAME_NS, true, 4, None);
     assert!(done.get(), "the cue fires immediately under reduced motion");
+
+    let (firing, needs_frame) = &frames[0];
+    assert!(
+        needs_frame,
+        "the firing frame must ask for the frame that acts on its write"
+    );
+    assert_eq!(
+        firing.fills.len(),
+        1,
+        "the one frame it paints is the band's own tone"
+    );
     for (index, (scene, needs_frame)) in frames.iter().enumerate() {
         assert_eq!(scene.glyph_runs, 0, "frame {index} painted rain");
-        assert_eq!(scene.fills, 0, "frame {index} painted the band tone");
-        assert!(!needs_frame, "frame {index} kept the shell spinning");
+        assert!(scene.clips.is_empty(), "frame {index} opened an assembly");
+        assert!(
+            *needs_frame == (index == 0),
+            "frame {index} kept the shell spinning"
+        );
     }
+    assert!(
+        !swallowed_at(0.0, true, &pointer(PointerPhase::Down, mid_surface())),
+        "a fired overlay is not a barrier: the tone frame takes no taps"
+    );
 }
 
 #[test]
@@ -446,6 +526,95 @@ fn the_release_lands_on_the_same_wall_clock_at_120hz() {
     );
 }
 
+#[test]
+fn the_overlay_swallows_pointer_and_scroll_only_until_its_assembly_lands() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let held = LANDED_MS - 200.0;
+    assert!(
+        swallowed_at(held, false, &pointer(PointerPhase::Down, mid_surface())),
+        "a tap must not reach a card nobody can see yet"
+    );
+    assert!(
+        swallowed_at(held, false, &wheel(mid_surface())),
+        "and neither must a wheel notch meant for the list under it"
+    );
+    assert!(
+        !swallowed_at(held, false, &char_key("a")),
+        "a focus-routed key was never this overlay's to take"
+    );
+
+    let landed = LANDED_MS + 100.0;
+    assert!(
+        landed < MIN_DENSE_MS + SEQUENCE_END_MS,
+        "the overlay must still be up, or this proves nothing"
+    );
+    assert!(
+        !swallowed_at(landed, false, &pointer(PointerPhase::Down, mid_surface())),
+        "a landed assembly is the band's own picture: a tap falls through it"
+    );
+    assert!(
+        !swallowed_at(landed, false, &wheel(mid_surface())),
+        "and so does the wheel"
+    );
+}
+
+#[test]
+fn the_assembly_paints_clipped_to_the_band() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (frames, _) = mount_loading_at(FRAME_NS, false, frame_at(LANDED_MS) + 1, Some(0));
+    assert!(
+        frames[frame_at(MIN_DENSE_MS)].0.clips.is_empty(),
+        "nothing is clipped while the assembly is still withheld"
+    );
+
+    let landed = &frames[frame_at(LANDED_MS)].0;
+    assert_eq!(
+        landed.clips, landed.fills,
+        "the assembly is clipped to exactly the box the tone fills — the same \
+         box the live scroller beneath clips to"
+    );
+    assert_eq!(landed.clips.len(), 1, "and the overlay does open one");
+}
+
+#[test]
+fn a_settle_inside_the_tail_still_lands_every_piece_it_mounts() {
+    let _g = serial();
+    let _ambient = setup();
+
+    // Late enough that an end measured from the ceiling would cut the pieces
+    // this settle mounts off mid-drop.
+    let release_frame = frame_at(MAX_HOLD_MS + 1_500.0);
+    let settled = frame_ms(release_frame, FRAME_NS);
+    let landed = settled + PIECE_DELAYS_MS[PIECES - 1] + PIECE_IN_MS;
+    let end = settled + SEQUENCE_END_MS;
+    let mut rig = Rig::mount(FRAME_NS, false, Some(release_frame), |released| {
+        if released { PIECES } else { 1 }
+    });
+    let frames = rig.drive(frame_at(end + 200.0));
+    assert!(rig.done.get(), "a settle inside the tail still ends");
+
+    let quiet = first_frame(&frames, "the sequence settling", |(_, needs_frame)| {
+        !needs_frame
+    });
+    let fired = frame_ms(quiet - 1, FRAME_NS);
+    assert!(
+        fired >= landed,
+        "the cue fired at {fired:.1}ms, over a piece landing at {landed:.1}ms"
+    );
+    lands_on("the re-based cue", fired, end, FRAME_NS);
+    for index in 0..PIECES {
+        assert_eq!(
+            occurrences(&frames[quiet - 1].0.glyph_ids, &piece_ids(index)),
+            1,
+            "every piece must be on screen on the last frame the overlay paints"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Part B — the real /sessions band under the overlay
 // ---------------------------------------------------------------------------
@@ -457,8 +626,11 @@ const SEEDED: [&str; 3] = ["dev", "jumping-peach", "herdr"];
 /// — as the card's own title, and again in the backend badge beside it.
 const BAND_COPIES: [usize; 3] = [1, 1, 2];
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
-
-type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
+/// The band's pieces: a card per seeded session, closed by the trailing row.
+const BAND_PIECES: usize = SEEDED.len() + 1;
+/// When the mounted band's last card has landed (see [`LANDED_MS`]).
+const BAND_LANDED_MS: f64 =
+    MIN_DENSE_MS + ASSEMBLY_OFFSET_MS + PIECE_DELAYS_MS[BAND_PIECES - 1] + PIECE_IN_MS;
 
 /// The glyph ids a card's name paints — `session_card` inks the theme's
 /// `label_large` slot, and inking replaces only the color.
@@ -497,6 +669,16 @@ impl Band {
     /// Mount with the loading rain on (`support::setup` opts every other suite
     /// out of it) and the mock connection dialled.
     fn mount() -> Band {
+        Band::mount_at(false)
+    }
+
+    /// [`Band::mount`] under a theme whose motion is reduced. The default rig
+    /// installs no theme of its own, so only this one names one.
+    fn mount_reduced() -> Band {
+        Band::mount_at(true)
+    }
+
+    fn mount_at(reduce_motion: bool) -> Band {
         set_loading_rain_for_tests(true);
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
@@ -516,9 +698,13 @@ impl Band {
             ]))
         });
         expect_connection_controller().connect(mock_target());
+        let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
+        if reduce_motion {
+            root.set_theme(Box::new(theme(true)));
+        }
         Band {
             nav,
-            root: RenderRoot::new(),
+            root,
             logic,
             state,
             tcx: TextContext::new(),
@@ -674,6 +860,60 @@ fn the_overlay_hands_the_band_over_to_live_cards_when_its_sequence_ends() {
         band.depth(),
         before + 1,
         "the handed-over cards are live: a tap pushes the terminal route"
+    );
+}
+
+#[test]
+fn a_tap_reaches_the_live_card_once_the_assembly_has_landed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut band = Band::mount();
+    band.settle_first_load();
+
+    let scene = band.drive_to(BAND_LANDED_MS + 100.0);
+    for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
+        assert_eq!(
+            occurrences(&scene.glyph_ids, &name_ids(name)),
+            2 * copies,
+            "the overlay is still up, printing its landed copy of {name} over the live one"
+        );
+    }
+
+    let before = band.depth();
+    let card = band.center_of(SEEDED[0]);
+    band.tap(card);
+    band.step();
+    band.step();
+    assert_eq!(
+        band.depth(),
+        before + 1,
+        "a landed card is live under the overlay: a tap pushes the terminal route"
+    );
+}
+
+#[test]
+fn reduced_motion_leaves_the_band_live_from_its_first_frame() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut band = Band::mount_reduced();
+    band.settle_first_load();
+
+    let scene = band.step();
+    assert!(
+        scene.glyph_runs < DENSE_RUNS,
+        "no rain plays under reduced motion: {} runs",
+        scene.glyph_runs
+    );
+
+    let before = band.depth();
+    let card = band.center_of(SEEDED[0]);
+    band.tap(card);
+    band.step();
+    band.step();
+    assert_eq!(
+        band.depth(),
+        before + 1,
+        "the frame after the cue is the band's own, taps included"
     );
 }
 
