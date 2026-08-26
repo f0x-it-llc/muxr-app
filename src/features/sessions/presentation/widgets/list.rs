@@ -28,6 +28,8 @@ const NEW_SESSION_PLUS: &str = "+";
 /// The new-session row's label — one spelling, shared by the row and the
 /// empty state's own action.
 const NEW_SESSION_LABEL: &str = "new session";
+/// What the list says while its first load is still in flight.
+const LOADING_LABEL: &str = "loading sessions\u{2026}";
 
 /// The dashed, centre-aligned row that closes the list. The `+` is amber
 /// because it is the call to action; the label beside it is muted.
@@ -67,6 +69,22 @@ pub(in crate::features::sessions::presentation) fn new_session_row(
     } else {
         any(dashed)
     }
+}
+
+/// What closes the list while the first load is still in flight: one muted
+/// line, padded to the band the dashed row takes once it settles. No border
+/// and no action — nothing here is pressable yet.
+pub(in crate::features::sessions::presentation) fn loading_view(
+    colors: &Palette,
+) -> AnyView<SessionsState> {
+    let theme = active_theme();
+    any(Padding(
+        EdgeInsets::all(NEW_ROW_PAD),
+        Align(
+            Alignment::CENTER,
+            text(LOADING_LABEL).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+        ),
+    ))
 }
 
 /// What the list shows once every session has been killed — Glyph's own

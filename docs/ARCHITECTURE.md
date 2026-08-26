@@ -42,9 +42,8 @@ there would always see the fallback baseline.
 Two page builders, not one floating chrome layer. `root_view` is the app's whole root content: the
 **outer** navigator (`/` and, once placed, the shell page) plus the app-wide toast layer, both fixed
 `Stack` indices `Stack`'s positional reconciliation never tears down, and an optional overlay tail
-(the cold-start splash) that alone grows or shrinks. The bar is no slot here at all — it belongs one
-page down, to `shell_page`'s own scaffold, which is what keeps it off `/` and off every in-shell
-navigation.
+(the cold-start splash) that alone grows or shrinks. The bar is no slot here — it belongs one page
+down, to `shell_page`'s own scaffold, keeping it off `/` and off every in-shell navigation.
 
 `shell_page` is the shell route's own page (see Navigation, below, for how it gets placed):
 `frust::scaffold` over a **second, inner** navigator carrying the three bar-bearing routes, its
@@ -115,38 +114,41 @@ reaches the host before either navigator.
 ## UI Substrate — `src/ui/`
 
 - **`palette`** — `Palette`, the app's one theme-derived colour vocabulary (`Palette::from_theme`,
-  `active_theme()`, `inked()` for tinting a `TextStyle`), adopted by all four features'
-  `presentation::widgets` in place of each's own former per-feature `Palette` struct. Terminal's
-  `GlyphInk`-sourced card tones and ANSI palette stay terminal-local by design.
+  `active_theme()`, `inked()` for tinting a `TextStyle`), adopted by all four features' widgets
+  (terminal's `GlyphInk`-sourced tones and ANSI palette stay local by design).
 - **`spacing`** — eleven named spacing constants (`MICRO`..`HERO`) on the app's measured de-facto
   scale, adopted by every feature in place of its own local padding/gap constants; an odd one-off
   value stays feature-local rather than earning a token of its own.
 - **`paint`** — shared paint-primitive tokens (hairline width, pill radius, glow blur/spread, dash
   on/off step), one declaration each so no feature's hand-rolled chrome can drift from another's.
 - **`backdrop`** — the app's full-bleed page background, shared by Connect and the splash overlay.
-- **`topbar`** — bar *furniture*, not the bar itself: `brand_leading`/`bar_icon`, the two slot
-  contents `shell_bar`'s `RouteMeta` adapter feeds to `frust_glyph::AppBarView` (mounted in the shell
-  scaffold's `app_bar` slot — the bar's own surface, inset consumption and title crossfade are all
-  Glyph's); `icon_button`, the app's one vector press-target primitive (promotion out of this module
-  is Planned, below); and `BAR_HEIGHT`, Glyph's own private compact-bar height, transcribed as the
-  one anchor `features::terminal`'s chrome still needs it as a number for.
-- **`sheet`** — `show_sheet`, a thin app-facing adapter over `frust::glyph`'s `glyph_sheet`/
-  `show_glyph_sheet` (the panel, its scrim, the drag handle, and every dismissal gesture belong to
-  Glyph itself); owns only the app's own full-content-width body gutter. `show_sheet` and
-  `dialogs`' helpers take only the navigator — nothing else about app state crosses that boundary.
-- **`side_sheet`** — `show_side_sheet`, the x-axis sibling adapter over `frust_glyph`'s own side
-  sheet: a sticky footer slot beside the body, and an `on_dismiss` fired once on any exit (scrim,
-  close affordance, back, or a programmatic close). Shares `sheet`'s one-shot dismissal gate,
-  `SheetHandle` (`ui/mod.rs`): `close`/`close_then` fire at most once, so a duplicate close cannot
-  pop the route or page under a sheet twice.
+- **`topbar`** — bar *furniture*, not the bar itself: `brand_leading`/`bar_icon`, the slot contents
+  `shell_bar` feeds `frust_glyph::AppBarView` (mounted in the shell scaffold's `app_bar` slot — the
+  bar's own surface/inset/crossfade are all Glyph's); `icon_button`, the app's one vector press-target
+  primitive (promotion out is Planned, below); and `BAR_HEIGHT`, Glyph's private compact-bar height, the
+  anchor `features::terminal`'s chrome still needs as a number.
+- **`sheet`** — `show_sheet`, an app-facing adapter over `frust::glyph`'s
+  `glyph_sheet`/`show_glyph_sheet` (panel, scrim, drag handle, dismissal all Glyph's); owns only the
+  full-content-width body gutter. `show_sheet`/`dialogs`' helpers take only the navigator — nothing else
+  about app state crosses that boundary.
+- **`side_sheet`** — `show_side_sheet`, the x-axis sibling adapter over `frust_glyph`'s own side sheet:
+  a sticky footer slot beside the body, an `on_dismiss` fired once on any exit (scrim, close, back, or
+  programmatic). Shares `sheet`'s one-shot dismissal gate, `SheetHandle` (`ui/mod.rs`):
+  `close`/`close_then` fire once, so a duplicate close can't pop a route or page twice.
 - **`dialogs`** — Flutter-parity confirm/name-input modals (`confirm_dialog`/`name_input_dialog`)
   over `frust::glyph::glyph_dialog`, pushed as transparent navigator pages; generic over `State`.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
   `shell::root_view` mounts permanently.
-- **`splash`** — the cold-start sequence: five beats off one master clock, each independently
-  mountable/testable; plays once per process launch, collapsing to a brief static hold under
-  `reduce_motion`. Every timing/geometry constant is transcribed once, in `ui/splash/mod.rs::spec`,
-  from `docs/splash.html`.
+- **`splash`** — the cold-start sequence (icon → dissolve (+burst) → assembly, unmount) off one master
+  clock, each beat independently mountable/testable, once per process launch, collapsing to a static hold
+  under `reduce_motion`. A second orchestrator, `loading`, plays the rain into that same assembly over a
+  band still loading its own content (Sessions' first load): dense until it settles, floored at 600ms and
+  capped at an 8s self-release, then thin plus a staggered assembly clipped to the band, unmounting onto the
+  live content. Scroll stops here for the overlay's whole life; a pointer stops until the last piece lands
+  and, if the band beneath has since changed, until the unmount; otherwise it falls through to the identical
+  live band; it publishes no semantics. Both orchestrators' timing/geometry constants transcribe once, in
+  `ui/splash/mod.rs::spec`, from `docs/splash.html`; `loading`'s own hold/ceiling/offset constants are this
+  app's tuning, not part of that transcription.
 
 **Chrome icons are vectors; font glyphs are content text only.** A bar affordance, a FAB, or a row's
 trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` — never a font
@@ -166,54 +168,53 @@ width-clamp-and-padding pass only, never a *structural* (side-by-side-pane, two-
 
 ## Tests — `tests/`
 
-Headless integration tests drive a `RenderRoot` directly (no GPU, no window). `tests/support::setup`
-is the one call site that opts a whole test binary onto every mock repository before `MuxrApp::init`
-runs — seven seams (connection, sessions, terminal, settings' preferences and auth tokens, connect's
-saved-servers and credential-service), each flipped by its own module's `use_mock_*_for_tests()`. The
-same module is also the shared paint/frame/pump harness (a recording paint scene, sized-frame/pump
-helpers, event builders, value and rect-diff readers). `routes.rs` smoke-tests the route table's shape
-and the session guard in isolation — no reactive owner on the stack at all, the tripwire for
-`session_guard_with`'s capture-not-context contract; `guard_shell.rs` is its shell-boundary
-counterpart, pinning the bounce-unwind, the reconnect loop, and dismiss-cell freshness.
-`sequence.rs`/`splash.rs` exercise the splash timeline; `navigation_motion.rs` mounts the *whole*
-app (only `MuxrApp` places the scaffold, and so the bar) to exercise the `RouteMeta` adapter, shell
-behavior (bar-less Connect, a titled route, direction on back, terminal fullscreen suppression, the
-settings → sessions → connect round trip) and overlay-host arbitration (R44-back, a modal dimming
-the bar) — read off the accessibility tree, since a navigator's own pages are otherwise invisible to
-it; `shell_handoff.rs` is the widget-identity regression test for the root `Stack`'s fixed indices.
-`layering.rs` is a source-scan conformance test enforcing that owner-dependent context lookups appear
-only at DI/presentation-sanctioned sites, and never inside a spawned async block's body regardless of
-directory.
-`comment_residue.rs` is a source-scan ratchet locking the frust checkout's Comment Conventions shut
-for this app's own `src/`/`tests/` — a slimmed port of frust's own conformance scan, plus a
-gate/G-ledger citation detector for this repo's device-gate review shorthand. `comment_density.rs`
-is the sibling comment-density ratchet: overall + per-file caps with a justified allowlist, over
-the same `src/`/`tests/` roots. Per-feature and net-transport suites are covered in
-[FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests) and
+Headless integration tests drive a `RenderRoot` directly (no GPU, no window). `tests/support::setup` is
+the one call site that opts a whole test binary onto every mock repository before `MuxrApp::init` runs —
+seven seams (connection, sessions, terminal, settings' preferences and auth tokens, connect's saved-
+servers and credential-service), each flipped by its own module's `use_mock_*_for_tests()`, plus the
+sessions loading-rain flag (`set_loading_rain_for_tests`), pinned off since every other suite's frame
+clock sits frozen mid-rain otherwise. The same module is also the shared paint/frame/pump harness (a
+recording paint scene, sized-frame/pump helpers, event builders, value and rect-diff readers).
+`routes.rs` smoke-tests the route table's shape and the session guard in isolation — no reactive owner
+on the stack at all, the tripwire for `session_guard_with`'s capture-not-context contract;
+`guard_shell.rs` is its shell-boundary counterpart, pinning the bounce-unwind, the reconnect loop, and
+dismiss-cell freshness. `sequence.rs`/`splash.rs` exercise the splash timeline and `splash_contract.rs`
+pins `ui/splash/mod.rs::spec` to `docs/splash.html`; `sessions_loading.rs` drives the `loading`
+orchestrator's release/hold/stagger standalone, then the mounted `/sessions` band's hand-over to live
+cards (see [FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests)).
+`navigation_motion.rs` mounts the *whole* app (only `MuxrApp` places the scaffold, and so the bar) to
+exercise the `RouteMeta` adapter, shell behavior (bar-less Connect, a titled route, direction on back,
+terminal fullscreen suppression, the settings → sessions → connect round trip) and overlay-host
+arbitration (R44-back, a modal dimming the bar) — read off the accessibility tree, since a navigator's
+own pages are otherwise invisible to it; `shell_handoff.rs` is the widget-identity regression test for
+the root `Stack`'s fixed indices. `layering.rs` is a source-scan conformance test enforcing that owner-
+dependent context lookups appear only at DI/presentation-sanctioned sites, and never inside a spawned
+async block's body regardless of directory. `comment_residue.rs` is a source-scan ratchet locking the
+frust checkout's Comment Conventions shut for this app's own `src/`/`tests/` — a slimmed port of frust's
+own conformance scan, plus a gate/G-ledger citation detector for this repo's device-gate review
+shorthand. `comment_density.rs` is the sibling comment-density ratchet: overall + per-file caps with a
+justified allowlist, over the same `src/`/`tests/` roots. Per-feature and net-transport suites are
+covered in [FEATURES_ARCHITECTURE.md](FEATURES_ARCHITECTURE.md#tests) and
 [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md#tests).
 
 ## Design References
 
-`docs/` also holds non-code design material: `splash.html`/`redesign.html`/`terminal.html` (interactive
-HTML mocks; `splash.html` is the timing/geometry source of truth above), plus `docs/muxr-app-icons/`,
-the Android/iOS icon masters the build pipelines consume.
+`docs/` also holds design material: the `splash.html`/`redesign.html`/`terminal.html` interactive
+mocks, plus `docs/muxr-app-icons/`, the Android/iOS icon masters the build pipelines consume.
 
 ## Planned
 
-- Scrollback-anchored selection: `term::selection` addresses only the rendered screen today and
-  clears a held selection on new output rather than retarget it stale (its module docs record why).
-- Space/tab/pane create and rename RPCs are wired (the tree side sheet's add rows and
-  press-and-hold; new-pane creation is tap-only, with no floating-vs-tiled UI toggle). Close and
-  resize are not — v2's terminal UI has no affordance for either yet.
-- The scroll RPC is unwired too — there is no scroll gesture on the terminal grid to drive it from.
+- Scrollback-anchored selection: `term::selection` addresses only the rendered screen and clears a
+  held selection on new output rather than retargeting it stale (its module docs record why).
+- Space/tab/pane create and rename RPCs are wired (add rows, press-and-hold; new-pane creation is
+  tap-only, no floating-vs-tiled toggle); close, resize, and scroll are not — v2's terminal UI has
+  no affordance for any of them, including a scroll gesture to drive the RPC from.
 - Background pause/reattach: a backgrounded app keeps its `AttachTerminal` stream open rather than
-  detaching and reattaching on resume, pending a frust app-lifecycle seam this app can hook into.
-- The live terminal feed's inbound flow control can, in principle, backpressure the app's one shared
-  HTTP/2 connection and stall other in-flight RPCs (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md));
-  a dedicated channel for the attach stream is the designed remedy, deferred past the device gate.
+  detaching/reattaching on resume, pending a frust app-lifecycle seam to hook into.
+- The live terminal feed's inbound flow control can backpressure the app's one shared HTTP/2
+  connection and stall other in-flight RPCs (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)); a
+  dedicated attach-stream channel is the designed remedy, deferred past the device gate.
 - The login-token field's buffer is zeroized on connect/disconnect; transient copies on the render
   pass and platform IME surface (suggestions, recents) still hold plaintext until masking lands.
-- Structural (side-by-side, two-column) responsive layouts, once frust's responsive primitive and a
-  design mock exist.
-- Promoting `icon_button` out of `ui::topbar` into its own module — its fourth-call-site trigger has
-  fired; still deferred.
+- Structural (side-by-side, two-column) layouts, pending frust's WIP responsive primitive and a design mock.
+- Promoting `icon_button` out of `ui::topbar` into its own module — the fourth-call-site trigger fired.

@@ -33,7 +33,7 @@
 //! real client will take, rather than an accidentally-synchronous shortcut.
 //! Kept small enough not to be felt (huddle's own repositories use the same
 //! device with a 600ms value, because it wants its loading skeletons visible;
-//! this screen has none to show).
+//! this screen's rain is clocked by the settle edge, not by this delay).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
