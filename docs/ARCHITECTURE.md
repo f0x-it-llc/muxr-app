@@ -140,15 +140,15 @@ reaches the host before either navigator.
 - **`toasts`** — `FailureToasts`, the app-wide failure→toast queue, plus the `toast_layer`
   `shell::root_view` mounts permanently.
 - **`splash`** — the cold-start sequence (icon → dissolve (+burst) → assembly, unmount) off one master
-  clock, each beat independently mountable/testable, once per process launch, collapsing to a static
-  hold under `reduce_motion`. A second orchestrator, `loading`, plays the rain into that same assembly
-  over a band still loading its own content (Sessions' first load): dense until it settles, floored at
-  600ms and capped at an 8s self-release, then thin plus a staggered assembly clipped to the band,
-  unmounting onto the live content. Pointer and scroll stop until the last piece lands and, if the
-  band beneath has since changed, until the unmount; otherwise they fall through to the identical live
-  band; it publishes no semantics. Both orchestrators' timing/geometry constants transcribe once, in
-  `ui/splash/mod.rs::spec`, from `docs/splash.html`; `loading`'s own hold/ceiling/offset constants are
-  this app's tuning, not part of that transcription.
+  clock, each beat independently mountable/testable, once per process launch, collapsing to a static hold
+  under `reduce_motion`. A second orchestrator, `loading`, plays the rain into that same assembly over a
+  band still loading its own content (Sessions' first load): dense until it settles, floored at 600ms and
+  capped at an 8s self-release, then thin plus a staggered assembly clipped to the band, unmounting onto the
+  live content. Scroll stops here for the overlay's whole life; a pointer stops until the last piece lands
+  and, if the band beneath has since changed, until the unmount; otherwise it falls through to the identical
+  live band; it publishes no semantics. Both orchestrators' timing/geometry constants transcribe once, in
+  `ui/splash/mod.rs::spec`, from `docs/splash.html`; `loading`'s own hold/ceiling/offset constants are this
+  app's tuning, not part of that transcription.
 
 **Chrome icons are vectors; font glyphs are content text only.** A bar affordance, a FAB, or a row's
 trailing chevron is always a `frust::icons` vector or an app-supplied `IconSource` — never a font
