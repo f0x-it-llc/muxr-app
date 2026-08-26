@@ -247,6 +247,7 @@ impl Rig {
                 pieces_for(count(settled)),
                 |pieces| any(Column(pieces)),
                 settled,
+                false,
                 done,
             )
         });
@@ -1038,6 +1039,17 @@ fn a_poll_landing_inside_the_tail_reaches_only_the_live_band() {
         "the fourth name is the live band's alone — the assembly never mounted it"
     );
 
+    let before = band.depth();
+    let stale_tap = band.center_of(SEEDED[0]);
+    band.tap(stale_tap);
+    band.step();
+    band.step();
+    assert_eq!(
+        band.depth(),
+        before,
+        "a poll landing inside the tail keeps every tap blocked past the landing"
+    );
+
     let handed_over = band.drive_to(MIN_DENSE_MS + SEQUENCE_END_MS + 200.0);
     assert!(
         handed_over.glyph_runs < DENSE_RUNS,
@@ -1055,5 +1067,15 @@ fn a_poll_landing_inside_the_tail_reaches_only_the_live_band() {
         occurrences(&handed_over.glyph_ids, &name_ids(FOURTH_NAME)),
         1,
         "the live band shows every session once the handoff completes"
+    );
+
+    let live_tap = band.center_of(SEEDED[0]);
+    band.tap(live_tap);
+    band.step();
+    band.step();
+    assert_eq!(
+        band.depth(),
+        before + 1,
+        "once the handoff completes the same tap reaches the now-live card"
     );
 }
