@@ -1,34 +1,33 @@
-//! The cold-start splash sequence's paint-driven building blocks — five
-//! beats off one master clock (see [`sequence`] for the timeline), each
-//! independently mountable/testable, plays once per process launch:
+//! The splash's paint-driven building blocks — four beats off one master
+//! clock (see [`sequence`] for the cold-start timeline), each independently
+//! mountable/testable, plus a second orchestrator for a loading band:
 //!
-//! | Module | What it paints |
+//! | Building block | What it paints |
 //! |---|---|
 //! | [`icon_phase`] | The real app icon springing in, holding, then dissolving outward |
 //! | [`burst`] | 14 one-shot glyph particles flying out of the icon's center |
-//! | [`rain`] | The full-surface amber matrix rain, thinning column by column |
-//! | [`sequence`] | The orchestrator: all three over one clock, ending in the Connect screen's piece-by-piece assembly |
+//! | [`rain`] | The full-surface amber matrix rain, thinning column by column — cued by [`loading`] alone |
+//! | [`piece_entry`](sequence::piece_entry)/`piece_motion` | The assembly primitive: one piece's drop and land flash, defined in [`sequence`], replayed by [`loading`] |
+//! | [`sequence`] | The cold-start orchestrator: icon then burst over one clock, ending in the Connect screen's piece-by-piece assembly |
+//! | [`loading`] | The rain and that same assembly, held over a still-loading band and released when its content settles |
 //!
-//! None of the first three widgets knows about the others — [`sequence`]
-//! owns the sequencing, cueing [`burst`]/[`rain`] at
-//! [`spec::ICON_DELAY_MS`] and the assembly at [`spec::ASSEMBLY_START_MS`]
-//! after that.
+//! No widget here knows about the others — its orchestrator owns the sequencing,
+//! [`sequence`] cueing [`burst`] and the assembly together at [`spec::ICON_DELAY_MS`].
 //!
-//! `docs/splash.html` is the design reference; its `<script>` constants are
-//! the timing contract, transcribed exactly once, here, into [`spec`] —
-//! never re-typed at a use site. Colors come from the active
-//! [`frust::Theme`] where a token exists; the two with none (the rain's
-//! near-white head, the reference amber for an unthemed paint pass) are
-//! named constants in [`spec`] carrying the CSS custom property they
-//! transcribe.
+//! `docs/splash.html` is the design reference; its `<script>` constants are the
+//! timing contract, transcribed exactly once, here, into [`spec`] — never re-typed
+//! at a use site. Colors come from the active [`frust::Theme`] where a token exists;
+//! the two with none (the rain's near-white head, the reference amber for an
+//! unthemed paint pass) are named constants in [`spec`] carrying the CSS custom
+//! property they transcribe.
 //!
-//! Every random choice comes from [`SplashRng`], a seeded LCG, never a
-//! system RNG: each widget takes a `seed: u64` so a test can replay an exact
-//! sequence. Each widget also independently collapses under
-//! `MotionScheme::reduce_motion`.
+//! Every random choice comes from [`SplashRng`], a seeded LCG, never a system RNG:
+//! each widget takes a `seed: u64` so a test can replay an exact sequence. Each
+//! widget also independently collapses under `MotionScheme::reduce_motion`.
 
 pub mod burst;
 pub mod icon_phase;
+pub mod loading;
 pub mod rain;
 pub mod sequence;
 
@@ -52,8 +51,8 @@ pub(crate) mod spec {
     pub(crate) const ICON_IN_MS: f64 = 350.0;
     /// Hold-at-rest duration (`ICON_HOLD = 650`).
     pub(crate) const ICON_HOLD_MS: f64 = 650.0;
-    /// When the icon dissolves and the rain takes over (`ICON_DELAY =
-    /// ICON_IN + ICON_HOLD`); also the orchestrator's cue for burst + rain.
+    /// When the icon dissolves (`ICON_DELAY = ICON_IN + ICON_HOLD`); also
+    /// the cold-start cue for the burst and the assembly.
     pub(crate) const ICON_DELAY_MS: f64 = ICON_IN_MS + ICON_HOLD_MS;
     /// Dissolve duration (`.app-icon.dissolve{transition:… .38s …}`).
     pub(crate) const ICON_DISSOLVE_MS: f64 = 380.0;
@@ -92,7 +91,8 @@ pub(crate) mod spec {
     /// The particle alphabet (`BURST_CHARS`).
     pub(crate) const BURST_CHARS: &[&str] = &["▣", "◧", "◎", "▤", "0", "1", "#"];
 
-    // ---- Matrix rain (`frame`) -------------------------------------------
+    // ---- Matrix rain (the loading-rain reference block's `rainFrame`, plus
+    //      the `fontSize`/`colW` its `initCols` sets above the block) -------
 
     /// Rain glyph size in logical px (`var fontSize = 14`).
     pub(crate) const RAIN_FONT_SIZE: f32 = 14.0;
@@ -155,9 +155,6 @@ pub(crate) mod spec {
 
     // ---- Assembly (`.piece` + `landPieces`) ------------------------------
 
-    /// How long after the rain is cued the first piece lands, rain-local
-    /// clock (`landPieces`: `data-delay + ICON_DELAY + 1500`).
-    pub(crate) const ASSEMBLY_START_MS: f64 = 1500.0;
     /// Per-piece stagger in source order (each `.piece`'s `data-delay`), from
     /// the assembly start. Eight entries, one per Connect-screen piece.
     pub(crate) const PIECE_DELAYS_MS: [f64; 8] =
@@ -189,6 +186,15 @@ pub(crate) mod spec {
     /// accent at 35%, so it resolves from `ColorScheme::primary` rather than
     /// being a second amber constant.
     pub(crate) const AMBER_GLOW_ALPHA: f64 = 0.35;
+
+    /// Floor on the dense beat before a release takes effect. A tuning value
+    /// for this app, not a `docs/splash.html` transcription.
+    pub(crate) const LOADING_MIN_DENSE_MS: f64 = 600.0;
+    /// Hold ceiling: a load that never settles releases here anyway.
+    pub(crate) const LOADING_MAX_HOLD_MS: f64 = 8_000.0;
+    /// `loading`'s own tuning — the beat between the release and the first
+    /// landing. A literal on purpose: a cold-start change must not move it.
+    pub(crate) const LOADING_ASSEMBLY_OFFSET_MS: f64 = 100.0;
 
     // ---- Reduced motion (the source's `if(reduced)` branch) ---------------
 
@@ -238,6 +244,21 @@ pub(crate) mod spec {
             plain + (pool_index - plain) % BRAND_GLYPHS.len()
         }
     }
+}
+
+/// The [`spec`] values `tests/splash_contract.rs` re-reads out of `docs/splash.html`.
+#[doc(hidden)]
+pub mod contract {
+    pub const ICON_IN_MS: f64 = super::spec::ICON_IN_MS;
+    pub const ICON_HOLD_MS: f64 = super::spec::ICON_HOLD_MS;
+    pub const DENSE_END_MS: f64 = super::spec::DENSE_END_MS;
+    pub const THIN_END_MS: f64 = super::spec::THIN_END_MS;
+    pub const RAIN_TAIL_MS: f64 = super::spec::RAIN_TAIL_MS;
+    pub const PIECE_IN_MS: f64 = super::spec::PIECE_IN_MS;
+    pub const RAIN_FONT_SIZE: f32 = super::spec::RAIN_FONT_SIZE;
+    pub const RAIN_COL_W: f64 = super::spec::RAIN_COL_W;
+    pub const BURST_COUNT: usize = super::spec::BURST_COUNT;
+    pub const PIECE_DELAYS_MS: [f64; 8] = super::spec::PIECE_DELAYS_MS;
 }
 
 // ---------------------------------------------------------------------------

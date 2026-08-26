@@ -12,8 +12,8 @@
 //! milliseconds — the widget only accumulates a clock, calls it, and paints
 //! what it returns. The phase is published through an optional [`RwSignal`]
 //! ([`IconPhaseView::on_phase`]), written only when it changes, so the
-//! orchestrator can start the burst and rain on a reactive edge instead of a
-//! timer; `IconPhase::Dissolve` publishes at exactly [`spec::ICON_DELAY_MS`].
+//! orchestrator can start the burst on a reactive edge instead of a timer;
+//! `IconPhase::Dissolve` publishes at exactly [`spec::ICON_DELAY_MS`].
 //!
 //! The framework has no app-reachable way to hand a decoded image's pixels
 //! to `PaintScene::draw_image`, so this widget composes rather than blits:
@@ -62,7 +62,7 @@ pub enum IconPhase {
     /// Held at rest ([`spec::ICON_IN_MS`] → [`spec::ICON_DELAY_MS`]).
     Hold,
     /// Scaling up and fading out ([`spec::ICON_DELAY_MS`] → +
-    /// [`spec::ICON_DISSOLVE_MS`]). **The burst/rain cue.**
+    /// [`spec::ICON_DISSOLVE_MS`]). **The burst/assembly cue.**
     Dissolve,
     /// Gone. Nothing is painted and no more frames are requested.
     Done,

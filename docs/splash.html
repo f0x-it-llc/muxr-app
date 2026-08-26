@@ -88,8 +88,8 @@ canvas.show{ opacity:1; }
 
   <div class="page-header">
     <div class="eyebrow">splash sequence</div>
-    <h1>Icon → rain → assembly</h1>
-    <p>Cold-start only, once per launch. The real app icon appears first, the way the OS would show it while the app loads — then it dissolves outward into the same amber rain, which thins out as the connect screen assembles itself piece by piece.</p>
+    <h1>Icon → dissolve → assembly</h1>
+    <p>Cold-start only, once per launch. The real app icon appears first, the way the OS would show it while the app loads — then it scales up and dissolves, and the connect screen assembles itself piece by piece out of that same moment. The amber rain lives further in, over content that is still loading; its reference player is below.</p>
   </div>
 
   <div class="phone">
@@ -115,16 +115,16 @@ canvas.show{ opacity:1; }
 
   <div class="controls">
     <button class="replay-btn" id="replayBtn">↻ replay sequence</button>
+    <button class="replay-btn" id="rainBtn">↻ loading rain</button>
     <span class="phase-label" id="phaseLabel">phase: <b>idle</b></span>
   </div>
   <div class="timeline" id="timeline"></div>
 
   <p class="notes">
-    <b>Icon phase</b> (0–1s) — the real exported app icon fades and springs in, holds just long enough to register as "the app icon," then scales up and dissolves while a handful of its own glyph characters burst outward — the seed the rain grows from, not two unrelated effects stitched together.<br>
-    <b>Rain phase</b> (+0–1.4s from dissolve) starts already mid-fall, full density, so it doesn't feel like it's booting up from nothing.<br>
-    <b>Thin phase</b> (+1.4–2.8s) drops respawn probability column-by-column instead of all at once — the rain visibly drains rather than switching off.<br>
-    <b>Assembly phase</b> (starts 1.5s after rain begins, staggered ~130ms apart) — each piece begins as a small rotated, blurred shard and drops in with a spring overshoot; a brief amber flash marks the landing.<br>
-    Gated behind <code>prefers-reduced-motion</code> — reduced-motion users get a brief static icon, then the finished screen directly, no rain.
+    <b>Icon phase</b> (0–1s) — the real exported app icon fades and springs in, holds just long enough to register as "the app icon," then scales up and dissolves while a handful of its own glyph characters burst outward (+0–0.6s from the dissolve).<br>
+    <b>Assembly phase</b> (starts on that same dissolve, staggered ~130ms apart) — each piece begins as a small rotated, blurred shard and drops in with a spring overshoot; a brief amber flash marks the landing. The last piece is down at 2.36s and the overlay is gone: the launch hands over the moment it has something to hand over.<br>
+    <b>Loading rain</b> — the rain is not a cold-start beat. It plays over a band still loading its own content (the sessions list's first load), clocked by that wait rather than by the icon, and its script lives on below under <i>loading rain (sessions) reference</i>; press <b>loading rain</b> to run it over the settled screen. Those burst glyphs are still the seed the rain grows from, not two unrelated effects stitched together — the same alphabet, spent where the waiting actually is.<br>
+    Gated behind <code>prefers-reduced-motion</code> — reduced-motion users get a brief static icon, then the finished screen directly, no burst.
   </p>
 
 <script>
@@ -138,6 +138,7 @@ canvas.show{ opacity:1; }
   var phaseLabel = document.getElementById('phaseLabel');
   var timeline = document.getElementById('timeline');
   var replayBtn = document.getElementById('replayBtn');
+  var rainBtn = document.getElementById('rainBtn');
 
   // build timeline ticks
   var TICKS = 24;
@@ -179,7 +180,7 @@ canvas.show{ opacity:1; }
 
   var ICON_IN = 350;
   var ICON_HOLD = 650;
-  var ICON_DELAY = ICON_IN + ICON_HOLD; // when the icon dissolves and rain takes over
+  var ICON_DELAY = ICON_IN + ICON_HOLD; // when the icon dissolves, the burst fires and the pieces start landing
   var BURST_CHARS = ['▣','◧','◎','▤','0','1','#'];
 
   function spawnBurst(){
@@ -209,29 +210,51 @@ canvas.show{ opacity:1; }
 
   var overallStart = null;
   var running = false;
-  var DENSE_END = 1400;
-  var THIN_END = 2800;
-  var TOTAL_MS = ICON_DELAY + THIN_END + 400;
+  var PIECE_IN = 500; // .piece's .5s spring transition, and landFlash's own window
+  var LAST_DELAY = Math.max.apply(null, pieces.map(function(p){ return parseInt(p.getAttribute('data-delay'),10); }));
+  var TOTAL_MS = ICON_DELAY + LAST_DELAY + PIECE_IN;
 
   function frame(ts){
     if(!running) return;
     if(overallStart===null) overallStart = ts;
     var tOverall = ts - overallStart;
 
-    // phase bookkeeping (spans the icon phase too, before rain math even starts)
+    // phase bookkeeping — the assembly rides the dissolve, so there are only two
     var phase = tOverall < ICON_DELAY ? 'icon'
-      : tOverall < ICON_DELAY+DENSE_END ? 'rain'
-      : tOverall < ICON_DELAY+THIN_END ? 'thinning' : 'settled';
+      : tOverall < TOTAL_MS ? 'assembly' : 'settled';
     phaseLabel.innerHTML = 'phase: <b>' + phase + '</b>';
     var filled = Math.min(TICKS, Math.floor((tOverall/TOTAL_MS)*TICKS));
     for(var k=0;k<TICKS;k++){ tickEls[k].className = k<filled ? 'done' : ''; }
 
-    if(tOverall < ICON_DELAY){
-      // still in the icon phase — nothing to draw on canvas yet, just keep the loop alive
+    if(tOverall < TOTAL_MS){
+      // nothing to draw here — the icon, burst and pieces are all CSS/DOM
       requestAnimationFrame(frame);
-      return;
+    } else {
+      running = false;
+      phaseLabel.innerHTML = 'phase: <b>settled</b>';
     }
-    var t = tOverall - ICON_DELAY; // rain-local clock, unchanged math below
+  }
+
+  // ---- loading rain (sessions) reference ---------------------------------
+  // Not a cold-start beat any more. This is the rain the app plays over a band
+  // whose content is still loading (the sessions list's first load), clocked by
+  // that wait rather than by the icon — kept live here because it is the source
+  // `src/ui/splash/mod.rs::spec` transcribes the DENSE_END/THIN_END/+400
+  // constants from. Press "loading rain" to run it over the settled screen.
+  var rainStart = null;
+  var raining = false;
+  var rainGen = 0; // a frame queued by an earlier run is stale, and must not drive drops[]
+  var DENSE_END = 1400;
+  var THIN_END = 2800;
+
+  function rainFrame(ts, gen){
+    if(!raining || gen !== rainGen) return;
+    if(rainStart===null) rainStart = ts;
+    var t = ts - rainStart; // rain-local clock, unchanged math below
+
+    var rainPhase = t < DENSE_END ? 'dense'
+      : t < THIN_END ? 'thinning' : 'settled';
+    phaseLabel.innerHTML = 'phase: <b>loading rain — ' + rainPhase + '</b>';
 
     // fade previous frame
     ctx.fillStyle = 'rgba(10,12,17,0.16)';
@@ -276,24 +299,36 @@ canvas.show{ opacity:1; }
       drops[c] += rand(0.35,0.75);
     }
 
-    if(t > 200 && Math.random() < 0.002 * (1-globalDensity)){
-      // occasional respawn of a stopped column at very low density to keep faint ambience briefly
-    }
+    // a stopped column stays stopped: no low-density ambient respawn here
 
     if(t < THIN_END + 400){
-      requestAnimationFrame(frame);
+      requestAnimationFrame(function(next){ rainFrame(next, gen); });
     } else {
       // ambient near-empty tail for a short bit then stop drawing (leave last cleared frame)
       ctx.fillStyle = 'rgba(10,12,17,0.4)';
       ctx.fillRect(0,0,W,H);
-      running = false;
-      phaseLabel.innerHTML = 'phase: <b>settled</b>';
+      raining = false;
+      canvas.classList.remove('show');
+      phaseLabel.innerHTML = 'phase: <b>loading rain — settled</b>';
     }
+  }
+
+  function playRain(){
+    running = false; // the cold-start loop owns the phase label and ticks; stop it first
+    raining = false;
+    var gen = ++rainGen;
+    initCols();
+    rainStart = null;
+    ctx.fillStyle = '#0a0c11';
+    ctx.fillRect(0,0,W,H);
+    canvas.classList.add('show');
+    raining = true;
+    requestAnimationFrame(function(ts){ rainFrame(ts, gen); });
   }
 
   function landPieces(){
     pieces.forEach(function(p){
-      var delay = parseInt(p.getAttribute('data-delay'),10) + ICON_DELAY + 1500;
+      var delay = parseInt(p.getAttribute('data-delay'),10) + ICON_DELAY;
       setTimeout(function(){
         p.classList.add('land','flash');
         setTimeout(function(){ p.classList.remove('flash'); }, 550);
@@ -308,17 +343,15 @@ canvas.show{ opacity:1; }
   function resetIcon(){
     icon.style.transition = '';
     icon.classList.remove('show','dissolve');
-    canvas.classList.remove('show');
   }
 
   function play(){
     resetPieces();
     resetIcon();
-    initCols();
+    raining = false;
+    canvas.classList.remove('show');
     overallStart = null;
     running = true;
-    ctx.fillStyle = '#0a0c11';
-    ctx.fillRect(0,0,W,H);
 
     if(reduced){
       // brief static icon, then straight to the finished screen — no rain, no scaling motion
@@ -340,13 +373,13 @@ canvas.show{ opacity:1; }
     requestAnimationFrame(function(){ icon.classList.add('show'); });
     setTimeout(function(){
       icon.classList.add('dissolve');
-      canvas.classList.add('show');
       spawnBurst();
     }, ICON_DELAY);
     landPieces();
   }
 
   replayBtn.addEventListener('click', play);
+  rainBtn.addEventListener('click', playRain);
   play();
 })();
 </script>
