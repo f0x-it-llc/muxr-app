@@ -18,7 +18,7 @@
 //! - **Read-only gating**: a read-only credential disables create/Rename/Kill
 //!   — never Attach (see [`Actions::open_manage_sheet`]).
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -138,8 +138,9 @@ pub struct SessionsState {
     /// rain is off, and set once by the overlay itself when its sequence ends.
     pub(super) loading_done: RwSignal<bool>,
     /// The overlay's own picture, fixed the moment `build` first sees the
-    /// release settled — a later data change reaches only the live band.
-    loading_snapshot: RefCell<Option<(Vec<Session>, bool)>>,
+    /// release settled — a later change to the session set reaches only the
+    /// live band (the read-only posture and colours stay live on both).
+    loading_snapshot: Option<(Vec<Session>, bool)>,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -355,7 +356,7 @@ impl Component for SessionsScreen {
             heartbeat,
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
-            loading_snapshot: RefCell::new(None),
+            loading_snapshot: None,
         }
     }
 
@@ -409,11 +410,16 @@ impl Component for SessionsScreen {
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
         let mut children = vec![live_scroller];
         if !loading_done {
-            // Compared against the live values while the freeze is still borrowed.
             let (overlay_pieces, stale) = if settled {
-                let mut snapshot = state.loading_snapshot.borrow_mut();
-                let frozen = snapshot.get_or_insert_with(|| (sessions.clone(), loaded));
-                let stale = frozen.0 != sessions || frozen.1 != loaded;
+                let frozen = state
+                    .loading_snapshot
+                    .get_or_insert_with(|| (sessions.clone(), loaded));
+                // The id ladder is the picture: a card that gained a pane or a
+                // preview between two polls is the same card in the same slot,
+                // and telemetry churn must not hold input on the overlay.
+                let frozen_ids = frozen.0.iter().map(|session| &session.id);
+                let live_ids = sessions.iter().map(|session| &session.id);
+                let stale = frozen.1 != loaded || frozen_ids.ne(live_ids);
                 (
                     list_pieces(&frozen.0, frozen.1, settled, read_only, &colors),
                     stale,

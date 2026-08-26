@@ -6,7 +6,7 @@
 //! | `0..`[`spec::DENSE_END_MS`] | dense, already mid-fall |
 //! | held at [`spec::DENSE_END_MS`] | still loading — the *clock* stops here, not the rain |
 //! | release `r` | the clock resumes from that hold; thinning starts |
-//! | `r +` [`spec::LOADING_ASSEMBLY_OFFSET_MS`] | the first piece lands ([`assembly_open_ms`]) |
+//! | `r +` [`spec::LOADING_ASSEMBLY_OFFSET_MS`] | the first piece starts dropping ([`assembly_open_ms`]) |
 //! | the last piece landed | this picture and the band's are one ([`assembly_landed_ms`]) |
 //! | `r + 1800` | rain tail and last piece both done ([`sequence_end_ms`]) |
 //!
@@ -18,17 +18,20 @@
 //! must not flip when the overlay goes, or the pod underneath loses its
 //! identity.
 //!
-//! **Input rule.** Hit-tested input — pointer *and* scroll — stops here only
-//! while this shows something the route beneath does not: from mount until the
-//! last piece has landed. From there events fall through (`Ignored`) to the live
-//! band, whose picture is the same one — and only while the picture beneath is
-//! still the one this shows: a data change inside the tail keeps input here until
-//! the unmount. Key/IME and the housekeeping broadcast never stop here at all.
+//! **Input rule.** A hit-tested pointer stops here only while this shows
+//! something the route beneath does not: from mount until the last piece has
+//! landed. From there a pointer falls through (`Ignored`) to the live band,
+//! whose picture is the same one — and only while the picture beneath is still
+//! the one this shows: a data change inside the tail keeps the pointer here
+//! until the unmount. Scroll stops here for the overlay's whole life — the
+//! picture has no scroll offset to match. Key/IME and the housekeeping
+//! broadcast never stop here at all.
 //!
 //! **A settle inside the tail.** [`auto_release_ms`] can open the assembly
 //! before the band has settled. When that settle lands, the rain clock stays
-//! where it is and both instants re-base onto the current frame — where the
-//! pieces that rebuild mounts take their first paint — so `done` is never
+//! where it is: the tail re-bases onto the current frame, and the pieces that
+//! rebuild mounts onto the frame they can first paint on — this one, or
+//! [`assembly_open_ms`] while that gate has yet to open — so `done` is never
 //! written while a piece is still un-landed.
 
 use std::cell::Cell;
@@ -225,8 +228,22 @@ impl<State: 'static> View<State> for LoadingView<State> {
 }
 
 impl LoadingWidget {
+    /// The pointer's half of the [input rule](self): stop while this picture
+    /// is not the band's own.
     fn blocking(&self) -> bool {
         !self.fired && (self.stale || self.landed_at.is_none_or(|landed| self.elapsed_ms < landed))
+    }
+
+    /// Whether `event` stops here rather than reaching the band beneath.
+    fn stops(&self, event: &InputEvent) -> bool {
+        match event {
+            // A scrolled band and a still picture of it are different
+            // pictures whatever their content: this one has no offset to
+            // match, so scroll stops here until the overlay is done.
+            InputEvent::Scroll { .. } => !self.fired,
+            InputEvent::Pointer(_) => self.blocking(),
+            _ => false,
+        }
     }
 
     /// Both ends: the tail runs from `from_ms`, the pieces from `open_ms`.
@@ -249,8 +266,9 @@ impl Widget for LoadingWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         if reduce_motion(Theme::from_paint_ctx(ctx)) {
-            // No motion, no timeline: the tone, the end, and the frame that acts on the write.
-            scene.fill_rect(ctx.origin(), ctx.size(), self.tone);
+            // No motion, no timeline, and nothing painted: a still tone over
+            // the live band is a picture of nothing, and the frame that acts
+            // on the write hands the band over anyway. Just the end, then.
             if !self.fired {
                 self.fired = true;
                 self.done.set(true);
@@ -262,20 +280,26 @@ impl Widget for LoadingWidget {
         let was_fired = self.fired;
         self.elapsed_ms += delta_ms(&mut self.last_frame, ctx.frame_time());
 
-        if self.release_at.is_none() {
-            if self.released {
+        match self.release_at {
+            None if self.released => {
                 let release = release_instant(self.elapsed_ms, spec::LOADING_MIN_DENSE_MS);
                 self.release_at = Some(release);
                 self.settled = true;
                 self.schedule(release, assembly_open_ms(release));
-            } else if self.elapsed_ms >= auto_release_ms() {
+            }
+            None if self.elapsed_ms >= auto_release_ms() => {
                 self.release_at = Some(auto_release_ms());
                 self.schedule(auto_release_ms(), assembly_open_ms(auto_release_ms()));
             }
-        } else if self.released && !self.settled {
-            // Settled inside the tail: the rain keeps its clock, the ends re-base.
-            self.settled = true;
-            self.schedule(self.elapsed_ms, self.elapsed_ms);
+            // Settled inside the tail: the rain keeps its clock, the tail
+            // re-bases onto this frame and the pieces onto the frame they
+            // first paint on — never earlier than the gate below.
+            Some(release) if self.released && !self.settled => {
+                self.settled = true;
+                let open = self.elapsed_ms.max(assembly_open_ms(release));
+                self.schedule(self.elapsed_ms, open);
+            }
+            _ => {}
         }
 
         scene.fill_rect(ctx.origin(), ctx.size(), self.tone);
@@ -305,7 +329,7 @@ impl Widget for LoadingWidget {
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if self.blocking() && matches!(event, InputEvent::Pointer(_) | InputEvent::Scroll { .. }) {
+        if self.stops(event) {
             return EventResult::Handled;
         }
         EventResult::Ignored
@@ -320,6 +344,7 @@ impl Widget for LoadingWidget {
 #[cfg(test)]
 mod tests {
     use frust::SizedBox;
+    use frust::authoring::{PointerButton, PointerEvent, PointerPhase, ScrollDelta};
 
     use super::*;
 
@@ -446,8 +471,25 @@ mod tests {
         );
     }
 
+    /// A wheel notch, aimed anywhere: this overlay hit-tests it by position
+    /// like a pointer, and answers it by rule alone.
+    fn wheel() -> InputEvent {
+        InputEvent::Scroll {
+            position: Point::ZERO,
+            delta: ScrollDelta::Lines(0.0, -3.0),
+        }
+    }
+
+    fn tap() -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::ZERO,
+            button: PointerButton::Primary,
+        })
+    }
+
     #[test]
-    fn input_stops_here_only_until_the_assembly_has_landed() {
+    fn the_pointer_stops_here_only_until_the_assembly_has_landed() {
         let mut next_id = 0;
         let mut ctx = BuildCtx::new(&mut next_id);
         let mut widget = inert_view(false, spec::AMBER_FALLBACK, false).build(&mut ctx);
@@ -471,6 +513,29 @@ mod tests {
         assert!(
             !widget.blocking(),
             "a fired overlay blocks nothing, reduced motion included"
+        );
+    }
+
+    #[test]
+    fn scroll_stops_here_for_the_overlays_whole_life() {
+        let mut next_id = 0;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let mut widget = inert_view(false, spec::AMBER_FALLBACK, false).build(&mut ctx);
+        widget.landed_at = Some(1_000.0);
+        widget.elapsed_ms = 5_000.0;
+        assert!(
+            !widget.stops(&tap()),
+            "a landed assembly is the band's own picture: a tap falls through"
+        );
+        assert!(
+            widget.stops(&wheel()),
+            "the band beneath scrolls; a picture of it at offset zero does not"
+        );
+
+        widget.fired = true;
+        assert!(
+            !widget.stops(&wheel()),
+            "a fired overlay stops nothing, the wheel included"
         );
     }
 
