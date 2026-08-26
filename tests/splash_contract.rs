@@ -5,14 +5,24 @@ use muxr::ui::splash::contract;
 
 const HTML: &str = include_str!("../docs/splash.html");
 
-/// The digits at the front of `text`, parsed. `what` names them in the failure.
+/// The number at the front of `text`, parsed whole — digits and at most one
+/// decimal point, so a fractional literal is never read as its integer part.
+/// `what` names it in the failure.
 fn leading_number(text: &str, what: &str) -> f64 {
-    let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+    let mut point_seen = false;
+    let literal: String = text
+        .chars()
+        .take_while(|c| {
+            c.is_ascii_digit() || (*c == '.' && !std::mem::replace(&mut point_seen, true))
+        })
+        .collect();
     assert!(
-        !digits.is_empty(),
+        !literal.is_empty(),
         "no number after `{what}` in docs/splash.html"
     );
-    digits.parse().expect("ascii digits parse as f64")
+    literal
+        .parse()
+        .unwrap_or_else(|e| panic!("`{literal}` after `{what}` is not an f64: {e}"))
 }
 
 /// The number following `needle`'s first occurrence in `hay`.
@@ -30,6 +40,16 @@ fn same(needle: &str, transcribed: f64) {
         transcribed,
         "`{needle}` in docs/splash.html drifted from its ui::splash::spec transcription"
     );
+}
+
+#[test]
+fn the_parse_reads_a_fractional_literal_whole() {
+    assert_eq!(leading_number("900;", "a whole literal"), 900.0);
+    assert_eq!(leading_number("14, colW = 14;", "a list"), 14.0);
+    assert_eq!(leading_number("14.9px", "a fraction"), 14.9);
+    // The drift a truncating parse would wave through: a mock retuned to 14.9
+    // must not still read as the 14.0 it was transcribed at.
+    assert_ne!(leading_number("14.9px", "a fraction"), 14.0);
 }
 
 #[test]

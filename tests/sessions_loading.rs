@@ -33,6 +33,7 @@ use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::di::expect_sessions_repository;
+use muxr::features::sessions::domain::entities::RenameRequest;
 use muxr::features::sessions::presentation::pages::{sessions_page, set_loading_rain_for_tests};
 use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::Preferences;
@@ -494,10 +495,10 @@ fn reduced_motion_ends_the_sequence_on_its_first_frame() {
         needs_frame,
         "the firing frame must ask for the frame that acts on its write"
     );
-    assert_eq!(
-        firing.fills.len(),
-        1,
-        "the one frame it paints is the band's own tone"
+    assert!(
+        firing.fills.is_empty(),
+        "a still tone over the live band is a picture of nothing: the one \
+         frame this overlay gets under reduced motion paints nothing at all"
     );
     for (index, (scene, needs_frame)) in frames.iter().enumerate() {
         assert_eq!(scene.glyph_runs, 0, "frame {index} painted rain");
@@ -509,7 +510,11 @@ fn reduced_motion_ends_the_sequence_on_its_first_frame() {
     }
     assert!(
         !swallowed_at(0.0, true, &pointer(PointerPhase::Down, mid_surface())),
-        "a fired overlay is not a barrier: the tone frame takes no taps"
+        "a fired overlay is not a barrier: its one frame takes no taps"
+    );
+    assert!(
+        !swallowed_at(0.0, true, &wheel(mid_surface())),
+        "nor the wheel — with nothing painted there is no picture to hold it"
     );
 }
 
@@ -532,7 +537,7 @@ fn the_release_lands_on_the_same_wall_clock_at_120hz() {
 }
 
 #[test]
-fn the_overlay_swallows_pointer_and_scroll_only_until_its_assembly_lands() {
+fn the_overlay_swallows_the_pointer_until_it_lands_and_scroll_for_its_whole_life() {
     let _g = serial();
     let _ambient = setup();
 
@@ -560,8 +565,17 @@ fn the_overlay_swallows_pointer_and_scroll_only_until_its_assembly_lands() {
         "a landed assembly is the band's own picture: a tap falls through it"
     );
     assert!(
-        !swallowed_at(landed, false, &wheel(mid_surface())),
-        "and so does the wheel"
+        swallowed_at(landed, false, &wheel(mid_surface())),
+        "the wheel does not: a scrolled band and this unscrollable picture of \
+         it are two different pictures, whatever their content"
+    );
+
+    // Right up to the unmount, too — the landing lifts the pointer's block
+    // alone.
+    let last = MIN_DENSE_MS + SEQUENCE_END_MS - 100.0;
+    assert!(
+        swallowed_at(last, false, &wheel(mid_surface())),
+        "the wheel is still this overlay's to take on its last frames"
     );
 }
 
@@ -620,6 +634,48 @@ fn a_settle_inside_the_tail_still_lands_every_piece_it_mounts() {
     }
 }
 
+#[test]
+fn a_settle_inside_the_offset_window_measures_the_landing_from_the_gate() {
+    let _g = serial();
+    let _ambient = setup();
+
+    // The ceiling has fired, but the assembly it opened is still behind the
+    // offset: the pieces this settle mounts cannot paint before the gate, so
+    // that is where their landing is measured from.
+    let release_frame = frame_at(MAX_HOLD_MS + 20.0);
+    let settled = frame_ms(release_frame, FRAME_NS);
+    let gate = MAX_HOLD_MS + ASSEMBLY_OFFSET_MS;
+    assert!(
+        settled < gate,
+        "this settle must land inside the offset window: {settled:.1}ms vs {gate:.1}ms"
+    );
+    let from_gate = gate + PIECE_DELAYS_MS[PIECES - 1] + PIECE_IN_MS;
+    let from_settle = settled + PIECE_DELAYS_MS[PIECES - 1] + PIECE_IN_MS;
+
+    let mut rig = Rig::mount(FRAME_NS, false, Some(release_frame), |released| {
+        if released { PIECES } else { 1 }
+    });
+    let probe = frame_at(from_gate - 60.0);
+    rig.drive(probe + 1);
+    let asked_at = frame_ms(probe, FRAME_NS);
+    assert!(
+        asked_at > from_settle && asked_at < from_gate,
+        "the probe must sit between the two landings: {asked_at:.1}ms is not \
+         inside {from_settle:.1}..{from_gate:.1}ms"
+    );
+    assert!(
+        rig.swallows(&pointer(PointerPhase::Down, mid_surface())),
+        "a piece is still dropping at {asked_at:.1}ms: the landing is measured \
+         from the gate at {gate:.1}ms, not from the settle at {settled:.1}ms"
+    );
+
+    rig.drive(frame_at(from_gate + 100.0) - probe);
+    assert!(
+        !rig.swallows(&pointer(PointerPhase::Down, mid_surface())),
+        "past the re-based landing the two pictures are the same one again"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Part B — the real /sessions band under the overlay
 // ---------------------------------------------------------------------------
@@ -639,6 +695,8 @@ const BAND_LANDED_MS: f64 =
 /// [`seed_extra_session`]'s name — distinct from every [`SEEDED`] name and
 /// backend/status text, so [`occurrences`] counts it cleanly.
 const FOURTH_NAME: &str = "late-arrival";
+/// [`rename_session`]'s replacement name, distinct for the same reason.
+const CHURNED_NAME: &str = "renamed-in-the-tail";
 
 /// The glyph ids a card's name paints — `session_card` inks the theme's
 /// `label_large` slot, and inking replaces only the color.
@@ -703,6 +761,41 @@ fn seed_extra_session(name: &str) {
     let deadline = Instant::now() + PUMP_DEADLINE;
     while !done.get() {
         assert!(Instant::now() < deadline, "timed out seeding {name:?}");
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Renames the session called `from` straight in the shared mock repository,
+/// like [`seed_extra_session`] and for the same reason. The id ladder is
+/// untouched: the live band's list differs from the frozen one in a field the
+/// overlay is not keyed on, which is what telemetry churn looks like here (the
+/// mock exposes no pane-count mutation of its own).
+fn rename_session(from: &str, to: &str) {
+    let repository = expect_sessions_repository();
+    let done = Rc::new(Cell::new(false));
+    let flag = Rc::clone(&done);
+    let (old_name, new_name) = (from.to_string(), to.to_string());
+    spawn_local(async move {
+        let sessions = repository
+            .list_sessions()
+            .await
+            .expect("the mock always lists");
+        let id = sessions
+            .iter()
+            .find(|session| session.name == old_name)
+            .map(|session| session.id.clone())
+            .unwrap_or_else(|| panic!("no session named {old_name:?} to rename"));
+        repository
+            .rename_session(RenameRequest { id, name: new_name })
+            .await
+            .expect("the mock never rejects a real name");
+        flag.set(true);
+    });
+    let runtime = ReactiveRuntime::get().expect("ReactiveRuntime::init must have run");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !done.get() {
+        assert!(Instant::now() < deadline, "timed out renaming {from:?}");
         runtime.pump_local();
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -971,6 +1064,9 @@ fn reduced_motion_leaves_the_band_live_from_its_first_frame() {
     let _g = serial();
     let _ambient = setup();
     let mut band = Band::mount_reduced();
+    // Under reduced motion the overlay fires on its very first paint — this
+    // one, before the load has even settled — and is gone by the frame below.
+    let firing = band.step();
     band.settle_first_load();
 
     let scene = band.step();
@@ -978,6 +1074,11 @@ fn reduced_motion_leaves_the_band_live_from_its_first_frame() {
         scene.glyph_runs < DENSE_RUNS,
         "no rain plays under reduced motion: {} runs",
         scene.glyph_runs
+    );
+    assert_eq!(
+        firing.fills, scene.fills,
+        "the overlay's one frame filled a box of its own over a band already \
+         live beneath it; both frames owe the strip's hairline and nothing else"
     );
 
     let before = band.depth();
@@ -1011,6 +1112,48 @@ fn mid_assembly_the_landing_copy_paints_over_the_live_one() {
             "both bands print {name} mid-assembly: the landing copy over the live one"
         );
     }
+}
+
+#[test]
+fn a_churn_only_poll_inside_the_tail_still_hands_the_tap_over() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut band = Band::mount();
+    speed_up_the_poll();
+    band.settle_first_load();
+    band.drive_to(BAND_LANDED_MS + 100.0);
+
+    rename_session(SEEDED[1], CHURNED_NAME);
+    band.wait_for_poll(CHURNED_NAME);
+
+    let mid_tail = band.step();
+    assert_eq!(
+        occurrences(&mid_tail.glyph_ids, &name_ids(SEEDED[0])),
+        2 * BAND_COPIES[0],
+        "the untouched card is still printed by both bands"
+    );
+    assert_eq!(
+        occurrences(&mid_tail.glyph_ids, &name_ids(SEEDED[1])),
+        1,
+        "the old name is the frozen assembly's alone"
+    );
+    assert_eq!(
+        occurrences(&mid_tail.glyph_ids, &name_ids(CHURNED_NAME)),
+        1,
+        "and the new one the live band's"
+    );
+
+    let before = band.depth();
+    let card = band.center_of(SEEDED[0]);
+    band.tap(card);
+    band.step();
+    band.step();
+    assert_eq!(
+        band.depth(),
+        before + 1,
+        "the same ids in the same order are the same picture: a change to a \
+         field the overlay is not keyed on must not take the tap back"
+    );
 }
 
 #[test]
