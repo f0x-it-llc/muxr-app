@@ -94,10 +94,10 @@ footer) lives in `pages.rs`, not in `widgets/`.
   by `SessionsController::first_load_settled` (set on either `Ok` or `Err`), with input falling through
   to the live band from the last piece's landing, not the unmount; the overlay's picture is frozen at
   that settle, so a poll landing inside its tail reaches only the live band, and input stays on the
-  overlay until the unmount while the two differ. Until it settles, the list's trailing row is
-  `widgets::loading_view` rather than the create row, and `set_loading_rain_for_tests` is the
-  process-static seam a test binary opts out with (see [ARCHITECTURE.md](ARCHITECTURE.md) for the shared
-  orchestrator).
+  overlay until the unmount while their session sets differ (membership or order — not telemetry). Until
+  it settles, the list's trailing row is `widgets::loading_view` rather than the create row, and
+  `set_loading_rain_for_tests` is the process-static seam a test binary opts out with (see
+  [ARCHITECTURE.md](ARCHITECTURE.md) for the shared orchestrator).
 - **`terminal`** — the attached session's terminal surface: a `GlyphInk`-toned card, the fullscreen
   seam, and the "panes & tabs" tree side sheet the app bar's one action opens directly (spaces →
   tabs → panes, zellij promoting its tabs to the top-level shape a space wears since it has none —
