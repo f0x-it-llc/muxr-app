@@ -409,12 +409,20 @@ impl Component for SessionsScreen {
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
         let mut children = vec![live_scroller];
         if !loading_done {
-            let overlay_pieces = if settled {
+            // Compared against the live values while the freeze is still borrowed.
+            let (overlay_pieces, stale) = if settled {
                 let mut snapshot = state.loading_snapshot.borrow_mut();
                 let frozen = snapshot.get_or_insert_with(|| (sessions.clone(), loaded));
-                list_pieces(&frozen.0, frozen.1, settled, read_only, &colors)
+                let stale = frozen.0 != sessions || frozen.1 != loaded;
+                (
+                    list_pieces(&frozen.0, frozen.1, settled, read_only, &colors),
+                    stale,
+                )
             } else {
-                list_pieces(&sessions, loaded, settled, read_only, &colors)
+                (
+                    list_pieces(&sessions, loaded, settled, read_only, &colors),
+                    false,
+                )
             };
             children.push(loading_sequence(
                 LOADING_RAIN_SEED,
@@ -422,6 +430,7 @@ impl Component for SessionsScreen {
                 overlay_pieces,
                 move |pieces| list_band(padded_list(pieces), is_wide),
                 settled,
+                stale,
                 state.loading_done,
             ));
         }

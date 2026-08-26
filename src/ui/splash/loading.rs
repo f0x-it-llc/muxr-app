@@ -19,10 +19,11 @@
 //! identity.
 //!
 //! **Input rule.** Hit-tested input — pointer *and* scroll — stops here only
-//! while this shows something the route beneath does not: from mount until
-//! the last piece has landed. From there events fall through (`Ignored`) to
-//! the live band, whose picture is the same one. Key/IME and the housekeeping
-//! broadcast never stop here at all.
+//! while this shows something the route beneath does not: from mount until the
+//! last piece has landed. From there events fall through (`Ignored`) to the live
+//! band, whose picture is the same one — and only while the picture beneath is
+//! still the one this shows: a data change inside the tail keeps input here until
+//! the unmount. Key/IME and the housekeeping broadcast never stop here at all.
 //!
 //! **A settle inside the tail.** [`auto_release_ms`] can open the assembly
 //! before the band has settled. When that settle lands, the rain clock stays
@@ -100,6 +101,9 @@ pub fn auto_release_ms() -> f64 {
 ///   both the *same* builders the live band uses (or the handoff crosses two
 ///   different pictures); the count fixes when the assembly has landed.
 /// - `released` — `false` while loading, `true` once settled; monotonic.
+/// - `stale` — `true` when the picture this overlay shows no longer matches
+///   the band beneath it; keeps input here past the landing, until the
+///   unmount.
 /// - `done` — set `true` exactly once, when the sequence is over.
 pub fn loading_sequence<State: 'static>(
     seed: u64,
@@ -107,6 +111,7 @@ pub fn loading_sequence<State: 'static>(
     pieces: Vec<AnyView<State>>,
     assemble: impl FnOnce(Vec<AnyView<State>>) -> AnyView<State>,
     released: bool,
+    stale: bool,
     done: RwSignal<bool>,
 ) -> AnyView<State> {
     let cell = Rc::new(Cell::new(0.0));
@@ -123,6 +128,7 @@ pub fn loading_sequence<State: 'static>(
         piece_count,
         tone,
         released,
+        stale,
         done,
     })
 }
@@ -136,6 +142,7 @@ pub struct LoadingView<State: 'static> {
     piece_count: usize,
     tone: Color,
     released: bool,
+    stale: bool,
     done: RwSignal<bool>,
 }
 
@@ -148,6 +155,7 @@ pub struct LoadingWidget {
     tone: Color,
     /// The latest `released` the view carried; acted on at paint, not build.
     released: bool,
+    stale: bool,
     /// The instant the release took effect, once one has.
     release_at: Option<f64>,
     /// Whether a `released` edge — not the hold ceiling — has been acted on.
@@ -173,6 +181,7 @@ impl<State: 'static> View<State> for LoadingView<State> {
             piece_count: self.piece_count,
             tone: self.tone,
             released: self.released,
+            stale: self.stale,
             release_at: None,
             settled: false,
             landed_at: None,
@@ -191,6 +200,7 @@ impl<State: 'static> View<State> for LoadingView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         element.released = self.released;
+        element.stale = self.stale;
         element.piece_count = self.piece_count;
         element.tone = self.tone;
         element.done = self.done;
@@ -216,7 +226,7 @@ impl<State: 'static> View<State> for LoadingView<State> {
 
 impl LoadingWidget {
     fn blocking(&self) -> bool {
-        !self.fired && self.landed_at.is_none_or(|landed| self.elapsed_ms < landed)
+        !self.fired && (self.stale || self.landed_at.is_none_or(|landed| self.elapsed_ms < landed))
     }
 
     /// Both ends: the tail runs from `from_ms`, the pieces from `open_ms`.
@@ -318,7 +328,7 @@ mod tests {
 
     /// A view whose children answer nothing, so a rebuild's flags are the
     /// overlay's own and not a child's.
-    fn inert_view(released: bool, tone: Color) -> LoadingView<()> {
+    fn inert_view(released: bool, tone: Color, stale: bool) -> LoadingView<()> {
         LoadingView {
             rain: any(SizedBox::<()>(None, None)),
             assembly: any(SizedBox::<()>(None, None)),
@@ -326,6 +336,7 @@ mod tests {
             piece_count: 1,
             tone,
             released,
+            stale,
             done: RwSignal::new(false),
         }
     }
@@ -439,7 +450,7 @@ mod tests {
     fn input_stops_here_only_until_the_assembly_has_landed() {
         let mut next_id = 0;
         let mut ctx = BuildCtx::new(&mut next_id);
-        let mut widget = inert_view(false, spec::AMBER_FALLBACK).build(&mut ctx);
+        let mut widget = inert_view(false, spec::AMBER_FALLBACK, false).build(&mut ctx);
         assert!(
             widget.blocking(),
             "a band still loading is behind a picture of itself"
@@ -464,17 +475,42 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_picture_keeps_blocking_past_the_landing() {
+        let mut next_id = 0;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let mut widget = inert_view(false, spec::AMBER_FALLBACK, true).build(&mut ctx);
+        widget.landed_at = Some(1_000.0);
+        widget.elapsed_ms = 1_000.0;
+        assert!(
+            widget.blocking(),
+            "a stale picture blocks even once its own pieces have landed"
+        );
+
+        widget.elapsed_ms = 5_000.0;
+        assert!(
+            widget.blocking(),
+            "staleness alone keeps blocking, however late"
+        );
+
+        widget.fired = true;
+        assert!(
+            !widget.blocking(),
+            "a fired overlay blocks nothing, stale or not"
+        );
+    }
+
+    #[test]
     fn a_release_or_a_tone_change_repaints_though_no_child_moved() {
         let mut next_id = 0;
         let mut ctx = BuildCtx::new(&mut next_id);
-        let held = inert_view(false, spec::AMBER_FALLBACK);
+        let held = inert_view(false, spec::AMBER_FALLBACK, false);
         let mut element = held.build(&mut ctx);
         assert!(
             !held.rebuild(&held, &mut element, &mut ctx).needs_paint(),
             "an unchanged rebuild owes no paint"
         );
 
-        let released = inert_view(true, spec::AMBER_FALLBACK);
+        let released = inert_view(true, spec::AMBER_FALLBACK, false);
         assert!(
             released
                 .rebuild(&held, &mut element, &mut ctx)
@@ -482,7 +518,7 @@ mod tests {
             "the release is read at paint, so it must ask for one"
         );
 
-        let retoned = inert_view(true, spec::ON_AMBER_FALLBACK);
+        let retoned = inert_view(true, spec::ON_AMBER_FALLBACK, false);
         assert!(
             retoned
                 .rebuild(&released, &mut element, &mut ctx)
