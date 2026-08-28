@@ -5,18 +5,22 @@
 //! [`frust::provide_context`], so a screen resolves them the same way it
 //! resolves any other feature's.
 //!
-//! The repository is the [`MockEntitlementRepository`] throughout this slice —
-//! the store-backed implementation lands behind this same seam, with no call
-//! site moving. When the test switch is on, the concrete mock is published
-//! beside its trait object too, so a suite can script it
-//! ([`mock_entitlement`], the `connect` credential store's precedent).
+//! The repository is the store-backed [`PlayEntitlementRepository`] in a real
+//! run, and the in-memory [`MockEntitlementRepository`] in the two cases that
+//! cannot reach a store: a headless suite that flipped
+//! [`use_mock_entitlement_for_tests`], and a `mock-iap` build — the desktop
+//! preview of the purchase flow, since no desktop platform can sell. An
+//! unopenable preferences store falls back to the mock too, rather than failing
+//! the launch (`connect`'s saved-servers precedent). With the test switch on,
+//! the concrete mock is published beside its trait object so a suite can script
+//! it ([`mock_entitlement`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
-use super::data::repositories::MockEntitlementRepository;
+use super::data::repositories::{MockEntitlementRepository, PlayEntitlementRepository};
 use super::domain::repositories::EntitlementRepository;
 use super::presentation::controller::ProController;
 
@@ -40,13 +44,31 @@ pub fn provide() {
 /// Publishes the entitlement store and hands it back, so the controller below
 /// is built over the very same instance rather than a second lookup's.
 fn provide_entitlement_repository() -> SharedEntitlementRepository {
-    let mock = Arc::new(MockEntitlementRepository::free());
-    let repository = Arc::clone(&mock) as SharedEntitlementRepository;
+    let scripted = USE_MOCK_ENTITLEMENT_FOR_TESTS.load(Ordering::Relaxed);
+    let repository = if scripted || cfg!(feature = "mock-iap") {
+        let mock = Arc::new(MockEntitlementRepository::free());
+        if scripted {
+            provide_context(Arc::clone(&mock));
+        }
+        mock as SharedEntitlementRepository
+    } else {
+        platform_entitlement_repository()
+    };
     provide_context(Arc::clone(&repository));
-    if USE_MOCK_ENTITLEMENT_FOR_TESTS.load(Ordering::Relaxed) {
-        provide_context(mock);
-    }
     repository
+}
+
+/// The real store, over the platform's own billing service and preferences.
+fn platform_entitlement_repository() -> SharedEntitlementRepository {
+    match PlayEntitlementRepository::standard() {
+        Ok(repository) => Arc::new(repository),
+        Err(err) => {
+            // Only the cache behind it failed to open; the in-memory store
+            // keeps the app launchable, entitled to nothing until it is fixed.
+            log::warn!("pro entitlement: falling back to the in-memory store: {err}");
+            Arc::new(MockEntitlementRepository::free())
+        }
+    }
 }
 
 pub fn expect_entitlement_repository() -> SharedEntitlementRepository {
