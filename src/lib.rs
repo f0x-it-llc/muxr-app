@@ -103,9 +103,16 @@ impl Component for MuxrApp {
             .forget();
 
         features::connect::di::provide();
+        features::pro::di::provide();
         features::sessions::di::provide();
         features::terminal::di::provide();
         features::settings::di::provide();
+
+        // Resolved here, not inside the future: the poller driving it installs
+        // no ambient reactive owner, so a lookup deferred into the body would
+        // panic on its first poll.
+        let pro = features::pro::di::expect_pro_controller();
+        frust::spawn_local(async move { pro.refresh().await });
 
         let controller = NavigatorController::new();
         let overlays = NavigatorController::new();
