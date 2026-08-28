@@ -439,6 +439,7 @@ pub fn serial() -> MutexGuard<'static, ()> {
 ///   these suites assert on (e.g. the sessions strip's `zellij 0.44.3 · 36ms`).
 /// - `sessions`/`terminal` `di`: mock repositories — a real one would fail "not connected"
 ///   against the mock-only connection above.
+/// - `pro` `di`: publishes the scriptable entitlement mock, so a suite can script store answers.
 /// - `sessions` `pages`: the list band's loading rain, which would hold the band over a pinned
 ///   `frame` clock it never advances past.
 /// - `fonts`: offline download source (no suite reaches the network by omission) and a throwaway
@@ -452,6 +453,7 @@ pub fn setup() -> Owner {
     muxr::features::terminal::di::use_mock_terminal_for_tests();
     muxr::features::connect::di::use_mock_saved_servers_for_tests();
     muxr::features::connect::di::use_mock_credentials_for_tests();
+    muxr::features::pro::di::use_mock_entitlement_for_tests();
     muxr::fonts::use_offline_font_source_for_tests();
     muxr::fonts::use_font_cache_dir_for_tests(
         std::env::temp_dir().join(format!("muxr-test-fonts-{}", std::process::id())),
