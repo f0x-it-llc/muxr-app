@@ -58,3 +58,15 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("build/frust-secure-storage"))
     }
 }
+
+// Added by `frust` Add Plugin: a plugin's Android library module,
+// included by path out of the frust checkout (the same derivation
+// `frust.embedding.dir` and the plugin's Cargo path dep use).
+include(":frust-iap")
+project(":frust-iap").projectDir = file("../../../plugins/iap/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-iap") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-iap"))
+    }
+}

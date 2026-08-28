@@ -241,6 +241,7 @@ dependencies {
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
     implementation(project(":frust-camera"))
     implementation(project(":frust-secure-storage"))
+    implementation(project(":frust-iap"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
