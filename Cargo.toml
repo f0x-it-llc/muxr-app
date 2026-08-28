@@ -42,6 +42,10 @@ frust-plugin = { path = "../../crates/frust-plugin" }
 frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 frust-secure-storage = { path = "../../plugins/secure-storage" }
 frust-camera = { path = "../../plugins/camera" }
+frust-iap = { path = "../../plugins/iap" }
+# `frust-iap` models the per-platform `requestPurchase` payloads as raw
+# `serde_json::Value` by design, so a caller has to build them itself.
+serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-webpki-roots-no-provider",
 ] }
@@ -78,6 +82,11 @@ rcgen = { version = "0.14", default-features = false, features = [
 
 [features]
 lean = ["log/release_max_level_warn"]
+# Desktop preview of the purchase flow: `cargo run --features mock-iap` keeps
+# `pro::di` on the scripted in-memory entitlement store, since no desktop
+# platform can sell. Never passed by a device build — the CLI only ever selects
+# `lean` (release) or `frust/perf-trace` (debug/profile).
+mock-iap = []
 
 
 [profile.release]
