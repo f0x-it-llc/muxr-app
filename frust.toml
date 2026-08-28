@@ -17,10 +17,10 @@ scheme = "muxr"
 # prod = {}
 
 # Android release signing is driven by `android/app/keystores/key.properties`,
-# a Java properties file the Gradle build reads directly (this file is NOT
-# parsed by Frust). It must be gitignored (the generated .gitignore already
-# excludes `key.properties` and `*.jks`) so the keystore/passwords never enter
-# version control. Keys (develop.*/prod.* prefixes):
+# a Java properties file the Gradle build reads directly. It must be
+# gitignored (the generated .gitignore already excludes `key.properties` and
+# `*.jks`) so the keystore/passwords never enter version control. Keys
+# (develop.*/prod.* prefixes):
 #   develop.storePassword=<...>   prod.storePassword=<...>
 #   develop.keyPassword=<...>     prod.keyPassword=<...>
 #   develop.keyAlias=<...>        prod.keyAlias=<...>
@@ -32,12 +32,24 @@ scheme = "muxr"
 # Gradle warning is logged for every release-artifact task Gradle exposes for
 # the variant — assemble/bundle/package<Flavor>Release, see
 # android/app/build.gradle.kts).
-# CLI-gate caveat: `frust build --release` instead gates on `android/key.properties`
-# (a different path this Gradle rig never reads) — do NOT create it to appease
-# the CLI; Gradle ignores it and ships a silently debug-signed release (see
-# docs/DEVELOPMENT.md's Android Signing section).
-# [signing]
-# keystore = "android/app/keystores/key.properties"
+#
+# `[signing]` below points the `frust` CLI's own release-signing gate
+# (`frust-drive`'s `android_build::signing`, verified against
+# crates/frust-drive/src/manifest.rs's `SigningSection` and
+# crates/frust-drive/src/android_build/signing.rs's key-resolution format
+# string) at this same file/prefix, so `frust build --release`/`appbundle`
+# resolves the identical `prod.*` keys Gradle already reads above instead of
+# the scaffold default `android/key.properties`. Gradle itself is untouched —
+# it keeps reading `app/keystores/key.properties` directly; the CLI's
+# generated `android/.frust-signing.properties` is transient — owner-only,
+# deleted by the CLI on exit, and not gitignored, so never leave one behind —
+# and this app's `build.gradle.kts` does not read it. `prefix` is single-valued
+# (one flavor per manifest), so it only wires up the `production` flavor's
+# `prod.*` keys — a develop RELEASE build still goes through the direct
+# Gradle recipe, `cd android && ./gradlew :app:assembleDevelopRelease`.
+[signing]
+key-properties = "app/keystores/key.properties"
+prefix = "prod"
 
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `com.it.f0x.muxr`).
