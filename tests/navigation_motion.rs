@@ -69,10 +69,21 @@ const GEAR: &str = "Settings";
 /// simply absent on iPhone) — a device-verified regression this suite pins shut.
 const BANNED_GLYPHS: [&str; 2] = ["\u{2039}", "\u{2699}"];
 
-/// How far into a transition the geometry probes paint. Early enough that the
-/// reduced-motion cross-fade (≤120ms) has **not** settled, so both frames
-/// compare like with like.
-const MID_TRANSITION_MS: f64 = 60.0;
+/// Where the pre-split probe samples the Glyph push, inside the leaving
+/// page's fade-out (`resolve_layers`'s `Glyph` arm,
+/// `../../crates/frust-widgets/src/nav/transition.rs`). Progress is eased —
+/// `p = curve.transform(t / 340)` on `Cubic(0.34, 1.35, 0.64, 1.0)`
+/// (`GLYPH_ENTER`/`GLYPH_SPATIAL_CURVE`, matching
+/// `frust_glyph::baseline()`'s `MotionScheme`) — and `GLYPH_FADE_SPLIT`
+/// (0.44) crosses at `t ≈ 44ms`. At `t = 24ms`, `p ≈ 0.258`: leaving
+/// `alpha ≈ 0.41` (painted, `dx ≈ -4.1px`), entering `alpha == 0` (discarded).
+const PRE_SPLIT_MS: f64 = 24.0;
+
+/// Where the post-split probe samples, past the ≈44ms crossing above. At
+/// `t = 60ms` (the old single-sample `MID_TRANSITION_MS`'s value, unchanged),
+/// `p ≈ 0.566`: leaving `alpha == 0` — into `DiscardScene` since frust
+/// `5fc1513a` — entering `alpha ≈ 0.226` (painted, `dx ≈ 6.9px`).
+const POST_SPLIT_MS: f64 = 60.0;
 
 /// A mock connect target — only `connected` flipping and the `host:port`
 /// endpoint matter here.
@@ -1266,12 +1277,21 @@ fn leaving_page_x(scene: &RecScene) -> f64 {
         .x
 }
 
-/// Push `/settings` off `/` and report `(settled x, mid-transition x)` for the
-/// leaving Connect page, plus the mid-transition glyph-run count.
-fn probe_push_transition(reduce_motion: bool) -> (f64, f64, usize) {
+/// The recorded rect in `rects` matching `size` within [`EPSILON`] on both
+/// dimensions — re-identifies a page's chrome by SHAPE once its position or
+/// presence changes. Local to this file (width-only `support::by_width`
+/// would be ambiguous here; `tests/support/mod.rs` is read-only for this card).
+fn rect_sized(rects: &[(Point, Size)], size: Size) -> Option<(Point, Size)> {
+    rects.iter().copied().find(|(_, s)| {
+        (s.width - size.width).abs() < EPSILON && (s.height - size.height).abs() < EPSILON
+    })
+}
+
+/// Push `/settings` off `/`; report the settled leaving-page frame plus
+/// frames at [`PRE_SPLIT_MS`]/[`POST_SPLIT_MS`] — either side of the split.
+fn probe_push_transition(reduce_motion: bool) -> (RecScene, RecScene, RecScene) {
     let mut h = Harness::themed(theme(reduce_motion));
     let settled = h.frame();
-    let base_x = leaving_page_x(&settled);
 
     // Pushed off `/`, so the leaving page is Connect — the one screen that
     // paints plenty of trackable chrome. The connection is what the session
@@ -1279,39 +1299,80 @@ fn probe_push_transition(reduce_motion: bool) -> (f64, f64, usize) {
     expect_connection_controller().connect(mock_target());
     app_nav().push("/settings");
     h.frame_at(0.0);
-    let mid = h.frame_at(MID_TRANSITION_MS);
-    (base_x, leaving_page_x(&mid), mid.glyph_runs)
+    let pre_split = h.frame_at(PRE_SPLIT_MS);
+    let post_split = h.frame_at(POST_SPLIT_MS);
+    (settled, pre_split, post_split)
 }
 
 #[test]
-fn a_route_push_slides_the_leaving_page_and_paints_both() {
+fn a_route_push_slides_the_leaving_page_then_reveals_the_entering_one() {
     let _g = serial();
     let _ambient = setup();
 
-    let (base_x, mid_x, mid_runs) = probe_push_transition(false);
+    let (settled, pre_split, post_split) = probe_push_transition(false);
+    let (settled_pos, settled_size) =
+        largest(&settled.rounded).expect("the settled leaving page painted chrome to track");
 
-    // The Glyph preset's leaving layer travels `-p * 16dp` along x…
-    assert!(
-        mid_x < base_x - EPSILON,
-        "the leaving page is displaced mid-transition ({mid_x} vs {base_x})"
-    );
-    assert!(
-        base_x - mid_x <= 16.0 + EPSILON,
-        "…by at most the preset's 16dp travel ({} px)",
-        base_x - mid_x
-    );
-
-    // …and both pages paint while it does, which an un-animated push would
-    // never do (a `PageTransition::None` push swaps in one frame).
-    let mut settled = Harness::mount();
+    // Settings' resting chrome, to re-identify it by size once displaced —
+    // a fresh, un-transitioned push, not the transitioning harness above.
+    let mut rest = Harness::mount();
     expect_connection_controller().connect(mock_target());
-    settled.push("/settings");
-    let after = settled.frame();
+    rest.push("/settings");
+    let entering_rest = rest.frame();
+    let (entering_pos, entering_size) =
+        largest(&entering_rest.rounded).expect("the settled entering page painted chrome to track");
+
+    // Pre-split: Connect still paints, displaced by `-p * 16dp`; Settings'
+    // alpha is exactly `0` there, so it paints nothing yet.
+    let (pre_pos, _) = rect_sized(&pre_split.rounded, settled_size).unwrap_or_else(|| {
+        panic!(
+            "Connect's {settled_size:?} chrome is gone before the fade split: {:?}",
+            pre_split.rounded
+        )
+    });
     assert!(
-        mid_runs > after.glyph_runs,
-        "mid-transition both pages paint ({mid_runs} runs) where the settled \
-         frame paints only the new one ({} runs)",
-        after.glyph_runs
+        pre_pos.x < settled_pos.x - EPSILON,
+        "the leaving page is displaced before the split ({} vs {})",
+        pre_pos.x,
+        settled_pos.x
+    );
+    assert!(
+        settled_pos.x - pre_pos.x <= 16.0 + EPSILON,
+        "…by at most the preset's 16dp travel ({} px)",
+        settled_pos.x - pre_pos.x
+    );
+    assert!(
+        rect_sized(&pre_split.rounded, entering_size).is_none(),
+        "Settings' {entering_size:?} chrome already paints before the split: {:?}",
+        pre_split.rounded
+    );
+
+    // Post-split: Glyph is a split cross-fade (`resolve_layers`'s `Glyph`
+    // arm) — one page paints per instant, the other goes to `DiscardScene`
+    // (frust `5fc1513a`), so "both pages paint" is only assertable ACROSS
+    // these two samples, never within one frame. Connect's chrome is gone…
+    assert!(
+        rect_sized(&post_split.rounded, settled_size).is_none(),
+        "Connect's {settled_size:?} chrome still paints past the split: {:?}",
+        post_split.rounded
+    );
+    // …Settings has taken over instead, displaced by `(1 - p) * 16dp`.
+    let (post_pos, _) = rect_sized(&post_split.rounded, entering_size).unwrap_or_else(|| {
+        panic!(
+            "Settings' {entering_size:?} chrome hasn't painted past the split: {:?}",
+            post_split.rounded
+        )
+    });
+    assert!(
+        post_pos.x > entering_pos.x + EPSILON,
+        "the entering page is displaced past the split ({} vs {})",
+        post_pos.x,
+        entering_pos.x
+    );
+    assert!(
+        post_pos.x - entering_pos.x <= 16.0 + EPSILON,
+        "…by at most the preset's 16dp travel ({} px)",
+        post_pos.x - entering_pos.x
     );
 }
 
@@ -1320,7 +1381,9 @@ fn reduce_motion_collapses_the_route_slide_to_a_pure_crossfade() {
     let _g = serial();
     let _ambient = setup();
 
-    let (base_x, mid_x, _) = probe_push_transition(true);
+    let (settled, _pre_split, post_split) = probe_push_transition(true);
+    let base_x = leaving_page_x(&settled);
+    let mid_x = leaving_page_x(&post_split);
 
     // The Glyph design system's hard accessibility rule, as geometry: a reduced
     // transition is a ≤120ms linear cross-fade with **no** slide, so the
