@@ -110,8 +110,16 @@ impl Component for MuxrApp {
 
         // Resolved here, not inside the future: the poller driving it installs
         // no ambient reactive owner, so a lookup deferred into the body would
-        // panic on its first poll.
+        // panic on its first poll. The store's own failures bridge to toasts
+        // off this same instance — refresh, purchase and restore alike, each
+        // announced once, by nobody else.
         let pro = features::pro::di::expect_pro_controller();
+
+        pro.core()
+            .failures()
+            .subscribe(|failure: &failure::AppFailure| ui::toasts::app_toasts().raise(failure))
+            .forget();
+
         frust::spawn_local(async move { pro.refresh().await });
 
         let controller = NavigatorController::new();

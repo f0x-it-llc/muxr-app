@@ -39,7 +39,7 @@ use frust_glyph::{dots_loader, skeleton};
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::domain::entities::{ProOffer, PurchaseOutcome};
-use crate::features::pro::presentation::controller::ProController;
+use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::spacing;
@@ -283,11 +283,15 @@ fn restore_action(
         let sheet = sheet.clone();
         let on_unlocked = Rc::clone(&on_unlocked);
         spawn_local(async move {
-            pro.restore().await;
-            if pro.is_pro_untracked() {
-                sheet.close_then(move || on_unlocked());
-            } else {
-                app_toasts().show(NOTHING_TO_RESTORE_TOAST);
+            match pro.restore().await {
+                RestoreOutcome::Restored => {
+                    sheet.close_then(move || on_unlocked());
+                }
+                RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
+                // A failure is the app's failure bridge to announce, once; a
+                // refused overlap says nothing at all, as a purchase's
+                // `Cancelled` doesn't. Neither is an empty account.
+                RestoreOutcome::Failed(_) | RestoreOutcome::Busy => {}
             }
         });
     })

@@ -25,6 +25,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use clean_signals::Failure;
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context, spawn_local,
@@ -1680,6 +1681,28 @@ fn tapping_restore_toasts_when_the_account_owns_nothing_to_restore() {
     assert!(
         toasts.iter().any(|t| t == NOTHING_TO_RESTORE_TOAST),
         "{toasts:?}"
+    );
+}
+
+#[test]
+fn tapping_restore_toasts_the_stores_failure_and_never_the_empty_account_copy() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    app_toasts().clear();
+    let failure = AppFailure::Network("store unreachable".to_string());
+    mock.fail_next_restore(failure.clone());
+
+    h.tap_label(RESTORE_LABEL);
+    pump_until(&mut h, "the store failure's own toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(
+        app_toasts().pending(),
+        vec![failure.user_message()],
+        "the app's failure bridge announced it, and nothing else did"
     );
 }
 
