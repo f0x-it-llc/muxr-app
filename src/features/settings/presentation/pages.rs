@@ -1,6 +1,6 @@
-//! The `/settings` route: muxr's server-settings screen — five groups
-//! (`connection`, `auth tokens`, `saved servers`, `terminal appearance`,
-//! `session poll`) plus Disconnect, following `docs/ARCHITECTURE.md`'s
+//! The `/settings` route: muxr's server-settings screen — six groups
+//! (`connection`, `auth tokens`, `saved servers`, `muxr pro`, `terminal
+//! appearance`, `session poll`) plus Disconnect, following `docs/ARCHITECTURE.md`'s
 //! canonical screen shape (a per-screen [`Component`] hosting
 //! [`SettingsController`] via `use_controller`, `build` a pure arrangement
 //! over [`widgets`]).
@@ -26,6 +26,7 @@
 //! both halves deliberate, since the router's session guard only fires at
 //! navigation time, never reactively.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
@@ -39,6 +40,11 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
+use crate::features::pro::di::expect_pro_controller;
+use crate::features::pro::presentation::controller::ProController;
+use crate::features::pro::presentation::{
+    NOTHING_TO_RESTORE_TOAST, UpgradeContext, show_upgrade_sheet,
+};
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
@@ -111,6 +117,9 @@ pub struct Actions {
     /// The app-scoped connection handle: the `connection` group reads it,
     /// and Disconnect clears it.
     pub connection: Arc<ConnectionController>,
+    /// The app-scoped entitlement handle: the `muxr pro` group reads its
+    /// `entitlement`, and both of that group's actions run through it.
+    pub pro: Arc<ProController>,
     /// The revoke animations in flight — screen-scoped presentation state,
     /// not the controller's (see [`RevokeAnimations`]).
     pub(super) scrambles: RevokeAnimations,
@@ -139,12 +148,20 @@ impl Component for SettingsScreen {
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
+        // Refresh the entitlement on every Settings mount, beside the
+        // screen's own first load — two paywalls (this row and `connect`'s
+        // gate) must not be able to disagree with a stale cached answer.
+        let pro = expect_pro_controller();
+        let pro_refresh = Arc::clone(&pro);
+        spawn_local(async move { pro_refresh.refresh().await });
+
         SettingsState {
             actions: Actions {
                 overlays: self.overlays.clone(),
                 app_nav: app_nav(),
                 controller,
                 connection: expect_connection_controller(),
+                pro,
                 scrambles: RevokeAnimations::new(),
             },
         }
@@ -157,6 +174,7 @@ impl Component for SettingsScreen {
         let saved = state.actions.controller.saved.get();
         let appearance = state.actions.controller.appearance.get();
         let poll = state.actions.controller.poll.get();
+        let entitlement = state.actions.pro.entitlement.get();
 
         let theme = active_theme();
         let colors = Palette::from_theme(&theme);
@@ -205,6 +223,9 @@ impl Component for SettingsScreen {
                     .map(|server| widgets::saved_server_item(server, &colors)),
             );
         }
+
+        body.push(widgets::group_label(widgets::PRO_GROUP_LABEL, &colors));
+        body.extend(widgets::pro_rows(entitlement, &colors));
 
         body.push(widgets::group_label("terminal appearance", &colors));
         body.extend(widgets::appearance_rows(&appearance, &colors));
@@ -680,6 +701,37 @@ impl Actions {
             },
         );
     }
+
+    /// Open the same paywall `connect`'s server-limit gate raises, from the
+    /// `muxr pro` group's Upgrade action. Nothing to unlock and no forget-and-
+    /// connect retry — Settings has neither a follow-on nor a blocked dial to
+    /// resume, unlike the gate. `on_unlocked` is a state-free `Rc<dyn Fn()>`
+    /// because the sheet's follow-on runs after the staged close with no
+    /// `AppState` in hand, so a no-op is all Settings needs to pass.
+    pub fn open_upgrade_sheet(&self) {
+        show_upgrade_sheet(
+            &self.overlays,
+            Arc::clone(&self.pro),
+            UpgradeContext {
+                on_unlocked: Rc::new(|| {}),
+                server_limit: None,
+            },
+        );
+    }
+
+    /// Run the restore flow directly, without the paywall sheet: the `muxr
+    /// pro` group's Restore action. Silent on a landed restore — the row's
+    /// own value flips to "Pro" the moment `entitlement` republishes — and
+    /// toasted when the account owns nothing to restore.
+    pub fn restore_purchases(&self) {
+        let pro = Arc::clone(&self.pro);
+        spawn_local(async move {
+            pro.restore().await;
+            if !pro.is_pro_untracked() {
+                app_toasts().show(NOTHING_TO_RESTORE_TOAST);
+            }
+        });
+    }
 }
 
 /// Open the one-time secret reveal for `controller`'s currently pending
@@ -743,4 +795,14 @@ pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &st
 /// The `Disconnect` button.
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
+}
+
+/// The `muxr pro` group's `Upgrade to Pro` action.
+pub(super) fn open_upgrade_sheet(state: &mut SettingsState) {
+    state.actions.open_upgrade_sheet();
+}
+
+/// The `muxr pro` group's `Restore purchases` action.
+pub(super) fn restore_purchases(state: &mut SettingsState) {
+    state.actions.restore_purchases();
 }
