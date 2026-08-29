@@ -26,7 +26,7 @@ use frust::{
     Stack, WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{FrameTime, NamedKey, PaintScene, RenderRoot, WindowInsets};
+use frust_core::{FrameTime, NamedKey, PaintScene, PointerPhase, RenderRoot, WindowInsets};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -43,7 +43,9 @@ use muxr::features::connect::domain::entities::{
 };
 use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
-use muxr::features::connect::presentation::controller::{ConnectController, CredentialOffer};
+use muxr::features::connect::presentation::controller::{
+    ConnectController, ConnectRetry, CredentialOffer, GatePrompt, OfferPrompt, ServerLimitBlock,
+};
 use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
 use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
 use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
@@ -56,6 +58,12 @@ use muxr::features::connect::presentation::widgets::pairing::{
 use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
 use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
 use muxr::features::connect::presentation::widgets::{Live, connect_pieces, connect_pieces_with};
+use muxr::features::pro::data::repositories::MockEntitlementRepository;
+use muxr::features::pro::di::{
+    SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
+};
+use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::palette::Palette;
@@ -64,8 +72,8 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, char_key, frame_sized, named_key, node_labels, serial, settle_sized, setup,
-    tap,
+    EPSILON, RecScene, char_key, frame_sized, named_key, node_labels, pointer, serial,
+    settle_sized, setup, tap,
 };
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
@@ -76,6 +84,11 @@ const SURFACE: Size = Size::new(800.0, 1200.0);
 /// A point in the top-left corner: scrim on the QR sheet (whose panel is
 /// bottom-anchored), and nothing at all on the screen itself.
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
+
+/// How many pump-and-settle rounds [`Harness::flush`] runs — comfortably more
+/// than the paywall's spawn → store answer → staged close → completion-frame
+/// chain needs (`tests/pro.rs`'s own count).
+const FLUSH_ROUNDS: usize = 4;
 
 /// The URL the happy path types — the mock's own placeholder.
 const VALID_URL: &str = SERVER_URL_PLACEHOLDER;
@@ -152,6 +165,39 @@ fn metrics_at(size: Size) -> WindowMetrics {
     WindowMetrics::new(size, 1.0, WindowInsets::default())
 }
 
+/// How a mounted fixture's install is entitled.
+///
+/// Every case but the free-tier gate's own mounts [`Tier::Pro`]: the app's
+/// seeded store holds three rows, which a *free* install may not connect to at
+/// all (`features::pro`'s one-server rule), and every one of those cases is
+/// about something else. The gate's own cases mount [`Tier::Free`] over a store
+/// they seed themselves ([`mount_limited`]).
+#[derive(Clone, Copy)]
+enum Tier {
+    Free,
+    Pro,
+}
+
+impl Tier {
+    fn entitlement(self) -> Entitlement {
+        match self {
+            Tier::Free => Entitlement::Free,
+            Tier::Pro => Entitlement::Pro,
+        }
+    }
+}
+
+/// Publish `tier` on both halves of the seam, inside [`Harness::mount_seeded`]'s
+/// window: the scriptable store, so `MuxrApp::init`'s own launch refresh
+/// republishes the same answer, and the live signal, since the first verdict is
+/// taken long before that refresh lands.
+fn entitle(tier: Tier) {
+    mock_entitlement()
+        .expect("tests/support opted this process into the scriptable store")
+        .set_entitlement(tier.entitlement());
+    expect_pro_controller().entitlement.set(tier.entitlement());
+}
+
 /// The Connect screen plus a live navigator over the same controller.
 struct Harness {
     nav: NavigatorController<AppState>,
@@ -176,7 +222,14 @@ impl Harness {
     /// controller loads its list once at construction, so a row written after
     /// the mount is invisible until something reloads.
     fn mount_seeded(seed: impl FnOnce()) -> Self {
+        Self::mount_tiered(Tier::Pro, seed)
+    }
+
+    /// [`Harness::mount_seeded`] over an install entitled as `tier` — see
+    /// [`Tier`] for why every case but the gate's own mounts entitled.
+    fn mount_tiered(tier: Tier, seed: impl FnOnce()) -> Self {
         let state = MuxrApp.init();
+        entitle(tier);
         seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-points `routes::app_nav()` at this fixture's own navigator, guard
@@ -240,6 +293,24 @@ impl Harness {
             std::thread::sleep(std::time::Duration::from_millis(1));
             self.settle();
         }
+    }
+
+    /// Pump the UI-thread queue and settle the frames [`FLUSH_ROUNDS`] times,
+    /// then deliver a pop's result with a harmless `Move`.
+    ///
+    /// [`Harness::settle`] alone carries a dialog, but not the paywall: its
+    /// store lookup, its staged close and the follow-on that close chains are
+    /// three separate queued steps (`tests/pro.rs` documents the chain).
+    fn flush(&mut self) {
+        let runtime =
+            frust_reactive::ReactiveRuntime::get().expect("setup() installed the runtime");
+        for _ in 0..FLUSH_ROUNDS {
+            runtime.pump_local();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.settle();
+        }
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Move, SCRIM_POINT));
     }
 
     /// Tap the first node matching `pred`, panicking with `what` if the tree
@@ -1305,7 +1376,33 @@ fn pairing_controller() -> Arc<ConnectController> {
     )
 }
 
-/// A [`ConnectController`] over explicit stores — the same four dependencies
+/// A [`GatePrompt`] that fails the test if it is ever raised. Every case
+/// outside the free-tier gate's own section connects well inside the one-server
+/// rule, so a block reaching this is a regression rather than a state to
+/// handle.
+fn ungated() -> GatePrompt {
+    Rc::new(|block: ServerLimitBlock| {
+        panic!(
+            "the free-tier gate refused this connect, asking to forget {:?}",
+            block
+                .to_forget
+                .iter()
+                .map(SavedServer::endpoint)
+                .collect::<Vec<String>>()
+        )
+    })
+}
+
+/// A [`ProController`] over a free-tier store of its own. The fixtures below
+/// build their dependencies by hand rather than through `MuxrApp::init`, so
+/// there is no app-scoped one to resolve — and free is the tier whose rule
+/// there is anything to test.
+fn free_pro() -> Arc<ProController> {
+    let repository = Arc::new(MockEntitlementRepository::free()) as SharedEntitlementRepository;
+    Arc::new(ProController::new(repository))
+}
+
+/// A [`ConnectController`] over explicit stores — the same five dependencies
 /// the screen's own `init` resolves, with the token store always the seeded
 /// mock (a save mints through it, and every assertion about a revoke reads it
 /// back through `MockAuthTokensRepository::snapshot`).
@@ -1319,22 +1416,26 @@ fn controller_over(
         credentials,
         Arc::new(MockAuthTokensRepository::seeded()),
         connection,
+        free_pro(),
     )
 }
 
-/// [`controller_over`] with the token store handed in, for the flows that
-/// assert on what was minted or revoked.
+/// [`controller_over`] with the token store and the entitlement handed in, for
+/// the flows that assert on what was minted or revoked, and for the free-tier
+/// gate's own cases.
 fn controller_with_tokens(
     servers: Arc<MockSavedServersRepository>,
     credentials: Arc<MockCredentialService>,
     tokens: Arc<MockAuthTokensRepository>,
     connection: Arc<ConnectionController>,
+    pro: Arc<ProController>,
 ) -> Arc<ConnectController> {
     Arc::new(ConnectController::new(
         servers,
         credentials,
         tokens,
         connection,
+        pro,
     ))
 }
 
@@ -1477,7 +1578,7 @@ fn the_pinned_cta_connects_with_the_codes_own_trust_and_token() {
     );
     let pinned = {
         let controller = Arc::clone(&controller);
-        Rc::new(move || controller.connect_from_pairing(&app_nav()))
+        Rc::new(move || controller.connect_from_pairing(&app_nav(), ungated()))
     };
     let mut form = Form::mount(&controller, pinned);
 
@@ -1546,7 +1647,7 @@ fn a_failed_pinned_connect_keeps_the_form_filled_and_the_cta_up() {
     );
     let pinned = {
         let controller = Arc::clone(&controller);
-        Rc::new(move || controller.connect_from_pairing(&app_nav()))
+        Rc::new(move || controller.connect_from_pairing(&app_nav(), ungated()))
     };
     let mut form = Form::mount(&controller, pinned);
 
@@ -1703,6 +1804,9 @@ struct Creds {
     servers: Arc<MockSavedServersRepository>,
     tokens: Arc<MockAuthTokensRepository>,
     connection: Arc<ConnectionController>,
+    /// The free-tier entitlement the controller takes every verdict from —
+    /// held so a gate case can publish a landed purchase mid-flight.
+    pro: Arc<ProController>,
     /// The app's real route table over this fixture's own navigator — held
     /// because `routes::app_nav()` resolves through it and a dropped router
     /// would take the handle's table with it. Type-erased because
@@ -1720,11 +1824,13 @@ fn credential_fixture(rows: Vec<SavedServer>) -> Creds {
     let servers = Arc::new(MockSavedServersRepository::with_servers(rows));
     let credentials = Arc::new(MockCredentialService::new());
     let tokens = Arc::new(MockAuthTokensRepository::seeded());
+    let pro = free_pro();
     let controller = controller_with_tokens(
         Arc::clone(&servers),
         Arc::clone(&credentials),
         Arc::clone(&tokens),
         Arc::clone(&connection),
+        Arc::clone(&pro),
     );
     Creds {
         controller,
@@ -1732,6 +1838,7 @@ fn credential_fixture(rows: Vec<SavedServer>) -> Creds {
         servers,
         tokens,
         connection,
+        pro,
         _router: router,
     }
 }
@@ -1972,6 +2079,7 @@ fn connect_fixture(creds: &Creds) -> Rc<RefCell<Vec<(String, bool)>>> {
         Rc::new(move |offer: CredentialOffer| {
             record.borrow_mut().push((offer.label, offer.replacing))
         }),
+        ungated(),
     );
     assert!(
         creds.connection.connected.get_untracked(),
@@ -2165,7 +2273,7 @@ fn a_successful_pairing_stores_the_scanned_token_behind_one_prompt() {
     creds
         .controller
         .apply_scanned_payload(scanned_payload(false));
-    creds.controller.connect_from_pairing(&app_nav());
+    creds.controller.connect_from_pairing(&app_nav(), ungated());
     pump_until_done("the paired credential save", || {
         creds.credentials.stored(PAIRED_ENDPOINT).is_some()
     });
@@ -2206,7 +2314,7 @@ fn a_denied_pairing_gate_leaves_the_session_live_and_the_row_unsaved() {
     creds
         .controller
         .apply_scanned_payload(scanned_payload(false));
-    creds.controller.connect_from_pairing(&app_nav());
+    creds.controller.connect_from_pairing(&app_nav(), ungated());
     pump_until_done("the denied pairing gate", || {
         !creds.credentials.prompts().is_empty()
     });
@@ -3190,6 +3298,549 @@ fn a_manual_connect_at_a_server_with_a_stored_credential_asks_to_replace_it() {
         !shows_text(&harness, OFFER_TITLE),
         "…rather than both wordings at once"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The free-tier server gate (`features::pro`'s one-server rule)
+// ---------------------------------------------------------------------------
+
+/// The gate cases' own two endpoints. Neither is a seeded row — every case
+/// below replaces the seeded store outright ([`only_saved`]), since three rows
+/// block a free install's every connect on their own.
+const LIMIT_A: &str = "limit-a.example:50051";
+const LIMIT_B: &str = "limit-b.example:50051";
+/// Their row labels, which are what the paywall's forget action names.
+const LIMIT_A_LABEL: &str = "Limit rig";
+const LIMIT_B_LABEL: &str = "Other rig";
+
+/// The paywall's heading and the three actions a blocked connect can take,
+/// transcribed rather than imported for the reason [`QR_LABEL`] is: these are
+/// the words a user reads, and a test that imported them could not catch them
+/// changing. [`PAYWALL_NOT_NOW`] reads the same as the offer dialog's own
+/// decline by coincidence, not by sharing anything with it.
+const UPGRADE_TITLE: &str = "Muxr Pro";
+const UPGRADE_ACTION: &str = "Upgrade \u{b7} $4.99";
+const FORGET_LIMIT_A: &str = "Forget Limit rig and connect";
+const FORGET_LIMIT_B: &str = "Forget Other rig and connect";
+const PAYWALL_NOT_NOW: &str = "Not now";
+
+/// A saved row for `endpoint`, carrying a stored credential when
+/// `has_credential` — which is what makes the row's own tap dial rather than
+/// refill the form.
+fn limit_row(endpoint: &str, label: &str, has_credential: bool) -> SavedServer {
+    let (host, port) = endpoint.rsplit_once(':').expect("host:port");
+    SavedServer {
+        host: host.to_string(),
+        port: port.parse().expect("a port"),
+        trust_mode: TrustMode::System,
+        label: label.to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: false,
+        has_credential,
+        token_name: None,
+        fingerprint: None,
+    }
+}
+
+/// [`limit_row`] stamped an hour ago. The list is most-recently-used first, so
+/// a row built this way sits *behind* one stamped now — which is what makes the
+/// retry's index shift after a forget real rather than incidental.
+fn older_limit_row(endpoint: &str, label: &str, has_credential: bool) -> SavedServer {
+    SavedServer {
+        last_used_ms: epoch_millis() - 60 * 60 * 1000,
+        ..limit_row(endpoint, label, has_credential)
+    }
+}
+
+/// Replace the app's own saved-server store with exactly `rows`, in
+/// [`Harness::mount_seeded`]'s window.
+fn only_saved(rows: Vec<SavedServer>) {
+    let store = expect_saved_servers();
+    for existing in store.list().expect("the mock store never fails") {
+        store
+            .remove(&existing.endpoint())
+            .expect("the mock store never fails");
+    }
+    for row in rows {
+        store.save(row).expect("the mock store never fails");
+    }
+}
+
+/// Mount the real screen as a `tier` install remembering exactly `rows`.
+fn mount_limited(tier: Tier, rows: Vec<SavedServer>) -> Harness {
+    Harness::mount_tiered(tier, move || only_saved(rows))
+}
+
+/// [`mount_limited`] at the free tier's ceiling: one remembered server, its
+/// credential seeded, so a forget has both halves to drop.
+fn mount_at_the_limit() -> Harness {
+    Harness::mount_tiered(Tier::Free, || {
+        only_saved(vec![limit_row(LIMIT_A, LIMIT_A_LABEL, true)]);
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed(LIMIT_A, CRED_TOKEN);
+    })
+}
+
+/// [`mount_at_the_limit`]'s legacy sibling: a free install remembering *two*
+/// servers, both credentials seeded — a state a free install can only have
+/// arrived at before the rule existed. [`LIMIT_A`] is the older of the two, so
+/// it sits second and the retry that re-enters by row has an index shift to
+/// survive.
+fn mount_over_the_limit() -> Harness {
+    Harness::mount_tiered(Tier::Free, || {
+        only_saved(vec![
+            older_limit_row(LIMIT_A, LIMIT_A_LABEL, true),
+            limit_row(LIMIT_B, LIMIT_B_LABEL, true),
+        ]);
+        let credentials =
+            mock_credentials().expect("tests/support opted this process into the mock");
+        credentials.seed(LIMIT_A, CRED_TOKEN);
+        credentials.seed(LIMIT_B, CRED_TOKEN);
+    })
+}
+
+/// Every endpoint the app's own store holds, in list order.
+fn app_saved_endpoints() -> Vec<String> {
+    expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .map(SavedServer::endpoint)
+        .collect()
+}
+
+/// …sorted, for the cases where two rows survive and their order is the
+/// store's business rather than the assertion's.
+fn app_saved_endpoints_sorted() -> Vec<String> {
+    let mut endpoints = app_saved_endpoints();
+    endpoints.sort();
+    endpoints
+}
+
+/// A [`GatePrompt`] that records what it refused instead of raising the sheet —
+/// the controller-level half of the gate, driven with no overlay host at all
+/// ([`connect_fixture`]'s recorder shape).
+fn recording_gate(seen: &Rc<RefCell<Vec<ServerLimitBlock>>>) -> GatePrompt {
+    let seen = Rc::clone(seen);
+    Rc::new(move |block: ServerLimitBlock| seen.borrow_mut().push(block))
+}
+
+/// The endpoints each recorded block asked to forget, in order.
+fn blocked_endpoints(seen: &Rc<RefCell<Vec<ServerLimitBlock>>>) -> Vec<Vec<String>> {
+    seen.borrow()
+        .iter()
+        .map(|block| block.to_forget.iter().map(SavedServer::endpoint).collect())
+        .collect()
+}
+
+/// Answer the save offer a retried connect raises with "not now" — these cases
+/// are about the dial behind it, and the offer's own behavior is covered above.
+fn decline_the_offer(harness: &mut Harness) {
+    assert!(
+        offer_dialog_up(harness),
+        "the dial went through and asked: {:?}",
+        node_labels(&harness.root)
+    );
+    harness.tap_node("the offer's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_NOT_NOW)
+    });
+}
+
+#[test]
+fn a_free_installs_second_server_raises_the_paywall_instead_of_dialing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+    let before = harness.nav.depth();
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "the verdict runs ahead of the dial, so nothing was connected"
+    );
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall is the whole answer: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        shows_text(&harness, FORGET_LIMIT_A),
+        "…naming the one row standing in the way"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the sheet is the only page pushed — nothing landed on /sessions"
+    );
+    assert_eq!(
+        app_saved_endpoints(),
+        vec![LIMIT_A.to_string()],
+        "and nothing was remembered: the only place a new row is written is a \
+         successful login"
+    );
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a refusal is the sheet, never a toast"
+    );
+}
+
+#[test]
+fn forgetting_the_row_in_the_way_dials_and_leaves_only_the_new_server_saved() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+    harness.tap_node("the paywall's forget-and-connect action", |node| {
+        node.role() == Role::Button && node.label() == Some(FORGET_LIMIT_A)
+    });
+    harness.flush();
+    decline_the_offer(&mut harness);
+
+    assert!(
+        expect_connection_controller().connected.get_untracked(),
+        "the same connect the sheet refused went through behind it"
+    );
+    assert_eq!(harness.nav.depth(), 2, "…and landed on /sessions");
+    assert_eq!(
+        app_saved_endpoints(),
+        vec![LIMIT_B.to_string()],
+        "the forgotten row is gone and the dialed one took its place"
+    );
+    assert_eq!(
+        credentials.stored(LIMIT_A),
+        None,
+        "…secret and all (this device only, as every forget is)"
+    );
+}
+
+#[test]
+fn a_free_install_may_still_reconnect_to_the_one_server_it_remembers() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+
+    connect_through_the_cta(&mut harness, LIMIT_A);
+    harness.flush();
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "the row being dialed is the row a free install is allowed to keep"
+    );
+    decline_the_offer(&mut harness);
+    assert!(expect_connection_controller().connected.get_untracked());
+    assert_eq!(app_saved_endpoints(), vec![LIMIT_A.to_string()]);
+}
+
+#[test]
+fn an_entitled_install_connects_to_a_second_server_and_keeps_both() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Pro, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "Pro lifts the rule rather than raising the bar"
+    );
+    decline_the_offer(&mut harness);
+    assert!(expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        app_saved_endpoints_sorted(),
+        vec![LIMIT_A.to_string(), LIMIT_B.to_string()]
+    );
+}
+
+#[test]
+fn buying_pro_from_the_paywall_closes_it_and_lets_the_blocked_connect_through() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+    harness.tap_node("the paywall's Upgrade action", |node| {
+        node.role() == Role::Button && node.label() == Some(UPGRADE_ACTION)
+    });
+    harness.flush();
+    decline_the_offer(&mut harness);
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "the sheet closed behind the purchase"
+    );
+    assert_eq!(
+        expect_pro_controller().entitlement.get_untracked(),
+        Entitlement::Pro
+    );
+    assert!(expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        app_saved_endpoints_sorted(),
+        vec![LIMIT_A.to_string(), LIMIT_B.to_string()],
+        "nothing was forgotten — the limit was lifted, not met"
+    );
+}
+
+#[test]
+fn not_now_leaves_the_paywall_closed_the_form_typed_and_nothing_dialed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+    let before = harness.nav.depth();
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+    harness.tap_node("the paywall's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(PAYWALL_NOT_NOW)
+    });
+    harness.flush();
+
+    assert!(!shows_text(&harness, UPGRADE_TITLE), "the sheet is gone");
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…and it was the only page there was"
+    );
+    assert!(!expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(LIMIT_B),
+        "the form is exactly as it was typed, one tap from trying again"
+    );
+    assert_eq!(app_saved_endpoints(), vec![LIMIT_A.to_string()]);
+}
+
+#[test]
+fn a_two_row_free_install_is_told_which_row_to_forget_before_any_unlock() {
+    // The tap is on the row it may keep, so the *other* one is what stands in
+    // the way.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_over_the_limit();
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    harness.tap_node("the saved row carrying a credential", |node| {
+        node.value() == Some(LIMIT_A)
+    });
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "a saved row's own tap is gated too: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        shows_text(&harness, FORGET_LIMIT_B),
+        "the row being connected to is never one of the rows to forget"
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "the verdict runs ahead of the unlock, so no biometric prompt fired"
+    );
+    assert!(!expect_connection_controller().connected.get_untracked());
+}
+
+#[test]
+fn a_saved_row_tapped_mid_dial_raises_no_paywall_and_forgets_nothing() {
+    // The mock backend settles a dial before `connect_with` returns, so an
+    // in-flight one is staged by holding the very signal a real dial holds
+    // (`tests/pro.rs`'s idiom for an overlapping call). Without the busy check
+    // ahead of the verdict, this tap would raise a paywall whose
+    // forget-and-connect drops a row and its secret for a dial that
+    // `recover_and_connect` then refuses — destructive, and connected to
+    // nothing.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_over_the_limit();
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+    expect_connection_controller().connecting.set(true);
+
+    harness.tap_node("the older saved row", |node| node.value() == Some(LIMIT_A));
+    harness.flush();
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "a tap the busy guard refuses never reaches the verdict: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…so nothing was pushed over the screen at all"
+    );
+    assert_eq!(
+        app_saved_endpoints_sorted(),
+        vec![LIMIT_A.to_string(), LIMIT_B.to_string()],
+        "and both rows are still remembered"
+    );
+    for endpoint in [LIMIT_A, LIMIT_B] {
+        assert_eq!(
+            credentials.stored(endpoint).as_deref(),
+            Some(CRED_TOKEN),
+            "…secrets and all"
+        );
+    }
+    assert!(
+        credentials.prompts().is_empty(),
+        "no unlock was started either"
+    );
+}
+
+#[test]
+fn forgetting_from_a_saved_rows_paywall_dials_that_row_after_the_index_shift() {
+    // The retry holds the *row* it was blocked on, not its index: forgetting
+    // the row ahead of it moves it from second to first, and a retry that had
+    // kept the index would unlock the wrong row or none at all.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_over_the_limit();
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    harness.tap_node("the older saved row", |node| node.value() == Some(LIMIT_A));
+    harness.flush();
+    assert!(
+        shows_text(&harness, FORGET_LIMIT_B),
+        "the paywall names the row ahead of the one being connected to: {:?}",
+        node_labels(&harness.root)
+    );
+
+    harness.tap_node("the paywall's forget-and-connect action", |node| {
+        node.role() == Role::Button && node.label() == Some(FORGET_LIMIT_B)
+    });
+    harness.flush();
+    harness.pump_until("the retried row's own connect", |_| {
+        expect_connection_controller().connected.get_untracked()
+    });
+
+    assert_eq!(
+        app_saved_endpoints(),
+        vec![LIMIT_A.to_string()],
+        "the forgotten row is gone and the tapped one is what dialed"
+    );
+    assert_eq!(credentials.stored(LIMIT_B), None, "…secret and all");
+    assert_eq!(
+        credentials.stored(LIMIT_A).as_deref(),
+        Some(CRED_TOKEN),
+        "while the row that was retried kept its own"
+    );
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "exactly one unlock ran — the retry's, on the row the tap named"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "…and it landed on /sessions (a recovered credential offers no save)"
+    );
+}
+
+#[test]
+fn a_blocked_pairing_dials_nothing_and_connects_once_the_row_is_forgotten() {
+    // The controller's own half of the pairing gate: the sheet is covered by
+    // the cases above (and `tests/pro.rs`), so this one lends a recorder and
+    // runs the two actions that sheet offers.
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+    let blocks: Rc<RefCell<Vec<ServerLimitBlock>>> = Rc::new(RefCell::new(Vec::new()));
+    let gate = recording_gate(&blocks);
+    creds
+        .controller
+        .apply_scanned_payload(scanned_payload(false));
+
+    creds
+        .controller
+        .connect_from_pairing(&app_nav(), Rc::clone(&gate));
+
+    assert!(
+        !creds.connection.connected.get_untracked(),
+        "a scan that lands on the limit dials nothing"
+    );
+    assert_eq!(blocked_endpoints(&blocks), vec![vec![LIMIT_A.to_string()]]);
+    assert!(
+        matches!(blocks.borrow()[0].retry, ConnectRetry::Pairing),
+        "…and the retry re-runs the pairing, not the form"
+    );
+    assert!(
+        creds.controller.pending_pairing.get_untracked().is_some(),
+        "the payload that retry dials is still stashed"
+    );
+
+    let to_forget = blocks.borrow()[0].to_forget.clone();
+    let retry_controller = Arc::clone(&creds.controller);
+    creds.controller.forget_saved_servers_then(
+        to_forget,
+        Box::new(move || retry_controller.connect_from_pairing(&app_nav(), gate)),
+    );
+    pump_until_done("the forget-and-connect retry", || {
+        creds.connection.connected.get_untracked()
+    });
+
+    assert_eq!(
+        blocks.borrow().len(),
+        1,
+        "the retry was let through rather than refused again"
+    );
+    assert_eq!(
+        fixture_rows(&creds.servers)
+            .iter()
+            .map(SavedServer::endpoint)
+            .collect::<Vec<String>>(),
+        vec![PAIRED_ENDPOINT.to_string()],
+        "the forgotten row is gone and the scanned one took its place"
+    );
+}
+
+#[test]
+fn a_blocked_connect_leaves_nothing_in_flight_and_the_unlocked_retry_dials_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+    let blocks: Rc<RefCell<Vec<ServerLimitBlock>>> = Rc::new(RefCell::new(Vec::new()));
+    let gate = recording_gate(&blocks);
+    let offered: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let offer_prompt: OfferPrompt = {
+        let record = Rc::clone(&offered);
+        Rc::new(move |offer: CredentialOffer| record.borrow_mut().push(offer.label))
+    };
+    creds.controller.set_url(LIMIT_B.to_string());
+
+    creds
+        .controller
+        .connect(&app_nav(), Rc::clone(&offer_prompt), Rc::clone(&gate));
+
+    assert_eq!(blocks.borrow().len(), 1, "the connect was refused");
+    assert!(!creds.connection.connected.get_untracked());
+    assert!(
+        offered.borrow().is_empty(),
+        "nothing dialed, so nothing was offered to save"
+    );
+    assert!(
+        !creds.controller.busy(),
+        "a blocked connect leaves no dial, unlock or unanswered offer behind — \
+         the paywall's own retry would otherwise be swallowed by the busy guard"
+    );
+
+    // What a landed purchase publishes on the controller the gate reads.
+    creds.pro.entitlement.set(Entitlement::Pro);
+    creds.controller.connect(&app_nav(), offer_prompt, gate);
+
+    assert_eq!(
+        blocks.borrow().len(),
+        1,
+        "…and the unlocked retry is not refused a second time"
+    );
+    assert!(creds.connection.connected.get_untracked());
+    assert_eq!(offered.borrow().len(), 1, "the retry dialed exactly once");
 }
 
 // ---------------------------------------------------------------------------
