@@ -41,7 +41,7 @@ use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
 use crate::features::pro::di::expect_pro_controller;
-use crate::features::pro::presentation::controller::ProController;
+use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use crate::features::pro::presentation::{
     NOTHING_TO_RESTORE_TOAST, UpgradeContext, show_upgrade_sheet,
 };
@@ -722,13 +722,14 @@ impl Actions {
     /// Run the restore flow directly, without the paywall sheet: the `muxr
     /// pro` group's Restore action. Silent on a landed restore — the row's
     /// own value flips to "Pro" the moment `entitlement` republishes — and
-    /// toasted when the account owns nothing to restore.
+    /// toasted only when the account really owns nothing to restore, never
+    /// when the store failed to answer or refused an overlapping call.
     pub fn restore_purchases(&self) {
         let pro = Arc::clone(&self.pro);
         spawn_local(async move {
-            pro.restore().await;
-            if !pro.is_pro_untracked() {
-                app_toasts().show(NOTHING_TO_RESTORE_TOAST);
+            match pro.restore().await {
+                RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
+                RestoreOutcome::Restored | RestoreOutcome::Failed(_) | RestoreOutcome::Busy => {}
             }
         });
     }

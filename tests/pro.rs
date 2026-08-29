@@ -21,6 +21,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use clean_signals::Failure;
 use frust::{AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, any, navigator};
 use frust_core::{PointerPhase, RenderRoot};
 use frust_reactive::ReactiveRuntime;
@@ -36,7 +37,7 @@ use muxr::features::pro::di::{
 };
 use muxr::features::pro::domain::entities::{Entitlement, PurchaseOutcome, ServerLimitVerdict};
 use muxr::features::pro::domain::use_cases::check_server_limit;
-use muxr::features::pro::presentation::controller::ProController;
+use muxr::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use muxr::features::pro::presentation::widgets::{
     NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, RESTORE_LABEL, UNAVAILABLE_COPY,
     UPGRADE_SHEET_TITLE,
@@ -277,6 +278,83 @@ fn restore_reaches_the_store_once_and_publishes_what_it_found() {
 
     assert_eq!(mock.restore_calls(), 1);
     assert_eq!(controller.entitlement.get_untracked(), Entitlement::Pro);
+}
+
+#[test]
+fn a_restore_that_finds_the_purchase_answers_restored() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    mock.set_entitlement(Entitlement::Pro);
+
+    let outcome = block_on(controller.restore());
+
+    assert_eq!(outcome, RestoreOutcome::Restored);
+    assert_eq!(controller.entitlement.get_untracked(), Entitlement::Pro);
+    assert_eq!(mock.restore_calls(), 1);
+    assert!(!controller.busy.get_untracked(), "the guard is released");
+}
+
+#[test]
+fn a_restore_that_finds_nothing_answers_nothing_to_restore() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    let log = failure_log(&controller);
+
+    let outcome = block_on(controller.restore());
+
+    assert_eq!(outcome, RestoreOutcome::NothingToRestore);
+    assert_eq!(controller.entitlement.get_untracked(), Entitlement::Free);
+    assert_eq!(mock.restore_calls(), 1);
+    assert!(
+        raised(&log).is_empty(),
+        "an empty account is an answer, not a failure"
+    );
+}
+
+#[test]
+fn a_failed_restore_answers_failed_and_never_nothing_to_restore() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    mock.set_entitlement(Entitlement::Pro);
+    block_on(controller.restore());
+    let log = failure_log(&controller);
+    let failure = AppFailure::Network("store unreachable".to_string());
+    mock.fail_next_restore(failure.clone());
+
+    let outcome = block_on(controller.restore());
+
+    assert_eq!(outcome, RestoreOutcome::Failed(failure.user_message()));
+    assert_eq!(raised(&log).len(), 1, "reported once, on the sink");
+    assert_eq!(
+        controller.entitlement.get_untracked(),
+        Entitlement::Pro,
+        "an unreachable store must not downgrade a paying install"
+    );
+    assert!(!controller.busy.get_untracked(), "the guard is released");
+}
+
+#[test]
+fn a_restore_raised_while_one_is_in_flight_never_reaches_the_store() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    app_toasts().clear();
+
+    block_on(controller.restore());
+    // The mock resolves without ever yielding, so an overlapping call is
+    // staged by holding the guard the first one would still be holding.
+    controller.busy.set(true);
+    let refused = block_on(controller.restore());
+
+    assert_eq!(refused, RestoreOutcome::Busy);
+    assert_eq!(mock.restore_calls(), 1, "the second call was refused");
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a refused overlap says nothing at all"
+    );
 }
 
 #[test]
@@ -681,6 +759,29 @@ fn a_restore_that_finds_nothing_says_so_and_leaves_the_sheet_up() {
         "{toasts:?}"
     );
     assert_eq!(sheet.depth(), 2, "the paywall stays up to buy from");
+    assert_eq!(sheet.unlocked.get(), 0);
+}
+
+#[test]
+fn a_restore_the_store_refused_toasts_the_failure_and_never_the_empty_account() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+    app_toasts().clear();
+    let log = failure_log(&sheet.pro);
+    sheet.open(Vec::new());
+    let failure = AppFailure::Network("store unreachable".to_string());
+    sheet.mock.fail_next_restore(failure.clone());
+
+    sheet.tap_label(RESTORE_LABEL);
+
+    assert_eq!(raised(&log).len(), 1, "reported once, on the sink");
+    assert_eq!(
+        app_toasts().pending(),
+        vec![failure.user_message()],
+        "the app's failure bridge announced it, and nothing else did"
+    );
+    assert_eq!(sheet.depth(), 2, "the paywall stays up");
     assert_eq!(sheet.unlocked.get(), 0);
 }
 

@@ -37,6 +37,8 @@ struct MockState {
     purchase: PurchaseOutcome,
     /// Consumed by the next `refresh`, which fails instead of answering.
     next_refresh_failure: Option<AppFailure>,
+    /// The same one-shot, for `restore` — an unreachable store mid-restore.
+    next_restore_failure: Option<AppFailure>,
     refresh_calls: usize,
     restore_calls: usize,
     purchase_calls: usize,
@@ -61,6 +63,7 @@ impl MockEntitlementRepository {
                 offer: Some(default_offer()),
                 purchase: PurchaseOutcome::Purchased,
                 next_refresh_failure: None,
+                next_restore_failure: None,
                 refresh_calls: 0,
                 restore_calls: 0,
                 purchase_calls: 0,
@@ -91,6 +94,13 @@ impl MockEntitlementRepository {
     /// Make the next (and only the next) refresh fail with `failure`.
     pub fn fail_next_refresh(&self, failure: AppFailure) {
         self.state().next_refresh_failure = Some(failure);
+    }
+
+    /// Make the next (and only the next) restore fail with `failure` — the
+    /// offline restore an entitlement read alone would report as an empty
+    /// account. The call still counts, exactly as a failed refresh does.
+    pub fn fail_next_restore(&self, failure: AppFailure) {
+        self.state().next_restore_failure = Some(failure);
     }
 
     pub fn refresh_calls(&self) -> usize {
@@ -155,7 +165,10 @@ impl EntitlementRepository for MockEntitlementRepository {
     async fn restore(&self) -> Result<Entitlement, AppFailure> {
         let mut state = self.state();
         state.restore_calls += 1;
-        Ok(state.entitlement)
+        match state.next_restore_failure.take() {
+            Some(failure) => Err(failure),
+            None => Ok(state.entitlement),
+        }
     }
 }
 
@@ -250,5 +263,20 @@ mod tests {
         assert_eq!(block_on(repo.restore()), Ok(Entitlement::Pro));
         assert_eq!(repo.restore_calls(), 1);
         assert_eq!(repo.refresh_calls(), 0, "a restore is not a refresh");
+    }
+
+    #[test]
+    fn a_scripted_restore_failure_is_consumed_by_exactly_one_call() {
+        let repo = MockEntitlementRepository::pro();
+        repo.fail_next_restore(AppFailure::Network("store unreachable".to_string()));
+
+        assert!(block_on(repo.restore()).is_err());
+        assert_eq!(block_on(repo.restore()), Ok(Entitlement::Pro));
+        assert_eq!(repo.restore_calls(), 2, "a failed call still counts");
+        assert_eq!(
+            repo.refresh_calls(),
+            0,
+            "the refresh one-shot is a separate script"
+        );
     }
 }
