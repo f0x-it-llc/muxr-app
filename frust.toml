@@ -50,7 +50,11 @@ scheme = "muxr"
 [signing]
 key-properties = "app/keystores/key.properties"
 prefix = "prod"
-
+# The CI half: the env-var *names* Gradle's `signingValue()` falls back to for
+# the `prod.*` keys (android/app/build.gradle.kts, android/app/keystores/README.md),
+# so the CLI gate resolves the same variables as Gradle rather than
+# frust-drive's ANDROID_STORE_FILE/… defaults — one rig, one set of names.
+env = { store-file = "KEYSTORE_PATH", store-password = "STORE_PASSWORD", key-alias = "KEY_ALIAS", key-password = "KEY_PASSWORD" }
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `com.it.f0x.muxr`).
 # identifier = "com.it.f0x.muxr"
