@@ -2,11 +2,12 @@
 
 Muxr is a [Frust](https://github.com/f0x-it-llc/frust)-native rewrite of the muxr client: an
 app that attaches to and controls remote [zellij](https://zellij.dev) terminal-multiplexer
-sessions through `muxrd`, a TLS + bearer-auth gRPC backend. All four features (`connect`,
+sessions through `muxrd`, a TLS + bearer-auth gRPC backend. Its four routed features (`connect`,
 `sessions`, `terminal`, `settings`) run over the real `muxrd` gRPC layer in production (a session
-guard bounces an unauthenticated push back to Connect); each also keeps a mock repository behind
-its `di.rs` seam for headless tests, and the desktop preview degrades gracefully where a plugin
-has no desktop backend (camera, biometrics).
+guard bounces an unauthenticated push back to Connect), and a fifth, routeless `pro` slice owns the
+in-app purchase and the free-tier server rule; each keeps a mock repository behind its `di.rs` seam
+for headless tests, and the desktop preview degrades gracefully where a plugin has no desktop
+backend (camera, biometrics, billing).
 
 ## Documentation
 
@@ -16,6 +17,7 @@ has no desktop backend (camera, biometrics).
 | NET — gRPC transport, connection state | [docs/NET_ARCHITECTURE.md](docs/NET_ARCHITECTURE.md) |
 | FEATURES — feature slices, canonical screen pattern | [docs/FEATURES_ARCHITECTURE.md](docs/FEATURES_ARCHITECTURE.md) |
 | Build, run, test, flavors, signing | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| Play Console, signing, release | [docs/RELEASE_ANDROID.md](docs/RELEASE_ANDROID.md) |
 
 Frust's own coding conventions apply here; see the frust checkout's `docs/CODE_STANDARDS.md`.
 
@@ -58,3 +60,5 @@ full command set, flavor identifiers, and signing setup.
 - Chrome icons (a bar affordance, a FAB, a row's trailing chevron) are always a `frust::icons`
   vector or an app-supplied `IconSource` — never a font glyph; see
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)'s UI Substrate section.
+- Entitlement is read only through `pro::di::expect_pro_controller()`'s `ProController` — never
+  granted off `request_purchase`'s return, and never mirrored into a second source of truth.
