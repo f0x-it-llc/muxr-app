@@ -39,6 +39,9 @@ pub struct ProController {
     /// The store's product description; `None` covers both "not asked yet"
     /// and "this platform cannot sell it".
     pub offer: RwSignal<Option<ProOffer>>,
+    /// Whether a lookup has come back at all — what tells [`offer`](Self::offer)'s
+    /// two `None`s apart, cleared at the start of each [`load_offer`](Self::load_offer).
+    pub offer_settled: RwSignal<bool>,
     /// Whether a purchase or restore is in flight (see the [module docs](self)).
     pub busy: RwSignal<bool>,
     /// The last outcome the store reported, for a screen's confirmation.
@@ -58,6 +61,7 @@ impl ProController {
             restore_purchases: RestorePurchases::new(repository),
             entitlement: RwSignal::new(cached),
             offer: RwSignal::new(None),
+            offer_settled: RwSignal::new(false),
             busy: RwSignal::new(false),
             last_outcome: RwSignal::new(None),
         }
@@ -83,6 +87,7 @@ impl ProController {
     /// Look the product up for the paywall; `None` publishes as itself, since
     /// "cannot be sold here" is an answer, not a failure to retry.
     pub async fn load_offer(&self) {
+        self.offer_settled.set(false);
         if let Ok(offer) = self
             .core
             .run(&self.fetch_offer, NoParams, RunOptions::default())
@@ -90,6 +95,7 @@ impl ProController {
         {
             self.offer.set(offer);
         }
+        self.offer_settled.set(true);
     }
 
     /// Run the buy flow, publish what it produced, and answer the caller the
