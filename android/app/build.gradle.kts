@@ -314,10 +314,15 @@ androidComponents {
                         it.name.startsWith(packageTaskPrefix)
                 }.configureEach {
                     doFirst {
+                        // THE CLI GREPS THIS WARNING: `frust build`/`frust run --release`
+                        // scan the Gradle output for the FRUST-SIGNING-FALLBACK token and
+                        // hard-fail rather than report success over a debug-signed
+                        // artifact (frust-drive's `android_build::signing` matcher).
+                        // Reword the prose freely; never drop the token.
                         logger.warn(
-                            "[muxr] release variant ${variant.name} is DEBUG-SIGNED: no " +
-                                "app/keystores/key.properties or *_KEYSTORE_* env signing " +
-                                "material found",
+                            "[muxr] release variant ${variant.name} is DEBUG-SIGNED: " +
+                                "[FRUST-SIGNING-FALLBACK] no app/keystores/key.properties " +
+                                "or *_KEYSTORE_* env signing material found",
                         )
                     }
                 }
