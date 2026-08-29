@@ -152,8 +152,8 @@ outside the repo.
 points the CLI's release gate (`frust-drive`'s `android_build::signing`) at that same file, so
 `frust build --release`/`appbundle` resolves the identical `prod.*` keys Gradle already reads instead
 of the scaffold default `android/key.properties`. Gradle itself is untouched, and the CLI's generated
-`android/.frust-signing.properties` is transient (owner-only, deleted on exit, not gitignored — never
-leave one behind). `prefix` is single-valued, so it wires up the `production` flavor only: a
+`android/.frust-signing.properties` is transient (owner-only, deleted on exit, and gitignored
+as a backstop). `prefix` is single-valued, so it wires up the `production` flavor only: a
 **develop** release build keeps the direct `./gradlew :app:assembleDevelopRelease` recipe above.
 
 ## Release (Play)
