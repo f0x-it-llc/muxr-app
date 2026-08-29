@@ -42,7 +42,7 @@ scheme = "muxr"
 # the scaffold default `android/key.properties`. Gradle itself is untouched —
 # it keeps reading `app/keystores/key.properties` directly; the CLI's
 # generated `android/.frust-signing.properties` is transient — owner-only,
-# deleted by the CLI on exit, and not gitignored, so never leave one behind —
+# deleted by the CLI on exit, and gitignored as a backstop —
 # and this app's `build.gradle.kts` does not read it. `prefix` is single-valued
 # (one flavor per manifest), so it only wires up the `production` flavor's
 # `prod.*` keys — a develop RELEASE build still goes through the direct
