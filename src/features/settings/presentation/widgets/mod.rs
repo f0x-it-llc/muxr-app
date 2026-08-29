@@ -17,6 +17,7 @@
 //! | [`pickers`] | screen 6's picker sheet (`layout refresh`/`font size`/`cursor style`) |
 //! | [`font_picker`] | the two-section font-family sheet, reusing `pickers`' row idiom |
 //! | [`saved_servers`] | the `saved servers` group, over `connect`'s own list |
+//! | [`pro`] | the `muxr pro` group: the plan row and the Upgrade/Restore actions |
 //! | [`groups`] | the four groups' row lists, pure arrangement over the above |
 //! | [`misc`] | the bell row and Disconnect — the two rows outside every other cluster |
 //!
@@ -34,6 +35,7 @@ mod font_picker;
 mod groups;
 mod misc;
 mod pickers;
+mod pro;
 mod rows;
 mod saved_servers;
 mod tokens;
@@ -44,6 +46,12 @@ pub(super) use font_picker::{
 pub(super) use groups::{appearance_rows, connection_rows, poll_rows, token_rows};
 pub(super) use misc::disconnect_button;
 pub(super) use pickers::{Picker, PickerKind, picker_sheet};
+pub(super) use pro::pro_rows;
+// Test-visible: `tests/settings.rs` imports these directly rather than
+// hard-coding the row's own literals (the same `pub` re-export shape
+// `features::pro::presentation::widgets` already uses for its own
+// test-facing constants).
+pub use pro::{PLAN_LABEL, PRO_GROUP_LABEL, RESTORE_LABEL, UPGRADE_LABEL};
 pub(super) use rows::{RowAction, SCROLL_PAD_BOTTOM, SCROLL_PAD_TOP, group_label, page_tone};
 pub(super) use saved_servers::{no_saved_servers_row, saved_server_item};
 pub(super) use tokens::{create_token_row, open_create_token_dialog, secret_reveal_sheet};

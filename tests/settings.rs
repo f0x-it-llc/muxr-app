@@ -9,7 +9,7 @@
 //! exercised end to end through a real navigator and located by painted
 //! geometry.
 //!
-//! Five groups plus Disconnect run past 1000px, so every frame here lays out at
+//! Six groups plus Disconnect run past 1000px, so every frame here lays out at
 //! [`SURFACE`], not `support::surface()`'s default — hence this file's own
 //! [`Harness::pump_once`] rather than `support::pump_frames`, which frames at
 //! the default (smaller) size and would silently re-layout what the next probe
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
-    WindowMetrics, any, navigator, provide_context,
+    WindowMetrics, any, navigator, provide_context, spawn_local,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
 use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
@@ -39,6 +39,9 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
+use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
@@ -47,6 +50,9 @@ use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
+};
+use muxr::features::settings::presentation::widgets::{
+    PLAN_LABEL, PRO_GROUP_LABEL, RESTORE_LABEL, UPGRADE_LABEL,
 };
 use muxr::fonts::catalog::{CatalogStatus, FontState};
 use muxr::fonts::source::FontSource;
@@ -62,7 +68,7 @@ use support::{
 };
 
 /// The surface every frame here lays out at — tall enough that the whole screen
-/// (five groups, the dashed create row, the saved-server rows and Disconnect)
+/// (six groups, the dashed create row, the saved-server rows and Disconnect)
 /// is on it at once. See the [module docs](self).
 const SURFACE: Size = Size::new(800.0, 1700.0);
 
@@ -87,12 +93,13 @@ const ROW_PAD_X: f64 = 16.0;
 /// The seeded token names `data`'s mock repository ships — the redesign's two
 /// `.token-item`s, in order.
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-/// The five group labels, as the screen prints them (the source's
+/// The six group labels, as the screen prints them (the source's
 /// `text-transform:uppercase`, applied in Rust — `text` carries no transform).
-const GROUPS: [&str; 5] = [
+const GROUPS: [&str; 6] = [
     "CONNECTION",
     "AUTH TOKENS",
     "SAVED SERVERS",
+    "MUXR PRO",
     "TERMINAL APPEARANCE",
     "SESSION POLL",
 ];
@@ -560,10 +567,16 @@ fn confirm(h: &mut Harness, dialog: &Chrome) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_five_groups_and_the_disconnect_action_render() {
+fn all_six_groups_and_the_disconnect_action_render() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
+
+    // The literal `GROUPS` entry is what the screen actually renders
+    // (`text-transform:uppercase` applied in Rust); tying it back to
+    // `PRO_GROUP_LABEL` here is what makes a drift between the two a test
+    // failure instead of a silent mismatch.
+    assert_eq!(PRO_GROUP_LABEL.to_uppercase(), "MUXR PRO");
 
     let values = node_values(&h.root);
     for group in GROUPS {
@@ -581,6 +594,7 @@ fn all_five_groups_and_the_disconnect_action_render() {
         "server url",
         "tls certificate",
         "zellij version",
+        PLAN_LABEL,
         "font family",
         "font size",
         "cursor style",
@@ -595,8 +609,13 @@ fn all_five_groups_and_the_disconnect_action_render() {
     // The dashed create row and the Disconnect button (a real `frust::button`,
     // so a label rather than a value).
     assert!(values.iter().any(|v| v == "create new token"), "{values:?}");
+    // The freshly-mocked install is Free, so the plan row prints it and both
+    // of the group's actions render.
+    assert!(values.iter().any(|v| v == "Free"), "{values:?}");
     let labels = node_labels(&h.root);
     assert!(labels.iter().any(|l| l == "Disconnect"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == UPGRADE_LABEL), "{labels:?}");
+    assert!(labels.iter().any(|l| l == RESTORE_LABEL), "{labels:?}");
 }
 
 #[test]
@@ -1558,6 +1577,133 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
         node_centers_by_label(&h.root, "forget").len(),
         3,
         "…and only that row went"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3c — the `muxr pro` group
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_pro_group_prints_free_and_offers_both_actions_when_unentitled() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::connected();
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == "Free"), "{values:?}");
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == UPGRADE_LABEL), "{labels:?}");
+    assert!(labels.iter().any(|l| l == RESTORE_LABEL), "{labels:?}");
+}
+
+#[test]
+fn a_pro_entitlement_prints_pro_and_hides_the_upgrade_action() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pro);
+
+    let controller = expect_pro_controller();
+    spawn_local(async move { controller.refresh().await });
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
+    });
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == "Pro"), "{values:?}");
+    let labels = node_labels(&h.root);
+    assert!(
+        !labels.iter().any(|l| l == UPGRADE_LABEL),
+        "an entitled install offers nothing to buy: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == RESTORE_LABEL),
+        "…nor anything to restore: {labels:?}"
+    );
+}
+
+#[test]
+fn tapping_upgrade_pushes_the_paywall_and_not_now_dismisses_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    h.tap_label(UPGRADE_LABEL);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the paywall is pushed as its own page");
+    assert!(
+        node_center_by_label(&h.root, NOT_NOW_LABEL).is_some(),
+        "the sheet's own dismissal action is reachable: {:?}",
+        node_labels(&h.root)
+    );
+
+    h.tap_label(NOT_NOW_LABEL);
+    h.flush();
+
+    assert_eq!(h.depth(), 1, "Not now dismisses the sheet");
+}
+
+#[test]
+fn tapping_restore_flips_the_plan_row_when_the_account_owns_pro() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pro);
+
+    h.tap_label(RESTORE_LABEL);
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
+    });
+
+    assert_eq!(mock.restore_calls(), 1);
+    let labels = node_labels(&h.root);
+    assert!(!labels.iter().any(|l| l == UPGRADE_LABEL), "{labels:?}");
+}
+
+#[test]
+fn tapping_restore_toasts_when_the_account_owns_nothing_to_restore() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    app_toasts().clear();
+
+    h.tap_label(RESTORE_LABEL);
+    pump_until(&mut h, "the nothing-to-restore toast", || {
+        !app_toasts().pending().is_empty()
+    });
+
+    let toasts = app_toasts().pending();
+    assert!(
+        toasts.iter().any(|t| t == NOTHING_TO_RESTORE_TOAST),
+        "{toasts:?}"
+    );
+}
+
+#[test]
+fn mounting_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_refresh() {
+    // `MuxrApp::init` already fires one launch refresh of its own
+    // (`tests/pro.rs`'s `app_init_publishes_the_pro_seam_and_fires_one_launch_refresh`);
+    // this pins the *second* call — Settings' own refresh of the entitlement
+    // on every mount — landing beside it, not in place of it.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+
+    pump_until(
+        &mut h,
+        "both the app's launch refresh and Settings' own mount refresh",
+        || mock.refresh_calls() >= 2,
+    );
+
+    assert_eq!(
+        mock.refresh_calls(),
+        2,
+        "one from MuxrApp::init's launch refresh, one from Settings' own mount"
     );
 }
 
