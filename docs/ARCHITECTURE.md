@@ -24,17 +24,18 @@ This hub covers composition, shell, navigation, shared UI substrate, and cross-c
 ## Composition Root — `src/lib.rs`
 
 `frust::app!(MuxrApp, setup = { frust::glyph_theme::install(); })` is the sole entry point, binding
-`MuxrApp` to Android/iOS/desktop and installing Glyph as the one design system first. `init` publishes
-the app-scoped `ConnectionController` (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)), calls each
-feature's own `di::provide()` (every feature wires its own repositories the same way — real by
-default, mock behind a process-static test-only seam), and builds the app's route `Router` alongside a
-second navigator, the root overlay host (`AppState::overlays`, see Navigation). `pro::di::provide()`
-also publishes the app-scoped `ProController`, whose entitlement `init` then refreshes once against
-the store — the handle resolved *before* that future, since its poller installs no reactive owner.
-`build` mounts `shell::root_view` unchanged — its body and stable three-slot `Stack` invariant (see
-Shell) untouched — then wraps that whole output, as its caller, in
-`frust::overlay_host(&state.overlays, ..)` (arbitration under Navigation). Each screen resolves
-`overlays` once in its own `Component::init`, exactly like `nav`.
+`MuxrApp` to Android/iOS/desktop and installing Glyph as the one design system first. `init` publishes the
+app-scoped `ConnectionController` (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)), calls each feature's
+own `di::provide()` (every feature wires its own repositories the same way — real by default, mock behind
+a process-static test-only seam), and builds the app's route `Router` alongside a second navigator, the
+root overlay host (`AppState::overlays`, see Navigation). `pro::di::provide()` also publishes the
+app-scoped `ProController`, whose entitlement `init` then refreshes once against the store — the handle
+resolved *before* that future, since its poller installs no reactive owner. Both `ConnectionController`
+and, on that same launch-resolved instance, `ProController` bridge failures to
+`ui::toasts::FailureToasts`. `build` mounts `shell::root_view` unchanged — its body and stable three-slot
+`Stack` invariant (see Shell) untouched — then wraps that whole output, as its caller, in
+`frust::overlay_host(&state.overlays, ..)` (arbitration under Navigation). Each screen resolves `overlays`
+once in its own `Component::init`, exactly like `nav`.
 
 `AppState` holds the `Router` handle plus the splash's state, its plan resolved on the first `build`,
 not `init` — where the theme isn't applied yet and `reduce_motion` reads the fallback baseline.
@@ -105,11 +106,10 @@ beneath Connect) rather than pushing over it; with nothing placed it applies no 
 `ConnectionController` (see [NET_ARCHITECTURE.md](NET_ARCHITECTURE.md)) **by capture, not context**,
 safe from any call stack, and navigation-time only: a mid-screen drop does not bounce it back.
 
-**A third navigator, outranking both.** Every sheet and dialog is a page of the root
-`frust::overlay_host` (`AppState::overlays`, see Composition Root), never of either route stack: it
-routes input and publishes accessibility nodes for its top page only, so the app underneath an open
-overlay — the bar included — is genuinely inert rather than merely dimmed. An Android back press
-reaches the host before either navigator.
+**A third navigator, outranking both.** Every sheet and dialog is a page of the root `frust::overlay_host`
+(`AppState::overlays`, see Composition Root), never of either route stack: it routes input and publishes
+accessibility nodes for its top page only, so the app underneath an open overlay — the bar included — is
+genuinely inert rather than merely dimmed. An Android back press reaches the host before either navigator.
 
 ## UI Substrate — `src/ui/`
 

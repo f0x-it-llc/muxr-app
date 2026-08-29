@@ -66,33 +66,31 @@ identically headless and under the sheet that mounts it — the tree's `Actions`
 `pages.rs`, and the paywall's callbacks take no state at all, since `ui::SheetHandle::close_then` runs
 its follow-on from Glyph's own `on_close`, where no `&mut AppState` exists.
 
-- **`connect`** — the `/` route: the manual connect form, the saved-server list, and the QR-pairing
-  sheet (camera scan → prefilled form → a pinned CTA; a scan never dials by itself). Credentials split
-  into two stores sharing only a `host:port` key: saved-server *metadata* (`shared-preferences`, key
-  `zelli_saved_servers`) and the auth token itself, behind the device's biometric gate
-  (`secure-storage`, key `zelli_cred_<host>_<port>`). Five credential flows, each its own controller
-  method: manual save (mint + rotate, revoking the old token only once the new one is stored),
-  one-prompt QR save (the scanned token *is* the credential), gated login with a saved credential (a
-  row stored under `TrustMode::NoVerification` needs one more confirm gate first; the manual form's
-  "Trust anyway" radio stays ungated — picking it is its own consent), ungated delete (owned by
-  Settings), and an upsert on every successful login. **Every dial takes `pro`'s free-tier verdict
-  before it reaches the wire**, raising the paywall through a `GatePrompt` the screen lends per press
-  instead of dialing: `ConnectController::connect`/`connect_from_pairing` take it inside the entry
+- **`connect`** — the `/` route: the manual connect form, the saved-server list, and the QR-pairing sheet
+  (camera scan → prefilled form → a pinned CTA; a scan never dials by itself). Credentials split into two
+  stores sharing a `host:port` key: saved-server *metadata* (`shared-preferences`, `zelli_saved_servers`)
+  and the auth token, behind the device's biometric gate (`secure-storage`, `zelli_cred_<host>_<port>`).
+  Five credential flows, each a controller method: manual save (mint + rotate, revoking the old token only
+  once the new one is stored), one-prompt QR save (the scanned token *is* the credential), gated login
+  with a saved credential (a row stored under `TrustMode::NoVerification` needs one more confirm gate
+  first; the manual form's "Trust anyway" radio stays ungated, picking it is consent), ungated delete
+  (owned by Settings), and an upsert on every successful login. **Every dial takes `pro`'s free-tier
+  verdict before it reaches the wire**, raising the paywall through a `GatePrompt` the screen lends per
+  press instead of dialing: `ConnectController::connect`/`connect_from_pairing` take it inside the entry
   point (busy → target → verdict → dial), while the saved-row tap is gated one level up in
-  `widgets::pro_gate::gated_saved_row_tap`, so the paywall precedes that row's own no-verification
-  confirm and `recover_and_connect` stays gate-free by contract. The block carries a `ConnectRetry`
-  naming the entry point, so unlocking Pro — or `forget_saved_servers_then` dropping the rows the free
-  tier can't keep, ordinary forget semantics in turn — re-enters the connect the user asked for.
-- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing every mutation
-  by `Session::id` (the backend-qualified routing key) rather than display name. A read-only credential
-  (`ConnectionController::is_read_only`) disables Rename/Kill and session creation, never Attach. The
-  first load is covered by the shared `loading` rain overlay — the last child of the scroller band's
-  always-present `Stack`, under a live server strip, released by
-  `SessionsController::first_load_settled` on either `Ok` or `Err`, with input staying on the overlay
-  past the last piece's landing only while the two session sets still differ (membership or order, not
-  telemetry; [ARCHITECTURE.md](ARCHITECTURE.md) owns the freeze/unmount half). Until it settles the
-  list's trailing row is `widgets::loading_view` rather than the create row, and
-  `set_loading_rain_for_tests` is the process-static seam a test binary opts out with.
+  `widgets::pro_gate::gated_saved_row_tap`, so the paywall precedes that row's own no-verification confirm
+  and `recover_and_connect` stays gate-free by contract. The block carries a `ConnectRetry` naming the
+  entry point, so unlocking Pro — or `forget_saved_servers_then` dropping the rows the free tier can't
+  keep — re-enters the connect the user asked for.
+- **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing mutations by
+  `Session::id` (the backend-qualified routing key), not display name. A read-only credential
+  (`ConnectionController::is_read_only`) disables Rename/Kill and creation, never Attach. The first load
+  is covered by the shared `loading` rain overlay — the scroller band's always-present `Stack`'s last
+  child, under a live server strip, released by `SessionsController::first_load_settled` on `Ok` or `Err`;
+  input stays on the overlay past the last piece's landing while the two session sets still differ
+  (membership/order, not telemetry; [ARCHITECTURE.md](ARCHITECTURE.md) owns freeze/unmount). Until settled
+  the trailing row is `widgets::loading_view`, not the create row; `set_loading_rain_for_tests` is the
+  process-static seam a test binary opts out with.
 - **`terminal`** — the attached session's surface: a `GlyphInk`-toned card, the fullscreen seam, and the
   "panes & tabs" tree side sheet the app bar's one action opens (spaces → tabs → panes; zellij and a
   zero-space herdr session promote tabs to the top). `domain::feed::TerminalFeed` is a second domain
@@ -130,30 +128,32 @@ its follow-on from Glyph's own `on_close`, where no `&mut AppState` exists.
   resolved once in `Component::init` and refreshed on every mount. Settings owns the Disconnect flow,
   the production caller of `ConnectionController::disconnect`.
 - **`pro`** — muxr's one in-app purchase and the free-tier rule it lifts; the only slice with no route.
-  `Entitlement` (`Free`/`Pro`/`Pending`, an unsettled purchase unlocking nothing), `ProFeature`, and
-  `server_limit_verdict`: a free install keeps exactly the server it is connecting to, and a blocked
-  verdict names every other row, to offer to forget them. `EntitlementRepository` has two
-  implementations: `IapEntitlementRepository` (`frust-iap`'s Play Billing/StoreKit surface plus an
-  `EntitlementCache` of two `frust-shared-preferences` keys, read as Free when absent, so a cold or
-  offline start gates on the last answer) and `MockEntitlementRepository`. `di::provide()` publishes
-  exactly one of them — the mock under the test seam, a `mock-iap` build or a prefs store that won't
-  open; the real store otherwise — plus the app-scoped `ProController` over that same instance, its
-  entitlement signal seeded from the cache and its `busy` a single-flight guard two paywalls share;
-  only the test seam also publishes the scriptable mock handle beside the trait object. **The purchase
-  contract is `frust-iap`'s** (its purchase-lifecycle section): Pro is granted only off a
-  store-reported `Purchased` row — never off `request_purchase`'s return — and acknowledged as soon as
-  the grant is durable (Play auto-refunds unacknowledged purchases); the store is re-queried at launch,
-  on every Settings mount and after each purchase or restore, every answer *overwriting* the cache so a
-  refund propagates to Free; failures log a store code, never a payload that could quote a token. Two
-  accepted limitations: the grant is client-side, with **no server-side receipt verification** (no
-  backend exists to do it), and a failed offer lookup renders the same "unavailable" copy as an
-  unsellable store, no retry affordance.
+  `Entitlement` (`Free`/`Pro`/`Pending`, unsettled and unlocking nothing), `ProFeature`, and
+  `server_limit_verdict` — a free install keeps only the server it's connecting to; blocked, it names the
+  rest, to offer forgetting them. `EntitlementRepository` has three implementations:
+  `IapEntitlementRepository` (`frust-iap`'s Play Billing/StoreKit surface over an `EntitlementCache` of
+  two `frust-shared-preferences` keys, Free when absent, so a cold or offline start gates on the last
+  answer), `MockEntitlementRepository`, and the degraded-launch `UnavailableEntitlementRepository` (sells
+  nothing, grants nothing). `di::provide()` publishes exactly one — the mock under the test seam or a
+  `mock-iap` build, that degraded store when the real one's prefs cache won't open, else the real store —
+  plus the app-scoped `ProController` over that instance, its entitlement signal seeded from the cache and
+  its `busy` a single-flight guard two paywalls share; only the test seam also publishes the scriptable
+  mock handle beside the trait object. The restore seam answers a `RestoreOutcome`
+  (`Restored`/`NothingToRestore`/`Failed`/`Busy`); only `NothingToRestore` raises its own toast — a
+  `Failed` instead reaches toasts through the controller's own failure sink. **The purchase contract is
+  `frust-iap`'s**: Pro is granted only off a store-reported `Purchased` row, never `request_purchase`'s
+  return — an error proving the flow never started (a dropped connection reopened and retried once; a host
+  refusal answering from its own code) fails that attempt fast, and only the documented ack-timeout still
+  waits on the listener — acknowledged as soon as the grant is durable (Play auto-refunds unacknowledged
+  purchases); re-queried at launch, each Settings mount and after purchase/restore, always *overwriting*
+  the cache so a refund reaches Free; failures log a store code, never a token. Two accepted limits: a
+  client-side grant, **no server-side receipt verification** (no backend exists), and a failed offer
+  lookup reads "unavailable" like an unsellable store — no retry affordance.
 
 ## Building a Screen (canonical pattern)
 
-Every screen is built this way — normative, not aspirational, and the shape every implementor (and
-every frust app author, once this repo is a public example) copies; huddle (`examples/huddle`) is the
-framework's own reference implementation of it.
+Every screen is built this way — normative, not aspirational — the shape every implementor copies;
+huddle (`examples/huddle`) is the framework's own reference implementation.
 
 - **Per-screen stateful Component** (Flutter `StatefulWidget` parity): a route builder is
   `fn(...) -> AnyView<AppState>` returning `any(component(XScreen))`; `XScreen` is `impl Component`
