@@ -3,9 +3,10 @@
 //!
 //! **A purchase is request → event → grant → settle.** `request_purchase` only
 //! acknowledges that the store took the request; the registered listener is the
-//! single source of truth for what actually happened, and an `Err` from the
-//! request does *not* end the flow (the sheet may already be open), so this
-//! repository logs that `Err` and keeps waiting. Settlement is last: Play
+//! single source of truth for what actually happened. An `Err` from the request
+//! is therefore classified rather than obeyed — only a timed-out dispatch ack
+//! leaves a flow that may still be running, and only that one waits for an
+//! event (`classify_request` holds the whole table). Settlement is last: Play
 //! auto-refunds an unacknowledged purchase after ~3 days, so every Purchased row
 //! this sees — from a live event or from the entitlement query at launch — is
 //! finished as soon as the grant is durable, and a failed settle never revokes
@@ -30,6 +31,8 @@
 //! `PlayStore` delegates each of its seven members to `frust_iap::Iap`
 //! one-to-one, and the `cfg(test)` fake answers from scripted rows.
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -138,6 +141,20 @@ enum StoreGap {
     Failed(AppFailure),
 }
 
+/// Why a purchase request ended the attempt on the spot, rather than leaving
+/// the answer to the listener. See
+/// [`IapEntitlementRepository::classify_request`].
+enum RequestGap {
+    /// Nothing to sell through here at all.
+    Unavailable,
+    /// The store refused, ahead of any purchase flow — its own code names the
+    /// outcome, so [`IapEntitlementRepository::refused`] reads it exactly as it
+    /// reads a refusal that arrived as an event.
+    Refused(IapPurchaseError),
+    /// The request never reached the store, carrying what the user is told.
+    NeverSent(&'static str),
+}
+
 // ---------------------------------------------------------------------------
 // The repository
 // ---------------------------------------------------------------------------
@@ -155,6 +172,12 @@ pub(crate) struct IapEntitlementRepository<S> {
     /// Whether the store connection has been opened since the last refusal.
     connected: AtomicBool,
     event_wait: Duration,
+    /// How often [`Self::await_outcome`] was entered. Test-only bookkeeping,
+    /// so a case whose whole point is that it answered without waiting can
+    /// assert that structurally instead of by the clock — nothing reads it in
+    /// a shipped build and no behaviour depends on it.
+    #[cfg(test)]
+    waits: AtomicUsize,
 }
 
 /// The production repository — the only shape the app itself builds.
@@ -196,6 +219,8 @@ impl<S: StoreApi> IapEntitlementRepository<S> {
             unavailable: AtomicBool::new(false),
             connected: AtomicBool::new(false),
             event_wait,
+            #[cfg(test)]
+            waits: AtomicUsize::new(0),
         }
     }
 }
@@ -270,6 +295,76 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
         StoreGap::Failed(AppFailure::Internal(code))
     }
 
+    /// Asks the store to start this app's purchase flow, re-opening a
+    /// connection that dropped underneath the call.
+    ///
+    /// [`Self::call`]'s `NotConnected` shape without its `off_thread` hop:
+    /// `request_purchase` is the plugin's one non-blocking, UI-thread-callable
+    /// member, so there is no blocking wait to move off this thread. Clearing
+    /// [`Self::connected`] is the load-bearing half — the flag says "connected"
+    /// until something clears it, so a service Play dropped underneath this
+    /// repository would otherwise refuse every later attempt the same way.
+    ///
+    /// `Ok(())` means the answer is the listener's to give.
+    async fn request(&self) -> Result<(), RequestGap> {
+        match self.store.request_purchase(purchase_props()) {
+            Ok(()) => Ok(()),
+            Err(IapError::NotConnected) => {
+                self.connected.store(false, Ordering::Relaxed);
+                self.ensure_connected().await.map_err(reconnect_gap)?;
+                match self.store.request_purchase(purchase_props()) {
+                    Ok(()) => Ok(()),
+                    // Exactly one retry: a connection that reports itself open
+                    // and refuses anyway is not going to answer this attempt.
+                    Err(err) => self.classify_request(err),
+                }
+            }
+            Err(err) => self.classify_request(err),
+        }
+    }
+
+    /// What an `Err` from [`StoreApi::request_purchase`] means for the attempt
+    /// behind it — the one call whose failure is not an outcome by itself.
+    ///
+    /// Its own wait is a dispatch ack rather than the purchase, and neither
+    /// backend takes back a request it already issued, so a flow that started
+    /// keeps running past the `Err` (`plugins/iap/README.md`, *An `Err` from
+    /// `request_purchase` doesn't prove the flow never started*). That
+    /// "unknown, not failed" reading covers one variant. Every other one is
+    /// raised before anything is dispatched, where waiting for an event means
+    /// waiting for an event that can never come:
+    ///
+    /// | [`IapError`] | Where it comes from | This attempt |
+    /// |---|---|---|
+    /// | `Platform` | **ambiguous**, and the reason this arm waits: it carries the dispatch ack timing out or a hop that failed after issuing the call (`android.rs`'s `ACK_TIMEOUT`, `apple.rs`'s `await_answer`), but equally a glue failure raised *before* anything was dispatched (`map_host_error`'s synthetic and unparseable arms; `bridge_error`'s code-less arm). Nothing in the payload tells the two apart from this side, so "the sheet may be open" holds for some of them and not others | **waits** — the wait costs one attempt, dropping a purchase already in flight costs the user money (a plugin follow-up to separate the two is filed) |
+    /// | `Store` | the host's synchronous throws ahead of its detached flow (`FrustIapHost.kt`'s `requestPurchase` branch: a request that fails the spec's own invariant, an openiap module exposing no `requestPurchase` handler, no current Activity — `developer-error` / `feature-not-supported` / `activity-unavailable`), through `map_host_error`. iOS reaches this row only for a throw that already *is* a `PurchaseError`: `FrustIapBridge.swift`'s `errorJson` keeps the spec shape for those alone, so the `DecodingError` its synchronous `requestPurchaseProps` decode actually raises degrades to the code-less shape and lands on the `Platform` row above instead | the code's own outcome, [`Self::refused`] |
+    /// | `NotAvailable` | a target with no billing backend | `Unavailable`, latched |
+    /// | `NotConnected` | the connection guard — [`Self::request`] has already re-opened and retried once by the time one reaches here | the store cannot be reached |
+    /// | `PlatformNotInitialized`, `NotSupportedOnPlatform` | the readiness guards, likewise before any platform work | no purchases on this device |
+    /// | `EventThread`, `UiThread`, `Serialization` | a defect on this side: the wrong thread, or a request that would not encode | a generic failure |
+    fn classify_request(&self, err: IapError) -> Result<(), RequestGap> {
+        match err {
+            IapError::Platform(_) => {
+                log::info!(
+                    "pro entitlement: the store took the request without acknowledging it; \
+                     waiting for its event"
+                );
+                Ok(())
+            }
+            IapError::Store(refusal) => Err(RequestGap::Refused(refusal)),
+            // Everything left reached no store: `classify` logs it by code and
+            // latches a platform that can never sell, exactly as it does for a
+            // blocking call's own failure.
+            other => {
+                let message = never_sent_message(&other);
+                Err(match self.classify(other) {
+                    StoreGap::Unavailable => RequestGap::Unavailable,
+                    StoreGap::Failed(_) => RequestGap::NeverSent(message),
+                })
+            }
+        }
+    }
+
     /// What the account's own rows entitle this install to, settling a Purchased
     /// row the store has not acknowledged yet on the way past.
     async fn entitlement_of(&self, rows: Vec<Purchase>) -> Entitlement {
@@ -314,6 +409,8 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
     /// anything else. Returns [`PurchaseOutcome::Failed`] when the wait runs
     /// out — the listener stays registered either way.
     async fn await_outcome(&self) -> Result<PurchaseOutcome, AppFailure> {
+        #[cfg(test)]
+        self.waits.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + self.event_wait;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -438,15 +535,15 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
             Err(StoreGap::Failed(failure)) => return Err(failure),
         }
         self.drain_stale_events();
-        // The one UI-thread-callable call, and the one whose `Err` is not an
-        // outcome: the store may already have the sheet open, so only a
-        // platform that cannot sell at all ends the attempt here.
-        if let Err(err) = self.store.request_purchase(purchase_props())
-            && matches!(self.classify(err), StoreGap::Unavailable)
-        {
-            return Ok(PurchaseOutcome::Unavailable);
+        match self.request().await {
+            // The store has the request — or took it and never acknowledged
+            // it, which from here is the same thing: its listener owns the
+            // answer either way.
+            Ok(()) => self.await_outcome().await,
+            Err(RequestGap::Unavailable) => Ok(PurchaseOutcome::Unavailable),
+            Err(RequestGap::Refused(refusal)) => self.refused(refusal).await,
+            Err(RequestGap::NeverSent(message)) => Ok(PurchaseOutcome::Failed(message.to_string())),
         }
-        self.await_outcome().await
     }
 
     async fn restore(&self) -> Result<Entitlement, AppFailure> {
@@ -559,6 +656,32 @@ fn store_code(err: &IapError) -> String {
     }
 }
 
+/// A failure to re-open the connection under a purchase request, as that
+/// attempt's own end: nothing was dispatched, so no event can answer it.
+fn reconnect_gap(gap: StoreGap) -> RequestGap {
+    match gap {
+        StoreGap::Unavailable => RequestGap::Unavailable,
+        StoreGap::Failed(_) => {
+            RequestGap::NeverSent(purchase_message(IapErrorCode::ServiceDisconnected))
+        }
+    }
+}
+
+/// What the user is told about a request that never reached the store — the
+/// same code-derived vocabulary as [`purchase_message`], for the failures that
+/// carry no store code of their own. The mapping is
+/// [`IapEntitlementRepository::classify_request`]'s table.
+fn never_sent_message(err: &IapError) -> &'static str {
+    let code = match err {
+        IapError::NotConnected => IapErrorCode::ServiceDisconnected,
+        IapError::PlatformNotInitialized | IapError::NotSupportedOnPlatform => {
+            IapErrorCode::IapNotAvailable
+        }
+        _ => IapErrorCode::Unknown,
+    };
+    purchase_message(code)
+}
+
 /// What a failed purchase tells the user, derived from the store's code — its
 /// message is the host's own text and never shown.
 fn purchase_message(code: IapErrorCode) -> &'static str {
@@ -604,8 +727,14 @@ mod tests {
         unavailable: bool,
         /// `request_purchase` refuses, without withholding `on_request`.
         request_fails: bool,
+        /// One pre-dispatch refusal per `request_purchase` call, in order.
+        /// Nothing reaches the store on these, so no event follows them.
+        request_errors: Vec<IapError>,
         settled: Vec<String>,
         restore_calls: usize,
+        /// How often the connection was opened — a second one is a latch that
+        /// was cleared and re-established.
+        connect_calls: usize,
     }
 
     impl FakeStore {
@@ -625,13 +754,22 @@ mod tests {
                 .unavailable
                 .then_some(IapError::NotAvailable(Unavailability::UnsupportedPlatform))
         }
+
+        /// The next scripted pre-dispatch refusal, if one is left.
+        fn next_request_error(&self) -> Option<IapError> {
+            let mut state = self.state();
+            (!state.request_errors.is_empty()).then(|| state.request_errors.remove(0))
+        }
     }
 
     impl StoreApi for FakeStore {
         fn init_connection(&self, _config: Option<serde_json::Value>) -> Result<bool, IapError> {
             match self.gap() {
                 Some(err) => Err(err),
-                None => Ok(true),
+                None => {
+                    self.state().connect_calls += 1;
+                    Ok(true)
+                }
             }
         }
 
@@ -657,6 +795,12 @@ mod tests {
 
         fn request_purchase(&self, _props: RequestPurchaseProps) -> Result<(), IapError> {
             if let Some(err) = self.gap() {
+                return Err(err);
+            }
+            // A refusal raised ahead of the purchase flow — a dropped
+            // connection, a host that threw before dispatching — reaches no
+            // store, so nothing is ever delivered for it.
+            if let Some(err) = self.next_request_error() {
                 return Err(err);
             }
             // The store's own answer arrives on the listener, whether or not
@@ -719,12 +863,57 @@ mod tests {
     /// A wait short enough that the timeout case is a test, not a pause.
     const TEST_WAIT: Duration = Duration::from_millis(30);
 
+    /// A wait no fail-fast case may ever reach, long enough that a regression
+    /// into one is a stall rather than a hiccup — 30s against the sub-second
+    /// work these cases actually do, so the sanity bound below survives a
+    /// heavily loaded machine while a real dead wait still blows through it.
+    const UNMISSABLE_WAIT: Duration = Duration::from_secs(30);
+
     fn repository() -> IapEntitlementRepository<FakeStore> {
+        repository_waiting(TEST_WAIT)
+    }
+
+    fn repository_waiting(wait: Duration) -> IapEntitlementRepository<FakeStore> {
         IapEntitlementRepository::with_event_wait(
             FakeStore::new(),
             EntitlementCache::in_memory(),
-            TEST_WAIT,
+            wait,
         )
+    }
+
+    /// Runs `purchase()` and reports how long it took, for the cases whose
+    /// point is that they answer without waiting for an event.
+    fn timed_purchase(
+        repo: &IapEntitlementRepository<FakeStore>,
+    ) -> (Result<PurchaseOutcome, AppFailure>, Duration) {
+        let started = Instant::now();
+        let outcome = block_on(repo.purchase());
+        (outcome, started.elapsed())
+    }
+
+    /// Asserts an attempt ended on its own answer rather than on the listener
+    /// wait.
+    ///
+    /// The load-bearing half is structural: [`IapEntitlementRepository::waits`]
+    /// counts entries into `await_outcome`, so this reads the property itself
+    /// rather than inferring it from a stopwatch a loaded machine can stretch.
+    /// The elapsed bound stays as a deliberately generous sanity check — half
+    /// of the repository's own `event_wait`, which a dead wait (the whole of
+    /// it) can never fit inside no matter how fast the machine is.
+    fn assert_answered_without_waiting(
+        repo: &IapEntitlementRepository<FakeStore>,
+        elapsed: Duration,
+    ) {
+        assert_eq!(
+            repo.waits.load(Ordering::Relaxed),
+            0,
+            "a request that never reached the store must not wait for an event that cannot come"
+        );
+        assert!(
+            elapsed < repo.event_wait / 2,
+            "answered in {elapsed:?}, past half of {:?}",
+            repo.event_wait
+        );
     }
 
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
@@ -768,12 +957,18 @@ mod tests {
         }
     }
 
-    fn refusal(code: IapErrorCode) -> IapEvent {
-        IapEvent::PurchaseError(IapPurchaseError {
+    /// The store's own refusal payload, carrying host text no outcome may ever
+    /// quote back.
+    fn refusal_payload(code: IapErrorCode) -> IapPurchaseError {
+        IapPurchaseError {
             code,
             message: "host text that must never be shown".to_string(),
             product_id: Some(PRO_PRODUCT_ID.to_string()),
-        })
+        }
+    }
+
+    fn refusal(code: IapErrorCode) -> IapEvent {
+        IapEvent::PurchaseError(refusal_payload(code))
     }
 
     #[test]
@@ -912,6 +1107,94 @@ mod tests {
 
         assert_eq!(block_on(repo.purchase()), Ok(PurchaseOutcome::Purchased));
         assert_eq!(repo.cached(), Entitlement::Pro);
+    }
+
+    #[test]
+    fn a_connection_dropped_under_the_request_is_re_opened_and_the_purchase_lands() {
+        let repo = repository();
+        repo.store.state().request_errors = vec![IapError::NotConnected];
+        repo.store.state().on_request = Some(IapEvent::PurchaseUpdated(row(
+            PurchaseState::Purchased,
+            None,
+        )));
+
+        assert_eq!(block_on(repo.purchase()), Ok(PurchaseOutcome::Purchased));
+        assert_eq!(
+            repo.store.state().connect_calls,
+            2,
+            "the cached flag has to be cleared and the connection actually re-opened"
+        );
+        assert!(
+            repo.connected.load(Ordering::Relaxed),
+            "the re-opened connection is what the next attempt starts from"
+        );
+        assert_eq!(
+            repo.waits.load(Ordering::Relaxed),
+            1,
+            "this one answers through the listener, which is what makes the fail-fast cases' \
+             own count of zero mean something"
+        );
+        assert_eq!(repo.cached(), Entitlement::Pro);
+    }
+
+    #[test]
+    fn a_connection_that_stays_dropped_fails_the_attempt_rather_than_waiting() {
+        // Nothing was ever dispatched, so no event is coming: waiting here is
+        // the dead wait that made every later Upgrade tap cost the same.
+        let repo = repository_waiting(UNMISSABLE_WAIT);
+        repo.store.state().request_errors = vec![IapError::NotConnected, IapError::NotConnected];
+
+        let (outcome, elapsed) = timed_purchase(&repo);
+
+        assert_eq!(
+            outcome,
+            Ok(PurchaseOutcome::Failed(
+                "The store couldn't be reached.".to_string()
+            ))
+        );
+        assert_answered_without_waiting(&repo, elapsed);
+        assert_eq!(
+            repo.store.state().connect_calls,
+            2,
+            "re-opened exactly once — a second refusal ends the attempt"
+        );
+    }
+
+    #[test]
+    fn a_refusal_raised_ahead_of_the_flow_answers_from_its_code_without_waiting() {
+        // The host validates the request, resolves the Activity and checks for
+        // a purchase handler *before* it detaches the flow, and throws these
+        // synchronously — no listener event can ever follow one.
+        let repo = repository_waiting(UNMISSABLE_WAIT);
+        repo.store.state().request_errors = vec![IapError::Store(refusal_payload(
+            IapErrorCode::FeatureNotSupported,
+        ))];
+
+        let (outcome, elapsed) = timed_purchase(&repo);
+
+        assert_eq!(
+            outcome,
+            Ok(PurchaseOutcome::Failed(
+                "Purchases aren't available on this device.".to_string()
+            )),
+            "the message is the code's, never the host's own text"
+        );
+        assert_answered_without_waiting(&repo, elapsed);
+        assert_eq!(repo.cached(), Entitlement::Free);
+    }
+
+    #[test]
+    fn a_cancel_the_request_itself_reports_is_a_cancel_not_a_wait() {
+        let repo = repository_waiting(UNMISSABLE_WAIT);
+        repo.store.state().request_errors = vec![IapError::Store(refusal_payload(
+            IapErrorCode::UserCancelled,
+        ))];
+
+        let (outcome, elapsed) = timed_purchase(&repo);
+
+        assert_eq!(outcome, Ok(PurchaseOutcome::Cancelled));
+        assert_answered_without_waiting(&repo, elapsed);
+        assert_eq!(repo.cached(), Entitlement::Free);
     }
 
     #[test]
