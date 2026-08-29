@@ -4,7 +4,7 @@
 //!
 //! Everything a store would decide is scripted here instead
 //! ([`MockEntitlementRepository::script_purchase`]/[`script_offer`]/
-//! [`fail_next_refresh`]), and every store call is counted, so a suite can
+//! [`fail_next_refresh`] and their siblings), and every store call is counted, so a suite can
 //! assert "the launch refresh ran exactly once" or "the second, overlapping
 //! purchase never reached the store".
 //!
@@ -18,7 +18,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::failure::AppFailure;
 use crate::features::pro::domain::entities::{
-    Entitlement, PRO_PRODUCT_ID, ProOffer, PurchaseOutcome,
+    Entitlement, PRO_PRODUCT_ID, ProOffer, PurchaseOutcome, RestoreResult,
 };
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
@@ -39,6 +39,14 @@ struct MockState {
     next_refresh_failure: Option<AppFailure>,
     /// The same one-shot, for `restore` — an unreachable store mid-restore.
     next_restore_failure: Option<AppFailure>,
+    /// …and for `purchase` — a store call failing outright, as opposed to a
+    /// scripted [`PurchaseOutcome`] the store reported.
+    next_purchase_failure: Option<AppFailure>,
+    /// …and for `offer` — a lookup that failed rather than answered `None`.
+    next_offer_failure: Option<AppFailure>,
+    /// Every `restore` answers [`RestoreResult::Unavailable`]: no store to
+    /// ask, as the degraded-launch repository and a desktop build have.
+    restore_unavailable: bool,
     refresh_calls: usize,
     restore_calls: usize,
     purchase_calls: usize,
@@ -64,6 +72,9 @@ impl MockEntitlementRepository {
                 purchase: PurchaseOutcome::Purchased,
                 next_refresh_failure: None,
                 next_restore_failure: None,
+                next_purchase_failure: None,
+                next_offer_failure: None,
+                restore_unavailable: false,
                 refresh_calls: 0,
                 restore_calls: 0,
                 purchase_calls: 0,
@@ -101,6 +112,24 @@ impl MockEntitlementRepository {
     /// account. The call still counts, exactly as a failed refresh does.
     pub fn fail_next_restore(&self, failure: AppFailure) {
         self.state().next_restore_failure = Some(failure);
+    }
+
+    /// Make the next (and only the next) purchase fail with `failure` — the
+    /// store call itself erroring, which is the controller's to turn into a
+    /// [`PurchaseOutcome::Failed`] rather than a scripted outcome.
+    pub fn fail_next_purchase(&self, failure: AppFailure) {
+        self.state().next_purchase_failure = Some(failure);
+    }
+
+    /// Make the next (and only the next) offer lookup fail with `failure`.
+    pub fn fail_next_offer(&self, failure: AppFailure) {
+        self.state().next_offer_failure = Some(failure);
+    }
+
+    /// Script every restore from here on as [`RestoreResult::Unavailable`]:
+    /// there is no store to ask, so nothing is said about the account.
+    pub fn script_restore_unavailable(&self) {
+        self.state().restore_unavailable = true;
     }
 
     pub fn refresh_calls(&self) -> usize {
@@ -147,12 +176,19 @@ impl EntitlementRepository for MockEntitlementRepository {
     }
 
     async fn offer(&self) -> Result<Option<ProOffer>, AppFailure> {
-        Ok(self.state().offer.clone())
+        let mut state = self.state();
+        match state.next_offer_failure.take() {
+            Some(failure) => Err(failure),
+            None => Ok(state.offer.clone()),
+        }
     }
 
     async fn purchase(&self) -> Result<PurchaseOutcome, AppFailure> {
         let mut state = self.state();
         state.purchase_calls += 1;
+        if let Some(failure) = state.next_purchase_failure.take() {
+            return Err(failure);
+        }
         let outcome = state.purchase.clone();
         match outcome {
             PurchaseOutcome::Purchased => state.entitlement = Entitlement::Pro,
@@ -162,12 +198,13 @@ impl EntitlementRepository for MockEntitlementRepository {
         Ok(outcome)
     }
 
-    async fn restore(&self) -> Result<Entitlement, AppFailure> {
+    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
         let mut state = self.state();
         state.restore_calls += 1;
         match state.next_restore_failure.take() {
             Some(failure) => Err(failure),
-            None => Ok(state.entitlement),
+            None if state.restore_unavailable => Ok(RestoreResult::Unavailable),
+            None => Ok(RestoreResult::Found(state.entitlement)),
         }
     }
 }
@@ -260,7 +297,10 @@ mod tests {
     fn restore_answers_the_stored_entitlement_and_counts_the_call() {
         let repo = MockEntitlementRepository::pro();
 
-        assert_eq!(block_on(repo.restore()), Ok(Entitlement::Pro));
+        assert_eq!(
+            block_on(repo.restore()),
+            Ok(RestoreResult::Found(Entitlement::Pro))
+        );
         assert_eq!(repo.restore_calls(), 1);
         assert_eq!(repo.refresh_calls(), 0, "a restore is not a refresh");
     }
@@ -271,12 +311,53 @@ mod tests {
         repo.fail_next_restore(AppFailure::Network("store unreachable".to_string()));
 
         assert!(block_on(repo.restore()).is_err());
-        assert_eq!(block_on(repo.restore()), Ok(Entitlement::Pro));
+        assert_eq!(
+            block_on(repo.restore()),
+            Ok(RestoreResult::Found(Entitlement::Pro))
+        );
         assert_eq!(repo.restore_calls(), 2, "a failed call still counts");
         assert_eq!(
             repo.refresh_calls(),
             0,
             "the refresh one-shot is a separate script"
+        );
+    }
+
+    #[test]
+    fn a_scripted_purchase_failure_is_consumed_by_exactly_one_call() {
+        let repo = MockEntitlementRepository::free();
+        repo.fail_next_purchase(AppFailure::Network("store unreachable".to_string()));
+
+        assert!(block_on(repo.purchase()).is_err());
+        assert_eq!(
+            repo.cached(),
+            Entitlement::Free,
+            "a failed call grants nothing"
+        );
+        assert_eq!(block_on(repo.purchase()), Ok(PurchaseOutcome::Purchased));
+        assert_eq!(repo.purchase_calls(), 2, "a failed call still counts");
+    }
+
+    #[test]
+    fn a_scripted_offer_failure_is_consumed_by_exactly_one_call() {
+        let repo = MockEntitlementRepository::free();
+        repo.fail_next_offer(AppFailure::Network("store unreachable".to_string()));
+
+        assert!(block_on(repo.offer()).is_err());
+        assert_eq!(block_on(repo.offer()), Ok(Some(default_offer())));
+    }
+
+    #[test]
+    fn an_unavailable_restore_says_so_rather_than_answering_an_empty_account() {
+        let repo = MockEntitlementRepository::pro();
+        repo.script_restore_unavailable();
+
+        assert_eq!(block_on(repo.restore()), Ok(RestoreResult::Unavailable));
+        assert_eq!(repo.restore_calls(), 1, "the call still counts");
+        assert_eq!(
+            repo.cached(),
+            Entitlement::Pro,
+            "nothing about the account changed"
         );
     }
 }

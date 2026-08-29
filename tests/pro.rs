@@ -248,7 +248,7 @@ fn an_unsettled_purchase_publishes_pending_rather_than_pro() {
 }
 
 #[test]
-fn a_failed_refresh_reports_once_and_leaves_the_entitlement_alone() {
+fn a_failed_refresh_is_logged_never_announced_and_leaves_the_entitlement_alone() {
     let _g = serial();
     let _ambient = setup();
     let (mock, controller) = controller();
@@ -259,12 +259,93 @@ fn a_failed_refresh_reports_once_and_leaves_the_entitlement_alone() {
 
     block_on(controller.refresh());
 
-    assert_eq!(raised(&log).len(), 1);
+    assert!(
+        raised(&log).is_empty(),
+        "nothing the user did failed, so nothing reaches the bridge: {:?}",
+        raised(&log)
+    );
     assert_eq!(
         controller.entitlement.get_untracked(),
         Entitlement::Pro,
         "an unreachable store must not downgrade a paying install"
     );
+}
+
+#[test]
+fn a_failed_offer_lookup_settles_unavailable_and_announces_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    let log = failure_log(&controller);
+    mock.fail_next_offer(AppFailure::Network("store unreachable".to_string()));
+
+    block_on(controller.load_offer());
+
+    assert!(
+        controller.offer_settled.get_untracked(),
+        "the lookup came back"
+    );
+    assert_eq!(controller.offer.get_untracked(), None);
+    assert!(
+        raised(&log).is_empty(),
+        "the sheet's unavailable copy is the one thing said about it"
+    );
+}
+
+#[test]
+fn a_failed_purchase_answers_failed_without_reaching_the_sink() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    let log = failure_log(&controller);
+    let failure = AppFailure::Network("store unreachable".to_string());
+    mock.fail_next_purchase(failure.clone());
+
+    let outcome = block_on(controller.purchase());
+
+    assert_eq!(outcome, PurchaseOutcome::Failed(failure.user_message()));
+    assert!(
+        raised(&log).is_empty(),
+        "the outcome carries the message; the sink stays silent so it is toasted once"
+    );
+    assert_eq!(controller.entitlement.get_untracked(), Entitlement::Free);
+    assert!(!controller.busy.get_untracked(), "the guard is released");
+}
+
+#[test]
+fn a_restore_that_finds_an_unsettled_purchase_answers_pending() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    mock.set_entitlement(Entitlement::Pending);
+
+    let outcome = block_on(controller.restore());
+
+    assert_eq!(outcome, RestoreOutcome::Pending);
+    assert_eq!(
+        controller.entitlement.get_untracked(),
+        Entitlement::Pending,
+        "published as what it is: taken, unsettled, unlocking nothing"
+    );
+}
+
+#[test]
+fn a_restore_with_no_store_answers_unavailable_and_never_nothing_to_restore() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    let log = failure_log(&controller);
+    mock.script_restore_unavailable();
+
+    let outcome = block_on(controller.restore());
+
+    assert_eq!(outcome, RestoreOutcome::Unavailable);
+    assert!(
+        raised(&log).is_empty(),
+        "no store was asked, so nothing failed"
+    );
+    assert_eq!(controller.entitlement.get_untracked(), Entitlement::Free);
+    assert!(!controller.busy.get_untracked(), "the guard is released");
 }
 
 #[test]
@@ -781,6 +862,70 @@ fn a_restore_the_store_refused_toasts_the_failure_and_never_the_empty_account() 
         vec![failure.user_message()],
         "the app's failure bridge announced it, and nothing else did"
     );
+    assert_eq!(sheet.depth(), 2, "the paywall stays up");
+    assert_eq!(sheet.unlocked.get(), 0);
+}
+
+#[test]
+fn a_purchase_the_store_refused_is_toasted_exactly_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+    app_toasts().clear();
+    let log = failure_log(&sheet.pro);
+    sheet.open(Vec::new());
+    let failure = AppFailure::Network("store unreachable".to_string());
+    sheet.mock.fail_next_purchase(failure.clone());
+
+    sheet.tap_label(SEEDED_UPGRADE);
+
+    assert_eq!(
+        app_toasts().pending(),
+        vec![failure.user_message()],
+        "the sheet announced it, and the app's failure bridge did not double it"
+    );
+    assert!(
+        raised(&log).is_empty(),
+        "the purchase run stays off the sink"
+    );
+    assert_eq!(sheet.depth(), 2, "the paywall stays up");
+    assert_eq!(sheet.unlocked.get(), 0);
+}
+
+#[test]
+fn a_restore_that_finds_an_unsettled_purchase_says_so_and_closes_without_unlocking() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+    app_toasts().clear();
+    sheet.mock.set_entitlement(Entitlement::Pending);
+    sheet.open(Vec::new());
+
+    sheet.tap_label(RESTORE_LABEL);
+
+    let toasts = app_toasts().pending();
+    assert!(toasts.iter().any(|t| t == PENDING_TOAST), "{toasts:?}");
+    assert!(
+        !toasts.iter().any(|t| t == NOTHING_TO_RESTORE_TOAST),
+        "a pending purchase is not an empty account: {toasts:?}"
+    );
+    assert_eq!(sheet.depth(), 1, "closed, as a pending purchase closes it");
+    assert_eq!(sheet.unlocked.get(), 0, "pending unlocks nothing");
+}
+
+#[test]
+fn a_restore_with_no_store_says_purchases_are_unavailable_and_leaves_the_sheet_up() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+    app_toasts().clear();
+    sheet.mock.script_restore_unavailable();
+    sheet.open(Vec::new());
+
+    sheet.tap_label(RESTORE_LABEL);
+
+    let toasts = app_toasts().pending();
+    assert_eq!(toasts, vec![UNAVAILABLE_COPY.to_string()], "{toasts:?}");
     assert_eq!(sheet.depth(), 2, "the paywall stays up");
     assert_eq!(sheet.unlocked.get(), 0);
 }

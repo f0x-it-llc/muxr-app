@@ -7,7 +7,7 @@ use std::sync::Arc;
 use clean_signals::{NoParams, UseCase};
 
 use crate::failure::AppFailure;
-use crate::features::pro::domain::entities::Entitlement;
+use crate::features::pro::domain::entities::RestoreResult;
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
 pub struct RestorePurchases {
@@ -24,10 +24,10 @@ impl RestorePurchases {
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 impl UseCase for RestorePurchases {
     type Params = NoParams;
-    type Output = Entitlement;
+    type Output = RestoreResult;
     type Failure = AppFailure;
 
-    async fn execute(&self, _params: NoParams) -> Result<Entitlement, AppFailure> {
+    async fn execute(&self, _params: NoParams) -> Result<RestoreResult, AppFailure> {
         self.repo.restore().await
     }
 }

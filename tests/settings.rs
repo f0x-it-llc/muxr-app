@@ -42,7 +42,9 @@ use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
-use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST};
+use muxr::features::pro::presentation::{
+    NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY,
+};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
@@ -1703,6 +1705,49 @@ fn tapping_restore_toasts_the_stores_failure_and_never_the_empty_account_copy() 
         app_toasts().pending(),
         vec![failure.user_message()],
         "the app's failure bridge announced it, and nothing else did"
+    );
+}
+
+#[test]
+fn tapping_restore_toasts_pending_when_the_purchase_is_taken_but_unsettled() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pending);
+    app_toasts().clear();
+
+    h.tap_label(RESTORE_LABEL);
+    pump_until(&mut h, "the pending toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    let toasts = app_toasts().pending();
+    assert!(toasts.iter().any(|t| t == PENDING_TOAST), "{toasts:?}");
+    assert!(
+        !toasts.iter().any(|t| t == NOTHING_TO_RESTORE_TOAST),
+        "a pending purchase is not an empty account: {toasts:?}"
+    );
+}
+
+#[test]
+fn tapping_restore_toasts_unavailable_when_no_store_can_be_asked() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.script_restore_unavailable();
+    app_toasts().clear();
+
+    h.tap_label(RESTORE_LABEL);
+    pump_until(&mut h, "the unavailable toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(
+        app_toasts().pending(),
+        vec![UNAVAILABLE_COPY.to_string()],
+        "no store was asked, so nothing is said about the account"
     );
 }
 

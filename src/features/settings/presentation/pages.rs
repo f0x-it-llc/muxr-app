@@ -43,7 +43,7 @@ use crate::features::connect::di::{expect_credential_service, expect_saved_serve
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use crate::features::pro::presentation::{
-    NOTHING_TO_RESTORE_TOAST, UpgradeContext, show_upgrade_sheet,
+    NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY, UpgradeContext, show_upgrade_sheet,
 };
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
@@ -722,13 +722,16 @@ impl Actions {
     /// Run the restore flow directly, without the paywall sheet: the `muxr
     /// pro` group's Restore action. Silent on a landed restore — the row's
     /// own value flips to "Pro" the moment `entitlement` republishes — and
-    /// toasted only when the account really owns nothing to restore, never
-    /// when the store failed to answer or refused an overlapping call.
+    /// toasted only for what the store actually said: nothing to restore, a
+    /// purchase still pending, or no store to ask. Never when the store
+    /// failed to answer or refused an overlapping call.
     pub fn restore_purchases(&self) {
         let pro = Arc::clone(&self.pro);
         spawn_local(async move {
             match pro.restore().await {
                 RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
+                RestoreOutcome::Pending => app_toasts().show(PENDING_TOAST),
+                RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
                 RestoreOutcome::Restored | RestoreOutcome::Failed(_) | RestoreOutcome::Busy => {}
             }
         });

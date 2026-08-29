@@ -5,7 +5,7 @@
 //! reaches the platform billing service; `cached` is deliberately synchronous,
 //! since a cold start has to render a gate before any store call can answer.
 
-use super::entities::{Entitlement, ProOffer, PurchaseOutcome};
+use super::entities::{Entitlement, ProOffer, PurchaseOutcome, RestoreResult};
 use crate::failure::AppFailure;
 
 /// This install's entitlement, as the platform store reports it. Consumed as
@@ -33,6 +33,8 @@ pub trait EntitlementRepository {
     async fn purchase(&self) -> Result<PurchaseOutcome, AppFailure>;
 
     /// Restore prior purchases on this account, then re-read the entitlement
-    /// the same way [`Self::refresh`] does.
-    async fn restore(&self) -> Result<Entitlement, AppFailure>;
+    /// the same way [`Self::refresh`] does. `Unavailable` is a store that
+    /// could not be asked at all — never the same answer as `Found(Free)`,
+    /// which is the store saying the account owns nothing.
+    async fn restore(&self) -> Result<RestoreResult, AppFailure>;
 }

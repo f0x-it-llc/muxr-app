@@ -127,33 +127,33 @@ its follow-on from Glyph's own `on_close`, where no `&mut AppState` exists.
   install's entitlement plus, short of Pro, the Upgrade/Restore actions — over a `ProController`
   resolved once in `Component::init` and refreshed on every mount. Settings owns the Disconnect flow,
   the production caller of `ConnectionController::disconnect`.
-- **`pro`** — muxr's one in-app purchase and the free-tier rule it lifts; the only slice with no route.
-  `Entitlement` (`Free`/`Pro`/`Pending`, unsettled and unlocking nothing), `ProFeature`, and
+- **`pro`** — muxr's one in-app purchase and the free-tier rule it lifts; the only routeless slice.
+  `Entitlement` (`Free`/`Pro`/`Pending` — unsettled, unlocking nothing), `ProFeature`, and
   `server_limit_verdict` — a free install keeps only the server it's connecting to; blocked, it names the
-  rest, to offer forgetting them. `EntitlementRepository` has three implementations:
-  `IapEntitlementRepository` (`frust-iap`'s Play Billing/StoreKit surface over an `EntitlementCache` of
-  two `frust-shared-preferences` keys, Free when absent, so a cold or offline start gates on the last
-  answer), `MockEntitlementRepository`, and the degraded-launch `UnavailableEntitlementRepository` (sells
-  nothing, grants nothing). `di::provide()` publishes exactly one — the mock under the test seam or a
-  `mock-iap` build, that degraded store when the real one's prefs cache won't open, else the real store —
-  plus the app-scoped `ProController` over that instance, its entitlement signal seeded from the cache and
-  its `busy` a single-flight guard two paywalls share; only the test seam also publishes the scriptable
-  mock handle beside the trait object. The restore seam answers a `RestoreOutcome`
-  (`Restored`/`NothingToRestore`/`Failed`/`Busy`); only `NothingToRestore` raises its own toast — a
-  `Failed` instead reaches toasts through the controller's own failure sink. **The purchase contract is
-  `frust-iap`'s**: Pro is granted only off a store-reported `Purchased` row, never `request_purchase`'s
-  return — an error proving the flow never started (a dropped connection reopened and retried once; a host
-  refusal answering from its own code) fails that attempt fast, and only the documented ack-timeout still
-  waits on the listener — acknowledged as soon as the grant is durable (Play auto-refunds unacknowledged
-  purchases); re-queried at launch, each Settings mount and after purchase/restore, always *overwriting*
-  the cache so a refund reaches Free; failures log a store code, never a token. Two accepted limits: a
-  client-side grant, **no server-side receipt verification** (no backend exists), and a failed offer
-  lookup reads "unavailable" like an unsellable store — no retry affordance.
+  rest to forget. `EntitlementRepository` has three implementations: `IapEntitlementRepository`
+  (`frust-iap` over an `EntitlementCache` of two `frust-shared-preferences` keys, Free when absent, so a
+  cold or offline start gates on it), `MockEntitlementRepository`, and the degraded-launch
+  `UnavailableEntitlementRepository` (sells nothing, grants nothing). `di::provide()` publishes one (the
+  mock under the test seam or a `mock-iap` build, the degraded store when the real one's prefs cache
+  won't open, else the real store) plus the app-scoped `ProController` over it — entitlement seeded from
+  the cache, `busy` a single-flight guard both paywalls share; only the test seam also publishes the mock
+  handle. A restore answers a `RestoreResult` (`Found(entitlement)` or `Unavailable`, a store never
+  asked), read back as a `RestoreOutcome`
+  (`Restored`/`Pending`/`NothingToRestore`/`Unavailable`/`Failed`/`Busy`); callers toast only the store's
+  own answers; a `Failed` reaches toasts via the controller's failure sink, a purchase's failure is the
+  sheet's alone (its run stays off the sink), background refreshes and the offer lookup fail quietly —
+  nothing is announced twice. **The purchase contract is `frust-iap`'s**: Pro is granted only off a
+  store-reported `Purchased` row, never `request_purchase`'s return — an error proving the flow never
+  started (a dropped connection is reopened and retried once; a host refusal answers from its code) fails
+  fast, and only the documented ack-timeout still waits on the listener — acknowledged once the grant is
+  durable (Play refunds unacknowledged ones); re-queried at launch, each Settings mount and after
+  purchase/restore, *overwriting* the cache so a refund reaches Free; failures log a store code, never a
+  token. Accepted limits: a client-side grant, **no server-side receipt verification** (no backend
+  exists); a failed offer lookup reads "unavailable" like an unsellable store, no retry affordance.
 
 ## Building a Screen (canonical pattern)
 
-Every screen is built this way — normative, not aspirational — the shape every implementor copies;
-huddle (`examples/huddle`) is the framework's own reference implementation.
+Every screen is built this way — normative, not aspirational; huddle (`examples/huddle`) is the reference.
 
 - **Per-screen stateful Component** (Flutter `StatefulWidget` parity): a route builder is
   `fn(...) -> AnyView<AppState>` returning `any(component(XScreen))`; `XScreen` is `impl Component`
