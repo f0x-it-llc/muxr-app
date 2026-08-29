@@ -257,6 +257,8 @@ fn upgrade_action(
                 // A dismissed store sheet is not an answer: this one stays up.
                 PurchaseOutcome::Cancelled => {}
                 PurchaseOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
+                // Every failure is this sheet's to announce, once — the
+                // controller keeps the purchase off the app's failure bridge.
                 PurchaseOutcome::Failed(message) => app_toasts().show(message),
             }
         });
@@ -287,7 +289,12 @@ fn restore_action(
                 RestoreOutcome::Restored => {
                     sheet.close_then(move || on_unlocked());
                 }
+                RestoreOutcome::Pending => {
+                    app_toasts().show(PENDING_TOAST);
+                    sheet.close();
+                }
                 RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
+                RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
                 // A failure is the app's failure bridge to announce, once; a
                 // refused overlap says nothing at all, as a purchase's
                 // `Cancelled` doesn't. Neither is an empty account.

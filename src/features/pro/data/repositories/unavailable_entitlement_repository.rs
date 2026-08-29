@@ -2,11 +2,14 @@
 //! durable cache behind [`super::PlayEntitlementRepository`] could not be
 //! opened, so this app sells nothing and grants nothing until it is fixed.
 //! The upgrade sheet already renders `UNAVAILABLE_COPY` for `offer() == None`
-//! and toasts it for [`PurchaseOutcome::Unavailable`], so no UI change is
-//! needed to carry this state.
+//! and toasts it for [`PurchaseOutcome::Unavailable`] and
+//! [`RestoreResult::Unavailable`] alike — a restore here reached no store, so
+//! it must never read as "this account owns nothing".
 
 use crate::failure::AppFailure;
-use crate::features::pro::domain::entities::{Entitlement, ProOffer, PurchaseOutcome};
+use crate::features::pro::domain::entities::{
+    Entitlement, ProOffer, PurchaseOutcome, RestoreResult,
+};
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
 /// See the [module docs](self).
@@ -31,8 +34,8 @@ impl EntitlementRepository for UnavailableEntitlementRepository {
         Ok(PurchaseOutcome::Unavailable)
     }
 
-    async fn restore(&self) -> Result<Entitlement, AppFailure> {
-        Ok(Entitlement::Free)
+    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
+        Ok(RestoreResult::Unavailable)
     }
 }
 
@@ -71,9 +74,9 @@ mod tests {
     }
 
     #[test]
-    fn restore_answers_free() {
+    fn restore_answers_unavailable_never_an_empty_account() {
         let repo = UnavailableEntitlementRepository;
-        assert_eq!(block_on(repo.restore()), Ok(Entitlement::Free));
+        assert_eq!(block_on(repo.restore()), Ok(RestoreResult::Unavailable));
     }
 
     #[test]

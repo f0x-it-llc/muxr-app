@@ -110,9 +110,11 @@ impl Component for MuxrApp {
 
         // Resolved here, not inside the future: the poller driving it installs
         // no ambient reactive owner, so a lookup deferred into the body would
-        // panic on its first poll. The store's own failures bridge to toasts
-        // off this same instance — refresh, purchase and restore alike, each
-        // announced once, by nobody else.
+        // panic on its first poll. The store's failures that no caller owns
+        // bridge to toasts off this same instance — a restore's, which its
+        // callers never re-announce. A purchase reports through its outcome
+        // (the sheet announces it once), and the background refreshes and the
+        // offer lookup fail quietly, so the bridge never doubles a message.
         let pro = features::pro::di::expect_pro_controller();
 
         pro.core()

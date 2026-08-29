@@ -50,7 +50,7 @@ use frust_shared_preferences::PrefsError;
 use crate::failure::AppFailure;
 use crate::features::pro::data::entitlement_cache::EntitlementCache;
 use crate::features::pro::domain::entities::{
-    Entitlement, PRO_PRODUCT_ID, ProOffer, PurchaseOutcome,
+    Entitlement, PRO_PRODUCT_ID, ProOffer, PurchaseOutcome, RestoreResult,
 };
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
@@ -336,12 +336,32 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
     ///
     /// | [`IapError`] | Where it comes from | This attempt |
     /// |---|---|---|
-    /// | `Platform` | **ambiguous**, and the reason this arm waits: it carries the dispatch ack timing out or a hop that failed after issuing the call (`android.rs`'s `ACK_TIMEOUT`, `apple.rs`'s `await_answer`), but equally a glue failure raised *before* anything was dispatched (`map_host_error`'s synthetic and unparseable arms; `bridge_error`'s code-less arm). Nothing in the payload tells the two apart from this side, so "the sheet may be open" holds for some of them and not others | **waits** — the wait costs one attempt, dropping a purchase already in flight costs the user money (a plugin follow-up to separate the two is filed) |
-    /// | `Store` | the host's synchronous throws ahead of its detached flow (`FrustIapHost.kt`'s `requestPurchase` branch: a request that fails the spec's own invariant, an openiap module exposing no `requestPurchase` handler, no current Activity — `developer-error` / `feature-not-supported` / `activity-unavailable`), through `map_host_error`. iOS reaches this row only for a throw that already *is* a `PurchaseError`: `FrustIapBridge.swift`'s `errorJson` keeps the spec shape for those alone, so the `DecodingError` its synchronous `requestPurchaseProps` decode actually raises degrades to the code-less shape and lands on the `Platform` row above instead | the code's own outcome, [`Self::refused`] |
+    /// | `Platform` | ambiguous — the ack timing out *or* glue failing before dispatch (below) | **waits** |
+    /// | `Store` | the host's synchronous throws ahead of its detached flow (below) | the code's own outcome, [`Self::refused`] |
     /// | `NotAvailable` | a target with no billing backend | `Unavailable`, latched |
     /// | `NotConnected` | the connection guard — [`Self::request`] has already re-opened and retried once by the time one reaches here | the store cannot be reached |
     /// | `PlatformNotInitialized`, `NotSupportedOnPlatform` | the readiness guards, likewise before any platform work | no purchases on this device |
     /// | `EventThread`, `UiThread`, `Serialization` | a defect on this side: the wrong thread, or a request that would not encode | a generic failure |
+    ///
+    /// `Platform` is the ambiguous row, and why that arm waits: it carries the
+    /// dispatch ack timing out or a hop that failed after issuing the call
+    /// (`android.rs`'s `ACK_TIMEOUT`, `apple.rs`'s `await_answer`), but equally
+    /// a glue failure raised *before* anything was dispatched (`map_host_error`'s
+    /// synthetic and unparseable arms; `bridge_error`'s code-less arm). Nothing
+    /// in the payload tells the two apart from this side, so "the sheet may be
+    /// open" holds for some of them and not others — the wait costs one attempt,
+    /// dropping a purchase already in flight costs the user money (a plugin
+    /// follow-up to separate the two is filed).
+    ///
+    /// `Store` is `FrustIapHost.kt`'s `requestPurchase` branch through
+    /// `map_host_error`: a request failing the spec's own invariant, an openiap
+    /// module exposing no `requestPurchase` handler, no current Activity —
+    /// `developer-error` / `feature-not-supported` / `activity-unavailable`.
+    /// iOS reaches this row only for a throw that already *is* a
+    /// `PurchaseError`: `FrustIapBridge.swift`'s `errorJson` keeps the spec
+    /// shape for those alone, so the `DecodingError` its synchronous
+    /// `requestPurchaseProps` decode actually raises degrades to the code-less
+    /// shape and lands on the `Platform` row instead.
     fn classify_request(&self, err: IapError) -> Result<(), RequestGap> {
         match err {
             IapError::Platform(_) => {
@@ -546,12 +566,21 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
         }
     }
 
-    async fn restore(&self) -> Result<Entitlement, AppFailure> {
+    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
         // Recovered purchases surface through the entitlement query below, not
-        // through this call's own return; a failure is logged and the query
-        // still runs.
-        let _ = self.call(|store| store.restore_purchases()).await;
-        self.refresh().await
+        // through the sync call's own return — but only a store that answered
+        // may say the account owns nothing: no store at all is `Unavailable`,
+        // and a sync that failed followed by an empty query is that failure,
+        // never an empty account.
+        let synced = self.call(|store| store.restore_purchases()).await;
+        if let Err(StoreGap::Unavailable) = synced {
+            return Ok(RestoreResult::Unavailable);
+        }
+        let entitlement = self.refresh().await?;
+        match (synced, entitlement) {
+            (Err(StoreGap::Failed(failure)), Entitlement::Free) => Err(failure),
+            (_, entitlement) => Ok(RestoreResult::Found(entitlement)),
+        }
     }
 }
 
@@ -727,6 +756,8 @@ mod tests {
         unavailable: bool,
         /// `request_purchase` refuses, without withholding `on_request`.
         request_fails: bool,
+        /// `restore_purchases` refuses; the query after it still answers.
+        restore_fails: bool,
         /// One pre-dispatch refusal per `request_purchase` call, in order.
         /// Nothing reaches the store on these, so no event follows them.
         request_errors: Vec<IapError>,
@@ -837,13 +868,15 @@ mod tests {
         }
 
         fn restore_purchases(&self) -> Result<(), IapError> {
-            match self.gap() {
-                Some(err) => Err(err),
-                None => {
-                    self.state().restore_calls += 1;
-                    Ok(())
-                }
+            if let Some(err) = self.gap() {
+                return Err(err);
             }
+            let mut state = self.state();
+            state.restore_calls += 1;
+            if state.restore_fails {
+                return Err(IapError::Platform("sync failed".to_string()));
+            }
+            Ok(())
         }
 
         fn set_purchase_listener(
@@ -1202,7 +1235,43 @@ mod tests {
         let repo = repository();
         repo.store.state().owned = vec![row(PurchaseState::Purchased, None)];
 
-        assert_eq!(block_on(repo.restore()), Ok(Entitlement::Pro));
+        assert_eq!(
+            block_on(repo.restore()),
+            Ok(RestoreResult::Found(Entitlement::Pro))
+        );
         assert_eq!(repo.store.state().restore_calls, 1);
+    }
+
+    #[test]
+    fn a_restore_with_no_store_answers_unavailable_never_an_empty_account() {
+        let repo = repository();
+        repo.store.state().unavailable = true;
+
+        assert_eq!(block_on(repo.restore()), Ok(RestoreResult::Unavailable));
+        assert_eq!(repo.store.state().restore_calls, 0, "nothing was asked");
+    }
+
+    #[test]
+    fn a_restore_whose_sync_failed_over_an_empty_account_is_that_failure() {
+        let repo = repository();
+        repo.store.state().restore_fails = true;
+
+        assert!(
+            block_on(repo.restore()).is_err(),
+            "the store did not answer"
+        );
+        assert_eq!(repo.store.state().restore_calls, 1);
+    }
+
+    #[test]
+    fn a_restore_whose_sync_failed_still_finds_the_purchase_the_query_reports() {
+        let repo = repository();
+        repo.store.state().restore_fails = true;
+        repo.store.state().owned = vec![row(PurchaseState::Purchased, None)];
+
+        assert_eq!(
+            block_on(repo.restore()),
+            Ok(RestoreResult::Found(Entitlement::Pro))
+        );
     }
 }

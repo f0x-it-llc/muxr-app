@@ -86,6 +86,19 @@ pub enum PurchaseOutcome {
     Failed(String),
 }
 
+/// What a restore found: the store's answer, or the fact that no store was
+/// asked. A bare `Entitlement` cannot say the second, and reading `Free` off
+/// a store that was never reached tells a paying user the account owns
+/// nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreResult {
+    /// The store answered; this is what the account owns now.
+    Found(Entitlement),
+    /// No store to ask here (no billing service, a cache that would not
+    /// open) — nothing was checked, so nothing is known about the account.
+    Unavailable,
+}
+
 /// Whether a free install may connect to (and remember) one more server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerLimitVerdict {
