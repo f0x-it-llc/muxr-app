@@ -10,17 +10,21 @@
 //! cannot reach a store: a headless suite that flipped
 //! [`use_mock_entitlement_for_tests`], and a `mock-iap` build — the desktop
 //! preview of the purchase flow, since no desktop platform can sell. An
-//! unopenable preferences store falls back to the mock too, rather than failing
-//! the launch (`connect`'s saved-servers precedent). With the test switch on,
-//! the concrete mock is published beside its trait object so a suite can script
-//! it ([`mock_entitlement`]).
+//! unopenable preferences store instead falls back to
+//! [`UnavailableEntitlementRepository`] — this launch sells nothing and grants
+//! nothing, rather than failing outright (`connect`'s saved-servers precedent
+//! covers the failure-doesn't-block-launch shape, not the answer this store
+//! gives). With the test switch on, the concrete mock is published beside its
+//! trait object so a suite can script it ([`mock_entitlement`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
-use super::data::repositories::{MockEntitlementRepository, PlayEntitlementRepository};
+use super::data::repositories::{
+    MockEntitlementRepository, PlayEntitlementRepository, UnavailableEntitlementRepository,
+};
 use super::domain::repositories::EntitlementRepository;
 use super::presentation::controller::ProController;
 
@@ -63,10 +67,10 @@ fn platform_entitlement_repository() -> SharedEntitlementRepository {
     match PlayEntitlementRepository::standard() {
         Ok(repository) => Arc::new(repository),
         Err(err) => {
-            // Only the cache behind it failed to open; the in-memory store
-            // keeps the app launchable, entitled to nothing until it is fixed.
-            log::warn!("pro entitlement: falling back to the in-memory store: {err}");
-            Arc::new(MockEntitlementRepository::free())
+            // Only the cache behind it failed to open; the store is
+            // unavailable for this launch, so nothing is sold or granted.
+            log::warn!("pro entitlement: store unavailable for this launch: {err}");
+            Arc::new(UnavailableEntitlementRepository)
         }
     }
 }
