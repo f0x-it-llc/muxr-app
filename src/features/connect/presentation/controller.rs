@@ -15,6 +15,8 @@ use crate::features::connect::domain::entities::{
 };
 use crate::features::connect::domain::use_cases::parse_endpoint::{Endpoint, parse_endpoint};
 use crate::features::connect::domain::use_cases::{SaveCredential, UnlockCredential};
+use crate::features::pro::domain::entities::ServerLimitVerdict;
+use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::SharedAuthTokensRepository;
 use crate::features::settings::domain::entities::CreateTokenRequest;
 use crate::routes::Nav;
@@ -32,6 +34,28 @@ pub struct CredentialOffer {
 /// an offer instead of navigating; supplied by the screen, which holds the
 /// overlay host this controller does not.
 pub type OfferPrompt = Rc<dyn Fn(CredentialOffer)>;
+
+/// Which connect a blocked dial re-runs once the paywall's answer clears it.
+/// The entry point rather than the target: each one re-reads its own source
+/// (the form, the stashed pairing, the row that was tapped).
+#[derive(Clone)]
+pub enum ConnectRetry {
+    Manual,
+    Pairing,
+    Saved(SavedServer),
+}
+
+/// What the free-tier server rule refused: the remembered rows standing in the
+/// way, and the connect to re-run once they no longer do.
+pub struct ServerLimitBlock {
+    pub to_forget: Vec<SavedServer>,
+    pub retry: ConnectRetry,
+}
+
+/// Callback a connect entry point invokes *instead of dialing* when the
+/// free-tier rule blocks it; supplied by the screen, which owns the paywall
+/// this controller cannot raise. Lent per call, exactly like [`OfferPrompt`].
+pub type GatePrompt = Rc<dyn Fn(ServerLimitBlock)>;
 
 /// The trust posture a fresh form starts on — the safe one.
 const DEFAULT_TRUST_MODE: TrustMode = TrustMode::System;
@@ -55,6 +79,9 @@ pub struct ConnectController {
     save_credential: SaveCredential,
     unlock_credential: UnlockCredential,
     connection: Arc<ConnectionController>,
+    /// The app-scoped entitlement view model every dial's free-tier verdict is
+    /// asked of. `Arc<ProController>`, so this controller stays `Send + Sync`.
+    pro: Arc<ProController>,
     saving_credential: AtomicBool,
     pub url: RwSignal<String>,
     pub token: RwSignal<Zeroizing<String>>,
@@ -73,6 +100,7 @@ impl ConnectController {
         credentials: Credentials,
         tokens: SharedAuthTokensRepository,
         connection: Arc<ConnectionController>,
+        pro: Arc<ProController>,
     ) -> Self {
         let controller = Self {
             core: ControllerCore::new(),
@@ -82,6 +110,7 @@ impl ConnectController {
             credentials,
             tokens,
             connection,
+            pro,
             saving_credential: AtomicBool::new(false),
             url: RwSignal::new(String::new()),
             token: RwSignal::new(Zeroizing::new(String::new())),
@@ -205,6 +234,50 @@ impl ConnectController {
     }
 
     // -----------------------------------------------------------------------
+    // The free-tier server gate (`features::pro`'s rule, ahead of every dial)
+    // -----------------------------------------------------------------------
+
+    /// The free-tier verdict for `endpoint`, raised on `gate_prompt` when it
+    /// refuses. `true` means the caller must return without dialing: a blocked
+    /// connect saves, unlocks, writes and toasts nothing, since the only place
+    /// a new saved row is written is a successful login.
+    fn blocked(&self, endpoint: &str, retry: ConnectRetry, gate_prompt: &GatePrompt) -> bool {
+        match self.pro.verdict_for(&self.saved.get_untracked(), endpoint) {
+            ServerLimitVerdict::Allowed => false,
+            ServerLimitVerdict::Blocked { to_forget } => {
+                gate_prompt(ServerLimitBlock { to_forget, retry });
+                true
+            }
+        }
+    }
+
+    /// [`Self::blocked`] for a tapped saved row, taken by the screen *ahead* of
+    /// [`Self::recover_and_connect`] rather than inside it: the row's own
+    /// no-verification confirmation sits between the two and dials through the
+    /// ungated method, so the verdict has to be taken before that dialog is
+    /// raised (`widgets::pro_gate` owns the ordering). A row with no stored
+    /// credential only refills the form, so there is nothing to judge.
+    pub fn saved_row_blocked(&self, server: &SavedServer, gate_prompt: &GatePrompt) -> bool {
+        if !server.has_credential {
+            return false;
+        }
+        self.blocked(
+            &server.endpoint(),
+            ConnectRetry::Saved(server.clone()),
+            gate_prompt,
+        )
+    }
+
+    /// Where `endpoint` sits in [`Self::saved`] now. A retry holds the row it
+    /// was blocked on across a forget, which moves every later row's index.
+    pub fn saved_row_index(&self, endpoint: &str) -> Option<usize> {
+        self.saved
+            .get_untracked()
+            .iter()
+            .position(|server| server.endpoint() == endpoint)
+    }
+
+    // -----------------------------------------------------------------------
     // The pairing path (see the module docs)
     // -----------------------------------------------------------------------
 
@@ -248,19 +321,27 @@ impl ConnectController {
     /// the token and raises the paired credential's one save prompt (session
     /// already live, so a denial changes nothing); on failure, leaves the form
     /// untouched for a one-tap retry.
-    pub fn connect_from_pairing(self: &Arc<Self>, nav: &Nav) {
+    pub fn connect_from_pairing(self: &Arc<Self>, nav: &Nav, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
         }
         let Some(payload) = self.pending_pairing.get_untracked() else {
             return;
         };
+        let target = pairing_target(&payload);
+        if self.blocked(
+            &target_endpoint(&target),
+            ConnectRetry::Pairing,
+            &gate_prompt,
+        ) {
+            // The payload stays stashed, so the retry dials this same code.
+            return;
+        }
         self.invalid.set(false);
         let nav = nav.clone();
         // Both `Copy`; the closure may outlive this borrow (see `Self::connect`).
         let token = self.token;
         let pending = self.pending_pairing;
-        let target = pairing_target(&payload);
         let upsert = self.login_upsert(&target);
         let controller = Arc::clone(self);
         // Stored as scanned — never re-minted; the QR already is the credential.
@@ -338,12 +419,21 @@ impl ConnectController {
     ///
     /// A rejection toasts and lights [`Self::invalid`]; a refused dial toasts and
     /// leaves the form as typed, for a one-tap retry. Neither navigates.
-    pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt) {
+    pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
         }
         match self.validated_target() {
             Ok(target) => {
+                if self.blocked(
+                    &target_endpoint(&target),
+                    ConnectRetry::Manual,
+                    &gate_prompt,
+                ) {
+                    // Before `invalid` too: a blocked connect writes nothing at
+                    // all, and the form is left exactly as it was typed.
+                    return;
+                }
                 self.invalid.set(false);
                 let nav = nav.clone();
                 // Token's job ends once the connection opens with it; captured by
@@ -566,7 +656,9 @@ impl ConnectController {
     /// the credential. Ignored while busy.
     ///
     /// Callers own the no-verification confirmation — by the time this runs it
-    /// was either unnecessary or already given.
+    /// was either unnecessary or already given — and, for the same reason, the
+    /// free-tier verdict: `widgets::pro_gate` takes it through
+    /// [`Self::saved_row_blocked`] before the confirmation it sits ahead of.
     pub fn recover_and_connect(self: &Arc<Self>, server: SavedServer, nav: &Nav) {
         if self.busy_untracked() {
             return;
@@ -668,6 +760,27 @@ impl ConnectController {
         let controller = Arc::clone(self);
         spawn_local(async move {
             controller.forget_saved(server).await;
+        });
+    }
+
+    /// Forgets `rows` in turn, then runs `then` on the UI thread — the paywall's
+    /// forget-and-connect, whose retry must not start until the last row is
+    /// actually gone (the verdict it re-takes reads the same list). Each row
+    /// goes through [`Self::forget_saved`], so the semantics are
+    /// [`Self::forget_saved_server`]'s exactly, failures included: a row whose
+    /// secret refuses to delete toasts and keeps its row, and the retry still
+    /// runs — where the gate simply refuses again.
+    pub fn forget_saved_servers_then(
+        self: &Arc<Self>,
+        rows: Vec<SavedServer>,
+        then: Box<dyn FnOnce()>,
+    ) {
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            for server in rows {
+                controller.forget_saved(server).await;
+            }
+            then();
         });
     }
 
@@ -803,6 +916,12 @@ impl LoginUpsert {
         }
         ConnectController::reload_into(&self.repository, self.saved);
     }
+}
+
+/// The `host:port` a target dials — the same key a saved row is written under
+/// ([`SavedServer::endpoint`]) and the free-tier rule is judged in.
+fn target_endpoint(target: &ConnectTarget) -> String {
+    format!("{}:{}", target.host, target.port)
 }
 
 /// `muxr-mobile-<label>-<base36 timestamp>` — the stamp keeps names unique
