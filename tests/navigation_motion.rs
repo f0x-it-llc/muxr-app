@@ -1287,6 +1287,17 @@ fn rect_sized(rects: &[(Point, Size)], size: Size) -> Option<(Point, Size)> {
     })
 }
 
+/// The biggest rounded rect in `page` whose size nothing in `other` shares —
+/// chrome that names this page alone once both are on screen at once.
+fn distinctive_chrome(page: &[(Point, Size)], other: &[(Point, Size)]) -> Option<(Point, Size)> {
+    let alone: Vec<(Point, Size)> = page
+        .iter()
+        .copied()
+        .filter(|(_, size)| rect_sized(other, *size).is_none())
+        .collect();
+    largest(&alone)
+}
+
 /// Push `/settings` off `/`; report the settled leaving-page frame plus
 /// frames at [`PRE_SPLIT_MS`]/[`POST_SPLIT_MS`] — either side of the split.
 fn probe_push_transition(reduce_motion: bool) -> (RecScene, RecScene, RecScene) {
@@ -1310,17 +1321,23 @@ fn a_route_push_slides_the_leaving_page_then_reveals_the_entering_one() {
     let _ambient = setup();
 
     let (settled, pre_split, post_split) = probe_push_transition(false);
-    let (settled_pos, settled_size) =
-        largest(&settled.rounded).expect("the settled leaving page painted chrome to track");
 
-    // Settings' resting chrome, to re-identify it by size once displaced —
-    // a fresh, un-transitioned push, not the transitioning harness above.
+    // Settings' resting chrome — a fresh, un-transitioned push, not the
+    // transitioning harness above.
     let mut rest = Harness::mount();
     expect_connection_controller().connect(mock_target());
     rest.push("/settings");
     let entering_rest = rest.frame();
+
+    // Each page is re-identified by size once displaced, so its fingerprint
+    // must be chrome the OTHER page never paints: both screens carry the same
+    // 38×22 toggle track (Connect's trust switch, Settings' bell row), and the
+    // biggest rect alone would match it on the wrong side of the split.
+    let (settled_pos, settled_size) = distinctive_chrome(&settled.rounded, &entering_rest.rounded)
+        .expect("the settled leaving page painted chrome Settings does not");
     let (entering_pos, entering_size) =
-        largest(&entering_rest.rounded).expect("the settled entering page painted chrome to track");
+        distinctive_chrome(&entering_rest.rounded, &settled.rounded)
+            .expect("the settled entering page painted chrome Connect does not");
 
     // Pre-split: Connect still paints, displaced by `-p * 16dp`; Settings'
     // alpha is exactly `0` there, so it paints nothing yet.
