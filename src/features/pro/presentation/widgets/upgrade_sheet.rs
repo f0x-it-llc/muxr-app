@@ -27,9 +27,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::authoring::Color;
 use frust::authoring::text::TextStyle;
-use frust::icons::{LINK, NOTIFICATIONS};
+use frust::icons::LINK;
 use frust::{
     AnyView, Axis, ButtonStyle, CrossAxisAlignment, FlexChild, FlexView, Get, GetUntracked,
     IconSource, NavigatorController, SizedBox, any, button, icon, inflexible, spawn_local, text,
@@ -65,9 +64,6 @@ pub const NOTHING_TO_RESTORE_TOAST: &str = "No Muxr Pro purchase found for this 
 const SUBTITLE_COPY: &str = "One-time purchase. Yours on this account for good.";
 /// The gated feature, named as the free tier's own rule names it.
 const MULTIPLE_SERVERS_COPY: &str = "Multiple servers";
-/// Named, but not yet sold: rendered dimmed so it never reads as a promise
-/// this build already keeps.
-const NOTIFICATIONS_COPY: &str = "Notifications — coming soon";
 /// The whole body an entitled install gets in place of the offer.
 const ALREADY_PRO_COPY: &str = "You're on Muxr Pro.";
 
@@ -75,7 +71,7 @@ const ALREADY_PRO_COPY: &str = "You're on Muxr Pro.";
 const TITLE_GAP: f64 = spacing::XS;
 /// The gap between the sheet's three bands (copy, benefits, actions).
 const SECTION_GAP: f64 = spacing::XXL;
-/// Between the two benefit rows, and between stacked action buttons.
+/// Between stacked action buttons.
 const ROW_GAP: f64 = spacing::SM;
 /// A benefit row's mark, and the gap between it and the row's text.
 const BENEFIT_MARK: f64 = spacing::XL;
@@ -162,16 +158,7 @@ fn upgrade_sheet_body(
             MULTIPLE_SERVERS_COPY,
             LINK,
             &theme.type_scale.body_medium,
-            colors.fg,
-            colors.amber,
-        ),
-        gap(ROW_GAP),
-        benefit_row(
-            NOTIFICATIONS_COPY,
-            NOTIFICATIONS,
-            &theme.type_scale.body_medium,
-            colors.fg_dim,
-            colors.fg_dim,
+            &colors,
         ),
         gap(SECTION_GAP),
     ];
@@ -329,21 +316,19 @@ fn not_now_action(sheet: &SheetHandle) -> AnyView<AppState> {
     .style(ButtonStyle::Ghost))
 }
 
-/// One benefit line: a `frust::icons` vector mark and its text, both toned by
-/// the caller so the unshipped row can read dimmer than the live one.
+/// One benefit line: a `frust::icons` vector mark and its text.
 fn benefit_row(
     label: &str,
     mark: IconSource,
     style: &TextStyle,
-    tone: Color,
-    mark_tone: Color,
+    colors: &Palette,
 ) -> AnyView<AppState> {
     any(FlexView::new(
         Axis::Horizontal,
         vec![
-            inflexible(icon(mark).size(BENEFIT_MARK).color(mark_tone)),
+            inflexible(icon(mark).size(BENEFIT_MARK).color(colors.amber)),
             inflexible(SizedBox::<AppState>(Some(BENEFIT_MARK_GAP), None)),
-            inflexible(text(label.to_string()).style(inked(style, tone))),
+            inflexible(text(label.to_string()).style(inked(style, colors.fg))),
         ],
     )
     .cross_axis(CrossAxisAlignment::Center))
