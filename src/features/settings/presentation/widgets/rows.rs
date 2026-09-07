@@ -300,12 +300,16 @@ pub(in super::super) enum RowAction {
     Static,
     /// A chevron row that opens a picker sheet.
     Picker(PickerKind),
+    /// A chevron row raising `features::pro`'s paywall — the `plan` row,
+    /// short of Pro.
+    UpgradeSheet,
 }
 
 /// One `.set-row`: the mark tile, the label over its value, and a trailing
-/// chevron for anything that leads somewhere. For [`RowAction::Picker`] the
-/// **whole row** is the tap target — the mock draws no separate hit area, and
-/// a 28px chevron alone would be unreachable on a phone.
+/// chevron for anything that leads somewhere. For [`RowAction::Picker`] and
+/// [`RowAction::UpgradeSheet`] the **whole row** is the tap target — the mock
+/// draws no separate hit area, and a 28px chevron alone would be unreachable
+/// on a phone.
 pub(super) fn settings_row(
     mark: RowMark,
     label: &'static str,
@@ -349,7 +353,7 @@ pub(super) fn settings_row(
 
     match action {
         RowAction::Static => any(box_),
-        RowAction::Picker(_) => any(GestureDetector(box_)
+        RowAction::Picker(_) | RowAction::UpgradeSheet => any(GestureDetector(box_)
             .on_tap(move |state: &mut SettingsState| pages::row_tapped(state, action))),
     }
 }
@@ -376,7 +380,7 @@ pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> AnyView<SettingsStat
 fn trailing_slot(action: RowAction, colors: &Palette) -> Option<AnyView<SettingsState>> {
     match action {
         RowAction::Static => None,
-        RowAction::Picker(_) => Some(any(icon(CHEVRON_RIGHT)
+        RowAction::Picker(_) | RowAction::UpgradeSheet => Some(any(icon(CHEVRON_RIGHT)
             .size(CHEVRON)
             .color(colors.fg_faintest))),
     }

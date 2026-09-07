@@ -41,10 +41,8 @@ use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
 use crate::features::pro::di::expect_pro_controller;
-use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
-use crate::features::pro::presentation::{
-    NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY, UpgradeContext, show_upgrade_sheet,
-};
+use crate::features::pro::presentation::controller::ProController;
+use crate::features::pro::presentation::{UpgradeContext, show_upgrade_sheet};
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
@@ -703,7 +701,7 @@ impl Actions {
     }
 
     /// Open the same paywall `connect`'s server-limit gate raises, from the
-    /// `muxr pro` group's Upgrade action. Nothing to unlock and no forget-and-
+    /// `muxr pro` group's plan row tap. Nothing to unlock and no forget-and-
     /// connect retry — Settings has neither a follow-on nor a blocked dial to
     /// resume, unlike the gate. `on_unlocked` is a state-free `Rc<dyn Fn()>`
     /// because the sheet's follow-on runs after the staged close with no
@@ -717,24 +715,6 @@ impl Actions {
                 server_limit: None,
             },
         );
-    }
-
-    /// Run the restore flow directly, without the paywall sheet: the `muxr
-    /// pro` group's Restore action. Silent on a landed restore — the row's
-    /// own value flips to "Pro" the moment `entitlement` republishes — and
-    /// toasted only for what the store actually said: nothing to restore, a
-    /// purchase still pending, or no store to ask. Never when the store
-    /// failed to answer or refused an overlapping call.
-    pub fn restore_purchases(&self) {
-        let pro = Arc::clone(&self.pro);
-        spawn_local(async move {
-            match pro.restore().await {
-                RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
-                RestoreOutcome::Pending => app_toasts().show(PENDING_TOAST),
-                RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
-                RestoreOutcome::Restored | RestoreOutcome::Failed(_) | RestoreOutcome::Busy => {}
-            }
-        });
     }
 }
 
@@ -773,6 +753,7 @@ pub(super) fn row_tapped(state: &mut SettingsState, action: RowAction) {
         // silently doing nothing.
         RowAction::Static => {}
         RowAction::Picker(kind) => state.actions.open_picker(kind),
+        RowAction::UpgradeSheet => state.actions.open_upgrade_sheet(),
     }
 }
 
@@ -799,14 +780,4 @@ pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &st
 /// The `Disconnect` button.
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
-}
-
-/// The `muxr pro` group's `Upgrade to Pro` action.
-pub(super) fn open_upgrade_sheet(state: &mut SettingsState) {
-    state.actions.open_upgrade_sheet();
-}
-
-/// The `muxr pro` group's `Restore purchases` action.
-pub(super) fn restore_purchases(state: &mut SettingsState) {
-    state.actions.restore_purchases();
 }

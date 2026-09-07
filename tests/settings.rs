@@ -25,7 +25,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clean_signals::Failure;
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context, spawn_local,
@@ -42,9 +41,7 @@ use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
-use muxr::features::pro::presentation::{
-    NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY,
-};
+use muxr::features::pro::presentation::{NOT_NOW_LABEL, RESTORE_LABEL};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
@@ -54,9 +51,7 @@ use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
 };
-use muxr::features::settings::presentation::widgets::{
-    PLAN_LABEL, PRO_GROUP_LABEL, RESTORE_LABEL, UPGRADE_LABEL,
-};
+use muxr::features::settings::presentation::widgets::{PLAN_LABEL, PRO_GROUP_LABEL};
 use muxr::fonts::catalog::{CatalogStatus, FontState};
 use muxr::fonts::source::FontSource;
 use muxr::routes::{app_nav, install_app_router};
@@ -612,13 +607,10 @@ fn all_six_groups_and_the_disconnect_action_render() {
     // The dashed create row and the Disconnect button (a real `frust::button`,
     // so a label rather than a value).
     assert!(values.iter().any(|v| v == "create new token"), "{values:?}");
-    // The freshly-mocked install is Free, so the plan row prints it and both
-    // of the group's actions render.
+    // The freshly-mocked install is Free, so the plan row prints it.
     assert!(values.iter().any(|v| v == "Free"), "{values:?}");
     let labels = node_labels(&h.root);
     assert!(labels.iter().any(|l| l == "Disconnect"), "{labels:?}");
-    assert!(labels.iter().any(|l| l == UPGRADE_LABEL), "{labels:?}");
-    assert!(labels.iter().any(|l| l == RESTORE_LABEL), "{labels:?}");
 }
 
 #[test]
@@ -1588,55 +1580,31 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_pro_group_prints_free_and_offers_both_actions_when_unentitled() {
+fn the_pro_group_prints_free_and_its_plan_row_opens_the_paywall() {
     let _g = serial();
     let _ambient = setup();
-    let h = Harness::connected();
+    let mut h = Harness::connected();
 
     let values = node_values(&h.root);
     assert!(values.iter().any(|v| v == "Free"), "{values:?}");
     let labels = node_labels(&h.root);
-    assert!(labels.iter().any(|l| l == UPGRADE_LABEL), "{labels:?}");
-    assert!(labels.iter().any(|l| l == RESTORE_LABEL), "{labels:?}");
-}
-
-#[test]
-fn a_pro_entitlement_prints_pro_and_hides_the_upgrade_action() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::connected();
-    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
-    mock.set_entitlement(Entitlement::Pro);
-
-    let controller = expect_pro_controller();
-    spawn_local(async move { controller.refresh().await });
-    h.pump_until_values("the plan row to flip to Pro", |values| {
-        values.iter().any(|v| v == "Pro")
-    });
-
-    let values = node_values(&h.root);
-    assert!(values.iter().any(|v| v == "Pro"), "{values:?}");
-    let labels = node_labels(&h.root);
     assert!(
-        !labels.iter().any(|l| l == UPGRADE_LABEL),
-        "an entitled install offers nothing to buy: {labels:?}"
+        !labels.iter().any(|l| l == "Upgrade to Pro"),
+        "the actions line is gone: {labels:?}"
     );
     assert!(
-        !labels.iter().any(|l| l == RESTORE_LABEL),
-        "…nor anything to restore: {labels:?}"
+        !labels.iter().any(|l| l == "Restore purchases"),
+        "…both of them: {labels:?}"
     );
-}
 
-#[test]
-fn tapping_upgrade_pushes_the_paywall_and_not_now_dismisses_it() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::connected();
-
-    h.tap_label(UPGRADE_LABEL);
+    h.tap_value(PLAN_LABEL);
     h.settle();
 
-    assert_eq!(h.depth(), 2, "the paywall is pushed as its own page");
+    assert_eq!(
+        h.depth(),
+        2,
+        "the plan row opens the paywall as its own page"
+    );
     assert!(
         node_center_by_label(&h.root, NOT_NOW_LABEL).is_some(),
         "the sheet's own dismissal action is reachable: {:?}",
@@ -1650,104 +1618,59 @@ fn tapping_upgrade_pushes_the_paywall_and_not_now_dismisses_it() {
 }
 
 #[test]
-fn tapping_restore_flips_the_plan_row_when_the_account_owns_pro() {
+fn a_pro_entitlement_prints_pro_and_the_plan_row_leads_nowhere() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
     mock.set_entitlement(Entitlement::Pro);
 
-    h.tap_label(RESTORE_LABEL);
+    let controller = expect_pro_controller();
+    spawn_local(async move { controller.refresh().await });
     h.pump_until_values("the plan row to flip to Pro", |values| {
         values.iter().any(|v| v == "Pro")
     });
 
-    assert_eq!(mock.restore_calls(), 1);
+    h.tap_value(PLAN_LABEL);
+    h.settle();
+
+    assert_eq!(h.depth(), 1, "an entitled plan row opens nothing");
     let labels = node_labels(&h.root);
-    assert!(!labels.iter().any(|l| l == UPGRADE_LABEL), "{labels:?}");
-}
-
-#[test]
-fn tapping_restore_toasts_when_the_account_owns_nothing_to_restore() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::connected();
-    app_toasts().clear();
-
-    h.tap_label(RESTORE_LABEL);
-    pump_until(&mut h, "the nothing-to-restore toast", || {
-        !app_toasts().pending().is_empty()
-    });
-
-    let toasts = app_toasts().pending();
     assert!(
-        toasts.iter().any(|t| t == NOTHING_TO_RESTORE_TOAST),
-        "{toasts:?}"
+        !labels.iter().any(|l| l == "Upgrade to Pro"),
+        "an entitled install offers nothing to buy: {labels:?}"
     );
-}
-
-#[test]
-fn tapping_restore_toasts_the_stores_failure_and_never_the_empty_account_copy() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::connected();
-    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
-    app_toasts().clear();
-    let failure = AppFailure::Network("store unreachable".to_string());
-    mock.fail_next_restore(failure.clone());
-
-    h.tap_label(RESTORE_LABEL);
-    pump_until(&mut h, "the store failure's own toast", || {
-        !app_toasts().pending_untracked().is_empty()
-    });
-
-    assert_eq!(
-        app_toasts().pending(),
-        vec![failure.user_message()],
-        "the app's failure bridge announced it, and nothing else did"
-    );
-}
-
-#[test]
-fn tapping_restore_toasts_pending_when_the_purchase_is_taken_but_unsettled() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::connected();
-    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
-    mock.set_entitlement(Entitlement::Pending);
-    app_toasts().clear();
-
-    h.tap_label(RESTORE_LABEL);
-    pump_until(&mut h, "the pending toast", || {
-        !app_toasts().pending_untracked().is_empty()
-    });
-
-    let toasts = app_toasts().pending();
-    assert!(toasts.iter().any(|t| t == PENDING_TOAST), "{toasts:?}");
     assert!(
-        !toasts.iter().any(|t| t == NOTHING_TO_RESTORE_TOAST),
-        "a pending purchase is not an empty account: {toasts:?}"
+        !labels.iter().any(|l| l == "Restore purchases"),
+        "…nor anything to restore: {labels:?}"
     );
 }
 
 #[test]
-fn tapping_restore_toasts_unavailable_when_no_store_can_be_asked() {
+fn restoring_from_the_paywall_flips_the_plan_row_and_closes_the_sheet() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
-    mock.script_restore_unavailable();
-    app_toasts().clear();
+    mock.set_entitlement(Entitlement::Pro);
+
+    h.tap_value(PLAN_LABEL);
+    h.settle();
 
     h.tap_label(RESTORE_LABEL);
-    pump_until(&mut h, "the unavailable toast", || {
-        !app_toasts().pending_untracked().is_empty()
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
     });
+    // The value flip lands on the restore's own reactive write; the sheet's
+    // `close_then` still has to play out its staged close before the pop
+    // actually lands — the same clock-driven finish `flush` gives Not now.
+    h.flush();
 
+    assert_eq!(mock.restore_calls(), 1);
     assert_eq!(
-        app_toasts().pending(),
-        vec![UNAVAILABLE_COPY.to_string()],
-        "no store was asked, so nothing is said about the account"
+        h.depth(),
+        1,
+        "the sheet's own close_then lands behind the restore"
     );
 }
 
