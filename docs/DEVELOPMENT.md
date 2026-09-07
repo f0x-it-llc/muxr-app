@@ -2,15 +2,15 @@
 
 ## Prerequisites
 
-- A [Frust](https://github.com/f0x-it-llc/frust) checkout, with this repo as its `apps/muxr-app`:
-  `Cargo.toml`'s `frust` (`../../crates/frust`) and `clean-signals-frust`
-  (`../../plugins/clean-signals-frust`) are **path** dependencies into it, as are six plugin crates
-  under `../../plugins/<dir>`, each directory dropping the crate's `frust-` prefix:
-  `frust-clipboard`, `frust-haptics` (needs Android's `android.permission.VIBRATE`, already checked
-  into `AndroidManifest.xml`), `frust-shared-preferences`, `frust-secure-storage`, `frust-camera`
-  and `frust-iap` (also included as the Gradle module `:frust-iap` by `android/settings.gradle.kts`)
-  — plus `../../crates/frust-plugin` for the Android JNI accessor. A temporary pre-publication
-  arrangement, documented verbatim in `Cargo.toml`'s comments.
+- A [Frust](https://github.com/f0x-it-llc/frust) checkout, `../../frust` from the repo root (a
+  sibling, not nested inside it): `Cargo.toml`'s `frust` (`../../frust/crates/frust`),
+  `clean-signals-frust` (`../../frust/plugins/clean-signals-frust`), six plugin crates under
+  `../../frust/plugins/<dir>` (dropping `frust-`: `frust-clipboard`, `frust-haptics` — needs
+  `android.permission.VIBRATE`, already in `AndroidManifest.xml` — `frust-shared-preferences`,
+  `frust-secure-storage`, `frust-camera`, `frust-iap`), and `../../frust/crates/frust-plugin` (JNI
+  accessor) are **path** dependencies; `android/gradle.properties`'s `frust.embedding.dir`,
+  `android/settings.gradle.kts`'s three plugin modules, and `ios/Runner.xcodeproj`'s two local
+  packages derive it one level deeper — `../../../frust/…` from `android/`/`ios/` (four files in all).
 - No `clean-signals-rs` sibling checkout is required: `clean-signals` itself isn't published yet, so
   `Cargo.toml` git+rev-pins it (`rev = "910f626"` on `master`) with the identical spec
   `clean-signals-frust`'s own dependency uses, so Cargo unifies both into one crate identity (see
@@ -160,7 +160,7 @@ as a backstop). `prefix` is single-valued, so it wires up the `production` flavo
 
 ```bash
 frust build appbundle --release --flavor production \
-  --build-name <semver> --build-number <N>          # run from apps/muxr-app
+  --build-name <semver> --build-number <N>          # run from the repo root
 ```
 
 `--build-name` is the versionName (semver), `--build-number` the versionCode — monotonic per upload,
