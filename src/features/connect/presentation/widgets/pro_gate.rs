@@ -18,16 +18,22 @@
 //! the dialog is raised. The retry re-enters the same handler by *row* — a
 //! forget moves every later index — so the confirmation is still asked once,
 //! and only for a connect that will actually happen.
+//!
+//! [`scan_blocked`] is the fourth gated entry point, taken at the tap since
+//! the endpoint is unknown until the scan completes; it raises the same
+//! sheet with no forget-and-connect action, and leaves the pairing dial a
+//! scan ends in to take its own verdict, the way [`server_limit_prompt`] does.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::NavigatorController;
+use frust::{GetUntracked, NavigatorController};
 
 use super::super::controller::{ConnectController, ConnectRetry, GatePrompt, ServerLimitBlock};
 use super::credential_dialogs::{credential_offer_prompt, handle_saved_row_tap};
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
+use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::pro::presentation::{ServerLimitContext, UpgradeContext, show_upgrade_sheet};
 use crate::routes::Nav;
@@ -133,4 +139,30 @@ fn retry_connect(
             }
         }
     })
+}
+
+/// The QR affordance's own gate — see the [module docs](self). `Blocked`
+/// raises the paywall with no forget-and-connect action and returns `true`;
+/// `Allowed` returns `false` and the affordance proceeds to its permission gate.
+pub(crate) fn scan_blocked(
+    controller: &Arc<ConnectController>,
+    overlays: &NavigatorController<AppState>,
+    pro: &Arc<ProController>,
+    on_unlocked: Rc<dyn Fn()>,
+) -> bool {
+    let saved = controller.saved.get_untracked();
+    match pro.new_server_verdict(&saved) {
+        ServerLimitVerdict::Allowed => false,
+        ServerLimitVerdict::Blocked { .. } => {
+            show_upgrade_sheet(
+                overlays,
+                Arc::clone(pro),
+                UpgradeContext {
+                    on_unlocked,
+                    server_limit: None,
+                },
+            );
+            true
+        }
+    }
 }

@@ -63,6 +63,7 @@ use muxr::features::pro::di::{
     SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
 };
 use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::presentation::RESTORE_LABEL;
 use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::routes::{app_nav, install_app_router};
@@ -3841,6 +3842,108 @@ fn a_blocked_connect_leaves_nothing_in_flight_and_the_unlocked_retry_dials_once(
     );
     assert!(creds.connection.connected.get_untracked());
     assert_eq!(offered.borrow().len(), 1, "the retry dialed exactly once");
+}
+
+/// The QR affordance's own gate: a free install already remembering a server
+/// takes the free-tier verdict at the tap, before the scanner ever mounts.
+#[test]
+fn a_free_installs_qr_tap_raises_the_paywall_when_a_server_is_already_saved() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+    let before = harness.nav.depth();
+
+    harness.tap_node("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall is the whole answer: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the sheet is the only page pushed"
+    );
+    assert!(
+        !shows_text(&harness, NO_CAMERA),
+        "the scanner never mounted behind the paywall"
+    );
+    assert!(
+        !shows_text(&harness, FORGET_LIMIT_A),
+        "there is no dial to retry, so no forget-and-connect action is offered"
+    );
+
+    harness.tap_node("the paywall's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(PAYWALL_NOT_NOW)
+    });
+    harness.flush();
+
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…and it was the only page there was"
+    );
+}
+
+#[test]
+fn a_free_install_remembering_nothing_scans_straight_away() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Free, vec![]);
+
+    harness.tap_node("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "the sheet is pushed as its own page"
+    );
+    assert!(
+        shows_text(&harness, NO_CAMERA),
+        "nothing stood in the way, so the scanner mounted off-device: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(!shows_text(&harness, UPGRADE_TITLE));
+}
+
+#[test]
+fn unlocking_from_the_qr_paywall_lands_in_the_scanner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+
+    harness.tap_node("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+    harness.flush();
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall is up before the unlock: {:?}",
+        node_labels(&harness.root)
+    );
+
+    mock_entitlement()
+        .expect("tests/support opted this process into the scriptable store")
+        .set_entitlement(Entitlement::Pro);
+    harness.tap_node("the paywall's Restore action", |node| {
+        node.role() == Role::Button && node.label() == Some(RESTORE_LABEL)
+    });
+    harness.pump_until("the scanner to land after the unlock", |harness| {
+        shows_text(harness, NO_CAMERA)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "the unlock's own scan is the only push"
+    );
+    assert!(!shows_text(&harness, UPGRADE_TITLE), "the paywall is gone");
 }
 
 // ---------------------------------------------------------------------------
