@@ -221,6 +221,7 @@ impl Component for ConnectScreen {
                 &state.overlays,
                 &state.controller,
                 &state.qr_permission_pending,
+                &state.pro,
             ),
         ]))
     }

@@ -37,6 +37,7 @@ use muxr::features::pro::di::{
 };
 use muxr::features::pro::domain::entities::{Entitlement, PurchaseOutcome, ServerLimitVerdict};
 use muxr::features::pro::domain::use_cases::check_server_limit;
+use muxr::features::pro::domain::use_cases::check_server_limit::check_new_server_limit;
 use muxr::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use muxr::features::pro::presentation::widgets::{
     NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, RESTORE_LABEL, UNAVAILABLE_COPY,
@@ -177,6 +178,23 @@ fn an_unsettled_purchase_is_judged_exactly_as_free() {
         check_server_limit(Entitlement::Pending, &[row(A)], A),
         ServerLimitVerdict::Allowed
     );
+}
+
+/// [`check_new_server_limit`]'s own three answers — asked with no target
+/// endpoint at all, unlike [`check_server_limit`], since the QR affordance
+/// that calls it has not scanned one yet.
+#[test]
+fn adding_an_unnamed_server_is_judged_by_whether_anything_is_saved_yet() {
+    assert_eq!(
+        check_new_server_limit(Entitlement::Pro, &[row(A)]),
+        ServerLimitVerdict::Allowed
+    );
+    assert_eq!(
+        check_new_server_limit(Entitlement::Free, &[]),
+        ServerLimitVerdict::Allowed
+    );
+    let verdict = check_new_server_limit(Entitlement::Free, &[row(A)]);
+    assert_eq!(forgets(&verdict), vec![A.to_string()]);
 }
 
 // ---------------------------------------------------------------------------

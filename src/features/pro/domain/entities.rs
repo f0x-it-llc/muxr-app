@@ -138,6 +138,24 @@ pub fn server_limit_verdict(
     }
 }
 
+/// Whether a free install may add a server it has not named yet — the QR
+/// affordance's own gate, taken before any endpoint is known, so there is
+/// nothing yet to compare a saved row against (unlike
+/// [`server_limit_verdict`]). Pro is unlimited; an install remembering
+/// nothing yet may add its first row; anything already remembered stands in
+/// the way of a server it cannot yet name, so every row is
+/// [`ServerLimitVerdict::Blocked`]'s `to_forget`.
+///
+/// [`Entitlement::Pending`] counts as free, as in [`server_limit_verdict`].
+pub fn new_server_verdict(entitlement: Entitlement, saved: &[SavedServer]) -> ServerLimitVerdict {
+    if entitlement.is_pro() || saved.is_empty() {
+        return ServerLimitVerdict::Allowed;
+    }
+    ServerLimitVerdict::Blocked {
+        to_forget: saved.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +249,36 @@ mod tests {
         assert_eq!(
             server_limit_verdict(Entitlement::Pending, &[row(A)], B),
             server_limit_verdict(Entitlement::Free, &[row(A)], B)
+        );
+    }
+
+    #[test]
+    fn pro_may_add_a_server_whatever_it_has_remembered() {
+        assert_eq!(
+            new_server_verdict(Entitlement::Pro, &[row(A), row(B)]),
+            ServerLimitVerdict::Allowed
+        );
+    }
+
+    #[test]
+    fn a_free_install_with_nothing_saved_may_add_its_first_server() {
+        assert_eq!(
+            new_server_verdict(Entitlement::Free, &[]),
+            ServerLimitVerdict::Allowed
+        );
+    }
+
+    #[test]
+    fn a_free_install_with_one_saved_server_is_blocked_and_told_which_to_forget() {
+        let verdict = new_server_verdict(Entitlement::Free, &[row(A)]);
+        assert_eq!(forgets(&verdict), vec![A.to_string()]);
+    }
+
+    #[test]
+    fn a_pending_purchase_is_judged_exactly_as_free_for_a_new_server_too() {
+        assert_eq!(
+            new_server_verdict(Entitlement::Pending, &[row(A)]),
+            new_server_verdict(Entitlement::Free, &[row(A)])
         );
     }
 }

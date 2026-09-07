@@ -21,6 +21,7 @@ use crate::features::pro::di::SharedEntitlementRepository;
 use crate::features::pro::domain::entities::{
     Entitlement, ProOffer, PurchaseOutcome, RestoreResult, ServerLimitVerdict,
 };
+use crate::features::pro::domain::use_cases::check_server_limit::check_new_server_limit;
 use crate::features::pro::domain::use_cases::{
     FetchOffer, PurchasePro, RefreshEntitlement, RestorePurchases, check_server_limit,
 };
@@ -181,5 +182,12 @@ impl ProController {
     /// remembered. Untracked, like [`is_pro_untracked`](Self::is_pro_untracked).
     pub fn verdict_for(&self, saved: &[SavedServer], endpoint: &str) -> ServerLimitVerdict {
         check_server_limit(self.entitlement.get_untracked(), saved, endpoint)
+    }
+
+    /// Whether this install may add a server it has not named yet, while
+    /// `saved` is remembered. Untracked, like [`is_pro_untracked`](Self::is_pro_untracked).
+    pub fn new_server_verdict(&self, saved: &[SavedServer]) -> ServerLimitVerdict {
+        let entitlement = self.entitlement.get_untracked();
+        check_new_server_limit(entitlement, saved)
     }
 }

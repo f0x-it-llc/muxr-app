@@ -8,7 +8,7 @@
 
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::domain::entities::{
-    Entitlement, ServerLimitVerdict, server_limit_verdict,
+    Entitlement, ServerLimitVerdict, new_server_verdict, server_limit_verdict,
 };
 
 /// Whether `entitlement` may connect to `target_endpoint` while `saved` is
@@ -19,4 +19,13 @@ pub fn check_server_limit(
     target_endpoint: &str,
 ) -> ServerLimitVerdict {
     server_limit_verdict(entitlement, saved, target_endpoint)
+}
+
+/// Whether `entitlement` may add a server it has not named yet, while
+/// `saved` is remembered — see [`new_server_verdict`].
+pub fn check_new_server_limit(
+    entitlement: Entitlement,
+    saved: &[SavedServer],
+) -> ServerLimitVerdict {
+    new_server_verdict(entitlement, saved)
 }

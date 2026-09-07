@@ -1,4 +1,5 @@
-//! The `.fab` QR affordance and its camera-permission gate.
+//! The `.fab` QR affordance and its three press-order gates: busy, the
+//! free-tier verdict, then the camera permission.
 //!
 //! The permission prompt is gated on the tap, not the sheet's mount:
 //! [`request_camera_access`] runs the blocking permission call off the UI
@@ -16,6 +17,12 @@
 //! tap while [`ConnectController::busy_untracked`] holds — load-bearing: the
 //! offer dialog pops synchronously on accept, so for the rest of the held
 //! save this screen is uncovered and the affordance is reachable.
+//!
+//! Ahead of the permission gate sits [`pro_gate::scan_blocked`](super::pro_gate::scan_blocked):
+//! a free install that already remembers a server is turned back at the tap,
+//! before the camera is ever asked about, and its unlock re-enters
+//! [`start_scan`] — the same permission-then-sheet flow the ungated press
+//! takes.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -26,8 +33,10 @@ use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, any, icons, safe_are
 use frust_camera::{CameraError, PermissionStatus};
 
 use super::super::controller::ConnectController;
+use super::pro_gate::scan_blocked;
 use super::qr_sheet::{CAMERA_UNAVAILABLE, camera_backend_available, qr_sheet_body};
 use crate::AppState;
+use crate::features::pro::presentation::controller::ProController;
 use crate::ui::palette::active_theme;
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
@@ -67,10 +76,12 @@ pub(crate) fn qr_affordance<S: 'static>(
     overlays: &frust::NavigatorController<AppState>,
     controller: &Arc<ConnectController>,
     pending: &Rc<Cell<bool>>,
+    pro: &Arc<ProController>,
 ) -> AnyView<S> {
     let overlays = overlays.clone();
     let controller = Arc::clone(controller);
     let pending = Rc::clone(pending);
+    let pro = Arc::clone(pro);
     let theme = active_theme();
     let scheme = theme.scheme();
     any(safe_area(Align(
@@ -83,7 +94,17 @@ pub(crate) fn qr_affordance<S: 'static>(
                 }
                 let overlays = overlays.clone();
                 let controller = Arc::clone(&controller);
-                request_camera_access(&pending, move || open_qr_sheet(&overlays, controller));
+                let pending = Rc::clone(&pending);
+                let on_unlocked: Rc<dyn Fn()> = {
+                    let overlays = overlays.clone();
+                    let controller = Arc::clone(&controller);
+                    let pending = Rc::clone(&pending);
+                    Rc::new(move || start_scan(&overlays, &controller, &pending))
+                };
+                if scan_blocked(&controller, &overlays, &pro, on_unlocked) {
+                    return;
+                }
+                start_scan(&overlays, &controller, &pending);
             })
             .fill(scheme.primary_container)
             .ink(scheme.on_primary_container)
@@ -92,6 +113,20 @@ pub(crate) fn qr_affordance<S: 'static>(
             .radius(FAB_BOX / 2.0),
         ),
     )))
+}
+
+/// The scan flow proper — the camera-permission gate, then the sheet it
+/// opens on a grant — shared by the press and by [`scan_blocked`]'s unlock
+/// callback, so an unlock from the paywall lands the user in the scanner
+/// they asked for.
+fn start_scan(
+    overlays: &frust::NavigatorController<AppState>,
+    controller: &Arc<ConnectController>,
+    pending: &Rc<Cell<bool>>,
+) {
+    let overlays = overlays.clone();
+    let controller = Arc::clone(controller);
+    request_camera_access(pending, move || open_qr_sheet(&overlays, controller));
 }
 
 /// Pushes the QR sheet as a page of `overlays`, closing itself the moment a
