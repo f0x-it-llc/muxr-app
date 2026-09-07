@@ -70,18 +70,18 @@ its follow-on from Glyph's own `on_close`, where no `&mut AppState` exists.
   (camera scan → prefilled form → a pinned CTA; a scan never dials by itself). Credentials split into two
   stores sharing a `host:port` key: saved-server *metadata* (`shared-preferences`, `zelli_saved_servers`)
   and the auth token, behind the device's biometric gate (`secure-storage`, `zelli_cred_<host>_<port>`).
-  Five credential flows, each a controller method: manual save (mint + rotate, revoking the old token only
-  once the new one is stored), one-prompt QR save (the scanned token *is* the credential), gated login
-  with a saved credential (a row stored under `TrustMode::NoVerification` needs one more confirm gate
-  first; the manual form's "Trust anyway" radio stays ungated, picking it is consent), ungated delete
-  (owned by Settings), and an upsert on every successful login. **Every dial takes `pro`'s free-tier
-  verdict before it reaches the wire**, raising the paywall through a `GatePrompt` the screen lends per
-  press instead of dialing: `ConnectController::connect`/`connect_from_pairing` take it inside the entry
-  point (busy → target → verdict → dial), while the saved-row tap is gated one level up in
-  `widgets::pro_gate::gated_saved_row_tap`, so the paywall precedes that row's own no-verification confirm
-  and `recover_and_connect` stays gate-free by contract. The block carries a `ConnectRetry` naming the
-  entry point, so unlocking Pro — or `forget_saved_servers_then` dropping the rows the free tier can't
-  keep — re-enters the connect the user asked for.
+  Five credential flows, each a controller method: manual save (mint + rotate, the old token revoked once
+  the new one lands), one-prompt QR save (the scanned token *is* the credential), gated login with a saved
+  credential (a `TrustMode::NoVerification` row needs one more confirm; the manual form's "Trust anyway"
+  radio stays ungated as consent), ungated delete (owned by Settings), and an upsert per successful login.
+  **Every dial takes `pro`'s free-tier verdict before it reaches the wire**, raising the paywall via a
+  per-press `GatePrompt` instead of dialing: `ConnectController::connect`/`connect_from_pairing` take it
+  inside the entry point (busy → target → verdict → dial), while the saved-row tap is gated one level
+  up in `widgets::pro_gate::gated_saved_row_tap`, ahead of that row's no-verification confirm;
+  `recover_and_connect` stays gate-free. The QR affordance is gated at the tap on `new_server_verdict`
+  (`widgets::pro_gate::scan_blocked`), since the endpoint's unknown pre-scan, raising the paywall with no
+  retry or forget action — a post-scan pairing dial still takes its own verdict. The block carries a
+  `ConnectRetry` naming the entry point, so unlocking Pro or forgetting excess rows re-enters that connect.
 - **`sessions`** — the session list: `GrpcSessionsRepository` beside the mock, addressing mutations by
   `Session::id` (the backend-qualified routing key), not display name. A read-only credential
   (`ConnectionController::is_read_only`) disables Rename/Kill and creation, never Attach. The first load
@@ -123,33 +123,33 @@ its follow-on from Glyph's own `on_close`, where no `&mut AppState` exists.
   support create (with a read-only toggle, gated behind `is_read_only`) and revoke, and a freshly
   minted secret shows once, in a reveal sheet, then is gone. The connection group's version row(s) are
   one per `ServerInfo::backend_versions` entry; the saved servers group renders `connect`'s own list
-  (`saved_server_item`, with its two delete actions); the `muxr pro` group is a plan row naming this
-  install's entitlement plus, short of Pro, the Upgrade/Restore actions — over a `ProController`
-  resolved once in `Component::init` and refreshed on every mount. Settings owns the Disconnect flow,
-  the production caller of `ConnectionController::disconnect`.
+  (`saved_server_item`, with its two delete actions); the `muxr pro` group is a plan row alone — short
+  of Pro a whole-row tap (`RowAction::UpgradeSheet`) opens the paywall sheet, home to Upgrade/Restore,
+  static once Pro — over a `ProController` resolved once in `Component::init` and refreshed on every
+  mount. Settings owns the Disconnect flow, the production caller of `ConnectionController::disconnect`.
 - **`pro`** — muxr's one in-app purchase and the free-tier rule it lifts; the only routeless slice.
   `Entitlement` (`Free`/`Pro`/`Pending` — unsettled, unlocking nothing), `ProFeature`, and
-  `server_limit_verdict` — a free install keeps only the server it's connecting to; blocked, it names the
-  rest to forget. `EntitlementRepository` has three implementations: `IapEntitlementRepository`
-  (`frust-iap` over an `EntitlementCache` of two `frust-shared-preferences` keys, Free when absent, so a
-  cold or offline start gates on it), `MockEntitlementRepository`, and the degraded-launch
-  `UnavailableEntitlementRepository` (sells nothing, grants nothing). `di::provide()` publishes one (the
-  mock under the test seam or a `mock-iap` build, the degraded store when the real one's prefs cache
-  won't open, else the real store) plus the app-scoped `ProController` over it — entitlement seeded from
-  the cache, `busy` a single-flight guard both paywalls share; only the test seam also publishes the mock
-  handle. A restore answers a `RestoreResult` (`Found(entitlement)` or `Unavailable`, a store never
-  asked), read back as a `RestoreOutcome`
-  (`Restored`/`Pending`/`NothingToRestore`/`Unavailable`/`Failed`/`Busy`); callers toast only the store's
-  own answers; a `Failed` reaches toasts via the controller's failure sink, a purchase's failure is the
-  sheet's alone (its run stays off the sink), background refreshes and the offer lookup fail quietly —
-  nothing is announced twice. **The purchase contract is `frust-iap`'s**: Pro is granted only off a
-  store-reported `Purchased` row, never `request_purchase`'s return — an error proving the flow never
+  `server_limit_verdict`/`new_server_verdict` — a free install keeps only the server it's connecting to,
+  and may add an unnamed one only while it remembers nothing; blocked, it names the rest to forget.
+  `EntitlementRepository` has three implementations: `IapEntitlementRepository` (`frust-iap` over an
+  `EntitlementCache` of two `frust-shared-preferences` keys, Free when absent, so a cold or offline start
+  gates on it), `MockEntitlementRepository`, and the degraded-launch `UnavailableEntitlementRepository`
+  (sells nothing, grants nothing). `di::provide()` publishes one (the mock under the test seam or a
+  `mock-iap` build, the degraded store when the real one's prefs cache won't open, else the real store)
+  plus the app-scoped `ProController` over it — entitlement seeded from the cache, `busy` a single-flight
+  guard both paywalls share; only the test seam also publishes the mock handle. A restore answers a
+  `RestoreResult` (`Found(entitlement)` or `Unavailable`, a store never asked), read back as a
+  `RestoreOutcome` (`Restored`/`Pending`/`NothingToRestore`/`Unavailable`/`Failed`/`Busy`); callers toast
+  only the store's own answers; a `Failed` reaches toasts via the controller's failure sink, a purchase's
+  failure is the sheet's alone (its run stays off the sink), background refreshes and the offer lookup fail
+  quietly — nothing is announced twice. **The purchase contract is `frust-iap`'s**: Pro is granted only off
+  a store-reported `Purchased` row, never `request_purchase`'s return — an error proving the flow never
   started (a dropped connection is reopened and retried once; a host refusal answers from its code) fails
   fast, and only the documented ack-timeout still waits on the listener — acknowledged once the grant is
   durable (Play refunds unacknowledged ones); re-queried at launch, each Settings mount and after
   purchase/restore, *overwriting* the cache so a refund reaches Free; failures log a store code, never a
-  token. Accepted limits: a client-side grant, **no server-side receipt verification** (no backend
-  exists); a failed offer lookup reads "unavailable" like an unsellable store, no retry affordance.
+  token. Accepted limits: a client-side grant, **no server-side receipt verification** (no backend exists);
+  a failed offer lookup reads "unavailable" like an unsellable store, no retry affordance.
 
 ## Building a Screen (canonical pattern)
 
