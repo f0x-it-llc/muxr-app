@@ -1,6 +1,6 @@
 //! The one Muxr Pro paywall: a bottom sheet over
 //! [`crate::ui::sheet::show_sheet`], raised both by the Connect screen's
-//! server-limit gate and by the Settings Upgrade row.
+//! server-limit gate and by the Settings plan row.
 //!
 //! Page-agnostic, the `connect` widgets shape: it takes an
 //! [`Arc<ProController>`] to read and act through, plus [`UpgradeContext`]'s
