@@ -760,11 +760,11 @@
 /* Begin XCLocalSwiftPackageReference section */
 		ABCDABCDABCDABCDABCD0031 /* XCLocalSwiftPackageReference "FrustEmbedding" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../platform/ios/FrustEmbedding";
+			relativePath = "../../../frust/platform/ios/FrustEmbedding";
 		};
 		ABCDABCDABCDABCDABCD0036 /* XCLocalSwiftPackageReference "FrustCamera" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../crates/frust/../../plugins/camera/platform/ios";
+			relativePath = "../../../frust/crates/frust/../../plugins/camera/platform/ios";
 		};
 /* End XCLocalSwiftPackageReference section */
 
