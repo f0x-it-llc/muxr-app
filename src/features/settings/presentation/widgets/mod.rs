@@ -17,7 +17,7 @@
 //! | [`pickers`] | screen 6's picker sheet (`layout refresh`/`font size`/`cursor style`) |
 //! | [`font_picker`] | the two-section font-family sheet, reusing `pickers`' row idiom |
 //! | [`saved_servers`] | the `saved servers` group, over `connect`'s own list |
-//! | [`pro`] | the `muxr pro` group: the plan row and the Upgrade/Restore actions |
+//! | [`pro`] | the `muxr pro` group: the plan row, which opens the paywall short of Pro |
 //! | [`groups`] | the four groups' row lists, pure arrangement over the above |
 //! | [`misc`] | the bell row and Disconnect — the two rows outside every other cluster |
 //!
@@ -51,7 +51,7 @@ pub(super) use pro::pro_rows;
 // hard-coding the row's own literals (the same `pub` re-export shape
 // `features::pro::presentation::widgets` already uses for its own
 // test-facing constants).
-pub use pro::{PLAN_LABEL, PRO_GROUP_LABEL, RESTORE_LABEL, UPGRADE_LABEL};
+pub use pro::{PLAN_LABEL, PRO_GROUP_LABEL};
 pub(super) use rows::{RowAction, SCROLL_PAD_BOTTOM, SCROLL_PAD_TOP, group_label, page_tone};
 pub(super) use saved_servers::{no_saved_servers_row, saved_server_item};
 pub(super) use tokens::{create_token_row, open_create_token_dialog, secret_reveal_sheet};
