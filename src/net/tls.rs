@@ -94,7 +94,7 @@ impl TrustConfig {
         }
 
         let mut digest = [0u8; PIN_LEN];
-        for (slot, pair) in digest.iter_mut().zip(bytes.chunks_exact(2)) {
+        for (slot, pair) in digest.iter_mut().zip(bytes.as_chunks::<2>().0) {
             let high = hex_nibble(pair[0]).ok_or(PinError::NotHex)?;
             let low = hex_nibble(pair[1]).ok_or(PinError::NotHex)?;
             *slot = (high << 4) | low;
