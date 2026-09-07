@@ -39,7 +39,7 @@ gradle.lifecycle.beforeProject {
 // included by path out of the frust checkout (the same derivation
 // `frust.embedding.dir` and the plugin's Cargo path dep use).
 include(":frust-camera")
-project(":frust-camera").projectDir = file("../../../plugins/camera/platform/android")
+project(":frust-camera").projectDir = file("../../../frust/plugins/camera/platform/android")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-camera") {
@@ -51,7 +51,7 @@ gradle.lifecycle.beforeProject {
 // included by path out of the frust checkout (the same derivation
 // `frust.embedding.dir` and the plugin's Cargo path dep use).
 include(":frust-secure-storage")
-project(":frust-secure-storage").projectDir = file("../../../plugins/secure-storage/platform/android")
+project(":frust-secure-storage").projectDir = file("../../../frust/plugins/secure-storage/platform/android")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-secure-storage") {
@@ -63,7 +63,7 @@ gradle.lifecycle.beforeProject {
 // included by path out of the frust checkout (the same derivation
 // `frust.embedding.dir` and the plugin's Cargo path dep use).
 include(":frust-iap")
-project(":frust-iap").projectDir = file("../../../plugins/iap/platform/android")
+project(":frust-iap").projectDir = file("../../../frust/plugins/iap/platform/android")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-iap") {
