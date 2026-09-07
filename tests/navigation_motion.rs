@@ -71,7 +71,7 @@ const BANNED_GLYPHS: [&str; 2] = ["\u{2039}", "\u{2699}"];
 
 /// Where the pre-split probe samples the Glyph push, inside the leaving
 /// page's fade-out (`resolve_layers`'s `Glyph` arm,
-/// `../../crates/frust-widgets/src/nav/transition.rs`). Progress is eased —
+/// `../../frust/crates/frust-widgets/src/nav/transition.rs`). Progress is eased —
 /// `p = curve.transform(t / 340)` on `Cubic(0.34, 1.35, 0.64, 1.0)`
 /// (`GLYPH_ENTER`/`GLYPH_SPATIAL_CURVE`, matching
 /// `frust_glyph::baseline()`'s `MotionScheme`) — and `GLYPH_FADE_SPLIT`
