@@ -820,10 +820,12 @@ impl Actions {
     /// is already on takes [`commit_pane`](Self::commit_pane) unchanged
     /// (`path.space_id` is `None` on zellij, which has no spaces at all); a
     /// row under any **other** space takes
-    /// [`TerminalController::commit_pane_in_space`] instead, which is
-    /// **always** herdr and so always mutating — refused up front for a
-    /// read-only credential, the same posture [`commit_pane`](Self::commit_pane)
-    /// takes for every herdr commit regardless of which tab it targets.
+    /// [`TerminalController::commit_pane_in_space`] instead, which is always
+    /// herdr. `SwitchSpace` carries no read-only gate on the wire
+    /// (`muxrd/src/grpc/space_ops.rs`'s `switch_space_impl` has no
+    /// `reject_if_read_only`), so a read-only credential reaches this the
+    /// same as any other caller; a server-side refusal still surfaces as a
+    /// toast through [`ack_result`](crate::net::error::ack_result).
     pub(crate) fn commit_tree_pane(
         &self,
         sheet: &SheetHandle,
@@ -835,10 +837,6 @@ impl Actions {
             self.commit_pane(sheet, &path.tab_key, pane_id, is_plugin);
             return;
         };
-        if self.connection.is_read_only.get_untracked() {
-            app_toasts().show(READ_ONLY_TOAST);
-            return;
-        }
         let controller = Arc::clone(&self.controller);
         let sheet = sheet.clone();
         let space_id = space_id.clone();
@@ -864,18 +862,13 @@ impl Actions {
     /// close beat: [`SheetHandle::close_after`] re-times the one pending
     /// close rather than stacking a second.
     ///
-    /// Refused client-side for a **read-only** credential when it needs a
-    /// tab move first (`GoToTab` is mutating) or targets **herdr** (whose
-    /// relay silently drops a read-only `FocusPane`); Zellij's same-tab
-    /// commit is a plain read, so it's exempt.
+    /// Reachable for a **read-only** credential regardless of tab or backend:
+    /// `GoToTab` carries no read-only gate on the wire
+    /// (`muxrd/src/grpc/tab_ops.rs`) and neither does `FocusPane`
+    /// (`muxrd/src/grpc/pane_ops.rs`), on zellij or herdr alike. A server-side
+    /// refusal still surfaces as a toast through
+    /// [`ack_result`](crate::net::error::ack_result).
     pub fn commit_pane(&self, sheet: &SheetHandle, tab_key: &str, pane_id: u32, is_plugin: bool) {
-        // Untracked: a press handler has no reactive owner on desktop.
-        let cross_tab = tab_key != self.controller.active_tab.get_untracked();
-        let herdr = self.controller.is_herdr_session();
-        if (cross_tab || herdr) && self.connection.is_read_only.get_untracked() {
-            app_toasts().show(READ_ONLY_TOAST);
-            return;
-        }
         let controller = Arc::clone(&self.controller);
         let sheet = sheet.clone();
         let tab_key = tab_key.to_string();
