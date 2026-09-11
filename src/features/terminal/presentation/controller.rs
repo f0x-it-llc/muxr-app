@@ -713,10 +713,11 @@ impl TerminalController {
     }
 
     /// Make the space `id` active and reload the tab world behind it — a
-    /// space *is* a different set of tabs. `SwitchSpace` is wire-MUTATING, so
-    /// a read-only credential is turned back before this is reached (the tree
-    /// withdraws every row that can call it), not here. Answers whether the
-    /// switch landed.
+    /// space *is* a different set of tabs. `SwitchSpace` carries no read-only
+    /// gate on the wire, so a read-only credential reaches this the same as
+    /// any other caller; the only refusal is a fail-closed `reattach
+    /// required`, already surfaced as `Err` here. Answers whether the switch
+    /// landed.
     ///
     /// A landed switch also becomes the resume hint's space rung — the one
     /// part of it a muxrd restart cannot stale — and moves
