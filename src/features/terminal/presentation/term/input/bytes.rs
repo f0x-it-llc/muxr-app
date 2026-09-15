@@ -39,6 +39,9 @@ pub const FORWARD_DELETE: &[u8] = b"\x1b[3~";
 pub const HOME: &[u8] = b"\x1b[H";
 /// End, same mode as [`HOME`].
 pub const END: &[u8] = b"\x1b[F";
+/// Insert (`CSI 2 ~`). Its clipboard siblings (`Copy`/`Cut`/`Paste`) send
+/// nothing — see [`named_key_bytes`].
+pub const INSERT: &[u8] = b"\x1b[2~";
 
 /// `CBT` — back-tab, what Shift+`Tab` sends (the bar's `Shift` armed over
 /// [`TAB`], and a desktop Shift+Tab).
@@ -239,6 +242,10 @@ impl BarKey {
 /// so a new [`NamedKey`] variant is a compile error, not a silently dropped
 /// key. Shares its sequences with [`BarKey`]: the bar's `↑` and a physical
 /// `↑` send the same three bytes, and the same six shifted ones.
+/// `Copy`/`Cut`/`Paste` deliberately send **nothing** — not a silent drop:
+/// the shell already decodes that hardware key onto `InputEvent::EditCommand`
+/// before a widget sees `InputEvent::Key`, so a byte here would double-handle
+/// the keypress (handled instead by `InputSeam::absorb`/`edit_command`).
 pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
     match key {
         NamedKey::Enter => &[ENTER_BYTE],
@@ -252,6 +259,8 @@ pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
         NamedKey::End => END,
         NamedKey::Escape => ESC,
         NamedKey::Tab => TAB,
+        NamedKey::Insert => INSERT,
+        NamedKey::Copy | NamedKey::Cut | NamedKey::Paste => &[],
     }
 }
 
@@ -361,5 +370,22 @@ mod tests {
             shifted_sequence(named_key_bytes(NamedKey::Enter)).is_none(),
             "Return has no shifted form here"
         );
+    }
+
+    #[test]
+    fn insert_sends_the_conventional_csi_sequence() {
+        assert_eq!(named_key_bytes(NamedKey::Insert), INSERT);
+        assert_eq!(hex(INSERT), "1b5b327e");
+    }
+
+    #[test]
+    fn the_clipboard_named_keys_send_nothing_here_deliberately() {
+        // Handled on the `EditCommand` path instead (see `named_key_bytes`).
+        for key in [NamedKey::Copy, NamedKey::Cut, NamedKey::Paste] {
+            assert!(
+                named_key_bytes(key).is_empty(),
+                "{key:?} is handled via EditCommand, not re-sent as bytes"
+            );
+        }
     }
 }

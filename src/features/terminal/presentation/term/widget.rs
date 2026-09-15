@@ -31,9 +31,9 @@ use std::time::Duration;
 
 use frust::authoring::text::{FontFamily, TextContext, TextLayout};
 use frust::authoring::{
-    Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, RoundedRect,
-    ScrollDelta, SemanticsCtx, Shape, Size, Vec2, View, Widget,
+    Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EditCommand, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerEvent, PointerPhase,
+    Rect, Role, RoundedRect, ScrollDelta, SemanticsCtx, Shape, Size, Vec2, View, Widget,
 };
 use frust::input::TOUCH_SLOP;
 use frust::{FrameTime, Theme};
@@ -601,14 +601,25 @@ impl Widget for TerminalGridWidget {
 
     /// The keystroke source's event half, the selection gesture's hands, **and**
     /// the touch state machine — one dispatch per event class, each arm's own
-    /// method carrying the ordering it owes the others.
+    /// method carrying the ordering it owes the others. `EditCommand` is a
+    /// fourth class, routed to [`edit_command`](Self::edit_command); `Overlay`
+    /// reaches no owner this widget registers, so it is always ignored (see
+    /// that arm).
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         match event {
             InputEvent::Pointer(pointer) => self.pointer_event(ctx, pointer),
             // The desktop wheel folds into the touch drag's own accumulator.
             InputEvent::Scroll { position, delta } => self.wheel_event(*position, *delta),
             InputEvent::Key(_) | InputEvent::Ime(_) => self.key_event(ctx, event),
+            InputEvent::EditCommand(_) => self.edit_command(ctx, event),
             InputEvent::Housekeeping => EventResult::Ignored,
+            // This widget registers no floated overlay surface (the Copy
+            // chip is a full-bleed SIBLING in `terminal_surface`, not an
+            // `OverlaySlot` this grid owns), so it is never the owner an
+            // `OverlayEvent` addresses — the routing contract says a
+            // non-owner falls through, and there is no owner here to fall
+            // through to.
+            InputEvent::Overlay(_) => EventResult::Ignored,
         }
     }
 
@@ -903,6 +914,77 @@ impl TerminalGridWidget {
         let state = seam.ime_state(self.caret_rect);
         ctx.publish_ime_state(state);
         ctx.request_redraw();
+        EventResult::Handled
+    }
+
+    /// One focus-routed clipboard/selection verb
+    /// ([`EditCommand`]). `Copy`/`Cut`/`SelectAll` are **reads** of the live
+    /// selection — muxrd's read-only boundary permits read/navigate/scroll/
+    /// select and refuses only input bytes — so none of the three checks
+    /// [`read_only`](Self::read_only); `Paste` IS input bytes, so it folds
+    /// through [`InputSeam::absorb`], the single gate every other byte this
+    /// grid emits already passes through, rather than a second check here
+    /// that could drift out of sync with it.
+    fn edit_command(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let InputEvent::EditCommand(cmd) = event else {
+            return EventResult::Ignored;
+        };
+        match cmd {
+            // `Cut`: this grid renders the remote session's own emitted
+            // output, so there is nothing **local** to delete — the
+            // destructive half of "cut" has no referent on a terminal.
+            // Aliased to `Copy` rather than refused or silently dropped, so
+            // a hardware/edit-menu Cut over a selection still gets the user
+            // the copy half of what they asked for instead of nothing.
+            EditCommand::Copy | EditCommand::Cut => self.copy_selection(),
+            // Not implemented: `selection`'s word-based model has no
+            // "select everything" resolution yet (see this module's own
+            // "Not implemented" list above), and no finger-release point to
+            // anchor the Copy chip at even if it did. A read, so never
+            // refused for read-only — simply inert until a
+            // scrollback/selection-handle pass gives it something to select.
+            EditCommand::SelectAll => EventResult::Ignored,
+            EditCommand::Paste(_) => {
+                let Some(seam) = self.input.clone() else {
+                    return EventResult::Ignored;
+                };
+                // Gated exactly as `key_event`'s keystrokes are: a grid with
+                // no `InputSeam`, one not holding focus, or whose
+                // `InputSeam::absorb` refuses for `read_only`, emits nothing.
+                if !ctx.has_focus() {
+                    return EventResult::Ignored;
+                }
+                if seam.absorb(event).is_none() {
+                    return EventResult::Ignored;
+                }
+                self.ime_engaged = true;
+                let state = seam.ime_state(self.caret_rect);
+                ctx.publish_ime_state(state);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+        }
+    }
+
+    /// `Copy`/`Cut`'s shared body — see [`edit_command`](Self::edit_command).
+    /// Nothing selected answers [`Ignored`](EventResult::Ignored) (frust-core's
+    /// own `EditCommand::Copy` doc: "a widget with no selection simply
+    /// reports `EventResult::Ignored`"), so the sink is never called and
+    /// nothing is written. Routed through the SAME
+    /// [`system_clipboard_sink`](super::chip::system_clipboard_sink) the Copy
+    /// chip uses — never a second clipboard path — so the chip and this
+    /// hardware/edit-command route can never disagree about what "copy"
+    /// writes or how it's redacted.
+    fn copy_selection(&mut self) -> EventResult {
+        let Some(seam) = self.selection.as_ref() else {
+            return EventResult::Ignored;
+        };
+        if !seam.is_active() {
+            return EventResult::Ignored;
+        }
+        let text = seam.text();
+        let _ = super::chip::system_clipboard_sink()(&text);
+        seam.clear();
         EventResult::Handled
     }
 
@@ -1398,6 +1480,11 @@ mod tests {
             })
         }
 
+        /// Deliver one `InputEvent::EditCommand`.
+        fn edit_command(&mut self, cmd: EditCommand) -> EventResult {
+            self.dispatch(&InputEvent::EditCommand(cmd))
+        }
+
         fn dispatch(&mut self, event: &InputEvent) -> EventResult {
             let mut state = ();
             let mut ctx = EventCtx::new(&mut state, Point::ZERO, self.geo.grid_size());
@@ -1730,5 +1817,51 @@ mod tests {
         );
         probe.pointer(PointerPhase::Up, outside);
         assert!(probe.taps().is_empty());
+    }
+
+    // `InputEvent::EditCommand` — see `edit_command`'s own doc for the
+    // read-only-boundary rationale. `Paste`'s affirmative (writable, focused)
+    // path needs a real `ctx.has_focus()`, which this lightweight harness
+    // cannot grant (`EventCtx::new` always starts `has_focus: false` — only
+    // the real focus-routing machinery in `tests/terminal.rs` sets it), so
+    // that half is pinned there instead; what's testable at this layer
+    // (read-only boundary, no-selection no-op, SelectAll's documented no-op)
+    // is pinned here.
+
+    #[test]
+    fn select_all_is_not_yet_implemented_and_ignored_either_way() {
+        // A read, so never refused for read-only — but also simply not
+        // implemented yet (see `edit_command`'s own doc), so both probes
+        // answer the same: `Ignored`, nothing changed.
+        for mut probe in [Probe::unwired(), Probe::unwired_read_only()] {
+            assert_eq!(
+                probe.edit_command(EditCommand::SelectAll),
+                EventResult::Ignored
+            );
+        }
+    }
+
+    #[test]
+    fn copy_and_cut_write_nothing_when_nothing_is_selected() {
+        // Deliberately exercises the no-selection guard only: the sink
+        // (`system_clipboard_sink`) is the REAL system clipboard, so a test
+        // must never reach the call that would clobber it (see `chip`'s own
+        // module docs) — nothing selected means `copy_selection` returns
+        // before it ever would.
+        let mut probe = Probe::unwired();
+        assert!(
+            probe.selection.range().is_none(),
+            "sanity: nothing selected"
+        );
+        assert_eq!(
+            probe.edit_command(EditCommand::Copy),
+            EventResult::Ignored,
+            "no selection, no sink call"
+        );
+        assert_eq!(
+            probe.edit_command(EditCommand::Cut),
+            EventResult::Ignored,
+            "Cut shares Copy's guard"
+        );
     }
 }
