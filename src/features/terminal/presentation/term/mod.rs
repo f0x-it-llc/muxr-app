@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use frust::authoring::{
-    EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect, any,
+    EditCommand, EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect, any,
 };
 use frust::{GestureDetector, GetUntracked, RwSignal, Set, Stack, StackView};
 use frust::{on_cleanup, spawn_blocking, spawn_local};
@@ -248,13 +248,17 @@ impl InputSeam {
     /// so a typed `"` arrives as `0x22`. Spelled once here, not per widget: two
     /// spellings disagreeing on content type is a silent corrupt-shell-command
     /// bug. `active` is always `true` — only a focused/claiming widget publishes
-    /// this, and a blur drops the surface.
+    /// this, and a blur drops the surface. `suppress_soft_keyboard` mirrors
+    /// [`read_only`](Self::read_only): needed for Copy/selection, never the
+    /// keyboard — agreeing with, not fighting, `TerminalGridWidget`'s own
+    /// read-only suppression.
     pub fn ime_state(&self, caret: Option<Rect>) -> ImeState {
         ImeState {
             active: true,
             editing: self.published(),
             caret,
             content_type: ImeContentType::Terminal,
+            suppress_soft_keyboard: self.read_only(),
         }
     }
 
@@ -265,7 +269,10 @@ impl InputSeam {
     /// call this — frust blurs on a `Down` claiming no focus, dropping the whole
     /// published surface, so whichever widget holds the focus path drives the
     /// same [`KeystrokeSource`] and publishes the same
-    /// [`ime_state`](Self::ime_state). A read-only session absorbs nothing.
+    /// [`ime_state`](Self::ime_state). A read-only session absorbs nothing —
+    /// including `EditCommand::Paste`, folded in here since paste IS input
+    /// bytes (`Copy`/`Cut`/`SelectAll` are reads the grid answers itself; see
+    /// `edit_command`).
     pub fn absorb(&self, event: &InputEvent) -> Option<Emission> {
         if self.read_only() {
             return None;
@@ -282,6 +289,7 @@ impl InputSeam {
                 InputEvent::Ime(ImeEvent::Compose { text, .. }) => source.on_compose(text),
                 InputEvent::Ime(ImeEvent::Disabled) => source.on_composition_end(),
                 InputEvent::Ime(ImeEvent::Enabled) => Emission::default(),
+                InputEvent::EditCommand(EditCommand::Paste(text)) => source.on_commit(text),
                 _ => return None,
             }
         };
