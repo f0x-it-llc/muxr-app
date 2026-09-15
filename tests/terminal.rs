@@ -1980,9 +1980,22 @@ fn a_read_only_credential_navigates_across_spaces() {
     // on ("forgekit") — expanding it is a read-only-safe peek, and its own
     // active tab cascades open on its own.
     h.tap(h.value_point("zelli_mobile"));
-    h.pump_until("zelli_mobile's own tab to auto-expand", |h| {
-        h.shows("ed@zelli zsh")
+    // Waited on through the controller's own signal, NOT painted geometry: the
+    // space this connection is already on ("forgekit") has its own settled
+    // reveal to collapse first, and `pump_until`'s pinned-zero paint clock never
+    // advances that tween — so forgekit's stale rows would still be sitting
+    // exactly where zelli_mobile's are about to land, and row [0] below would be
+    // devbox's pane instead of this browse's.
+    h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
+        debug_controller()
+            .expect("mounted")
+            .expanded_tab
+            .get_untracked()
+            .as_deref()
+            == Some("logs")
     });
+    // Runs those reveals forward for real so this frame paints the settled
+    // result rather than forgekit's stale geometry.
     let scene = h.settle_motion(0.0);
     h.tap(center(tree_pane_rows(&scene)[0]));
     h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
