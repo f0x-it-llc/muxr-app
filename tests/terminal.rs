@@ -2022,7 +2022,6 @@ fn a_read_only_credential_navigates_across_spaces() {
     );
 }
 
-
 #[test]
 fn a_read_only_credential_navigates_across_tabs() {
     let _g = serial();
@@ -2061,7 +2060,6 @@ fn a_read_only_credential_navigates_across_tabs() {
     assert_eq!(h.depth(), REST_DEPTH, "…and the sheet closed behind it");
 }
 
-
 #[test]
 fn a_read_only_credential_navigates_panes_on_herdr() {
     let _g = serial();
@@ -2085,7 +2083,6 @@ fn a_read_only_credential_navigates_panes_on_herdr() {
         "the focused pane moved with the commit"
     );
 }
-
 
 #[test]
 fn a_read_only_credential_refuses_the_rename_dialog_and_says_why() {
