@@ -803,7 +803,7 @@ fn the_card_paints_glyphs_terminal_ink_and_not_the_mocks_hexes() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
 
     let ink = frust_glyph::baseline()
         .extension::<frust_glyph::GlyphInk>()
@@ -1407,7 +1407,7 @@ fn the_sheets_close_button_dismisses_it() {
     // The close button is the sheet's one *labelled* control — a real
     // `Role::Button`, unlike the pills (which are gesture targets over runs).
     // It lives inside the navigator, so it is tapped by the rect it paints.
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
     let close = scene
         .rounded
         .iter()
@@ -1980,10 +1980,23 @@ fn a_read_only_credential_navigates_across_spaces() {
     // on ("forgekit") — expanding it is a read-only-safe peek, and its own
     // active tab cascades open on its own.
     h.tap(h.value_point("zelli_mobile"));
-    h.pump_until("zelli_mobile's own tab to auto-expand", |h| {
-        h.shows("ed@zelli zsh")
+    // Waited on through the controller's own signal, NOT painted geometry: the
+    // space this connection is already on ("forgekit") has its own settled
+    // reveal to collapse first, and `pump_until`'s pinned-zero paint clock never
+    // advances that tween — so forgekit's stale rows would still be sitting
+    // exactly where zelli_mobile's are about to land, and row [0] below would be
+    // devbox's pane instead of this browse's.
+    h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
+        debug_controller()
+            .expect("mounted")
+            .expanded_tab
+            .get_untracked()
+            .as_deref()
+            == Some("logs")
     });
-    let scene = h.frame();
+    // Runs those reveals forward for real so this frame paints the settled
+    // result rather than forgekit's stale geometry.
+    let scene = h.settle_motion(0.0);
     h.tap(center(tree_pane_rows(&scene)[0]));
     h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
@@ -2008,6 +2021,7 @@ fn a_read_only_credential_navigates_across_spaces() {
         "…and the sheet's own space list followed it"
     );
 }
+
 
 #[test]
 fn a_read_only_credential_navigates_across_tabs() {
@@ -2047,6 +2061,7 @@ fn a_read_only_credential_navigates_across_tabs() {
     assert_eq!(h.depth(), REST_DEPTH, "…and the sheet closed behind it");
 }
 
+
 #[test]
 fn a_read_only_credential_navigates_panes_on_herdr() {
     let _g = serial();
@@ -2070,6 +2085,7 @@ fn a_read_only_credential_navigates_panes_on_herdr() {
         "the focused pane moved with the commit"
     );
 }
+
 
 #[test]
 fn a_read_only_credential_refuses_the_rename_dialog_and_says_why() {
@@ -2145,7 +2161,7 @@ fn every_affordance_on_this_screen_is_a_vector_and_announces_a_word() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
 
     // The expand button draws exactly one filled path (its mark) and no glyph
     // of its own — the "chrome icons are vectors" rule, as geometry.
@@ -2636,7 +2652,7 @@ fn holding_a_pane_row_renames_it_without_committing_it() {
     );
 
     // A plain tap on the same row still commits it.
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
     h.tap(center(tree_pane_rows(&scene)[1]));
     // `floor - 1`: depth is already `floor` (the sheet, still up) before this
     // tap — the wait has to watch for the sheet's own pop, not the level it is

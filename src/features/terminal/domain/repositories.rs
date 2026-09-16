@@ -62,8 +62,9 @@ pub trait TerminalRepository {
 
     /// Make the space with [`Space::id`] `space_id` the active one. Which space this
     /// connection is looking at is per-connection backend state keyed on the routing
-    /// token [`bind`](Self::bind) recorded — but the wire still marks `SwitchSpace`
-    /// **MUTATING**, refused to a read-only credential.
+    /// token [`bind`](Self::bind) recorded. The wire's `SwitchSpace` carries no
+    /// read-only gate — a read-only credential may call it; the only remaining
+    /// failure is a fail-closed `reattach required`.
     async fn switch_space(&self, space_id: String) -> Result<(), AppFailure>;
 
     /// Move the session's focus to the tab with [`TabEntry::tab_id`] `tab_id`. Separate
@@ -118,9 +119,8 @@ pub trait TerminalRepository {
 
     /// Focus the pane `pane_id` (`is_plugin` as in [`rename_pane`](Self::rename_pane)) — a view
     /// switch, not a mutation: the wire's `FocusPane` is the one pane action not MUTATING, so a
-    /// read-only credential may send it. A per-connection relay backend (herdr) still drops it
-    /// silently for such a credential, which is why `presentation` refuses the combination
-    /// before it goes out.
+    /// read-only credential may send it on either backend — neither zellij nor herdr gates
+    /// this on the read-only credential.
     async fn focus_pane(&self, _pane_id: u32, _is_plugin: bool) -> Result<(), AppFailure> {
         Err(unsupported("focus_pane"))
     }
