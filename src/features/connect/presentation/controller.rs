@@ -60,6 +60,17 @@ pub type GatePrompt = Rc<dyn Fn(ServerLimitBlock)>;
 /// The trust posture a fresh form starts on — the safe one.
 const DEFAULT_TRUST_MODE: TrustMode = TrustMode::System;
 
+/// The port a bare host dials under [`TrustMode::System`]: a publicly trusted
+/// certificate implies a TLS-terminating edge in front of `muxrd`, which this
+/// app's own demo deployment fronts on the standard HTTPS port.
+const PUBLIC_CA_DEFAULT_PORT: u16 = 443;
+
+/// The port a bare host dials under [`TrustMode::NoVerification`] or
+/// [`TrustMode::Pinned`]: `muxrd`'s own default bind port
+/// (`DEFAULT_BIND = "127.0.0.1:50051"` in `muxr-core/muxrd/src/config.rs`),
+/// dialed directly with no TLS-terminating edge in front of it.
+const MUXRD_DEFAULT_PORT: u16 = 50051;
+
 /// Whether a fresh form offers to remember the server. `true`, matching the mock.
 const DEFAULT_REMEMBER: bool = true;
 
@@ -167,7 +178,23 @@ impl ConnectController {
         self.token.set(Zeroizing::new(String::new()));
     }
 
+    /// Sets the trust mode. A manual choice that disagrees with a stashed
+    /// pairing's own posture ([`pairing_trust_mode`]) drops the pairing first
+    /// (`clear_pending_pairing`, which also resets the mode to the default)
+    /// and only then applies the chosen one — mirroring [`Self::set_token`]/
+    /// [`Self::set_url`]: without this, the selector's radio would move while
+    /// both CTAs kept dialing the pairing's own posture underneath it.
+    /// Re-selecting the pairing's own posture is not an override, so the
+    /// pairing survives it.
     pub fn select_trust_mode(&self, mode: TrustMode) {
+        let overrides_pairing = self.pending_pairing.with(|pending| {
+            pending
+                .as_ref()
+                .is_some_and(|payload| pairing_trust_mode(&payload.trust) != mode)
+        });
+        if overrides_pairing {
+            self.clear_pending_pairing();
+        }
         self.trust_mode.set(mode);
     }
 
@@ -305,11 +332,11 @@ impl ConnectController {
 
     /// Drop the stashed pairing unless `url` still names its host and port.
     fn invalidate_pairing_unless_covering(&self, url: &str) {
+        let default_port = default_port_for(self.trust_mode.get_untracked());
         let covered = self.pending_pairing.with(|pending| match pending {
             None => true,
-            Some(payload) => {
-                parse_endpoint(url).is_ok_and(|endpoint| pairing_covers(payload, &endpoint))
-            }
+            Some(payload) => parse_endpoint(url, default_port)
+                .is_ok_and(|endpoint| pairing_covers(payload, &endpoint)),
         });
         if !covered {
             self.clear_pending_pairing();
@@ -369,7 +396,8 @@ impl ConnectController {
     /// matching stashed pairing supplies its own posture and fingerprint (never
     /// offerable).
     pub fn validated_target(&self) -> Result<ConnectTarget, AppFailure> {
-        let endpoint = parse_endpoint(&self.url.get_untracked())?;
+        let default_port = default_port_for(self.trust_mode.get_untracked());
+        let endpoint = parse_endpoint(&self.url.get_untracked(), default_port)?;
         let saved = self.saved.get_untracked();
         let known = saved
             .iter()
@@ -979,6 +1007,19 @@ impl AsRef<ControllerCore<AppFailure>> for ConnectController {
     }
 }
 
+/// The port a bare (no `:port`) host dials under `mode`: a publicly trusted
+/// certificate implies a TLS-terminating edge on the HTTPS port
+/// ([`PUBLIC_CA_DEFAULT_PORT`]); a self-verified or pinned connection dials
+/// `muxrd` directly on its own default ([`MUXRD_DEFAULT_PORT`]). A scanned
+/// pairing always prefills `host:port` explicitly, so this default never
+/// applies to it.
+fn default_port_for(mode: TrustMode) -> u16 {
+    match mode {
+        TrustMode::System => PUBLIC_CA_DEFAULT_PORT,
+        TrustMode::NoVerification | TrustMode::Pinned => MUXRD_DEFAULT_PORT,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pairing → form / target mapping
 // ---------------------------------------------------------------------------
@@ -1081,8 +1122,11 @@ mod tests {
     #[test]
     fn a_pairing_covers_exactly_the_address_it_was_scanned_for() {
         let payload = pinned("192.168.1.100", 50051, "ab");
+        // Every prefill below always carries an explicit port, so the default
+        // passed here never applies — any [`TrustMode`] would do.
         let at = |raw: &str| {
-            parse_endpoint(raw).is_ok_and(|endpoint| pairing_covers(&payload, &endpoint))
+            parse_endpoint(raw, default_port_for(TrustMode::System))
+                .is_ok_and(|endpoint| pairing_covers(&payload, &endpoint))
         };
         assert!(at("192.168.1.100:50051"), "the prefilled text itself");
         assert!(!at("192.168.1.100:50052"), "another port");
@@ -1092,7 +1136,12 @@ mod tests {
     #[test]
     fn a_bracketed_ipv6_prefill_still_covers_its_own_payload() {
         let payload = pinned("fd00::1", 50051, "ab");
-        let endpoint = parse_endpoint(&pairing_endpoint(&payload)).expect("host:port parses");
+        // Explicit port again — the default passed here is never reached.
+        let endpoint = parse_endpoint(
+            &pairing_endpoint(&payload),
+            default_port_for(TrustMode::System),
+        )
+        .expect("host:port parses");
         assert!(pairing_covers(&payload, &endpoint));
     }
 
@@ -1122,6 +1171,34 @@ mod tests {
         assert_eq!(
             target.label, "rig.example.com:50051",
             "a QR that named no label still labels its saved row with something"
+        );
+    }
+
+    #[test]
+    fn default_port_for_every_trust_mode() {
+        assert_eq!(default_port_for(TrustMode::System), PUBLIC_CA_DEFAULT_PORT);
+        assert_eq!(
+            default_port_for(TrustMode::NoVerification),
+            MUXRD_DEFAULT_PORT
+        );
+        assert_eq!(default_port_for(TrustMode::Pinned), MUXRD_DEFAULT_PORT);
+    }
+
+    #[test]
+    fn a_bare_host_validates_to_each_trust_modes_own_default_port() {
+        assert_eq!(
+            parse_endpoint("demo.muxr.app", default_port_for(TrustMode::System)),
+            Ok(Endpoint {
+                host: "demo.muxr.app".to_string(),
+                port: PUBLIC_CA_DEFAULT_PORT,
+            })
+        );
+        assert_eq!(
+            parse_endpoint("demo.muxr.app", default_port_for(TrustMode::NoVerification)),
+            Ok(Endpoint {
+                host: "demo.muxr.app".to_string(),
+                port: MUXRD_DEFAULT_PORT,
+            })
         );
     }
 }
