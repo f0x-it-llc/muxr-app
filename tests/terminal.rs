@@ -1968,7 +1968,7 @@ fn a_read_only_credential_withdraws_the_trees_three_create_rows() {
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
+fn a_read_only_credential_navigates_across_spaces() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
@@ -1985,10 +1985,17 @@ fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
     });
     let scene = h.frame();
     h.tap(center(tree_pane_rows(&scene)[0]));
-    h.pump_for(2 * CLOSE_DELAY);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
-    let selected: Vec<String> = debug_controller()
-        .expect("mounted")
+    // A read-only credential can navigate across spaces: `SwitchSpace` carries
+    // no read-only gate on the wire (muxrd/src/grpc/space_ops.rs).
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        controller.active_tab.get_untracked(),
+        "logs",
+        "the commit's `switch_space` landed — the connection followed it"
+    );
+    let selected: Vec<String> = controller
         .spaces
         .get_untracked()
         .into_iter()
@@ -1997,22 +2004,13 @@ fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
         .collect();
     assert_eq!(
         selected,
-        ["forgekit"],
-        "`SwitchSpace` is MUTATING, so the commit is turned back here rather \
-         than at the server"
-    );
-    assert!(
-        app_toasts()
-            .pending_untracked()
-            .iter()
-            .any(|message| message == READ_ONLY_TOAST),
-        "…and it says why: {:?}",
-        app_toasts().pending_untracked()
+        ["zelli_mobile"],
+        "…and the sheet's own space list followed it"
     );
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
+fn a_read_only_credential_navigates_across_tabs() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -2034,28 +2032,23 @@ fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
         app_toasts().pending_untracked()
     );
 
-    // A commit that has to move tabs first is `GoToTab`, which is MUTATING —
-    // so the row stays on screen and says why, and nothing moves.
+    // A read-only credential can navigate across tabs: `GoToTab` carries no
+    // read-only gate on the wire (muxrd/src/grpc/tab_ops.rs).
     h.open_sheet();
     h.tap(h.value_point("btop"));
     let scene = h.settle();
     h.tap(center(tree_pane_rows(&scene)[0]));
-    h.pump_for(2 * CLOSE_DELAY);
 
-    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
-    assert!(h.shows(DEVBOX_TITLE), "…and the card never moved");
-    assert!(
-        app_toasts()
-            .pending_untracked()
-            .iter()
-            .any(|message| message == READ_ONLY_TOAST),
-        "the row says why: {:?}",
-        app_toasts().pending_untracked()
-    );
+    h.pump_until_values("the btop tab", |values| {
+        values.iter().any(|v| v == BTOP_TITLE)
+    });
+    assert!(h.shows(BTOP_TITLE), "the commit's `go_to_tab` landed");
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert_eq!(h.depth(), REST_DEPTH, "…and the sheet closed behind it");
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_herdr_commit_inside_the_active_tab_too() {
+fn a_read_only_credential_navigates_panes_on_herdr() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
@@ -2064,25 +2057,17 @@ fn a_read_only_credential_refuses_a_herdr_commit_inside_the_active_tab_too() {
 
     let (_before, after) = h.open_sheet();
 
-    // Inside the browsed tab, so the wire call is `FocusPane` alone — which a
-    // herdr relay drops for a read-only client without a word. The refusal is
-    // the client's, ahead of that silence: the row stays up and says why.
+    // A read-only credential can navigate panes on herdr: `FocusPane` carries
+    // no read-only gate on the wire (muxrd/src/grpc/pane_ops.rs).
     h.tap(center(tree_pane_rows(&after)[1]));
-    h.pump_for(2 * CLOSE_DELAY);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert_eq!(h.depth(), REST_DEPTH, "the sheet closed");
 
-    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
+    let (_, reopened) = h.open_sheet();
     assert_eq!(
-        tree_focused_row(&h.frame()),
-        Some(0),
-        "…and the focused pane never moved"
-    );
-    assert!(
-        app_toasts()
-            .pending_untracked()
-            .iter()
-            .any(|message| message == READ_ONLY_TOAST),
-        "the row says why: {:?}",
-        app_toasts().pending_untracked()
+        tree_focused_row(&reopened),
+        Some(1),
+        "the focused pane moved with the commit"
     );
 }
 
