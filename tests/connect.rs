@@ -53,7 +53,7 @@ use muxr::features::connect::presentation::widgets::fields::{
     SERVER_URL_PLACEHOLDER, TOKEN_PLACEHOLDER, field_text_style,
 };
 use muxr::features::connect::presentation::widgets::pairing::{
-    PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
+    PAIRED_CONNECT_LABEL, PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
 };
 use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
 use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
@@ -93,8 +93,10 @@ const FLUSH_ROUNDS: usize = 4;
 
 /// The URL the happy path types — the mock's own placeholder.
 const VALID_URL: &str = SERVER_URL_PLACEHOLDER;
-/// …and one that cannot be a dial target (no `:port`).
-const INVALID_URL: &str = "not-an-endpoint";
+/// …and one that still cannot be a dial target: a bare host now parses (its
+/// posture's own default port applies), so this keeps its explicit `:port`
+/// but makes that port unparseable.
+const INVALID_URL: &str = "not-an-endpoint:not-a-port";
 
 /// `AppFailure::Network`'s user-facing message — what a rejected form toasts.
 const NETWORK_TOAST: &str = "Connection problem — please try again.";
@@ -1229,6 +1231,16 @@ fn scanned_payload(read_only: bool) -> PairingPayload {
     parse_pairing_uri(&uri).expect("the fixture URI is a well-formed pairing code")
 }
 
+/// [`scanned_payload`]'s `tm=ca` sibling, for the same [`PAIRED_ENDPOINT`] and
+/// token — the demo QR's own shape (`ca`, not `pin`).
+fn scanned_payload_ca(read_only: bool) -> PairingPayload {
+    let ro = u8::from(read_only);
+    let uri = format!(
+        "muxr://pair?v=2&h=192.168.1.100&p=50051&t={PAIRED_TOKEN_B64}&ro={ro}&n=Home%20Rig&tm=ca"
+    );
+    parse_pairing_uri(&uri).expect("the fixture URI is a well-formed pairing code")
+}
+
 /// The endpoint [`scanned_payload`] pairs with — deliberately **not** one of
 /// the seeded saved servers, so nothing about the prefill can come from the
 /// saved list.
@@ -1363,6 +1375,29 @@ impl Form {
             .find(|(_, node)| node.role() == Role::RadioButton && node.label() == Some(label))
             .map(|(_, node)| node.is_selected() == Some(true))
             .unwrap_or_else(|| panic!("no trust row labelled {label:?}"))
+    }
+
+    /// Tap the trust-selector row labelled `label` and render the frame after
+    /// it — [`Self::tap_button`]'s twin for a `Role::RadioButton` node.
+    fn tap_trust_row(&mut self, label: &str) {
+        let point = self
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                if node.role() != Role::RadioButton || node.label() != Some(label) {
+                    return None;
+                }
+                let bounds = node.bounds()?;
+                Some(Point::new(
+                    (bounds.x0 + bounds.x1) / 2.0,
+                    (bounds.y0 + bounds.y1) / 2.0,
+                ))
+            })
+            .unwrap_or_else(|| panic!("no trust row labelled {label:?}"));
+        tap(&mut self.root, &mut self.state, point);
+        self.frame();
     }
 }
 
@@ -1763,6 +1798,72 @@ fn the_ordinary_cta_still_connects_while_a_matching_pairing_is_stashed() {
         !target.offer_credential,
         "a scanned credential's save is the pairing flow's own step, never the \
          manual offer"
+    );
+}
+
+#[test]
+fn choosing_a_trust_mode_by_hand_drops_the_pairing() {
+    // The defect this fixes: `select_trust_mode` only moved the radio, while
+    // both CTAs kept reading the stashed pairing's own posture underneath
+    // it — "Trust anyway" over a `tm=ca` scan never actually dialed
+    // insecurely, no matter which row the selector showed selected.
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload_ca(false));
+    form.frame();
+    assert!(form.button(PAIRED_CONNECT_LABEL).is_some());
+
+    form.tap_trust_row(INSECURE_TRUST);
+
+    assert_eq!(
+        controller.pending_pairing.get_untracked(),
+        None,
+        "a manual posture that disagrees with the pairing's own drops it"
+    );
+    assert_eq!(
+        controller
+            .validated_target()
+            .expect("the prefilled endpoint is still dialable")
+            .trust_mode,
+        TrustMode::NoVerification,
+        "…and the chosen posture is what a dial actually uses"
+    );
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        PAIRED_TOKEN,
+        "the scanned token stays typed even though the pairing itself is gone"
+    );
+    assert_eq!(
+        form.button(PAIRED_CONNECT_LABEL),
+        None,
+        "the paired CTA goes with the pairing it depended on"
+    );
+}
+
+#[test]
+fn re_selecting_the_pairings_own_trust_keeps_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload_ca(false));
+    form.frame();
+    assert!(form.button(PAIRED_CONNECT_LABEL).is_some());
+
+    // `tm=ca` maps onto `TrustMode::System` — already the selected row.
+    form.tap_trust_row(SYSTEM_TRUST);
+
+    assert!(
+        controller.pending_pairing.get_untracked().is_some(),
+        "re-picking the pairing's own posture is not a manual override"
+    );
+    assert!(
+        form.button(PAIRED_CONNECT_LABEL).is_some(),
+        "…so the paired CTA stays up"
     );
 }
 
@@ -3972,10 +4073,17 @@ fn the_live_screens_fields_stay_enabled() {
 }
 
 #[test]
-fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
+fn the_static_splash_mocks_fields_refuse_editing_on_tap() {
     // `connect_pieces` (== `connect_pieces_with(theme, None, saved)`) is what
     // the cold-start splash assembles — no navigator, no controller — so a
     // bare `()` state and a standalone `RenderRoot` reproduce it directly.
+    //
+    // frust's read-only contract (`TextInput: a read-only field is focusable
+    // and copyable`) means a tap here MAY claim focus now — that alone is not
+    // the defect this guards. What must still never happen is a stray tap
+    // during the splash's staggering entrance caret-editing or accepting
+    // input into a field with nothing behind it: no keystroke may land, and
+    // any IME session the field publishes must keep the soft keyboard down.
     let _g = serial();
     let _ambient = setup();
 
@@ -3996,9 +4104,7 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
     assert_eq!(fields.len(), 2, "the splash mock still renders both fields");
     assert!(
         fields.iter().all(|(_, _, read_only)| *read_only),
-        "the splash's static fields must present as read-only — a stray tap \
-         during the staggering entrance must not focus or caret a field with \
-         nothing behind it: {fields:?}"
+        "the splash's static fields must present as read-only: {fields:?}"
     );
     assert!(
         fields.iter().all(|(_, disabled, _)| !*disabled),
@@ -4007,8 +4113,6 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
          screen took over: {fields:?}"
     );
 
-    // Read-only hangs off the same focus gate `enabled(false)` did
-    // (`TextInputWidget::interactive` is `enabled && !read_only`).
     let centers: Vec<Point> = root
         .semantics()
         .nodes
@@ -4020,12 +4124,35 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
     assert_eq!(centers.len(), 2, "both fields carry bounds to tap");
     for point in centers {
         tap(&mut root, &mut state, point);
+        frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+
+        // A focused read-only field may publish a keyboard-suppressed IME
+        // session (for copy); it must never ask for the keyboard itself.
+        if let Some(ime) = root.ime_state() {
+            assert!(
+                ime.suppress_soft_keyboard,
+                "a focused read-only splash field must never raise its \
+                 keyboard: {ime:?}"
+            );
+        }
+
+        // Either way, a stray keystroke must never land on a field with
+        // nothing behind it.
+        root.event(&mut state, &char_key("x"));
     }
     frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+
+    let values: Vec<Option<String>> = root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
+        .map(|(_, node)| node.value().map(str::to_string))
+        .collect();
     assert!(
-        root.semantics().focus.is_none(),
-        "a read-only field must not become the tree's focus node after a \
-         direct tap"
+        values.iter().all(|value| value.as_deref() == Some("")),
+        "a stray tap during the splash's staggering entrance must never let a \
+         keystroke reach a field with nothing behind it: {values:?}"
     );
 }
 
