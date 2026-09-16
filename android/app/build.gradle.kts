@@ -238,14 +238,6 @@ android {
 // declares neither directly.
 dependencies {
     implementation(project(":frust-embedding"))
-    // `rustls-platform-verifier`'s Kotlin half: TrustConfig::SystemCa (src/net/tls.rs)
-    // calls into `org.rustls.platformverifier.CertificateVerifier` over JNI, and
-    // without this dependency that class is missing from the APK, so every
-    // "Public domain (CA)" handshake fails at runtime with
-    // `ClassNotFoundException: org.rustls.platformverifier.CertificateVerifier`.
-    // Resolved from the local Maven repo `settings.gradle.kts` locates via
-    // `cargo metadata` (crate README, "Deployment Considerations -> Android").
-    implementation("rustls:rustls-platform-verifier:latest.release")
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
     implementation(project(":frust-camera"))
     implementation(project(":frust-secure-storage"))
