@@ -5,15 +5,17 @@
 //! through the same function, so the frame it finishes on and the frame the
 //! route paints are one picture.
 //!
-//! The screen's three layers are backdrop, scrolled layout, QR affordance. The
-//! scroll and the FAB both belong to the screen, not the layout — the splash
-//! assembles into a fixed layer with nothing to scroll.
+//! The screen's four layers are backdrop, scrolled layout, QR affordance, and
+//! the getting-started affordance in the opposite corner. The scroll and both
+//! affordances belong to the screen, not the layout — the splash assembles
+//! into a fixed layer with nothing to scroll.
 //!
 //! Handles are resolved once in [`Component::init`], never in a press handler.
 //! The credential dialogs live in [`super::widgets::credential_dialogs`], the
 //! QR gate and camera lifecycle in
-//! [`super::widgets::qr_affordance`]/[`super::widgets::qr_sheet`], and the
-//! free-tier server gate's paywall in [`super::widgets::pro_gate`].
+//! [`super::widgets::qr_affordance`]/[`super::widgets::qr_sheet`], the
+//! free-tier server gate's paywall in [`super::widgets::pro_gate`], and the
+//! orientation dialog in [`super::widgets::getting_started`].
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -28,6 +30,7 @@ use frust::{
 
 use super::controller::ConnectController;
 use super::widgets::credential_dialogs::{credential_offer_prompt, handle_saved_row_delete};
+use super::widgets::getting_started::info_affordance;
 use super::widgets::pro_gate::{gated_saved_row_tap, server_limit_prompt};
 use super::widgets::qr_affordance::qr_affordance;
 use super::widgets::{Live, connect_pieces_with};
@@ -223,6 +226,7 @@ impl Component for ConnectScreen {
                 &state.qr_permission_pending,
                 &state.pro,
             ),
+            info_affordance(&state.overlays),
         ]))
     }
 }

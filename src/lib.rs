@@ -2,6 +2,7 @@ pub mod connection;
 pub mod failure;
 pub mod features;
 pub mod fonts;
+pub mod links;
 pub mod net;
 pub mod responsive;
 pub mod routes;

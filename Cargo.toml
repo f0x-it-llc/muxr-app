@@ -43,6 +43,7 @@ frust-shared-preferences = { path = "../../frust/plugins/shared-preferences" }
 frust-secure-storage = { path = "../../frust/plugins/secure-storage" }
 frust-camera = { path = "../../frust/plugins/camera" }
 frust-iap = { path = "../../frust/plugins/iap" }
+frust-url-launcher = { path = "../../frust/plugins/url-launcher" }
 # `frust-iap` models the per-platform `requestPurchase` payloads as raw
 # `serde_json::Value` by design, so a caller has to build them itself.
 serde_json = "1"

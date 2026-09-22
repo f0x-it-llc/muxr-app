@@ -1783,6 +1783,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-url-launcher"
+version = "0.1.0"
+dependencies = [
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.19",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "frust-widgets"
 version = "0.1.0"
 dependencies = [
@@ -3178,6 +3192,7 @@ dependencies = [
  "frust-shared-preferences",
  "frust-shell-common",
  "frust-text",
+ "frust-url-launcher",
  "jni 0.22.4",
  "kurbo",
  "log",
@@ -3759,6 +3774,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
 dependencies = [
+ "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]

@@ -442,6 +442,7 @@ pub fn serial() -> MutexGuard<'static, ()> {
 /// - `pro` `di`: publishes the scriptable entitlement mock, so a suite can script store answers.
 /// - `sessions` `pages`: the list band's loading rain, which would hold the band over a pinned
 ///   `frame` clock it never advances past.
+/// - `links`: a no-op link opener, so no tapped link ever reaches this machine's browser.
 /// - `fonts`: offline download source (no suite reaches the network by omission) and a throwaway
 ///   temp cache dir (nothing writes into this machine's real app data).
 pub fn setup() -> Owner {
@@ -454,6 +455,7 @@ pub fn setup() -> Owner {
     muxr::features::connect::di::use_mock_saved_servers_for_tests();
     muxr::features::connect::di::use_mock_credentials_for_tests();
     muxr::features::pro::di::use_mock_entitlement_for_tests();
+    muxr::links::set_link_opener_for_tests(|_url| {});
     muxr::fonts::use_offline_font_source_for_tests();
     muxr::fonts::use_font_cache_dir_for_tests(
         std::env::temp_dir().join(format!("muxr-test-fonts-{}", std::process::id())),
