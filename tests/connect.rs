@@ -18,7 +18,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{
@@ -66,6 +66,7 @@ use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::pro::presentation::RESTORE_LABEL;
 use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
+use muxr::links::set_link_opener_for_tests;
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::palette::Palette;
 use muxr::ui::toasts::app_toasts;
@@ -114,6 +115,16 @@ const INSECURE_CHIP: &str = "insecure";
 /// this one is the button's *name* — a test that imported it could not catch
 /// it changing). See [`BANNED_GLYPH`] for why it is words, not a mark.
 const QR_LABEL: &str = "Pair by QR code";
+/// The getting-started affordance's accessible name, its dialog's title and
+/// the two actions — transcribed for the reason [`QR_LABEL`] is: the words a
+/// user reads. The title differs from the button's name on purpose, so a
+/// title on screen can only mean the dialog is up.
+const INFO_LABEL: &str = "Getting started";
+const GETTING_STARTED_TITLE: &str = "Getting started with Muxr";
+const OPEN_GUIDE_LABEL: &str = "Open guide";
+const CLOSE_LABEL: &str = "Close";
+/// Where the guide action lands.
+const DOCS_URL: &str = "https://muxr.app/docs.html";
 
 /// `.connect{padding:30px 22px}` — the layer's horizontal inset, transcribed
 /// (the constant itself is private to `presentation::pages`). What the CTA
@@ -833,16 +844,16 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
     // else on Connect paints one at all: every other piece is rounded rects
     // (swatches, panels, the CTA bar) and stroked borders. So "the affordance
     // is a vector" is literally "there is a filled path inside the FAB" — one
-    // of exactly as many paths as this screen has vector marks: the FAB, plus
-    // one delete affordance per saved row.
+    // of exactly as many paths as this screen has vector marks: the FAB, the
+    // getting-started mark, plus one delete affordance per saved row.
     let rows = expect_saved_servers()
         .list()
         .expect("the mock store never fails")
         .len();
     assert_eq!(
         scene.paths.len(),
-        rows + 1,
-        "every vector on the screen is the FAB's mark or a row's delete mark: {:?}",
+        rows + 2,
+        "every vector on the screen is the FAB's mark, the getting-started mark or a row's delete mark: {:?}",
         scene.paths
     );
     let (origin, size) = *scene
@@ -888,6 +899,104 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
     assert!(
         !labels.iter().any(|l| l.contains(BANNED_GLYPH)),
         "…nor may any accessible name: {labels:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The getting-started affordance
+// ---------------------------------------------------------------------------
+
+fn info_button(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(INFO_LABEL)
+}
+
+#[test]
+fn the_getting_started_affordance_sits_in_the_top_trailing_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+
+    // Opposite the QR FAB: a store-front visitor's first tap, clear of the
+    // form and of the mark at the top of the column.
+    let info = harness.bounds("the getting-started affordance", info_button);
+    assert!(
+        info.x0 > SURFACE.width / 2.0,
+        "in the trailing half of the surface: {info:?}"
+    );
+    assert!(
+        info.y1 < SURFACE.height / 4.0,
+        "at the top of the surface: {info:?}"
+    );
+    assert!(
+        info.width() >= MIN_TAP_TARGET && info.height() >= MIN_TAP_TARGET,
+        "clears the {MIN_TAP_TARGET}px platform minimum tap target: {info:?}"
+    );
+}
+
+#[test]
+fn tapping_the_affordance_raises_the_getting_started_dialog_and_close_dismisses_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let before = harness.nav.depth();
+    assert!(
+        !shows_text(&harness, GETTING_STARTED_TITLE),
+        "nothing explains itself until asked"
+    );
+
+    harness.tap_node("the getting-started affordance", info_button);
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the dialog is pushed as its own page"
+    );
+    assert!(
+        shows_text(&harness, GETTING_STARTED_TITLE),
+        "…and it is the orientation dialog"
+    );
+    assert!(
+        shows_text(&harness, OPEN_GUIDE_LABEL),
+        "…offering the guide as an action"
+    );
+
+    harness.tap_node("the dialog's Close action", |node| {
+        node.role() == Role::Button && node.label() == Some(CLOSE_LABEL)
+    });
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "Close pops the dialog and nothing else"
+    );
+}
+
+#[test]
+fn the_guide_action_hands_the_docs_url_to_the_link_opener_and_closes() {
+    let _g = serial();
+    let _ambient = setup();
+    let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&opened);
+    set_link_opener_for_tests(move |url| {
+        sink.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(url.to_string());
+    });
+    let mut harness = Harness::mount();
+    let before = harness.nav.depth();
+
+    harness.tap_node("the getting-started affordance", info_button);
+    harness.tap_node("the dialog's guide action", |node| {
+        node.role() == Role::Button && node.label() == Some(OPEN_GUIDE_LABEL)
+    });
+
+    assert_eq!(
+        *opened.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![DOCS_URL.to_string()],
+        "exactly one launch, of the setup guide"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…and the dialog closed behind it"
     );
 }
 

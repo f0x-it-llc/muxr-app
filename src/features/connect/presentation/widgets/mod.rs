@@ -1,12 +1,12 @@
 //! The Connect screen's widgets: the eight staggered pieces, plus the screen's
-//! own QR, credential and free-tier-gate chrome.
+//! own QR, credential, free-tier-gate and getting-started chrome.
 //!
 //! [`connect_pieces_with`] returns the eight pieces in stagger order:
 //! [`mark::connect_mark`], [`badge::server_badge`], [`badge::heading`],
 //! [`fields::server_url_field`], [`fields::token_field`],
 //! [`trust::remember_row`], [`cta::connect_button`], [`saved::saved_address`].
-//! [`qr_affordance`], [`qr_sheet`], [`credential_dialogs`] and [`pro_gate`]
-//! are screen chrome, never staggered pieces.
+//! [`qr_affordance`], [`qr_sheet`], [`credential_dialogs`], [`pro_gate`] and
+//! [`getting_started`] are screen chrome, never staggered pieces.
 //!
 //! # The parity contract
 //!
@@ -32,6 +32,7 @@ pub mod badge;
 pub mod credential_dialogs;
 pub mod cta;
 pub mod fields;
+pub mod getting_started;
 pub mod mark;
 pub mod pairing;
 pub mod pro_gate;
