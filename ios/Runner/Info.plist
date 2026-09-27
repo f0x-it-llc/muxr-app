@@ -90,5 +90,9 @@
 	<!-- Face ID / Touch ID usage description, added only when the frust-secure-storage biometric gate is used. -->
 	<key>NSFaceIDUsageDescription</key>
 	<string>Unlock your stored credentials.</string>
+	<!-- Export compliance: the app uses only standard TLS (the gRPC channel and HTTPS
+	     font downloads), which is exempt, so uploads skip the encryption questionnaire. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
