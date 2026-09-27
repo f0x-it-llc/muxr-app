@@ -514,7 +514,10 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
     }
 
     async fn refresh(&self) -> Result<Entitlement, AppFailure> {
-        match self.call(|store| store.get_available_purchases(None)).await {
+        match self
+            .call(|store| store.get_available_purchases(Some(active_purchases_only())))
+            .await
+        {
             Ok(rows) => {
                 let entitlement = self.entitlement_of(rows).await;
                 self.cache.write(entitlement);
@@ -650,6 +653,17 @@ fn settlement(purchase: &Purchase) -> PurchaseInput {
     }
 }
 
+/// The purchase query every entitlement check makes: what the account holds
+/// now. Unasked, StoreKit's side answers from the full transaction history
+/// (`Transaction.all`), where a refunded or revoked purchase still reads as
+/// purchased, so a refunded iOS user would keep Pro. Play ignores the flag.
+fn active_purchases_only() -> PurchaseOptions {
+    PurchaseOptions {
+        only_include_active_items_ios: Some(true),
+        ..PurchaseOptions::default()
+    }
+}
+
 /// This app's product in a fetch answer, if the store knows it. A subscriptions
 /// envelope can't hold it — the query asks for an in-app product.
 fn offered_product(result: FetchProductsResult) -> Option<Product> {
@@ -762,6 +776,8 @@ mod tests {
         /// Nothing reaches the store on these, so no event follows them.
         request_errors: Vec<IapError>,
         settled: Vec<String>,
+        /// The options of every purchase query, in order.
+        purchase_queries: Vec<Option<PurchaseOptions>>,
         restore_calls: usize,
         /// How often the connection was opened — a second one is a latch that
         /// was cleared and re-established.
@@ -816,8 +832,9 @@ mod tests {
 
         fn get_available_purchases(
             &self,
-            _options: Option<PurchaseOptions>,
+            options: Option<PurchaseOptions>,
         ) -> Result<Vec<Purchase>, IapError> {
+            self.state().purchase_queries.push(options);
             match self.gap() {
                 Some(err) => Err(err),
                 None => Ok(self.state().owned.clone()),
@@ -1002,6 +1019,23 @@ mod tests {
 
     fn refusal(code: IapErrorCode) -> IapEvent {
         IapEvent::PurchaseError(refusal_payload(code))
+    }
+
+    #[test]
+    fn the_entitlement_check_asks_for_active_purchases_only() {
+        // StoreKit's default answer is the whole transaction history, where a
+        // refunded purchase still reads as purchased.
+        let repo = repository();
+
+        let _ = block_on(repo.refresh());
+
+        assert_eq!(
+            repo.store.state().purchase_queries,
+            vec![Some(PurchaseOptions {
+                only_include_active_items_ios: Some(true),
+                ..PurchaseOptions::default()
+            })]
+        );
     }
 
     #[test]
