@@ -3,20 +3,14 @@
     "eula" : "",
     "policies" : [
       {
-        "locales" : [
-          {
-            "locale" : "en_US",
-            "policyText" : "",
-            "policyURL" : ""
-          }
-        ]
+        "locale" : "en_US",
+        "policyText" : "",
+        "policyURL" : ""
       }
     ]
   },
   "identifier" : "9F3A6C21",
-  "nonRenewingSubscriptions" : [
-
-  ],
+  "nonRenewingSubscriptions" : [],
   "products" : [
     {
       "displayPrice" : "9.99",
@@ -38,13 +32,9 @@
     "_failTransactionsEnabled" : false,
     "_locale" : "en_US",
     "_storefront" : "USA",
-    "_storeKitErrors" : [
-
-    ]
+    "_storeKitErrors" : []
   },
-  "subscriptionGroups" : [
-
-  ],
+  "subscriptionGroups" : [],
   "version" : {
     "major" : 4,
     "minor" : 0
