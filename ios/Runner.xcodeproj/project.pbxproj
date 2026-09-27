@@ -12,6 +12,8 @@
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
 		ABCDABCDABCDABCDABCD0033 /* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */; };
 		ABCDABCDABCDABCDABCD0034 /* FrustCamera in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0035 /* FrustCamera */; };
+		ABCDABCDABCDABCDABCD0037 /* FrustIap in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0038 /* FrustIap */; };
+		ABCDABCDABCDABCDABCD003B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD003A /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -20,6 +22,7 @@
 		ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD003A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -29,6 +32,7 @@
 			files = (
 				ABCDABCDABCDABCDABCD0033 /* FrustEmbedding in Frameworks */,
 				ABCDABCDABCDABCDABCD0034 /* FrustCamera in Frameworks */,
+				ABCDABCDABCDABCDABCD0037 /* FrustIap in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -40,6 +44,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */,
+				ABCDABCDABCDABCDABCD003B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -69,6 +74,7 @@
 				ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
 				ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */,
+				ABCDABCDABCDABCDABCD003A /* PrivacyInfo.xcprivacy */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -93,6 +99,7 @@
 			packageProductDependencies = (
 				ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */,
 				ABCDABCDABCDABCDABCD0035 /* FrustCamera */,
+				ABCDABCDABCDABCDABCD0038 /* FrustIap */,
 			);
 			productName = Runner;
 			productReference = ABCDABCDABCDABCDABCD0003 /* Runner.app */;
@@ -124,6 +131,7 @@
 			packageReferences = (
 				ABCDABCDABCDABCDABCD0031 /* XCLocalSwiftPackageReference "FrustEmbedding" */,
 				ABCDABCDABCDABCDABCD0036 /* XCLocalSwiftPackageReference "FrustCamera" */,
+				ABCDABCDABCDABCDABCD0039 /* XCLocalSwiftPackageReference "FrustIap" */,
 			);
 			productRefGroup = ABCDABCDABCDABCDABCD0008 /* Products */;
 			projectDirPath = "";
@@ -267,7 +275,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -306,7 +314,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -346,7 +354,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Profile;
 		};
@@ -519,7 +527,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr.dev";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Debug-Develop";
 		};
@@ -559,7 +567,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr.dev";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Profile-Develop";
 		};
@@ -598,7 +606,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr.dev";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Release-Develop";
 		};
@@ -637,7 +645,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Debug-Production";
 		};
@@ -677,7 +685,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Profile-Production";
 		};
@@ -716,7 +724,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Release-Production";
 		};
@@ -766,6 +774,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../frust/crates/frust/../../plugins/camera/platform/ios";
 		};
+		ABCDABCDABCDABCDABCD0039 /* XCLocalSwiftPackageReference "FrustIap" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../frust/plugins/iap/platform/ios/FrustIap";
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -776,6 +788,10 @@
 		ABCDABCDABCDABCDABCD0035 /* FrustCamera */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FrustCamera;
+		};
+		ABCDABCDABCDABCDABCD0038 /* FrustIap */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FrustIap;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
