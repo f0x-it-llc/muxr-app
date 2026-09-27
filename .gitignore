@@ -48,3 +48,9 @@ dist/
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
+
+# Xcode's per-user state: window layout, breakpoints, scheme order. Written
+# into the .xcodeproj/.xcworkspace (and beside local Swift packages under
+# .swiftpm/) whenever the project is opened in Xcode; never shared config.
+xcuserdata/
+.swiftpm/
