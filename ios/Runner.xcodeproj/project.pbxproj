@@ -17,6 +17,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		6444DA7C30690BF0000A8DDE /* Muxr.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = Muxr.storekit; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0003 /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
@@ -54,6 +55,7 @@
 		ABCDABCDABCDABCDABCD0007 = {
 			isa = PBXGroup;
 			children = (
+				6444DA7C30690BF0000A8DDE /* Muxr.storekit */,
 				ABCDABCDABCDABCDABCD0009 /* Runner */,
 				ABCDABCDABCDABCDABCD0008 /* Products */,
 			);
