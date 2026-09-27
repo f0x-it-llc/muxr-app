@@ -1,0 +1,52 @@
+{
+  "appPolicies" : {
+    "eula" : "",
+    "policies" : [
+      {
+        "locales" : [
+          {
+            "locale" : "en_US",
+            "policyText" : "",
+            "policyURL" : ""
+          }
+        ]
+      }
+    ]
+  },
+  "identifier" : "9F3A6C21",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "9.99",
+      "familyShareable" : false,
+      "internalID" : "4E7B1D90",
+      "localizations" : [
+        {
+          "description" : "Unlimited servers",
+          "displayName" : "Muxr Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "muxr_pro",
+      "referenceName" : "Muxr Pro",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+
+    ]
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}
