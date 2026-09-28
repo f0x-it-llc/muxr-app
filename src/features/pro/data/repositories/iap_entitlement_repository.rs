@@ -409,7 +409,11 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
     /// row the store has not acknowledged yet on the way past.
     async fn entitlement_of(&self, rows: Vec<Purchase>) -> Entitlement {
         let mut pending = false;
-        for row in rows.iter().filter(|row| row.product_id == PRO_PRODUCT_ID) {
+        // A refunded or revoked transaction stays in StoreKit's history.
+        for row in rows
+            .iter()
+            .filter(|row| row.product_id == PRO_PRODUCT_ID && !is_revoked(row))
+        {
             match row.purchase_state {
                 PurchaseState::Purchased => {
                     if awaits_acknowledgement(row) {
@@ -449,10 +453,10 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
     }
 
     /// StoreKit's unfinished transactions for this product: a purchase that
-    /// completed while the app was not running to finish it. The active query
+    /// completed while the app was not running to finish it. The purchase query
     /// can miss one on a cold launch (seen under Xcode's StoreKit testing), and
     /// nothing else here finishes it, so it would be replayed forever. Play has
-    /// no such list; any failure reads as none, since the active query already
+    /// no such list; any failure reads as none, since the purchase query already
     /// answered.
     async fn unfinished_pro(&self) -> Vec<Purchase> {
         let rows = match self.once(|store| store.get_pending_transactions()).await {
@@ -578,13 +582,13 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
 
     async fn refresh(&self) -> Result<Entitlement, AppFailure> {
         match self
-            .call(|store| store.get_available_purchases(Some(active_purchases_only())))
+            .call(|store| store.get_available_purchases(Some(purchase_history())))
             .await
         {
             Ok(mut rows) => {
                 // Updates the listener queued outside a purchase flow, and
-                // StoreKit's unfinished transactions: a purchase the active
-                // query can miss right after it lands.
+                // StoreKit's unfinished transactions: a purchase the query
+                // above can miss right after it lands.
                 let mut unsettled = self.queued_pro_updates();
                 for row in self.unfinished_pro().await {
                     if !unsettled.iter().any(|queued| queued.id == row.id) {
@@ -760,13 +764,17 @@ fn settlement(purchase: &Purchase) -> PurchaseInput {
     }
 }
 
-/// The purchase query every entitlement check makes: what the account holds
-/// now. Unasked, StoreKit's side answers from the full transaction history
-/// (`Transaction.all`), where a refunded or revoked purchase still reads as
-/// purchased, so a refunded iOS user would keep Pro. Play ignores the flag.
-fn active_purchases_only() -> PurchaseOptions {
+/// The purchase query every entitlement check makes: StoreKit's full history
+/// (`Transaction.all`), revocations filtered out by [`entitlement_of`], rather
+/// than its active-items view (`Transaction.currentEntitlements`), which can
+/// answer empty for an owned purchase on a cold launch (Apple Developer Forums
+/// thread 726200; reproduced under Xcode's StoreKit testing). Named, not left
+/// to the default, so the choice is visible. Play ignores the flag.
+///
+/// [`entitlement_of`]: IapEntitlementRepository::entitlement_of
+fn purchase_history() -> PurchaseOptions {
     PurchaseOptions {
-        only_include_active_items_ios: Some(true),
+        only_include_active_items_ios: Some(false),
         ..PurchaseOptions::default()
     }
 }
@@ -1193,7 +1201,7 @@ mod tests {
     #[test]
     fn an_unfinished_purchase_the_active_query_missed_grants_pro_and_is_finished() {
         // A purchase completed while the app was killed: StoreKit lists it as
-        // unfinished, and a cold launch's active query may not return it.
+        // unfinished, and a cold launch's purchase query may not return it.
         let repo = repository();
         repo.store.state().unfinished = Some(vec![row(PurchaseState::Purchased, None)]);
 
@@ -1233,9 +1241,8 @@ mod tests {
     }
 
     #[test]
-    fn the_entitlement_check_asks_for_active_purchases_only() {
-        // StoreKit's default answer is the whole transaction history, where a
-        // refunded purchase still reads as purchased.
+    fn the_entitlement_check_reads_the_full_purchase_history() {
+        // StoreKit's active-items view can answer empty on a cold launch.
         let repo = repository();
 
         let _ = block_on(repo.refresh());
@@ -1243,10 +1250,32 @@ mod tests {
         assert_eq!(
             repo.store.state().purchase_queries,
             vec![Some(PurchaseOptions {
-                only_include_active_items_ios: Some(true),
+                only_include_active_items_ios: Some(false),
                 ..PurchaseOptions::default()
             })]
         );
+    }
+
+    #[test]
+    fn a_refunded_purchase_in_the_history_grants_nothing() {
+        let repo = repository();
+        let mut refunded = row(PurchaseState::Purchased, None);
+        refunded.extra.insert(KEY_REVOKED.to_string(), 1.0.into());
+        repo.store.state().owned = vec![refunded];
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Free));
+    }
+
+    #[test]
+    fn a_later_live_purchase_outweighs_a_refunded_one() {
+        let repo = repository();
+        let mut refunded = row(PurchaseState::Purchased, None);
+        refunded.extra.insert(KEY_REVOKED.to_string(), 1.0.into());
+        let mut bought_again = row(PurchaseState::Purchased, None);
+        bought_again.id = "txn-2".to_string();
+        repo.store.state().owned = vec![refunded, bought_again];
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Pro));
     }
 
     #[test]
