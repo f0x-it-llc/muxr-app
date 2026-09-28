@@ -50,6 +50,8 @@ pub struct ProController {
     fetch_offer: FetchOffer,
     purchase_pro: PurchasePro,
     restore_purchases: RestorePurchases,
+    /// Only for [`Self::follow_store_changes`]' wake-ups; reads go through use cases.
+    store: SharedEntitlementRepository,
     /// What this install is entitled to right now — every gate's input.
     pub entitlement: RwSignal<Entitlement>,
     /// The store's product description; `None` covers both "not asked yet"
@@ -81,7 +83,8 @@ impl ProController {
             refresh_entitlement: RefreshEntitlement::new(Arc::clone(&repository)),
             fetch_offer: FetchOffer::new(Arc::clone(&repository)),
             purchase_pro: PurchasePro::new(Arc::clone(&repository)),
-            restore_purchases: RestorePurchases::new(repository),
+            restore_purchases: RestorePurchases::new(Arc::clone(&repository)),
+            store: repository,
             entitlement: RwSignal::new(cached),
             offer: RwSignal::new(None),
             offer_settled: RwSignal::new(false),
@@ -106,6 +109,17 @@ impl ProController {
         {
             Ok(entitlement) => self.entitlement.set(entitlement),
             Err(failure) => log::warn!("pro: entitlement refresh failed: {failure}"),
+        }
+    }
+
+    /// Re-read the entitlement whenever the store reports a change on its own,
+    /// for the life of the process; a purchase or restore in flight reads its own.
+    pub async fn follow_store_changes(&self) {
+        loop {
+            self.store.store_changed().await;
+            if !self.busy.get_untracked() {
+                self.refresh().await;
+            }
         }
     }
 

@@ -38,6 +38,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 #[cfg(not(test))]
 use frust::spawn_blocking;
 use frust_iap::{
@@ -171,6 +173,11 @@ enum RequestGap {
 pub(crate) struct IapEntitlementRepository<S> {
     store: Arc<S>,
     cache: EntitlementCache,
+    /// Raised by the listener on every store event; see [`Self::store_changed`].
+    changed: Arc<Notify>,
+    /// Whether a purchase flow is waiting on the listener, so a refresh leaves
+    /// the queued events to it.
+    purchasing: AtomicBool,
     /// Purchase events, as the registered listener hands them over.
     events: Arc<Mutex<Receiver<IapEvent>>>,
     /// Held for this repository's whole life — dropping it unregisters.
@@ -211,6 +218,8 @@ impl<S: StoreApi> IapEntitlementRepository<S> {
 
     fn with_event_wait(store: S, cache: EntitlementCache, event_wait: Duration) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let changed = Arc::new(Notify::new());
+        let raised = Arc::clone(&changed);
         let listener = store.set_purchase_listener(Box::new(move |event| {
             // The whole callback: no blocking, no store call, no signal write —
             // this runs on the plugin's shared event-delivery thread. A send
@@ -218,10 +227,13 @@ impl<S: StoreApi> IapEntitlementRepository<S> {
             // races this handle's own drop, so it is ignored rather than
             // unwrapped.
             let _ = sender.send(event);
+            raised.notify_one();
         }));
         Self {
             store: Arc::new(store),
             cache,
+            changed,
+            purchasing: AtomicBool::new(false),
             events: Arc::new(Mutex::new(receiver)),
             _listener: listener,
             unavailable: AtomicBool::new(false),
@@ -416,6 +428,26 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
         }
     }
 
+    /// This product's purchases the listener delivered outside a purchase flow,
+    /// taken off the queue. Empty while a flow is waiting on that queue.
+    fn queued_pro_updates(&self) -> Vec<Purchase> {
+        if self.purchasing.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                IapEvent::PurchaseUpdated(row)
+                    if row.product_id == PRO_PRODUCT_ID
+                        && matches!(row.purchase_state, PurchaseState::Purchased) =>
+                {
+                    Some(row)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// StoreKit's unfinished transactions for this product: a purchase that
     /// completed while the app was not running to finish it. The active query
     /// can miss one on a cold launch (seen under Xcode's StoreKit testing), and
@@ -550,8 +582,16 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
             .await
         {
             Ok(mut rows) => {
-                let unfinished = self.unfinished_pro().await;
-                for row in unfinished.iter().filter(|row| !is_revoked(row)) {
+                // Updates the listener queued outside a purchase flow, and
+                // StoreKit's unfinished transactions: a purchase the active
+                // query can miss right after it lands.
+                let mut unsettled = self.queued_pro_updates();
+                for row in self.unfinished_pro().await {
+                    if !unsettled.iter().any(|queued| queued.id == row.id) {
+                        unsettled.push(row);
+                    }
+                }
+                for row in unsettled.iter().filter(|row| !is_revoked(row)) {
                     if !rows.iter().any(|owned| owned.id == row.id) {
                         rows.push(row.clone());
                     }
@@ -559,7 +599,7 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
                 let entitlement = self.entitlement_of(rows).await;
                 // Finished after the grant, revoked ones included: StoreKit
                 // replays an unfinished transaction at every launch until then.
-                for row in &unfinished {
+                for row in &unsettled {
                     self.settle(row).await;
                 }
                 self.cache.write(entitlement);
@@ -594,6 +634,23 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
     }
 
     async fn purchase(&self) -> Result<PurchaseOutcome, AppFailure> {
+        self.purchasing.store(true, Ordering::Relaxed);
+        let outcome = self.purchase_flow().await;
+        self.purchasing.store(false, Ordering::Relaxed);
+        outcome
+    }
+
+    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
+        self.restore_flow().await
+    }
+
+    async fn store_changed(&self) {
+        self.changed.notified().await;
+    }
+}
+
+impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
+    async fn purchase_flow(&self) -> Result<PurchaseOutcome, AppFailure> {
         match self.ensure_connected().await {
             Ok(()) => {}
             Err(StoreGap::Unavailable) => return Ok(PurchaseOutcome::Unavailable),
@@ -611,7 +668,7 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
         }
     }
 
-    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
+    async fn restore_flow(&self) -> Result<RestoreResult, AppFailure> {
         // Recovered purchases surface through the entitlement query below, not
         // through the sync call's own return — but only a store that answered
         // may say the account owns nothing: no store at all is `Unavailable`,
@@ -854,6 +911,19 @@ mod tests {
                 .then_some(IapError::NotAvailable(Unavailability::UnsupportedPlatform))
         }
 
+        /// Hands `event` to the registered listener, as the store does for a
+        /// purchase that lands outside any flow.
+        fn deliver(&self, event: IapEvent) {
+            let listener = self
+                .listener
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(listener) = listener {
+                listener(event);
+            }
+        }
+
         /// The next scripted pre-dispatch refusal, if one is left.
         fn next_request_error(&self) -> Option<IapError> {
             let mut state = self.state();
@@ -1082,6 +1152,42 @@ mod tests {
 
     fn refusal(code: IapErrorCode) -> IapEvent {
         IapEvent::PurchaseError(refusal_payload(code))
+    }
+
+    #[test]
+    fn an_update_delivered_outside_a_purchase_grants_pro_and_is_finished() {
+        // StoreKit hands a purchase that completed while the app was dead to
+        // the listener after launch, once the launch check already answered.
+        let repo = repository();
+        repo.store.deliver(IapEvent::PurchaseUpdated(row(
+            PurchaseState::Purchased,
+            None,
+        )));
+
+        block_on(repo.store_changed());
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Pro));
+        assert_eq!(repo.store.state().settled, vec!["txn-1".to_string()]);
+    }
+
+    #[test]
+    fn a_purchase_in_flight_keeps_its_events_from_a_refresh() {
+        let repo = repository();
+        repo.store.deliver(IapEvent::PurchaseUpdated(row(
+            PurchaseState::Purchased,
+            None,
+        )));
+        repo.purchasing.store(true, Ordering::Relaxed);
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Free));
+        assert!(repo.store.state().settled.is_empty());
+        assert!(
+            repo.events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .try_recv()
+                .is_ok(),
+            "the flow's event is still queued for it"
+        );
     }
 
     #[test]
