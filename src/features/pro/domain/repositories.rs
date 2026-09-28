@@ -37,4 +37,12 @@ pub trait EntitlementRepository {
     /// could not be asked at all — never the same answer as `Found(Free)`,
     /// which is the store saying the account owns nothing.
     async fn restore(&self) -> Result<RestoreResult, AppFailure>;
+
+    /// Resolves the next time the store reports a purchase change on its own:
+    /// one that completed while the app was not running, or was approved
+    /// later. The caller re-reads the entitlement with [`Self::refresh`]. A
+    /// store that never pushes changes never resolves.
+    async fn store_changed(&self) {
+        std::future::pending::<()>().await
+    }
 }

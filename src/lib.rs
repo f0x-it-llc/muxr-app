@@ -123,7 +123,9 @@ impl Component for MuxrApp {
             .subscribe(|failure: &failure::AppFailure| ui::toasts::app_toasts().raise(failure))
             .forget();
 
+        let follower = std::sync::Arc::clone(&pro);
         frust::spawn_local(async move { pro.refresh().await });
+        frust::spawn_local(async move { follower.follow_store_changes().await });
 
         let controller = NavigatorController::new();
         let overlays = NavigatorController::new();
