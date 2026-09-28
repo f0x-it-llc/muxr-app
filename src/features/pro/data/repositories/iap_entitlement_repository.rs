@@ -64,11 +64,14 @@ const PURCHASE_WAIT: Duration = Duration::from_secs(600);
 /// Play's own flag for a purchase it has taken but not yet acknowledged.
 const KEY_ACKNOWLEDGED: &str = "isAcknowledgedAndroid";
 
+/// StoreKit's stamp on a refunded or revoked transaction.
+const KEY_REVOKED: &str = "revocationDateIOS";
+
 // ---------------------------------------------------------------------------
 // The store seam
 // ---------------------------------------------------------------------------
 
-/// The seven `frust_iap::Iap` calls this repository makes. See the [module
+/// The eight `frust_iap::Iap` calls this repository makes. See the [module
 /// docs](self).
 pub(crate) trait StoreApi {
     fn init_connection(&self, config: Option<serde_json::Value>) -> Result<bool, IapError>;
@@ -84,6 +87,7 @@ pub(crate) trait StoreApi {
         is_consumable: Option<bool>,
     ) -> Result<(), IapError>;
     fn restore_purchases(&self) -> Result<(), IapError>;
+    fn get_pending_transactions(&self) -> Result<Vec<Purchase>, IapError>;
     fn set_purchase_listener(
         &self,
         callback: Box<dyn Fn(IapEvent) + Send + Sync>,
@@ -124,6 +128,10 @@ impl StoreApi for PlayStore {
 
     fn restore_purchases(&self) -> Result<(), IapError> {
         Iap::restore_purchases()
+    }
+
+    fn get_pending_transactions(&self) -> Result<Vec<Purchase>, IapError> {
+        Iap::get_pending_transactions()
     }
 
     fn set_purchase_listener(
@@ -408,6 +416,29 @@ impl<S: StoreApi + Send + Sync + 'static> IapEntitlementRepository<S> {
         }
     }
 
+    /// StoreKit's unfinished transactions for this product: a purchase that
+    /// completed while the app was not running to finish it. The active query
+    /// can miss one on a cold launch (seen under Xcode's StoreKit testing), and
+    /// nothing else here finishes it, so it would be replayed forever. Play has
+    /// no such list; any failure reads as none, since the active query already
+    /// answered.
+    async fn unfinished_pro(&self) -> Vec<Purchase> {
+        let rows = match self.once(|store| store.get_pending_transactions()).await {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(IapError::NotSupportedOnPlatform)) | Err(_) => return Vec::new(),
+            Ok(Err(err)) => {
+                let _ = self.classify(err);
+                return Vec::new();
+            }
+        };
+        rows.into_iter()
+            .filter(|row| {
+                row.product_id == PRO_PRODUCT_ID
+                    && matches!(row.purchase_state, PurchaseState::Purchased)
+            })
+            .collect()
+    }
+
     /// Acknowledge a purchase the entitlement is already granted off. A failure
     /// is logged by [`Self::classify`] and changes nothing: the store keeps
     /// re-delivering an unsettled row, so the next refresh tries again.
@@ -518,8 +549,19 @@ impl<S: StoreApi + Send + Sync + 'static> EntitlementRepository for IapEntitleme
             .call(|store| store.get_available_purchases(Some(active_purchases_only())))
             .await
         {
-            Ok(rows) => {
+            Ok(mut rows) => {
+                let unfinished = self.unfinished_pro().await;
+                for row in unfinished.iter().filter(|row| !is_revoked(row)) {
+                    if !rows.iter().any(|owned| owned.id == row.id) {
+                        rows.push(row.clone());
+                    }
+                }
                 let entitlement = self.entitlement_of(rows).await;
+                // Finished after the grant, revoked ones included: StoreKit
+                // replays an unfinished transaction at every launch until then.
+                for row in &unfinished {
+                    self.settle(row).await;
+                }
                 self.cache.write(entitlement);
                 Ok(entitlement)
             }
@@ -636,6 +678,14 @@ fn awaits_acknowledgement(purchase: &Purchase) -> bool {
         .get(KEY_ACKNOWLEDGED)
         .and_then(|flag| flag.as_bool())
         == Some(false)
+}
+
+/// Whether StoreKit refunded or revoked this transaction.
+fn is_revoked(purchase: &Purchase) -> bool {
+    purchase
+        .extra
+        .get(KEY_REVOKED)
+        .is_some_and(|stamp| !stamp.is_null())
 }
 
 /// Enough of a purchase to identify the transaction being settled.
@@ -778,6 +828,8 @@ mod tests {
         settled: Vec<String>,
         /// The options of every purchase query, in order.
         purchase_queries: Vec<Option<PurchaseOptions>>,
+        /// StoreKit's unfinished transactions; `None` answers as Play does.
+        unfinished: Option<Vec<Purchase>>,
         restore_calls: usize,
         /// How often the connection was opened — a second one is a latch that
         /// was cleared and re-established.
@@ -838,6 +890,17 @@ mod tests {
             match self.gap() {
                 Some(err) => Err(err),
                 None => Ok(self.state().owned.clone()),
+            }
+        }
+
+        fn get_pending_transactions(&self) -> Result<Vec<Purchase>, IapError> {
+            match self.gap() {
+                Some(err) => Err(err),
+                None => self
+                    .state()
+                    .unfinished
+                    .clone()
+                    .ok_or(IapError::NotSupportedOnPlatform),
             }
         }
 
@@ -1019,6 +1082,48 @@ mod tests {
 
     fn refusal(code: IapErrorCode) -> IapEvent {
         IapEvent::PurchaseError(refusal_payload(code))
+    }
+
+    #[test]
+    fn an_unfinished_purchase_the_active_query_missed_grants_pro_and_is_finished() {
+        // A purchase completed while the app was killed: StoreKit lists it as
+        // unfinished, and a cold launch's active query may not return it.
+        let repo = repository();
+        repo.store.state().unfinished = Some(vec![row(PurchaseState::Purchased, None)]);
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Pro));
+        assert_eq!(repo.store.state().settled, vec!["txn-1".to_string()]);
+    }
+
+    #[test]
+    fn an_unfinished_purchase_already_owned_is_finished_once() {
+        let repo = repository();
+        repo.store.state().owned = vec![row(PurchaseState::Purchased, None)];
+        repo.store.state().unfinished = Some(vec![row(PurchaseState::Purchased, None)]);
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Pro));
+        assert_eq!(repo.store.state().settled, vec!["txn-1".to_string()]);
+    }
+
+    #[test]
+    fn a_revoked_unfinished_purchase_is_finished_but_grants_nothing() {
+        let repo = repository();
+        let mut revoked = row(PurchaseState::Purchased, None);
+        revoked.extra.insert(KEY_REVOKED.to_string(), 1.0.into());
+        repo.store.state().unfinished = Some(vec![revoked]);
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Free));
+        assert_eq!(repo.store.state().settled, vec!["txn-1".to_string()]);
+    }
+
+    #[test]
+    fn a_store_without_unfinished_transactions_changes_nothing() {
+        // Play answers `NotSupportedOnPlatform`; that is no gap in the check.
+        let repo = repository();
+        repo.store.state().owned = vec![row(PurchaseState::Purchased, Some(true))];
+
+        assert_eq!(block_on(repo.refresh()), Ok(Entitlement::Pro));
+        assert!(repo.store.state().settled.is_empty());
     }
 
     #[test]
