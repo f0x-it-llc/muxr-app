@@ -11,6 +11,7 @@ use frust::{
 use frust_glyph::{BadgeVariant, avatar, badge};
 
 use super::pairing::READ_ONLY_CHIP;
+use super::pro_gate::row_is_locked;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
@@ -35,6 +36,10 @@ const DELETE_MARK: f64 = 18.0;
 pub const CREDENTIAL_CHIP: &str = "credential";
 /// What the Tablet list says in place of rows when nothing is saved.
 pub const NO_SAVED_SERVERS: &str = "no saved servers";
+/// The tag a row past the free tier's limit carries, beside its lock mark.
+pub const PRO_TAG: &str = "pro";
+/// The lock mark leading the pro tag.
+const LOCK_MARK: f64 = 12.0;
 /// The Tablet row's leading initial box.
 const AVATAR: f64 = 26.0;
 
@@ -51,7 +56,7 @@ pub fn saved_address<S: 'static>(
     let now = epoch_millis();
     let mut children = vec![saved_header(theme, colors), v_gap(spacing::MICRO)];
     for (index, server) in servers.iter().enumerate() {
-        children.push(saved_row(theme, colors, server, index, now, live));
+        children.push(saved_row(theme, colors, server, servers, index, now, live));
     }
     backed(column::<S>(children), colors)
 }
@@ -93,6 +98,7 @@ fn saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     server: &SavedServer,
+    servers: &[SavedServer],
     index: usize,
     now_ms: i64,
     live: Option<&Live>,
@@ -120,7 +126,7 @@ fn saved_row<S: 'static>(
             ])),
         ),
     ];
-    items.extend(chips::<S>(server));
+    items.extend(chips::<S>(colors, server, locked(server, servers, live)));
     let body = Padding(EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y), row::<S>(items));
     let tappable: AnyView<S> = match live {
         None => any(body),
@@ -136,8 +142,15 @@ fn saved_row<S: 'static>(
     ]))
 }
 
-/// The credential and read-only chips a row carries, each led by its gap.
-fn chips<S: 'static>(server: &SavedServer) -> Vec<FlexChild<S>> {
+/// Whether the row wears the pro tag. The splash has no controller, so no
+/// entitlement to judge by, and paints none.
+fn locked(server: &SavedServer, servers: &[SavedServer], live: Option<&Live>) -> bool {
+    live.is_some_and(|live| row_is_locked(server, servers, live.controller.entitlement()))
+}
+
+/// The credential and read-only chips a row carries, then the pro tag when
+/// `locked`, each led by its gap.
+fn chips<S: 'static>(colors: &Palette, server: &SavedServer, locked: bool) -> Vec<FlexChild<S>> {
     let mut items = Vec::new();
     for (shown, chip) in [
         (server.has_credential, CREDENTIAL_CHIP),
@@ -147,6 +160,14 @@ fn chips<S: 'static>(server: &SavedServer) -> Vec<FlexChild<S>> {
             items.push(inflexible(h_gap::<S>(spacing::MD)));
             items.push(inflexible(any(badge(chip, BadgeVariant::Neutral))));
         }
+    }
+    if locked {
+        items.push(inflexible(h_gap::<S>(spacing::MD)));
+        items.push(inflexible(any(icon(icons::LOCK)
+            .size(LOCK_MARK)
+            .color(colors.amber))));
+        items.push(inflexible(h_gap::<S>(spacing::MICRO)));
+        items.push(inflexible(any(badge(PRO_TAG, BadgeVariant::Accent))));
     }
     items
 }
@@ -171,7 +192,9 @@ pub fn tablet_saved_list<S: 'static>(
         if index > 0 {
             children.push(v_gap(spacing::SM));
         }
-        children.push(tablet_saved_row(theme, colors, server, index, now, live));
+        children.push(tablet_saved_row(
+            theme, colors, server, servers, index, now, live,
+        ));
     }
     any(column::<S>(children))
 }
@@ -182,6 +205,7 @@ fn tablet_saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     server: &SavedServer,
+    servers: &[SavedServer],
     index: usize,
     now_ms: i64,
     live: &Live,
@@ -213,7 +237,11 @@ fn tablet_saved_row<S: 'static>(
             ])),
         ),
     ];
-    items.extend(chips::<S>(server));
+    items.extend(chips::<S>(
+        colors,
+        server,
+        locked(server, servers, Some(live)),
+    ));
     let on_tap = Rc::clone(&live.on_saved_tap);
     let body = GestureDetector(row::<S>(items)).on_tap(move |_state: &mut S| on_tap(index));
     let content = row::<S>(vec![

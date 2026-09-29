@@ -28,6 +28,7 @@ pub fn server_url_field<S: 'static>(
     let value = live
         .map(|live| live.controller.url.get())
         .unwrap_or_default();
+    let error = live.and_then(|live| live.controller.url_error.get());
     let controller = live.map(|live| Arc::clone(&live.controller));
     field(
         theme,
@@ -37,6 +38,7 @@ pub fn server_url_field<S: 'static>(
         value,
         FieldOptions {
             invalid,
+            error,
             obscured: false,
             read_only: live.is_none(),
         },
@@ -66,6 +68,7 @@ pub fn token_field<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Li
         value,
         FieldOptions {
             invalid: false,
+            error: None,
             obscured: true,
             read_only: live.is_none(),
         },
@@ -83,6 +86,9 @@ struct FieldOptions {
     /// Inks the label `error` while the form is invalid — only
     /// [`server_url_field`] ever sets this.
     invalid: bool,
+    /// The helper line under the input, in the error tone — only
+    /// [`server_url_field`] ever sets this.
+    error: Option<String>,
     /// Mask the rendered glyphs (password mode) — only [`token_field`] sets it.
     obscured: bool,
     /// Refuses focus/caret/editing while painting at full alpha. `true` for
@@ -112,20 +118,24 @@ fn field<S: 'static>(
     } else {
         colors.fg_dim
     };
-    backed(
-        column::<S>(vec![
-            any(text(label).style(inked(&theme.type_scale.label_small, label_ink))),
-            v_gap::<S>(spacing::XS),
-            any(
-                text_input::<S, _>(value, move |_state: &mut S, next: String| on_change(next))
-                    .placeholder(placeholder)
-                    .text_style(field_text_style(theme, colors.fg))
-                    .obscured(options.obscured)
-                    .read_only(options.read_only),
-            ),
-        ]),
-        colors,
-    )
+    let mut children = vec![
+        any(text(label).style(inked(&theme.type_scale.label_small, label_ink))),
+        v_gap::<S>(spacing::XS),
+        any(
+            text_input::<S, _>(value, move |_state: &mut S, next: String| on_change(next))
+                .placeholder(placeholder)
+                .text_style(field_text_style(theme, colors.fg))
+                .obscured(options.obscured)
+                .read_only(options.read_only),
+        ),
+    ];
+    if let Some(message) = options.error {
+        children.push(v_gap::<S>(spacing::XS));
+        children.push(any(
+            text(message).style(inked(&theme.type_scale.body_small, colors.error))
+        ));
+    }
+    backed(column::<S>(children), colors)
 }
 
 /// `body_medium` re-inked, with one deliberate change to its family, applied

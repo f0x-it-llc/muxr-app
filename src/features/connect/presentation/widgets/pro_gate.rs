@@ -33,7 +33,8 @@ use super::super::controller::{ConnectController, ConnectRetry, GatePrompt, Serv
 use super::credential_dialogs::{credential_offer_prompt, handle_saved_row_tap};
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
-use crate::features::pro::domain::entities::ServerLimitVerdict;
+use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
+use crate::features::pro::domain::use_cases::check_server_limit::check_server_limit;
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::pro::presentation::{ServerLimitContext, UpgradeContext, show_upgrade_sheet};
 use crate::routes::Nav;
@@ -93,6 +94,26 @@ pub(crate) fn gated_saved_row_tap(
         return;
     }
     handle_saved_row_tap(controller, overlays, nav, index);
+}
+
+/// Whether `server` is past the free tier's limit while `saved` is remembered
+/// (most-recently-used first): the leading row is the one a free install keeps,
+/// every other row is what [`check_server_limit`] would block. The one place
+/// the saved rows' pro tag reads its rule from.
+pub(crate) fn row_is_locked(
+    server: &SavedServer,
+    saved: &[SavedServer],
+    entitlement: Entitlement,
+) -> bool {
+    let endpoint = server.endpoint();
+    let leading = saved
+        .first()
+        .is_some_and(|first| first.endpoint() == endpoint);
+    !leading
+        && matches!(
+            check_server_limit(entitlement, saved, &endpoint),
+            ServerLimitVerdict::Blocked { .. }
+        )
 }
 
 /// Drop the rows the free tier cannot keep, then retry — in that order, since
