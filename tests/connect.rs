@@ -4271,9 +4271,13 @@ fn a_collapsed_tablet_folds_the_saved_list_under_the_button_row() {
 
     assert!(
         !harness.shows_value(GETTING_STARTED_BODY),
-        "no left panel, so no paragraph"
+        "no left panel, so no paragraph until asked"
     );
-    assert_eq!(count(&harness, |node| node.label() == Some(INFO_LABEL)), 0);
+    assert_eq!(
+        count(&harness, |node| node.label() == Some(INFO_LABEL)),
+        1,
+        "the info mark keeps the orientation reachable"
+    );
     assert_eq!(count(&harness, saved_header), 1, "one saved-servers header");
     assert_qr_beside_the_cta(&harness);
 
@@ -4284,6 +4288,19 @@ fn a_collapsed_tablet_folds_the_saved_list_under_the_button_row() {
         cta.y1 <= header.y0 && header.y1 <= row.y0,
         "the phone's order: button row, header, rows: {cta:?} / {header:?} / {row:?}"
     );
+}
+
+#[test]
+fn a_collapsed_tablet_raises_the_getting_started_dialog_from_the_info_mark() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(COLLAPSED_TABLET, Harness::mount);
+    let before = harness.nav.depth();
+
+    harness.tap_node("the getting-started affordance", info_button);
+    assert_eq!(harness.nav.depth(), before + 1, "the dialog is pushed");
+    assert!(shows_text(&harness, GETTING_STARTED_TITLE));
+    assert!(harness.shows_value(GETTING_STARTED_BODY));
 }
 
 #[test]
