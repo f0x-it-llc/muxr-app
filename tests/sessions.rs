@@ -22,8 +22,8 @@
 //! sheet. Every repository call is real async work on the UI-thread queue, so
 //! [`Harness::pump_until_values`] deadline-waits for a mutation.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use frust::{
@@ -34,7 +34,7 @@ use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
-use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::sessions::di::SharedSessionsRepository;
 use muxr::features::sessions::domain::entities::{
@@ -1743,4 +1743,155 @@ fn a_phone_card_tap_still_attaches_and_marks_this_device() {
     h.settle();
 
     assert_eq!(h.depth(), 2, "a phone tap attaches");
+}
+
+// ---------------------------------------------------------------------------
+// 13 — the new-session dialog's backend choice
+// ---------------------------------------------------------------------------
+
+/// A repository that serves one card and records every create it is asked for.
+struct RecordingCreateRepo {
+    created: Mutex<Vec<CreateSessionParams>>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for RecordingCreateRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        let mut all = vec![stub_session("alpha")];
+        all.extend(
+            self.created
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|params| stub_session(&params.name)),
+        );
+        Ok(all)
+    }
+
+    async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
+        let session = stub_session(&params.name);
+        self.created.lock().unwrap().push(params);
+        Ok(session)
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the backend-choice tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the backend-choice tests")
+    }
+}
+
+/// Mount over a recording repository, connect offering `backends`, and wait
+/// for the one card to land.
+fn offering(backends: Vec<ServerBackend>) -> (Harness, Arc<RecordingCreateRepo>) {
+    let repo = Arc::new(RecordingCreateRepo {
+        created: Mutex::new(Vec::new()),
+    });
+    let mut h = sized(
+        FULL_TABLET,
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+    );
+    let connection = expect_connection_controller();
+    let mut info = connection
+        .server_info
+        .get_untracked()
+        .expect("the mock connect published server info");
+    info.available_backends = backends;
+    connection.server_info.set(Some(info));
+    h.pump_until_values("the seeded card", |values| {
+        values.iter().any(|v| v == "alpha")
+    });
+    (h, repo)
+}
+
+/// Type `name` into the open dialog's field and submit with Enter.
+fn create_named(h: &mut Harness, dialog: &Chrome, name: &str) {
+    h.tap(center(dialog.content_child()));
+    h.type_text(name);
+    h.press(NamedKey::Enter);
+    h.flush();
+    h.pump_until_values("the created card", |values| {
+        values.iter().any(|v| v == name)
+    });
+}
+
+#[test]
+fn two_offered_backends_show_the_choice_and_herdr_reaches_the_repository() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = offering(vec![ServerBackend::Zellij, ServerBackend::Herdr]);
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    assert!(
+        has_label(&h, "zellij") && has_label(&h, "herdr"),
+        "the segmented control is mounted"
+    );
+
+    // The segment nodes carry no bounds of their own, and the control packs
+    // its segments to the left: the selected pill (the first segment) is
+    // painted as the panel's last rounded rect, so "herdr" sits just past it.
+    let (pill_origin, pill_size) = *dialog.rounded.last().expect("the selected segment's pill");
+    let y = node_centers_by_label(&h.root, "herdr")[0].y;
+    h.tap(Point::new(pill_origin.x + pill_size.width + 20.0, y));
+    h.settle();
+    create_named(&mut h, &dialog, "on-herdr");
+
+    let created = repo.created.lock().unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].name, "on-herdr");
+    assert_eq!(created[0].backend, SessionBackend::Herdr);
+}
+
+#[test]
+fn two_offered_backends_default_to_zellij() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = offering(vec![ServerBackend::Herdr, ServerBackend::Zellij]);
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    create_named(&mut h, &dialog, "untouched");
+
+    assert_eq!(
+        repo.created.lock().unwrap()[0].backend,
+        SessionBackend::Zellij
+    );
+}
+
+#[test]
+fn a_lone_backend_mounts_no_choice_and_creates_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = offering(vec![ServerBackend::Zellij]);
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    assert!(!has_label(&h, "herdr"), "no segmented control");
+    create_named(&mut h, &dialog, "plain");
+
+    assert_eq!(
+        repo.created.lock().unwrap()[0].backend,
+        SessionBackend::Zellij
+    );
+}
+
+#[test]
+fn a_blank_name_creates_nothing_with_or_without_the_choice() {
+    let _g = serial();
+    let _ambient = setup();
+    for backends in [
+        vec![ServerBackend::Zellij],
+        vec![ServerBackend::Zellij, ServerBackend::Herdr],
+    ] {
+        let (mut h, repo) = offering(backends);
+        let dialog = open_dialog_by_value(&mut h, "new session");
+        h.tap(center(dialog.content_child()));
+        h.type_text("   ");
+        h.press(NamedKey::Enter);
+        h.tap_label("Create");
+        h.flush();
+        assert_eq!(h.depth(), 2, "a blank name leaves the dialog open");
+        assert!(repo.created.lock().unwrap().is_empty());
+    }
 }

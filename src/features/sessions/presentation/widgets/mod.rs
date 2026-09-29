@@ -3,7 +3,7 @@
 //! 02 — one submodule per visual cluster: [`server_strip`] (`.conn-row`),
 //! [`session_card`] (`.sess-card`), [`list`] (new-session button, empty and
 //! failed states, the Tablet list column beside the detail), [`detail`] (the
-//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows). Page-coupled by design (`docs/FEATURES_ARCHITECTURE.md`'s
+//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows), [`new_session_dialog`] (name + backend choice). Page-coupled by design (`docs/FEATURES_ARCHITECTURE.md`'s
 //! widgets/ paragraph): each reads the page's state type or calls its
 //! `pages::*` action shims directly.
 //!
@@ -20,6 +20,7 @@
 mod detail;
 mod list;
 mod manage_sheet;
+mod new_session_dialog;
 mod server_strip;
 mod session_card;
 
@@ -38,6 +39,7 @@ pub(in crate::features::sessions::presentation) use list::{
     empty_view, loading_view, master_detail, new_session_row, tablet_list, tablet_list_pieces,
 };
 pub(in crate::features::sessions::presentation) use manage_sheet::sheet_body;
+pub(in crate::features::sessions::presentation) use new_session_dialog::open_new_session_dialog;
 pub(in crate::features::sessions::presentation) use server_strip::{DOT, server_strip};
 pub(in crate::features::sessions::presentation) use session_card::{CardMode, session_card};
 

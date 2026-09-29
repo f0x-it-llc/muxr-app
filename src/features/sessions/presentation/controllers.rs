@@ -114,11 +114,8 @@ impl SessionsController {
         }
     }
 
-    pub async fn create(&self, name: String) {
-        let params = CreateSessionParams {
-            name,
-            backend: SessionBackend::Zellij,
-        };
+    pub async fn create(&self, name: String, backend: SessionBackend) {
+        let params = CreateSessionParams { name, backend };
         if self
             .core
             .run(&self.create, params, RunOptions::default())
@@ -258,7 +255,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        block_on(c.create("staging".to_string()));
+        block_on(c.create("staging".to_string(), SessionBackend::Zellij));
 
         let names: Vec<String> = c
             .sessions
