@@ -1656,7 +1656,7 @@ mod tests {
 
     #[test]
     fn a_load_lands_on_the_mocks_active_tab() {
-        let c = controller(Some("s-1"));
+        let c = controller(Some("zellij:dev"));
         assert!(!c.loaded.get_untracked());
 
         block_on(c.load());
@@ -1785,7 +1785,7 @@ mod tests {
             Arc::new(MockTerminalRepository::seeded()),
             Arc::clone(&sessions) as Arc<dyn SessionsRepository + Send + Sync>,
             Arc::new(MockPreferencesRepository::seeded()),
-            Some("s-1".to_string()),
+            Some("zellij:dev".to_string()),
         );
         block_on(c.load());
 
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn detach_needs_an_attached_session() {
-        let attached = controller(Some("s-1"));
+        let attached = controller(Some("zellij:dev"));
         assert!(block_on(attached.detach()));
 
         let bare = controller(None);

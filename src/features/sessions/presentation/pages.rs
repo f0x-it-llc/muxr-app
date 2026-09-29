@@ -635,10 +635,10 @@ impl Actions {
 
     /// Open the create-session dialog (the dashed row and the empty state's
     /// action both land here).
-    pub fn open_create_dialog(&self) {
+    pub fn open_create_dialog(&self, connection: &Arc<ConnectionController>) {
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
-        let available = expect_connection_controller()
+        let available = connection
             .server_info
             .get_untracked()
             .map(|info| info.available_backends)
@@ -787,7 +787,7 @@ pub(super) fn retry_first_load(state: &mut SessionsState) {
 }
 
 pub(super) fn open_create_dialog(state: &mut SessionsState) {
-    state.actions.open_create_dialog();
+    state.actions.open_create_dialog(&state.connection);
 }
 
 /// Open the management sheet for `id` — a card long-press. Reads the

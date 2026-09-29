@@ -36,7 +36,9 @@ pub fn provide() {
 
 fn platform_sessions_repository() -> SharedSessionsRepository {
     if USE_MOCK_SESSIONS_FOR_TESTS.load(Ordering::Relaxed) {
-        return Arc::new(MockSessionsRepository::seeded());
+        let mock = Arc::new(MockSessionsRepository::seeded());
+        provide_context(Arc::clone(&mock));
+        return mock;
     }
     Arc::new(GrpcSessionsRepository::new(expect_connection_controller()))
 }
@@ -50,5 +52,17 @@ pub fn expect_sessions_repository() -> SharedSessionsRepository {
     use_context::<SharedSessionsRepository>().expect(
         "expect_sessions_repository: features::sessions::di::provide() must run first \
          (MuxrApp::init calls it)",
+    )
+}
+
+/// The concrete mock behind the repository, so a test can reach its churn seam.
+///
+/// # Panics
+///
+/// Panics unless [`provide`] ran on the mock ([`use_mock_sessions_for_tests`]).
+pub fn expect_mock_sessions_repository() -> Arc<MockSessionsRepository> {
+    use_context::<Arc<MockSessionsRepository>>().expect(
+        "expect_mock_sessions_repository: provide() must run on the mock \
+         (use_mock_sessions_for_tests)",
     )
 }

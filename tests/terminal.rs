@@ -62,7 +62,7 @@ const PANEL_PADDING: f64 = 20.0;
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The session the suite attaches to — the sessions mock's first seeded one.
-const SESSION_ID: &str = "s-1";
+const SESSION_ID: &str = "zellij:dev";
 const SESSION_NAME: &str = "dev";
 
 /// `docs/terminal.html`'s `TABS`, as the screen must print them.

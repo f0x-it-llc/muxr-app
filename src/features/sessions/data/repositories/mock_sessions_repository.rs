@@ -36,7 +36,6 @@
 //! this screen's rain is clocked by the settle edge, not by this delay).
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use crate::failure::AppFailure;
@@ -53,19 +52,13 @@ const MOCK_LATENCY: Duration = Duration::from_millis(20);
 pub struct MockSessionsRepository {
     /// The live session set. Mutated in place by create/rename/kill.
     sessions: Mutex<Vec<Session>>,
-    /// Mints ids for sessions created at runtime (`s-5`, `s-6`, …), so a
-    /// created-then-renamed session keeps one stable key.
-    next_id: AtomicU32,
 }
 
 impl MockSessionsRepository {
     /// A repository seeded with [`seed`]'s three sessions.
     pub fn seeded() -> Self {
-        let sessions = seed();
-        let next_id = AtomicU32::new(sessions.len() as u32 + 1);
         Self {
-            sessions: Mutex::new(sessions),
-            next_id,
+            sessions: Mutex::new(seed()),
         }
     }
 
@@ -76,6 +69,18 @@ impl MockSessionsRepository {
         self.lock().clone()
     }
 
+    /// Test seam: changes a field of the session called `name` that no id
+    /// depends on (one more pane), the way daemon telemetry churns between
+    /// polls. Panics when there is no such session.
+    pub fn churn(&self, name: &str) {
+        let mut sessions = self.lock();
+        let session = sessions
+            .iter_mut()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("churn: no session named {name:?}"));
+        session.layout.panes += 1;
+    }
+
     /// The store, with a poisoned lock recovered rather than propagated: a
     /// panicking test must not cascade into every later call on this
     /// repository (`ui::toasts`'s `serial()` uses the same recovery).
@@ -84,17 +89,19 @@ impl MockSessionsRepository {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-
-    /// Mint the next runtime session id.
-    fn mint_id(&self) -> String {
-        format!("s-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
-    }
 }
 
 impl Default for MockSessionsRepository {
     fn default() -> Self {
         Self::seeded()
     }
+}
+
+/// The id production mints for a session: `<backend>:<name>` — the same
+/// convention `GrpcSessionsRepository` reconciles, so a rename changes the id
+/// here exactly as it does there.
+fn session_id(backend: SessionBackend, name: &str) -> String {
+    format!("{}:{name}", backend.label())
 }
 
 /// A terminal pane fixture.
@@ -136,7 +143,7 @@ fn ringing(tab: TabSummary) -> TabSummary {
 fn seed() -> Vec<Session> {
     vec![
         Session {
-            id: "s-1".to_string(),
+            id: session_id(SessionBackend::Zellij, "dev"),
             name: "dev".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Zellij,
@@ -191,7 +198,7 @@ fn seed() -> Vec<Session> {
             },
         },
         Session {
-            id: "s-2".to_string(),
+            id: session_id(SessionBackend::Zellij, "jumping-peach"),
             name: "jumping-peach".to_string(),
             status: SessionStatus::Resurrectible,
             backend: SessionBackend::Zellij,
@@ -208,7 +215,7 @@ fn seed() -> Vec<Session> {
             },
         },
         Session {
-            id: "s-3".to_string(),
+            id: session_id(SessionBackend::Herdr, "herdr"),
             name: "herdr".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Herdr,
@@ -247,13 +254,13 @@ fn seed() -> Vec<Session> {
 }
 
 /// A session created at runtime: one empty tab, running, no clients yet.
-fn new_session(id: String, name: String, backend: SessionBackend) -> Session {
+fn new_session(name: String, backend: SessionBackend) -> Session {
     let third = match backend {
         SessionBackend::Zellij => ThirdMetric::Clients(0),
         SessionBackend::Herdr => ThirdMetric::Spaces(0),
     };
     Session {
-        id,
+        id: session_id(backend, &name),
         name,
         status: SessionStatus::Running,
         backend,
@@ -292,7 +299,7 @@ impl SessionsRepository for MockSessionsRepository {
                 "create_session called with a blank name".to_string(),
             ));
         }
-        let session = new_session(self.mint_id(), name, params.backend);
+        let session = new_session(name, params.backend);
         self.lock().push(session.clone());
         Ok(session)
     }
@@ -312,6 +319,7 @@ impl SessionsRepository for MockSessionsRepository {
                 request.id
             )));
         };
+        session.id = session_id(session.backend, &name);
         session.name = name;
         Ok(session.clone())
     }
@@ -397,11 +405,12 @@ mod tests {
     }
 
     #[test]
-    fn create_appends_a_session_with_a_fresh_id() {
+    fn create_appends_a_session_with_a_name_derived_id() {
         let repo = MockSessionsRepository::seeded();
         let created = block_on(repo.create_session(params("staging"))).expect("create succeeds");
 
         assert_eq!(created.name, "staging");
+        assert_eq!(created.id, "zellij:staging");
         let sessions = repo.snapshot();
         assert_eq!(sessions.len(), SEEDED_COUNT + 1);
         assert_eq!(
@@ -424,20 +433,20 @@ mod tests {
     }
 
     #[test]
-    fn rename_changes_the_name_and_keeps_the_id() {
+    fn rename_changes_the_name_and_mints_the_id_from_it() {
         let repo = MockSessionsRepository::seeded();
         let renamed = block_on(repo.rename_session(RenameRequest {
-            id: "s-1".to_string(),
+            id: "zellij:dev".to_string(),
             name: "  dev-2  ".to_string(),
         }))
         .expect("rename succeeds");
 
-        assert_eq!(renamed.id, "s-1");
+        assert_eq!(renamed.id, "zellij:dev-2");
         assert_eq!(renamed.name, "dev-2", "the stored name is trimmed");
         assert_eq!(
             repo.snapshot()
                 .iter()
-                .find(|s| s.id == "s-1")
+                .find(|s| s.id == "zellij:dev-2")
                 .map(|s| s.name.clone()),
             Some("dev-2".to_string())
         );
@@ -459,17 +468,17 @@ mod tests {
     #[test]
     fn kill_removes_exactly_one_session() {
         let repo = MockSessionsRepository::seeded();
-        block_on(repo.kill_session("s-2".to_string())).expect("kill succeeds");
+        block_on(repo.kill_session("zellij:jumping-peach".to_string())).expect("kill succeeds");
 
         let sessions = repo.snapshot();
         assert_eq!(sessions.len(), SEEDED_COUNT - 1);
-        assert!(sessions.iter().all(|s| s.id != "s-2"));
+        assert!(sessions.iter().all(|s| s.id != "zellij:jumping-peach"));
     }
 
     #[test]
     fn killing_every_session_empties_the_store() {
         let repo = MockSessionsRepository::seeded();
-        for id in ["s-1", "s-2", "s-3"] {
+        for id in ["zellij:dev", "zellij:jumping-peach", "herdr:herdr"] {
             block_on(repo.kill_session(id.to_string())).expect("kill succeeds");
         }
 
