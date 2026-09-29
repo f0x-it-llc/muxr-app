@@ -30,6 +30,9 @@ pub struct SessionsController {
     /// Signals when the first `refresh()` has settled (completed, whether
     /// success or failure), releasing the overlay that holds the loading rain.
     pub first_load_settled: RwSignal<bool>,
+    /// The Tablet detail's selection, keyed by [`Session::id`] — cleared by a
+    /// load whose set no longer carries that id.
+    pub selected: RwSignal<Option<String>>,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
@@ -47,6 +50,7 @@ impl SessionsController {
             sessions: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
             first_load_settled: RwSignal::new(false),
+            selected: RwSignal::new(None),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
@@ -68,6 +72,7 @@ impl SessionsController {
             return;
         }
         if let Ok(sessions) = result {
+            self.forget_vanished_selection(&sessions);
             self.sessions.set(sessions);
             self.loaded.set(true);
         }
@@ -83,6 +88,30 @@ impl SessionsController {
         }
         let _release = ReleasePollClaim(&self.poll_in_flight);
         self.refresh().await;
+    }
+
+    /// Re-runs a failed first load; its success sets `loaded`, the gate
+    /// [`take_poll_tick`](Self::take_poll_tick) reads, so the poll re-arms.
+    pub async fn retry_first_load(&self) {
+        if !self.loaded.get_untracked() {
+            self.refresh().await;
+        }
+    }
+
+    pub fn select(&self, id: &str) {
+        if self.selected.get_untracked().as_deref() != Some(id) {
+            self.selected.set(Some(id.to_string()));
+        }
+    }
+
+    fn forget_vanished_selection(&self, sessions: &[Session]) {
+        let vanished = self
+            .selected
+            .get_untracked()
+            .is_some_and(|id| !sessions.iter().any(|s| s.id == id));
+        if vanished {
+            self.selected.set(None);
+        }
     }
 
     pub async fn create(&self, name: String) {
@@ -324,6 +353,74 @@ mod tests {
 
         c.observe_depth(1);
         assert!(c.is_polling());
+    }
+
+    #[test]
+    fn a_selection_survives_a_rename_and_a_reload() {
+        let c = controller();
+        block_on(c.refresh());
+        let id = c.sessions.get_untracked()[0].id.clone();
+        c.select(&id);
+
+        block_on(c.rename(id.clone(), "dev-2".to_string()));
+        block_on(c.refresh());
+
+        assert_eq!(c.selected.get_untracked(), Some(id));
+    }
+
+    #[test]
+    fn killing_the_selected_session_clears_the_selection() {
+        let c = controller();
+        block_on(c.refresh());
+        let id = c.sessions.get_untracked()[1].id.clone();
+        c.select(&id);
+
+        block_on(c.kill(id));
+
+        assert_eq!(c.selected.get_untracked(), None);
+    }
+
+    #[test]
+    fn a_retry_after_a_failed_first_load_rearms_the_poll() {
+        let c = SessionsController::new(Arc::new(FailOnceSessionsRepository::default()));
+        block_on(c.refresh());
+        assert!(!c.take_poll_tick(), "no poll after a failed first load");
+
+        block_on(c.retry_first_load());
+
+        assert!(c.loaded.get_untracked());
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
+        assert!(c.take_poll_tick(), "the successful retry re-arms the poll");
+    }
+
+    /// Fails its first `list_sessions`, then answers like the seeded mock.
+    #[derive(Default)]
+    struct FailOnceSessionsRepository {
+        calls: AtomicUsize,
+        inner: MockSessionsRepository,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+    impl SessionsRepository for FailOnceSessionsRepository {
+        async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AppFailure::Network("first load".to_string()));
+            }
+            self.inner.list_sessions().await
+        }
+
+        async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
+            self.inner.create_session(params).await
+        }
+
+        async fn rename_session(&self, request: RenameRequest) -> Result<Session, AppFailure> {
+            self.inner.rename_session(request).await
+        }
+
+        async fn kill_session(&self, id: String) -> Result<(), AppFailure> {
+            self.inner.kill_session(id).await
+        }
     }
 
     /// A test repository whose list_sessions returns an error.

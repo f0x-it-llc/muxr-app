@@ -1,8 +1,9 @@
 //! `.conn-row` — the server-info strip under the top bar: the heartbeat's
 //! glowing success dot and ping ring, the dim `zellij 0.44.3 · herdr 0.3.1`
 //! version meta, the live `36ms` latency, and — only for the posture that
-//! actually skips certificate validation — the `insecure` warning chip.
-//! Closed by a hairline rule.
+//! actually skips certificate validation — the `insecure` warning chip, then
+//! the cyan `read-only` chip for a read-only credential. Closed by a hairline
+//! rule.
 //!
 //! **No endpoint here.** The shell's floating bar already titles the
 //! connected host, so the meta text takes the flexible slot instead and
@@ -42,6 +43,8 @@ pub(in crate::features::sessions::presentation) const DOT: f64 = 7.0;
 /// The label the strip prints for the one TLS posture that skips
 /// certificate validation — the source's `.warn-badge`.
 const INSECURE_CHIP: &str = "insecure";
+/// The chip a read-only credential adds after it.
+const READ_ONLY_CHIP: &str = "read-only";
 /// The separator between the strip's per-backend versions
 /// (`zellij 0.44.3 · herdr 0.3.1`).
 const META_SEPARATOR: &str = " \u{b7} ";
@@ -50,6 +53,7 @@ const META_SEPARATOR: &str = " \u{b7} ";
 pub(in crate::features::sessions::presentation) fn server_strip(
     info: Option<&ServerInfo>,
     beat: HeartbeatVisual,
+    read_only: bool,
     colors: &Palette,
 ) -> AnyView<SessionsState> {
     let theme = active_theme();
@@ -82,6 +86,10 @@ pub(in crate::features::sessions::presentation) fn server_strip(
             if let Some(chip) = insecure_chip(info.trust_mode) {
                 children.push(h_gap(STRIP_GAP));
                 children.push(inflexible(badge(chip, BadgeVariant::Warning)));
+            }
+            if read_only {
+                children.push(h_gap(STRIP_GAP));
+                children.push(inflexible(badge(READ_ONLY_CHIP, BadgeVariant::Info)));
             }
             row(children)
         }

@@ -1,21 +1,25 @@
 //! `.new-sess-btn` and the empty state — the screen's only two create entry
-//! points now that the stock app bar's own `+` is gone.
+//! points now that the stock app bar's own `+` is gone — plus the Tablet list
+//! column (`docs/tablet.html`'s `.s-side`): its cards, the failed first load's
+//! Retry, and the [`master_detail`] row that sets it beside the detail pane.
 
 use frust::authoring::DashPattern;
 use frust::motion::AnimatedOpacity;
 use frust::{
-    Align, Alignment, AnyView, BorderStyle, ButtonStyle, EdgeInsets, GestureDetector, Padding, any,
-    button, container, inflexible, text,
+    Align, Alignment, AnyView, Axis, BorderStyle, ButtonStyle, CrossAxisAlignment, EdgeInsets,
+    FlexView, GestureDetector, Padding, SizedBox, any, button, colored_box, container, divider,
+    flexible, inflexible, safe_area, text,
 };
 use frust_glyph::empty_state;
 
+use crate::features::sessions::domain::entities::Session;
 use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
 use super::super::pages::{self, SessionsState};
-use super::session_card::IDLE_OPACITY;
-use super::{active_theme, h_gap, row};
+use super::session_card::{CardMode, IDLE_OPACITY, session_card};
+use super::{LoadPhase, active_theme, column, h_gap, row};
 
 /// `.new-sess-btn{padding:13px}` — no on-scale `ui::spacing` match.
 const NEW_ROW_PAD: f64 = 13.0;
@@ -30,6 +34,12 @@ const NEW_SESSION_PLUS: &str = "+";
 const NEW_SESSION_LABEL: &str = "new session";
 /// What the list says while its first load is still in flight.
 const LOADING_LABEL: &str = "loading sessions\u{2026}";
+/// `.s-side{width:300px}`, and 240px on the collapsed band.
+const COLUMN_WIDTH_FULL: f64 = 300.0;
+const COLUMN_WIDTH_COLLAPSED: f64 = 240.0;
+/// `.s-list{padding:10px;gap:8px}` / `.s-foot{padding:10px}`.
+const COLUMN_PAD: f64 = spacing::MD;
+const COLUMN_GAP: f64 = spacing::SM;
 
 /// The dashed, centre-aligned row that closes the list. The `+` is amber
 /// because it is the call to action; the label beside it is muted.
@@ -84,6 +94,100 @@ pub(in crate::features::sessions::presentation) fn loading_view(
             Alignment::CENTER,
             text(LOADING_LABEL).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
         ),
+    ))
+}
+
+/// The Tablet list column's children: a card per session (a tap selects),
+/// closed by the loading line while the first load is in flight; the failed
+/// state with its Retry, or the empty state, in place of the cards.
+pub(in crate::features::sessions::presentation) fn tablet_list_pieces(
+    sessions: &[Session],
+    phase: LoadPhase,
+    read_only: bool,
+    selected: Option<&str>,
+    previews: bool,
+    colors: &Palette,
+) -> Vec<AnyView<SessionsState>> {
+    match phase {
+        LoadPhase::Failed => return vec![failed_view()],
+        LoadPhase::Loaded if sessions.is_empty() => return vec![empty_view(read_only)],
+        LoadPhase::Loaded | LoadPhase::Loading => {}
+    }
+    let mut pieces: Vec<AnyView<SessionsState>> = sessions
+        .iter()
+        .map(|session| {
+            let selected = selected == Some(session.id.as_str());
+            session_card(session, colors, CardMode::Tablet { selected, previews })
+        })
+        .collect();
+    if phase == LoadPhase::Loading {
+        pieces.push(loading_view(colors));
+    }
+    pieces
+}
+
+/// The Tablet list's `pieces` as the column's padded, gapped stack.
+pub(in crate::features::sessions::presentation) fn tablet_list(
+    pieces: Vec<AnyView<SessionsState>>,
+) -> AnyView<SessionsState> {
+    any(Padding(
+        EdgeInsets::all(COLUMN_PAD),
+        column(pieces, COLUMN_GAP),
+    ))
+}
+
+/// The Tablet body: the list column (`strip` over `list`, `footer` under a
+/// rule once there is one) on the surface tone with a hairline right edge,
+/// and `detail` taking the rest of the width.
+pub(in crate::features::sessions::presentation) fn master_detail(
+    strip: AnyView<SessionsState>,
+    list: AnyView<SessionsState>,
+    footer: Option<AnyView<SessionsState>>,
+    detail: AnyView<SessionsState>,
+    full: bool,
+    colors: &Palette,
+) -> AnyView<SessionsState> {
+    let mut side = vec![inflexible(strip), flexible(1, list)];
+    if let Some(footer) = footer {
+        side.push(inflexible(divider(colors.rule)));
+        side.push(inflexible(Padding(EdgeInsets::all(COLUMN_PAD), footer)));
+    }
+    let side =
+        container(FlexView::new(Axis::Vertical, side).cross_axis(CrossAxisAlignment::Stretch))
+            .fill(colors.surface);
+    let width = if full {
+        COLUMN_WIDTH_FULL
+    } else {
+        COLUMN_WIDTH_COLLAPSED
+    };
+    let edge = colored_box::<SessionsState>()
+        .size(HAIRLINE, 0.0)
+        .fill(colors.rule);
+    let body = FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(SizedBox::<SessionsState>(Some(width), None).child(side)),
+            inflexible(edge),
+            flexible(1, detail),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Stretch);
+    any(safe_area(body).top(false))
+}
+
+/// A first load that failed: Glyph's [`empty_state`] with a Retry that
+/// re-runs it.
+fn failed_view() -> AnyView<SessionsState> {
+    any(empty_state(
+        "Couldn't load sessions",
+        "Connection problem \u{2014} please try again.",
+    )
+    .glyph("\u{25a3}")
+    .action(
+        button("Retry", |state: &mut SessionsState| {
+            pages::retry_first_load(state)
+        })
+        .style(ButtonStyle::Secondary),
     ))
 }
 
