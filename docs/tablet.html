@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>muxr Tablet — Glyph Design Reference v0.3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   muxr tablet reference v0.3 — hand-transcription reference, like redesign.html
+   and terminal.html. Same tokens as those two. The Rust app renders everything
+   in JetBrains Mono; Space Mono / IBM Plex here are the mock's own faces.
+   Every frame is a CSS container: switch the frame size at the top of the page
+   and the same markup collapses the way the size-class rule says it should.
+   ========================================================================== */
+:root{
+  --bg-void:#0a0c11; --bg-base:#10131a; --bg-surface:#161a23; --bg-raised:#1e2330; --bg-overlay:#272d3d; --bg-hover:#2f3648;
+  --amber:#ffb627; --amber-dim:#c98a12; --amber-faint:rgba(255,182,39,0.12); --amber-glow:rgba(255,182,39,0.30); --amber-border:rgba(255,182,39,0.36);
+  --cyan:#5ec8d8; --cyan-faint:rgba(94,200,216,0.13);
+  --success:#5fd88f; --success-faint:rgba(95,216,143,0.11);
+  --warning:#f5c860; --warning-faint:rgba(245,200,96,0.13); --warning-border:rgba(245,200,96,0.35);
+  --error:#ff6b6b; --error-faint:rgba(255,107,107,0.11); --error-border:rgba(255,107,107,0.35);
+  --fg:#f2ead9; --fg-muted:#a39c88; --fg-dim:#6b6556; --fg-faintest:#332f26;
+  --border:rgba(242,234,217,0.09); --border-bright:rgba(242,234,217,0.18);
+  --radius-xs:3px; --radius-sm:6px; --radius-md:10px; --radius-lg:16px; --radius-xl:22px; --radius-full:999px;
+  --font-display:'Space Mono', monospace; --font-mono:'IBM Plex Mono', monospace;
+  --ease-out:cubic-bezier(0.16,1,0.3,1); --ease-spring:cubic-bezier(0.34,1.4,0.55,1);
+  --term-header:#221e17; --term-body:#1b1811; --term-border:rgba(255,238,210,0.07); --term-out:#9b917a; --term-comment:#726a58;
+  --fw:1024px; --fh:720px;
+}
+*,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
+body{ font-family:var(--font-mono); background:#050608; color:var(--fg); min-height:100vh; -webkit-font-smoothing:antialiased; }
+::selection{ background:var(--amber-faint); color:var(--amber); }
+:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+::-webkit-scrollbar{ width:5px; height:5px; } ::-webkit-scrollbar-thumb{ background:var(--border-bright); border-radius:3px; }
+button{ font-family:inherit; }
+
+.page{ display:flex; flex-direction:column; align-items:center; padding:48px 24px 90px; gap:56px; }
+.page-header{ text-align:center; max-width:760px; }
+.eyebrow{ font-size:11px; color:var(--amber); letter-spacing:0.1em; text-transform:uppercase; margin-bottom:14px; }
+h1{ font-family:var(--font-display); font-weight:700; font-size:clamp(26px,4vw,38px); letter-spacing:-0.01em; margin-bottom:12px; }
+h1 span{ color:var(--amber); }
+.page-header p{ font-size:12.5px; color:var(--fg-muted); line-height:1.75; font-weight:300; }
+
+/* page-level controls: frame size + per-frame demo toggles */
+.controls,.demo{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:center; font-size:10.5px; color:var(--fg-dim); letter-spacing:0.08em; text-transform:uppercase; }
+.controls{ margin-top:-30px; }
+.controls .lbl,.demo .lbl{ margin-right:4px; }
+.size-btn,.demo button{ font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.04em; text-transform:none; padding:6px 11px; border-radius:var(--radius-full); border:1px solid var(--border-bright); background:var(--bg-surface); color:var(--fg-muted); cursor:pointer; transition:border-color .15s,color .15s,background .15s; }
+.size-btn:hover,.demo button:hover{ border-color:var(--amber-border); color:var(--amber); }
+.size-btn.on,.demo button.on{ background:var(--amber-faint); border-color:var(--amber-border); color:var(--amber); }
+.demo .grp{ display:flex; gap:6px; align-items:center; padding:4px 8px; border:1px dashed var(--border); border-radius:var(--radius-md); }
+
+.screen-block{ display:flex; flex-direction:column; align-items:center; gap:16px; width:100%; }
+.screen-label{ font-size:10.5px; color:var(--fg-dim); letter-spacing:0.1em; text-transform:uppercase; display:flex; align-items:center; gap:10px; }
+.screen-label::before,.screen-label::after{ content:''; width:44px; height:1px; background:var(--border-bright); }
+.screen-label b{ color:var(--amber); font-weight:500; }
+.frame-note{ max-width:820px; text-align:center; font-size:11px; color:var(--fg-dim); line-height:1.7; }
+.frame-note b{ color:var(--amber); font-weight:500; }
+
+/* frame sizes — the shortest-side rule */
+.page[data-size="land"]{ --fw:1024px; --fh:720px; }
+.page[data-size="med"]{ --fw:720px; --fh:720px; }
+.page[data-size="port"]{ --fw:768px; --fh:1024px; }
+.tablet{ width:var(--fw); height:var(--fh); flex-shrink:0; background:var(--bg-void); border-radius:20px; border:1.5px solid var(--border-bright); overflow:hidden; position:relative; display:flex; flex-direction:column; box-shadow:0 0 0 1px #000, 0 40px 90px rgba(0,0,0,0.6); container:frame / inline-size; transition:width .3s var(--ease-out),height .3s var(--ease-out); }
+.t-status{ height:30px; background:var(--bg-void); display:flex; align-items:center; justify-content:space-between; padding:0 22px; font-size:11px; font-weight:600; flex-shrink:0; }
+.t-status .r{ color:var(--fg-muted); font-size:10px; letter-spacing:1px; font-weight:400; }
+.t-app{ flex:1; display:flex; min-height:0; }
+.t-shell{ flex:1; display:flex; flex-direction:column; min-width:0; }
+
+/* icons: chrome icons are vectors (frust::icons); font glyphs stay content text */
+.ic{ width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; }
+.ic .f{ fill:currentColor; stroke:none; }
+.ic.sm{ width:16px; height:16px; } .ic.xs{ width:13px; height:13px; stroke-width:2; }
+
+/* global nav rail — shell routes only, never on Connect */
+.gnav{ width:56px; background:var(--bg-void); border-right:1px solid var(--border); display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:4px; flex-shrink:0; }
+.gnav-logo{ width:34px; height:34px; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:3px; padding:7px; margin-bottom:12px; border:1px solid var(--border-bright); border-radius:9px; }
+.gnav-logo span{ border-radius:2px; background:var(--amber); }
+.gnav-logo span:nth-child(1),.gnav-logo span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
+.gnav-btn{ width:44px; height:44px; border-radius:var(--radius-md); display:flex; align-items:center; justify-content:center; color:var(--fg-dim); cursor:pointer; transition:background .15s,color .15s; position:relative; border:none; background:transparent; }
+.gnav-btn:hover{ background:var(--bg-surface); color:var(--fg-muted); }
+.gnav-btn.active{ background:var(--amber-faint); color:var(--amber); }
+.gnav-btn .live{ position:absolute; top:9px; right:9px; width:6px; height:6px; border-radius:50%; background:var(--success); box-shadow:0 0 6px var(--success); }
+.gnav-spacer{ flex:1; }
+.gnav-lbl{ font-size:8px; color:var(--fg-faintest); letter-spacing:0.08em; text-transform:uppercase; margin-top:-2px; }
+
+/* shell app bar — the Glyph AppBar the phone shell already draws (RouteMeta adapter) */
+.shellbar{ height:52px; flex-shrink:0; display:flex; align-items:center; padding:0 6px; border-bottom:1px solid var(--border); background:var(--bg-void); position:relative; }
+.shellbar .slot{ width:40px; height:40px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); cursor:pointer; border:none; background:transparent; transition:background .15s,color .15s; }
+.shellbar .slot:hover,.shellbar .slot.open{ background:var(--bg-overlay); color:var(--amber); }
+.shellbar .title{ position:absolute; left:50%; transform:translateX(-50%); font-family:var(--font-display); font-size:13px; font-weight:700; letter-spacing:-0.01em; white-space:nowrap; }
+.shellbar .grow{ flex:1; }
+.brand{ display:flex; align-items:center; gap:7px; padding-left:8px; font-family:var(--font-display); font-weight:700; font-size:13px; color:var(--fg); }
+.brand .mk{ width:16px; height:16px; display:grid; grid-template-columns:1fr 1fr; gap:2px; }
+.brand .mk span{ background:var(--amber); border-radius:1.5px; } .brand .mk span:nth-child(1),.brand .mk span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
+
+/* shared atoms */
+.dot{ width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.dot.ok{ background:var(--success); box-shadow:0 0 6px var(--success); } .dot.warn{ background:var(--warning); } .dot.off{ background:var(--fg-dim); }
+.ping{ position:relative; } .ping::after{ content:''; position:absolute; inset:-5px; border-radius:50%; border:1px solid var(--success); opacity:0; animation:ping 1.6s ease-out infinite; }
+@keyframes ping{ 0%{ transform:scale(.4); opacity:.8; } 100%{ transform:scale(1.6); opacity:0; } }
+.chip{ font-size:9.5px; padding:3px 8px; border-radius:var(--radius-full); border:1px solid transparent; white-space:nowrap; flex-shrink:0; display:inline-flex; align-items:center; gap:4px; }
+.chip.ok{ background:var(--success-faint); color:var(--success); } .chip.warn{ background:var(--warning-faint); color:var(--warning); border-color:var(--warning-border); }
+.chip.neutral{ background:var(--bg-raised); color:var(--fg-muted); border-color:var(--border-bright); } .chip.amber{ background:var(--amber-faint); color:var(--amber); border-color:var(--amber-border); }
+.chip.cyan{ background:var(--cyan-faint); color:var(--cyan); } .chip.dim{ background:var(--bg-raised); color:var(--fg-dim); border-color:var(--border); }
+.chip.err{ background:var(--error-faint); color:var(--error); border-color:var(--error-border); }
+.tag{ font-size:8.5px; padding:1px 6px; border-radius:var(--radius-xs); border:1px solid var(--cyan-faint); background:var(--cyan-faint); color:var(--cyan); flex-shrink:0; }
+.toggle{ width:36px; height:21px; border-radius:var(--radius-full); background:var(--bg-overlay); border:1px solid var(--border-bright); position:relative; flex-shrink:0; cursor:pointer; transition:background .15s; }
+.toggle::after{ content:''; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:var(--fg-dim); transition:transform .18s var(--ease-spring),background .15s; }
+.toggle.on{ background:var(--amber-faint); border-color:var(--amber-border); } .toggle.on::after{ transform:translateX(15px); background:var(--amber); }
+.btn{ font-family:var(--font-mono); font-size:11px; font-weight:500; padding:9px 14px; min-height:36px; border-radius:var(--radius-sm); border:1px solid var(--border-bright); background:var(--bg-raised); color:var(--fg-muted); cursor:pointer; transition:border-color .15s,color .15s,background .15s,opacity .15s; display:inline-flex; align-items:center; justify-content:center; gap:7px; white-space:nowrap; }
+.btn:hover{ border-color:var(--amber-border); color:var(--amber); }
+.btn.primary{ background:var(--amber); border-color:var(--amber); color:#241a04; font-weight:600; } .btn.primary:hover{ background:#ffc247; color:#241a04; }
+.btn.danger{ background:transparent; color:var(--error); border-color:var(--error-border); } .btn.danger:hover{ background:var(--error-faint); }
+.btn.ghost{ background:transparent; border-color:transparent; color:var(--fg-dim); } .btn.ghost:hover{ color:var(--fg-muted); border-color:transparent; }
+.btn.wide{ width:100%; } .btn.tall{ min-height:44px; font-size:12px; letter-spacing:0.03em; }
+.btn .spin{ display:none; width:12px; height:12px; border:2px solid rgba(36,26,4,0.3); border-top-color:#241a04; border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin{ to{ transform:rotate(360deg); } }
+.ibtn{ width:44px; height:44px; border-radius:var(--radius-sm); border:none; background:transparent; color:var(--fg-dim); display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; transition:background .15s,color .15s; }
+.ibtn:hover{ background:var(--bg-hover); color:var(--fg); } .ibtn.danger:hover{ color:var(--error); }
+.card{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-lg); padding:16px; min-width:0; }
+.card-title{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.1em; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+.card-title::before{ content:'//'; color:var(--amber-dim); } .card-title::after{ content:''; flex:1; height:1px; background:var(--border); }
+.card-title .cnote{ font-size:9px; color:var(--cyan); text-transform:none; letter-spacing:0; }
+.sub-hdr{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.1em; display:flex; align-items:center; gap:8px; }
+.sub-hdr::after{ content:''; flex:1; height:1px; background:var(--border); }
+.dashed{ border:1px dashed var(--border-bright); border-radius:var(--radius-md); padding:10px; min-height:44px; text-align:center; font-size:10.5px; color:var(--fg-dim); cursor:pointer; transition:border-color .15s,color .15s,opacity .15s; display:flex; align-items:center; justify-content:center; gap:6px; background:transparent; width:100%; }
+.dashed:hover{ border-color:var(--amber-border); color:var(--amber); } .dashed b{ color:var(--amber); font-weight:500; }
+.empty{ display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:8px; padding:30px 20px; color:var(--fg-dim); }
+.empty .g{ font-size:26px; color:var(--fg-faintest); } .empty h5{ font-size:12.5px; color:var(--fg-muted); font-weight:500; } .empty p{ font-size:10.5px; line-height:1.6; max-width:260px; }
+.skel{ background:linear-gradient(90deg,var(--bg-raised) 25%,var(--bg-overlay) 50%,var(--bg-raised) 75%); background-size:200% 100%; animation:shimmer 1.4s linear infinite; border-radius:var(--radius-sm); }
+@keyframes shimmer{ to{ background-position:-200% 0; } }
+.crumbs{ display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--term-comment); min-width:0; overflow:hidden; white-space:nowrap; }
+.crumbs span{ color:var(--term-out); } .crumbs span.cur{ color:var(--amber); } .crumbs i{ font-style:normal; color:var(--term-comment); }
+
+/* in-frame overlays: menu, dialog, sheet, toast (all pages of the root overlay host) */
+.modal{ position:absolute; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; opacity:0; transition:opacity .18s var(--ease-out); }
+.modal.open{ opacity:1; }
+.modal .scrim{ position:absolute; inset:0; background:rgba(0,0,0,0.6); }
+.modal .panel{ position:relative; width:min(480px, calc(100% - 48px)); background:var(--bg-overlay); border:1px solid var(--border-bright); border-radius:var(--radius-lg); padding:20px; box-shadow:0 24px 60px rgba(0,0,0,0.55); transform:scale(.96); transition:transform .22s var(--ease-spring); }
+.modal.open .panel{ transform:none; }
+.modal.sheet{ align-items:flex-end; } .modal.sheet .panel{ border-radius:var(--radius-lg) var(--radius-lg) 0 0; transform:translateY(20px); padding-top:14px; }
+.modal.sheet .panel::before{ content:''; display:block; width:36px; height:4px; border-radius:2px; background:var(--border-bright); margin:0 auto 14px; }
+.modal.sheet.open .panel{ transform:none; }
+.modal h4{ font-family:var(--font-display); font-size:14px; margin-bottom:8px; } .modal p{ font-size:11px; color:var(--fg-muted); line-height:1.65; font-weight:300; }
+.modal .acts{ display:flex; justify-content:flex-end; gap:8px; margin-top:18px; } .modal .acts.col{ flex-direction:column; } .modal .acts.col .btn{ width:100%; min-height:42px; }
+.modal .field{ margin-top:12px; }
+.toastbox{ position:absolute; left:0; right:0; bottom:22px; display:flex; justify-content:center; pointer-events:none; z-index:70; }
+.toast{ background:var(--bg-overlay); border:1px solid var(--border-bright); color:var(--fg); font-size:11px; padding:10px 16px; border-radius:var(--radius-md); box-shadow:0 12px 30px rgba(0,0,0,0.5); animation:toastin .2s var(--ease-out); max-width:70%; }
+@keyframes toastin{ from{ opacity:0; transform:translateY(8px); } }
+.dd{ position:absolute; top:46px; right:8px; background:var(--bg-overlay); border:1px solid var(--border-bright); border-radius:var(--radius-md); min-width:210px; padding:6px; box-shadow:0 16px 40px rgba(0,0,0,0.5); transform-origin:top right; transform:scale(0.86) translateY(-8px); opacity:0; pointer-events:none; transition:transform .2s var(--ease-spring),opacity .18s var(--ease-out); z-index:50; }
+.dd.open{ transform:none; opacity:1; pointer-events:auto; }
+.dd-i{ display:flex; align-items:center; gap:10px; padding:10px 11px; min-height:40px; font-size:11px; color:var(--fg-muted); border-radius:var(--radius-sm); cursor:pointer; }
+.dd-i:hover{ background:var(--bg-raised); color:var(--fg); } .dd-i .ic{ color:var(--amber); width:16px; height:16px; } .dd-i.err{ color:var(--error); } .dd-i.err .ic{ color:var(--error); }
+.dd-i .chk{ margin-left:auto; color:var(--amber); opacity:0; } .dd-i.on .chk{ opacity:1; }
+.dd-sep{ height:1px; background:var(--border); margin:4px 6px; }
+.ctx{ position:absolute; z-index:55; }
+
+/* ===== 01 connect ===== */
+.connect{ flex:1; display:flex; min-width:0; }
+.c-left{ width:420px; background:var(--bg-base); border-right:1px solid var(--border); padding:30px 30px 24px; display:flex; flex-direction:column; gap:16px; overflow-y:auto; flex-shrink:0; }
+.c-brand{ display:flex; align-items:center; gap:14px; }
+.mark{ width:52px; height:52px; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:4px; padding:10px; border:1px solid var(--border-bright); border-radius:12px; flex-shrink:0; }
+.mark span{ border-radius:3px; background:var(--amber); } .mark span:nth-child(1),.mark span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
+.badge-box{ border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:6px 10px; font-size:10.5px; color:var(--fg); } .badge-box small{ display:block; font-size:9.5px; color:var(--fg-dim); margin-top:2px; }
+.c-left h2{ font-family:var(--font-display); font-size:20px; line-height:1.25; letter-spacing:-0.01em; } .c-left h2 span{ color:var(--amber); }
+.gs{ background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:12px 13px; display:flex; flex-direction:column; gap:10px; }
+.gs p{ font-size:10.5px; color:var(--fg-muted); line-height:1.7; font-weight:300; } .gs .btn{ align-self:flex-start; }
+.saved-list{ display:flex; flex-direction:column; gap:8px; }
+.saved{ display:flex; align-items:center; gap:10px; background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:6px 4px 6px 12px; min-height:56px; cursor:pointer; transition:border-color .15s,background .15s; }
+.saved:hover{ border-color:var(--amber-border); background:var(--bg-raised); }
+.sav-av{ width:26px; height:26px; border-radius:var(--radius-xs); background:var(--amber-faint); color:var(--amber); font-size:11px; font-weight:600; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.saved.locked .sav-av{ background:var(--bg-raised); color:var(--fg-dim); }
+.saved .n{ flex:1; min-width:0; font-size:11.5px; font-weight:500; } .saved .n small{ display:block; font-size:9.5px; color:var(--fg-dim); margin-top:2px; font-weight:400; line-height:1.5; }
+.saved .chips{ display:flex; gap:5px; flex-shrink:0; }
+.c-right{ flex:1; background:var(--bg-surface); display:flex; flex-direction:column; align-items:center; padding:30px 44px; overflow-y:auto; min-width:0; }
+.form{ width:100%; max-width:520px; display:flex; flex-direction:column; gap:16px; margin:auto 0; flex-shrink:0; }
+.form-h{ font-family:var(--font-display); font-size:16px; font-weight:700; margin-bottom:4px; } .form-sub{ font-size:11px; color:var(--fg-muted); line-height:1.6; font-weight:300; }
+.field{ display:flex; flex-direction:column; gap:6px; } .field label{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; transition:color .15s; }
+.field input{ background:var(--bg-base); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:12px 13px; min-height:44px; font-family:var(--font-mono); font-size:12px; color:var(--fg); outline:none; transition:border-color .15s,box-shadow .15s; width:100%; }
+.field input::placeholder{ color:var(--fg-dim); } .field input:focus{ border-color:var(--amber-border); box-shadow:0 0 0 3px var(--amber-faint); }
+.field .help{ display:none; font-size:10px; color:var(--error); }
+.row-between{ display:flex; align-items:center; justify-content:space-between; font-size:11.5px; color:var(--fg); min-height:36px; }
+.radio{ display:flex; align-items:center; gap:10px; font-size:11.5px; padding:8px 0; min-height:40px; cursor:pointer; color:var(--fg); }
+.rdot{ width:16px; height:16px; border-radius:50%; border:1.5px solid var(--border-bright); position:relative; flex-shrink:0; }
+.radio.sel .rdot{ border-color:var(--amber); } .radio.sel .rdot::after{ content:''; position:absolute; inset:3px; border-radius:50%; background:var(--amber); }
+.pin-cap,.pairing,.pair-cap{ display:none; }
+.pin-cap{ font-size:10.5px; color:var(--amber); padding:8px 0 2px; align-items:center; gap:8px; }
+.pairing{ flex-direction:column; gap:10px; }
+.pair-cap{ font-size:10.5px; color:var(--fg-muted); align-items:center; gap:8px; flex-wrap:wrap; }
+.btn-row{ display:flex; gap:10px; } .btn-row .primary{ flex:1; }
+.saved-compact{ display:none; flex-direction:column; gap:10px; margin-top:6px; }
+#connectFrame[data-state="scanned"] .pairing,#connectFrame[data-state="scanned"] .pair-cap{ display:flex; }
+#connectFrame[data-state="scanned"] .pin-cap,#connectFrame[data-state="savedpin"] .pin-cap{ display:flex; }
+#connectFrame[data-state="error"] .field.url label{ color:var(--error); } #connectFrame[data-state="error"] .field.url input{ border-color:var(--error-border); } #connectFrame[data-state="error"] .field.url .help{ display:block; }
+#connectFrame[data-state="busy"] #connectBtn .spin{ display:inline-block; } #connectFrame[data-state="busy"] #connectBtn{ opacity:.85; }
+
+/* ===== 02 sessions ===== */
+.sessions{ flex:1; display:flex; min-width:0; min-height:0; }
+.s-side{ width:300px; background:var(--bg-surface); border-right:1px solid var(--border); display:flex; flex-direction:column; flex-shrink:0; transition:width .3s var(--ease-out); }
+.s-side-head{ padding:12px 14px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:10px; }
+.strip{ display:flex; align-items:center; gap:9px; font-size:10.5px; color:var(--fg-dim); flex-wrap:wrap; min-height:22px; }
+.strip .lat{ color:var(--amber); font-weight:500; } .strip .lat.settled{ color:var(--fg-dim); }
+.strip .ro-chip{ display:none; } #sessFrame.ro .strip .ro-chip{ display:inline-flex; }
+.filter{ background:var(--bg-base); border:1px solid var(--border); border-radius:var(--radius-sm); padding:0 10px; min-height:36px; font-size:10.5px; color:var(--fg-dim); display:flex; align-items:center; gap:8px; }
+.s-list{ flex:1; overflow-y:auto; padding:10px; display:flex; flex-direction:column; gap:8px; position:relative; }
+.sess{ background:var(--bg-base); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:11px 12px; cursor:pointer; border-left:2px solid var(--border-bright); transition:border-color .18s,background .18s; }
+.sess.run{ border-left-color:var(--success); } .sess.idle{ opacity:0.55; }
+.sess:hover{ background:var(--bg-raised); }
+.sess.selected{ background:var(--amber-faint); border-color:var(--amber-border); border-left-color:var(--amber); }
+.sess-top{ display:flex; align-items:center; gap:8px; margin-bottom:7px; flex-wrap:wrap; }
+.sess-av{ width:24px; height:24px; border-radius:var(--radius-xs); background:var(--bg-raised); color:var(--fg-muted); font-size:10.5px; font-weight:600; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.sess.run .sess-av{ background:var(--success-faint); color:var(--success); } .sess.selected .sess-av{ background:var(--amber); color:#241a04; }
+.sess-nm{ flex:1; font-size:12.5px; font-weight:500; min-width:60px; } .sess-nm .ic{ color:var(--warning); vertical-align:-3px; margin-left:4px; }
+.sess-meta{ font-size:10px; color:var(--fg-dim); display:flex; gap:10px; flex-wrap:wrap; }
+.sess-prev{ display:flex; gap:5px; margin-top:8px; } .sess-prev span{ flex:1; background:var(--bg-raised); border:1px solid var(--border); border-radius:4px; padding:5px 7px; font-size:9.5px; color:var(--fg-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.s-foot{ padding:10px; border-top:1px solid var(--border); }
+#sessFrame.ro .s-foot .dashed{ opacity:.55; pointer-events:none; }
+.rain{ position:absolute; inset:0; overflow:hidden; pointer-events:none; background:repeating-linear-gradient(180deg, transparent 0 14px, rgba(255,182,39,0.05) 14px 15px); }
+.rain i{ position:absolute; top:-40px; width:1px; height:34px; background:linear-gradient(180deg, transparent, var(--amber)); opacity:.7; animation:fall 1.3s linear infinite; }
+@keyframes fall{ to{ transform:translateY(760px); } }
+.s-detail{ flex:1; display:flex; flex-direction:column; min-width:0; background:var(--bg-base); }
+.d-top{ min-height:56px; background:var(--bg-surface); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; padding:8px 20px; flex-shrink:0; flex-wrap:wrap; }
+.d-top h3{ font-family:var(--font-display); font-size:15px; } .d-actions{ margin-left:auto; display:flex; gap:8px; }
+#sessFrame.ro .d-actions .btn.mut{ opacity:.45; pointer-events:none; }
+.d-body{ flex:1; overflow-y:auto; padding:20px; display:grid; grid-template-columns:1fr 1fr; gap:14px; align-content:start; }
+.span2{ grid-column:1/-1; }
+.stats{ display:flex; gap:24px; flex-wrap:wrap; } .stat b{ display:block; font-family:var(--font-display); font-size:20px; color:var(--fg); } .stat b.a{ color:var(--amber); } .stat small{ font-size:10px; color:var(--fg-dim); }
+.lay{ display:grid; gap:5px; height:112px; } .lay.g2{ grid-template-columns:2fr 1fr; } .lay.g1{ grid-template-columns:1fr; } .lay.g11{ grid-template-columns:1fr 1fr; }
+.lp{ background:var(--bg-raised); border:1px solid var(--border); border-radius:5px; padding:7px 9px; display:flex; flex-direction:column; gap:4px; min-width:0; }
+.lp.f{ border-color:var(--amber-border); background:var(--amber-faint); } .lp .t{ font-size:9.5px; color:var(--fg-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .lp.f .t{ color:var(--amber); }
+.ln{ height:2px; border-radius:1px; background:var(--fg-faintest); } .lp.f .ln{ background:rgba(255,182,39,0.3); }
+.lay .stk{ display:flex; flex-direction:column; gap:5px; min-width:0; } .lay .stk .lp{ flex:1; }
+.tree-tab{ border:1px solid var(--border-bright); border-radius:7px; overflow:hidden; margin-bottom:8px; }
+.tree-tab-h{ background:var(--bg-surface); padding:9px 11px; min-height:38px; display:flex; align-items:center; gap:9px; font-size:11.5px; }
+.idx{ width:16px; height:16px; border-radius:4px; background:var(--bg-raised); color:var(--fg-dim); font-size:9px; font-weight:600; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.tree-tab.cur .idx{ background:var(--amber); color:#241a04; } .tree-tab-h .nm{ flex:1; font-weight:500; } .tree-tab-h .ic{ color:var(--warning); width:14px; height:14px; }
+.tree-panes{ padding:8px 10px 8px 26px; display:flex; flex-wrap:wrap; gap:6px; border-top:1px solid var(--border); background:var(--bg-base); }
+.pp{ display:flex; align-items:center; gap:7px; border:1px solid var(--border-bright); background:var(--bg-surface); border-radius:var(--radius-full); padding:6px 12px 6px 6px; min-height:32px; font-size:10.5px; color:var(--fg-muted); cursor:pointer; transition:border-color .15s; }
+.pp:hover{ border-color:var(--amber-border); }
+.pp i{ width:17px; height:17px; border-radius:50%; background:var(--bg-raised); color:var(--fg-dim); font-size:8px; font-style:normal; display:flex; align-items:center; justify-content:center; }
+.pp.f{ border-color:var(--amber-border); background:var(--amber-faint); color:var(--amber); } .pp.f i{ background:var(--amber); color:#241a04; } .pp small{ color:var(--fg-dim); font-size:9px; }
+.resurrect p{ font-size:11px; color:var(--fg-muted); line-height:1.65; margin-bottom:12px; font-weight:300; }
+
+/* ===== 03 terminal ===== */
+.term-screen{ flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+.term-row{ flex:1; display:flex; min-height:0; }
+.rail{ width:264px; background:var(--bg-surface); border-right:1px solid var(--border); display:flex; flex-direction:column; flex-shrink:0; overflow:hidden; transition:width .38s var(--ease-spring); position:relative; }
+.rail-full{ display:flex; flex-direction:column; height:100%; min-width:264px; transition:opacity .2s var(--ease-out); }
+.rail-mini{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:6px; opacity:0; pointer-events:none; transition:opacity .25s var(--ease-out) .12s; overflow-y:auto; }
+.term-screen.fs .rail{ width:56px; } .term-screen.fs .rail-full{ opacity:0; pointer-events:none; } .term-screen.fs .rail-mini{ opacity:1; pointer-events:auto; }
+.mini-btn{ width:44px; height:44px; border-radius:var(--radius-md); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-size:9px; color:var(--fg-dim); cursor:pointer; border:1px solid var(--border); background:var(--bg-base); flex-shrink:0; }
+.mini-btn .ic{ width:15px; height:15px; } .mini-btn.a{ color:var(--amber); border-color:var(--amber-border); background:var(--amber-faint); } .mini-sep{ width:20px; height:1px; background:var(--border-bright); margin:2px 0; flex-shrink:0; }
+.mini-btn.more{ border-style:dashed; }
+.rail-head{ padding:12px 14px 10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; flex-shrink:0; flex-wrap:wrap; }
+.rail-head .n{ font-size:12.5px; font-weight:600; flex:1; min-width:80px; } .rail-head small{ display:block; font-size:9.5px; color:var(--fg-dim); font-weight:400; margin-top:1px; }
+.rail-head .ro-chip{ display:none; } #termFrame.ro .rail-head .ro-chip{ display:inline-flex; }
+.rail-tree{ flex:1; overflow-y:auto; padding:12px 12px 8px; }
+.rail-foot{ padding:8px 12px 10px; border-top:1px solid var(--border); display:flex; flex-direction:column; gap:6px; flex-shrink:0; }
+.rail-foot .tip{ font-size:9.5px; color:var(--fg-dim); font-style:italic; } .rail-foot .btn{ width:100%; }
+
+/* tree (space card / tab rect / pane pill) */
+.space-group{ margin-bottom:8px; }
+.space-row{ background:var(--bg-base); border:1px solid var(--border-bright); border-radius:13px; padding:8px 6px 8px 10px; min-height:44px; display:flex; align-items:center; gap:8px; cursor:pointer; transition:border-color .2s,background .2s; }
+.space-group.expanded > .space-row{ border-color:var(--amber-border); background:var(--bg-raised); }
+.r-icon{ display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.space-icon{ width:20px; height:20px; color:var(--amber); } .space-icon .ic{ width:15px; height:15px; }
+.r-name{ flex:1; min-width:0; font-size:12px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.r-meta{ font-size:9.5px; color:var(--fg-dim); flex-shrink:0; }
+.r-chev{ color:var(--fg-dim); flex-shrink:0; transition:transform .28s var(--ease-spring),color .2s; display:flex; } .r-chev .ic{ width:14px; height:14px; }
+.space-group.expanded > .space-row .r-chev,.tab-group.expanded > .tab-row .r-chev{ transform:rotate(90deg); color:var(--amber); }
+.r-act{ width:28px; height:28px; border-radius:var(--radius-sm); border:none; background:transparent; color:var(--fg-dim); display:none; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; transition:background .15s; }
+.r-act .ic{ width:14px; height:14px; }
+.space-row:hover .r-act,.tab-row:hover .r-act,.pane-row:hover .r-act{ display:flex; } .pane-row:hover .r-path,.space-row:hover .r-meta{ display:none; } .r-act:hover{ background:var(--bg-hover); color:var(--fg); }
+#termFrame.ro .r-act{ display:none; }
+.tabs-wrap,.panes-wrap{ display:grid; grid-template-rows:0fr; transition:grid-template-rows .32s var(--ease-spring); }
+.space-group.expanded > .tabs-wrap,.tab-group.expanded > .panes-wrap{ grid-template-rows:1fr; }
+.tabs-inner{ overflow:hidden; margin-left:19px; padding:8px 0 2px 13px; border-left:1px dashed var(--border-bright); display:flex; flex-direction:column; gap:6px; }
+.panes-inner{ overflow:hidden; margin-left:16px; padding:7px 0 3px 12px; border-left:1px dashed var(--amber-border); display:flex; flex-direction:column; gap:6px; }
+.tab-row{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:7px; padding:6px 4px 6px 10px; min-height:40px; display:flex; align-items:center; gap:8px; cursor:pointer; opacity:0; transform:translateX(10px); transition:opacity .22s var(--ease-out),transform .22s var(--ease-out),border-color .18s,background .18s; }
+.tab-row.active{ border-color:var(--amber-border); background:var(--amber-faint); }
+.tab-icon{ width:16px; height:16px; border-radius:4px; background:var(--bg-raised); color:var(--fg-dim); font-size:9px; font-weight:600; } .tab-row.active .tab-icon{ background:var(--amber); color:#241a04; }
+.tab-row .r-name{ font-size:11px; } .tab-row .bell{ color:var(--warning); display:flex; } .tab-row .bell .ic{ width:13px; height:13px; }
+.pane-row{ background:var(--bg-base); border:1px solid var(--border-bright); border-radius:var(--radius-full); padding:5px 4px 5px 6px; min-height:36px; display:flex; align-items:center; gap:7px; cursor:pointer; opacity:0; transform:translateX(10px); transition:opacity .2s var(--ease-out),transform .2s var(--ease-out),border-color .18s,background .18s; }
+.pane-row.focused{ border-color:var(--amber-border); background:var(--amber-faint); }
+.pane-icon{ width:18px; height:18px; border-radius:50%; background:var(--bg-raised); color:var(--fg-dim); } .pane-icon .ic{ width:11px; height:11px; } .pane-row.focused .pane-icon{ background:var(--amber); color:#241a04; }
+.pane-row .r-name{ font-size:10.5px; } .pane-row .r-path{ font-size:9px; color:var(--fg-dim); max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex-shrink:0; }
+.pane-row.exited .r-name{ color:var(--fg-dim); } .pane-row.exited .r-path{ display:none; } .pane-row .ex{ font-size:8.5px; color:var(--fg-dim); border:1px solid var(--border); border-radius:var(--radius-xs); padding:1px 5px; flex-shrink:0; }
+.tab-row.show,.pane-row.show,.add-row.show,.empty-hint.show{ opacity:1; transform:none; }
+.empty-hint{ font-size:10px; color:var(--fg-dim); font-style:italic; padding:5px 2px; opacity:0; transition:opacity .2s; }
+.add-row{ border:1px dashed var(--border-bright); border-radius:8px; padding:7px 10px; min-height:36px; text-align:center; font-size:10px; color:var(--fg-dim); opacity:0; transform:translateX(10px); transition:opacity .2s var(--ease-out),transform .2s var(--ease-out),border-color .15s,color .15s; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:4px; }
+.add-row:hover{ border-color:var(--amber-border); color:var(--amber); } .add-row b{ color:var(--amber); font-weight:500; } .add-row.pane-add{ border-radius:var(--radius-full); }
+.add-space{ border-radius:13px; padding:10px; min-height:44px; opacity:1; transform:none; }
+#termFrame.ro .add-row{ display:none; }
+
+.term-main{ flex:1; display:flex; flex-direction:column; min-width:0; padding:14px; transition:padding .38s var(--ease-spring); }
+.term-screen.fs .term-main{ padding:0; }
+.tcard{ flex:1; background:var(--term-body); border:1px solid var(--term-border); border-radius:var(--radius-xl); overflow:hidden; display:flex; flex-direction:column; min-height:0; box-shadow:0 20px 50px rgba(0,0,0,0.4); transition:border-radius .38s var(--ease-spring); }
+.term-screen.fs .tcard{ border-radius:0; }
+.tcard-head{ display:flex; align-items:center; gap:12px; padding:10px 12px 10px 20px; min-height:48px; background:var(--term-header); flex-shrink:0; }
+.tcard-title{ font-family:var(--font-display); font-weight:700; font-size:13.5px; color:var(--amber); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tcard-head .crumbs{ flex:1; }
+.tcard-head .ro-chip{ display:none; } #termFrame.ro .tcard-head .ro-chip{ display:inline-flex; }
+.expand{ width:36px; height:36px; border-radius:50%; background:rgba(255,238,210,0.06); border:1px solid var(--term-border); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); cursor:pointer; transition:background .15s,color .15s,border-color .15s; flex-shrink:0; }
+.expand .ic{ width:16px; height:16px; }
+.expand:hover,.expand.on{ background:var(--amber-faint); color:var(--amber); border-color:var(--amber-border); }
+.lstrip{ display:none; align-items:center; gap:12px; padding:8px 20px; min-height:38px; font-size:11px; border-bottom:1px solid var(--term-border); background:rgba(255,238,210,0.03); flex-shrink:0; }
+.lstrip .btn{ margin-left:auto; min-height:30px; padding:5px 12px; }
+.lstrip .ls-dot{ width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.lstrip[data-state="reconnecting"]{ display:flex; color:var(--warning); } .lstrip[data-state="reconnecting"] .ls-dot{ background:var(--warning); animation:blink 1s steps(1) infinite; }
+.lstrip[data-state="disconnected"]{ display:flex; color:var(--error); } .lstrip[data-state="disconnected"] .ls-dot{ background:var(--error); }
+.lstrip[data-state="ended"]{ display:flex; color:var(--fg-muted); } .lstrip[data-state="ended"] .ls-dot{ background:var(--fg-dim); }
+.lstrip .only{ display:none; } .lstrip[data-state="reconnecting"] .only.rc,.lstrip[data-state="disconnected"] .only.dc,.lstrip[data-state="ended"] .only.en{ display:inline-flex; }
+.tbody{ flex:1; padding:18px 22px; overflow:hidden; font-size:13px; line-height:1.95; }
+.tl{ display:block; opacity:0; transform:translateY(4px); transition:opacity .18s var(--ease-out),transform .18s var(--ease-out); white-space:pre-wrap; }
+.tl.show{ opacity:1; transform:none; } .tl .p{ color:var(--amber); } .tl .o{ color:var(--term-out); } .tl .c{ color:var(--term-comment); font-style:italic; } .tl .g{ color:var(--success); } .tl .k{ color:#b79df0; } .tl .s{ color:var(--warning); } .tl .b{ color:var(--cyan); }
+.tl .cur{ display:inline-block; width:7px; height:13px; background:var(--amber); vertical-align:-2px; animation:blink 1.1s steps(1) infinite; }
+#termFrame.ro .tl .cur{ background:transparent; border:1px solid var(--amber); animation:none; }
+@keyframes blink{ 50%{ opacity:0; } } @media (prefers-reduced-motion:reduce){ .tl .cur,.lstrip .ls-dot{ animation:none; } .ping::after{ animation:none; } }
+.kbar{ display:flex; flex-wrap:wrap; align-items:center; gap:5px; row-gap:6px; padding:8px 12px; background:var(--term-header); border-top:1px solid var(--term-border); flex-shrink:0; }
+#termFrame.ro .kbar,#termFrame.nokb .kbar,#termFrame.ro .frow,#termFrame.nokb .frow{ display:none; }
+.kgrp{ display:flex; gap:4px; }
+.key{ background:rgba(255,238,210,0.06); border:1px solid var(--term-border); border-radius:var(--radius-sm); padding:0 7px; min-width:36px; height:44px; font-size:10px; color:var(--fg-muted); text-align:center; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background .15s,color .15s,border-color .15s; flex-shrink:0; }
+.key:hover{ color:var(--fg); } .key.latched{ background:var(--amber-faint); border-color:var(--amber-border); color:var(--amber); } .key.del{ color:var(--error); }
+.key .ic{ width:14px; height:14px; }
+.ksep{ width:1px; height:24px; background:var(--term-border); margin:0 2px; flex-shrink:0; } .kspace{ flex:1; }
+.arrows{ display:grid; grid-template-columns:repeat(3,36px); grid-template-rows:repeat(2,21px); gap:2px; }
+.arrows .key{ min-width:0; height:auto; padding:0; } .arrows .none{ visibility:hidden; }
+.frow{ display:none; gap:5px; padding:0 14px 8px; background:var(--term-header); flex-shrink:0; overflow-x:auto; }
+#termFrame.fn .frow{ display:flex; } #termFrame.fn .key.fnk{ background:var(--amber-faint); border-color:var(--amber-border); color:var(--amber); }
+.frow .key{ flex:1; min-width:40px; height:36px; font-size:10px; }
+
+/* ===== 04 settings ===== */
+.settings{ flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--bg-base); overflow-y:auto; }
+.set-wrap{ width:100%; max-width:920px; margin:0 auto; padding:22px 24px 30px; }
+.set-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.srow{ display:flex; align-items:center; gap:11px; padding:8px 0; min-height:48px; border-bottom:1px solid var(--border); }
+.srow:last-child{ border-bottom:none; } .srow.tap{ cursor:pointer; } .srow.tap:hover .slabel{ color:var(--amber); }
+.sico{ width:28px; height:28px; border-radius:var(--radius-sm); background:var(--bg-raised); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--fg-muted); flex-shrink:0; } .sico .ic{ width:15px; height:15px; }
+.sbody{ flex:1; min-width:0; } .slabel{ font-size:12px; transition:color .15s; } .sval{ font-size:10px; color:var(--fg-dim); margin-top:2px; } .sval.ok{ color:var(--success); } .sval.warn{ color:var(--warning); } .sval.cy{ color:var(--cyan); }
+.srow .chev{ color:var(--fg-dim); display:flex; } .srow .chev .ic{ width:14px; height:14px; }
+.tok{ background:var(--bg-base); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:8px 8px 8px 12px; min-height:56px; display:flex; align-items:center; gap:10px; margin-bottom:8px; transition:height .3s var(--ease-out),opacity .3s,margin .3s,padding .3s; overflow:hidden; }
+.tok .tn{ flex:1; min-width:0; font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .tok .tn small{ display:block; font-size:9.5px; color:var(--fg-dim); margin-top:2px; }
+.tok .tn.scr{ color:var(--error); } .tok.gone{ height:0; min-height:0; opacity:0; margin:0; padding-top:0; padding-bottom:0; border-width:0; }
+.revoke{ font-family:var(--font-mono); font-size:10px; color:var(--error); background:transparent; border:1px solid var(--error-border); border-radius:var(--radius-full); padding:0 12px; min-height:32px; cursor:pointer; } .revoke:hover{ background:var(--error-faint); }
+#setFrame.ro .revoke{ color:var(--fg-dim); border-color:var(--border); } #setFrame.ro .dashed.gated{ opacity:.45; } #setFrame.ro .dashed.gated b{ color:var(--fg-dim); }
+.stepper{ display:flex; align-items:center; gap:6px; } .stepper button{ width:36px; height:36px; border-radius:var(--radius-sm); background:var(--bg-raised); border:1px solid var(--border-bright); color:var(--fg-muted); display:flex; align-items:center; justify-content:center; cursor:pointer; } .stepper button:hover{ color:var(--amber); border-color:var(--amber-border); } .stepper span{ font-size:11px; color:var(--amber); min-width:36px; text-align:center; }
+.sv{ display:flex; align-items:center; gap:10px; background:var(--bg-base); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:10px 12px; margin-bottom:8px; flex-wrap:wrap; }
+.sv .tn{ flex:1; min-width:120px; font-size:11.5px; } .sv .tn small{ display:block; font-size:9.5px; color:var(--fg-dim); margin-top:2px; }
+.sv .acts{ display:flex; gap:6px; } .sv .acts .btn{ min-height:32px; padding:5px 11px; font-size:10px; }
+.pro-row .star{ color:var(--amber); } #setFrame.pro .pro-free{ display:none; } #setFrame:not(.pro) .pro-on{ display:none; }
+.pro-on .ok-line{ font-size:11px; color:var(--success); padding:6px 0 2px; }
+
+/* rationale + inventories */
+.rat{ max-width:1024px; width:100%; display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+.rat.two{ grid-template-columns:repeat(2,1fr); }
+.rat .card h5{ font-size:10px; color:var(--amber); text-transform:uppercase; letter-spacing:0.1em; margin-bottom:9px; font-weight:500; }
+.rat .card p,.rat .card li{ font-size:11px; color:var(--fg-muted); line-height:1.75; font-weight:300; }
+.rat .card ul{ padding-left:14px; } .rat .card li b{ color:var(--fg); font-weight:500; } .rat .card li i{ color:var(--cyan); font-style:normal; }
+.divider{ width:100%; max-width:1024px; display:flex; align-items:center; gap:16px; } .divider::before,.divider::after{ content:''; flex:1; height:1px; background:var(--border); } .divider span{ font-size:10.5px; color:var(--fg-dim); letter-spacing:0.1em; text-transform:uppercase; }
+table.rules{ width:100%; max-width:760px; border-collapse:collapse; font-size:11px; }
+table.rules th{ text-align:left; font-size:9.5px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.1em; padding:8px 10px; border-bottom:1px solid var(--border-bright); font-weight:500; }
+table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:var(--fg-muted); vertical-align:top; line-height:1.6; } table.rules td b{ color:var(--amber); font-weight:500; }
+
+/* ===== the collapse band: any frame narrower than 840 (medium band, portrait) ===== */
+@container frame (max-width: 839px){
+  .c-left{ display:none; } .saved-compact{ display:flex; } .c-right{ padding:26px 28px; }
+  .s-side{ width:240px; } .sess-prev{ display:none; }
+  .rail{ width:56px; } .rail-full{ opacity:0; pointer-events:none; } .rail-mini{ opacity:1; pointer-events:auto; }
+  .set-grid{ grid-template-columns:1fr; }
+  .d-body{ grid-template-columns:1fr; }
+  .tcard-head .crumbs{ display:none; }
+  .key.opt{ display:none; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-sessions" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></symbol>
+<symbol id="i-term" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle class="f" cx="12" cy="5" r="1.7"/><circle class="f" cx="12" cy="12" r="1.7"/><circle class="f" cx="12" cy="19" r="1.7"/></symbol>
+<symbol id="i-moreh" viewBox="0 0 24 24"><circle class="f" cx="5" cy="12" r="1.7"/><circle class="f" cx="12" cy="12" r="1.7"/><circle class="f" cx="19" cy="12" r="1.7"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M13 7l4 4"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"/></symbol>
+<symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></symbol>
+<symbol id="i-collapse" viewBox="0 0 24 24"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0112 0v5l2 2H4zM10 20a2 2 0 004 0"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+<symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 13v7H4V6h7"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.3-5.7M20 4v5h-5"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="12" r="4"/><path d="M12 12h9M18 12v3M15 12v2"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+<symbol id="i-chevr" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+<symbol id="i-arru" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+<symbol id="i-arrd" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+<symbol id="i-arrl" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+<symbol id="i-arrr" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+<symbol id="i-star" viewBox="0 0 24 24"><path class="f" d="M12 2l3 7 7 .6-5.3 4.6L18.3 22 12 18l-6.3 4 1.6-7.8L2 9.6 9 9z"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/></symbol>
+<symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M4 12h16"/></symbol>
+<symbol id="i-space" viewBox="0 0 24 24"><path d="M12 3l9 9-9 9-9-9z"/></symbol>
+<symbol id="i-tab" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></symbol>
+<symbol id="i-pane" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></symbol>
+<symbol id="i-latency" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></symbol>
+<symbol id="i-cursor" viewBox="0 0 24 24"><rect x="8" y="4" width="8" height="16" rx="1"/></symbol>
+<symbol id="i-font" viewBox="0 0 24 24"><path d="M5 19L11 5h2l6 14M7.5 14h9"/></symbol>
+</defs></svg>
+
+<div class="page" id="page" data-size="land">
+
+  <div class="page-header">
+    <div class="eyebrow">tablet design reference · glyph · v0.3</div>
+    <h1><span>mu</span>xr — Tablet</h1>
+    <p>The four phone screens re-laid for a tablet, on Glyph, built only from what the shipped app and muxrd can supply today. Sessions becomes master-detail, the "panes &amp; tabs" side sheet becomes a docked rail, Settings becomes a card grid of its six real groups, and Connect earns its width with the returning-user path beside the form. Every frame below is a CSS container: switch the frame size and the same markup collapses the way the size-class rule below says it should. Interactive bits are marked with a demo strip under each frame.</p>
+  </div>
+
+  <div class="controls">
+    <span class="lbl">frame</span>
+    <button class="size-btn on" data-size="land">landscape · 1024 × 720</button>
+    <button class="size-btn" data-size="med">medium band · 720 × 720</button>
+    <button class="size-btn" data-size="port">portrait · 768 × 1024</button>
+  </div>
+
+  <table class="rules">
+    <thead><tr><th>window</th><th>structure</th><th>what collapses</th></tr></thead>
+    <tbody>
+      <tr><td><b>shortest side &lt; 600</b></td><td>phone layout, unchanged</td><td>nothing new; the existing 600px clamp tier still covers phone landscape</td></tr>
+      <tr><td><b>shortest side ≥ 600, width &lt; 840</b></td><td>tablet structure, panels collapsed in place</td><td>Connect drops its left panel and puts saved servers under the form; the sessions column narrows and hides pane previews; the terminal rail becomes the 56px mini rail; the settings and detail grids go single-column; the breadcrumb hides</td></tr>
+      <tr><td><b>shortest side ≥ 600, width ≥ 840</b></td><td>the full two-pane layouts</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <div class="frame-note">The structure is chosen from the <b>shortest side</b>, so rotating an iPad never flips it. Everything the width changes is a width animation with both states already in the tree, which is a layout-time change and needs no rebuild. iPad Split View at one third or one half has a shortest side under 600 and gets the phone layout.</div>
+
+  <!-- ============ 01 CONNECT ============ -->
+  <div class="screen-block">
+    <div class="screen-label"><b>01</b> connect · saved servers beside the form · no rail, no bar</div>
+    <div class="tablet" id="connectFrame" data-state="default">
+      <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
+      <div class="t-app">
+        <div class="connect">
+          <div class="c-left">
+            <div class="c-brand">
+              <div class="mark"><span></span><span></span><span></span><span></span></div>
+              <div class="badge-box">muxrd server<small>zellij · herdr</small></div>
+            </div>
+            <h2>attach to a<br><span>herdr</span> or <span>zellij</span> session</h2>
+            <div class="gs">
+              <p>Muxr is the mobile client for muxrd, a small open-source server you run on your own machine beside zellij or herdr. Install muxrd there, pair this app with it, and connect.</p>
+              <button class="btn"><svg class="ic sm"><use href="#i-ext"/></svg>Open guide</button>
+            </div>
+            <div class="sub-hdr">saved servers</div>
+            <div class="saved-list" id="savedWide"></div>
+          </div>
+          <div class="c-right">
+            <div class="form">
+              <div><div class="form-h">Connect to server</div><div class="form-sub">Enter credentials to attach to a remote zellij or herdr session, or pair with the QR code muxrctl shows.</div></div>
+              <div class="field url"><label>server url</label><input value="dev.home.local:50051" placeholder="zellij.example.com:50051"><div class="help">Enter host:port, for example dev.home.local:50051. A bare host uses :443 under Public domain (CA) and :50051 under Trust anyway.</div></div>
+              <div class="field"><label>login token</label><input type="password" value="3f9a2c1b7e44" placeholder="paste or scan a token"></div>
+              <div class="row-between">Remember for 4 weeks <div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+              <div class="trust" id="trust">
+                <div class="radio sel" onclick="pickRadio(this)"><span class="rdot"></span>Public domain (CA)</div>
+                <div class="radio" onclick="pickRadio(this)"><span class="rdot"></span>Trust anyway <span class="chip warn">insecure</span></div>
+                <div class="pin-cap"><svg class="ic sm"><use href="#i-lock"/></svg>pinned certificate — <span id="pinSrc">from the scanned QR code</span></div>
+              </div>
+              <div class="pairing">
+                <div class="pair-cap"><svg class="ic sm"><use href="#i-scan"/></svg>scanned pairing — the code's own token and trust <span class="chip cyan">read-only</span></div>
+                <button class="btn primary wide tall">Connect now (pinned)</button>
+              </div>
+              <div class="btn-row"><button class="btn primary tall" id="connectBtn"><span class="spin"></span>→ connect</button><button class="btn tall"><svg class="ic sm"><use href="#i-scan"/></svg>Pair by QR code</button></div>
+              <div class="saved-compact"><div class="sub-hdr">saved servers</div><div class="saved-list" id="savedCompact"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="demo">
+      <span class="lbl">state</span>
+      <button class="on" data-cstate="default">default</button>
+      <button data-cstate="scanned">scanned pairing</button>
+      <button data-cstate="savedpin">saved pin</button>
+      <button data-cstate="error">url error</button>
+      <button data-cstate="busy">connecting</button>
+    </div>
+    <div class="frame-note">Connect stays outside the shell: no rail, no bar. The left panel is the <b>returning-user path</b>: the getting-started paragraph moves out of its dialog, and the saved-server rows carry everything the phone row has (trust, recency, the <b>credential</b> and <b>read-only</b> chips, the delete target) plus the label, and a <b>pro</b> tag on rows past the free limit so the paywall is not a surprise. Nothing previews server state before Login; the phone's green dot was decorative and is gone. The form keeps its three trust states (CA, Trust anyway, pinned caption), the post-scan block with its own <b>Connect now</b>, an inline error line, and the QR FAB becomes a button. Under 840px the left panel folds and the saved list moves under the form, the phone's order.</div>
+  </div>
+
+  <!-- ============ 02 SESSIONS ============ -->
+  <div class="screen-block">
+    <div class="screen-label"><b>02</b> sessions · master-detail</div>
+    <div class="tablet" id="sessFrame" data-list="ok">
+      <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
+      <div class="t-app">
+        <div class="gnav">
+          <div class="gnav-logo"><span></span><span></span><span></span><span></span></div>
+          <button class="gnav-btn active" title="Sessions"><svg class="ic"><use href="#i-sessions"/></svg></button>
+          <div class="gnav-spacer"></div>
+          <button class="gnav-btn" title="Settings"><svg class="ic"><use href="#i-gear"/></svg></button>
+        </div>
+        <div class="t-shell">
+          <div class="shellbar">
+            <div class="brand"><div class="mk"><span></span><span></span><span></span><span></span></div>muxr</div>
+            <div class="title">100.71.31.57</div>
+            <div class="grow"></div>
+          </div>
+          <div class="sessions">
+            <div class="s-side">
+              <div class="s-side-head">
+                <div class="strip"><span class="dot ok ping"></span><span>zellij 0.45.1 · herdr 0.9.0</span><span class="lat" id="lat">36ms</span><span class="chip warn">insecure</span><span class="chip cyan ro-chip">read-only</span></div>
+                <div class="filter"><svg class="ic sm"><use href="#i-search"/></svg>filter sessions</div>
+              </div>
+              <div class="s-list" id="sessList"></div>
+              <div class="s-foot"><button class="dashed" id="newSess"><b>+</b> new session</button></div>
+            </div>
+            <div class="s-detail" id="sDetail"></div>
+          </div>
+        </div>
+      </div>
+      <div class="toastbox"></div>
+    </div>
+    <div class="demo">
+      <span class="grp"><span class="lbl">list</span><button class="on" data-lstate="ok">4 sessions</button><button data-lstate="empty">empty</button><button data-lstate="loading">loading</button><button data-lstate="failed">first load failed</button></span>
+      <span class="grp"><button data-toggle="ro" data-frame="sessFrame" data-after="renderSessions">read-only session</button></span>
+    </div>
+    <div class="frame-note">Tap <b>selects</b>; attach is the header button or a double-tap, and selection follows the session id across the 3s poll. The list column header is the phone's server strip: ping ring, versions, latency, <b>insecure</b>, and a new <b>read-only</b> chip. Cards carry the real third metric per backend (clients on zellij, spaces on herdr, tabs saved when resurrectible), a bell mark, and "attached from this device", all already in the list response. The detail's layout preview and tabs-to-panes tree come from a <b>per-selection layout poll</b>, new work the wire supports; tapping a pane attaches straight into it. Rename and kill are visible here instead of behind a long-press; under read-only they dim and attach never does. The empty, loading, failed and resurrectible states are drawn; the failed state gains a Retry the phone lacks.</div>
+  </div>
+
+  <!-- ============ 03 TERMINAL ============ -->
+  <div class="screen-block">
+    <div class="screen-label"><b>03</b> terminal · docked rail · persistent key bar</div>
+    <div class="tablet" id="termFrame">
+      <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
+      <div class="t-app">
+        <div class="gnav">
+          <div class="gnav-logo"><span></span><span></span><span></span><span></span></div>
+          <button class="gnav-btn" title="Sessions (detaches until the retained page ships)"><svg class="ic"><use href="#i-sessions"/></svg></button>
+          <button class="gnav-btn active" title="Current session"><svg class="ic"><use href="#i-term"/></svg><span class="live"></span></button>
+          <div class="gnav-spacer"></div>
+          <button class="gnav-btn" title="Settings"><svg class="ic"><use href="#i-gear"/></svg></button>
+        </div>
+        <div class="t-shell term-screen" id="termScreen">
+          <div class="shellbar" id="appbar">
+            <button class="slot" title="Back"><svg class="ic"><use href="#i-back"/></svg></button>
+            <div class="title">terminal</div>
+            <div class="grow"></div>
+            <button class="slot" id="kebab" title="Terminal menu"><svg class="ic"><use href="#i-more"/></svg></button>
+            <div class="dd" id="dd">
+              <div class="dd-i" data-act="rename"><svg class="ic"><use href="#i-edit"/></svg>Rename session</div>
+              <div class="dd-i" data-act="fs"><svg class="ic"><use href="#i-expand"/></svg>Immersive mode</div>
+              <div class="dd-i on" data-act="kb"><svg class="ic"><use href="#i-term"/></svg>Show key bar<svg class="ic chk"><use href="#i-check"/></svg></div>
+              <div class="dd-sep"></div>
+              <div class="dd-i err" data-act="detach"><svg class="ic"><use href="#i-logout"/></svg>Detach session</div>
+            </div>
+          </div>
+          <div class="term-row">
+            <div class="rail">
+              <div class="rail-full">
+                <div class="rail-head"><span class="n">herdr<small>3 spaces · 8 panes</small></span><span class="chip ok">running</span><span class="chip cyan ro-chip">read-only</span></div>
+                <div class="rail-tree" id="railTree"></div>
+                <div class="rail-foot"><span class="tip" id="railTip">hold a row to rename, or use its ⋯ menu</span><button class="btn" id="detachBtn"><svg class="ic sm"><use href="#i-logout"/></svg>detach</button></div>
+              </div>
+              <div class="rail-mini" id="railMini"></div>
+            </div>
+            <div class="term-main">
+              <div class="tcard">
+                <div class="tcard-head">
+                  <div class="tcard-title" id="tTitle">ed@devbox: ~</div>
+                  <div class="crumbs" id="tCrumb"></div>
+                  <span class="chip cyan ro-chip">read-only</span>
+                  <div class="expand" id="expand" title="Fullscreen"><svg class="ic"><use href="#i-expand"/></svg></div>
+                </div>
+                <div class="lstrip" id="lstrip" data-state="connected">
+                  <span class="ls-dot"></span>
+                  <span class="only rc">reconnecting…</span>
+                  <span class="only dc">disconnected</span>
+                  <span class="only en">session ended</span>
+                  <button class="btn only dc">Retry</button>
+                  <button class="btn only en">Back to sessions</button>
+                </div>
+                <div class="tbody" id="tBody"></div>
+                <div class="kbar">
+                  <div class="kgrp"><div class="key latched" onclick="this.classList.toggle('latched')">Ctrl</div><div class="key" onclick="this.classList.toggle('latched')">Alt</div><div class="key" onclick="this.classList.toggle('latched')">Shift</div><div class="key">Esc</div></div>
+                  <div class="ksep"></div>
+                  <div class="kgrp"><div class="key">Tab</div><div class="key opt">Home</div><div class="key opt">End</div><div class="key">PgUp</div><div class="key">PgDn</div><div class="key del">Del</div></div>
+                  <div class="ksep"></div>
+                  <div class="key fnk" id="fnKey">Fn</div>
+                  <div class="kspace"></div>
+                  <div class="arrows"><div class="key none"></div><div class="key"><svg class="ic"><use href="#i-arru"/></svg></div><div class="key none"></div><div class="key"><svg class="ic"><use href="#i-arrl"/></svg></div><div class="key"><svg class="ic"><use href="#i-arrd"/></svg></div><div class="key"><svg class="ic"><use href="#i-arrr"/></svg></div></div>
+                </div>
+                <div class="frow" id="frow"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="toastbox"></div>
+    </div>
+    <div class="demo">
+      <span class="grp"><span class="lbl">link</span><button class="on" data-link="connected">connected</button><button data-link="reconnecting">reconnecting</button><button data-link="disconnected">disconnected</button><button data-link="ended">session ended</button></span>
+      <span class="grp"><button data-toggle="ro" data-frame="termFrame" data-after="railRoChanged">read-only session</button><button id="fsDemo">immersive</button><button id="replayDemo">replay cascade</button></span>
+    </div>
+    <div class="frame-note">The rail is the phone's side sheet <b>docked</b>: same space card, tab rect and pane pill, same guides, but it never closes, animates only on a user expand, and follows server-side focus from the layout poll. It gains the session name and backend the phone never shows, a <b>float</b> tag and an <b>exited</b> mark the data already carries, a bell on the tab, a hover ⋯ per row for rename (no close or kill, those RPCs are not wired), and a single footer action, <b>detach</b>; the replay button is gone, it was a test seam. The kebab is now a real menu. The card gets the Glyph breadcrumb, the three-state <b>link strip</b>, and a read-only chip. The key bar is persistent on wide (a hardware keyboard produces no inset), keeps Shift, adds Home, End and an Fn row, and uses the inverted-T cluster. Immersive removes the bar and collapses the rail to the mini rail with tooltips, so navigation is never lost.</div>
+  </div>
+
+  <!-- ============ 04 SETTINGS ============ -->
+  <div class="screen-block">
+    <div class="screen-label"><b>04</b> server settings · the six real groups as a card grid</div>
+    <div class="tablet" id="setFrame">
+      <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
+      <div class="t-app">
+        <div class="gnav">
+          <div class="gnav-logo"><span></span><span></span><span></span><span></span></div>
+          <button class="gnav-btn" title="Sessions"><svg class="ic"><use href="#i-sessions"/></svg></button>
+          <div class="gnav-spacer"></div>
+          <button class="gnav-btn active" title="Settings"><svg class="ic"><use href="#i-gear"/></svg></button>
+        </div>
+        <div class="t-shell">
+          <div class="shellbar">
+            <button class="slot" title="Back"><svg class="ic"><use href="#i-back"/></svg></button>
+            <div class="title">server settings</div>
+            <div class="grow"></div>
+          </div>
+          <div class="settings">
+            <div class="set-wrap">
+              <div class="set-grid">
+                <div class="card"><div class="card-title">connection</div>
+                  <div class="srow"><span class="sico"><svg class="ic"><use href="#i-link"/></svg></span><div class="sbody"><div class="slabel">server url</div><div class="sval ok">100.71.31.57:50051</div></div></div>
+                  <div class="srow"><span class="sico"><svg class="ic"><use href="#i-shield"/></svg></span><div class="sbody"><div class="slabel">tls certificate</div><div class="sval warn">insecure (plaintext)</div></div><span class="chip warn">insecure</span></div>
+                  <div class="srow"><span class="sico"><svg class="ic"><use href="#i-latency"/></svg></span><div class="sbody"><div class="slabel">latency</div><div class="sval">36ms</div></div></div>
+                  <div class="srow"><span class="sico">z</span><div class="sbody"><div class="slabel">zellij version</div><div class="sval">0.45.1</div></div></div>
+                  <div class="srow"><span class="sico">h</span><div class="sbody"><div class="slabel">herdr version</div><div class="sval">0.9.0</div></div></div>
+                </div>
+                <div class="card"><div class="card-title">auth tokens</div>
+                  <div id="tokList">
+                    <div class="tok"><div class="tn">muxr-mobile-devbox-1726<small>created 2026-09-12</small></div><span class="chip neutral">read-write</span><button class="revoke">revoke</button></div>
+                    <div class="tok"><div class="tn">ci-viewer<small>created 2026-09-20</small></div><span class="chip cyan">read-only</span><button class="revoke">revoke</button></div>
+                  </div>
+                  <button class="dashed gated" id="newTok"><b>+</b> create new token</button>
+                </div>
+                <div class="card"><div class="card-title">saved servers</div>
+                  <div class="sv"><div class="tn">devbox <span class="chip cyan">credential saved</span><small>100.71.31.57:50051 · just now</small></div><div class="acts"><button class="btn danger" data-confirm="delcred">delete credential</button><button class="btn ghost" data-confirm="forget">forget</button></div></div>
+                  <div class="sv"><div class="tn">prod<small>prod.corp.internal:443 · last week</small></div><div class="acts"><button class="btn ghost" data-confirm="forget">forget</button></div></div>
+                </div>
+                <div class="card"><div class="card-title">muxr pro</div>
+                  <div class="pro-free">
+                    <div class="srow tap pro-row" id="planRow"><span class="sico star"><svg class="ic"><use href="#i-star"/></svg></span><div class="sbody"><div class="slabel">plan</div><div class="sval">Free · one saved server</div></div><span class="chev"><svg class="ic"><use href="#i-chevr"/></svg></span></div>
+                    <div class="srow"><span class="sico"><svg class="ic"><use href="#i-refresh"/></svg></span><div class="sbody"><div class="slabel">Restore purchases</div><div class="sval">for a purchase made on another device</div></div><button class="btn ghost" id="restoreBtn">restore</button></div>
+                  </div>
+                  <div class="pro-on">
+                    <div class="srow pro-row"><span class="sico star"><svg class="ic"><use href="#i-star"/></svg></span><div class="sbody"><div class="slabel">plan</div><div class="sval ok">Pro</div></div></div>
+                    <div class="ok-line">You're on Muxr Pro.</div>
+                  </div>
+                </div>
+                <div class="card"><div class="card-title">terminal appearance</div>
+                  <div class="srow tap"><span class="sico"><svg class="ic"><use href="#i-font"/></svg></span><div class="sbody"><div class="slabel">font family</div><div class="sval">JetBrains Mono · built-in</div></div><span class="chev"><svg class="ic"><use href="#i-chevr"/></svg></span></div>
+                  <div class="srow"><span class="sico">14</span><div class="sbody"><div class="slabel">font size</div><div class="sval">10 to 24px on wide</div></div><div class="stepper"><button id="fsDown"><svg class="ic xs"><use href="#i-arrd"/></svg></button><span id="fsVal">14px</span><button id="fsUp"><svg class="ic xs"><use href="#i-arru"/></svg></button></div></div>
+                  <div class="srow tap"><span class="sico"><svg class="ic"><use href="#i-cursor"/></svg></span><div class="sbody"><div class="slabel">cursor style</div><div class="sval">block</div></div><span class="chev"><svg class="ic"><use href="#i-chevr"/></svg></span></div>
+                </div>
+                <div class="card"><div class="card-title">session poll</div>
+                  <div class="srow tap"><span class="sico"><svg class="ic"><use href="#i-refresh"/></svg></span><div class="sbody"><div class="slabel">layout refresh</div><div class="sval">every 3s</div></div><span class="chev"><svg class="ic"><use href="#i-chevr"/></svg></span></div>
+                  <div class="srow"><span class="sico"><svg class="ic"><use href="#i-bell"/></svg></span><div class="sbody"><div class="slabel">bell notifications</div><div class="sval">haptic + badge</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+                </div>
+                <div class="card span2" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="flex:1;min-width:220px"><div class="slabel">Disconnect</div><div class="sval">You will need the server's token to attach again. Saved servers and credentials stay on this device.</div></div><button class="btn danger" id="disconnectBtn">Disconnect</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="toastbox"></div>
+    </div>
+    <div class="demo">
+      <span class="grp"><button data-toggle="ro" data-frame="setFrame">read-only session</button><button data-toggle="pro" data-frame="setFrame">plan: Pro</button></span>
+    </div>
+    <div class="frame-note">Six groups of two to six rows do not need master-detail, so the grid is the whole screen and the shell bar keeps its <b>server settings</b> title and back. The groups are the app's own: connection (with the three real TLS values and a new latency row), auth tokens (scope chips, revoke with its scramble, create gated under read-only), <b>saved servers</b> and <b>muxr pro</b>, both missing from v0.2, terminal appearance with the size range widened for tablets, and session poll. Invented rows are gone: auto-reconnect is automatic backoff, and Alt always sends the escape prefix. The paywall, confirms and the create-token dialog open at dialog width, never full-bleed.</div>
+  </div>
+
+  <div class="divider"><span>decisions this mock takes</span></div>
+  <div class="rat">
+    <div class="card"><h5>global rail, v1 scope</h5><p>Sessions and Settings only. The Terminal slot appears while attached and, until the terminal page is retained across routes, means "return to this attached session" only from Settings-by-rail is <i>not</i> offered: leaving Terminal still detaches. Retaining the page is the one architectural item this design depends on; ship the rail without it first.</p></div>
+    <div class="card"><h5>the shell bar stays</h5><p>One Glyph app bar over every in-shell route, exactly the phone's RouteMeta adapter: brand or back on the left, title centred, the terminal menu on the right. The gear leaves the bar for the rail on wide. Connect stays bar-less and rail-less.</p></div>
+    <div class="card"><h5>back, per screen</h5><p>Back on Sessions still raises "Disconnect from server?"; back on Terminal or Settings returns to Sessions. The rail's Sessions item from Terminal behaves as detach until the retained page exists.</p></div>
+    <div class="card"><h5>tap semantics on sessions</h5><p>Phone tap attaches; tablet tap selects, attach is the header button or a double-tap. Selection tracks the session id across the poll so a rename keeps it.</p></div>
+    <div class="card"><h5>key bar on wide</h5><p>Persistent, toggled from the terminal menu, because a hardware keyboard produces no keyboard inset and the phone bar would never appear. Shift stays; Home, End and F-keys are added and need byte mappings.</p></div>
+    <div class="card"><h5>read-only everywhere</h5><p>A read-only chip in the sessions strip, the rail header and the card header. Add rows withdrawn, renames refused, no key bar, the grid never focuses; selection, copy, scroll, browse and attach keep working.</p></div>
+  </div>
+
+  <div class="divider"><span>what has to exist for this to ship</span></div>
+  <div class="rat two">
+    <div class="card"><h5>new in glyph</h5><ul>
+      <li><b>navigation rail</b>, docked, 56px, icon with an optional micro label, active tint, a live dot for the attached slot</li>
+      <li><b>docked panel</b> for the terminal rail: Glyph's side sheet is modal-only and pinned to the right edge</li>
+      <li><b>two-pane container</b> with a fixed side width and a flexible detail, no divider drag in v1</li>
+      <li><b>sheet max width</b> on wide, or a dialog-sized variant, for the paywall, QR, manage, picker, token reveal and font sheets</li>
+      <li>reused as-is: <i>menu, breadcrumb, stat card, empty state, skeleton, tooltip, alert, list item, segmented control</i></li>
+    </ul></div>
+    <div class="card"><h5>new app work</h5><ul>
+      <li><b>per-selection layout poll</b> on Sessions for the preview and tree; attach-into-pane reuses the resume slot</li>
+      <li><b>render dropped fields</b>: session age, bell, attached-by-me; the latency row in Settings</li>
+      <li><b>backend picker</b> in the new-session dialog: the wire's create request already takes one</li>
+      <li><b>rail behaviour</b>: no close on commit, resting state, follow server-side focus, per-row menu</li>
+      <li><b>key bar</b>: persistent mode, Home, End, F-keys, hardware PgUp and PgDn</li>
+      <li><b>font size</b> range beyond 14px on wide; inline field errors on Connect; a Retry on first-load failure</li>
+      <li><b>iOS</b>: the target moves from iPhone-only to universal, which adds iPad screenshots to the listing</li>
+      <li><b>palette</b>: hover, overlay, glow, warning and error faint and border tints do not exist in the Rust palette yet</li>
+    </ul></div>
+  </div>
+
+</div>
+
+<script>
+/* ---------- helpers ---------- */
+function $(s, r){ return (r||document).querySelector(s); }
+function $$(s, r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); }
+function mk(cls, html, tag){ var d=document.createElement(tag||'div'); d.className=cls; if(html!=null) d.innerHTML=html; return d; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function ico(n, cls){ return '<svg class="ic '+(cls||'')+'" aria-hidden="true"><use href="#i-'+n+'"/></svg>'; }
+function toast(frame, msg){ var box=frame.querySelector('.toastbox'); if(!box) return; box.innerHTML=''; var t=mk('toast', esc(msg)); box.appendChild(t); clearTimeout(box._t); box._t=setTimeout(function(){ if(t.parentNode) t.remove(); }, 2400); }
+function openModal(frame, html, opts){ closeModal(frame); var m=mk('modal'+(opts&&opts.sheet?' sheet':''), '<div class="scrim"></div><div class="panel" role="dialog">'+html+'</div>'); frame.appendChild(m); requestAnimationFrame(function(){ m.classList.add('open'); }); m.querySelector('.scrim').onclick=function(){ closeModal(frame); }; $$('[data-close]', m).forEach(function(b){ b.addEventListener('click', function(){ closeModal(frame); }); }); return m; }
+function closeModal(frame){ var m=frame.querySelector('.modal'); if(m) m.remove(); }
+function confirmDialog(frame, title, body, action, danger){ return openModal(frame, '<h4>'+esc(title)+'</h4><p>'+esc(body)+'</p><div class="acts"><button class="btn ghost" data-close>Cancel</button><button class="btn '+(danger===false?'primary':'danger')+'" data-close>'+esc(action)+'</button></div>'); }
+function nameDialog(frame, title, value, action){ var m=openModal(frame, '<h4>'+esc(title)+'</h4><div class="field"><input value="'+esc(value||'')+'"></div><div class="acts"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" data-close>'+esc(action||'Save')+'</button></div>'); var i=m.querySelector('input'); i.focus(); i.select(); return m; }
+
+/* frame size switcher */
+$$('.size-btn').forEach(function(b){ b.onclick=function(){ $$('.size-btn').forEach(function(x){ x.classList.remove('on'); }); b.classList.add('on'); $('#page').setAttribute('data-size', b.getAttribute('data-size')); }; });
+/* generic class toggles on a frame */
+$$('[data-toggle]').forEach(function(b){ b.onclick=function(){ var f=document.getElementById(b.getAttribute('data-frame')); var on=f.classList.toggle(b.getAttribute('data-toggle')); b.classList.toggle('on', on); var after=b.getAttribute('data-after'); if(after && window[after]) window[after](); }; });
+function pickGroup(btn, attr){ var g=btn.parentElement; $$('[data-'+attr+']', g).forEach(function(x){ x.classList.remove('on'); }); btn.classList.add('on'); }
+
+/* ===== 01 connect ===== */
+var SAVED=[
+  {label:'devbox', host:'dev.home.local:50051', trust:'system TLS', when:'2 hours ago', port:'50051', cred:true, ro:false},
+  {label:'prod', host:'prod.corp.internal:443', trust:'pinned TLS', when:'last week', port:'443', cred:true, ro:true},
+  {label:'lab', host:'10.0.0.8:50051', trust:'no-verification TLS', when:'not used yet', port:'50051', cred:false, ro:false, locked:true}
+];
+function savedRow(s){
+  var chips='';
+  if(s.cred) chips+='<span class="chip neutral">credential</span>';
+  if(s.ro) chips+='<span class="chip cyan">read-only</span>';
+  if(s.locked) chips+='<span class="chip amber">'+ico('lock','xs')+'pro</span>';
+  var row=mk('saved'+(s.locked?' locked':''), '<span class="sav-av">'+esc(s.label[0].toUpperCase())+'</span><span class="n">'+esc(s.label)+'<small>'+esc(s.host)+' · '+esc(s.trust)+' · '+esc(s.when)+'</small></span><span class="chips">'+chips+'</span><button class="ibtn danger" title="Delete '+esc(s.label)+'">'+ico('trash')+'</button>');
+  row.querySelector('.ibtn').onclick=function(e){ e.stopPropagation(); confirmDialog($('#connectFrame'), 'Remove server?', s.label+' and its saved credential are removed from this device only. Nothing is deleted on the server.', 'Remove'); };
+  row.onclick=function(){
+    var f=$('#connectFrame');
+    if(s.locked){ openModal(f, paywallHtml('Forget prod and connect'), {sheet:true}); return; }
+    if(s.trust==='no-verification TLS' && s.cred){ confirmDialog(f, 'Connect without verification?', "This connection can't verify the server, and the saved token will be sent over an unauthenticated channel.", 'Connect anyway'); return; }
+    if(!s.cred){ $('#connectFrame input').value=s.host; setConnectState('default'); return; }
+    setConnectState(s.trust==='pinned TLS' ? 'savedpin' : 'busy'); if(s.trust==='pinned TLS'){ $('#pinSrc').textContent='from the saved server'; }
+  };
+  return row;
+}
+function renderSaved(){ ['savedWide','savedCompact'].forEach(function(id){ var el=document.getElementById(id); el.innerHTML=''; SAVED.forEach(function(s){ el.appendChild(savedRow(s)); }); }); }
+function pickRadio(el){ $$('.radio', el.parentElement).forEach(function(r){ r.classList.remove('sel'); }); el.classList.add('sel'); var f=$('#connectFrame'); if(f.getAttribute('data-state')==='scanned' || f.getAttribute('data-state')==='savedpin') f.setAttribute('data-state','default'); }
+function setConnectState(st){
+  var f=$('#connectFrame'); f.setAttribute('data-state', st);
+  var radios=$$('#trust .radio');
+  if(st==='scanned' || st==='savedpin'){ radios.forEach(function(r){ r.classList.remove('sel'); }); $('#pinSrc').textContent = st==='scanned' ? 'from the scanned QR code' : 'from the saved server'; }
+  else if(!radios.some(function(r){ return r.classList.contains('sel'); })){ radios[0].classList.add('sel'); }
+  $$('[data-cstate]').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-cstate')===st); });
+}
+$$('[data-cstate]').forEach(function(b){ b.onclick=function(){ setConnectState(b.getAttribute('data-cstate')); }; });
+$('#connectBtn').onclick=function(){ setConnectState('busy'); setTimeout(function(){ setConnectState('default'); }, 1400); };
+renderSaved();
+
+/* ===== paywall (shared by connect + settings) ===== */
+function paywallHtml(forget){
+  return '<h4>Muxr Pro</h4><p>One-time purchase. Yours on this account for good.</p>'+
+    '<div style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:11.5px"><span style="color:var(--amber);display:flex">'+ico('link','sm')+'</span>Multiple servers</div>'+
+    '<div class="acts col"><button class="btn primary" data-close>Upgrade · $4.99</button><button class="btn ghost" data-close>Restore purchases</button>'+(forget?'<button class="btn danger" data-close>'+esc(forget)+'</button>':'')+'<button class="btn ghost" data-close>Not now</button></div>';
+}
+
+/* ===== 02 sessions ===== */
+var SESS=[
+  {id:'zellij:dev', name:'dev', backend:'zellij', status:'running', tabs:4, panes:9, third:['clients',0], age:'2h', bell:false, current:true, previews:['nvim main.rs','cargo test'],
+   layout:{tab:'devbox', shape:'g2', panes:[{t:'nvim main.rs',f:true},{t:'btop'},{t:'ed@precision: ~'}]},
+   tree:[{n:'btop',panes:[{n:'btop'}]},{n:'minefit-api',panes:[{n:'cargo run',p:'~/api'},{n:'ed@minefit',p:'~'}]},{n:'devbox',cur:true,panes:[{n:'ed@devbox',p:'~',f:true},{n:'cargo test',p:'~/api'},{n:'lazygit',p:'~',fl:true}]},{n:'logs',bell:true,panes:[{n:'tail -f',p:'/var/log'}]}]},
+  {id:'zellij:logs-monitor', name:'logs-monitor', backend:'zellij', status:'running', tabs:1, panes:2, third:['clients',1], age:'3d', bell:true, current:false, previews:['tail -f nginx','htop'],
+   layout:{tab:'main', shape:'g11', panes:[{t:'tail -f nginx',f:true},{t:'htop'}]},
+   tree:[{n:'main',cur:true,bell:true,panes:[{n:'tail -f nginx',p:'/var/log',f:true},{n:'htop',p:'~'}]}]},
+  {id:'herdr:herdr', name:'herdr', backend:'herdr', status:'running', tabs:2, panes:3, third:['spaces',3], age:'6d', bell:false, current:false, previews:['ed@devbox','ed@gohora'], space:'forgekit',
+   layout:{tab:'devbox', shape:'g1', panes:[{t:'ed@devbox: ~',f:true}]},
+   tree:[{n:'gohora',panes:[{n:'ed@gohora',p:'~/src'}]},{n:'devbox',cur:true,panes:[{n:'ed@devbox',p:'~',f:true}]}]},
+  {id:'zellij:jumping-peach', name:'jumping-peach', backend:'zellij', status:'resurrectible', tabs:0, panes:0, third:['tabs saved',0], age:'12d', bell:false, current:false, previews:[]}
+];
+var selId='zellij:dev';
+function statusChip(s){ return s.status==='running' ? '<span class="chip ok">running</span>' : '<span class="chip dim">resurrectible</span>'; }
+function thirdMetric(s){ var g = s.third[0]==='clients' ? '◎ ' : s.third[0]==='spaces' ? '◆ ' : ''; return g + s.third[1] + ' ' + s.third[0]; }
+function renderList(){
+  var f=$('#sessFrame'), st=f.getAttribute('data-list'), list=$('#sessList'); list.innerHTML='';
+  if(st==='loading'){ list.appendChild(mk('empty','<p>loading sessions…</p>')); var r=mk('rain'); for(var i=0;i<14;i++){ var s=document.createElement('i'); s.style.left=(4+i*7)+'%'; s.style.animationDelay=(i*0.17)+'s'; r.appendChild(s); } list.appendChild(r); return; }
+  if(st==='failed'){ var e=mk('empty','<div class="g">▣</div><h5>Couldn\'t load sessions</h5><p>Connection problem — please try again.</p><button class="btn">'+ico('refresh','sm')+'Retry</button>'); list.appendChild(e); return; }
+  if(st==='empty'){ list.appendChild(mk('empty','<div class="g">▣</div><h5>No sessions</h5><p>Create one to start working on this server.</p><button class="btn primary">+ new session</button>')); return; }
+  SESS.forEach(function(s){
+    var c=mk('sess '+(s.status==='running'?'run':'idle')+(s.id===selId?' selected':''));
+    var prev = s.previews.length ? '<div class="sess-prev">'+s.previews.map(function(p){ return '<span>'+esc(p)+'</span>'; }).join('')+'</div>' : '';
+    c.innerHTML='<div class="sess-top"><span class="sess-av">'+esc(s.name[0].toUpperCase())+'</span><span class="sess-nm">'+esc(s.name)+(s.bell?ico('bell','xs'):'')+'</span>'+statusChip(s)+'<span class="chip neutral">'+s.backend+'</span></div>'+
+      '<div class="sess-meta"><span>▣ '+s.panes+' panes</span><span>◧ '+s.tabs+' tabs</span><span>'+esc(thirdMetric(s))+'</span>'+(s.current?'<span style="color:var(--amber)">● this device</span>':'')+'</div>'+prev;
+    c.onclick=function(){ selId=s.id; renderSessions(); };
+    c.ondblclick=function(){ toast(f, 'attach → /terminal?session='+s.id); };
+    list.appendChild(c);
+  });
+}
+function overviewCard(s){
+  var third = s.third[0];
+  return '<div class="card"><div class="card-title">overview</div><div class="stats"><div class="stat"><b class="a">'+s.tabs+'</b><small>tabs</small></div><div class="stat"><b class="a">'+s.panes+'</b><small>panes</small></div><div class="stat"><b>'+s.third[1]+'</b><small>'+esc(third)+'</small></div><div class="stat"><b>'+esc(s.age)+'</b><small>age</small></div></div></div>';
+}
+function layoutCard(s){
+  var L=s.layout, ps=L.panes, inner='';
+  if(L.shape==='g2'){ inner='<div class="lp f"><span class="t">'+esc(ps[0].t)+'</span><span class="ln"></span><span class="ln" style="width:80%"></span><span class="ln" style="width:55%"></span></div><div class="stk"><div class="lp"><span class="t">'+esc(ps[1].t)+'</span><span class="ln"></span></div><div class="lp"><span class="t">'+esc(ps[2].t)+'</span><span class="ln"></span></div></div>'; }
+  else { inner=ps.map(function(p){ return '<div class="lp'+(p.f?' f':'')+'"><span class="t">'+esc(p.t)+'</span><span class="ln"></span><span class="ln" style="width:70%"></span></div>'; }).join(''); }
+  var title = (s.backend==='herdr' ? 'space · '+esc(s.space)+' · tab · ' : 'active tab · ')+esc(L.tab);
+  return '<div class="card"><div class="card-title">'+title+'<span class="cnote">per-selection layout poll</span></div><div class="lay '+L.shape+'">'+inner+'</div></div>';
+}
+function treeCard(s){
+  var rows=s.tree.map(function(t,i){
+    var panes = t.cur ? '<div class="tree-panes">'+t.panes.map(function(p){ return '<div class="pp'+(p.f?' f':'')+'" title="attach into this pane"><i>▤</i>'+esc(p.n)+(p.p?' <small>'+esc(p.p)+'</small>':'')+(p.fl?' <span class="tag">float</span>':'')+'</div>'; }).join('')+'</div>' : '';
+    var chip = t.cur ? '<span class="chip amber">focused tab</span>' : t.bell ? '<span class="chip warn">bell</span>' : '<span class="chip dim">'+t.panes.length+' pane'+(t.panes.length===1?'':'s')+'</span>';
+    return '<div class="tree-tab'+(t.cur?' cur':'')+'"><div class="tree-tab-h"><span class="idx">'+(i+1)+'</span><span class="nm">'+esc(t.n)+'</span>'+(t.bell&&!t.cur?ico('bell'):'')+chip+'</div>'+panes+'</div>';
+  }).join('');
+  var title = s.backend==='herdr' ? 'tabs → panes · space '+esc(s.space) : 'tabs → panes';
+  return '<div class="card span2"><div class="card-title">'+title+'<span class="cnote">tap a pane to attach into it</span></div>'+rows+'</div>';
+}
+function noSelection(st){
+  var msg = st==='empty' ? ['No sessions','Create one on the left to start working on this server.'] : st==='loading' ? ['','']: st==='failed' ? ['Nothing to show','The list could not be loaded. Retry on the left.'] : ['Select a session','Its layout and tabs show here. Attach from the header or double-tap a card.'];
+  if(st==='loading') return '<div class="d-body"><div class="card"><div class="skel" style="height:18px;width:40%;margin-bottom:12px"></div><div class="skel" style="height:44px"></div></div><div class="card"><div class="skel" style="height:18px;width:50%;margin-bottom:12px"></div><div class="skel" style="height:112px"></div></div><div class="card span2"><div class="skel" style="height:38px;margin-bottom:8px"></div><div class="skel" style="height:38px;margin-bottom:8px"></div><div class="skel" style="height:38px"></div></div></div>';
+  return '<div class="empty" style="flex:1"><div class="g">◧</div><h5>'+esc(msg[0])+'</h5><p>'+esc(msg[1])+'</p></div>';
+}
+function renderSessions(){
+  var f=$('#sessFrame'), ro=f.classList.contains('ro'), d=$('#sDetail'), st=f.getAttribute('data-list');
+  renderList();
+  var s=SESS.filter(function(x){ return x.id===selId; })[0];
+  if(st!=='ok' || !s){ d.innerHTML=noSelection(st); return; }
+  var head='<div class="d-top"><h3>'+esc(s.name)+'</h3>'+statusChip(s)+'<span class="chip neutral">'+s.backend+'</span>'+(s.current?'<span class="chip amber">attached from this device</span>':'')+(s.bell?'<span class="chip warn">'+ico('bell','xs')+'bell</span>':'')+
+    '<div class="d-actions"><button class="btn mut" id="dRename">'+ico('edit','sm')+'rename</button><button class="btn danger mut" id="dKill">kill</button><button class="btn primary" id="dAttach">→ '+(s.status==='running'?'attach':'attach to resurrect')+'</button></div></div>';
+  var body;
+  if(s.status==='resurrectible'){ body='<div class="d-body"><div class="card span2 resurrect"><div class="card-title">saved, not running</div><p>This session is kept by the server but has no live panes. Attaching resurrects it with its saved tabs; the layout preview appears once it runs.</p></div>'+overviewCard(s)+'</div>'; }
+  else { body='<div class="d-body">'+overviewCard(s)+layoutCard(s)+treeCard(s)+'</div>'; }
+  d.innerHTML=head+body;
+  $('#dRename').onclick=function(){ if(ro){ toast(f,'Read-only session — reconnect with a read-write token to change this'); return; } nameDialog(f, 'Rename session', s.name); };
+  $('#dKill').onclick=function(){ if(ro){ toast(f,'Read-only session — reconnect with a read-write token to change this'); return; } confirmDialog(f, 'Kill session?', 'Any attached client is disconnected immediately.', 'Kill'); };
+  $('#dAttach').onclick=function(){ toast(f, 'attach → /terminal?session='+s.id); };
+  $$('.pp', d).forEach(function(p){ p.onclick=function(){ toast(f, 'attach into pane · '+p.textContent.trim().split(' ')[0]); }; });
+}
+$$('[data-lstate]').forEach(function(b){ b.onclick=function(){ pickGroup(b,'lstate'); $('#sessFrame').setAttribute('data-list', b.getAttribute('data-lstate')); renderSessions(); }; });
+$('#newSess').onclick=function(){ var f=$('#sessFrame'); if(f.classList.contains('ro')){ toast(f,'Read-only session — reconnect with a read-write token to change this'); return; }
+  openModal(f, '<h4>New session</h4><div class="field"><label>name</label><input placeholder="leave blank for a generated name"></div><div class="field"><label>backend</label><div style="display:flex;gap:6px"><button class="btn" style="flex:1;background:var(--amber-faint);border-color:var(--amber-border);color:var(--amber)">zellij</button><button class="btn" style="flex:1">herdr</button></div></div><div class="acts"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" data-close>Create</button></div>'); };
+(function(){ var lat=$('#lat'), v=36; setInterval(function(){ v=Math.max(22, Math.min(60, v+Math.round((Math.random()-0.5)*8))); lat.textContent=v+'ms'; lat.classList.remove('settled'); setTimeout(function(){ lat.classList.add('settled'); }, 300); }, 3000); })();
+renderSessions();
+
+/* ===== 03 terminal ===== */
+var PANES={
+  p1:{name:'ed@cupline',path:'~',title:'ed@cupline: ~',focused:false,lines:[['p','ed@cupline:~$ whoami'],['o','ed'],['p','ed@cupline:~$ ',1]]},
+  p2:{name:'tail',path:'/var/log',title:'tail: /var/log/syslog',focused:false,exited:true,lines:[['p','$ tail -f /var/log/syslog'],['o','Sep 29 07:41:02 cupline sshd: Accepted publickey for ed'],['c','# process exited']]},
+  p3:{name:'journalctl',path:'-u muxrd',title:'journalctl: -f -u muxrd',focused:false,lines:[['p','$ journalctl -f -u muxrd'],['o','Sep 29 07:41:10 cupline muxrd[812]: client attached'],['c','# unit logs, live tail']]},
+  p4:{name:'ed@precision',path:'~',title:'ed@precision: ~',focused:false,lines:[['p','ed@precision:~$ btop'],['o','cpu 12% · mem 4.1/16gb · net 1.2mb/s'],['c','# live system monitor, refreshes every 2s'],['p','ed@precision:~$ ',1]]},
+  p5:{name:'ed@minefit',path:'~/api',title:'ed@minefit: ~/api',focused:false,lines:[['p','ed@minefit:~/api$ cargo run --release'],['o','Compiling minefit-api v0.3.2'],['g','Finished release [optimized] in 12.4s'],['p','ed@minefit:~/api$ ',1]]},
+  p6:{name:'ed@gohora',path:'~/src',title:'ed@gohora: ~/src',focused:false,lines:[['p','ed@gohora:~/src$ go build ./...'],['g','ok  gohora/cmd/server  0.842s'],['c','# no errors, 3 packages rebuilt'],['p','ed@gohora:~/src$ ',1]]},
+  p7:{name:'ed@devbox',path:'/home/ed',title:'ed@devbox: ~',focused:true,lines:[['p','ed@devbox:~$ systemctl status muxrd'],['o','● muxrd.service - muxr gRPC daemon'],['g','   Active: active (running) since Sat 2026-09-26 10:31:23'],['o','   Main PID: 318886 (muxrd)'],['o','   Listen: 0.0.0.0:50051 (TLS · bearer)'],['c','# the rail follows focus; the grid is the one attached pane on herdr'],['p','ed@devbox:~$ ',1]]},
+  p8:{name:'lazygit',path:'~',title:'lazygit: ~',focused:false,floating:true,lines:[['p','$ lazygit'],['s','  feature/tablet-layout  ·  3 staged, 1 modified'],['o','  M docs/tablet.html'],['c','# floating pane']]}
+};
+var SPACES=[
+  {id:'cupline',name:'cupline',tabs:[{id:'main',name:'main',last:true,panes:['p1']},{id:'logs',name:'logs',last:false,bell:true,panes:['p2','p3']}]},
+  {id:'zelli_mobile',name:'zelli_mobile',tabs:[]},
+  {id:'forgekit',name:'forgekit',tabs:[{id:'btop',name:'btop',last:false,panes:['p4']},{id:'minefit',name:'minefit-api',last:false,panes:['p5']},{id:'gohora',name:'gohora',last:false,panes:['p6']},{id:'devbox',name:'devbox',last:true,panes:['p7','p8']}]}
+];
+var ctx={space:'forgekit', tab:'devbox'};
+var tBody=$('#tBody'), tTitle=$('#tTitle'), tCrumb=$('#tCrumb'), railTree=$('#railTree'), railMini=$('#railMini'), termFrame=$('#termFrame');
+var elMap={};
+function renderPane(id){
+  var p=PANES[id]; tTitle.textContent=p.title;
+  tCrumb.innerHTML='<span>herdr</span><i>›</i><span>'+esc(ctx.space)+'</span><i>›</i><span class="cur">'+esc(ctx.tab)+'</span>';
+  tBody.innerHTML='';
+  p.lines.forEach(function(l){ var s=document.createElement('span'); s.className='tl'; s.innerHTML='<span class="'+l[0]+'">'+esc(l[1])+'</span>'+(l[2]?'<span class="cur"></span>':''); tBody.appendChild(s); });
+  $$('.tl', tBody).forEach(function(l,i){ setTimeout(function(){ l.classList.add('show'); }, i*110+60); });
+  renderMini();
+}
+function rowMenu(e, kind, name){
+  e.stopPropagation();
+  var f=termFrame; closeModal(f);
+  var m=mk('dd ctx open', '<div class="dd-i" data-a="rename">'+ico('edit')+'Rename '+kind+'</div>'+(kind!=='pane'?'<div class="dd-i" data-a="new">'+ico('plus')+'New '+(kind==='space'?'tab':'pane')+' here</div>':''));
+  var r=f.getBoundingClientRect(); m.style.left=Math.min(e.clientX-r.left, r.width-230)+'px'; m.style.top=(e.clientY-r.top)+'px'; m.style.right='auto';
+  f.appendChild(m);
+  $$('.dd-i', m).forEach(function(i){ i.onclick=function(ev){ ev.stopPropagation(); m.remove(); if(i.getAttribute('data-a')==='rename') nameDialog(f, 'Rename '+kind, name); else nameDialog(f, kind==='space'?'New tab':'New pane', '', 'Create'); }; });
+  setTimeout(function(){ document.addEventListener('click', function h(){ m.remove(); document.removeEventListener('click', h); }); }, 0);
+}
+function buildTree(){
+  railTree.innerHTML=''; elMap={};
+  SPACES.forEach(function(sp){
+    var g=mk('space-group');
+    var row=mk('space-row','<span class="r-icon space-icon">'+ico('space')+'</span><span class="r-name">'+esc(sp.name)+'</span><span class="r-meta">'+sp.tabs.length+' tab'+(sp.tabs.length===1?'':'s')+'</span><button class="r-act" title="Space actions">'+ico('moreh')+'</button><span class="r-chev">'+ico('chevr')+'</span>');
+    row.onclick=function(){ toggleSpace(sp.id); }; row.querySelector('.r-act').onclick=function(e){ rowMenu(e,'space',sp.name); }; g.appendChild(row);
+    var tw=mk('tabs-wrap'), ti=mk('tabs-inner'), rows=[], tabs={};
+    if(!sp.tabs.length){ var e=mk('empty-hint','no tabs yet'); ti.appendChild(e); rows.push(e); }
+    sp.tabs.forEach(function(tab, n){
+      var tg=mk('tab-group'), tr=mk('tab-row','<span class="r-icon tab-icon">'+(n+1)+'</span><span class="r-name">'+esc(tab.name)+'</span>'+(tab.bell?'<span class="bell" title="bell">'+ico('bell')+'</span>':'')+'<button class="r-act" title="Tab actions">'+ico('moreh')+'</button><span class="r-chev">'+ico('chevr')+'</span>');
+      tr.onclick=function(e){ e.stopPropagation(); toggleTab(sp.id, tab.id, false); }; tr.querySelector('.r-act').onclick=function(e){ rowMenu(e,'tab',tab.name); }; tg.appendChild(tr); rows.push(tr);
+      var pw=mk('panes-wrap'), pi=mk('panes-inner'), prs=[];
+      tab.panes.forEach(function(pid){
+        var p=PANES[pid], pr=mk('pane-row'+(p.focused?' focused':'')+(p.exited?' exited':''),'<span class="r-icon pane-icon">'+ico('pane')+'</span><span class="r-name">'+esc(p.name)+'</span>'+(p.floating?'<span class="tag">float</span>':'')+(p.exited?'<span class="ex">exited</span>':'')+'<span class="r-path">'+esc(p.path)+'</span><button class="r-act" title="Pane actions">'+ico('moreh')+'</button>');
+        pr.onclick=function(e){ e.stopPropagation(); selectPane(sp.id, tab.id, pid); }; pr.querySelector('.r-act').onclick=function(e){ rowMenu(e,'pane',p.name); }; pi.appendChild(pr); prs.push(pr);
+      });
+      var ap=mk('add-row pane-add','<b>+</b> new pane'); ap.onclick=function(e){ e.stopPropagation(); toast(termFrame,'new tiled pane in '+tab.name); }; pi.appendChild(ap); prs.push(ap);
+      pw.appendChild(pi); tg.appendChild(pw); ti.appendChild(tg); tabs[tab.id]={group:tg,row:tr,rows:prs};
+    });
+    var at=mk('add-row','<b>+</b> new tab'); at.onclick=function(e){ e.stopPropagation(); nameDialog(termFrame,'New tab','','Create'); }; ti.appendChild(at); rows.push(at);
+    tw.appendChild(ti); g.appendChild(tw); railTree.appendChild(g); elMap[sp.id]={group:g,rows:rows,tabs:tabs};
+  });
+  var as=mk('add-row add-space show','<b>+</b> new space'); as.onclick=function(){ nameDialog(termFrame,'New space','','Create'); }; railTree.appendChild(as);
+}
+function renderMini(){
+  railMini.innerHTML='';
+  SPACES.forEach(function(sp){ var b=mk('mini-btn'+(sp.id===ctx.space?' a':''), ico('space')); b.title=sp.name+' · '+sp.tabs.length+' tabs'; b.onclick=function(){ if(sp.tabs.length){ var last=sp.tabs.filter(function(t){return t.last;})[0]||sp.tabs[0]; selectPane(sp.id,last.id,last.panes[0]); } }; railMini.appendChild(b); });
+  railMini.appendChild(mk('mini-sep'));
+  var sp=SPACES.filter(function(x){ return x.id===ctx.space; })[0];
+  sp.tabs.forEach(function(t,i){ var b=mk('mini-btn'+(t.id===ctx.tab?' a':''), '<span>'+(i+1)+'</span>'); b.title=t.name; b.onclick=function(){ selectPane(sp.id,t.id,t.panes[0]); }; railMini.appendChild(b); });
+  railMini.appendChild(mk('mini-sep'));
+  var tab=sp.tabs.filter(function(t){ return t.id===ctx.tab; })[0];
+  if(tab) tab.panes.forEach(function(pid){ var p=PANES[pid], b=mk('mini-btn'+(p.focused?' a':''), ico('pane')); b.title=p.name; b.onclick=function(){ selectPane(sp.id,tab.id,pid); }; railMini.appendChild(b); });
+  var x=mk('mini-btn more', ico('expand')); x.title='Exit immersive'; x.onclick=function(){ setFs(false); }; railMini.appendChild(x);
+}
+function collapseAll(){
+  Object.keys(elMap).forEach(function(sid){ var s=elMap[sid]; s.group.classList.remove('expanded'); s.rows.forEach(function(e){ e.classList.remove('show'); });
+    Object.keys(s.tabs).forEach(function(tid){ var t=s.tabs[tid]; t.group.classList.remove('expanded'); t.row.classList.remove('active'); t.rows.forEach(function(e){ e.classList.remove('show'); }); }); });
+}
+function toggleSpace(id){
+  var was=elMap[id].group.classList.contains('expanded'); collapseAll(); if(was){ showResting(ctx.space, ctx.tab); return; }
+  var s=elMap[id]; s.group.classList.add('expanded');
+  s.rows.forEach(function(e,i){ setTimeout(function(){ e.classList.add('show'); }, 90+i*70); });
+  var d=SPACES.filter(function(x){ return x.id===id; })[0], last=d.tabs.filter(function(t){ return t.last; })[0]||d.tabs[0];
+  if(last) setTimeout(function(){ toggleTab(id, last.id, true); }, 90+s.rows.length*70+140);
+}
+function toggleTab(sid, tid, auto){
+  var s=elMap[sid]; if(!s.group.classList.contains('expanded')) return;
+  var was=s.tabs[tid].group.classList.contains('expanded');
+  Object.keys(s.tabs).forEach(function(k){ var t=s.tabs[k]; t.group.classList.remove('expanded'); t.row.classList.remove('active'); t.rows.forEach(function(e){ e.classList.remove('show'); }); });
+  if(was && !auto) return;
+  var t=s.tabs[tid]; t.group.classList.add('expanded'); t.row.classList.add('active');
+  t.rows.forEach(function(e,i){ setTimeout(function(){ e.classList.add('show'); }, 80+i*70); });
+}
+function showResting(sid, tid){
+  var s=elMap[sid]; s.group.classList.add('expanded'); s.rows.forEach(function(e){ e.classList.add('show'); });
+  var t=s.tabs[tid]; if(!t) return; t.group.classList.add('expanded'); t.row.classList.add('active'); t.rows.forEach(function(e){ e.classList.add('show'); });
+}
+function selectPane(sid, tid, pid){
+  Object.keys(PANES).forEach(function(k){ PANES[k].focused=false; }); PANES[pid].focused=true;
+  SPACES.forEach(function(sp){ if(sp.id===sid) sp.tabs.forEach(function(t){ t.last=(t.id===tid); }); });
+  ctx.space=sid; ctx.tab=tid; renderPane(pid); buildTree(); showResting(sid, tid);
+}
+function railRoChanged(){ $('#railTip').textContent = termFrame.classList.contains('ro') ? 'read-only: browse and switch only' : 'hold a row to rename, or use its ⋯ menu'; }
+buildTree(); renderPane('p7'); showResting('forgekit','devbox');
+$('#replayDemo').onclick=function(){ collapseAll(); setTimeout(function(){ toggleSpace('forgekit'); }, 240); };
+$('#detachBtn').onclick=function(){ toast(termFrame,'detached'); };
+
+/* menu, immersive, key bar, link strip */
+var kebab=$('#kebab'), dd=$('#dd'), ts=$('#termScreen'), appbar=$('#appbar'), expand=$('#expand');
+kebab.onclick=function(e){ e.stopPropagation(); kebab.classList.toggle('open'); dd.classList.toggle('open'); };
+document.addEventListener('click', function(){ kebab.classList.remove('open'); dd.classList.remove('open'); });
+function setFs(on){ ts.classList.toggle('fs', on); appbar.style.display = on ? 'none' : ''; expand.classList.toggle('on', on); expand.innerHTML = ico(on?'collapse':'expand'); expand.title = on ? 'Exit fullscreen' : 'Fullscreen'; $('#fsDemo').classList.toggle('on', on); }
+expand.onclick=function(){ setFs(!ts.classList.contains('fs')); };
+$('#fsDemo').onclick=function(){ setFs(!ts.classList.contains('fs')); };
+$$('.dd-i', dd).forEach(function(i){ i.addEventListener('click', function(e){ e.stopPropagation(); kebab.classList.remove('open'); dd.classList.remove('open'); var a=i.getAttribute('data-act');
+  if(a==='rename'){ if(termFrame.classList.contains('ro')){ toast(termFrame,'read-only session'); return; } nameDialog(termFrame,'Rename session','herdr'); }
+  else if(a==='fs') setFs(true);
+  else if(a==='kb'){ var off=termFrame.classList.toggle('nokb'); i.classList.toggle('on', !off); }
+  else if(a==='detach') toast(termFrame,'detached'); }); });
+var frow=$('#frow'); for(var i=1;i<=12;i++){ frow.appendChild(mk('key','F'+i)); }
+$('#fnKey').onclick=function(){ termFrame.classList.toggle('fn'); };
+$$('[data-link]').forEach(function(b){ b.onclick=function(){ pickGroup(b,'link'); $('#lstrip').setAttribute('data-state', b.getAttribute('data-link')); }; });
+
+/* ===== 04 settings ===== */
+var setFrame=$('#setFrame');
+function roToast(){ toast(setFrame,'Read-only session — reconnect with a read-write token to change this'); }
+function scramble(row){
+  var nameEl=row.querySelector('.tn'), small=nameEl.querySelector('small'), name=nameEl.firstChild.textContent, chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-#$%&', frames=14, i=0;
+  nameEl.classList.add('scr');
+  var t=setInterval(function(){ i++; var lock=Math.floor(name.length*0.4*Math.min(1,i/frames)), out=''; for(var k=0;k<name.length;k++){ out+= k<lock ? '·' : chars[Math.floor(Math.random()*chars.length)]; } nameEl.firstChild.textContent=out;
+    if(i>=frames){ clearInterval(t); setTimeout(function(){ row.style.height=row.offsetHeight+'px'; requestAnimationFrame(function(){ row.classList.add('gone'); }); setTimeout(function(){ row.remove(); toast(setFrame,'Revoked '+name); },320); },120); } },40);
+}
+$$('#tokList .revoke').forEach(function(b){ b.onclick=function(){ if(setFrame.classList.contains('ro')){ roToast(); return; } var row=b.closest('.tok'); var m=confirmDialog(setFrame,'Revoke token?','Any client still using this token is disconnected immediately.','Revoke'); m.querySelector('.btn.danger').addEventListener('click', function(){ scramble(row); }); }; });
+$('#newTok').onclick=function(){ if(setFrame.classList.contains('ro')){ roToast(); return; }
+  var m=openModal(setFrame,'<h4>New token</h4><div class="field"><label>name</label><input placeholder="name"></div><div class="row-between" style="margin-top:12px">read-only <div class="toggle" onclick="this.classList.toggle(\'on\')"></div></div><div class="acts"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="tokSave">Save</button></div>');
+  m.querySelector('#tokSave').onclick=function(){ var name=m.querySelector('input').value.trim()||'new-token'; closeModal(setFrame); toast(setFrame,'Created '+name);
+    setTimeout(function(){ openModal(setFrame,'<h4>token secret</h4><p>'+esc(name)+'</p><div style="background:var(--bg-raised);border:1px solid var(--border-bright);border-radius:var(--radius-md);padding:12px;font-size:12.5px;margin-top:10px;word-break:break-all">mx1_8f3a…c72e9b41</div><div class="acts col"><button class="btn primary" data-close>Copy secret</button><p style="text-align:center">This is the only time this secret is shown. Copy it now — it can\'t be viewed again.</p><button class="btn ghost" data-close>Done</button></div>', {sheet:true}); }, 600); }; };
+$$('[data-confirm]', setFrame).forEach(function(b){ b.onclick=function(){ var k=b.getAttribute('data-confirm');
+  if(k==='delcred') confirmDialog(setFrame,'Delete credential?','The credential saved for 100.71.31.57:50051 is removed from this device and its token revoked on the server. The saved server itself is kept.','Delete');
+  else confirmDialog(setFrame,'Forget server?','The saved profile for this endpoint is deleted, along with its saved credential. You will need its address and a token to connect again.','Forget'); }; });
+$('#planRow').onclick=function(){ openModal(setFrame, paywallHtml(null), {sheet:true}); };
+$('#restoreBtn').onclick=function(){ toast(setFrame,'No Muxr Pro purchase found for this account.'); };
+$('#disconnectBtn').onclick=function(){ confirmDialog(setFrame,'Disconnect','You will need the server\'s token to attach again.','Disconnect'); };
+/* deep links: ?size=land|med|port&cstate=scanned&list=loading&link=disconnected&ro=1&fs=1&pro=1 */
+(function(){ var q=new URLSearchParams(location.search);
+  if(q.get('size')){ var b=$('.size-btn[data-size="'+q.get('size')+'"]'); if(b) b.click(); }
+  if(q.get('cstate')) setConnectState(q.get('cstate'));
+  if(q.get('list')){ var l=$('[data-lstate="'+q.get('list')+'"]'); if(l) l.click(); }
+  if(q.get('link')){ var k=$('[data-link="'+q.get('link')+'"]'); if(k) k.click(); }
+  if(q.get('ro')) $$('[data-toggle="ro"]').forEach(function(b){ b.click(); });
+  if(q.get('pro')) $$('[data-toggle="pro"]').forEach(function(b){ b.click(); });
+  if(q.get('fs')) setFs(true);
+})();
+(function(){ var v=14, el=$('#fsVal'); $('#fsDown').onclick=function(){ v=Math.max(10,v-1); el.textContent=v+'px'; }; $('#fsUp').onclick=function(){ v=Math.min(24,v+1); el.textContent=v+'px'; }; })();
+</script>
+</body>
+</html>

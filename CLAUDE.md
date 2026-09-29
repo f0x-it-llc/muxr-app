@@ -27,8 +27,8 @@ The project documents live in Zabin, not in this repository: project `prj_000001
 | Cross-system shape, shared gates, review focus, doc budgets | `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/REVIEW_FOCUS.md`, `docs/DOC_POLICY.md` |
 
 Frust's own coding conventions apply here; see the frust checkout's `docs/CODE_STANDARDS.md`. This
-repo's `docs/` keeps only design assets: the `splash.html`/`redesign.html`/`terminal.html` mocks
-(`tests/splash_contract.rs` reads `splash.html`) and the `muxr-app-icons/` masters.
+repo's `docs/` keeps only design assets: the `splash.html`/`redesign.html`/`terminal.html`/`tablet.html`
+mocks (`tests/splash_contract.rs` reads `splash.html`) and the `muxr-app-icons/` masters.
 
 ## Must-Know Commands
 
