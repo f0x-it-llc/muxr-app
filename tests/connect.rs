@@ -45,6 +45,7 @@ use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::{
     ConnectController, ConnectRetry, CredentialOffer, GatePrompt, OfferPrompt, ServerLimitBlock,
+    URL_ERROR_MESSAGE,
 };
 use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
 use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
@@ -57,7 +58,7 @@ use muxr::features::connect::presentation::widgets::pairing::{
     PAIRED_CONNECT_LABEL, PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
 };
 use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
-use muxr::features::connect::presentation::widgets::saved::NO_SAVED_SERVERS;
+use muxr::features::connect::presentation::widgets::saved::{NO_SAVED_SERVERS, PRO_TAG};
 use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
 use muxr::features::connect::presentation::widgets::{Live, connect_pieces, connect_pieces_with};
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
@@ -100,9 +101,6 @@ const VALID_URL: &str = SERVER_URL_PLACEHOLDER;
 /// posture's own default port applies), so this keeps its explicit `:port`
 /// but makes that port unparseable.
 const INVALID_URL: &str = "not-an-endpoint:not-a-port";
-
-/// `AppFailure::Network`'s user-facing message — what a rejected form toasts.
-const NETWORK_TOAST: &str = "Connection problem — please try again.";
 
 /// The trust selector's **two** rows (`widgets::trust`'s `trust_option_label`) — the
 /// mock's own pair. `TrustMode::Pinned` is deliberately not one of them; see
@@ -1012,7 +1010,7 @@ fn the_guide_action_hands_the_docs_url_to_the_link_opener_and_closes() {
 }
 
 #[test]
-fn an_invalid_url_toasts_and_never_navigates() {
+fn an_invalid_url_shows_the_inline_line_and_never_toasts_or_navigates() {
     let _g = serial();
     let _ambient = setup();
     let mut harness = Harness::mount();
@@ -1026,20 +1024,39 @@ fn an_invalid_url_toasts_and_never_navigates() {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
 
-    assert_eq!(
-        app_toasts().pending_untracked(),
-        vec![NETWORK_TOAST.to_string()],
-        "the rejection surfaced as the failure's user message, not its detail"
-    );
     assert!(
-        !app_toasts().pending_untracked()[0].contains(INVALID_URL),
-        "…and never echoes what was typed"
+        app_toasts().pending_untracked().is_empty(),
+        "a validation reject is the inline line, never a toast"
+    );
+    assert!(harness.shows_value(URL_ERROR_MESSAGE), "the inline line");
+    assert!(
+        !URL_ERROR_MESSAGE.contains(INVALID_URL),
+        "…which never echoes what was typed"
     );
     assert_eq!(harness.nav.depth(), 1, "nothing was pushed");
     assert!(
         !expect_connection_controller().connected.get_untracked(),
         "and no connection was opened"
     );
+}
+
+#[test]
+fn editing_the_url_clears_the_inline_line() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    type_url(&mut harness, INVALID_URL);
+    harness.tap_node("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    assert!(harness.shows_value(URL_ERROR_MESSAGE));
+
+    harness.tap_node("the server URL field", |node| {
+        node.role() == Role::TextInput
+    });
+    harness.type_text("x");
+    assert!(!harness.shows_value(URL_ERROR_MESSAGE), "an edit clears it");
 }
 
 #[test]
@@ -4285,6 +4302,41 @@ fn a_phone_keeps_the_corner_affordances_and_no_inline_paragraph() {
         fab.width() < PHONE.width / 2.0 && (cta.x1 - cta.x0) > fab.width(),
         "the QR action is still the corner FAB, the CTA still full-bleed: {fab:?} vs {cta:?}"
     );
+}
+
+/// How many `pro` tags the screen shows.
+fn pro_tags(harness: &Harness) -> usize {
+    count(harness, |node| {
+        node.role() == Role::Status && node.label() == Some(PRO_TAG)
+    })
+}
+
+#[test]
+fn a_free_install_tags_every_row_past_the_first_with_pro_on_both_classes() {
+    let _g = serial();
+    let _ambient = setup();
+    let rows = || {
+        vec![
+            limit_row(LIMIT_A, LIMIT_A_LABEL, false),
+            older_limit_row(LIMIT_B, LIMIT_B_LABEL, false),
+        ]
+    };
+    for size in [PHONE, FULL_TABLET] {
+        let harness = sized(size, || mount_limited(Tier::Free, rows()));
+        assert_eq!(pro_tags(&harness), 1, "free at {size:?}");
+    }
+}
+
+#[test]
+fn a_pro_install_tags_no_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let rows = vec![
+        limit_row(LIMIT_A, LIMIT_A_LABEL, false),
+        older_limit_row(LIMIT_B, LIMIT_B_LABEL, false),
+    ];
+    let harness = sized(FULL_TABLET, || mount_limited(Tier::Pro, rows));
+    assert_eq!(pro_tags(&harness), 0);
 }
 
 #[test]

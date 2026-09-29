@@ -15,7 +15,7 @@ use crate::features::connect::domain::entities::{
 };
 use crate::features::connect::domain::use_cases::parse_endpoint::{Endpoint, parse_endpoint};
 use crate::features::connect::domain::use_cases::{SaveCredential, UnlockCredential};
-use crate::features::pro::domain::entities::ServerLimitVerdict;
+use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::SharedAuthTokensRepository;
 use crate::features::settings::domain::entities::CreateTokenRequest;
@@ -76,6 +76,9 @@ const DEFAULT_REMEMBER: bool = true;
 
 /// The prefix every token this device mints for itself carries, so a server's
 /// token list says which device asked for each one.
+/// What a host:port parse reject says under the SERVER URL field.
+pub const URL_ERROR_MESSAGE: &str = "Enter host:port, for example dev.home.local:50051. A bare host uses :443 under Public domain (CA) and :50051 under Trust anyway.";
+
 const TOKEN_NAME_PREFIX: &str = "muxr-mobile";
 
 /// How much of a server's label rides in a minted token's name. Long enough to
@@ -100,6 +103,9 @@ pub struct ConnectController {
     pub remember: RwSignal<bool>,
     pub saved: RwSignal<Vec<SavedServer>>,
     pub invalid: RwSignal<bool>,
+    /// The inline line under the URL field: set by a validation reject (which
+    /// raises no toast), cleared by any edit and by a settled dial.
+    pub url_error: RwSignal<Option<String>>,
     pub pending_pairing: RwSignal<Option<PairingPayload>>,
     pub unlocking: RwSignal<bool>,
     pub resolving_offer: RwSignal<bool>,
@@ -129,6 +135,7 @@ impl ConnectController {
             remember: RwSignal::new(DEFAULT_REMEMBER),
             saved: RwSignal::new(Vec::new()),
             invalid: RwSignal::new(false),
+            url_error: RwSignal::new(None),
             pending_pairing: RwSignal::new(None),
             unlocking: RwSignal::new(false),
             resolving_offer: RwSignal::new(false),
@@ -165,6 +172,15 @@ impl ConnectController {
         if self.invalid.get_untracked() {
             self.invalid.set(false);
         }
+        if self.url_error.get_untracked().is_some() {
+            self.url_error.set(None);
+        }
+    }
+
+    /// The install's current entitlement, tracked — what the saved rows' pro
+    /// tags are computed from.
+    pub fn entitlement(&self) -> Entitlement {
+        self.pro.entitlement.get()
     }
 
     /// Sets the token field. A hand-typed token drops a live pairing — the
@@ -316,6 +332,7 @@ impl ConnectController {
         self.token.set(payload.token.clone());
         self.trust_mode.set(pairing_trust_mode(&payload.trust));
         self.invalid.set(false);
+        self.url_error.set(None);
         self.pending_pairing.set(Some(payload));
     }
 
@@ -365,6 +382,7 @@ impl ConnectController {
             return;
         }
         self.invalid.set(false);
+        self.url_error.set(None);
         let nav = nav.clone();
         // Both `Copy`; the closure may outlive this borrow (see `Self::connect`).
         let token = self.token;
@@ -445,7 +463,7 @@ impl ConnectController {
     /// `nav`/`offer_prompt` are lent, not held: both wrap `Rc`, so are neither
     /// `Send` nor `Sync`, while this controller must be both.
     ///
-    /// A rejection toasts and lights [`Self::invalid`]; a refused dial toasts and
+    /// A rejection sets [`Self::url_error`] and lights [`Self::invalid`], with no toast; a refused dial toasts and
     /// leaves the form as typed, for a one-tap retry. Neither navigates.
     pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
@@ -463,6 +481,7 @@ impl ConnectController {
                     return;
                 }
                 self.invalid.set(false);
+                self.url_error.set(None);
                 let nav = nav.clone();
                 // Token's job ends once the connection opens with it; captured by
                 // value (`RwSignal` is `Copy`) since the closure may outlive this borrow.
@@ -488,9 +507,9 @@ impl ConnectController {
                     }
                 });
             }
-            Err(failure) => {
+            Err(_) => {
                 self.invalid.set(true);
-                app_toasts().raise(&failure);
+                self.url_error.set(Some(URL_ERROR_MESSAGE.to_owned()));
             }
         }
     }
