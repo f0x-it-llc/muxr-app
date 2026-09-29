@@ -75,18 +75,6 @@ h1 span{ color:var(--amber); }
 .ic .f{ fill:currentColor; stroke:none; }
 .ic.sm{ width:16px; height:16px; } .ic.xs{ width:13px; height:13px; stroke-width:2; }
 
-/* global nav rail — shell routes only, never on Connect */
-.gnav{ width:56px; background:var(--bg-void); border-right:1px solid var(--border); display:flex; flex-direction:column; align-items:center; padding:10px 0; gap:4px; flex-shrink:0; }
-.gnav-logo{ width:34px; height:34px; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:3px; padding:7px; margin-bottom:12px; border:1px solid var(--border-bright); border-radius:9px; }
-.gnav-logo span{ border-radius:2px; background:var(--amber); }
-.gnav-logo span:nth-child(1),.gnav-logo span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
-.gnav-btn{ width:44px; height:44px; border-radius:var(--radius-md); display:flex; align-items:center; justify-content:center; color:var(--fg-dim); cursor:pointer; transition:background .15s,color .15s; position:relative; border:none; background:transparent; }
-.gnav-btn:hover{ background:var(--bg-surface); color:var(--fg-muted); }
-.gnav-btn.active{ background:var(--amber-faint); color:var(--amber); }
-.gnav-btn .live{ position:absolute; top:9px; right:9px; width:6px; height:6px; border-radius:50%; background:var(--success); box-shadow:0 0 6px var(--success); }
-.gnav-spacer{ flex:1; }
-.gnav-lbl{ font-size:8px; color:var(--fg-faintest); letter-spacing:0.08em; text-transform:uppercase; margin-top:-2px; }
-
 /* shell app bar — the Glyph AppBar the phone shell already draws (RouteMeta adapter) */
 .shellbar{ height:52px; flex-shrink:0; display:flex; align-items:center; padding:0 6px; border-bottom:1px solid var(--border); background:var(--bg-void); position:relative; }
 .shellbar .slot{ width:40px; height:40px; border-radius:var(--radius-sm); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); cursor:pointer; border:none; background:transparent; transition:background .15s,color .15s; }
@@ -445,7 +433,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
 
   <!-- ============ 01 CONNECT ============ -->
   <div class="screen-block">
-    <div class="screen-label"><b>01</b> connect · saved servers beside the form · no rail, no bar</div>
+    <div class="screen-label"><b>01</b> connect · saved servers beside the form · no bar</div>
     <div class="tablet" id="connectFrame" data-state="default">
       <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
       <div class="t-app">
@@ -493,7 +481,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
       <button data-cstate="error">url error</button>
       <button data-cstate="busy">connecting</button>
     </div>
-    <div class="frame-note">Connect stays outside the shell: no rail, no bar. The left panel is the <b>returning-user path</b>: the getting-started paragraph moves out of its dialog, and the saved-server rows carry everything the phone row has (trust, recency, the <b>credential</b> and <b>read-only</b> chips, the delete target) plus the label, and a <b>pro</b> tag on rows past the free limit so the paywall is not a surprise. Nothing previews server state before Login; the phone's green dot was decorative and is gone. The form keeps its three trust states (CA, Trust anyway, pinned caption), the post-scan block with its own <b>Connect now</b>, an inline error line, and the QR FAB becomes a button. Under 840px the left panel folds and the saved list moves under the form, the phone's order.</div>
+    <div class="frame-note">Connect stays outside the shell: no bar. The left panel is the <b>returning-user path</b>: the getting-started paragraph moves out of its dialog, and the saved-server rows carry everything the phone row has (trust, recency, the <b>credential</b> and <b>read-only</b> chips, the delete target) plus the label, and a <b>pro</b> tag on rows past the free limit so the paywall is not a surprise. Nothing previews server state before Login; the phone's green dot was decorative and is gone. The form keeps its three trust states (CA, Trust anyway, pinned caption), the post-scan block with its own <b>Connect now</b>, an inline error line, and the QR FAB becomes a button. Under 840px the left panel folds and the saved list moves under the form, the phone's order.</div>
   </div>
 
   <!-- ============ 02 SESSIONS ============ -->
@@ -502,17 +490,12 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
     <div class="tablet" id="sessFrame" data-list="ok">
       <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
       <div class="t-app">
-        <div class="gnav">
-          <div class="gnav-logo"><span></span><span></span><span></span><span></span></div>
-          <button class="gnav-btn active" title="Sessions"><svg class="ic"><use href="#i-sessions"/></svg></button>
-          <div class="gnav-spacer"></div>
-          <button class="gnav-btn" title="Settings"><svg class="ic"><use href="#i-gear"/></svg></button>
-        </div>
         <div class="t-shell">
           <div class="shellbar">
             <div class="brand"><div class="mk"><span></span><span></span><span></span><span></span></div>muxr</div>
             <div class="title">100.71.31.57</div>
             <div class="grow"></div>
+            <button class="slot" title="Server settings"><svg class="ic"><use href="#i-gear"/></svg></button>
           </div>
           <div class="sessions">
             <div class="s-side">
@@ -542,13 +525,6 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
     <div class="tablet" id="termFrame">
       <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
       <div class="t-app">
-        <div class="gnav">
-          <div class="gnav-logo"><span></span><span></span><span></span><span></span></div>
-          <button class="gnav-btn" title="Sessions (detaches until the retained page ships)"><svg class="ic"><use href="#i-sessions"/></svg></button>
-          <button class="gnav-btn active" title="Current session"><svg class="ic"><use href="#i-term"/></svg><span class="live"></span></button>
-          <div class="gnav-spacer"></div>
-          <button class="gnav-btn" title="Settings"><svg class="ic"><use href="#i-gear"/></svg></button>
-        </div>
         <div class="t-shell term-screen" id="termScreen">
           <div class="shellbar" id="appbar">
             <button class="slot" title="Back"><svg class="ic"><use href="#i-back"/></svg></button>
@@ -619,12 +595,6 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
     <div class="tablet" id="setFrame">
       <div class="t-status"><span>9:41</span><span class="r">●●●▮ 88%</span></div>
       <div class="t-app">
-        <div class="gnav">
-          <div class="gnav-logo"><span></span><span></span><span></span><span></span></div>
-          <button class="gnav-btn" title="Sessions"><svg class="ic"><use href="#i-sessions"/></svg></button>
-          <div class="gnav-spacer"></div>
-          <button class="gnav-btn active" title="Settings"><svg class="ic"><use href="#i-gear"/></svg></button>
-        </div>
         <div class="t-shell">
           <div class="shellbar">
             <button class="slot" title="Back"><svg class="ic"><use href="#i-back"/></svg></button>
@@ -687,9 +657,9 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
 
   <div class="divider"><span>decisions this mock takes</span></div>
   <div class="rat">
-    <div class="card"><h5>global rail, v1 scope</h5><p>Sessions and Settings only. The Terminal slot appears while attached and, until the terminal page is retained across routes, means "return to this attached session" only from Settings-by-rail is <i>not</i> offered: leaving Terminal still detaches. Retaining the page is the one architectural item this design depends on; ship the rail without it first.</p></div>
-    <div class="card"><h5>the shell bar stays</h5><p>One Glyph app bar over every in-shell route, exactly the phone's RouteMeta adapter: brand or back on the left, title centred, the terminal menu on the right. The gear leaves the bar for the rail on wide. Connect stays bar-less and rail-less.</p></div>
-    <div class="card"><h5>back, per screen</h5><p>Back on Sessions still raises "Disconnect from server?"; back on Terminal or Settings returns to Sessions. The rail's Sessions item from Terminal behaves as detach until the retained page exists.</p></div>
+    <div class="card"><h5>no global rail</h5><p>Dropped in the 2026-09-30 revision: a 56px strip carrying a logo and two buttons paid for its width with nothing the shell bar does not already offer. The shell bar is the whole navigation on every class, so no Glyph navigation rail is needed and the terminal page does not have to be retained across routes for this design to ship.</p></div>
+    <div class="card"><h5>the shell bar stays</h5><p>One Glyph app bar over every in-shell route, exactly the phone's RouteMeta adapter: brand or back on the left, title centred, the terminal menu on the right. The gear stays on the Sessions bar on every class, as on the phone. Connect stays bar-less.</p></div>
+    <div class="card"><h5>back, per screen</h5><p>Back on Sessions still raises "Disconnect from server?"; back on Terminal or Settings returns to Sessions.</p></div>
     <div class="card"><h5>tap semantics on sessions</h5><p>Phone tap attaches; tablet tap selects, attach is the header button or a double-tap. Selection tracks the session id across the poll so a rename keeps it.</p></div>
     <div class="card"><h5>key bar on wide</h5><p>Persistent, toggled from the terminal menu, because a hardware keyboard produces no keyboard inset and the phone bar would never appear. Shift stays; Home, End and F-keys are added and need byte mappings.</p></div>
     <div class="card"><h5>read-only everywhere</h5><p>A read-only chip in the sessions strip, the rail header and the card header. Add rows withdrawn, renames refused, no key bar, the grid never focuses; selection, copy, scroll, browse and attach keep working.</p></div>
@@ -698,7 +668,6 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
   <div class="divider"><span>what has to exist for this to ship</span></div>
   <div class="rat two">
     <div class="card"><h5>new in glyph</h5><ul>
-      <li><b>navigation rail</b>, docked, 56px, icon with an optional micro label, active tint, a live dot for the attached slot</li>
       <li><b>docked panel</b> for the terminal rail: Glyph's side sheet is modal-only and pinned to the right edge</li>
       <li><b>two-pane container</b> with a fixed side width and a flexible detail, no divider drag in v1</li>
       <li><b>sheet max width</b> on wide, or a dialog-sized variant, for the paywall, QR, manage, picker, token reveal and font sheets</li>
