@@ -27,9 +27,9 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, Theme,
-    WindowMetrics, any, navigator, provide_context,
+    WindowMetrics, any, navigator,
 };
-use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP, WindowInsets};
+use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -171,11 +171,6 @@ fn mock_target() -> ConnectTarget {
     }
 }
 
-/// A [`WindowMetrics`] whose size is `size` — see `Harness::mount_with_metrics`.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
-}
-
 /// The screen, an overlay navigator over it, and everything a frame needs.
 struct Harness {
     /// The **mounted** navigator: the screen's overlays land here.
@@ -202,10 +197,7 @@ impl Harness {
     /// `None` leaves context unset, exactly the state every other test in this
     /// suite mounts under, so this is purely additive.
     fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Self {
-        if let Some(metrics) = metrics {
-            provide_context(metrics);
-        }
-        Self::mount()
+        support::mount_with_metrics(metrics, Self::mount)
     }
 
     /// [`mount`](Self::mount) attached to `session` instead of [`SESSION_ID`] —
@@ -2272,7 +2264,8 @@ fn a_frame_needs_no_settling_before_the_first_load_lands() {
 fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
+    let mut h =
+        Harness::mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
 
     let (origin, size, _) = card(&h.frame());
     assert!(
@@ -2299,7 +2292,8 @@ fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
 fn fullscreen_stays_edge_to_edge_even_with_wide_metrics() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
+    let mut h =
+        Harness::mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
 
     h.tap_label(EXPAND);
     // Mid-flight first: the wide branch's extra padding changes value on the
@@ -2333,7 +2327,7 @@ fn narrow_metrics_leave_the_wrap_padding_unchanged_like_no_metrics_at_all() {
     // Explicit narrow metrics, even though the harness still paints at the
     // full-width `SURFACE` — proving the branch keys on the *published*
     // width, not the paint surface.
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let mut h = Harness::mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
 
     let (origin, size, radius) = card(&h.frame());
     assert!(
@@ -2348,7 +2342,7 @@ fn narrow_metrics_leave_the_wrap_padding_unchanged_like_no_metrics_at_all() {
 fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let mut h = Harness::mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
 
     // Portrait used to sit flush under the floating bar while landscape read
     // as spaced — the gap is the *top* inset only, so the sides stay at the
