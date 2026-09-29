@@ -40,7 +40,7 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
-use crate::features::sessions::domain::entities::Session;
+use crate::features::sessions::domain::entities::{Session, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
 use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav, sessions_back_signal};
@@ -638,13 +638,17 @@ impl Actions {
     pub fn open_create_dialog(&self) {
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
-        name_input_dialog(
+        let available = expect_connection_controller()
+            .server_info
+            .get_untracked()
+            .map(|info| info.available_backends)
+            .unwrap_or_default();
+        widgets::open_new_session_dialog(
             &self.overlays,
-            "New session",
-            "",
-            move |_app: &mut AppState, name: String| {
+            &available,
+            move |_app: &mut AppState, name: String, backend: SessionBackend| {
                 let handle = Arc::clone(&controller);
-                spawn_local(async move { handle.create(name).await });
+                spawn_local(async move { handle.create(name, backend).await });
             },
         );
     }
