@@ -17,6 +17,9 @@
 //!   [`resolve_poll_interval`]) rather than snapshotting it once at mount.
 //! - **Read-only gating**: a read-only credential disables create/Rename/Kill
 //!   — never Attach (see [`Actions::open_manage_sheet`]).
+//! - **Size class**: [`Responsive`] is read once per `build`; a Tablet window
+//!   gets the list column beside the detail pane (`widgets::master_detail`),
+//!   where a card tap selects rather than attaches.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -31,6 +34,7 @@ use frust::{
     WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area, scroll_view,
     spawn_local, use_context,
 };
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
@@ -38,7 +42,7 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::Session;
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
-use crate::responsive::WIDE_BREAKPOINT_PX;
+use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav, sessions_back_signal};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::palette::Palette;
@@ -49,7 +53,7 @@ use crate::ui::toasts::app_toasts;
 
 use super::controllers::{POLL_PERIOD_SECS, SessionsController};
 use super::heartbeat::{self, HeartbeatState};
-use super::widgets;
+use super::widgets::{self, CardMode, LoadPhase};
 
 /// The route this screen attaches into. The session id rides as a query
 /// param (`Location::parse` splits it off before matching, so the flat
@@ -58,6 +62,12 @@ use super::widgets;
 const TERMINAL_ROUTE: &str = "/terminal";
 /// The query key [`TERMINAL_ROUTE`] carries the session id under.
 const SESSION_QUERY_KEY: &str = "session";
+/// The keys a pane pill adds: the tab's wire index and the pane's title.
+const TAB_QUERY_KEY: &str = "tab";
+const PANE_QUERY_KEY: &str = "pane";
+/// What the detail header's rename/kill say under a read-only credential.
+const READ_ONLY_TOAST: &str =
+    "Read-only session \u{2014} reconnect with a read-write token to change this";
 
 const DISCONNECT_TITLE: &str = "Disconnect from server?";
 const DISCONNECT_CONFIRM_LABEL: &str = "Disconnect";
@@ -71,7 +81,8 @@ const LIST_PAD_Y: f64 = spacing::LG;
 /// `.sessions-list{gap:12px}` — between consecutive list children.
 const LIST_GAP: f64 = spacing::BASE;
 
-/// The scrolling list column's max width past [`WIDE_BREAKPOINT_PX`] — a
+/// The scrolling list column's max width past
+/// [`WIDE_BREAKPOINT_PX`](crate::responsive::WIDE_BREAKPOINT_PX) — a
 /// tablet/landscape/desktop window centers the card list rather than
 /// stretching it edge to edge.
 ///
@@ -390,21 +401,31 @@ impl Component for SessionsScreen {
             theme.motion.reduce_motion,
         );
 
-        // Responsive width clamp: read metrics once, branch on one constant,
-        // never touch layout again (`glyph-catalog`'s reference idiom).
-        // `None` behaves like a narrow window.
-        let metrics = use_context::<WindowMetrics>();
-        let is_wide = metrics
-            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
-            .unwrap_or(false);
+        // The size-class rule, read once; `None` behaves like a phone.
+        let rule = Responsive::of(use_context::<WindowMetrics>());
+        let selected = state.actions.controller.selected.get();
+        let layout = if rule.is_tablet() {
+            ListLayout::Tablet {
+                full: rule.is_full(),
+                selected: selected.clone(),
+            }
+        } else {
+            ListLayout::Compact {
+                wide: rule.wide_clamp,
+            }
+        };
+        let tone = if rule.is_tablet() {
+            colors.surface
+        } else {
+            colors.base
+        };
 
         // Both renderings assemble the same pieces through the same band; the
         // live one adds `scroll_view`, a pass-through at offset 0.
-        let live_scroller = list_band(
-            any(scroll_view(padded_list(list_pieces(
-                &sessions, loaded, settled, read_only, &colors,
-            )))),
-            is_wide,
+        let live_scroller = list_view(
+            list_pieces(&sessions, loaded, settled, read_only, &colors, &layout),
+            &layout,
+            true,
         );
         // Always a `Stack`, overlay or not: an erased child type that flips
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
@@ -421,29 +442,44 @@ impl Component for SessionsScreen {
                 let live_ids = sessions.iter().map(|session| &session.id);
                 let stale = frozen.1 != loaded || frozen_ids.ne(live_ids);
                 (
-                    list_pieces(&frozen.0, frozen.1, settled, read_only, &colors),
+                    list_pieces(&frozen.0, frozen.1, settled, read_only, &colors, &layout),
                     stale,
                 )
             } else {
                 (
-                    list_pieces(&sessions, loaded, settled, read_only, &colors),
+                    list_pieces(&sessions, loaded, settled, read_only, &colors, &layout),
                     false,
                 )
             };
+            let overlay_layout = layout.clone();
             children.push(loading_sequence(
                 LOADING_RAIN_SEED,
-                colors.base,
+                tone,
                 overlay_pieces,
-                move |pieces| list_band(padded_list(pieces), is_wide),
+                move |pieces| list_view(pieces, &overlay_layout, false),
                 settled,
                 stale,
                 state.loading_done,
             ));
         }
-        let mut bands = vec![
-            inflexible(widgets::server_strip(info.as_ref(), beat, &colors)),
-            flexible(1, any(Stack(children))),
-        ];
+        let strip = widgets::server_strip(info.as_ref(), beat, read_only, &colors);
+        let list = any(Stack(children));
+        let mut bands = match layout {
+            ListLayout::Compact { .. } => vec![inflexible(strip), flexible(1, list)],
+            ListLayout::Tablet { full, .. } => {
+                let footer = settled.then(|| widgets::new_session_row(&colors, read_only));
+                let detail = widgets::detail_pane(
+                    &sessions,
+                    selected.as_deref(),
+                    LoadPhase::of(loaded, settled),
+                    read_only,
+                    full,
+                    &colors,
+                );
+                let body = widgets::master_detail(strip, list, footer, detail, full, &colors);
+                vec![flexible(1, body)]
+            }
+        };
         // Mounted only while ring/roll still owe a frame; kept at the
         // list's end so the two real bands keep positional identity.
         if beat.animating() {
@@ -471,22 +507,41 @@ fn disconnect_message(host: &str) -> String {
     )
 }
 
+/// Which list this frame lays out: Compact's clamped band or the Tablet column.
+#[derive(Clone)]
+enum ListLayout {
+    Compact {
+        wide: bool,
+    },
+    Tablet {
+        full: bool,
+        selected: Option<String>,
+    },
+}
+
 /// The list's children in stagger order: the empty state, or a card per
 /// session closed by the dashed create row — closed by [`widgets::loading_view`]
 /// instead until the first load settles, failure included (before it, no cards).
+/// The Tablet column's own pieces come from [`widgets::tablet_list_pieces`].
 fn list_pieces(
     sessions: &[Session],
     loaded: bool,
     settled: bool,
     read_only: bool,
     colors: &Palette,
+    layout: &ListLayout,
 ) -> Vec<AnyView<SessionsState>> {
+    if let ListLayout::Tablet { full, selected } = layout {
+        let phase = LoadPhase::of(loaded, settled);
+        let selected = selected.as_deref();
+        return widgets::tablet_list_pieces(sessions, phase, read_only, selected, *full, colors);
+    }
     if loaded && sessions.is_empty() {
         return vec![widgets::empty_view(read_only)];
     }
     let mut pieces: Vec<AnyView<SessionsState>> = sessions
         .iter()
-        .map(|session| widgets::session_card(session, colors))
+        .map(|session| widgets::session_card(session, colors, CardMode::Compact))
         .collect();
     pieces.push(if settled {
         widgets::new_session_row(colors, read_only)
@@ -494,6 +549,24 @@ fn list_pieces(
         widgets::loading_view(colors)
     });
     pieces
+}
+
+/// `pieces` laid out for `layout`, scrolling when `scroll` (the live band; the
+/// loading overlay's picture does not scroll).
+fn list_view(
+    pieces: Vec<AnyView<SessionsState>>,
+    layout: &ListLayout,
+    scroll: bool,
+) -> AnyView<SessionsState> {
+    let list = match layout {
+        ListLayout::Compact { .. } => padded_list(pieces),
+        ListLayout::Tablet { .. } => widgets::tablet_list(pieces),
+    };
+    let list = if scroll { any(scroll_view(list)) } else { list };
+    match layout {
+        ListLayout::Compact { wide } => list_band(list, *wide),
+        ListLayout::Tablet { .. } => list,
+    }
 }
 
 /// `pieces` as the screen's padded, [`LIST_GAP`]-spaced, stretched column.
@@ -551,7 +624,13 @@ impl Actions {
     /// both land here.
     pub fn attach(&self, id: &str) {
         self.pause_for_push();
-        push_terminal(&self.app_nav, id);
+        self.app_nav.push(&terminal_location(id, None));
+    }
+
+    /// Attach to `id` straight into one pane: a Tablet pane pill's tap.
+    pub fn attach_pane(&self, id: &str, tab: u32, pane: &str) {
+        self.pause_for_push();
+        self.app_nav.push(&terminal_location(id, Some((tab, pane))));
     }
 
     /// Open the create-session dialog (the dashed row and the empty state's
@@ -666,6 +745,43 @@ pub(super) fn attach(state: &mut SessionsState, id: &str) {
     state.actions.attach(id);
 }
 
+/// A Tablet card tap: select `id` for the detail pane.
+pub(super) fn select(state: &mut SessionsState, id: &str) {
+    state.actions.controller.select(id);
+}
+
+pub(super) fn attach_pane(state: &mut SessionsState, id: &str, tab: u32, pane: &str) {
+    state.actions.attach_pane(id, tab, pane);
+}
+
+/// The detail header's rename, refused with [`READ_ONLY_TOAST`] when read-only.
+pub(super) fn open_rename(state: &mut SessionsState, id: &str) {
+    if !refused_read_only(state) {
+        state.actions.open_rename_dialog(id);
+    }
+}
+
+/// The detail header's kill, refused like [`open_rename`].
+pub(super) fn open_kill(state: &mut SessionsState, id: &str) {
+    if !refused_read_only(state) {
+        state.actions.open_kill_dialog(id);
+    }
+}
+
+fn refused_read_only(state: &SessionsState) -> bool {
+    let read_only = state.connection.is_read_only.get_untracked();
+    if read_only {
+        app_toasts().show(READ_ONLY_TOAST);
+    }
+    read_only
+}
+
+/// The failed first load's Retry.
+pub(super) fn retry_first_load(state: &mut SessionsState) {
+    let controller = Arc::clone(&state.actions.controller);
+    spawn_local(async move { controller.retry_first_load().await });
+}
+
 pub(super) fn open_create_dialog(state: &mut SessionsState) {
     state.actions.open_create_dialog();
 }
@@ -678,12 +794,17 @@ pub(super) fn open_manage_sheet(state: &mut SessionsState, id: &str) {
     state.actions.open_manage_sheet(id, read_only);
 }
 
-/// Pushes the `/terminal` route for `id` through the app's one guarded
-/// [`Nav`] handle — the one place this location is spelled, so the push
-/// runs the real route table with its real session guard, same as a deep
-/// link.
-fn push_terminal(nav: &Nav, id: &str) {
-    nav.push(&format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}"));
+/// The `/terminal` location for `id`, optionally aimed at one `(tab, pane)`
+/// — the one place it is spelled; pushed through the app's one guarded
+/// [`Nav`], so it runs the real route table and session guard like a deep
+/// link. The pane title is percent-encoded.
+fn terminal_location(id: &str, pane: Option<(u32, &str)>) -> String {
+    let mut location = format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}");
+    if let Some((tab, title)) = pane {
+        let title = utf8_percent_encode(title, NON_ALPHANUMERIC);
+        location.push_str(&format!("&{TAB_QUERY_KEY}={tab}&{PANE_QUERY_KEY}={title}"));
+    }
+    location
 }
 
 #[cfg(test)]
@@ -702,6 +823,20 @@ mod tests {
             loc.query.get(SESSION_QUERY_KEY).map(String::as_str),
             Some("s-1")
         );
+    }
+
+    #[test]
+    fn a_pane_location_adds_the_tab_index_and_the_encoded_pane_title() {
+        let raw = terminal_location("s-1", Some((2, "ed@precision: ~")));
+        assert!(raw.contains("pane=ed%40precision%3A%20%7E"), "{raw}");
+        let loc = frust::Location::parse(&raw);
+
+        assert_eq!(loc.path, TERMINAL_ROUTE);
+        let query = |key: &str| loc.query.get(key).map(String::as_str);
+        assert_eq!(query(SESSION_QUERY_KEY), Some("s-1"));
+        assert_eq!(query(TAB_QUERY_KEY), Some("2"));
+        assert_eq!(query(PANE_QUERY_KEY), Some("ed@precision: ~"));
+        assert_eq!(terminal_location("s-1", None), "/terminal?session=s-1");
     }
 
     /// An observer over `signal`, mounted (as `init` mounts one) at whatever

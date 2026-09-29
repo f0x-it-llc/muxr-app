@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, WindowMetrics,
-    any, navigator,
+    any, navigator, provide_context,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
@@ -53,9 +53,9 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, added, by_width, center, char_key, frame, largest, long_press, named_key,
-    node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer, pump_frames,
-    serial, settle, setup, smallest, tap,
+    EPSILON, RecScene, added, by_width, center, char_key, frame_sized, largest, long_press,
+    named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer,
+    pump_frames, serial, settle_sized, setup, smallest, tap,
 };
 
 /// A point in the top-left corner — scrim on every overlay this screen pushes
@@ -82,6 +82,12 @@ const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 /// `crate::responsive::WIDE_BREAKPOINT_PX` — the responsive width-clamp pass
 /// — transcribed (the constant itself is private to `presentation::pages`).
 const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
+/// A landscape phone's height: wide enough to clamp, still Compact.
+const PHONE_LANDSCAPE_H: f64 = 390.0;
+/// The Tablet windows the master-detail suite lays out at, and a phone's.
+const FULL_TABLET: Size = Size::new(1024.0, 720.0);
+const COLLAPSED_TABLET: Size = Size::new(720.0, 720.0);
+const PHONE: Size = Size::new(390.0, 844.0);
 
 /// The seeded session names `data`'s mock repository ships — the redesign's
 /// three cards, in order.
@@ -125,15 +131,26 @@ struct Harness {
     logic: Logic,
     state: AppState,
     tcx: TextContext,
+    /// The size every frame lays out at.
+    surface: Size,
 }
 
 impl Harness {
     /// Mount the screen (see the [module docs](self) for the shape), leaving
     /// the connection **disconnected** and the first load un-awaited.
     fn mount() -> Self {
+        Harness::mount_over(None, support::surface())
+    }
+
+    /// [`mount`](Self::mount) laid out at `surface`, over `repository` in
+    /// place of the seeded mock when one is given.
+    fn mount_over(repository: Option<SharedSessionsRepository>, surface: Size) -> Self {
         // The real composition root, unbuilt: publishes DI including this
         // feature's repository, but never plays a splash.
         let state = MuxrApp.init();
+        if let Some(repository) = repository {
+            provide_context(repository);
+        }
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-points `routes::app_nav()` at this fixture's own navigator, real
         // route table and session guard included.
@@ -163,6 +180,7 @@ impl Harness {
             logic,
             state,
             tcx: TextContext::new(),
+            surface,
         };
         harness.frame();
         harness
@@ -178,22 +196,24 @@ impl Harness {
 
     /// One frame at the zero clock.
     fn frame(&mut self) -> RecScene {
-        frame(
+        frame_sized(
             &mut self.root,
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
+            self.surface,
         )
     }
 
     /// Drive a pushed/popped overlay past the navigator's input-blocking
     /// transition, returning the last frame's paint record.
     fn settle(&mut self) -> RecScene {
-        settle(
+        settle_sized(
             &mut self.root,
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
+            self.surface,
         )
     }
 
@@ -225,6 +245,10 @@ impl Harness {
                 &mut self.tcx,
                 1,
             );
+            // `pump_frames` lays out at the default surface.
+            if self.surface != support::surface() {
+                self.frame();
+            }
         }
     }
 
@@ -1039,7 +1063,9 @@ fn card_backs_in(scene: &RecScene, left: f64, width: f64) -> Vec<(Point, Size)> 
 fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(support::metrics_at(support::W, support::H)));
+    // A phone on its side: wide, but its short side keeps it Compact (the
+    // 800×600 default surface would be a Tablet window).
+    let mut h = mount_with_metrics(Some(support::metrics_at(support::W, PHONE_LANDSCAPE_H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
 
@@ -1448,4 +1474,273 @@ async fn a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop(
     let interval = resolve_poll_interval(&preferences).await;
 
     assert_eq!(interval, Duration::from_secs(u64::from(POLL_PERIOD_SECS)));
+}
+
+// ---------------------------------------------------------------------------
+// 12 — Tablet master-detail: a card tap selects, the detail pane shows it
+// ---------------------------------------------------------------------------
+
+/// Mount at `size` (published as the window's metrics too) over `repository`,
+/// then connect.
+fn sized(size: Size, repository: Option<SharedSessionsRepository>) -> Harness {
+    let metrics = support::metrics_at(size.width, size.height);
+    let mut h =
+        support::mount_with_metrics(Some(metrics), || Harness::mount_over(repository, size));
+    expect_connection_controller().connect(mock_target(false));
+    h.frame();
+    h
+}
+
+fn count_values(h: &Harness, value: &str) -> usize {
+    node_values(&h.root).iter().filter(|v| *v == value).count()
+}
+
+fn has_label(h: &Harness, label: &str) -> bool {
+    node_labels(&h.root).iter().any(|l| l == label)
+}
+
+fn has_value(h: &Harness, value: &str) -> bool {
+    count_values(h, value) > 0
+}
+
+/// A stat card's printed value, read from its semantics description.
+fn stat_value(h: &Harness, label: &str) -> Option<String> {
+    h.root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(label) && node.description().is_some())
+        .and_then(|(_, node)| node.description().map(str::to_string))
+}
+
+/// Tap the **last** node printing `value` — the detail pane sits after the
+/// list column, so its copy of a repeated title is the later one.
+fn tap_last_value(h: &mut Harness, value: &str) {
+    let point = *node_centers_by_value(&h.root, value)
+        .last()
+        .unwrap_or_else(|| panic!("nothing printing {value:?}"));
+    h.tap(point);
+}
+
+#[test]
+fn a_tablet_card_tap_selects_it_and_the_detail_header_names_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    assert!(
+        has_value(&h, "loading sessions\u{2026}") && !has_label(&h, "Select a session"),
+        "the first load in flight: the column's loading line, skeletons in the detail"
+    );
+    h.await_sessions();
+    assert!(has_label(&h, "Select a session"), "nothing selected yet");
+    assert_eq!(count_values(&h, SEEDED[1]), 1, "only the card names it");
+
+    h.tap_value(SEEDED[1]);
+    h.settle();
+
+    assert_eq!(h.depth(), 1, "a Tablet tap selects, it never attaches");
+    assert_eq!(count_values(&h, SEEDED[1]), 2, "the header names it too");
+    let labels = node_labels(&h.root);
+    assert!(
+        labels.iter().any(|l| l.contains("attach")),
+        "the header's actions carry attach: {labels:?}"
+    );
+    assert!(!has_label(&h, "Select a session"));
+    // The second seeded card is the resurrectible one.
+    assert!(has_label(&h, "\u{2192} attach to resurrect"), "{labels:?}");
+    assert!(has_value(&h, "saved, not running"));
+    let values = node_values(&h.root);
+    assert!(
+        !values
+            .iter()
+            .any(|v| v.starts_with("tabs \u{2192} panes") || v.starts_with("active tab")),
+        "a resurrectible session draws no layout card: {values:?}"
+    );
+}
+
+#[test]
+fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    assert!(has_label(&h, "\u{2192} attach"));
+    assert!(has_value(&h, "tabs \u{2192} panes"));
+    assert!(has_value(&h, "active tab \u{b7} main"));
+    for tab in ["main", "build", "edit", "logs"] {
+        assert!(has_value(&h, tab), "every tab is listed: {tab}");
+    }
+    assert!(has_label(&h, "focused tab"));
+    assert!(has_label(&h, "float"), "the floating pane carries its tag");
+    assert!(has_value(&h, "scratch"), "the focused tab's pane pills");
+    assert!(
+        !has_value(&h, "cargo watch") && !has_value(&h, "journalctl"),
+        "only the focused tab is open"
+    );
+    // The counts are the layout summary's, not a wire zero.
+    assert_eq!(stat_value(&h, "tabs").as_deref(), Some("4"));
+    assert_eq!(stat_value(&h, "panes").as_deref(), Some("9"));
+    assert_eq!(stat_value(&h, "clients").as_deref(), Some("0"));
+    assert_eq!(stat_value(&h, "age").as_deref(), Some("3 hours ago"));
+
+    // A pane pill attaches straight into its pane.
+    tap_last_value(&mut h, "scratch");
+    h.settle();
+    assert_eq!(h.depth(), 2, "a pane pill pushes the terminal route");
+}
+
+#[test]
+fn the_herdr_detail_names_its_space_on_the_collapsed_band() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(COLLAPSED_TABLET, None);
+    h.await_sessions();
+
+    h.tap_value(SEEDED[2]);
+    h.settle();
+
+    assert_eq!(h.depth(), 1);
+    assert!(has_value(&h, "space \u{b7} home \u{b7} tab \u{b7} work"));
+    assert!(has_value(&h, "tabs \u{2192} panes \u{b7} space home"));
+    assert_eq!(stat_value(&h, "spaces").as_deref(), Some("5"));
+}
+
+/// Fails its first `list_sessions`, then answers one session — and counts.
+struct FailFirstRepo {
+    calls: AtomicU32,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for FailFirstRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(AppFailure::Network("first load".to_string()));
+        }
+        Ok(vec![stub_session("alpha")])
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the retry test")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the retry test")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the retry test")
+    }
+}
+
+#[test]
+fn a_failed_first_load_offers_a_retry_that_reruns_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(FailFirstRepo {
+        calls: AtomicU32::new(0),
+    });
+    let mut h = sized(
+        FULL_TABLET,
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+    );
+    h.pump_until("the failed state", |h| {
+        has_label(h, "Couldn't load sessions")
+    });
+    assert!(has_label(&h, "Retry"));
+    assert!(
+        has_label(&h, "Select a session"),
+        "the detail shows no selection"
+    );
+    assert_eq!(repo.calls.load(Ordering::SeqCst), 1);
+
+    h.tap_label("Retry");
+    h.pump_until_values("the retried load", |values| {
+        values.iter().any(|v| v == "alpha")
+    });
+
+    assert_eq!(
+        repo.calls.load(Ordering::SeqCst),
+        2,
+        "Retry re-ran the load"
+    );
+    assert!(!has_label(&h, "Couldn't load sessions"));
+}
+
+#[test]
+fn read_only_on_tablet_chips_the_strip_and_leaves_only_attach_working() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+    assert!(has_label(&h, "read-only"), "the strip's read-only chip");
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+    let toasts = muxr::ui::toasts::app_toasts();
+    toasts.clear();
+    for action in ["rename", "kill"] {
+        h.tap_label(action);
+        h.settle();
+        assert_eq!(h.depth(), 1, "a read-only {action} opens nothing");
+    }
+    let raised = toasts.pending_untracked();
+    assert_eq!(raised.len(), 2, "each refusal says why: {raised:?}");
+    assert!(raised.iter().all(|t| t.starts_with("Read-only session")));
+
+    h.tap_label("\u{2192} attach");
+    h.settle();
+    assert_eq!(h.depth(), 2, "attach is never read-only-gated");
+}
+
+#[test]
+fn the_detail_headers_rename_opens_the_shared_dialog() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    h.tap_label("rename");
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the rename dialog is up");
+}
+
+#[test]
+fn read_only_adds_the_strip_chip_on_compact_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    assert!(!has_label(&h, "read-only"));
+
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+
+    assert!(has_label(&h, "read-only"));
+}
+
+#[test]
+fn a_phone_card_tap_still_attaches_and_marks_this_device() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(PHONE, None);
+    h.await_sessions();
+    assert!(
+        !has_label(&h, "Select a session"),
+        "no detail pane on a phone"
+    );
+    assert_eq!(count_values(&h, "\u{25cf} attached here"), 1);
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "a phone tap attaches");
 }
