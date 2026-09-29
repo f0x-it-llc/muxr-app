@@ -1,16 +1,17 @@
 //! `.sess-card` — one session card: the whole box is the control.
 //!
 //! **A tap attaches (on Tablet it selects instead); a long-press opens the
-//! management sheet** — the redesign draws no per-card buttons. [`GestureDetector`]'s long-press
-//! fires on the first pointer event after the 500ms threshold and never
-//! also fires the tap, which is what makes "long-press must not attach" a
-//! property of the framework rather than a guard written here.
+//! management sheet** — the redesign draws no per-card buttons.
+//! [`GestureDetector`]'s long-press fires on the first pointer event after the
+//! 500ms threshold and never also fires the tap, which is what makes
+//! "long-press must not attach" a property of the framework rather than a
+//! guard written here.
 //!
 //! Running and idle differ in four places: the 2px `success` left accent
 //! (absent when idle, though its width is still reserved), the avatar's
 //! wash and ink, the status chip, and — idle only — a whole-card dim to
 //! [`IDLE_OPACITY`] plus no `.sess-panes` row at all. A bell mark follows the
-//! name and an accent `● attached here` span closes the meta row on every
+//! name and an accent `● this device` span closes the meta row on every
 //! class; a Tablet selection repaints the card in the amber selection wash.
 
 use frust::authoring::Color;
@@ -57,10 +58,8 @@ pub(super) const IDLE_OPACITY: f64 = 0.55;
 const MAX_PREVIEW_PILLS: usize = 2;
 /// The bell mark after a ringing session's name.
 pub(super) const BELL_ICON: f64 = 14.0;
-/// The meta span a session attached from this device carries — worded
-/// without "dev", which `tests/sessions_loading.rs` counts as a card name's
-/// glyph run.
-const THIS_DEVICE: &str = "\u{25cf} attached here";
+/// The meta span a session attached from this device carries.
+const THIS_DEVICE: &str = "\u{25cf} this device";
 
 /// How a card is placed: Compact's list, or the Tablet list column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

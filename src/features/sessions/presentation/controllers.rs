@@ -98,6 +98,9 @@ impl SessionsController {
         }
     }
 
+    /// Points the Tablet detail at `id`. **Unchecked**: an id that is not in
+    /// the loaded set is stored as given (the detail pane tolerates an unknown
+    /// id and shows its empty state), and the next refresh forgets it.
     pub fn select(&self, id: &str) {
         if self.selected.get_untracked().as_deref() != Some(id) {
             self.selected.set(Some(id.to_string()));
@@ -127,16 +130,22 @@ impl SessionsController {
     }
 
     pub async fn rename(&self, id: String, name: String) {
-        if self
+        let was_selected = self.selected.get_untracked().as_deref() == Some(id.as_str());
+        let renamed = self
             .core
             .run(
                 &self.rename,
                 RenameRequest { id, name },
                 RunOptions::default(),
             )
-            .await
-            .is_ok()
-        {
+            .await;
+        if let Ok(renamed) = renamed {
+            // The repository mints the id from the name (`<backend>:<name>`),
+            // so a rename moves it: follow it, or the refresh would find the
+            // old id gone and clear the selection.
+            if was_selected {
+                self.selected.set(Some(renamed.id));
+            }
             self.refresh().await;
         }
     }
@@ -276,7 +285,7 @@ mod tests {
         block_on(c.rename(id.clone(), "dev-2".to_string()));
 
         assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
-        assert_eq!(c.session(&id).map(|s| s.name), Some("dev-2".to_string()));
+        assert!(c.sessions.get_untracked().iter().any(|s| s.name == "dev-2"));
     }
 
     #[test]
@@ -353,16 +362,47 @@ mod tests {
     }
 
     #[test]
-    fn a_selection_survives_a_rename_and_a_reload() {
+    fn a_selection_follows_a_rename_that_changes_the_id() {
         let c = controller();
         block_on(c.refresh());
         let id = c.sessions.get_untracked()[0].id.clone();
         c.select(&id);
 
         block_on(c.rename(id.clone(), "dev-2".to_string()));
-        block_on(c.refresh());
+        let renamed = c.selected.get_untracked().expect("still selected");
+        assert_ne!(renamed, id, "the mock mints the id from the new name");
+        assert_eq!(
+            c.session(&renamed).map(|s| s.name),
+            Some("dev-2".to_string())
+        );
 
-        assert_eq!(c.selected.get_untracked(), Some(id));
+        block_on(c.refresh());
+        assert_eq!(c.selected.get_untracked(), Some(renamed));
+    }
+
+    #[test]
+    fn renaming_another_session_leaves_the_selection_alone() {
+        let c = controller();
+        block_on(c.refresh());
+        let sessions = c.sessions.get_untracked();
+        c.select(&sessions[0].id);
+
+        block_on(c.rename(sessions[1].id.clone(), "other".to_string()));
+
+        assert_eq!(c.selected.get_untracked(), Some(sessions[0].id.clone()));
+    }
+
+    #[test]
+    fn a_selection_survives_a_failed_refresh() {
+        let c = SessionsController::new(Arc::new(FailOnceSessionsRepository::default()));
+        c.select("zellij:dev");
+
+        block_on(c.refresh());
+        assert!(!c.loaded.get_untracked(), "the first load failed");
+        assert_eq!(c.selected.get_untracked().as_deref(), Some("zellij:dev"));
+
+        block_on(c.refresh());
+        assert_eq!(c.selected.get_untracked().as_deref(), Some("zellij:dev"));
     }
 
     #[test]

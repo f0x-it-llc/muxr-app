@@ -3,19 +3,19 @@
 //! 02 — one submodule per visual cluster: [`server_strip`] (`.conn-row`),
 //! [`session_card`] (`.sess-card`), [`list`] (new-session button, empty and
 //! failed states, the Tablet list column beside the detail), [`detail`] (the
-//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows), [`new_session_dialog`] (name + backend choice). Page-coupled by design (`docs/FEATURES_ARCHITECTURE.md`'s
-//! widgets/ paragraph): each reads the page's state type or calls its
-//! `pages::*` action shims directly.
+//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows) and
+//! [`new_session_dialog`] (name + backend choice). Page-coupled by design
+//! (`APP_FEATURES_ARCHITECTURE.md`'s widgets/ paragraph): each reads the
+//! page's state type or calls its `pages::*` action shims directly.
 //!
 //! Amber is brand/CTA and the Tablet selection wash, never a health signal —
 //! liveness is always `success`; a running session must never read as
-//! "selected". Every
-//! element with a Glyph catalog counterpart uses it; the rest (card accent,
-//! pane pills, `.conn-row` rule, dashed outline) composes `frust::container`/
-//! `colored_box`/`divider` directly, each in the widget module that needs it
-//! — the feature-local `chrome` primitives that used to cover the gap are
-//! gone now that frust's own baseline carries them. `frust_glyph::baseline()`
-//! wins where it and the HTML disagree.
+//! "selected". Every element with a Glyph catalog counterpart uses it; the
+//! rest (card accent, pane pills, `.conn-row` rule, dashed outline) composes
+//! `frust::container`/`colored_box`/`divider` directly, each in the widget
+//! module that needs it — the feature-local `chrome` primitives that used to
+//! cover the gap are gone now that frust's own baseline carries them.
+//! `frust_glyph::baseline()` wins where it and the HTML disagree.
 
 mod detail;
 mod list;

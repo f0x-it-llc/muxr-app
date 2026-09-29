@@ -1595,7 +1595,7 @@ fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
     let param = |key: &str| nav.param(key);
     assert_eq!(
         param(muxr::routes::TERMINAL_SESSION_QUERY_KEY).as_deref(),
-        Some("s-1")
+        Some("zellij:dev")
     );
     assert_eq!(
         param(muxr::routes::TERMINAL_TAB_QUERY_KEY).as_deref(),
@@ -1729,6 +1729,43 @@ fn the_detail_headers_rename_opens_the_shared_dialog() {
 }
 
 #[test]
+fn renaming_the_selected_session_from_the_detail_keeps_the_detail_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    let before = h.frame();
+    h.tap_label("rename");
+    let after = h.settle();
+    let dialog = Chrome::diff(&before, &after);
+    let field = dialog.content_child();
+    h.tap(Point::new(
+        field.0.x + field.1.width - 4.0,
+        field.0.y + field.1.height / 2.0,
+    ));
+    h.type_text("-2");
+    h.press(NamedKey::Enter);
+    h.flush();
+    h.pump_until_values("the renamed card", |values| {
+        values.iter().any(|v| v == "dev-2")
+    });
+    h.settle();
+
+    assert!(
+        !has_label(&h, "Select a session"),
+        "the rename renamed the session's id too; the selection followed it"
+    );
+    assert_eq!(
+        count_values(&h, "dev-2"),
+        2,
+        "the list card and the detail header both show the renamed session"
+    );
+}
+
+#[test]
 fn read_only_adds_the_strip_chip_on_compact_too() {
     let _g = serial();
     let _ambient = setup();
@@ -1751,7 +1788,7 @@ fn a_phone_card_tap_still_attaches_and_marks_this_device() {
         !has_label(&h, "Select a session"),
         "no detail pane on a phone"
     );
-    assert_eq!(count_values(&h, "\u{25cf} attached here"), 1);
+    assert_eq!(count_values(&h, "\u{25cf} this device"), 1);
 
     h.tap_value(SEEDED[0]);
     h.settle();

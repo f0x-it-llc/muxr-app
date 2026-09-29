@@ -73,11 +73,7 @@ pub(in crate::features::sessions::presentation) fn open_new_session_dialog(
                 name.set(next)
             })
             .on_submit(move |_state: &mut AppState, typed: String| {
-                submit(
-                    &enter_nav,
-                    &typed,
-                    enter_backends[choice.get_untracked().min(enter_backends.len() - 1)],
-                )
+                submit(&enter_nav, &typed, chosen(&enter_backends, choice))
             });
             let mut rows = vec![inflexible(field)];
             if page_backends.len() > 1 {
@@ -107,7 +103,7 @@ pub(in crate::features::sessions::presentation) fn open_new_session_dialog(
                         submit(
                             &submit_nav,
                             &submit_current,
-                            submit_backends[choice.get_untracked().min(submit_backends.len() - 1)],
+                            chosen(&submit_backends, choice),
                         );
                     }
                 })
@@ -124,6 +120,12 @@ pub(in crate::features::sessions::presentation) fn open_new_session_dialog(
             }
         },
     );
+}
+
+/// The backend the segmented choice currently names. The index is clamped, so
+/// a choice left over from a longer offer can never index past the end.
+fn chosen(backends: &[SessionBackend], choice: RwSignal<usize>) -> SessionBackend {
+    backends[choice.get_untracked().min(backends.len() - 1)]
 }
 
 /// Pop the dialog carrying the trimmed name and backend, or do nothing with a
@@ -151,5 +153,14 @@ mod tests {
             vec![SessionBackend::Herdr]
         );
         assert_eq!(offered(&[]), vec![SessionBackend::Zellij]);
+    }
+
+    #[test]
+    fn chosen_follows_the_choice_and_clamps_a_stale_index() {
+        let both = [SessionBackend::Zellij, SessionBackend::Herdr];
+        assert_eq!(chosen(&both, RwSignal::new(0)), SessionBackend::Zellij);
+        assert_eq!(chosen(&both, RwSignal::new(1)), SessionBackend::Herdr);
+        assert_eq!(chosen(&both, RwSignal::new(7)), SessionBackend::Herdr);
+        assert_eq!(chosen(&both[..1], RwSignal::new(1)), SessionBackend::Zellij);
     }
 }
