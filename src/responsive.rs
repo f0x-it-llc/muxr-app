@@ -1,54 +1,29 @@
-//! Tablet-aware responsive sizing rules.
+//! The size-class rule every screen reads at the top of `build`.
 //!
-//! Responsive layout in Muxr uses the **shortest-side rule**: structure depends on
-//! `min(width, height)` rather than orientation. This keeps layouts stable during
-//! rotation — a device that rotates from portrait to landscape does not flip a
-//! sidebar to a drawer or vice versa, even when the window's absolute dimensions
-//! cross the breakpoint. This follows Material 3's
-//! [window-size-class](https://m3.material.io/foundations/layout/applying-layout/window-size-classes)
-//! design and is confirmed in this app by docs/tablet.html's size-class table.
-//!
-//! The 600 dp compact/medium boundary comes from Material 3 and the Android
-//! framework (see Material 3 window-size-class docs and the docs/tablet.html
-//! reference design). When `min(width, height) >= 600`, the device is treated as
-//! a tablet, and broader layouts (e.g., a docked sidebar) may be used. When below
-//! 600, layouts stay compact (stacked screens, drawer-based navigation).
-//!
-//! A resize that crosses a breakpoint causes a rebuild on the next frame. The
-//! frame driver at `frust-shell-ios/src/app/frame.rs:348` runs every frame and
-//! calls `RenderRoot::rebuild` on each vsync, and `frame_gate.rs:483` opens a
-//! rebuild pass on size changes. Together, this means a layout change becomes
-//! visible within one frame after the size change arrives.
-//!
-//! # Full-width band
-//!
-//! The `WidthBand` enum controls secondary layout within size classes: when
-//! `width >= 840`, a "Full" band allows multi-column layouts to spread across
-//! the whole screen. Below that, a "Collapsed" band keeps panels grouped or
-//! overlaid. The band does not cause a navigation restructure or rotation-flipping
-//! behavior — it only affects panel placement within the chosen structure.
+//! Structure is chosen from the window's **shortest side** ([`SizeClass`]), so
+//! rotating a tablet never flips it and an iPad Split View half reads as a
+//! phone; the [`WidthBand`] only collapses panels in place within that
+//! structure. A resize reaches `build` on the next frames without a probe:
+//! the frame driver rebuilds on every frame it runs
+//! (`../frust/crates/frust-shell-ios/src/app/frame.rs:348`) and a resize
+//! reopens the frame gate's three-frame warmup window
+//! (`../frust/crates/frust-shell-common/src/frame_gate.rs:82`, `:483`).
+//! Thresholds: `docs/tablet.html` (size-class table) and the Material 3
+//! compact/medium window-size-class boundary at 600.
 
 /// Material 3 compact/medium window-size-class boundary
 /// (<https://m3.material.io/foundations/layout/applying-layout/window-size-classes>).
 pub const WIDE_BREAKPOINT_PX: f64 = 600.0;
 
-/// Tablet size class threshold: the shortest side of the window.
-///
-/// When `min(width, height) >= TABLET_MIN_SHORT_SIDE_PX`, the device enters
-/// tablet layout. Below this, layouts stay compact.
+/// Shortest side at or above which a window is [`SizeClass::Tablet`]
+/// (Material 3's compact/medium boundary, as in `docs/tablet.html`).
 pub const TABLET_MIN_SHORT_SIDE_PX: f64 = 600.0;
 
-/// Full-width band threshold: the width of the window.
-///
-/// When `width >= FULL_BAND_MIN_WIDTH_PX`, a "Full" band allows broader layouts.
-/// Below this, a "Collapsed" band constrains panels.
+/// Width at or above which a Tablet window is [`WidthBand::Full`]
+/// (`docs/tablet.html`'s 840 band).
 pub const FULL_BAND_MIN_WIDTH_PX: f64 = 840.0;
 
-/// Device size class, determined by the shortest side of the window.
-///
-/// Tablets and larger devices use structured layouts with sidebars or
-/// multi-column grids. Compact phones constrain layout to a single primary
-/// column or drawer-based navigation.
+/// Structural class from the window's shortest side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SizeClass {
     /// Compact layout: `min(width, height) < 600.0`.
@@ -57,11 +32,8 @@ pub enum SizeClass {
     Tablet,
 }
 
-/// Horizontal panel layout band.
-///
-/// Controls whether secondary panels (like a sidebar) occupy the full remaining
-/// width or are constrained and centered. Does not trigger a navigation
-/// restructure; only affects panel grouping and alignment.
+/// Width band within the Tablet structure: whether panels sit side by side
+/// or collapse in place. Always `Collapsed` on Compact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WidthBand {
     /// Panels are constrained or collapsed: `width < 840.0`.
@@ -70,39 +42,20 @@ pub enum WidthBand {
     Full,
 }
 
-/// Complete responsive layout rule: size class, width band, and legacy clamp flag.
-///
-/// Each screen reads `Responsive` computed from the current [`frust::WindowMetrics`]
-/// and branches its layout accordingly. All three rules are independent:
-/// - `class` determines structure (tablet sidebar vs. compact drawer)
-/// - `band` determines panel width within that structure
-/// - `wide_clamp` gates the legacy phone-landscape width clamp for backward
-///   compatibility (same rule today: `width >= 600`)
+/// The rule a screen reads once per build from [`frust::WindowMetrics`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Responsive {
     /// Size class from the shortest side of the window.
     pub class: SizeClass,
     /// Width band for secondary panels.
     pub band: WidthBand,
-    /// Legacy phone-landscape clamp: `width >= 600.0`.
-    ///
-    /// When true, screens clamp their width on phones in landscape. This flag
-    /// preserves the current UI for phone users even as tablet layouts expand.
+    /// Today's clamp tier (`width >= WIDE_BREAKPOINT_PX`), kept for phone landscape.
     pub wide_clamp: bool,
 }
 
 impl Responsive {
-    /// Compute a [`Responsive`] rule from window metrics.
-    ///
-    /// When metrics are `None` (e.g., in a test harness with no shell or a
-    /// desktop preview that has not reported size), this returns the compact,
-    /// collapsed, non-clamped default (the same branch as a genuinely narrow
-    /// phone in portrait).
-    ///
-    /// # Arguments
-    ///
-    /// * `metrics` - The current [`frust::WindowMetrics`], or `None` if no shell
-    ///   has published size yet.
+    /// The rule for `metrics`; `None` (no shell, headless tests) is
+    /// Compact / Collapsed / no clamp, the narrow branch every screen has today.
     pub fn of(metrics: Option<frust::WindowMetrics>) -> Responsive {
         match metrics {
             Some(m) => {
@@ -135,12 +88,12 @@ impl Responsive {
         }
     }
 
-    /// Check if this is a tablet-class layout.
+    /// `class == Tablet`.
     pub fn is_tablet(self) -> bool {
         self.class == SizeClass::Tablet
     }
 
-    /// Check if this is a full-width band layout.
+    /// `band == Full` (implies Tablet).
     pub fn is_full(self) -> bool {
         self.band == WidthBand::Full
     }
