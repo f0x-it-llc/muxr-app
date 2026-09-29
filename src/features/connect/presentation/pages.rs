@@ -9,8 +9,8 @@
 //! the getting-started affordance in the opposite corner. The scroll and both
 //! affordances belong to the screen, not the layout — the splash assembles
 //! into a fixed layer with nothing to scroll. That is the Compact tree; a
-//! Tablet window ([`Responsive`], read once per build) gets [`tablet_body`]
-//! over the same backdrop instead, with neither corner affordance.
+//! Tablet window ([`Responsive`], read once per build) gets
+//! [`tablet_screen`] instead, assembled in [`super::widgets::tablet`].
 //!
 //! Handles are resolved once in [`Component::init`], never in a press handler.
 //! The credential dialogs live in [`super::widgets::credential_dialogs`], the
@@ -26,8 +26,8 @@ use std::sync::Arc;
 use clean_signals_frust::use_controller;
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, Padding, SizedBox, Stack, Theme, WindowMetrics, any, colored_box, component,
-    container, flexible, inflexible, safe_area, scroll_view, use_context,
+    GetUntracked, Padding, SizedBox, Stack, WindowMetrics, any, component, inflexible, safe_area,
+    scroll_view, use_context,
 };
 
 use super::controller::ConnectController;
@@ -35,20 +35,19 @@ use super::widgets::credential_dialogs::{credential_offer_prompt, handle_saved_r
 use super::widgets::getting_started::info_affordance;
 use super::widgets::pro_gate::{gated_saved_row_tap, server_limit_prompt};
 use super::widgets::qr_affordance::{qr_affordance, qr_button};
-use super::widgets::{Live, connect_pieces_with, tablet_form_pieces, tablet_panel_pieces};
+use super::widgets::tablet::tablet_screen;
+use super::widgets::{Live, connect_pieces_with};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
-use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::expect_auth_tokens_repository;
 use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
-use crate::ui::paint::HAIRLINE;
-use crate::ui::palette::{Palette, active_theme};
+use crate::ui::palette::active_theme;
 use crate::ui::spacing;
 
 /// The content column's max width past
@@ -61,9 +60,6 @@ const CONNECT_CLAMP_WIDTH: f64 = 520.0;
 /// into a bounded `Stack` layer, and `CENTER` there would trade this clamp's
 /// horizontal jump for a vertical one.
 const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
-/// The Tablet full band's left panel width (`docs/tablet.html`'s `.c-left`).
-const LEFT_PANEL_WIDTH: f64 = 420.0;
-
 /// Arranges `pieces` into a safe-area-inset, padded, top-anchored column with
 /// [`spacing::SHEET`] between them, each stretched to the layer width — and,
 /// past the wide breakpoint, clamped to [`CONNECT_CLAMP_WIDTH`] and
@@ -94,7 +90,7 @@ fn clamped_layout<S: 'static>(pieces: Vec<AnyView<S>>, wide_clamp: bool) -> AnyV
 }
 
 /// Centers `child` at no more than [`CONNECT_CLAMP_WIDTH`], top-anchored.
-fn clamp<S: 'static>(child: AnyView<S>) -> AnyView<S> {
+pub(super) fn clamp<S: 'static>(child: AnyView<S>) -> AnyView<S> {
     any(Align(
         CLAMP_ALIGNMENT,
         SizedBox::<S>(Some(CONNECT_CLAMP_WIDTH), None).child(child),
@@ -102,7 +98,7 @@ fn clamp<S: 'static>(child: AnyView<S>) -> AnyView<S> {
 }
 
 /// `pieces` stacked full-width with `gap` between them.
-fn gapped<S: 'static>(pieces: Vec<AnyView<S>>, gap: f64) -> FlexView<S> {
+pub(super) fn gapped<S: 'static>(pieces: Vec<AnyView<S>>, gap: f64) -> FlexView<S> {
     let mut children = Vec::with_capacity(pieces.len() * 2);
     for (index, piece) in pieces.into_iter().enumerate() {
         if index > 0 {
@@ -111,60 +107,6 @@ fn gapped<S: 'static>(pieces: Vec<AnyView<S>>, gap: f64) -> FlexView<S> {
         children.push(inflexible(piece));
     }
     FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
-}
-
-/// The Tablet structure: on the full band a [`LEFT_PANEL_WIDTH`] panel
-/// beside the form column; collapsed, the form column alone, the saved list
-/// folded under its button row. The form clamps like Compact's wide window
-/// and scrolls from its top when taller than the frame.
-fn tablet_body(
-    state: &ConnectState,
-    theme: &Theme,
-    live: &Live,
-    saved: &[SavedServer],
-    full: bool,
-) -> AnyView<ConnectState> {
-    let qr = qr_button(
-        &state.overlays,
-        &state.controller,
-        &state.qr_permission_pending,
-        &state.pro,
-    );
-    let folded = (!full).then_some(saved);
-    let form = gapped(tablet_form_pieces(theme, live, folded, qr), spacing::XL);
-    let form_column = any(scroll_view(Padding(
-        EdgeInsets::symmetric(spacing::SHEET, spacing::HERO),
-        clamp(any(form)),
-    )));
-    if !full {
-        return form_column;
-    }
-    let colors = Palette::from_theme(theme);
-    let inset = EdgeInsets {
-        left: spacing::HERO,
-        top: spacing::HERO,
-        right: spacing::HERO,
-        bottom: spacing::SHEET,
-    };
-    let panel = container(scroll_view(Padding(
-        inset,
-        gapped(tablet_panel_pieces(theme, live, saved), spacing::XL),
-    )))
-    .fill(colors.base);
-    let edge = colored_box::<ConnectState>()
-        .size(HAIRLINE, 0.0)
-        .fill(colors.rule);
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(any(
-                SizedBox::<ConnectState>(Some(LEFT_PANEL_WIDTH), None).child(panel)
-            )),
-            inflexible(any(edge)),
-            flexible(1, form_column),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// The Connect screen: the `/` route's page. See the [module docs](self).
@@ -290,18 +232,13 @@ impl Component for ConnectScreen {
         // builder its own snapshot (the widgets' parity contract).
         let saved = state.controller.saved.get();
         if rule.is_tablet() {
-            // Both corner affordances are Compact-only: the QR action and the
-            // orientation paragraph sit in the Tablet flow instead.
-            return any(Stack(vec![
-                any(page_backdrop::<ConnectState>()),
-                any(safe_area(tablet_body(
-                    state,
-                    &theme,
-                    &live,
-                    &saved,
-                    rule.is_full(),
-                ))),
-            ]));
+            let qr = qr_button(
+                &state.overlays,
+                &state.controller,
+                &state.qr_permission_pending,
+                &state.pro,
+            );
+            return tablet_screen(&theme, &live, &saved, rule.is_full(), qr, &state.overlays);
         }
         let content = clamped_layout(
             connect_pieces_with(&theme, Some(&live), &saved),

@@ -41,6 +41,7 @@ pub mod pro_gate;
 pub mod qr_affordance;
 pub mod qr_sheet;
 pub mod saved;
+pub mod tablet;
 pub mod trust;
 
 use std::rc::Rc;
