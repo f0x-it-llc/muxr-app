@@ -29,7 +29,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::authoring::Size;
-use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, any, icons, safe_area, spawn_local};
+use frust::{
+    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, Padding, any, button, icons, safe_area,
+    spawn_local,
+};
 use frust_camera::{CameraError, PermissionStatus};
 
 use super::super::controller::ConnectController;
@@ -78,34 +81,17 @@ pub(crate) fn qr_affordance<S: 'static>(
     pending: &Rc<Cell<bool>>,
     pro: &Arc<ProController>,
 ) -> AnyView<S> {
-    let overlays = overlays.clone();
-    let controller = Arc::clone(controller);
-    let pending = Rc::clone(pending);
-    let pro = Arc::clone(pro);
     let theme = active_theme();
     let scheme = theme.scheme();
     any(safe_area(Align(
         Alignment::BOTTOM_RIGHT,
         Padding(
             EdgeInsets::all(FAB_MARGIN),
-            icon_button(icons::SCAN_MARK, FAB_LABEL, move |_state: &mut S| {
-                if controller.busy_untracked() {
-                    return;
-                }
-                let overlays = overlays.clone();
-                let controller = Arc::clone(&controller);
-                let pending = Rc::clone(&pending);
-                let on_unlocked: Rc<dyn Fn()> = {
-                    let overlays = overlays.clone();
-                    let controller = Arc::clone(&controller);
-                    let pending = Rc::clone(&pending);
-                    Rc::new(move || start_scan(&overlays, &controller, &pending))
-                };
-                if scan_blocked(&controller, &overlays, &pro, on_unlocked) {
-                    return;
-                }
-                start_scan(&overlays, &controller, &pending);
-            })
+            icon_button(
+                icons::SCAN_MARK,
+                FAB_LABEL,
+                qr_press(overlays, controller, pending, pro),
+            )
             .fill(scheme.primary_container)
             .ink(scheme.on_primary_container)
             .icon_size(FAB_MARK)
@@ -113,6 +99,56 @@ pub(crate) fn qr_affordance<S: 'static>(
             .radius(FAB_BOX / 2.0),
         ),
     )))
+}
+
+/// The Tablet form's in-flow QR action: a secondary button under the FAB's
+/// own name, firing the FAB's press path gate for gate.
+///
+/// Known gap: `frust::button` takes a text label only, so the mock's leading
+/// scan mark is not painted here.
+pub(crate) fn qr_button<S: 'static>(
+    overlays: &frust::NavigatorController<AppState>,
+    controller: &Arc<ConnectController>,
+    pending: &Rc<Cell<bool>>,
+    pro: &Arc<ProController>,
+) -> AnyView<S> {
+    any(
+        button(FAB_LABEL, qr_press(overlays, controller, pending, pro))
+            .style(ButtonStyle::Secondary)
+            .label_alignment(Alignment::CENTER),
+    )
+}
+
+/// The press both QR affordances fire: busy, the free-tier gate, then
+/// [`start_scan`] (see the [module docs](self)).
+fn qr_press<S: 'static>(
+    overlays: &frust::NavigatorController<AppState>,
+    controller: &Arc<ConnectController>,
+    pending: &Rc<Cell<bool>>,
+    pro: &Arc<ProController>,
+) -> impl Fn(&mut S) + 'static {
+    let overlays = overlays.clone();
+    let controller = Arc::clone(controller);
+    let pending = Rc::clone(pending);
+    let pro = Arc::clone(pro);
+    move |_state: &mut S| {
+        if controller.busy_untracked() {
+            return;
+        }
+        let overlays = overlays.clone();
+        let controller = Arc::clone(&controller);
+        let pending = Rc::clone(&pending);
+        let on_unlocked: Rc<dyn Fn()> = {
+            let overlays = overlays.clone();
+            let controller = Arc::clone(&controller);
+            let pending = Rc::clone(&pending);
+            Rc::new(move || start_scan(&overlays, &controller, &pending))
+        };
+        if scan_blocked(&controller, &overlays, &pro, on_unlocked) {
+            return;
+        }
+        start_scan(&overlays, &controller, &pending);
+    }
 }
 
 /// The scan flow proper — the camera-permission gate, then the sheet it

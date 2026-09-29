@@ -52,10 +52,12 @@ use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
 use muxr::features::connect::presentation::widgets::fields::{
     SERVER_URL_PLACEHOLDER, TOKEN_PLACEHOLDER, field_text_style,
 };
+use muxr::features::connect::presentation::widgets::getting_started::GETTING_STARTED_BODY;
 use muxr::features::connect::presentation::widgets::pairing::{
     PAIRED_CONNECT_LABEL, PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
 };
 use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
+use muxr::features::connect::presentation::widgets::saved::NO_SAVED_SERVERS;
 use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
 use muxr::features::connect::presentation::widgets::{Live, connect_pieces, connect_pieces_with};
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
@@ -169,6 +171,16 @@ fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     support::mount_with_metrics(metrics, Harness::mount)
 }
 
+/// `mount` under `size`'s metrics, every frame then laid out at `size` too —
+/// how the size-class cases see the structure a real window of that shape gets.
+fn sized(size: Size, mount: impl FnOnce() -> Harness) -> Harness {
+    let metrics = support::metrics_at(size.width, size.height);
+    let mut harness = support::mount_with_metrics(Some(metrics), mount);
+    harness.surface = size;
+    harness.settle();
+    harness
+}
+
 /// How a mounted fixture's install is entitled.
 ///
 /// Every case but the free-tier gate's own mounts [`Tier::Pro`]: the app's
@@ -209,6 +221,8 @@ struct Harness {
     logic: Logic,
     state: AppState,
     tcx: TextContext,
+    /// What every frame lays out at: [`SURFACE`] unless [`sized`] said otherwise.
+    surface: Size,
 }
 
 impl Harness {
@@ -253,6 +267,7 @@ impl Harness {
             logic,
             state,
             tcx: TextContext::new(),
+            surface: SURFACE,
         };
         harness.settle();
         harness
@@ -269,7 +284,7 @@ impl Harness {
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
-            SURFACE,
+            self.surface,
         )
     }
 
@@ -684,11 +699,17 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
 // Responsive width-clamp pass
 // ---------------------------------------------------------------------------
 
+/// Phone-landscape metrics as wide as [`SURFACE`]: past the wide breakpoint
+/// but Compact (shortest side under 600), the one shape the clamp serves.
+fn compact_wide() -> WindowMetrics {
+    support::metrics_at(SURFACE.width, 390.0)
+}
+
 #[test]
 fn wide_metrics_clamp_and_center_the_content_column() {
     let _g = serial();
     let _ambient = setup();
-    let harness = mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
+    let harness = mount_with_metrics(Some(compact_wide()));
 
     // The CTA is the layer's own full-bleed piece (see the test above), so its
     // box is the cheapest honest read on where the *clamped* layer itself
@@ -766,7 +787,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     // The clamp lives in `connect_layout`, the one function both renderings
     // assemble through, so this asserts the two land on the same horizontal
     // box rather than that each happens to satisfy the same arithmetic.
-    let harness = mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
+    let harness = mount_with_metrics(Some(compact_wide()));
     let live = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
@@ -4144,6 +4165,282 @@ fn unlocking_from_the_qr_paywall_lands_in_the_scanner() {
         "the unlock's own scan is the only push"
     );
     assert!(!shows_text(&harness, UPGRADE_TITLE), "the paywall is gone");
+}
+
+// ---------------------------------------------------------------------------
+// The Tablet structure: two panels on the full band, folded when collapsed
+// ---------------------------------------------------------------------------
+
+/// `docs/tablet.html`'s landscape frame: Tablet, full band.
+const FULL_TABLET: Size = Size::new(1024.0, 720.0);
+/// Tablet (shortest side 600 or more) on the collapsed band (under 840 wide).
+const COLLAPSED_TABLET: Size = Size::new(720.0, 720.0);
+/// A phone in portrait: Compact.
+const PHONE: Size = Size::new(390.0, 844.0);
+/// The saved list's header run, as `widgets::saved` paints it.
+const SAVED_HEADER: &str = "SAVED SERVERS";
+/// The seeded store's pinned row's label — the Tablet row's primary line.
+const PINNED_LABEL: &str = "herdr staging";
+
+fn qr_action(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(QR_LABEL)
+}
+
+fn connect_cta(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+}
+
+fn saved_header(node: &Node) -> bool {
+    node.value() == Some(SAVED_HEADER)
+}
+
+/// How many nodes on screen match `pred`.
+fn count(harness: &Harness, pred: impl Fn(&Node) -> bool) -> usize {
+    harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| pred(node))
+        .count()
+}
+
+/// The QR action sits in the CTA's own row, trailing it — the in-flow
+/// button, not the corner FAB.
+fn assert_qr_beside_the_cta(harness: &Harness) {
+    assert_eq!(count(harness, qr_action), 1, "one QR action, no FAB");
+    let qr = harness.bounds("the QR button", qr_action);
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    assert!(
+        (qr.y0 - cta.y0).abs() < EPSILON && (qr.y1 - cta.y1).abs() < EPSILON,
+        "the QR button shares the CTA's row: {qr:?} vs {cta:?}"
+    );
+    assert!(qr.x0 > cta.x1, "…trailing it: {qr:?} vs {cta:?}");
+    assert!(qr.height() >= MIN_TAP_TARGET, "{qr:?}");
+}
+
+#[test]
+fn a_full_tablet_puts_orientation_and_saved_servers_beside_the_form() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(FULL_TABLET, Harness::mount);
+
+    assert!(
+        harness.shows_value(GETTING_STARTED_BODY),
+        "the orientation paragraph is inline: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        count(&harness, |node| node.label() == Some(INFO_LABEL)),
+        0,
+        "…so the corner affordance that raised it is not mounted"
+    );
+    assert_eq!(count(&harness, saved_header), 1, "one saved-servers header");
+    assert_qr_beside_the_cta(&harness);
+
+    let header = harness.bounds("the saved header", saved_header);
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    assert!(
+        header.x1 <= cta.x0,
+        "the saved list sits in the left panel, beside the form: {header:?} vs {cta:?}"
+    );
+}
+
+#[test]
+fn a_collapsed_tablet_folds_the_saved_list_under_the_button_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(COLLAPSED_TABLET, Harness::mount);
+
+    assert!(
+        !harness.shows_value(GETTING_STARTED_BODY),
+        "no left panel, so no paragraph"
+    );
+    assert_eq!(count(&harness, |node| node.label() == Some(INFO_LABEL)), 0);
+    assert_eq!(count(&harness, saved_header), 1, "one saved-servers header");
+    assert_qr_beside_the_cta(&harness);
+
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    let header = harness.bounds("the saved header", saved_header);
+    let row = harness.bounds("the pinned row", |node| node.value() == Some(PINNED_LABEL));
+    assert!(
+        cta.y1 <= header.y0 && header.y1 <= row.y0,
+        "the phone's order: button row, header, rows: {cta:?} / {header:?} / {row:?}"
+    );
+}
+
+#[test]
+fn a_phone_keeps_the_corner_affordances_and_no_inline_paragraph() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(PHONE, Harness::mount);
+
+    assert!(!harness.shows_value(GETTING_STARTED_BODY));
+    assert_eq!(count(&harness, info_button), 1, "the info mark is up");
+    assert_eq!(count(&harness, qr_action), 1);
+    assert_eq!(count(&harness, saved_header), 1);
+    let fab = harness.bounds("the QR affordance", qr_action);
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    assert!(
+        fab.width() < PHONE.width / 2.0 && (cta.x1 - cta.x0) > fab.width(),
+        "the QR action is still the corner FAB, the CTA still full-bleed: {fab:?} vs {cta:?}"
+    );
+}
+
+#[test]
+fn an_empty_tablet_list_says_so_under_its_header() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(FULL_TABLET, || mount_limited(Tier::Pro, vec![]));
+
+    assert_eq!(count(&harness, saved_header), 1);
+    assert!(
+        harness.shows_value(NO_SAVED_SERVERS),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+}
+
+#[test]
+fn a_tablet_saved_row_leads_with_its_label_and_refills_the_form_like_the_phone_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, Harness::mount);
+
+    let meta_prefix = format!("{PINNED_ENDPOINT} · pinned TLS · ");
+    assert!(
+        harness
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.value().is_some_and(|v| v.starts_with(&meta_prefix))),
+        "the meta line leads with host:port: {:?}",
+        node_labels(&harness.root)
+    );
+
+    harness.tap_node("the pinned row", |node| {
+        node.role() == Role::Label && node.value() == Some(PINNED_LABEL)
+    });
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(PINNED_ENDPOINT),
+        "the row filled the server-URL field"
+    );
+    assert!(
+        harness.shows_value(PINNED_CAPTION),
+        "…and its pinned posture"
+    );
+}
+
+#[test]
+fn a_tablet_rows_delete_target_raises_the_same_remove_confirmation() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, mount_with_credential_row);
+    let before = harness.nav.depth();
+
+    let target = harness.bounds("the row's delete target", |node| {
+        node.role() == Role::Button && node.label() == Some(DELETE_CRED_LABEL)
+    });
+    assert!(
+        target.width() >= MIN_TAP_TARGET && target.height() >= MIN_TAP_TARGET,
+        "{target:?}"
+    );
+    harness.tap_node("the row's delete target", |node| {
+        node.role() == Role::Button && node.label() == Some(DELETE_CRED_LABEL)
+    });
+    assert_eq!(harness.nav.depth(), before + 1);
+    assert!(shows_text(&harness, REMOVE_TITLE));
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "the row's own tap never fired"
+    );
+}
+
+#[test]
+fn a_tablet_credential_row_unlocks_and_lands_on_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, mount_with_credential_row);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the credential row", |node| {
+        node.role() == Role::Label && node.value() == Some("Cred rig")
+    });
+    pump_until_done("the recovered connect", || {
+        expect_connection_controller().connected.get_untracked()
+    });
+    harness.settle();
+
+    assert_eq!(credentials.prompts().len(), 1, "exactly one prompt");
+    assert!(harness.nav.depth() > before, "…and landed on /sessions");
+}
+
+#[test]
+fn the_tablet_guide_button_hands_the_docs_url_to_the_link_opener() {
+    let _g = serial();
+    let _ambient = setup();
+    let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&opened);
+    set_link_opener_for_tests(move |url| {
+        sink.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(url.to_string());
+    });
+    let mut harness = sized(FULL_TABLET, Harness::mount);
+    let before = harness.nav.depth();
+
+    harness.tap_node("the inline guide button", |node| {
+        node.role() == Role::Button && node.label() == Some(OPEN_GUIDE_LABEL)
+    });
+
+    assert_eq!(
+        *opened.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![DOCS_URL.to_string()]
+    );
+    assert_eq!(harness.nav.depth(), before, "no dialog in between");
+}
+
+#[test]
+fn the_tablet_qr_button_opens_the_scanner_like_the_fab() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(COLLAPSED_TABLET, || mount_limited(Tier::Free, vec![]));
+
+    harness.tap_node("the QR button", qr_action);
+
+    assert_eq!(harness.nav.depth(), 2, "the sheet is pushed");
+    assert!(
+        shows_text(&harness, NO_CAMERA),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+}
+
+#[test]
+fn the_tablet_qr_button_takes_the_fabs_free_tier_gate() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, || {
+        mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)])
+    });
+    let before = harness.nav.depth();
+
+    harness.tap_node("the QR button", qr_action);
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(harness.nav.depth(), before + 1);
+    assert!(
+        !shows_text(&harness, NO_CAMERA),
+        "the scanner never mounted"
+    );
 }
 
 // ---------------------------------------------------------------------------
