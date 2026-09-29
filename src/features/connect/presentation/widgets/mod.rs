@@ -26,6 +26,9 @@
 //!    ([`tablet_panel_pieces`], [`tablet_form_pieces`]) is the screen's
 //!    alone: the splash keeps the compact pieces on every class.
 //!
+//! One accepted difference: the saved rows' pro tag paints only under `Some(..)`,
+//! since the splash has no entitlement to read.
+//!
 //! Every piece is `<State>`-generic (the splash composes under
 //! [`crate::AppState`], the screen under its own `ConnectState`), reads no
 //! state it is handed, and takes the [`Palette`] resolved once per build.

@@ -33,8 +33,9 @@ use super::super::controller::{ConnectController, ConnectRetry, GatePrompt, Serv
 use super::credential_dialogs::{credential_offer_prompt, handle_saved_row_tap};
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
-use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
-use crate::features::pro::domain::use_cases::check_server_limit::check_server_limit;
+use crate::features::pro::domain::entities::{
+    Entitlement, ServerLimitVerdict, row_is_beyond_free_tier,
+};
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::pro::presentation::{ServerLimitContext, UpgradeContext, show_upgrade_sheet};
 use crate::routes::Nav;
@@ -96,24 +97,16 @@ pub(crate) fn gated_saved_row_tap(
     handle_saved_row_tap(controller, overlays, nav, index);
 }
 
-/// Whether `server` is past the free tier's limit while `saved` is remembered
-/// (most-recently-used first): the leading row is the one a free install keeps,
-/// every other row is what [`check_server_limit`] would block. The one place
-/// the saved rows' pro tag reads its rule from.
+/// Whether tapping `server` raises the paywall while `saved` is remembered:
+/// the domain's [`row_is_beyond_free_tier`], so the pro tag marks exactly the
+/// rows [`gated_saved_row_tap`] gates. Under Free with two or more rows that is
+/// every row.
 pub(crate) fn row_is_locked(
     server: &SavedServer,
     saved: &[SavedServer],
     entitlement: Entitlement,
 ) -> bool {
-    let endpoint = server.endpoint();
-    let leading = saved
-        .first()
-        .is_some_and(|first| first.endpoint() == endpoint);
-    !leading
-        && matches!(
-            check_server_limit(entitlement, saved, &endpoint),
-            ServerLimitVerdict::Blocked { .. }
-        )
+    row_is_beyond_free_tier(entitlement, saved, &server.endpoint())
 }
 
 /// Drop the rows the free tier cannot keep, then retry — in that order, since

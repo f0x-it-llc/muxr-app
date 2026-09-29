@@ -138,6 +138,20 @@ pub fn server_limit_verdict(
     }
 }
 
+/// Whether tapping the saved row at `endpoint` would raise the paywall: true
+/// exactly when [`server_limit_verdict`] is [`ServerLimitVerdict::Blocked`] for
+/// that endpoint. Under Free with two or more rows that is every row.
+pub fn row_is_beyond_free_tier(
+    entitlement: Entitlement,
+    saved: &[SavedServer],
+    endpoint: &str,
+) -> bool {
+    matches!(
+        server_limit_verdict(entitlement, saved, endpoint),
+        ServerLimitVerdict::Blocked { .. }
+    )
+}
+
 /// Whether a free install may add a server it has not named yet — the QR
 /// affordance's own gate, taken before any endpoint is known, so there is
 /// nothing yet to compare a saved row against (unlike
@@ -238,6 +252,25 @@ mod tests {
     fn a_blocked_verdict_never_lists_the_server_being_connected_to() {
         let verdict = server_limit_verdict(Entitlement::Free, &[row(A), row(B)], A);
         assert_eq!(forgets(&verdict), vec![B.to_string()]);
+    }
+
+    #[test]
+    fn a_free_install_with_one_row_tags_nothing() {
+        assert!(!row_is_beyond_free_tier(Entitlement::Free, &[row(A)], A));
+    }
+
+    #[test]
+    fn a_free_install_with_two_rows_tags_both() {
+        let saved = vec![row(A), row(B)];
+        assert!(row_is_beyond_free_tier(Entitlement::Free, &saved, A));
+        assert!(row_is_beyond_free_tier(Entitlement::Free, &saved, B));
+    }
+
+    #[test]
+    fn pro_and_an_empty_list_tag_nothing() {
+        let saved = vec![row(A), row(B)];
+        assert!(!row_is_beyond_free_tier(Entitlement::Pro, &saved, A));
+        assert!(!row_is_beyond_free_tier(Entitlement::Free, &[], A));
     }
 
     #[test]
