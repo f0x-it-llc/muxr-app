@@ -89,11 +89,6 @@ const DETACHED_TOAST: &str = "detached";
 /// anyway — the sheet has no disabled row state, so the row refuses.
 const READ_ONLY_TOAST: &str = "read-only session";
 
-/// The query key `/terminal?session=<id>` carries the attached session's id
-/// under. Transcribed rather than imported (a feature never imports a sibling's
-/// `presentation`); `tests/terminal.rs` asserts the round trip.
-const SESSION_QUERY_KEY: &str = "session";
-
 /// The wrap padding's wide-window target — `WRAP_PAD`'s 14px scaled up past
 /// [`WIDE_BREAKPOINT_PX`]. Bespoke geometry, not a `crate::ui::spacing` tier.
 /// The card stays full-bleed at any width (more breathing room, no
@@ -281,7 +276,7 @@ impl Component for TerminalScreen {
         let app_nav = app_nav();
         // The attached session's id, read **here** because `init` is the one
         // moment `Nav::param` is exact: this push is what recorded the query.
-        let session = app_nav.param(SESSION_QUERY_KEY);
+        let session = app_nav.param(crate::routes::TERMINAL_SESSION_QUERY_KEY);
         // The screen-scoped view model over the three app-scoped repositories
         // `di` published (`sessions`'/`settings`' through their own `di.rs` — the
         // sanctioned cross-feature widening). Auto-disposed on unmount.

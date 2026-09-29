@@ -100,6 +100,7 @@ impl Default for MockSessionsRepository {
 /// A terminal pane fixture.
 fn pane(title: &str, cwd: Option<&str>, focused: bool, floating: bool) -> PaneSummary {
     PaneSummary {
+        id: 0,
         title: title.to_string(),
         cwd: cwd.map(str::to_string),
         focused,
@@ -108,14 +109,25 @@ fn pane(title: &str, cwd: Option<&str>, focused: bool, floating: bool) -> PaneSu
     }
 }
 
-/// A tab fixture.
-fn tab(index: u32, name: &str, focused: bool, panes: Vec<PaneSummary>) -> TabSummary {
+/// A tab fixture; its panes are numbered in order, unique within the tab.
+fn tab(index: u32, name: &str, focused: bool, mut panes: Vec<PaneSummary>) -> TabSummary {
+    for (id, pane) in (0..).zip(panes.iter_mut()) {
+        pane.id = id;
+    }
     TabSummary {
         index,
         name: name.to_string(),
         focused,
         has_bell: false,
         panes,
+    }
+}
+
+/// `tab` with its bell ringing.
+fn ringing(tab: TabSummary) -> TabSummary {
+    TabSummary {
+        has_bell: true,
+        ..tab
     }
 }
 
@@ -147,7 +159,7 @@ fn seed() -> Vec<Session> {
                             pane("scratch", None, false, true),
                         ],
                     ),
-                    tab(
+                    ringing(tab(
                         1,
                         "build",
                         false,
@@ -155,7 +167,7 @@ fn seed() -> Vec<Session> {
                             pane("cargo watch", Some("/home/ed/muxr"), false, false),
                             pane("tail -f", Some("/var/log"), false, false),
                         ],
-                    ),
+                    )),
                     tab(
                         2,
                         "edit",

@@ -43,7 +43,10 @@ use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
 use crate::responsive::Responsive;
-use crate::routes::{Nav, app_nav, sessions_back_signal};
+use crate::routes::{
+    Nav, TERMINAL_PANE_QUERY_KEY, TERMINAL_SESSION_QUERY_KEY, TERMINAL_TAB_QUERY_KEY, app_nav,
+    sessions_back_signal,
+};
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::palette::Palette;
 use crate::ui::sheet::show_sheet;
@@ -60,11 +63,6 @@ use super::widgets::{self, CardMode, LoadPhase};
 /// `/terminal` route and `crate::routes`' own session-guard `loc.path` check
 /// are both unaffected).
 const TERMINAL_ROUTE: &str = "/terminal";
-/// The query key [`TERMINAL_ROUTE`] carries the session id under.
-const SESSION_QUERY_KEY: &str = "session";
-/// The keys a pane pill adds: the tab's wire index and the pane's title.
-const TAB_QUERY_KEY: &str = "tab";
-const PANE_QUERY_KEY: &str = "pane";
 /// What the detail header's rename/kill say under a read-only credential.
 const READ_ONLY_TOAST: &str =
     "Read-only session \u{2014} reconnect with a read-write token to change this";
@@ -627,8 +625,10 @@ impl Actions {
         self.app_nav.push(&terminal_location(id, None));
     }
 
-    /// Attach to `id` straight into one pane: a Tablet pane pill's tap.
-    pub fn attach_pane(&self, id: &str, tab: u32, pane: &str) {
+    /// Attach to `id` carrying a Tablet pane pill's `(tab, pane id)` target.
+    /// The terminal honours that target once Phase 4's attach-into-pane card
+    /// lands; until then it attaches at the session's server focus.
+    pub fn attach_pane(&self, id: &str, tab: u32, pane: u32) {
         self.pause_for_push();
         self.app_nav.push(&terminal_location(id, Some((tab, pane))));
     }
@@ -754,7 +754,7 @@ pub(super) fn select(state: &mut SessionsState, id: &str) {
     state.actions.controller.select(id);
 }
 
-pub(super) fn attach_pane(state: &mut SessionsState, id: &str, tab: u32, pane: &str) {
+pub(super) fn attach_pane(state: &mut SessionsState, id: &str, tab: u32, pane: u32) {
     state.actions.attach_pane(id, tab, pane);
 }
 
@@ -798,15 +798,17 @@ pub(super) fn open_manage_sheet(state: &mut SessionsState, id: &str) {
     state.actions.open_manage_sheet(id, read_only);
 }
 
-/// The `/terminal` location for `id`, optionally aimed at one `(tab, pane)`
-/// — the one place it is spelled; pushed through the app's one guarded
-/// [`Nav`], so it runs the real route table and session guard like a deep
-/// link. The pane title is percent-encoded.
-fn terminal_location(id: &str, pane: Option<(u32, &str)>) -> String {
-    let mut location = format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}={id}");
-    if let Some((tab, title)) = pane {
-        let title = utf8_percent_encode(title, NON_ALPHANUMERIC);
-        location.push_str(&format!("&{TAB_QUERY_KEY}={tab}&{PANE_QUERY_KEY}={title}"));
+/// The `/terminal` location for `id`, optionally aimed at one
+/// `(tab index, pane id)` — the one place it is spelled; pushed through the
+/// app's one guarded [`Nav`], so it runs the real route table and session
+/// guard like a deep link. The session id is percent-encoded.
+fn terminal_location(id: &str, pane: Option<(u32, u32)>) -> String {
+    let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
+    let mut location = format!("{TERMINAL_ROUTE}?{TERMINAL_SESSION_QUERY_KEY}={id}");
+    if let Some((tab, pane)) = pane {
+        location.push_str(&format!(
+            "&{TERMINAL_TAB_QUERY_KEY}={tab}&{TERMINAL_PANE_QUERY_KEY}={pane}"
+        ));
     }
     location
 }
@@ -819,28 +821,30 @@ mod tests {
     fn the_attach_location_carries_the_session_id_as_a_query_param() {
         // Tripwire: the path stays flat `/terminal` (route table + session
         // guard match on it); the id is only in the query.
-        let raw = format!("{TERMINAL_ROUTE}?{SESSION_QUERY_KEY}=s-1");
+        let raw = format!("{TERMINAL_ROUTE}?{TERMINAL_SESSION_QUERY_KEY}=s-1");
         let loc = frust::Location::parse(&raw);
 
         assert_eq!(loc.path, TERMINAL_ROUTE);
         assert_eq!(
-            loc.query.get(SESSION_QUERY_KEY).map(String::as_str),
+            loc.query
+                .get(TERMINAL_SESSION_QUERY_KEY)
+                .map(String::as_str),
             Some("s-1")
         );
     }
 
     #[test]
-    fn a_pane_location_adds_the_tab_index_and_the_encoded_pane_title() {
-        let raw = terminal_location("s-1", Some((2, "ed@precision: ~")));
-        assert!(raw.contains("pane=ed%40precision%3A%20%7E"), "{raw}");
+    fn a_pane_location_adds_the_tab_index_and_the_pane_id_and_encodes_the_session() {
+        let raw = terminal_location("zellij:a&b=c d", Some((2, 7)));
+        assert!(raw.contains("session=zellij%3Aa%26b%3Dc%20d"), "{raw}");
         let loc = frust::Location::parse(&raw);
 
         assert_eq!(loc.path, TERMINAL_ROUTE);
         let query = |key: &str| loc.query.get(key).map(String::as_str);
-        assert_eq!(query(SESSION_QUERY_KEY), Some("s-1"));
-        assert_eq!(query(TAB_QUERY_KEY), Some("2"));
-        assert_eq!(query(PANE_QUERY_KEY), Some("ed@precision: ~"));
-        assert_eq!(terminal_location("s-1", None), "/terminal?session=s-1");
+        assert_eq!(query(TERMINAL_SESSION_QUERY_KEY), Some("zellij:a&b=c d"));
+        assert_eq!(query(TERMINAL_TAB_QUERY_KEY), Some("2"));
+        assert_eq!(query(TERMINAL_PANE_QUERY_KEY), Some("7"));
+        assert_eq!(terminal_location("s-1", None), "/terminal?session=s%2D1");
     }
 
     /// An observer over `signal`, mounted (as `init` mounts one) at whatever

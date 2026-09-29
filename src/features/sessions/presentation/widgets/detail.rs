@@ -2,7 +2,9 @@
 //! session's header — name, status/backend chips, the this-device and bell
 //! chips, then rename, kill and the primary attach — over a grid of Glyph
 //! cards: overview stats, the active tab's pane tiles, and the full-width
-//! tabs → panes card whose pane pills attach straight into a pane.
+//! tabs → panes card whose pane pills carry a tab/pane target (honoured by
+//! the terminal once Phase 4's attach-into-pane card lands; until then it
+//! attaches at the session's server focus).
 //!
 //! Every count reads the session's `LayoutSummary`. No selection, a list
 //! still loading, a failed first load, an empty list and a resurrectible
@@ -509,7 +511,8 @@ fn pane_pills(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> AnyVi
     any(column(rows, PILL_GAP))
 }
 
-/// `.pp`: pane mark, title, cwd, `float` — a tap attaches into the pane.
+/// `.pp`: pane mark, title, cwd, `float` — a tap attaches with the pane's
+/// `(tab, id)` target (see the module docs for who honours it).
 fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> AnyView<SessionsState> {
     let theme = active_theme();
     let (fill, border, ink) = if pane.focused {
@@ -550,9 +553,9 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> AnyVie
     .border(border, HAIRLINE)
     .radius(RADIUS_FULL);
     let id = id.to_string();
-    let title = pane.title.clone();
+    let pane_id = pane.id;
     any(GestureDetector(pill)
-        .on_tap(move |state: &mut SessionsState| pages::attach_pane(state, &id, tab, &title)))
+        .on_tap(move |state: &mut SessionsState| pages::attach_pane(state, &id, tab, pane_id)))
 }
 
 #[cfg(test)]

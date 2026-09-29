@@ -67,6 +67,14 @@ const SESSIONS_ROUTE: &str = "/sessions";
 const TERMINAL_ROUTE: &str = "/terminal";
 pub const SETTINGS_ROUTE: &str = "/settings";
 
+/// The `/terminal` query contract, shared by the screens that push it and the
+/// one that reads it: the attached session's id.
+pub const TERMINAL_SESSION_QUERY_KEY: &str = "session";
+/// The zero-based tab index a pane pill targets.
+pub const TERMINAL_TAB_QUERY_KEY: &str = "tab";
+/// The wire pane id (unique within the tab's terminal panes) a pill targets.
+pub const TERMINAL_PANE_QUERY_KEY: &str = "pane";
+
 /// The `/` route (and the outer navigator's initial page): Connect.
 pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
     connect_page(overlays)
