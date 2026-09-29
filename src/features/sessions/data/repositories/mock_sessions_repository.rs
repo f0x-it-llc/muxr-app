@@ -41,7 +41,8 @@ use std::time::Duration;
 
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
-    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
+    CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionBackend,
+    SessionStatus, TabSummary, ThirdMetric,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
@@ -96,6 +97,28 @@ impl Default for MockSessionsRepository {
     }
 }
 
+/// A terminal pane fixture.
+fn pane(title: &str, cwd: Option<&str>, focused: bool, floating: bool) -> PaneSummary {
+    PaneSummary {
+        title: title.to_string(),
+        cwd: cwd.map(str::to_string),
+        focused,
+        floating,
+        exited: false,
+    }
+}
+
+/// A tab fixture.
+fn tab(index: u32, name: &str, focused: bool, panes: Vec<PaneSummary>) -> TabSummary {
+    TabSummary {
+        index,
+        name: name.to_string(),
+        focused,
+        has_bell: false,
+        panes,
+    }
+}
+
 /// The seeded session set — `docs/redesign.html`'s three cards, transcribed
 /// 1:1 (counts, pane previews and all), in the order it draws them.
 fn seed() -> Vec<Session> {
@@ -105,11 +128,54 @@ fn seed() -> Vec<Session> {
             name: "dev".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Zellij,
+            age_secs: 3 * 3600,
+            has_bell: true,
+            is_current: true,
             layout: LayoutSummary {
                 tabs: 4,
                 panes: 9,
                 third: ThirdMetric::Clients(0),
                 preview: vec!["btop".to_string(), "ed@precision:~".to_string()],
+                tabs_detail: vec![
+                    tab(
+                        0,
+                        "main",
+                        true,
+                        vec![
+                            pane("btop", Some("/home/ed"), true, false),
+                            pane("ed@precision:~", Some("/home/ed"), false, false),
+                            pane("scratch", None, false, true),
+                        ],
+                    ),
+                    tab(
+                        1,
+                        "build",
+                        false,
+                        vec![
+                            pane("cargo watch", Some("/home/ed/muxr"), false, false),
+                            pane("tail -f", Some("/var/log"), false, false),
+                        ],
+                    ),
+                    tab(
+                        2,
+                        "edit",
+                        false,
+                        vec![
+                            pane("hx", Some("/home/ed/muxr"), false, false),
+                            pane("shell", Some("/home/ed/muxr"), false, false),
+                        ],
+                    ),
+                    tab(
+                        3,
+                        "logs",
+                        false,
+                        vec![
+                            pane("journalctl", None, false, false),
+                            pane("shell", None, false, false),
+                        ],
+                    ),
+                ],
+                space: None,
             },
         },
         Session {
@@ -117,11 +183,16 @@ fn seed() -> Vec<Session> {
             name: "jumping-peach".to_string(),
             status: SessionStatus::Resurrectible,
             backend: SessionBackend::Zellij,
+            age_secs: 2 * 24 * 3600,
+            has_bell: false,
+            is_current: false,
             layout: LayoutSummary {
                 tabs: 0,
                 panes: 0,
                 third: ThirdMetric::TabsSaved(0),
                 preview: Vec::new(),
+                tabs_detail: Vec::new(),
+                space: None,
             },
         },
         Session {
@@ -129,6 +200,9 @@ fn seed() -> Vec<Session> {
             name: "herdr".to_string(),
             status: SessionStatus::Running,
             backend: SessionBackend::Herdr,
+            age_secs: 45 * 60,
+            has_bell: false,
+            is_current: false,
             layout: LayoutSummary {
                 tabs: 2,
                 panes: 3,
@@ -137,23 +211,55 @@ fn seed() -> Vec<Session> {
                     "\u{b7}\u{b7}\u{b7}".to_string(),
                     "\u{b7}\u{b7}\u{b7}".to_string(),
                 ],
+                tabs_detail: vec![
+                    tab(
+                        0,
+                        "work",
+                        true,
+                        vec![
+                            pane("\u{b7}\u{b7}\u{b7}", None, true, false),
+                            pane("\u{b7}\u{b7}\u{b7}", None, false, false),
+                        ],
+                    ),
+                    tab(
+                        1,
+                        "notes",
+                        false,
+                        vec![pane("\u{b7}\u{b7}\u{b7}", None, false, false)],
+                    ),
+                ],
+                space: Some("home".to_string()),
             },
         },
     ]
 }
 
 /// A session created at runtime: one empty tab, running, no clients yet.
-fn new_session(id: String, name: String) -> Session {
+fn new_session(id: String, name: String, backend: SessionBackend) -> Session {
+    let third = match backend {
+        SessionBackend::Zellij => ThirdMetric::Clients(0),
+        SessionBackend::Herdr => ThirdMetric::Spaces(0),
+    };
     Session {
         id,
         name,
         status: SessionStatus::Running,
-        backend: SessionBackend::Zellij,
+        backend,
+        age_secs: 0,
+        has_bell: false,
+        is_current: false,
         layout: LayoutSummary {
             tabs: 1,
             panes: 1,
-            third: ThirdMetric::Clients(0),
+            third,
             preview: Vec::new(),
+            tabs_detail: vec![tab(
+                0,
+                "Tab #1",
+                true,
+                vec![pane("shell", None, true, false)],
+            )],
+            space: None,
         },
     }
 }
@@ -166,15 +272,15 @@ impl SessionsRepository for MockSessionsRepository {
         Ok(self.snapshot())
     }
 
-    async fn create_session(&self, name: String) -> Result<Session, AppFailure> {
+    async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
-        let name = name.trim().to_string();
+        let name = params.name.trim().to_string();
         if name.is_empty() {
             return Err(AppFailure::Internal(
                 "create_session called with a blank name".to_string(),
             ));
         }
-        let session = new_session(self.mint_id(), name);
+        let session = new_session(self.mint_id(), name, params.backend);
         self.lock().push(session.clone());
         Ok(session)
     }
@@ -229,6 +335,24 @@ mod tests {
             .block_on(fut)
     }
 
+    fn params(name: &str) -> CreateSessionParams {
+        CreateSessionParams {
+            name: name.to_string(),
+            backend: SessionBackend::Zellij,
+        }
+    }
+
+    #[test]
+    fn the_seed_drives_the_detail_states() {
+        let sessions = seed();
+        let dev = sessions[0].layout.focused_tab().expect("a focused tab");
+        assert_eq!(dev.panes.len(), 3);
+        assert!(dev.panes.iter().any(|p| p.floating));
+        assert_eq!(sessions[0].layout.tabs_detail.len(), 4);
+        assert!(sessions[1].layout.tabs_detail.is_empty());
+        assert_eq!(sessions[2].backend, SessionBackend::Herdr);
+    }
+
     #[test]
     fn the_seed_is_the_redesigns_three_cards_verbatim() {
         let repo = MockSessionsRepository::seeded();
@@ -263,8 +387,7 @@ mod tests {
     #[test]
     fn create_appends_a_session_with_a_fresh_id() {
         let repo = MockSessionsRepository::seeded();
-        let created =
-            block_on(repo.create_session("staging".to_string())).expect("create succeeds");
+        let created = block_on(repo.create_session(params("staging"))).expect("create succeeds");
 
         assert_eq!(created.name, "staging");
         let sessions = repo.snapshot();
@@ -282,7 +405,7 @@ mod tests {
     #[test]
     fn create_rejects_a_blank_name() {
         let repo = MockSessionsRepository::seeded();
-        let failure = block_on(repo.create_session("   ".to_string())).expect_err("blank rejected");
+        let failure = block_on(repo.create_session(params("   "))).expect_err("blank rejected");
 
         assert!(matches!(failure, AppFailure::Internal(_)));
         assert_eq!(repo.snapshot().len(), SEEDED_COUNT, "nothing was appended");

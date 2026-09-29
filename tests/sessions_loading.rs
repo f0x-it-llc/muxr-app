@@ -33,7 +33,9 @@ use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::di::expect_sessions_repository;
-use muxr::features::sessions::domain::entities::RenameRequest;
+use muxr::features::sessions::domain::entities::{
+    CreateSessionParams, RenameRequest, SessionBackend,
+};
 use muxr::features::sessions::presentation::pages::{sessions_page, set_loading_rain_for_tests};
 use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::Preferences;
@@ -752,7 +754,10 @@ fn seed_extra_session(name: &str) {
     let owned = name.to_string();
     spawn_local(async move {
         repository
-            .create_session(owned)
+            .create_session(CreateSessionParams {
+                name: owned,
+                backend: SessionBackend::Zellij,
+            })
             .await
             .expect("the mock never rejects a real name");
         flag.set(true);

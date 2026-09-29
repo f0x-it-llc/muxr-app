@@ -38,7 +38,8 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::sessions::di::SharedSessionsRepository;
 use muxr::features::sessions::domain::entities::{
-    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
+    CreateSessionParams, LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus,
+    ThirdMetric,
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
@@ -1199,11 +1200,16 @@ fn stub_session(name: &str) -> Session {
         name: name.to_string(),
         status: SessionStatus::Running,
         backend: SessionBackend::Zellij,
+        age_secs: 0,
+        has_bell: false,
+        is_current: false,
         layout: LayoutSummary {
             tabs: 1,
             panes: 1,
             third: ThirdMetric::Clients(0),
             preview: Vec::new(),
+            tabs_detail: Vec::new(),
+            space: None,
         },
     }
 }
@@ -1235,7 +1241,7 @@ impl SessionsRepository for CountingSessionsRepo {
         Ok(Vec::new())
     }
 
-    async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
         unreachable!("not exercised by the poll/staleness tests")
     }
 
@@ -1312,7 +1318,7 @@ impl SessionsRepository for RaceSessionsRepo {
         }
     }
 
-    async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
         unreachable!("not exercised by the poll/staleness tests")
     }
 

@@ -1,4 +1,4 @@
-//! [`CreateSession`] — creates a session by name (the list's dashed
+//! [`CreateSession`] — creates a session by name and backend (the list's dashed
 //! "+ new session" row and the empty state's action, both through the
 //! name-input dialog).
 //!
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use clean_signals::UseCase;
 
 use crate::failure::AppFailure;
-use crate::features::sessions::domain::entities::Session;
+use crate::features::sessions::domain::entities::{CreateSessionParams, Session};
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
 pub struct CreateSession {
@@ -28,11 +28,11 @@ impl CreateSession {
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 impl UseCase for CreateSession {
-    type Params = String;
+    type Params = CreateSessionParams;
     type Output = Session;
     type Failure = AppFailure;
 
-    async fn execute(&self, name: String) -> Result<Session, AppFailure> {
-        self.repo.create_session(name).await
+    async fn execute(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
+        self.repo.create_session(params).await
     }
 }

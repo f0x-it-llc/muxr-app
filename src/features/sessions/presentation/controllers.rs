@@ -5,7 +5,9 @@ use clean_signals::{ControllerCore, NoParams, RunOptions};
 use frust::{GetUntracked, RwSignal, Set};
 
 use crate::failure::AppFailure;
-use crate::features::sessions::domain::entities::{RenameRequest, Session};
+use crate::features::sessions::domain::entities::{
+    CreateSessionParams, RenameRequest, Session, SessionBackend,
+};
 use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::sessions::domain::use_cases::{
     CreateSession, KillSession, ListSessions, RenameSession,
@@ -84,9 +86,13 @@ impl SessionsController {
     }
 
     pub async fn create(&self, name: String) {
+        let params = CreateSessionParams {
+            name,
+            backend: SessionBackend::Zellij,
+        };
         if self
             .core
-            .run(&self.create, name, RunOptions::default())
+            .run(&self.create, params, RunOptions::default())
             .await
             .is_ok()
         {
@@ -182,7 +188,7 @@ mod tests {
     use super::*;
     use crate::features::sessions::data::repositories::MockSessionsRepository;
     use crate::features::sessions::domain::entities::{
-        LayoutSummary, SessionBackend, SessionStatus, ThirdMetric,
+        CreateSessionParams, LayoutSummary, SessionStatus, ThirdMetric,
     };
 
     /// How many sessions the mock repository seeds (the redesign's three
@@ -330,7 +336,10 @@ mod tests {
             Err(AppFailure::Network("simulated network error".to_string()))
         }
 
-        async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+        async fn create_session(
+            &self,
+            _params: CreateSessionParams,
+        ) -> Result<Session, AppFailure> {
             Err(AppFailure::Internal("not implemented".to_string()))
         }
 
@@ -416,11 +425,16 @@ mod tests {
             name: format!("call-{call}"),
             status: SessionStatus::Running,
             backend: SessionBackend::Zellij,
+            age_secs: 0,
+            has_bell: false,
+            is_current: false,
             layout: LayoutSummary {
                 tabs: 0,
                 panes: 0,
                 third: ThirdMetric::Clients(0),
                 preview: Vec::new(),
+                tabs_detail: Vec::new(),
+                space: None,
             },
         }
     }
@@ -437,7 +451,10 @@ mod tests {
             Ok(vec![gated_session(call)])
         }
 
-        async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+        async fn create_session(
+            &self,
+            _params: CreateSessionParams,
+        ) -> Result<Session, AppFailure> {
             Err(AppFailure::Internal("not implemented".to_string()))
         }
 
