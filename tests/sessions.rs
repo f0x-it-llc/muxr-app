@@ -28,9 +28,9 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, WindowMetrics,
-    any, navigator, provide_context,
+    any, navigator,
 };
-use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
+use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
@@ -107,19 +107,11 @@ fn mock_target(offer_credential: bool) -> ConnectTarget {
     }
 }
 
-/// A [`WindowMetrics`] whose size is `size` — see `mount_with_metrics`.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
-}
-
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
 /// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
-    if let Some(metrics) = metrics {
-        provide_context(metrics);
-    }
-    Harness::mount()
+    support::mount_with_metrics(metrics, Harness::mount)
 }
 
 /// The app-logic closure `RenderRoot::rebuild` drives.
@@ -1046,7 +1038,7 @@ fn card_backs_in(scene: &RecScene, left: f64, width: f64) -> Vec<(Point, Size)> 
 fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(metrics_at(support::surface())));
+    let mut h = mount_with_metrics(Some(support::metrics_at(support::W, support::H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
 
@@ -1095,10 +1087,7 @@ fn narrow_metrics_leave_the_list_column_unclamped_like_no_metrics_at_all() {
     // Explicit narrow metrics, even though the harness still paints at the
     // full-width default surface — proving the branch keys on the
     // *published* width, not the paint surface.
-    let mut h = mount_with_metrics(Some(metrics_at(Size::new(
-        400.0,
-        support::surface().height,
-    ))));
+    let mut h = mount_with_metrics(Some(support::metrics_at(400.0, support::H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
 

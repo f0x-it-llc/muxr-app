@@ -26,7 +26,7 @@ use frust::{
     Stack, WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{FrameTime, NamedKey, PaintScene, PointerPhase, RenderRoot, WindowInsets};
+use frust_core::{FrameTime, NamedKey, PaintScene, PointerPhase, RenderRoot};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -166,17 +166,7 @@ fn empty_base_page() -> AnyView<AppState> {
 /// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
 /// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
-    if let Some(metrics) = metrics {
-        provide_context(metrics);
-    }
-    Harness::mount()
-}
-
-/// A [`WindowMetrics`] whose size is [`SURFACE`] itself — a shell reporting
-/// the same window this harness actually paints at, so a clamp's centering
-/// math is checkable against real recorded geometry.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
+    support::mount_with_metrics(metrics, Harness::mount)
 }
 
 /// How a mounted fixture's install is entitled.
@@ -698,7 +688,7 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
 fn wide_metrics_clamp_and_center_the_content_column() {
     let _g = serial();
     let _ambient = setup();
-    let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
+    let harness = mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
 
     // The CTA is the layer's own full-bleed piece (see the test above), so its
     // box is the cheapest honest read on where the *clamped* layer itself
@@ -730,7 +720,7 @@ fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
     // width, not the paint surface, and lands exactly where the no-metrics
     // baseline (`the_cta_spans_the_layer_and_clears_the_minimum_tap_target`)
     // already does.
-    let harness = mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let harness = mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
 
     let cta = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
@@ -776,7 +766,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     // The clamp lives in `connect_layout`, the one function both renderings
     // assemble through, so this asserts the two land on the same horizontal
     // box rather than that each happens to satisfy the same arithmetic.
-    let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
+    let harness = mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
     let live = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
@@ -798,7 +788,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     // height-bounded `Stack`, so a vertically-centered alignment would drop the
     // whole column down the screen and trade the width jump for a taller one.
     // Wide and narrow must therefore agree on where the column starts.
-    provide_context(metrics_at(Size::new(400.0, SURFACE.height)));
+    provide_context(support::metrics_at(400.0, SURFACE.height));
     let narrow = splash_cta_bounds(&[]);
     assert!(
         (splash.y0 - narrow.y0).abs() < EPSILON,
@@ -811,7 +801,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
 fn narrow_metrics_leave_the_splash_assembly_full_bleed_too() {
     let _g = serial();
     let _ambient = setup();
-    provide_context(metrics_at(Size::new(400.0, SURFACE.height)));
+    provide_context(support::metrics_at(400.0, SURFACE.height));
 
     // The other half of the branch: below the breakpoint the splash spans the
     // layer exactly as the live screen does (the shared function takes one

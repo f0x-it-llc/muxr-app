@@ -30,7 +30,7 @@ use frust::{
     WindowMetrics, any, navigator, provide_context, spawn_local,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
+use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_reactive::ReactiveRuntime;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -131,19 +131,11 @@ fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
     }
 }
 
-/// A [`WindowMetrics`] whose size is `size` — see `mount_with_metrics`.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
-}
-
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
 /// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
-    if let Some(metrics) = metrics {
-        provide_context(metrics);
-    }
-    Harness::mount()
+    support::mount_with_metrics(metrics, Harness::mount)
 }
 
 /// The bounds of the first node labelled `label` — `tests/connect.rs`'s
@@ -2714,7 +2706,7 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
 fn wide_metrics_clamp_and_center_the_groups_column() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(metrics_at(SURFACE)));
+    let mut h = mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
     h.frame();
 
     // Disconnect is the screen's last, full-width row — the cheapest honest
@@ -2743,7 +2735,7 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
     // Explicit narrow metrics, even though the harness still paints at the
     // full-width `SURFACE` — proving the branch keys on the *published*
     // width, not the paint surface.
-    let mut h = mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let mut h = mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
     h.frame();
 
     let disconnect = bounds_by_label(&h.root, "Disconnect");

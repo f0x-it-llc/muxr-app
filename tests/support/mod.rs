@@ -1,16 +1,20 @@
 //! Shared headless-test harness: a GPU-free recording paint target ([`RecScene`]), frame/pointer/
 //! keyboard helpers, and the [`setup`] ambient-owner + mock-opt-in seam every suite runs through
-//! before `MuxrApp::init`. Factored so every `tests/*.rs` file (each its own crate root) can
-//! share it; not every test uses every helper.
+//! before `MuxrApp::init`. Every `tests/*.rs` crate root shares it; unused helpers are expected.
 //!
 //! [`frame`] paints at `FrameTime::ZERO`; use [`frame_at`]/[`settle`] for anything driven off the
 //! frame clock — a navigator push/pop transition **blocks all input** mid-flight. [`long_press`]
 //! spans two paints so the hold timer crosses its threshold.
 //!
-//! To locate what to tap: semantics helpers (`node_labels`/`node_center_by_label`/etc.) read the
-//! accessibility tree and are the only way to assert what a toast said, but see nothing inside a
-//! `Navigator` (no child semantics forwarded); use the recorded-geometry helpers
-//! (`largest`/`smallest`/`by_width`/`added`) for a pushed page instead.
+//! To locate what to tap: the semantics helpers (`node_labels`/`node_center_by_label`/…) read the
+//! accessibility tree (the only way to assert a toast's text) but see nothing in a `Navigator`;
+//! use the recorded-geometry helpers (`largest`/`smallest`/`by_width`/`added`) for a pushed page.
+//!
+//! **Window metrics:** [`metrics_at`]/[`mount_with_metrics`]/[`reprovide_metrics`] publish a resize
+//! exactly as a shell does. It reaches `build` on the next frames without a probe: every [`frame`]
+//! runs `RenderRoot::rebuild` (frust-core `app.rs:1189`), as the shell driver does on each frame it
+//! runs (frust-shell-ios `app/frame.rs:348`), and a resize reopens the frame gate's
+//! `WARMUP_FRAMES = 3` window (frust-shell-common `frame_gate.rs:82`, `:483`).
 #![allow(dead_code)]
 
 use std::any::Any;
@@ -18,10 +22,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use frust::provide_context;
 use frust_core::accesskit::{Node, Role};
 use frust_core::{
     FrameTime, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene, PointerButton,
-    PointerEvent, PointerPhase, RenderRoot, View, WindowEdgeInsets, WindowInsets,
+    PointerEvent, PointerPhase, RenderRoot, View, WindowEdgeInsets, WindowInsets, WindowMetrics,
 };
 use frust_reactive::{FrameWaker, ReactiveRuntime};
 use frust_scene::GlyphRun;
@@ -41,6 +46,24 @@ pub fn surface() -> Size {
     Size::new(W, H)
 }
 
+/// A [`WindowMetrics`] of `width`×`height` logical px: scale 1.0, zero insets, orientation derived.
+pub fn metrics_at(width: f64, height: f64) -> WindowMetrics {
+    WindowMetrics::new(Size::new(width, height), 1.0, WindowInsets::default())
+}
+
+/// Publish `metrics` when `Some`, then run a screen's own `mount`; `None` leaves context unset.
+pub fn mount_with_metrics<T>(metrics: Option<WindowMetrics>, mount: impl FnOnce() -> T) -> T {
+    if let Some(metrics) = metrics {
+        provide_context(metrics);
+    }
+    mount()
+}
+
+/// Re-publish `metrics` as a shell does on resize.
+pub fn reprovide_metrics(metrics: WindowMetrics) {
+    provide_context(metrics);
+}
+
 /// A [`WindowInsets`] with only an IME bottom occlusion (`view_insets.bottom`, never
 /// `view_padding` — system bars aren't the IME). Publish via [`RenderRoot::set_insets`] before
 /// the frame that should see the keyboard up.
@@ -57,9 +80,8 @@ pub fn ime_bottom_inset(bottom: f64) -> WindowInsets {
 /// `rounded_fills` carry colour (and radius) for tone assertions a box alone can't make — e.g. a
 /// scrim rect that only changes alpha frame to frame ([`alpha_of`]/[`fills_at`]). `paths` is
 /// filled vector geometry, the one thing `frust::icon` emits (a path with no glyph run).
-/// `transforms` is every pushed `Affine`, recorded standalone rather than composed into the other
-/// channels' coordinates — the only way to observe a widget that animates via a paint-time
-/// transform push (e.g. `frust_glyph`'s sliding sheet panel) instead of moving pod origins.
+/// `transforms` is every pushed `Affine`, recorded standalone — the one way to observe a widget
+/// that animates via a paint-time transform push (`frust_glyph`'s sheet panel), not pod origins.
 #[derive(Default)]
 pub struct RecScene {
     pub glyph_runs: usize,
@@ -249,7 +271,6 @@ pub const SETTLE_MS: f64 = 2_000.0;
 
 /// Drive a freshly pushed/popped overlay past its transition: frames at 0 and [`SETTLE_MS`]
 /// (completing the transition during paint), then one more whose **rebuild** finalizes it.
-///
 /// **Required before tapping a pushed page**: mid-transition the navigator suppresses all
 /// routing (a tap sent too early is silently swallowed), and the transition isn't done when its
 /// last frame paints but when the *following rebuild* finalizes it — the third frame is what
@@ -372,7 +393,6 @@ fn node_center<S: 'static, V: View<S>>(
 pub const HELD_MS: f64 = 600.0;
 
 /// A full long-press at `p`: press, hold past [`HELD_MS`], release.
-///
 /// The two middle frames are required: `GestureDetector` measures a hold across *paints* (the
 /// only pass with a clock), and its callback fires on the *next pointer event* — the `Up` below
 /// (`frust_widgets::gesture`'s fire-on-release contract). A long-press never also fires `on_tap`,
