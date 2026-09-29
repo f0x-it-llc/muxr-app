@@ -158,6 +158,8 @@ pub struct TabSummary {
 /// One terminal pane of a [`TabSummary`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneSummary {
+    /// The wire pane id, unique within a tab's terminal panes.
+    pub id: u32,
     pub title: String,
     /// Working directory, `None` when the backend reports none.
     pub cwd: Option<String>,

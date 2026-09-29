@@ -32,9 +32,9 @@
 //! production-facing ever renders their return value. Rather than pay a
 //! second `ListSessions` round trip just to populate one, both construct
 //! their [`Session`] optimistically from what the request already
-//! establishes: a created session is created zellij (mirroring
-//! [`MockSessionsRepository`](super::MockSessionsRepository)'s own
-//! `new_session` — no backend picker yet), and a renamed session's id is
+//! establishes: a created session carries the backend the request asked for
+//! (`params.backend`, which [`MockSessionsRepository`](super::MockSessionsRepository)'s
+//! own `new_session` honours too), and a renamed session's id is
 //! *reconciled* — the `<backend>:<name>` convention lets this file recompute
 //! the id from the old id's own backend prefix plus the new name, no round
 //! trip needed. Every other field on the optimistic [`Session`] is a
@@ -386,6 +386,7 @@ fn layout_derived_from(layout: Layout) -> LayoutDerived {
                 .iter()
                 .filter(|pane| !pane.is_plugin)
                 .map(|pane| PaneSummary {
+                    id: pane.id,
                     title: pane.title.clone(),
                     cwd: Some(pane.cwd.clone()).filter(|cwd| !cwd.is_empty()),
                     focused: pane.is_focused,

@@ -1587,10 +1587,24 @@ fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
     assert_eq!(stat_value(&h, "clients").as_deref(), Some("0"));
     assert_eq!(stat_value(&h, "age").as_deref(), Some("3 hours ago"));
 
-    // A pane pill attaches straight into its pane.
+    // A pane pill pushes the terminal route carrying its tab and pane id.
     tap_last_value(&mut h, "scratch");
     h.settle();
     assert_eq!(h.depth(), 2, "a pane pill pushes the terminal route");
+    let nav = muxr::routes::app_nav();
+    let param = |key: &str| nav.param(key);
+    assert_eq!(
+        param(muxr::routes::TERMINAL_SESSION_QUERY_KEY).as_deref(),
+        Some("s-1")
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_TAB_QUERY_KEY).as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_PANE_QUERY_KEY).as_deref(),
+        Some("2")
+    );
 }
 
 #[test]
