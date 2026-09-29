@@ -1030,8 +1030,14 @@ fn an_invalid_url_shows_the_inline_line_and_never_toasts_or_navigates() {
     );
     assert!(harness.shows_value(URL_ERROR_MESSAGE), "the inline line");
     assert!(
-        !URL_ERROR_MESSAGE.contains(INVALID_URL),
-        "…which never echoes what was typed"
+        !harness
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() != Role::TextInput)
+            .any(|(_, node)| node.value().is_some_and(|v| v.contains(INVALID_URL))),
+        "…which never echoes what was typed (the field itself holds it, nothing else)"
     );
     assert_eq!(harness.nav.depth(), 1, "nothing was pushed");
     assert!(
@@ -1057,6 +1063,52 @@ fn editing_the_url_clears_the_inline_line() {
     });
     harness.type_text("x");
     assert!(!harness.shows_value(URL_ERROR_MESSAGE), "an edit clears it");
+}
+
+#[test]
+fn a_rejected_url_then_a_successful_connect_leaves_no_inline_line() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    creds.controller.set_url(INVALID_URL.to_string());
+    creds
+        .controller
+        .connect(&app_nav(), Rc::new(|_offer: CredentialOffer| {}), ungated());
+    assert!(creds.controller.invalid.get_untracked());
+    assert_eq!(
+        creds.controller.url_error.get_untracked().as_deref(),
+        Some(URL_ERROR_MESSAGE)
+    );
+
+    // Written straight to the signal: `set_url` would clear the line itself,
+    // and this case is about the dial clearing it.
+    creds.controller.url.set(VALID_URL.to_string());
+    creds
+        .controller
+        .connect(&app_nav(), Rc::new(|_offer: CredentialOffer| {}), ungated());
+
+    assert!(creds.connection.connected.get_untracked(), "it dialed");
+    assert!(!creds.controller.invalid.get_untracked());
+    assert_eq!(creds.controller.url_error.get_untracked(), None);
+}
+
+#[test]
+fn applying_a_scanned_payload_clears_a_rejected_url() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    creds.controller.set_url(INVALID_URL.to_string());
+    creds
+        .controller
+        .connect(&app_nav(), Rc::new(|_offer: CredentialOffer| {}), ungated());
+    assert!(creds.controller.url_error.get_untracked().is_some());
+
+    creds
+        .controller
+        .apply_scanned_payload(scanned_payload(false));
+
+    assert!(!creds.controller.invalid.get_untracked());
+    assert_eq!(creds.controller.url_error.get_untracked(), None);
 }
 
 #[test]
@@ -4329,7 +4381,7 @@ fn pro_tags(harness: &Harness) -> usize {
 }
 
 #[test]
-fn a_free_install_tags_every_row_past_the_first_with_pro_on_both_classes() {
+fn a_free_install_with_two_rows_tags_both_on_both_classes() {
     let _g = serial();
     let _ambient = setup();
     let rows = || {
@@ -4340,7 +4392,19 @@ fn a_free_install_tags_every_row_past_the_first_with_pro_on_both_classes() {
     };
     for size in [PHONE, FULL_TABLET] {
         let harness = sized(size, || mount_limited(Tier::Free, rows()));
-        assert_eq!(pro_tags(&harness), 1, "free at {size:?}");
+        assert_eq!(pro_tags(&harness), 2, "free at {size:?}");
+    }
+}
+
+#[test]
+fn a_free_install_with_one_row_tags_none_on_both_classes() {
+    let _g = serial();
+    let _ambient = setup();
+    for size in [PHONE, FULL_TABLET] {
+        let harness = sized(size, || {
+            mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)])
+        });
+        assert_eq!(pro_tags(&harness), 0, "free at {size:?}");
     }
 }
 

@@ -74,11 +74,14 @@ const MUXRD_DEFAULT_PORT: u16 = 50051;
 /// Whether a fresh form offers to remember the server. `true`, matching the mock.
 const DEFAULT_REMEMBER: bool = true;
 
+/// What a host:port parse reject says under the SERVER URL field.
+pub const URL_ERROR_MESSAGE: &str = concat!(
+    "Enter host:port, for example dev.home.local:50051. A bare host uses :443 ",
+    "under Public domain (CA) and :50051 under Trust anyway.",
+);
+
 /// The prefix every token this device mints for itself carries, so a server's
 /// token list says which device asked for each one.
-/// What a host:port parse reject says under the SERVER URL field.
-pub const URL_ERROR_MESSAGE: &str = "Enter host:port, for example dev.home.local:50051. A bare host uses :443 under Public domain (CA) and :50051 under Trust anyway.";
-
 const TOKEN_NAME_PREFIX: &str = "muxr-mobile";
 
 /// How much of a server's label rides in a minted token's name. Long enough to
@@ -104,7 +107,8 @@ pub struct ConnectController {
     pub saved: RwSignal<Vec<SavedServer>>,
     pub invalid: RwSignal<bool>,
     /// The inline line under the URL field: set by a validation reject (which
-    /// raises no toast), cleared by any edit and by a settled dial.
+    /// raises no toast), cleared by a URL edit, an applied scanned payload and
+    /// the start of a dial.
     pub url_error: RwSignal<Option<String>>,
     pub pending_pairing: RwSignal<Option<PairingPayload>>,
     pub unlocking: RwSignal<bool>,
@@ -169,12 +173,22 @@ impl ConnectController {
     pub fn set_url(&self, url: String) {
         self.invalidate_pairing_unless_covering(&url);
         self.url.set(url);
-        if self.invalid.get_untracked() {
-            self.invalid.set(false);
+        if self.invalid.get_untracked() || self.url_error.get_untracked().is_some() {
+            self.clear_url_validation();
         }
-        if self.url_error.get_untracked().is_some() {
-            self.url_error.set(None);
-        }
+    }
+
+    /// The one writer that rejects the URL: lights [`Self::invalid`] and sets
+    /// the inline line together, so the two signals never disagree.
+    fn reject_url(&self, message: &str) {
+        self.invalid.set(true);
+        self.url_error.set(Some(message.to_owned()));
+    }
+
+    /// The counterpart of [`Self::reject_url`]: clears both signals.
+    fn clear_url_validation(&self) {
+        self.invalid.set(false);
+        self.url_error.set(None);
     }
 
     /// The install's current entitlement, tracked — what the saved rows' pro
@@ -331,8 +345,7 @@ impl ConnectController {
         self.url.set(pairing_endpoint(&payload));
         self.token.set(payload.token.clone());
         self.trust_mode.set(pairing_trust_mode(&payload.trust));
-        self.invalid.set(false);
-        self.url_error.set(None);
+        self.clear_url_validation();
         self.pending_pairing.set(Some(payload));
     }
 
@@ -381,8 +394,7 @@ impl ConnectController {
             // The payload stays stashed, so the retry dials this same code.
             return;
         }
-        self.invalid.set(false);
-        self.url_error.set(None);
+        self.clear_url_validation();
         let nav = nav.clone();
         // Both `Copy`; the closure may outlive this borrow (see `Self::connect`).
         let token = self.token;
@@ -463,8 +475,9 @@ impl ConnectController {
     /// `nav`/`offer_prompt` are lent, not held: both wrap `Rc`, so are neither
     /// `Send` nor `Sync`, while this controller must be both.
     ///
-    /// A rejection sets [`Self::url_error`] and lights [`Self::invalid`], with no toast; a refused dial toasts and
-    /// leaves the form as typed, for a one-tap retry. Neither navigates.
+    /// A rejection sets [`Self::url_error`] and lights [`Self::invalid`], with
+    /// no toast; a refused dial toasts and leaves the form as typed, for a
+    /// one-tap retry. Neither navigates.
     pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
@@ -480,8 +493,7 @@ impl ConnectController {
                     // all, and the form is left exactly as it was typed.
                     return;
                 }
-                self.invalid.set(false);
-                self.url_error.set(None);
+                self.clear_url_validation();
                 let nav = nav.clone();
                 // Token's job ends once the connection opens with it; captured by
                 // value (`RwSignal` is `Copy`) since the closure may outlive this borrow.
@@ -507,9 +519,13 @@ impl ConnectController {
                     }
                 });
             }
-            Err(_) => {
-                self.invalid.set(true);
-                self.url_error.set(Some(URL_ERROR_MESSAGE.to_owned()));
+            Err(failure) => {
+                // Intentional: every validation reject takes the inline line, not a
+                // toast (the plan's Phase 2 decision), superseding "Compact
+                // byte-for-byte" for this behaviour. `validated_target`'s only
+                // failure today is the URL parse, so the fixed message is honest.
+                log::debug!("connect: form rejected: {failure:?}");
+                self.reject_url(URL_ERROR_MESSAGE);
             }
         }
     }
