@@ -164,7 +164,9 @@ h1 span{ color:var(--amber); }
 .saved.locked .sav-av{ background:var(--bg-raised); color:var(--fg-dim); }
 .saved .n{ flex:1; min-width:0; font-size:11.5px; font-weight:500; } .saved .n small{ display:block; font-size:9.5px; color:var(--fg-dim); margin-top:2px; font-weight:400; line-height:1.5; }
 .saved .chips{ display:flex; gap:5px; flex-shrink:0; }
-.c-right{ flex:1; background:var(--bg-surface); display:flex; flex-direction:column; align-items:center; padding:30px 44px; overflow-y:auto; min-width:0; }
+.c-right{ flex:1; background:var(--bg-surface); display:flex; flex-direction:column; align-items:center; padding:30px 44px; overflow-y:auto; min-width:0; position:relative; }
+.c-info{ display:none; position:absolute; top:12px; right:12px; width:40px; height:40px; border-radius:var(--radius-sm); align-items:center; justify-content:center; color:var(--fg-muted); background:transparent; border:none; cursor:pointer; }
+.c-info:hover{ background:var(--bg-overlay); color:var(--amber); }
 .form{ width:100%; max-width:520px; display:flex; flex-direction:column; gap:16px; margin:auto 0; flex-shrink:0; }
 .form-h{ font-family:var(--font-display); font-size:16px; font-weight:700; margin-bottom:4px; } .form-sub{ font-size:11px; color:var(--fg-muted); line-height:1.6; font-weight:300; }
 .field{ display:flex; flex-direction:column; gap:6px; } .field label{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; transition:color .15s; }
@@ -355,7 +357,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
 
 /* ===== the collapse band: any frame narrower than 840 (medium band, portrait) ===== */
 @container frame (max-width: 839px){
-  .c-left{ display:none; } .saved-compact{ display:flex; } .c-right{ padding:26px 28px; }
+  .c-left{ display:none; } .saved-compact{ display:flex; } .c-right{ padding:26px 28px; } .c-info{ display:flex; }
   .s-side{ width:240px; } .sess-prev{ display:none; }
   .rail{ width:56px; } .rail-full{ opacity:0; pointer-events:none; } .rail-mini{ opacity:1; pointer-events:auto; }
   .set-grid{ grid-template-columns:1fr; }
@@ -425,7 +427,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
     <thead><tr><th>window</th><th>structure</th><th>what collapses</th></tr></thead>
     <tbody>
       <tr><td><b>shortest side &lt; 600</b></td><td>phone layout, unchanged</td><td>nothing new; the existing 600px clamp tier still covers phone landscape</td></tr>
-      <tr><td><b>shortest side ≥ 600, width &lt; 840</b></td><td>tablet structure, panels collapsed in place</td><td>Connect drops its left panel and puts saved servers under the form; the sessions column narrows and hides pane previews; the terminal rail becomes the 56px mini rail; the settings and detail grids go single-column; the breadcrumb hides</td></tr>
+      <tr><td><b>shortest side ≥ 600, width &lt; 840</b></td><td>tablet structure, panels collapsed in place</td><td>Connect drops its left panel, puts saved servers under the form and brings back the phone's Getting-started info mark; the sessions column narrows and hides pane previews; the terminal rail becomes the 56px mini rail; the settings and detail grids go single-column; the breadcrumb hides</td></tr>
       <tr><td><b>shortest side ≥ 600, width ≥ 840</b></td><td>the full two-pane layouts</td><td>—</td></tr>
     </tbody>
   </table>
@@ -452,6 +454,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
             <div class="saved-list" id="savedWide"></div>
           </div>
           <div class="c-right">
+            <button class="c-info" title="Getting started"><svg class="ic"><use href="#i-info"/></svg></button>
             <div class="form">
               <div><div class="form-h">Connect to server</div><div class="form-sub">Enter credentials to attach to a remote zellij or herdr session, or pair with the QR code muxrctl shows.</div></div>
               <div class="field url"><label>server url</label><input value="dev.home.local:50051" placeholder="zellij.example.com:50051"><div class="help">Enter host:port, for example dev.home.local:50051. A bare host uses :443 under Public domain (CA) and :50051 under Trust anyway.</div></div>
@@ -481,7 +484,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
       <button data-cstate="error">url error</button>
       <button data-cstate="busy">connecting</button>
     </div>
-    <div class="frame-note">Connect stays outside the shell: no bar. The left panel is the <b>returning-user path</b>: the getting-started paragraph moves out of its dialog, and the saved-server rows carry everything the phone row has (trust, recency, the <b>credential</b> and <b>read-only</b> chips, the delete target) plus the label, and a <b>pro</b> tag on rows past the free limit so the paywall is not a surprise. Nothing previews server state before Login; the phone's green dot was decorative and is gone. The form keeps its three trust states (CA, Trust anyway, pinned caption), the post-scan block with its own <b>Connect now</b>, an inline error line, and the QR FAB becomes a button. Under 840px the left panel folds and the saved list moves under the form, the phone's order.</div>
+    <div class="frame-note">Connect stays outside the shell: no bar. The left panel is the <b>returning-user path</b>: the getting-started paragraph moves out of its dialog, and the saved-server rows carry everything the phone row has (trust, recency, the <b>credential</b> and <b>read-only</b> chips, the delete target) plus the label, and a <b>pro</b> tag on rows past the free limit so the paywall is not a surprise. Nothing previews server state before Login; the phone's green dot was decorative and is gone. The form keeps its three trust states (CA, Trust anyway, pinned caption), the post-scan block with its own <b>Connect now</b>, an inline error line, and the QR FAB becomes a button. Under 840px the left panel folds, the saved list moves under the form (the phone's order) and the phone's top-trailing info mark returns, so Getting started stays reachable on a portrait tablet.</div>
   </div>
 
   <!-- ============ 02 SESSIONS ============ -->
