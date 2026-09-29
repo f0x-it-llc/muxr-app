@@ -810,9 +810,19 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
     );
     assert_eq!(mounted.mirror(), "ls -l", "the whole line, untouched");
 
-    // And the diff engine still has a live baseline to shorten: the next
-    // snapshot (a real Backspace) still emits, rather than the silent no-op
-    // an actually-scrubbed baseline would produce.
+    // And the diff engine still has a live baseline to shorten. frust routes
+    // `Ime` along the focus path, so an unfocused grid is unreachable by a
+    // snapshot: an ordinary tap re-focuses it first, and only then does the
+    // next snapshot (a real Backspace) emit, rather than the silent no-op an
+    // actually-scrubbed baseline would produce.
+    mounted.event(PointerPhase::Down, focus_at);
+    mounted.event(PointerPhase::Up, focus_at);
+    mounted.frame(HELD_MS + 200.0);
+    assert!(
+        mounted.root.is_focus_active(),
+        "the next ordinary tap refocuses"
+    );
+    mounted.drain();
     let mut shorter = mounted.mirror();
     shorter.pop();
     mounted.apply(&shorter);

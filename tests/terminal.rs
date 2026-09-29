@@ -1996,7 +1996,14 @@ fn a_read_only_credential_navigates_across_spaces() {
     });
     // Runs those reveals forward for real so this frame paints the settled
     // result rather than forgekit's stale geometry.
-    let scene = h.settle_motion(0.0);
+    //
+    // Settled three times over: on a read-only tree one settle still paints a
+    // single pane row while the tap lands on forgekit's not-yet-retracted one,
+    // so the commit targets the space the connection is already on (measured:
+    // `commit_pane_in_space("forgekit")`, no switch, no toast).
+    h.settle_motion(0.0);
+    h.settle_motion(2_000.0);
+    let scene = h.settle_motion(4_000.0);
     h.tap(center(tree_pane_rows(&scene)[0]));
     h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
