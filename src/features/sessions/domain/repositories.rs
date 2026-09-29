@@ -6,7 +6,7 @@
 //! fails with [`AppFailure`], mapped once in `data`.
 
 use crate::failure::AppFailure;
-use crate::features::sessions::domain::entities::{RenameRequest, Session};
+use crate::features::sessions::domain::entities::{CreateSessionParams, RenameRequest, Session};
 
 /// Read/write access to the connected server's session list.
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -15,8 +15,9 @@ pub trait SessionsRepository {
     /// Sessions in the server's own display order — never re-sorted here.
     async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure>;
 
-    /// Creates a session named `name`; returns it as stored (server-minted id).
-    async fn create_session(&self, name: String) -> Result<Session, AppFailure>;
+    /// Creates a session as `params` describes; returns it as stored
+    /// (server-minted id).
+    async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure>;
 
     /// Renames an existing session; returns it as stored.
     async fn rename_session(&self, request: RenameRequest) -> Result<Session, AppFailure>;
