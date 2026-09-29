@@ -6,18 +6,20 @@
 //!
 //! Screen chrome, never a staggered piece (see [`super`]'s module docs), so
 //! the splash never paints it. The dialog is raised on the overlay host's
-//! navigator, like every other dialog this screen owns.
+//! navigator, like every other dialog this screen owns. On Tablet the mark is
+//! not mounted: the paragraph sits inline in the left panel instead.
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, any,
-    button, safe_area,
+    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, Theme, any,
+    button, inflexible, safe_area, text,
 };
-use frust_glyph::{glyph_dialog, show_glyph_dialog};
+use frust_glyph::{glyph_card, glyph_dialog, show_glyph_dialog};
 
+use super::{column, row};
 use crate::AppState;
 use crate::links::open_external;
-use crate::ui::palette::{Palette, active_theme};
+use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::topbar::icon_button;
 
 /// The affordance's accessible name — what a screen reader announces, and
@@ -26,7 +28,9 @@ pub const INFO_LABEL: &str = "Getting started";
 /// The dialog's title — also how the tests tell the pushed page apart from
 /// the button that raised it.
 pub const GETTING_STARTED_TITLE: &str = "Getting started with Muxr";
-const GETTING_STARTED_BODY: &str = concat!(
+/// The orientation paragraph — the dialog's body, and the Tablet panel's
+/// inline card text.
+pub const GETTING_STARTED_BODY: &str = concat!(
     "Muxr is the mobile client for muxrd, a small open-source server you run on ",
     "your own machine beside zellij or herdr. Install muxrd there, pair this app ",
     "with it, and connect. The setup guide at muxr.app/docs.html walks through ",
@@ -72,6 +76,40 @@ pub(crate) fn info_affordance<S: 'static>(
             .radius(BOX / 2.0),
         ),
     )))
+}
+
+/// The Tablet panel's headline in the display face, the backend names in the
+/// accent. `text` carries one style per run, so each colour is its own run.
+pub(crate) fn tablet_headline<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
+    let run = |copy: &str, ink| {
+        inflexible(any(
+            text(copy).style(inked(&theme.type_scale.headline_small, ink))
+        ))
+    };
+    any(column::<S>(vec![
+        any(text("attach to a").style(inked(&theme.type_scale.headline_small, colors.fg))),
+        any(row::<S>(vec![
+            run("herdr", colors.amber),
+            run(" or", colors.fg),
+            run(" zellij", colors.amber),
+            run(" session", colors.fg),
+        ])),
+    ]))
+}
+
+/// The Tablet panel's inline orientation: the dialog's paragraph in a Glyph
+/// card with **Open guide** under it, through the same link seam.
+pub(crate) fn getting_started_card<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
+    any(glyph_card::<S>()
+        .desc(
+            text(GETTING_STARTED_BODY).style(inked(&theme.type_scale.body_small, colors.fg_muted)),
+        )
+        .footer(Align(
+            Alignment::TOP_LEFT,
+            button(OPEN_GUIDE_LABEL, |_state: &mut S| open_external(DOCS_URL))
+                .style(ButtonStyle::Secondary)
+                .small(),
+        )))
 }
 
 /// Push the orientation dialog as a page of `overlays`: one paragraph, a

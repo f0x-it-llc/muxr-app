@@ -22,7 +22,9 @@
 //!    focus gate without the dimming.
 //! 3. The responsive clamp lives in
 //!    [`connect_layout`](super::pages::connect_layout), the one function
-//!    both callers assemble through.
+//!    both callers assemble through on Compact. The Tablet structure
+//!    ([`tablet_panel_pieces`], [`tablet_form_pieces`]) is the screen's
+//!    alone: the splash keeps the compact pieces on every class.
 //!
 //! Every piece is `<State>`-generic (the splash composes under
 //! [`crate::AppState`], the screen under its own `ConnectState`), reads no
@@ -51,6 +53,7 @@ use frust::{
 use super::controller::ConnectController;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::ui::palette::Palette;
+use crate::ui::spacing;
 
 /// What a piece needs to be a control rather than a picture: the screen's
 /// hosted controller, plus the four actions it cannot express itself.
@@ -135,6 +138,50 @@ pub fn connect_pieces_with<S: 'static>(
         cta::connect_button(theme, &colors, live),
         saved::saved_address(theme, &colors, saved, live),
     ]
+}
+
+/// The Tablet left panel, top to bottom: brand row, headline, the inline
+/// getting-started card, and the saved list.
+pub fn tablet_panel_pieces<S: 'static>(
+    theme: &Theme,
+    live: &Live,
+    saved: &[SavedServer],
+) -> Vec<AnyView<S>> {
+    let colors = Palette::from_theme(theme);
+    vec![
+        any(row::<S>(vec![
+            inflexible(mark::connect_mark(theme, &colors)),
+            inflexible(h_gap::<S>(spacing::LG)),
+            inflexible(badge::server_badge(theme, &colors)),
+        ])),
+        getting_started::tablet_headline(theme, &colors),
+        getting_started::getting_started_card(theme, &colors),
+        saved::tablet_saved_list(theme, &colors, saved, live),
+    ]
+}
+
+/// The Tablet form column: the phone's form pieces, then the action block
+/// with `secondary` beside the CTA, then — when `folded` carries the list
+/// (the collapsed band) — the saved list under it.
+pub fn tablet_form_pieces<S: 'static>(
+    theme: &Theme,
+    live: &Live,
+    folded: Option<&[SavedServer]>,
+    secondary: AnyView<S>,
+) -> Vec<AnyView<S>> {
+    let colors = Palette::from_theme(theme);
+    let wired = Some(live);
+    let mut pieces = vec![
+        badge::heading(theme, &colors),
+        fields::server_url_field(theme, &colors, wired),
+        fields::token_field(theme, &colors, wired),
+        trust::remember_row(theme, &colors, wired),
+        cta::connect_actions(theme, &colors, wired, secondary),
+    ];
+    if let Some(saved) = folded {
+        pieces.push(saved::tablet_saved_list(theme, &colors, saved, live));
+    }
+    pieces
 }
 
 /// The eight pieces with no live wiring — the shared splash/route seam.
