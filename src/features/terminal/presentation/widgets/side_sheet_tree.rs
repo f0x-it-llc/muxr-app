@@ -205,25 +205,41 @@ pub(crate) enum RowMenuChoice {
     NewHere,
 }
 
-/// The overflow menu for `target`: rename everywhere, plus a create under a space or tab.
-pub(crate) fn row_menu(target: &RowTarget) -> Vec<MenuEntry> {
+/// The overflow menu's one table for `target`: each entry beside the choice it
+/// answers — rename everywhere, plus a create under a space or tab.
+fn row_menu_table(target: &RowTarget) -> Vec<(Option<RowMenuChoice>, MenuEntry)> {
     let (rename, create) = match target {
         RowTarget::Space { .. } => ("Rename space", Some("New tab here")),
         RowTarget::Tab { .. } => ("Rename tab", Some("New pane here")),
         RowTarget::Pane { .. } => ("Rename pane", None),
     };
-    let mut entries = vec![menu_item(rename).icon(icons::EDIT)];
-    entries.extend(create.map(|label| menu_item(label).icon(icons::ADD)));
+    let mut entries = vec![(
+        Some(RowMenuChoice::Rename),
+        menu_item(rename).icon(icons::EDIT),
+    )];
+    entries.extend(create.map(|label| {
+        (
+            Some(RowMenuChoice::NewHere),
+            menu_item(label).icon(icons::ADD),
+        )
+    }));
     entries
 }
 
-/// The [`RowMenuChoice`] behind entry `index` of [`row_menu`]`(target)`.
+/// The overflow menu for `target`, straight from [`row_menu_table`].
+pub(crate) fn row_menu(target: &RowTarget) -> Vec<MenuEntry> {
+    row_menu_table(target)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// The [`RowMenuChoice`] behind entry `index` of [`row_menu`]`(target)`, read
+/// back through the same table.
 pub(crate) fn row_menu_choice(target: &RowTarget, index: usize) -> Option<RowMenuChoice> {
-    match (index, target) {
-        (0, _) => Some(RowMenuChoice::Rename),
-        (1, RowTarget::Space { .. } | RowTarget::Tab { .. }) => Some(RowMenuChoice::NewHere),
-        _ => None,
-    }
+    row_menu_table(target)
+        .get(index)
+        .and_then(|(choice, _)| *choice)
 }
 
 /// Which tab a pane row belongs to — the identifiers a commit needs, resolved

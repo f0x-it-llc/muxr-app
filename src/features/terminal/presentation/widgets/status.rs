@@ -8,16 +8,14 @@ use frust::{
     Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Stack, any,
     container, flexible, icons, inflexible, text,
 };
-use frust_glyph::{
-    BadgeVariant, MenuEntry, badge, breadcrumb, crumb, menu_item, menu_item_danger, menu_separator,
-};
+use frust_glyph::{MenuEntry, breadcrumb, crumb, menu_item, menu_item_danger, menu_separator};
 
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 
 use super::super::chrome::{EXPAND_SIZE, expand_button};
 use super::card::CardInk;
-use super::util::{h_gap, row, sized};
+use super::util::{h_gap, read_only_badge, row, sized};
 
 /// `.term-statusrow{padding:14px 14px 14px 18px}` with the **vertical** pair
 /// tightened to 6px — the mock's 14px made a 56px chrome band. Horizontal
@@ -42,10 +40,6 @@ const TITLE_LINE_HEIGHT: f32 = 18.0;
 const EXPAND_LABEL: &str = "Fullscreen";
 const COLLAPSE_LABEL: &str = "Exit fullscreen";
 
-/// The read-only chip's word — the rail's own, repeated here because the two
-/// clusters do not import each other.
-const READ_ONLY_CHIP: &str = "read-only";
-
 /// What the Tablet's terminal menu asks for — [`terminal_menu_choice`] maps a
 /// picked entry index here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,10 +54,14 @@ pub(crate) enum TerminalMenuChoice {
     Detach,
 }
 
-/// The Tablet kebab's menu. Glyph's menu has no checked-item variant, so
-/// "Show key bar" carries a leading check icon **only while it is on** (the
-/// menu is rebuilt on every open).
-pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<MenuEntry> {
+/// The kebab's one table: each entry beside the choice it answers (`None` for
+/// the separator, which still occupies an index). Glyph's menu has no
+/// checked-item variant, so "Show key bar" carries a leading check icon
+/// **only while it is on** (the menu is rebuilt on every open).
+fn terminal_menu_table(
+    fullscreen: bool,
+    key_bar_visible: bool,
+) -> Vec<(Option<TerminalMenuChoice>, MenuEntry)> {
     let immersive = if fullscreen {
         icons::FULLSCREEN_EXIT
     } else {
@@ -74,24 +72,37 @@ pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<Menu
         key_bar = key_bar.icon(icons::CHECK);
     }
     vec![
-        menu_item("Rename session").icon(icons::EDIT),
-        menu_item("Immersive mode").icon(immersive),
-        key_bar,
-        menu_separator(),
-        menu_item_danger("Detach session").icon(icons::LOGOUT),
+        (
+            Some(TerminalMenuChoice::Rename),
+            menu_item("Rename session").icon(icons::EDIT),
+        ),
+        (
+            Some(TerminalMenuChoice::Immersive),
+            menu_item("Immersive mode").icon(immersive),
+        ),
+        (Some(TerminalMenuChoice::KeyBar), key_bar),
+        (None, menu_separator()),
+        (
+            Some(TerminalMenuChoice::Detach),
+            menu_item_danger("Detach session").icon(icons::LOGOUT),
+        ),
     ]
 }
 
-/// The [`TerminalMenuChoice`] behind entry `index` of [`terminal_menu`] (the
-/// separator counts as an entry and answers `None`).
+/// The Tablet kebab's menu entries, straight from [`terminal_menu_table`].
+pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<MenuEntry> {
+    terminal_menu_table(fullscreen, key_bar_visible)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// The [`TerminalMenuChoice`] behind entry `index` of [`terminal_menu`], read
+/// back through the same table (the separator answers `None`).
 pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
-    match index {
-        0 => Some(TerminalMenuChoice::Rename),
-        1 => Some(TerminalMenuChoice::Immersive),
-        2 => Some(TerminalMenuChoice::KeyBar),
-        4 => Some(TerminalMenuChoice::Detach),
-        _ => None,
-    }
+    terminal_menu_table(false, false)
+        .get(index)
+        .and_then(|(choice, _)| *choice)
 }
 
 /// `.term-statusrow` — the pane title (ellipsized, single line) and, at the
@@ -174,7 +185,7 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     }
     if read_only {
         children.push(h_gap(spacing::SM));
-        children.push(inflexible(badge(READ_ONLY_CHIP, BadgeVariant::Info)));
+        children.push(inflexible(read_only_badge()));
     }
     children.push(h_gap(spacing::SM));
     children.push(inflexible(Stack(vec![any(press_band), any(button)])));
