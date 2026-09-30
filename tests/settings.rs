@@ -31,7 +31,7 @@ use frust::{
     WindowMetrics, any, navigator, provide_context, spawn_local,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{NamedKey, PointerPhase, RenderRoot};
+use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot, ScrollDelta};
 use frust_reactive::ReactiveRuntime;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -46,7 +46,9 @@ use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST,
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
-use muxr::features::settings::domain::entities::{AuthToken, CreateTokenRequest, MintedToken};
+use muxr::features::settings::domain::entities::{
+    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken,
+};
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
@@ -1855,6 +1857,59 @@ fn picking_font_size_20px_through_the_picker_persists_and_reads_back() {
 
     h.pump_until_values("20px", |values| values.iter().any(|v| v == "20px"));
     assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
+}
+
+/// Mount at `width`×`height`, open the font-size picker, wheel its list until
+/// the last size is reachable, pick it, and read it back from the row.
+fn picks_the_largest_font_size_at(width: f64, height: f64) {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(support::metrics_at(width, height)));
+    h.frame();
+    let last = format!(
+        "{}px",
+        AppearancePrefs::FONT_SIZES_PX[AppearancePrefs::FONT_SIZES_PX.len() - 1]
+    );
+
+    h.tap_value("font size");
+    h.settle();
+    let first = h.center_of(&format!("{}px", AppearancePrefs::FONT_SIZES_PX[0]));
+    let band_span = h.center_of(&last).y - first.y;
+    assert!(
+        band_span > height - 220.0,
+        "the list overflows its band, so it must scroll: {band_span}"
+    );
+    for _ in 0..40 {
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: first,
+                delta: ScrollDelta::Lines(0.0, 3.0),
+            },
+        );
+        h.settle();
+    }
+    let reached = h.center_of(&last);
+    assert!(
+        reached.y - first.y < band_span - 100.0,
+        "wheeling moved the list: {reached:?} vs {band_span}"
+    );
+    h.tap(reached);
+    h.flush();
+    h.pump_until_values(&last, |values| {
+        values.iter().filter(|v| **v == last).count() == 1
+    });
+    assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
+}
+
+#[test]
+fn the_font_size_picker_scrolls_to_24px_on_a_phone_in_landscape() {
+    picks_the_largest_font_size_at(844.0, 390.0);
+}
+
+#[test]
+fn the_font_size_picker_scrolls_to_24px_on_the_smallest_tablet() {
+    picks_the_largest_font_size_at(1024.0, 720.0);
 }
 
 // ---------------------------------------------------------------------------

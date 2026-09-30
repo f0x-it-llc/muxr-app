@@ -81,6 +81,9 @@ const STORE_BUSY_TOAST: &str = "A store operation is already running";
 /// a broken one.
 const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
 const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
+/// A generous per-row estimate for sizing an option list that fits: the band
+/// never exceeds the rows' own height, so short lists do not gain blank space.
+const PICK_ROW_ESTIMATE_PX: f64 = 48.0;
 
 /// The groups column's max width on a phone-landscape window
 /// (`Responsive::wide_clamp` without Tablet) — the flat group list centres
@@ -357,10 +360,17 @@ impl Actions {
                     .position(|secs| *secs == poll.layout_refresh_secs),
             ),
         };
+        let rows_height = options.len() as f64 * PICK_ROW_ESTIMATE_PX;
+        let max_height = use_context::<WindowMetrics>().map(|metrics| {
+            (metrics.size.height - SHEET_SCROLL_RESERVE_PX)
+                .max(SHEET_SCROLL_FLOOR_PX)
+                .min(rows_height)
+        });
         Picker {
             title: kind.title(),
             options,
             selected,
+            max_height,
         }
     }
 
