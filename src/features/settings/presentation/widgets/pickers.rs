@@ -13,7 +13,8 @@ use std::rc::Rc;
 use frust::authoring::Color;
 use frust::icons::CHECK;
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible, text,
+    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible,
+    scroll_view, text,
 };
 
 use crate::AppState;
@@ -68,6 +69,9 @@ pub(in super::super) struct Picker {
     pub(in super::super) options: Vec<String>,
     /// Which one is current, if the stored value is still an offered choice.
     pub(in super::super) selected: Option<usize>,
+    /// The option list's scroll-band height cap, from the window's own
+    /// metrics. `None` (every headless suite) leaves the list unbounded.
+    pub(in super::super) max_height: Option<f64>,
 }
 
 /// The pick handler, shared by every row of one sheet.
@@ -81,10 +85,11 @@ pub(in super::super) fn picker_sheet(
     let theme = active_theme();
     let on_pick: OnPick = Rc::new(on_pick);
     let last = picker.options.len().saturating_sub(1);
-    let mut children = vec![
+    let head = vec![
         any(text(picker.title).style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
         any(SizedBox::<AppState>(None, Some(PICK_TITLE_GAP))),
     ];
+    let mut children = Vec::new();
     for (index, option) in picker.options.iter().enumerate() {
         children.push(pick_row(
             option,
@@ -97,7 +102,16 @@ pub(in super::super) fn picker_sheet(
             },
         ));
     }
-    any(column(children))
+    let scroller = scroll_view(column(children));
+    let list: AnyView<AppState> = match picker.max_height {
+        // A fixed height, not a flex share: the sheet body is unbounded in
+        // height, so a `flexible` child would divide zero free space.
+        Some(height) => any(SizedBox::<AppState>(None, Some(height)).child(scroller)),
+        None => any(scroller),
+    };
+    let mut body = head;
+    body.push(list);
+    any(column(body))
 }
 
 /// One `.pick-row`. The selected one fills `--amber-faint` past the sheet's
