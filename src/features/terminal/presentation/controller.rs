@@ -166,6 +166,9 @@ pub struct TerminalController {
     /// last moved to, written only by user-driven moves
     /// (see [`remember_resume_pane`](Self::remember_resume_pane)).
     resume: Arc<ResumeSlot>,
+    /// Whether the tree is the Tablet's docked rail rather than the modal sheet —
+    /// see [`settle_rest`](Self::settle_rest).
+    docked: AtomicBool,
 }
 
 /// The shipped default font size, px — settings' own `Preferences::defaults()`,
@@ -289,6 +292,7 @@ impl TerminalController {
             attach_settled: AtomicBool::new(false),
             layout_writes: AtomicU64::new(0),
             resume: Arc::new(ResumeSlot::default()),
+            docked: AtomicBool::new(false),
         }
     }
 
@@ -349,6 +353,9 @@ impl TerminalController {
         self.session_name.set(session_name);
         self.loaded.set(true);
         self.replay_reveal();
+        if self.is_docked() {
+            self.settle_rest();
+        }
     }
 
     /// Expand the space `id` in the tree sheet — [`expanded_space`](Self::expanded_space)'s
@@ -430,6 +437,42 @@ impl TerminalController {
             self.expanded_space.set(self.selected_space_id());
         }
         self.expanded_tab.set(Some(self.active_tab.get_untracked()));
+    }
+
+    /// Mark the tree docked (the Tablet rail) or not, answering whether that changed.
+    pub fn set_docked(&self, docked: bool) -> bool {
+        self.docked.swap(docked, Ordering::Relaxed) != docked
+    }
+
+    /// Whether the tree is the docked rail — see [`set_docked`](Self::set_docked).
+    pub fn is_docked(&self) -> bool {
+        self.docked.load(Ordering::Relaxed)
+    }
+
+    /// Put the docked rail back in its **resting** state: the selected space and the tab
+    /// the server flags active both expanded, nothing browsed. A landed load, a landed
+    /// commit and a browse closed under another space all come back here, so the rail
+    /// always shows where the session is. A no-op on a disposed mount.
+    pub fn settle_rest(&self) {
+        let Some(tabs) = self.tabs.try_get_untracked() else {
+            return;
+        };
+        let key = rest_tab_key(&tabs).or_else(|| self.active_tab.try_get_untracked());
+        if self.is_herdr_session() {
+            self.expanded_space.set(self.selected_space_id());
+        }
+        self.expanded_tab.set(key);
+        self.browsed_space_tabs.set(None);
+    }
+
+    /// Close the expanded space `id`: docked, a browsed space hands the rail back to
+    /// [`settle_rest`](Self::settle_rest); anything else collapses as the sheet does.
+    pub fn close_space(&self, id: &str) {
+        if self.is_docked() && self.selected_space_id().as_deref() != Some(id) {
+            self.settle_rest();
+        } else {
+            self.collapse_space();
+        }
     }
 
     /// Clear the tree sheet's whole browse: expansion and the browsed-space cache. The
@@ -986,7 +1029,10 @@ impl TerminalController {
     /// **Disposal-safe**: a tick in flight at teardown reads `try_*`, so the
     /// commit is a no-op.
     fn publish_tabs(&self, tabs: Vec<TabEntry>, seed: Seed) {
-        let Some(unchanged) = self.tabs.try_with_untracked(|current| *current == tabs) else {
+        let Some((unchanged, resting)) = self
+            .tabs
+            .try_with_untracked(|current| (*current == tabs, rest_tab_key(current)))
+        else {
             return;
         };
         let mut wrote = false;
@@ -1009,9 +1055,15 @@ impl TerminalController {
             self.active_tab.set(active.clone());
             wrote = true;
         }
+        let moved = rest_tab_key(&tabs);
         if !unchanged {
             self.tabs.set(tabs);
             wrote = true;
+        }
+        // Docked, the rail follows a focus another client moved — but only when it was
+        // resting on the old one: a browse in progress is the user's, not the poll's.
+        if self.is_docked() && moved != resting && self.expanded_tab.get_untracked() == resting {
+            self.expanded_tab.set(moved);
         }
         if wrote {
             self.layout_writes.fetch_add(1, Ordering::Relaxed);
@@ -1283,6 +1335,14 @@ const HERDR_BACKEND: &str = "herdr:";
 /// hint is best-effort, so a herdr session risks landing on the daemon's
 /// global focus. A closure (not a method) since it owns the [`AttachSpec`].
 pub type Reattach = Rc<dyn Fn()>;
+
+/// The key of the tab `tabs` flags active — where the server says focus is, and so
+/// where the docked rail rests.
+fn rest_tab_key(tabs: &[TabEntry]) -> Option<String> {
+    tabs.iter()
+        .find(|tab| tab.active)
+        .map(|tab| tab.key.clone())
+}
 
 /// Whether the session with id `session` runs on the **herdr** backend — this screen's
 /// one backend discriminator, read off the id's `<backend>:<name>` convention
@@ -1973,6 +2033,8 @@ mod tests {
         /// the selection onto, flagged in every later `list_spaces` answer the way a real
         /// server would. `None` is [`SEEDED_SPACE`], this world's own resting selection.
         selected: Mutex<Option<String>>,
+        /// The tab every later `list_tabs` flags active; `None` keeps `alpha`.
+        active: Mutex<Option<String>>,
     }
 
     /// The space [`RecordingRepository`] starts out selected on.
@@ -2038,6 +2100,11 @@ mod tests {
             *self.focused.lock().unwrap_or_else(PoisonError::into_inner) = Some(focus);
         }
 
+        /// Flag `key` active on every later `list_tabs` — another client moving focus.
+        fn report_active(&self, key: &str) {
+            *self.active.lock().unwrap_or_else(PoisonError::into_inner) = Some(key.to_string());
+        }
+
         /// Park this call for whatever [`delay_calls`](Self::delay_calls) queued.
         async fn park(&self) {
             let delay = self
@@ -2097,6 +2164,7 @@ mod tests {
             pane_path: format!("/srv/{key}"),
             panes: vec![pane(base, true), pane(base + 1, false)],
             active,
+            has_bell: false,
         }
     }
 
@@ -2162,6 +2230,16 @@ mod tests {
             if self.stamp.load(Ordering::Relaxed) {
                 for tab in &mut tabs {
                     tab.label = format!("{}#{call}", tab.key);
+                }
+            }
+            if let Some(key) = self
+                .active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref()
+            {
+                for tab in &mut tabs {
+                    tab.active = tab.key == key;
                 }
             }
             Ok(tabs)
@@ -2261,6 +2339,69 @@ mod tests {
             .find(|tab| tab.key == key)
             .and_then(|tab| tab.panes.into_iter().find(|pane| pane.focused))
             .map(|pane| pane.id)
+    }
+
+    /// [`recorded`], reloaded as the Tablet's docked rail.
+    fn docked(session_id: &str) -> (Arc<TerminalController>, Arc<RecordingRepository>) {
+        let (c, repository) = recorded(session_id);
+        assert!(c.set_docked(true));
+        assert!(!c.set_docked(true), "only a real flip reports a change");
+        block_on(c.load());
+        (c, repository)
+    }
+
+    #[test]
+    fn a_docked_load_rests_on_the_selected_space_and_the_active_tab() {
+        let (c, _repository) = docked("herdr:work");
+        assert_eq!(c.expanded_space.get_untracked().as_deref(), Some("ws-1"));
+        assert_eq!(c.expanded_tab.get_untracked().as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn a_docked_rail_follows_another_clients_focus_only_while_resting() {
+        let (c, repository) = docked("zellij:dev");
+        repository.report_active("beta");
+        block_on(c.reload_tabs());
+        assert_eq!(c.expanded_tab.get_untracked().as_deref(), Some("beta"));
+
+        c.collapse_tab();
+        repository.report_active("alpha");
+        block_on(c.reload_tabs());
+        assert_eq!(
+            c.expanded_tab.get_untracked(),
+            None,
+            "a browse is the user's"
+        );
+    }
+
+    #[test]
+    fn the_sheet_never_follows_a_moved_focus() {
+        let (c, repository) = recorded("zellij:dev");
+        c.seed_expansion();
+        repository.report_active("beta");
+        block_on(c.reload_tabs());
+        assert_eq!(c.expanded_tab.get_untracked().as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn closing_a_browsed_space_docked_hands_the_rail_back_to_rest() {
+        let (c, _repository) = docked("herdr:work");
+        c.expanded_space.set(Some("ws-2".to_string()));
+        c.expanded_tab.set(None);
+        c.browsed_space_tabs
+            .set(Some(("ws-2".to_string(), Vec::new())));
+
+        c.close_space("ws-2");
+        assert_eq!(c.expanded_space.get_untracked().as_deref(), Some("ws-1"));
+        assert_eq!(c.expanded_tab.get_untracked().as_deref(), Some("alpha"));
+        assert_eq!(c.browsed_space_tabs.get_untracked(), None);
+
+        c.close_space("ws-1");
+        assert_eq!(
+            c.expanded_space.get_untracked(),
+            None,
+            "the rest space collapses"
+        );
     }
 
     #[test]

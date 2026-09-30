@@ -104,6 +104,7 @@ mod tests {
             pane_path: String::new(),
             panes: Vec::<PaneEntry>::new(),
             active: false,
+            has_bell: false,
         }
     }
 

@@ -80,7 +80,34 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
         pane_path: "/home/ed".to_string(),
         panes: seed_panes(index, &format!("ed@{key}"), "/home/ed"),
         active: false,
+        has_bell: false,
     }
+}
+
+/// Every landed navigation verb (`switch_space:<id>`, `go_to_tab:<id>`,
+/// `focus_pane:<id>`), in call order — process-global like [`TEST_TABS`], so
+/// only a serialized suite reads it.
+static VERB_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The navigation verbs this store has answered `Ok` to since the last
+/// [`clear_verb_log`]. Never read by production code.
+pub fn verb_log() -> Vec<String> {
+    lock_verb_log().clone()
+}
+
+/// Forget every recorded verb — a suite's own setup.
+pub fn clear_verb_log() {
+    lock_verb_log().clear();
+}
+
+fn lock_verb_log() -> std::sync::MutexGuard<'static, Vec<String>> {
+    VERB_LOG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn log_verb(verb: &str, target: impl std::fmt::Display) {
+    lock_verb_log().push(format!("{verb}:{target}"));
 }
 
 /// An in-memory [`TerminalRepository`]. See the [module docs](self).
@@ -196,8 +223,9 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
         pane_path: path.to_string(),
         panes: seed_panes(index, name, path),
         active: key == "devbox",
+        has_bell: false,
     };
-    vec![
+    let mut tabs = vec![
         tab(
             1,
             "btop",
@@ -230,7 +258,13 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
             "ed@devbox",
             "/home/ed",
         ),
-    ]
+    ];
+    // One of each mark the docked rail draws: a ringing tab, an exited pane,
+    // and a floating one under the tab the rail rests on.
+    tabs[2].has_bell = true;
+    tabs[0].panes[1].exited = true;
+    tabs[3].panes[1].floating = true;
+    tabs
 }
 
 /// `zelli_mobile`'s seeded tab world — a second, smaller populated space so
@@ -247,6 +281,7 @@ fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
         pane_path: path.to_string(),
         panes: seed_panes(index, "ed@zelli", path),
         active,
+        has_bell: false,
     };
     vec![
         tab(1, "logs", "~/logs", true),
@@ -367,6 +402,7 @@ impl TerminalRepository for MockTerminalRepository {
             )));
         }
         self.select_space(&space_id);
+        log_verb("switch_space", &space_id);
         Ok(())
     }
 
@@ -378,6 +414,7 @@ impl TerminalRepository for MockTerminalRepository {
         if !self.tabs_snapshot().iter().any(|tab| tab.tab_id == tab_id) {
             return Err(AppFailure::Internal(format!("go_to_tab: no tab {tab_id}")));
         }
+        log_verb("go_to_tab", tab_id);
         Ok(())
     }
 
@@ -421,6 +458,7 @@ impl TerminalRepository for MockTerminalRepository {
             let focused = addressed(pane);
             pane.focused = focused;
         }
+        log_verb("focus_pane", pane_id);
         Ok(())
     }
 }
@@ -634,6 +672,24 @@ mod tests {
             [20],
             "…and no other tab's focus moved with it"
         );
+    }
+
+    #[test]
+    fn the_seed_carries_one_bell_one_exited_pane_and_one_floating_pane() {
+        let tabs = seed_tabs_forgekit();
+        let bells: Vec<&str> = tabs
+            .iter()
+            .filter(|tab| tab.has_bell)
+            .map(|tab| tab.key.as_str())
+            .collect();
+        assert_eq!(bells, ["gohora"]);
+        let panes = || tabs.iter().flat_map(|tab| tab.panes.iter());
+        assert_eq!(panes().filter(|pane| pane.exited).count(), 1);
+        let floating: Vec<u32> = panes()
+            .filter(|pane| pane.floating)
+            .map(|pane| pane.id)
+            .collect();
+        assert_eq!(floating, [41], "under devbox, the tab the rail rests on");
     }
 
     #[test]

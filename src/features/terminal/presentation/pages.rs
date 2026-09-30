@@ -2,7 +2,8 @@
 //! `docs/terminal.html` v2 — no tabs strip, path bar, cmd hint, or FAB. The
 //! app bar's menu button opens the "panes & tabs" side sheet directly
 //! (`crate::shell` forwards its press to [`open_terminal_menu`]); the pane
-//! title sits in the card's status row.
+//! title sits in the card's status row. On a Tablet the tree is docked
+//! instead, as [`super::widgets::rail`] beside the card.
 //!
 //! [`terminal_page`] is what `crate::routes` mounts — a per-screen
 //! [`Component`] whose `init` hosts a [`TerminalController`] via
@@ -19,14 +20,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::text::FontStyle;
-use frust::authoring::{Size, WindowInsets};
+use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
     IconData, NavigatorController, PopResult, RwSignal, SystemUiMode, WindowMetrics, any,
     component, container, flexible, icons, inflexible, on_cleanup, scroll_view, set_system_ui_mode,
     spawn_local, text, use_context,
 };
-use frust_glyph::show_glyph_dialog;
+use frust_glyph::{show_glyph_dialog, show_glyph_menu};
 
 use crate::AppState;
 use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};
@@ -34,10 +35,11 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
+use crate::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::{PaneEntry, ScrollStep, TabEntry};
 use crate::features::terminal::domain::feed::WheelKind;
-use crate::responsive::WIDE_BREAKPOINT_PX;
+use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
 use crate::ui::palette::{Palette, active_theme};
@@ -54,8 +56,10 @@ use super::term;
 use super::widgets::card::{CardInk, card_body};
 use super::widgets::link_strip::link_strip;
 use super::widgets::new_tab_dialog::new_tab_dialog;
+use super::widgets::rail::{MiniActions, MiniData, RailHead, docked_rail, mini_rail, rail_summary};
 use super::widgets::side_sheet_tree::{
-    TabPath, TreeActions, TreeData, TreeMutations, auto_expand_after_cascade, tree_body,
+    PressMenu, RowMenuChoice, RowTarget, TabPath, TreeActions, TreeData, TreeMode, TreeMutations,
+    auto_expand_after_cascade, row_menu, row_menu_choice, tree_body,
 };
 use super::widgets::status::status_row;
 use super::widgets::util::{column, h_gap, row, sized, v_gap};
@@ -90,7 +94,7 @@ const DETACHED_TOAST: &str = "detached";
 const READ_ONLY_TOAST: &str = "read-only session";
 
 /// The wrap padding's wide-window target — `WRAP_PAD`'s 14px scaled up past
-/// [`WIDE_BREAKPOINT_PX`]. Bespoke geometry, not a `crate::ui::spacing` tier.
+/// [`crate::responsive::WIDE_BREAKPOINT_PX`]. Bespoke geometry, not a `crate::ui::spacing` tier.
 /// The card stays full-bleed at any width (more breathing room, no
 /// content-column clamp), carried as a *gutter* the stage adds to `WRAP_PAD`
 /// and animates to zero with it rather than by widening `WRAP_PAD` itself.
@@ -170,6 +174,8 @@ pub struct Actions {
     /// The live grid's content-tap/wheel hooks, once a live session exists — see
     /// [`GridHooks`]. Same shared-cell shape as [`live_probe`](Self::live_probe).
     grid_hooks: Rc<RefCell<Option<GridHooks>>>,
+    /// Whether the last `build` laid out the Tablet structure (the docked rail).
+    tablet: Rc<Cell<bool>>,
 }
 
 /// A test/diagnostic handle onto the live pane's emulator + feed, reached through
@@ -263,7 +269,9 @@ pub fn debug_controller() -> Option<Arc<TerminalController>> {
 /// this action on `/terminal` alone).
 pub fn open_terminal_menu(_state: &mut AppState) {
     let actions = TERMINAL_CHROME.with(|cell| cell.borrow().clone());
-    if let Some(actions) = actions {
+    // TODO(tsk_000001a0ee1a8a73DcrNH7sb): the Tablet kebab becomes a Glyph menu;
+    // until then it opens nothing there, the docked rail already being the tree.
+    if let Some(actions) = actions.filter(|actions| !actions.tablet.get()) {
         actions.open_sheet();
     }
 }
@@ -302,6 +310,9 @@ impl Component for TerminalScreen {
             controller.attach_live();
         }
 
+        let tablet = Responsive::of(use_context::<WindowMetrics>()).is_tablet();
+        controller.set_docked(tablet);
+
         // First load: spaces, tabs, the active tab's lines, the session name.
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.load().await });
@@ -315,6 +326,7 @@ impl Component for TerminalScreen {
             detaching: Rc::new(Cell::new(false)),
             live_probe: Rc::new(RefCell::new(None)),
             grid_hooks: Rc::new(RefCell::new(None)),
+            tablet: Rc::new(Cell::new(tablet)),
         };
         // Publish for the app bar's `⋮` (see [`Actions`]' own docs).
         TERMINAL_CHROME.with(|cell| *cell.borrow_mut() = Some(actions.clone()));
@@ -475,15 +487,24 @@ impl Component for TerminalScreen {
         let colors = Palette::from_theme(&theme);
         let ink = CardInk::from_theme(&theme);
 
-        // Responsive width-clamp: read metrics once, branch once. These are the
-        // card's windowed gutters only — the stage animates them to zero itself
-        // (`super::chrome::terminal_stage`), which is why they are handed to it
-        // rather than wrapped around it.
-        let metrics = use_context::<WindowMetrics>();
-        let is_wide = metrics
-            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
-            .unwrap_or(false);
-        let gutters = if is_wide {
+        // Responsive: read metrics once, branch on the one rule. The size class
+        // docks the tree; the clamp tier is the card's windowed gutters only —
+        // the stage animates them to zero itself (`super::chrome::terminal_stage`),
+        // which is why they are handed to it rather than wrapped around it.
+        let responsive = Responsive::of(use_context::<WindowMetrics>());
+        let tablet = responsive.is_tablet();
+        state.actions.tablet.set(tablet);
+        if controller.set_docked(tablet) {
+            let controller = Arc::clone(&controller);
+            spawn_local(async move {
+                if tablet {
+                    controller.settle_rest();
+                } else {
+                    controller.reset_browse();
+                }
+            });
+        }
+        let gutters = if responsive.wide_clamp {
             EdgeInsets::all(WIDE_WRAP_PAD_PX - WRAP_PAD)
         } else {
             EdgeInsets {
@@ -564,6 +585,16 @@ impl Component for TerminalScreen {
         // bar band included: the bar slides in over it, and a page that stopped at
         // the clearance would flash the shell's clear colour through the gap.
         let page: AnyView<TerminalState> = any(container(stage).fill(colors.void));
+        let page = if tablet {
+            let mini = fullscreen || !responsive.is_full();
+            let rail = rail_view(&state.actions, mini, fullscreen, read_only, link);
+            any(
+                FlexView::new(Axis::Horizontal, vec![inflexible(rail), flexible(1, page)])
+                    .cross_axis(CrossAxisAlignment::Stretch),
+            )
+        } else {
+            page
+        };
 
         // Key bar mount: a fixed slot beneath the card, live-mode only. The `None`
         // arm returns `page` unwrapped rather than adding an always-zero sibling.
@@ -762,7 +793,7 @@ impl Actions {
     /// this is the wiring that owns the controller and spawns the timer.
     pub fn toggle_tree_space(&self, id: &str, expanded: bool) {
         if expanded {
-            self.controller.collapse_space();
+            self.controller.close_space(id);
             return;
         }
         let controller = Arc::clone(&self.controller);
@@ -821,19 +852,13 @@ impl Actions {
     /// `reject_if_read_only`), so a read-only credential reaches this the
     /// same as any other caller; a server-side refusal still surfaces as a
     /// toast through [`ack_result`](crate::net::error::ack_result).
-    pub(crate) fn commit_tree_pane(
-        &self,
-        sheet: &SheetHandle,
-        path: &TabPath,
-        pane_id: u32,
-        is_plugin: bool,
-    ) {
+    fn commit_tree_pane(&self, after: &AfterCommit, path: &TabPath, pane_id: u32, is_plugin: bool) {
         let Some(space_id) = &path.space_id else {
-            self.commit_pane(sheet, &path.tab_key, pane_id, is_plugin);
+            self.commit_pane_then(after, &path.tab_key, pane_id, is_plugin);
             return;
         };
         let controller = Arc::clone(&self.controller);
-        let sheet = sheet.clone();
+        let after = after.clone();
         let space_id = space_id.clone();
         let tab_key = path.tab_key.clone();
         spawn_local(async move {
@@ -843,7 +868,7 @@ impl Actions {
             {
                 return;
             }
-            sheet.close_after(SHEET_CLOSE_DELAY).await;
+            after.land(&controller).await;
         });
     }
 
@@ -864,8 +889,18 @@ impl Actions {
     /// refusal still surfaces as a toast through
     /// [`ack_result`](crate::net::error::ack_result).
     pub fn commit_pane(&self, sheet: &SheetHandle, tab_key: &str, pane_id: u32, is_plugin: bool) {
+        self.commit_pane_then(
+            &AfterCommit::Close(sheet.clone()),
+            tab_key,
+            pane_id,
+            is_plugin,
+        );
+    }
+
+    /// [`commit_pane`](Self::commit_pane) with the follow-up `after` picks.
+    fn commit_pane_then(&self, after: &AfterCommit, tab_key: &str, pane_id: u32, is_plugin: bool) {
         let controller = Arc::clone(&self.controller);
-        let sheet = sheet.clone();
+        let after = after.clone();
         let tab_key = tab_key.to_string();
         spawn_local(async move {
             if !controller.commit_pane(tab_key, pane_id, is_plugin).await {
@@ -875,8 +910,77 @@ impl Actions {
                 // first tap's commit still owns the close).
                 return;
             }
-            sheet.close_after(SHEET_CLOSE_DELAY).await;
+            after.land(&controller).await;
         });
+    }
+
+    /// Open the docked rail's overflow menu for `target`, anchored at `anchor`,
+    /// and run whichever [`RowMenuChoice`] it answers with.
+    fn open_row_menu(&self, anchor: Rect, target: &RowTarget) {
+        let (entries, target) = (target.clone(), target.clone());
+        let actions = self.clone();
+        show_glyph_menu(
+            &self.overlays,
+            anchor,
+            move || row_menu(&entries),
+            move |_app: &mut AppState, result: PopResult| {
+                let choice = result
+                    .take::<usize>()
+                    .and_then(|index| row_menu_choice(&target, index));
+                match (choice, &target) {
+                    (Some(RowMenuChoice::Rename), RowTarget::Space { id, name }) => {
+                        actions.open_rename_space_dialog(id, name);
+                    }
+                    (Some(RowMenuChoice::Rename), RowTarget::Tab { tab_id, label, .. }) => {
+                        actions.open_rename_tab_dialog(*tab_id, label);
+                    }
+                    (
+                        Some(RowMenuChoice::Rename),
+                        RowTarget::Pane {
+                            id,
+                            is_plugin,
+                            title,
+                        },
+                    ) => {
+                        actions.open_rename_pane_dialog(*id, *is_plugin, title);
+                    }
+                    (Some(RowMenuChoice::NewHere), RowTarget::Space { id, .. }) => {
+                        actions.open_new_tab_dialog_in(Some(id));
+                    }
+                    (Some(RowMenuChoice::NewHere), RowTarget::Tab { path, .. }) => {
+                        actions.new_tree_pane(path);
+                    }
+                    _ => {}
+                }
+            },
+        );
+    }
+
+    /// The mini rail's presses: a space is adopted (its load re-rests the rail),
+    /// a tab or pane commits exactly as a tree pane row does.
+    fn mini_actions(&self) -> MiniActions<TerminalState> {
+        let (space, tab, pane, exit) = (self.clone(), self.clone(), self.clone(), self.clone());
+        MiniActions {
+            on_space: Rc::new(move |_state: &mut TerminalState, id: &str| {
+                let controller = Arc::clone(&space.controller);
+                let id = id.to_string();
+                spawn_local(async move {
+                    controller.adopt_space(id).await;
+                });
+            }),
+            on_tab: Rc::new(move |_state: &mut TerminalState, target: &TabEntry| {
+                let focused = target.panes.iter().find(|pane| pane.focused);
+                if let Some(pane) = focused.or_else(|| target.panes.first()) {
+                    tab.commit_pane_then(&AfterCommit::Rest, &target.key, pane.id, pane.is_plugin);
+                }
+            }),
+            on_pane: Rc::new(
+                move |_state: &mut TerminalState, key: &str, target: &PaneEntry| {
+                    pane.commit_pane_then(&AfterCommit::Rest, key, target.id, target.is_plugin);
+                },
+            ),
+            on_exit_immersive: Rc::new(move |_state: &mut TerminalState| exit.toggle_fullscreen()),
+        }
     }
 
     /// Open the rename dialog, seeded with the attached session's *current* name —
@@ -1070,20 +1174,29 @@ impl Actions {
     }
 }
 
-/// Build the tree sheet's read side from the controller's own tracked
-/// signals — the [`TreeData`] borrow [`tree_body`] renders from — and hand it
-/// straight to `tree_body` alongside [`tree_actions`]'s wiring. A free fn
-/// (rather than an `Actions` method) since it needs to borrow four owned
-/// locals across the call, which a method returning `AnyView` can't do.
+/// The side sheet's body: [`tree_view`] in its sheet mode, scrolling, and a
+/// pane commit closing the sheet behind it.
 fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
-    let controller = &actions.controller;
     // This body is a page of the **root** overlay host, so it can outlive the
     // screen that pushed it (a guard bounce off `/terminal` leaves the sheet
     // up). One untracked liveness check ahead of the tracked reads below, which
     // panic on a disposed owner; nothing follows it that could dispose one.
-    if !controller.signals_alive() {
+    if !actions.controller.signals_alive() {
         return any(column(Vec::new()));
     }
+    // The side sheet hands its body slot a tight extent and clips whatever
+    // overflows it — the tree itself scrolls no more than `tree_body` on its
+    // own does, so a session with many spaces/tabs/panes stays fully
+    // reachable rather than running off the bottom of the panel.
+    let after = AfterCommit::Close(sheet.clone());
+    any(scroll_view(tree_view(actions, TreeMode::Sheet, after)))
+}
+
+/// The tree over the controller's tracked signals — the [`TreeData`] borrow
+/// [`tree_body`] renders from — in `mode`, committing with `after`. A free fn
+/// since it borrows four owned locals across the call.
+fn tree_view<S: 'static>(actions: &Actions, mode: TreeMode, after: AfterCommit) -> AnyView<S> {
+    let controller = &actions.controller;
     let spaces = controller.spaces.get();
     let tabs = controller.tabs.get();
     let browsed = controller.browsed_space_tabs.get();
@@ -1098,25 +1211,87 @@ fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> 
         expanded_tab: expanded_tab.as_deref(),
         has_spaces,
     };
-    // The side sheet hands its body slot a tight extent and clips whatever
-    // overflows it — the tree itself scrolls no more than `tree_body` on its
-    // own does, so a session with many spaces/tabs/panes stays fully
-    // reachable rather than running off the bottom of the panel.
-    any(scroll_view(tree_body(&data, &tree_actions(actions, sheet))))
+    let docked = mode == TreeMode::Docked;
+    tree_body(&data, &tree_actions(actions, after, docked), mode)
+}
+
+/// The Tablet's rail beside the card: the full rail, or the mini rail in the
+/// collapsed band and in immersive (`mini`), so the tree is never out of reach.
+fn rail_view(
+    actions: &Actions,
+    mini: bool,
+    fullscreen: bool,
+    read_only: bool,
+    link: Option<FeedStatus>,
+) -> AnyView<TerminalState> {
+    let controller = &actions.controller;
+    let top = match use_context::<WindowInsets>() {
+        Some(insets) if fullscreen => insets.padding().top,
+        _ => 0.0,
+    };
+    let tabs = controller.tabs.get();
+    if mini {
+        let (spaces, active_tab) = (controller.spaces.get(), controller.active_tab.get());
+        let data = MiniData {
+            spaces: &spaces,
+            tabs: &tabs,
+            active_tab: &active_tab,
+            fullscreen,
+            top,
+        };
+        return mini_rail(&data, &actions.mini_actions());
+    }
+    let spaces = controller
+        .has_spaces()
+        .then(|| controller.spaces.get().len());
+    let name = controller
+        .session_name
+        .get()
+        .or_else(|| controller.session_id())
+        .unwrap_or_default();
+    let head = RailHead {
+        name: &name,
+        summary: rail_summary(spaces, &tabs),
+        link,
+        read_only,
+    };
+    let detach = actions.clone();
+    docked_rail(
+        &head,
+        tree_view(actions, TreeMode::Docked, AfterCommit::Rest),
+        top,
+        move |_state: &mut TerminalState| detach.detach(),
+    )
+}
+
+/// What a landed tree commit does next: the sheet closes a beat later, the
+/// docked rail stays and re-rests on where the session now is.
+#[derive(Clone)]
+enum AfterCommit {
+    Close(SheetHandle),
+    Rest,
+}
+
+impl AfterCommit {
+    async fn land(&self, controller: &TerminalController) {
+        match self {
+            AfterCommit::Close(sheet) => sheet.close_after(SHEET_CLOSE_DELAY).await,
+            AfterCommit::Rest => controller.settle_rest(),
+        }
+    }
 }
 
 /// Wire the tree's [`TreeActions`]/[`TreeMutations`] onto this screen's
 /// existing dialog-opener/commit/new-pane handlers — every gesture the tree
-/// can fire, bridged from its view-only callbacks to `&mut AppState`
-/// (this sheet is a page of the root overlay host, like every other overlay
-/// this screen pushes).
-fn tree_actions(actions: &Actions, sheet: &SheetHandle) -> TreeActions<AppState> {
+/// can fire, bridged from its view-only callbacks to whichever state mounts
+/// it (`AppState` under the sheet, a page of the root overlay host, and
+/// `TerminalState` in the rail); only the rail gets overflow menus.
+fn tree_actions<S: 'static>(actions: &Actions, after: AfterCommit, docked: bool) -> TreeActions<S> {
     let read_only = actions.connection.is_read_only.get();
 
     let toggle_space_actions = actions.clone();
     let toggle_tab_actions = actions.clone();
     let commit_actions = actions.clone();
-    let commit_sheet = sheet.clone();
 
     let mutations = (!read_only).then(|| {
         let rename_space_actions = actions.clone();
@@ -1125,43 +1300,49 @@ fn tree_actions(actions: &Actions, sheet: &SheetHandle) -> TreeActions<AppState>
         let new_space_actions = actions.clone();
         let new_tab_actions = actions.clone();
         let new_pane_actions = actions.clone();
+        let menu_actions = actions.clone();
         TreeMutations {
-            on_rename_space: Rc::new(move |_app: &mut AppState, id: &str, label: &str| {
+            on_rename_space: Rc::new(move |_app: &mut S, id: &str, label: &str| {
                 rename_space_actions.open_rename_space_dialog(id, label);
             }),
-            on_rename_tab: Rc::new(move |_app: &mut AppState, tab_id: u64, label: &str| {
+            on_rename_tab: Rc::new(move |_app: &mut S, tab_id: u64, label: &str| {
                 rename_tab_actions.open_rename_tab_dialog(tab_id, label);
             }),
             on_rename_pane: Rc::new(
-                move |_app: &mut AppState, pane_id: u32, is_plugin: bool, title: &str| {
+                move |_app: &mut S, pane_id: u32, is_plugin: bool, title: &str| {
                     rename_pane_actions.open_rename_pane_dialog(pane_id, is_plugin, title);
                 },
             ),
-            on_new_space: Rc::new(move |_app: &mut AppState| {
+            on_new_space: Rc::new(move |_app: &mut S| {
                 new_space_actions.open_create_space_dialog();
             }),
             // Both create rows carry the level they were drawn under, and both
             // move the session there before creating: a create always lands
             // where the connection is, so targeting is a switch, not a flag.
-            on_new_tab: Rc::new(move |_app: &mut AppState, space: Option<&str>| {
+            on_new_tab: Rc::new(move |_app: &mut S, space: Option<&str>| {
                 new_tab_actions.open_new_tab_dialog_in(space);
             }),
-            on_new_pane: Rc::new(move |_app: &mut AppState, path: &TabPath| {
+            on_new_pane: Rc::new(move |_app: &mut S, path: &TabPath| {
                 new_pane_actions.new_tree_pane(path);
+            }),
+            on_menu: docked.then(|| {
+                Rc::new(move |_app: &mut S, anchor: Rect, target: &RowTarget| {
+                    menu_actions.open_row_menu(anchor, target);
+                }) as PressMenu<S>
             }),
         }
     });
 
     TreeActions {
-        on_space: Rc::new(move |_app: &mut AppState, id: &str, expanded: bool| {
+        on_space: Rc::new(move |_app: &mut S, id: &str, expanded: bool| {
             toggle_space_actions.toggle_tree_space(id, expanded);
         }),
-        on_tab: Rc::new(move |_app: &mut AppState, key: &str, expanded: bool| {
+        on_tab: Rc::new(move |_app: &mut S, key: &str, expanded: bool| {
             toggle_tab_actions.toggle_tree_tab(key, expanded);
         }),
         on_pane: Rc::new(
-            move |_app: &mut AppState, path: &TabPath, pane_id: u32, is_plugin: bool| {
-                commit_actions.commit_tree_pane(&commit_sheet, path, pane_id, is_plugin);
+            move |_app: &mut S, path: &TabPath, pane_id: u32, is_plugin: bool| {
+                commit_actions.commit_tree_pane(&after, path, pane_id, is_plugin);
             },
         ),
         mutations,
@@ -1280,6 +1461,7 @@ mod tests {
             pane_path: String::new(),
             panes: Vec::new(),
             active: false,
+            has_bell: false,
         };
         let tabs = vec![
             tab("btop", "ed@precision: ~"),
@@ -1327,6 +1509,7 @@ mod tests {
             pane_path: String::new(),
             panes,
             active: true,
+            has_bell: false,
         }
     }
 
