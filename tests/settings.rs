@@ -25,6 +25,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use clean_signals::Failure;
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
     WindowMetrics, any, navigator, provide_context, spawn_local,
@@ -2875,6 +2876,63 @@ fn the_restore_row_is_absent_on_pro() {
     let values = node_values(&h.root);
     assert!(!values.iter().any(|v| v == RESTORE_LABEL), "{values:?}");
     assert!(!node_labels(&h.root).iter().any(|l| l == "restore"));
+}
+
+#[test]
+fn a_failed_restore_from_the_row_toasts_the_failure_message_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    let failure = AppFailure::Network("store unreachable".to_string());
+    mock.fail_next_restore(failure.clone());
+    app_toasts().clear();
+
+    h.tap_label("restore");
+    pump_until(&mut h, "the failure toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec![failure.user_message()]
+    );
+}
+
+#[test]
+fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
+
+    // A purchase elsewhere holds the pro controller's busy flag.
+    let pro = expect_pro_controller();
+    pro.busy.set(true);
+    h.pump_once();
+    h.pump_once();
+    assert!(
+        !restoring(&node_values(&h.root)),
+        "a purchase is not a restore"
+    );
+
+    // Tapping restore meanwhile is refused with a toast, not a restoring row.
+    app_toasts().clear();
+    h.tap_label("restore");
+    pump_until(&mut h, "the busy toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+    assert_eq!(app_toasts().pending_untracked().len(), 1);
+    assert!(!restoring(&node_values(&h.root)), "a refused restore");
+    pro.busy.set(false);
+
+    // A landed restore leaves the row as it found it.
+    app_toasts().clear();
+    h.tap_label("restore");
+    pump_until(&mut h, "the restore to land", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+    assert!(!restoring(&node_values(&h.root)), "released once it lands");
 }
 
 // ---------------------------------------------------------------------------

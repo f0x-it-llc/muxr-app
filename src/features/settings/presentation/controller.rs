@@ -81,6 +81,9 @@ pub struct SettingsController {
     /// The saved servers this device remembers — the `saved servers` group's
     /// rows, each with whether a credential is stored for it.
     pub saved: RwSignal<Vec<SavedServer>>,
+    /// Whether a restore started from the `muxr pro` restore row is in flight
+    /// (a purchase running elsewhere does not set it).
+    pub restoring: RwSignal<bool>,
 }
 
 impl SettingsController {
@@ -109,6 +112,7 @@ impl SettingsController {
             poll: RwSignal::new(defaults.poll),
             loaded: RwSignal::new(false),
             pending_token_secret: RwSignal::new(None),
+            restoring: RwSignal::new(false),
             saved: RwSignal::new(Vec::new()),
         }
     }
