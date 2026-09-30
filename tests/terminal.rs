@@ -3051,6 +3051,53 @@ fn a_read_only_rail_lands_a_pane_tap_right_behind_a_space_browse() {
     assert_eq!(h.depth(), REST_DEPTH);
 }
 
+/// Tab keys are unique only within one layout (an unnamed tab is keyed by its display
+/// name), so a browsed space can carry a tab keyed like the resting one. The mock's
+/// poll always reports `devbox` active: to a rail resting on `btop`, another client
+/// moving the focus back.
+#[test]
+fn a_docked_poll_follows_focus_only_while_resting_never_into_a_same_keyed_browse() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    let c = debug_controller().expect("mounted");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime");
+    let at = |space: &str, tab: &str| (Some(space.to_string()), Some(tab.to_string()));
+    let rest_on_btop = || {
+        assert!(rt.block_on(c.switch_tab("btop".to_string())));
+        c.settle_rest();
+        assert_eq!(expanded(&c), at("forgekit", "btop"));
+    };
+    let poll = || {
+        assert!(c.take_layout_poll_tick());
+        rt.block_on(c.refresh_layout_from_poll());
+    };
+
+    rest_on_btop();
+    rt.block_on(c.expand_space("zelli_mobile".to_string()));
+    let (space, mut tabs) = c.browsed_space_tabs.get_untracked().expect("browsed");
+    tabs[0].key = "btop".to_string();
+    c.browsed_space_tabs.set(Some((space, tabs)));
+    c.expand_tab("btop".to_string());
+    poll();
+    assert_eq!(
+        expanded(&c),
+        at("zelli_mobile", "btop"),
+        "a browse is the user's"
+    );
+
+    rest_on_btop();
+    poll();
+    assert_eq!(
+        expanded(&c),
+        at("forgekit", "devbox"),
+        "nothing browsed: it follows"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The key bar's two tiers
 // ---------------------------------------------------------------------------
