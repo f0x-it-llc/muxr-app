@@ -18,9 +18,11 @@ The project documents live in Zabin, not in this repository: project `prj_000001
 
 | Topic | Zabin document |
 |-------|----------------|
-| Architecture (hub) — composition root, shell, navigation, UI substrate, tests | `docs/APP_ARCHITECTURE.md` |
+| Architecture (hub) — composition root, shell, navigation, tests | `docs/APP_ARCHITECTURE.md` |
 | NET — gRPC transport, connection state | `docs/APP_NET_ARCHITECTURE.md` |
+| UI — `src/ui/` substrate, responsive rule, resize contract, test seam | `docs/APP_UI_ARCHITECTURE.md` |
 | FEATURES — feature slices, canonical screen pattern | `docs/APP_FEATURES_ARCHITECTURE.md` |
+| TERMINAL — terminal slice: ports, focus, tree, rail, key bar, attach target | `docs/APP_TERMINAL_ARCHITECTURE.md` |
 | Coding conventions beyond frust's `docs/CODE_STANDARDS.md` | `docs/APP_CODE_STANDARDS.md` |
 | Build, run, test, flavors | `docs/APP_DEVELOPMENT.md` |
 | Signing, Play Console, release | `docs/APP_RELEASE_ANDROID.md` |
@@ -67,6 +69,9 @@ set, flavor identifiers, and the test rig; `docs/APP_RELEASE_ANDROID.md` for sig
   reaches it through `routes::app_nav()`, never by building its own.
 - Chrome icons (a bar affordance, a FAB, a row's trailing chevron) are always a `frust::icons`
   vector or an app-supplied `IconSource` — never a font glyph; see the Zabin
-  `docs/APP_ARCHITECTURE.md`'s UI Substrate section.
+  `docs/APP_UI_ARCHITECTURE.md`'s UI Substrate section.
 - Entitlement is read only through `pro::di::expect_pro_controller()`'s `ProController` — never
   granted off `request_purchase`'s return, and never mirrored into a second source of truth.
+- A screen reads `responsive::Responsive::of(use_context::<WindowMetrics>())` exactly once, at the top
+  of its own `Component::build`, and passes the value down — never per widget, never cached across
+  builds (Zabin `docs/APP_UI_ARCHITECTURE.md`, Responsive).
