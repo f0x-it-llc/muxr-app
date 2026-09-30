@@ -618,20 +618,24 @@ impl Component for TerminalScreen {
         // arm returns `page` unwrapped rather than adding an always-zero sibling.
         match state.live.as_ref() {
             Some(session) => {
-                // The keyboard's reported height is the app's one proxy for "the
-                // IME is up" — this screen has no other text input, so it mirrors
-                // `keybar`'s own internal read rather than inventing a second one.
-                let keyboard_up = use_context::<WindowInsets>()
-                    .map(|insets| insets.view_insets.bottom > 0.0)
-                    .unwrap_or(false);
-                any(FlexView::new(
-                    Axis::Vertical,
-                    vec![
-                        flexible(1, page),
-                        inflexible(keybar::key_bar(keyboard_up, &session.input)),
-                    ],
+                let bar = if tablet {
+                    // Persistent behind the menu toggle; read-only never shows it.
+                    let shown = controller.key_bar_visible.get() && !read_only;
+                    let fn_row = controller.fn_row_visible;
+                    keybar::tablet_key_bar(shown, responsive.band, fn_row, &session.input)
+                } else {
+                    // The keyboard's reported height is the app's one proxy for "the
+                    // IME is up" — this screen has no other text input, so it mirrors
+                    // `keybar`'s own internal read rather than inventing a second one.
+                    let keyboard_up = use_context::<WindowInsets>()
+                        .map(|insets| insets.view_insets.bottom > 0.0)
+                        .unwrap_or(false);
+                    keybar::key_bar(keyboard_up, &session.input)
+                };
+                any(
+                    FlexView::new(Axis::Vertical, vec![flexible(1, page), inflexible(bar)])
+                        .cross_axis(CrossAxisAlignment::Stretch),
                 )
-                .cross_axis(CrossAxisAlignment::Stretch))
             }
             None => page,
         }

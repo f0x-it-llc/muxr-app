@@ -102,9 +102,11 @@ pub struct TerminalController {
     pub lines: RwSignal<Vec<TermLine>>,
     /// The attached session's current name, for the rename dialog's seed.
     pub session_name: RwSignal<Option<String>>,
-    /// Whether the Tablet's key bar shows; the menu's "Show key bar" toggles it and
-    /// the key-bar card wires the bar to it.
+    /// Whether the Tablet's key bar shows; the menu's "Show key bar" toggles it
+    /// (see `keybar::tablet_key_bar`).
     pub key_bar_visible: RwSignal<bool>,
+    /// Whether the Tablet key bar's F1–F12 row is open; its `Fn` cap toggles it.
+    pub fn_row_visible: RwSignal<bool>,
     /// Whether the first load has landed (the card body stays empty until it has).
     pub loaded: RwSignal<bool>,
     /// Whether the card is fullscreen. Controller state, not widget state: it drives
@@ -276,6 +278,7 @@ impl TerminalController {
             lines: RwSignal::new(Vec::new()),
             session_name: RwSignal::new(None),
             key_bar_visible: RwSignal::new(true),
+            fn_row_visible: RwSignal::new(false),
             loaded: RwSignal::new(false),
             fullscreen: RwSignal::new(false),
             reveal_epoch: RwSignal::new(0),

@@ -1,8 +1,18 @@
-//! The terminal **key bar**: the twelve keys a soft keyboard has no room
-//! for, docked above the keyboard while — and only while — the IME is up.
+//! The terminal **key bar**: the keys a soft keyboard has no room for, in two
+//! tiers. [`key_bar`] is the Compact tier — twelve keys docked above the
+//! keyboard while, and only while, the IME is up:
 //!
 //! ```text
 //! Ctrl  Alt  Shift  Esc │ Tab  ↑  ↓  ←  → │ PgUp  PgDn │ Del
+//! ```
+//!
+//! [`tablet_key_bar`] is the Tablet tier (`docs/tablet.html` frame 03),
+//! persistent behind the menu's "Show key bar" since a hardware keyboard
+//! raises no inset, with `Fn` revealing an F1–F12 row:
+//!
+//! ```text
+//! Ctrl  Alt  Shift  Esc │ Tab  Home  End  PgUp  PgDn  Del │ Fn        ↑
+//!                                                                  ←  ↓  →
 //! ```
 //!
 //! Ported from the Flutter incumbent (order/sequences/latch semantics), plus
@@ -11,8 +21,9 @@
 //! character — the reason the latch lives at that emission choke point.
 //!
 //! Contracts:
-//! 1. **Fixed slot, never appears/disappears**: `key_bar(false, ..)` returns
-//!    a zero-height view, mounted unconditionally — an unkeyed child list
+//! 1. **Fixed slot, never appears/disappears**: a hidden tier returns a
+//!    zero-height view (the Tablet's keeps only the keyboard's inset), mounted
+//!    unconditionally — an unkeyed child list
 //!    reconciles positionally, so an appearing bar would shift the grid's
 //!    index and drop focus, dismissing the keyboard it exists to serve.
 //! 2. **Every cap claims focus on every tap**: an unclaimed pointer `Down` is
@@ -39,11 +50,13 @@ use frust::authoring::{
     build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
-    Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, IconSource,
-    Padding, SizedBox, Theme, flexible, icon, icons, inflexible, text,
+    Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    IconSource, Padding, RwSignal, Set, SizedBox, Theme, flexible, icon, icons, inflexible, text,
 };
 
+use crate::responsive::WidthBand;
 use crate::ui::palette::{Palette, active_theme};
+use crate::ui::spacing;
 
 use super::term::input::BarKey;
 use super::term::{InputSeam, ModifierLatch};
@@ -97,6 +110,61 @@ const FALLBACK_CAP_WIDTH: f64 = 32.0;
 /// the shared palette's own `--amber-border` derivation, at the same strength.
 const DANGER_BORDER_ALPHA: f32 = 0.35;
 
+// Tablet tier geometry, from `docs/tablet.html`'s `.key`, `.ksep`, `.arrows`
+// and `.frow .key`.
+
+/// A Tablet cap's height.
+pub const TABLET_CAP_HEIGHT: f64 = 44.0;
+/// A Tablet cap's minimum width — also one arrow column's width.
+const TABLET_CAP_MIN_W: f64 = 36.0;
+/// The inset between a Tablet cap's edge and its label, per side.
+const TABLET_CAP_PAD_X: f64 = 7.0;
+/// A Tablet cap's label size.
+pub const TABLET_LABEL_SIZE: f32 = 10.5;
+/// One label character's advance at [`TABLET_LABEL_SIZE`] (see [`LABEL_ADVANCE`]).
+const TABLET_LABEL_ADVANCE: f64 = 0.6 * TABLET_LABEL_SIZE as f64 + 0.475;
+/// A Tablet arrow mark's drawn size.
+const TABLET_ICON_SIZE: f64 = 14.0;
+/// A Tablet group rule's height.
+const TABLET_SEPARATOR_H: f64 = 24.0;
+/// The gap between the arrow cluster's cells, both axes.
+const ARROW_GAP: f64 = spacing::MICRO;
+/// One arrow cell's height: two rows and their gap span one Tablet cap.
+pub const ARROW_CAP_HEIGHT: f64 = (TABLET_CAP_HEIGHT - ARROW_GAP) / 2.0;
+/// An F-key cap's height.
+pub const FN_CAP_HEIGHT: f64 = 36.0;
+
+/// One tier's cap metrics: height, label inset, arrow size and label size.
+#[derive(Clone, Copy, PartialEq)]
+struct CapShape {
+    height: f64,
+    pad_x: f64,
+    icon: f64,
+    label: f32,
+}
+
+const COMPACT_CAP: CapShape = CapShape {
+    height: CAP_HEIGHT,
+    pad_x: CAP_PAD_X,
+    icon: ICON_SIZE,
+    label: LABEL_SIZE,
+};
+const TABLET_CAP: CapShape = CapShape {
+    height: TABLET_CAP_HEIGHT,
+    pad_x: TABLET_CAP_PAD_X,
+    icon: TABLET_ICON_SIZE,
+    label: TABLET_LABEL_SIZE,
+};
+const ARROW_CAP: CapShape = CapShape {
+    height: ARROW_CAP_HEIGHT,
+    pad_x: 0.0,
+    ..TABLET_CAP
+};
+const FN_CAP: CapShape = CapShape {
+    height: FN_CAP_HEIGHT,
+    ..TABLET_CAP
+};
+
 /// The arrow mark a key draws, or `None` for a text-labelled cap. The catalog's
 /// own [`frust::icons`] arrow pair — see the [module docs](self)'s contract 3.
 fn arrow_mark(key: BarKey) -> Option<IconSource> {
@@ -135,99 +203,251 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
         return any(SizedBox::<State>(None, Some(0.0)));
     }
 
-    let theme = active_theme();
-    let colors = Palette::from_theme(&theme);
-    let ink = CardInk::from_theme(&theme);
-    let danger = theme.scheme().error;
-    let latch = seam.latch();
-    // The keyboard's own inset the bar docks on; zero in a headless test/desktop.
-    let keyboard = frust::use_context::<WindowInsets>()
-        .map(|insets| insets.view_insets.bottom)
-        .unwrap_or(0.0);
-
+    let kit = Kit::new(seam);
     let mut children: Vec<FlexChild<State>> = Vec::with_capacity(BarKey::ORDER.len() * 2);
     for (index, key) in BarKey::ORDER.iter().copied().enumerate() {
         if key.separator_before() {
             // Replaces the gap rather than adding to it — its own margin,
             // and the row has no px to spend twice.
-            children.push(inflexible(separator::<State>(&colors)));
+            children.push(inflexible(separator::<State>(
+                &kit.colors,
+                SEPARATOR_H,
+                SEPARATOR_MARGIN,
+            )));
         } else if index > 0 {
             children.push(inflexible(SizedBox::<State>(Some(CAP_GAP), None)));
         }
-        children.push(flexible(
-            cap_weight(key),
-            key_cap(key, &theme, &colors, danger, latch, seam),
-        ));
+        children.push(flexible(cap_weight(key), kit.cap(key, COMPACT_CAP)));
     }
 
-    // Band outside, padding inside: full-bleed chrome must reach both screen
-    // edges, keyboard inset included.
-    any(BarBackdropView {
-        fill: ink.head,
-        hairline: ink.card_border,
-        child: any(Padding(
-            EdgeInsets {
-                left: BAR_PAD_X,
-                top: BAR_PAD_Y,
-                right: BAR_PAD_X,
-                bottom: BAR_PAD_Y + keyboard,
-            },
-            FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
-        )),
-    })
+    let row = FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center);
+    kit.band(BAR_PAD_X, BAR_PAD_Y, any(row))
 }
 
-/// One group rule — a hairline the height of a cap's middle.
-fn separator<State: 'static>(colors: &Palette) -> AnyView<State> {
+/// The keyboard's own inset a bar docks on; zero in a headless test/desktop.
+fn keyboard_inset() -> f64 {
+    frust::use_context::<WindowInsets>()
+        .map(|insets| insets.view_insets.bottom)
+        .unwrap_or(0.0)
+}
+
+/// The Tablet tier ([module docs](self)): mounted while `shown` — the screen's
+/// "Show key bar" with the session not read-only — docked above the keyboard
+/// when one is up and at the screen's foot otherwise. The `Collapsed` band drops
+/// `Home`/`End` so the row fits; `fn_row` is the `Fn` cap's own toggle.
+///
+/// Hidden, it keeps only the keyboard's inset, so the grid still clears a soft
+/// keyboard. Read-only is re-checked on the seam: this tier never waits for an
+/// IME, whose absence is how the Compact tier stays off a read-only session.
+/// Tracks `seam.revision` and `fn_row`, like [`key_bar`].
+pub fn tablet_key_bar<State: 'static>(
+    shown: bool,
+    band: WidthBand,
+    fn_row: RwSignal<bool>,
+    seam: &InputSeam,
+) -> AnyView<State> {
+    let _revision = seam.revision.get();
+    let fn_open = fn_row.get();
+    if !shown || seam.read_only() {
+        return any(SizedBox::<State>(None, Some(keyboard_inset())));
+    }
+
+    let kit = Kit::new(seam);
+    let mut row: Vec<FlexChild<State>> = Vec::with_capacity(BarKey::TABLET_ORDER.len() * 2 + 2);
+    let keys = BarKey::TABLET_ORDER
+        .iter()
+        .copied()
+        .filter(|key| band == WidthBand::Full || !matches!(key, BarKey::Home | BarKey::End));
+    for key in keys {
+        if key.tablet_separator_before() {
+            row.push(inflexible(separator::<State>(
+                &kit.colors,
+                TABLET_SEPARATOR_H,
+                spacing::SM,
+            )));
+        } else if !row.is_empty() {
+            row.push(inflexible(SizedBox::<State>(Some(spacing::TIGHT), None)));
+        }
+        let cap = if key == BarKey::Fn {
+            let toggle = Rc::new(move |_state: &mut State| fn_row.set(!fn_row.get_untracked()));
+            kit.toggle_cap(key, TABLET_CAP, fn_open, toggle)
+        } else {
+            kit.cap(key, TABLET_CAP)
+        };
+        let width = tablet_cap_width(key);
+        row.push(inflexible(SizedBox::<State>(Some(width), None).child(cap)));
+    }
+    row.push(flexible(1, SizedBox::<State>(None, None)));
+    row.push(inflexible(arrow_cluster::<State>(&kit)));
+
+    let mut rows = vec![inflexible(
+        FlexView::new(Axis::Horizontal, row).cross_axis(CrossAxisAlignment::Center),
+    )];
+    if fn_open {
+        let mut keys: Vec<FlexChild<State>> = Vec::with_capacity(BarKey::FN_ROW.len() * 2);
+        for key in BarKey::FN_ROW {
+            if !keys.is_empty() {
+                keys.push(inflexible(SizedBox::<State>(Some(spacing::TIGHT), None)));
+            }
+            keys.push(flexible(1, kit.cap(key, FN_CAP)));
+        }
+        rows.push(inflexible(SizedBox::<State>(None, Some(spacing::XS))));
+        rows.push(inflexible(FlexView::new(Axis::Horizontal, keys)));
+    }
+    let column = FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch);
+    kit.band(spacing::BASE, spacing::SM, any(column))
+}
+
+/// A Tablet cap's width: its label plus [`TABLET_CAP_PAD_X`] a side, never
+/// under [`TABLET_CAP_MIN_W`].
+fn tablet_cap_width(key: BarKey) -> f64 {
+    let label = key.label().chars().count() as f64 * TABLET_LABEL_ADVANCE;
+    (label + 2.0 * TABLET_CAP_PAD_X).max(TABLET_CAP_MIN_W)
+}
+
+/// The inverted-T: `↑` alone over `← ↓ →`, three [`TABLET_CAP_MIN_W`]
+/// columns whose two rows together span one Tablet cap.
+fn arrow_cluster<State: 'static>(kit: &Kit<'_>) -> AnyView<State> {
+    let cell = |key: Option<BarKey>| {
+        let slot = SizedBox::<State>(Some(TABLET_CAP_MIN_W), Some(ARROW_CAP_HEIGHT));
+        inflexible(match key {
+            Some(key) => slot.child(kit.cap(key, ARROW_CAP)),
+            None => slot,
+        })
+    };
+    let gap = || inflexible(SizedBox::<State>(Some(ARROW_GAP), Some(ARROW_GAP)));
+    let line = |keys: [Option<BarKey>; 3]| {
+        let [a, b, c] = keys.map(cell);
+        inflexible(FlexView::new(Axis::Horizontal, vec![a, gap(), b, gap(), c]))
+    };
+    any(FlexView::new(
+        Axis::Vertical,
+        vec![
+            line([None, Some(BarKey::Up), None]),
+            gap(),
+            line([Some(BarKey::Left), Some(BarKey::Down), Some(BarKey::Right)]),
+        ],
+    ))
+}
+
+/// One group rule — a `height`-tall hairline with `margin` either side.
+fn separator<State: 'static>(colors: &Palette, height: f64, margin: f64) -> AnyView<State> {
     any(Padding(
-        EdgeInsets::symmetric(SEPARATOR_MARGIN, 0.0),
+        EdgeInsets::symmetric(margin, 0.0),
         BarBackdropView {
             fill: colors.outline,
             hairline: Color::TRANSPARENT,
-            child: any(SizedBox::<State>(Some(SEPARATOR_W), Some(SEPARATOR_H))),
+            child: any(SizedBox::<State>(Some(SEPARATOR_W), Some(height))),
         },
     ))
 }
 
-/// One cap, wired to `seam`: a latch key toggles, every other key sends its
-/// sequence — both through [`InputSeam::dispatch`], the app's single byte exit.
-fn key_cap<State: 'static>(
-    key: BarKey,
-    theme: &Theme,
-    colors: &Palette,
+/// What every cap of one bar build shares: the theme's tones, the latch the
+/// pips are drawn from, and the seam presses go through.
+struct Kit<'a> {
+    theme: Theme,
+    colors: Palette,
+    ink: CardInk,
     danger: Color,
     latch: ModifierLatch,
-    seam: &InputSeam,
-) -> KeyCapView<State> {
-    let armed = key.armed(latch);
-    let (fill, border, ink) = if armed {
-        (colors.amber_faint, colors.amber_border, colors.amber)
-    } else if key.is_danger() {
-        (
-            colors.raised,
-            danger.with_alpha(DANGER_BORDER_ALPHA),
-            danger,
-        )
-    } else {
-        (colors.raised, colors.outline, colors.fg_muted)
-    };
-    let mut label = theme.type_scale.label_small.clone();
-    label.size = LABEL_SIZE;
-    label.color = ink;
+    seam: &'a InputSeam,
+}
 
-    let pressed_seam = seam.clone();
-    KeyCapView {
-        key,
-        label,
-        ink,
-        fill,
-        border,
-        armed,
-        seam: seam.clone(),
+impl<'a> Kit<'a> {
+    fn new(seam: &'a InputSeam) -> Self {
+        let theme = active_theme();
+        Self {
+            colors: Palette::from_theme(&theme),
+            ink: CardInk::from_theme(&theme),
+            danger: theme.scheme().error,
+            latch: seam.latch(),
+            theme,
+            seam,
+        }
+    }
+
+    /// The bar's band around `content`: fill and top hairline outside, padding
+    /// inside, so full-bleed chrome reaches both screen edges, keyboard inset
+    /// included.
+    fn band<State: 'static>(
+        &self,
+        pad_x: f64,
+        pad_y: f64,
+        content: AnyView<State>,
+    ) -> AnyView<State> {
+        any(BarBackdropView {
+            fill: self.ink.head,
+            hairline: self.ink.card_border,
+            child: any(Padding(
+                EdgeInsets {
+                    left: pad_x,
+                    top: pad_y,
+                    right: pad_x,
+                    bottom: pad_y + keyboard_inset(),
+                },
+                content,
+            )),
+        })
+    }
+
+    /// One cap, wired to the seam: a latch key toggles, every other key sends its
+    /// sequence — both through [`InputSeam::dispatch`], the app's single byte exit.
+    fn cap<State: 'static>(&self, key: BarKey, shape: CapShape) -> KeyCapView<State> {
+        let pressed_seam = self.seam.clone();
         // Via `press_bar_key`, never hand-rolled: it's where the read-only gate lives.
-        on_press: Rc::new(move |_state: &mut State| {
+        let on_press = Rc::new(move |_state: &mut State| {
             pressed_seam.press_bar_key(key);
-        }),
+        });
+        self.view(key, shape, key.armed(self.latch), key.is_latch(), on_press)
+    }
+
+    /// A cap that toggles screen state rather than the latch — `Fn` — drawn and
+    /// announced as armed while `on`.
+    fn toggle_cap<State: 'static>(
+        &self,
+        key: BarKey,
+        shape: CapShape,
+        on: bool,
+        on_press: Rc<dyn Fn(&mut State)>,
+    ) -> KeyCapView<State> {
+        self.view(key, shape, on, true, on_press)
+    }
+
+    fn view<State: 'static>(
+        &self,
+        key: BarKey,
+        shape: CapShape,
+        armed: bool,
+        toggle: bool,
+        on_press: Rc<dyn Fn(&mut State)>,
+    ) -> KeyCapView<State> {
+        let colors = &self.colors;
+        let (fill, border, ink) = if armed {
+            (colors.amber_faint, colors.amber_border, colors.amber)
+        } else if key.is_danger() {
+            (
+                colors.raised,
+                self.danger.with_alpha(DANGER_BORDER_ALPHA),
+                self.danger,
+            )
+        } else {
+            (colors.raised, colors.outline, colors.fg_muted)
+        };
+        let mut label = self.theme.type_scale.label_small.clone();
+        label.size = shape.label;
+        label.color = ink;
+        KeyCapView {
+            key,
+            shape,
+            label,
+            ink,
+            fill,
+            border,
+            armed,
+            toggle,
+            seam: self.seam.clone(),
+            on_press,
+        }
     }
 }
 
@@ -313,26 +533,29 @@ impl Widget for BarBackdropWidget {
 /// co-drives the grid's keystroke source (see the [module docs](self)).
 struct KeyCapView<State: 'static> {
     key: BarKey,
+    shape: CapShape,
     label: TextStyle,
     ink: Color,
     fill: Color,
     border: Color,
     armed: bool,
+    /// Whether the cap announces itself as a toggle (a latch key, or `Fn`).
+    toggle: bool,
     seam: InputSeam,
     on_press: Rc<dyn Fn(&mut State)>,
 }
 
 impl<State: 'static> KeyCapView<State> {
     /// The cap's content: a vector arrow, or its printed label — centred
-    /// inside a [`CAP_PAD_X`] inset that stays inside the press target and
-    /// fill, so a wide label can never paint over the border.
+    /// inside its shape's inset ([`CAP_PAD_X`] on Compact) that stays inside
+    /// the press target and fill, so a wide label can never paint over the border.
     fn content(&self) -> AnyView<State> {
         let inner: AnyView<State> = match arrow_mark(self.key) {
-            Some(mark) => any(icon(mark).size(ICON_SIZE).color(self.ink)),
+            Some(mark) => any(icon(mark).size(self.shape.icon).color(self.ink)),
             None => any(text(self.key.label()).style(self.label.clone())),
         };
         any(Padding(
-            EdgeInsets::symmetric(CAP_PAD_X, 0.0),
+            EdgeInsets::symmetric(self.shape.pad_x, 0.0),
             Align(Alignment::CENTER, inner),
         ))
     }
@@ -342,9 +565,11 @@ impl<State: 'static> KeyCapView<State> {
 struct KeyCapWidget {
     /// The accessible name — a word, never the arrow glyph the cap draws.
     name: &'static str,
-    /// Whether this cap is a latch key, and whether it is armed. Announced as
-    /// a toggle; `None` for every non-latch key.
+    /// Whether this cap is a toggle (a latch key, or `Fn`), and whether it is
+    /// on. Announced as a toggle; `None` for every other key.
     toggled: Option<bool>,
+    /// The cap's own height — its tier's [`CapShape`].
+    height: f64,
     fill: Color,
     border: Color,
     content: ChildPod,
@@ -365,7 +590,8 @@ impl<State: 'static> View<State> for KeyCapView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> KeyCapWidget {
         KeyCapWidget {
             name: self.key.name(),
-            toggled: self.key.is_latch().then_some(self.armed),
+            toggled: self.toggle.then_some(self.armed),
+            height: self.shape.height,
             fill: self.fill,
             border: self.border,
             content: build_child(&self.content(), ctx),
@@ -386,10 +612,20 @@ impl<State: 'static> View<State> for KeyCapView<State> {
         element.on_press = erase_callback(&self.on_press);
         element.seam = self.seam.clone();
         let mut flags = rebuild_child(&prev.content(), &self.content(), &mut element.content, ctx);
-        if prev.fill != self.fill || prev.border != self.border || prev.armed != self.armed {
+        if prev.shape != self.shape {
+            element.height = self.shape.height;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        // A band change shifts the Tablet row, so a slot can take another key.
+        if prev.key != self.key
+            || prev.fill != self.fill
+            || prev.border != self.border
+            || prev.armed != self.armed
+        {
+            element.name = self.key.name();
             element.fill = self.fill;
             element.border = self.border;
-            element.toggled = self.key.is_latch().then_some(self.armed);
+            element.toggled = self.toggle.then_some(self.armed);
             // Semantics are re-collected off paint, so this republishes through it.
             flags |= ChangeFlags::PAINT;
         }
@@ -408,7 +644,7 @@ impl Widget for KeyCapWidget {
         } else {
             FALLBACK_CAP_WIDTH
         };
-        let size = bc.constrain(Size::new(width, CAP_HEIGHT));
+        let size = bc.constrain(Size::new(width, self.height));
         self.content.layout_child(ctx, &BoxConstraints::tight(size));
         self.content.set_origin(Point::ZERO);
         size
