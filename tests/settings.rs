@@ -1718,7 +1718,7 @@ fn mounting_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_re
 /// downloadable catalog, so it has a sheet of its own — covered by section 4b
 /// below.
 const PICKERS: [(&str, usize, usize, &str); 3] = [
-    ("font size", 5, 2, "14px"),
+    ("font size", 15, 2, "24px"),
     ("cursor style", 3, 0, "bar"),
     ("layout refresh", 4, 1, "every 10s"),
 ];
@@ -1837,6 +1837,23 @@ fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
         "the check moved two rows down: {moved} vs {}",
         2.0 * row_height.height
     );
+}
+
+#[test]
+fn picking_font_size_20px_through_the_picker_persists_and_reads_back() {
+    // The range now spans 10–24, so 20px sits in the middle. Verify the picker
+    // can select and persist values beyond the old max of 14px.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let sheet = open_picker(&mut h, "font size");
+    // 20px is at index 10 in [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, ...]
+    // The default (currently selected) is at index 2 (12px); pick from there to index 10.
+    pick(&mut h, &sheet, 2, 10);
+
+    h.pump_until_values("20px", |values| values.iter().any(|v| v == "20px"));
+    assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
 }
 
 // ---------------------------------------------------------------------------
