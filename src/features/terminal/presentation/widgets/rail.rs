@@ -12,8 +12,12 @@
 
 use std::rc::Rc;
 
-use frust::authoring::Size;
 use frust::authoring::text::{FontStyle, TextOverflow};
+use frust::authoring::{
+    Action, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, Widget, build_child,
+    rebuild_child, route_event_single, teardown_child,
+};
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexView,
     GestureDetector, IconData, Padding, SizedBox, any, button, container, flexible, icons,
@@ -29,7 +33,7 @@ use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
 use super::side_sheet_tree::SPACE_DIAMOND;
-use super::util::{h_gap, row, sized, v_gap};
+use super::util::{h_gap, read_only_badge, row, sized, v_gap};
 
 /// `.rail{width:264px}`.
 pub(crate) const RAIL_WIDTH: f64 = 264.0;
@@ -71,7 +75,6 @@ const FOOT_PAD: EdgeInsets = EdgeInsets {
 const TIP: &str = "hold a row to rename, or use its \u{22ef} menu";
 const TIP_READ_ONLY: &str = "read-only: browse and switch only";
 const DETACH_LABEL: &str = "detach";
-const READ_ONLY_CHIP: &str = "read-only";
 const EXIT_IMMERSIVE: &str = "Exit immersive";
 
 /// What the rail's header prints.
@@ -148,7 +151,7 @@ pub(crate) fn docked_rail<State: 'static>(
     ];
     if head.read_only {
         chips.push(h_gap(spacing::TIGHT));
-        chips.push(inflexible(badge(READ_ONLY_CHIP, BadgeVariant::Info)));
+        chips.push(inflexible(read_only_badge()));
     }
 
     let mut tip_style = sized(&theme.type_scale.body_small, TIP_SIZE, colors.fg_dim);
@@ -259,6 +262,7 @@ pub(crate) fn mini_rail<State: 'static>(
             )),
         )
         .on_tap(move |state: &mut State| open(state, &target));
+        let cell = labelled_button(tab.label.clone(), cell);
         items.push(any(tooltip(cell, tab.label.clone())));
     }
     if let Some(tab) = data.tabs.iter().find(|tab| tab.key == data.active_tab) {
@@ -322,6 +326,84 @@ fn rule<State: 'static>(
     colors: &Palette,
 ) -> AnyView<State> {
     any(container(SizedBox::<State>(width, height)).fill(colors.outline))
+}
+
+/// `child` (a tap target) published to accessibility as a button named `label`
+/// — a bare [`GestureDetector`] draws and taps but is invisible to a screen
+/// reader, and the badge inside carries only the tab's index.
+fn labelled_button<State: 'static, V: View<State>>(
+    label: String,
+    child: V,
+) -> LabelledButtonView<State> {
+    LabelledButtonView {
+        label,
+        child: any(child),
+    }
+}
+
+/// The declarative half of [`labelled_button`].
+struct LabelledButtonView<State: 'static> {
+    label: String,
+    child: AnyView<State>,
+}
+
+/// The retained half of a [`labelled_button`].
+struct LabelledButtonWidget {
+    label: String,
+    child: ChildPod,
+}
+
+impl<State: 'static> View<State> for LabelledButtonView<State> {
+    type Element = LabelledButtonWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> LabelledButtonWidget {
+        LabelledButtonWidget {
+            label: self.label.clone(),
+            child: build_child(&self.child, ctx),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut LabelledButtonWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if prev.label != self.label {
+            element.label = self.label.clone();
+            // Semantics are recomputed off the paint pass.
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut LabelledButtonWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for LabelledButtonWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.child.set_origin(Point::ZERO);
+        bc.constrain(size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        ctx.push_node(Role::Button, |node| {
+            node.set_label(self.label.as_str());
+            node.add_action(Action::Click);
+        });
+    }
 }
 
 #[cfg(test)]

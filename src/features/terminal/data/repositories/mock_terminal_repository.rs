@@ -84,19 +84,23 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
     }
 }
 
+/// The most verbs [`VERB_LOG`] keeps.
+const VERB_LOG_CAP: usize = 64;
+
 /// Every landed navigation verb (`switch_space:<id>`, `go_to_tab:<id>`,
 /// `focus_pane:<id>`), in call order — process-global like [`TEST_TABS`], so
-/// only a serialized suite reads it.
+/// only a serialized suite reads it. Capped at [`VERB_LOG_CAP`]: the oldest verb
+/// drops first, so a long preview session cannot grow it.
 static VERB_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// The navigation verbs this store has answered `Ok` to since the last
-/// [`clear_verb_log`]. Never read by production code.
-pub fn verb_log() -> Vec<String> {
+/// [`clear_verb_log_for_tests`]. Never read by production code.
+pub fn verb_log_for_tests() -> Vec<String> {
     lock_verb_log().clone()
 }
 
 /// Forget every recorded verb — a suite's own setup.
-pub fn clear_verb_log() {
+pub fn clear_verb_log_for_tests() {
     lock_verb_log().clear();
 }
 
@@ -107,7 +111,11 @@ fn lock_verb_log() -> std::sync::MutexGuard<'static, Vec<String>> {
 }
 
 fn log_verb(verb: &str, target: impl std::fmt::Display) {
-    lock_verb_log().push(format!("{verb}:{target}"));
+    let mut log = lock_verb_log();
+    if log.len() >= VERB_LOG_CAP {
+        log.remove(0);
+    }
+    log.push(format!("{verb}:{target}"));
 }
 
 /// An in-memory [`TerminalRepository`]. See the [module docs](self).

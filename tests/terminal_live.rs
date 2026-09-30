@@ -47,7 +47,7 @@ use muxr::features::settings::domain::entities::{
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, clear_test_tabs, clear_verb_log, verb_log,
+    add_test_tab, clear_test_tabs, clear_verb_log_for_tests, verb_log_for_tests,
 };
 use muxr::features::terminal::di::expect_terminal_repository;
 use muxr::features::terminal::domain::feed::TerminalFeed;
@@ -1736,13 +1736,13 @@ fn focused_pane_of(key: &str) -> Option<u32> {
 fn a_deep_link_lands_on_its_tab_and_pane_once() {
     let _g = serial();
     let _ambient = setup();
-    clear_verb_log();
+    clear_verb_log_for_tests();
     // Position 2 is gohora (tab id 3); pane 31 is its unfocused sibling.
     let mut h = Harness::mount_at("/terminal?session=s-1&tab=2&pane=31");
-    h.pump_until("the target", |_| verb_log().len() >= 2);
+    h.pump_until("the target", |_| verb_log_for_tests().len() >= 2);
     h.pump_for(Duration::from_millis(100));
 
-    assert_eq!(verb_log(), ["go_to_tab:3", "focus_pane:31"]);
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
     let c = debug_controller().expect("mounted");
     assert_eq!(c.active_tab.get_untracked(), "gohora");
     assert_eq!(focused_pane_of("gohora"), Some(31));
@@ -1758,7 +1758,11 @@ fn a_deep_link_lands_on_its_tab_and_pane_once() {
             again.apply_attach_target().await;
         });
     h.pump_for(Duration::from_millis(100));
-    assert_eq!(verb_log(), ["go_to_tab:3", "focus_pane:31"], "no re-apply");
+    assert_eq!(
+        verb_log_for_tests(),
+        ["go_to_tab:3", "focus_pane:31"],
+        "no re-apply"
+    );
 }
 
 #[test]
@@ -1770,10 +1774,16 @@ fn a_deep_link_naming_no_such_tab_or_pane_sends_nothing() {
         "/terminal?session=s-1&tab=2&pane=99",
         "/terminal?session=s-1&tab=x&pane=y",
     ] {
-        clear_verb_log();
+        clear_verb_log_for_tests();
         let mut h = Harness::mount_at(location);
+        // A fixed settle: the harness has no "mock idle" signal to pump until, and a
+        // negative can only wait out the window a wrong apply would land in.
         h.pump_for(Duration::from_millis(150));
-        assert!(verb_log().is_empty(), "{location}: {:?}", verb_log());
+        assert!(
+            verb_log_for_tests().is_empty(),
+            "{location}: {:?}",
+            verb_log_for_tests()
+        );
         drop(h);
     }
 }
@@ -1820,7 +1830,7 @@ fn live_deep_link() -> Arc<TerminalController> {
 fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reload() {
     let _g = serial();
     let _ambient = setup();
-    clear_verb_log();
+    clear_verb_log_for_tests();
     let c = live_deep_link();
     let rt = runtime();
 
@@ -1833,11 +1843,14 @@ fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reloa
     });
     start(&rt, &mut settled);
     rt.block_on(load);
-    assert!(verb_log().is_empty(), "the load's tabs were fenced out");
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "the load's tabs were fenced out"
+    );
     assert!(c.tabs.get_untracked().is_empty(), "…and never published");
 
     rt.block_on(settled);
-    assert_eq!(verb_log(), ["go_to_tab:3", "focus_pane:31"]);
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
     assert_eq!(c.active_tab.get_untracked(), "gohora");
 }
 
@@ -1845,7 +1858,7 @@ fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reloa
 fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
     let _g = serial();
     let _ambient = setup();
-    clear_verb_log();
+    clear_verb_log_for_tests();
     let c = live_deep_link();
 
     runtime().block_on(async {
@@ -1853,7 +1866,11 @@ fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
         c.reload_tabs().await;
         c.apply_attach_target().await;
     });
-    assert!(verb_log().is_empty(), "{:?}", verb_log());
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "{:?}",
+        verb_log_for_tests()
+    );
     assert_eq!(
         c.pending_attach_target(),
         Some(AttachTarget {
@@ -1870,7 +1887,7 @@ fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
 fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
     let _g = serial();
     let _ambient = setup();
-    clear_verb_log();
+    clear_verb_log_for_tests();
     let c = live_deep_link();
     let rt = runtime();
     rt.block_on(c.load());
@@ -1891,6 +1908,6 @@ fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
     });
     rt.block_on(tap);
 
-    assert_eq!(verb_log(), ["go_to_tab:1", "focus_pane:11"]);
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
     assert_eq!(c.active_tab.get_untracked(), "btop");
 }

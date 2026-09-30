@@ -82,6 +82,7 @@ pub struct TabEntry {
     pub panes: Vec<PaneEntry>,
     /// Whether this is the tab the card shows on arrival (`devbox`).
     pub active: bool,
+    /// Whether the tab carries an unacknowledged bell — drawn only by the docked rail.
     pub has_bell: bool,
 }
 

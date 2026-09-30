@@ -37,7 +37,7 @@ use peniko::Color;
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    clear_verb_log, verb_log,
+    clear_verb_log_for_tests, verb_log_for_tests,
 };
 use muxr::features::terminal::presentation::pages::{
     debug_controller, open_terminal_menu, terminal_page,
@@ -2992,7 +2992,9 @@ fn the_collapsed_band_mounts_the_mini_rail_instead() {
     let point = h.label_point("ed@devbox zsh");
     h.tap(point);
     h.pump_until("the mini rail's commit", |_| {
-        verb_log().iter().any(|verb| verb == "focus_pane:41")
+        verb_log_for_tests()
+            .iter()
+            .any(|verb| verb == "focus_pane:41")
     });
 }
 
@@ -3024,7 +3026,7 @@ fn a_read_only_rail_lands_a_pane_tap_right_behind_a_space_browse() {
     let _ambient = setup();
     let mut h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
     make_read_only(&mut h);
-    clear_verb_log();
+    clear_verb_log_for_tests();
 
     h.tap(h.value_point("zelli_mobile"));
     h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
@@ -3039,10 +3041,13 @@ fn a_read_only_rail_lands_a_pane_tap_right_behind_a_space_browse() {
     h.settle_motion(0.0);
     h.settle_motion(2_000.0);
     h.tap(h.value_point("ed@zelli zsh"));
-    h.pump_until("the commit", |_| verb_log().len() >= 2);
+    h.pump_until("the commit", |_| verb_log_for_tests().len() >= 2);
     h.pump_for(2 * CLOSE_DELAY);
 
-    assert_eq!(verb_log(), ["switch_space:zelli_mobile", "focus_pane:11"]);
+    assert_eq!(
+        verb_log_for_tests(),
+        ["switch_space:zelli_mobile", "focus_pane:11"]
+    );
     let controller = debug_controller().expect("mounted");
     assert_eq!(
         expanded(&controller),
@@ -3180,4 +3185,83 @@ fn a_live_phone_keeps_the_ime_only_compact_bar() {
     h.frame();
     assert!(h.labelled("Escape"), "the keyboard is up");
     assert!(!h.labelled(HOME_CAP), "the Compact tier: no Home cap");
+}
+
+#[test]
+fn a_mini_rail_tab_cell_is_a_named_button_and_taps_by_its_label() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.frame();
+    clear_verb_log_for_tests();
+
+    assert!(node_labels(&h.root).iter().any(|l| l == "minefit-api"));
+    h.tap_label("minefit-api");
+    h.pump_until("the tab commit", |_| {
+        verb_log_for_tests()
+            .iter()
+            .any(|verb| verb == "go_to_tab:2")
+    });
+}
+
+#[test]
+fn every_kebab_index_decodes_to_the_entry_its_table_declares() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    let controller = debug_controller().expect("mounted");
+
+    open_terminal_menu(&mut h.state);
+    h.settle();
+    let labels = node_labels(&h.root);
+    for entry in [
+        "Rename session",
+        "Immersive mode",
+        "Show key bar",
+        "Detach session",
+    ] {
+        assert!(labels.iter().any(|l| l == entry), "{entry}: {labels:?}");
+    }
+    h.nav.pop_with_result(PopResult::of(3_usize));
+    h.flush();
+    h.settle();
+    assert_eq!(h.depth(), REST_DEPTH, "the separator picks nothing");
+    assert!(controller.key_bar_visible.get_untracked());
+    assert!(!app_nav().bar().fullscreen);
+
+    h.choose_terminal_menu(5);
+    assert_eq!(h.depth(), REST_DEPTH, "past the table picks nothing");
+
+    h.choose_terminal_menu(0);
+    assert_eq!(h.depth(), REST_DEPTH + 1, "entry 0 is the rename dialog");
+}
+
+#[test]
+fn every_row_menu_index_decodes_to_the_entry_its_table_declares() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+
+    h.tap_label("devbox actions");
+    h.settle();
+    let labels = node_labels(&h.root);
+    for entry in ["Rename tab", "New pane here"] {
+        assert!(labels.iter().any(|l| l == entry), "{entry}: {labels:?}");
+    }
+    h.nav.pop_with_result(PopResult::of(2_usize));
+    h.flush();
+    h.settle();
+    assert_eq!(h.depth(), REST_DEPTH, "past the table picks nothing");
+}
+
+#[test]
+fn the_read_only_chip_shows_on_a_tablet_through_the_shared_helper() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+    assert!(!node_labels(&h.root).iter().any(|l| l == "read-only"));
+    make_read_only(&mut h);
+    assert!(node_labels(&h.root).iter().any(|l| l == "read-only"));
 }
