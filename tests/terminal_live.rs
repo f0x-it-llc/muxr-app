@@ -43,7 +43,7 @@ use muxr::features::settings::domain::entities::{
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, clear_test_tabs,
+    add_test_tab, clear_test_tabs, clear_verb_log, verb_log,
 };
 use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::pages::{
@@ -117,12 +117,17 @@ impl Harness {
     /// a **herdr** session, whose id prefix is the one thing the sheet's
     /// spaces section is gated on.
     fn mount_session(session: &str) -> Self {
+        Self::mount_at(&format!("/terminal?session={session}"))
+    }
+
+    /// [`mount`](Self::mount) at the full `location`, query included.
+    fn mount_at(location: &str) -> Self {
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         let record_only: NavigatorController<AppState> = NavigatorController::new();
         let _router = install_app_router(&record_only, &nav, expect_connection_controller());
         expect_connection_controller().connect(mock_target());
-        app_nav().push(&format!("/terminal?session={session}"));
+        app_nav().push(location);
 
         let mounted = Rc::new(Cell::new(true));
         let logic_nav = nav.clone();
@@ -1705,4 +1710,64 @@ fn the_sheet_body_composes_a_scroll_container() {
         "the sheet body has no scroll container: {:?}",
         support::node_roles(&h.root)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Attach into a pane: the `tab`/`pane` deep-link params.
+// ---------------------------------------------------------------------------
+
+/// The focused pane id of the tab keyed `key`, off the mounted controller.
+fn focused_pane_of(key: &str) -> Option<u32> {
+    let tabs = debug_controller().expect("mounted").tabs.get_untracked();
+    let tab = tabs.into_iter().find(|tab| tab.key == key)?;
+    tab.panes
+        .iter()
+        .find(|pane| pane.focused)
+        .map(|pane| pane.id)
+}
+
+#[test]
+fn a_deep_link_lands_on_its_tab_and_pane_once() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log();
+    // Position 2 is gohora (tab id 3); pane 31 is its unfocused sibling.
+    let mut h = Harness::mount_at("/terminal?session=s-1&tab=2&pane=31");
+    h.pump_until("the target", |_| verb_log().len() >= 2);
+    h.pump_for(Duration::from_millis(100));
+
+    assert_eq!(verb_log(), ["go_to_tab:3", "focus_pane:31"]);
+    let c = debug_controller().expect("mounted");
+    assert_eq!(c.active_tab.get_untracked(), "gohora");
+    assert_eq!(focused_pane_of("gohora"), Some(31));
+
+    let again = Arc::clone(&c);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(async move {
+            again.reload_tabs().await;
+            let _ = again.mirror_link(FeedStatus::Connected, Some("c-2".to_string()));
+            again.apply_attach_target().await;
+        });
+    h.pump_for(Duration::from_millis(100));
+    assert_eq!(verb_log(), ["go_to_tab:3", "focus_pane:31"], "no re-apply");
+}
+
+#[test]
+fn a_deep_link_naming_no_such_tab_or_pane_sends_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    for location in [
+        "/terminal?session=s-1&tab=9&pane=31",
+        "/terminal?session=s-1&tab=2&pane=99",
+        "/terminal?session=s-1&tab=x&pane=y",
+    ] {
+        clear_verb_log();
+        let mut h = Harness::mount_at(location);
+        h.pump_for(Duration::from_millis(150));
+        assert!(verb_log().is_empty(), "{location}: {:?}", verb_log());
+        drop(h);
+    }
 }
