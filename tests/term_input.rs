@@ -38,12 +38,14 @@ use kurbo::{Point, Size};
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::keybar::{
-    CAP_HEIGHT, CAP_PAD_X, ICON_SIZE, LABEL_SIZE, key_bar,
+    ARROW_CAP_HEIGHT, CAP_HEIGHT, CAP_PAD_X, ICON_SIZE, LABEL_SIZE, TABLET_CAP_HEIGHT, key_bar,
+    tablet_key_bar,
 };
 use muxr::features::terminal::presentation::term::{
     BarKey, InputSeam, SharedEmulator, SharedFeed, TerminalEmulator, TerminalPalette, pump_wake,
     terminal_grid,
 };
+use muxr::responsive::WidthBand;
 
 mod support;
 use support::{
@@ -56,6 +58,9 @@ const FONT_SIZE: f32 = 13.0;
 
 /// A phone-shaped surface, in logical px.
 const PHONE: Size = Size::new(392.7, 872.7);
+
+/// A landscape tablet surface — room for the Full band's whole Tablet row.
+const TABLET: Size = Size::new(1024.0, 720.0);
 
 /// The grid's accessible name.
 const LABEL: &str = "dev \u{b7} zsh";
@@ -81,6 +86,17 @@ struct TermScreen {
     /// than on this wiring: a cap that somehow got mounted over a read-only
     /// session must still be inert.
     force_bar: bool,
+    /// Mount the Tablet tier instead of the Compact one.
+    tablet: Option<TabletBar>,
+}
+
+/// The Tablet tier's inputs: its band, the screen's "Show key bar", and the
+/// `Fn` row's own toggle.
+#[derive(Clone, Copy)]
+struct TabletBar {
+    band: WidthBand,
+    shown: RwSignal<bool>,
+    fn_row: RwSignal<bool>,
 }
 
 impl Component for TermScreen {
@@ -103,12 +119,17 @@ impl Component for TermScreen {
         .input(self.seam.clone())
         .read_only(self.read_only);
 
+        let bar = match self.tablet {
+            // No IME wait on a Tablet: only the toggle and read-only gate it.
+            Some(tablet) => {
+                let shown = tablet.shown.get() && (!self.read_only || self.force_bar);
+                tablet_key_bar::<Self::State>(shown, tablet.band, tablet.fn_row, &self.seam)
+            }
+            None => key_bar::<Self::State>(active, &self.seam),
+        };
         any(FlexView::new(
             Axis::Vertical,
-            vec![
-                flexible(1, grid),
-                inflexible(key_bar::<Self::State>(active, &self.seam)),
-            ],
+            vec![flexible(1, grid), inflexible(bar)],
         ))
     }
 }
@@ -134,6 +155,10 @@ struct Mounted {
     generation: RwSignal<u64>,
     seam: InputSeam,
     bar_active: RwSignal<bool>,
+    /// The Tablet tier's inputs, when it is the one mounted.
+    tablet: Option<TabletBar>,
+    /// The surface [`frame`](Self::frame) lays out at.
+    surface: Size,
     /// Whether the screen is still on the tree — cleared by
     /// [`unmount`](Self::unmount), the way `tests/terminal_live.rs` unmounts
     /// its own screen.
@@ -155,7 +180,27 @@ impl Mounted {
         Self::mount(true, true)
     }
 
+    /// The Tablet tier in `band`, on a tablet-sized surface.
+    fn tablet(band: WidthBand) -> Self {
+        Self::mount_tier(false, false, Some(band))
+    }
+
+    /// A read-only session under the Tablet tier; `force_bar` as in
+    /// [`read_only_with_bar`](Self::read_only_with_bar).
+    fn read_only_tablet(force_bar: bool) -> Self {
+        Self::mount_tier(true, force_bar, Some(WidthBand::Full))
+    }
+
     fn mount(read_only: bool, force_bar: bool) -> Self {
+        Self::mount_tier(read_only, force_bar, None)
+    }
+
+    fn mount_tier(read_only: bool, force_bar: bool, band: Option<WidthBand>) -> Self {
+        let tablet = band.map(|band| TabletBar {
+            band,
+            shown: RwSignal::new(true),
+            fn_row: RwSignal::new(false),
+        });
         let feed = Rc::new(RefCell::new(DemoFeed::manual()));
         let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
         let seam = InputSeam::new(Rc::clone(&feed) as SharedFeed);
@@ -177,6 +222,7 @@ impl Mounted {
                 bar_active,
                 read_only,
                 force_bar,
+                tablet,
             }))
         });
 
@@ -193,6 +239,8 @@ impl Mounted {
             generation,
             seam,
             bar_active,
+            tablet,
+            surface: if band.is_some() { TABLET } else { PHONE },
             mounted,
         };
         mounted.frame();
@@ -209,7 +257,7 @@ impl Mounted {
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
-            PHONE,
+            self.surface,
             ms(0.0),
         );
     }
@@ -1003,6 +1051,179 @@ fn twelve_caps_and_their_padding_fit_a_narrow_phone_row() {
             size.width
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Tablet tier
+// ---------------------------------------------------------------------------
+
+/// The Collapsed band's row budget: without `Home`/`End`, the row fits it.
+const COLLAPSED_ROW_W: f64 = 580.0;
+
+/// Whether a node labelled `label` is on the tree.
+fn shows(mounted: &Mounted, label: &str) -> bool {
+    node_labels(&mounted.root).iter().any(|l| l == label)
+}
+
+#[test]
+fn the_tablet_tier_is_up_with_no_keyboard_and_sends_home_end_and_the_arrows() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::tablet(WidthBand::Full);
+    mounted.tap(IN_GRID);
+    mounted.drain();
+
+    for name in [
+        "Control",
+        "Escape",
+        "Home",
+        "End",
+        "Page up",
+        "Delete",
+        "Function keys",
+        "Up arrow",
+        "Left arrow",
+        "Down arrow",
+        "Right arrow",
+    ] {
+        assert!(shows(&mounted, name), "{name} missing with no keyboard up");
+    }
+    assert!(!shows(&mounted, "F1"), "the Fn row starts closed");
+
+    mounted.tap_cap("Home");
+    assert_eq!(mounted.drain_hex(), "1b5b48");
+    mounted.tap_cap("End");
+    assert_eq!(mounted.drain_hex(), "1b5b46");
+    mounted.tap_cap("Up arrow");
+    assert_eq!(mounted.drain_hex(), "1b5b41");
+    mounted.tap_cap("Right arrow");
+    assert_eq!(mounted.drain_hex(), "1b5b43");
+    mounted.tap_cap("Shift");
+    mounted.tap_cap("Home");
+    assert_eq!(mounted.drain_hex(), "1b5b48", "Home has no shifted form");
+
+    let ime = mounted
+        .root
+        .ime_state()
+        .expect("a Tablet cap hands focus off like a Compact one");
+    assert!(ime.active);
+}
+
+#[test]
+fn the_fn_cap_opens_the_f_key_row_and_each_f_key_takes_one_modifier() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::tablet(WidthBand::Full);
+    mounted.tap(IN_GRID);
+    mounted.drain();
+
+    mounted.tap_cap("Function keys");
+    assert!(mounted.drain().is_empty(), "Fn sends nothing of its own");
+    assert_eq!(mounted.toggled("Function keys"), Some(Toggled::True));
+    assert!(shows(&mounted, "F1") && shows(&mounted, "F12"));
+
+    mounted.tap_cap("F1");
+    assert_eq!(mounted.drain_hex(), "1b4f50");
+    mounted.tap_cap("F12");
+    assert_eq!(mounted.drain_hex(), "1b5b32347e");
+    mounted.tap_cap("Shift");
+    mounted.tap_cap("F5");
+    assert_eq!(mounted.drain_hex(), "1b5b31353b327e", "CSI 15;2~");
+    mounted.tap_cap("Control");
+    mounted.tap_cap("F5");
+    assert_eq!(mounted.drain_hex(), "1b5b31353b357e", "CSI 15;5~");
+    mounted.frame();
+    assert_eq!(
+        mounted.toggled("Control"),
+        Some(Toggled::False),
+        "the F-key spent Ctrl"
+    );
+    mounted.tap_cap("Alt");
+    mounted.tap_cap("F1");
+    assert_eq!(mounted.drain_hex(), "1b5b313b3350", "CSI 1;3P");
+
+    // One parameter per key: Shift wins, Ctrl stays armed for what follows.
+    mounted.tap_cap("Control");
+    mounted.tap_cap("Shift");
+    mounted.tap_cap("F6");
+    assert_eq!(mounted.drain_hex(), "1b5b31373b327e");
+    mounted.frame();
+    assert_eq!(mounted.toggled("Control"), Some(Toggled::True));
+
+    mounted.tap_cap("Function keys");
+    assert!(!shows(&mounted, "F1"), "a second tap closes the row");
+    assert_eq!(mounted.toggled("Function keys"), Some(Toggled::False));
+}
+
+#[test]
+fn the_collapsed_tablet_tier_drops_home_and_end_and_fits_its_row_budget() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::tablet(WidthBand::Collapsed);
+    mounted.surface = Size::new(COLLAPSED_ROW_W, TABLET.height);
+    mounted.frame();
+    assert!(!shows(&mounted, "Home") && !shows(&mounted, "End"));
+    assert!(shows(&mounted, "Page up") && shows(&mounted, "Function keys"));
+
+    // Fill and border share a cap's box, so one entry per distinct origin is one cap.
+    let scene = mounted.frame_at_width(COLLAPSED_ROW_W);
+    let caps_of = |height: f64| {
+        let mut caps: Vec<(Point, Size)> = Vec::new();
+        for (origin, size, _, _) in &scene.rounded_fills {
+            let seen = |(at, _): &(Point, Size)| {
+                (at.x - origin.x).abs() < EPSILON && (at.y - origin.y).abs() < EPSILON
+            };
+            if (size.height - height).abs() < EPSILON && !caps.iter().any(seen) {
+                caps.push((*origin, *size));
+            }
+        }
+        caps
+    };
+    let row = caps_of(TABLET_CAP_HEIGHT);
+    assert_eq!(row.len(), BarKey::TABLET_ORDER.len() - 2, "{row:?}");
+    let arrows = caps_of(ARROW_CAP_HEIGHT);
+    assert_eq!(arrows.len(), 4, "the inverted-T's four cells: {arrows:?}");
+    for (origin, size) in row.iter().chain(&arrows) {
+        assert!(
+            origin.x + size.width <= COLLAPSED_ROW_W + EPSILON,
+            "a cap runs past {COLLAPSED_ROW_W}: {origin:?} {size:?}"
+        );
+    }
+    let top = arrows
+        .iter()
+        .map(|(o, _)| o.y)
+        .fold(f64::INFINITY, f64::min);
+    let upper = arrows.iter().filter(|(o, _)| (o.y - top).abs() < EPSILON);
+    assert_eq!(upper.count(), 1, "one cell on top, three under it");
+}
+
+#[test]
+fn hiding_the_tablet_tier_unmounts_every_cap() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::tablet(WidthBand::Full);
+    assert!(shows(&mounted, "Escape"));
+    mounted.tablet.expect("a Tablet mount").shown.set(false);
+    mounted.frame();
+    assert!(!shows(&mounted, "Escape") && !shows(&mounted, "Home"));
+}
+
+#[test]
+fn a_read_only_session_never_shows_the_tablet_tier() {
+    let _serial = serial();
+    let _owner = setup();
+    let mounted = Mounted::read_only_tablet(false);
+    assert!(
+        !shows(&mounted, "Escape"),
+        "the screen's own read-only gate"
+    );
+
+    // Forced past that gate, the bar is up on the first frame (built before the
+    // grid published its read-only posture) and the seam's own check hides it.
+    let mut mounted = Mounted::read_only_tablet(true);
+    assert!(shows(&mounted, "Escape"), "the forced first frame");
+    mounted.frame();
+    assert!(!shows(&mounted, "Escape"), "the seam's read-only gate");
 }
 
 // ---------------------------------------------------------------------------

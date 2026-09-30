@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, PopResult, Set, SizedBox, Stack, Theme,
-    WindowMetrics, any, navigator,
+    WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP};
 use frust_text::TextContext;
@@ -3049,4 +3049,88 @@ fn a_read_only_rail_lands_a_pane_tap_right_behind_a_space_browse() {
         (Some("zelli_mobile".to_string()), Some("logs".to_string()))
     );
     assert_eq!(h.depth(), REST_DEPTH);
+}
+
+// ---------------------------------------------------------------------------
+// The key bar's two tiers
+// ---------------------------------------------------------------------------
+
+/// The Tablet tier's `Home` cap and its `Fn` cap, by accessible name.
+const HOME_CAP: &str = "Home";
+const FN_CAP: &str = "Function keys";
+
+impl Harness {
+    /// Enter the fixture replay (the live pane) and settle the build that mounts it.
+    fn enter_live(&mut self) {
+        debug_controller().expect("mounted").enter_live();
+        self.flush();
+    }
+
+    /// Whether a node labelled `label` is on the tree.
+    fn labelled(&self, label: &str) -> bool {
+        node_labels(&self.root).iter().any(|l| l == label)
+    }
+}
+
+#[test]
+fn a_live_tablet_shows_the_key_bar_with_no_keyboard_behind_the_menu_toggle() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.enter_live();
+    assert!(h.labelled(HOME_CAP) && h.labelled("End") && h.labelled(FN_CAP));
+
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(!h.labelled(HOME_CAP) && !h.labelled("Escape"), "hidden");
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(h.labelled(HOME_CAP), "and back");
+}
+
+#[test]
+fn a_collapsed_tablet_drops_home_and_end_from_its_key_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.enter_live();
+    assert!(!h.labelled(HOME_CAP) && !h.labelled("End"));
+    assert!(h.labelled("Page up") && h.labelled(FN_CAP));
+}
+
+#[test]
+fn the_tablet_fn_cap_mounts_the_f_key_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.enter_live();
+    assert!(!h.labelled("F1"));
+
+    h.tap_label(FN_CAP);
+    h.frame();
+    assert!(h.labelled("F1") && h.labelled("F12"));
+    let controller = debug_controller().expect("mounted");
+    assert!(controller.fn_row_visible.get_untracked());
+}
+
+#[test]
+fn a_read_only_tablet_mounts_no_key_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    make_read_only(&mut h);
+    h.enter_live();
+    assert!(!h.labelled(HOME_CAP) && !h.labelled("Escape"));
+}
+
+#[test]
+fn a_live_phone_keeps_the_ime_only_compact_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(SESSION_ID);
+    h.enter_live();
+    assert!(!h.labelled("Escape"), "no keyboard, no bar");
+
+    provide_context(support::ime_bottom_inset(300.0));
+    h.frame();
+    assert!(h.labelled("Escape"), "the keyboard is up");
+    assert!(!h.labelled(HOME_CAP), "the Compact tier: no Home cap");
 }
