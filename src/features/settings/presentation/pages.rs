@@ -31,27 +31,32 @@ use std::sync::Arc;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, NavigatorController, Padding, SizedBox, WindowMetrics, any, component,
-    inflexible, safe_area, scroll_view, spawn_local, use_context,
+    Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets,
+    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, SizedBox, WindowMetrics,
+    any, button, component, flexible, inflexible, safe_area, scroll_view, spawn_local, text,
+    use_context,
 };
+use frust_glyph::glyph_card;
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
 use crate::features::pro::di::expect_pro_controller;
-use crate::features::pro::presentation::controller::ProController;
-use crate::features::pro::presentation::{UpgradeContext, show_upgrade_sheet};
+use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
+use crate::features::pro::presentation::{
+    NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY, UpgradeContext, show_upgrade_sheet,
+};
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
-use crate::responsive::WIDE_BREAKPOINT_PX;
+use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::confirm_dialog;
-use crate::ui::palette::{Palette, active_theme};
+use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::sheet::show_sheet;
+use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
 
 use super::controller::SettingsController;
@@ -76,11 +81,20 @@ const READ_ONLY_TOKEN_TOAST: &str =
 const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
 const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
 
-/// The groups column's max width past [`WIDE_BREAKPOINT_PX`] — a
-/// tablet/landscape/desktop window centers the whole scrolling group list
-/// rather than stretching it edge to edge. A plain width clamp, not a
-/// structural layout switch (no design mock exists for one here).
+/// The groups column's max width on a phone-landscape window
+/// (`Responsive::wide_clamp` without Tablet) — the flat group list centres
+/// rather than stretching edge to edge.
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
+
+/// The card grid's content max width on Tablet, centred in the window.
+const CARD_GRID_MAX_WIDTH: f64 = 920.0;
+/// The gap between cards, horizontally and vertically.
+const CARD_GAP: f64 = 14.0;
+/// The Disconnect confirmation's body copy, shared by the dialog and the
+/// Tablet card's row value.
+const DISCONNECT_COPY: &str = "You will need the server's token to attach again.";
+/// The Disconnect action's label, on the Tablet card's button and the dialog.
+const DISCONNECT_LABEL: &str = "Disconnect";
 
 /// The Settings screen's route entry point.
 pub fn settings_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
@@ -181,13 +195,14 @@ impl Component for SettingsScreen {
         // constant, never touch layout again. `None` (no shell has
         // published metrics yet, or a bare test harness) takes the same
         // branch as a genuinely narrow window.
-        let metrics = use_context::<WindowMetrics>();
-        let is_wide = metrics
-            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
-            .unwrap_or(false);
+        let responsive = Responsive::of(use_context::<WindowMetrics>());
+        let busy = state.actions.pro.busy.get();
 
-        let mut body = vec![widgets::group_label("connection", &colors)];
-        body.extend(widgets::connection_rows(info.as_ref(), &colors));
+        let mut groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)> = Vec::new();
+        groups.push((
+            "connection",
+            widgets::connection_rows(info.as_ref(), &colors),
+        ));
 
         // The revoke timelines in flight, and what each renders this frame.
         // Tracked: starting one — and its RPC answering — is what wakes this
@@ -207,30 +222,42 @@ impl Component for SettingsScreen {
             spawn_local(async move { scrambles.sweep(reduce_motion) });
         }
 
-        body.push(widgets::group_label("auth tokens", &colors));
-        body.extend(widgets::token_rows(&tokens, &showing, read_only, &colors));
-        body.push(widgets::create_token_row(&colors, !read_only));
+        let mut token_group = widgets::token_rows(&tokens, &showing, read_only, &colors);
+        token_group.push(widgets::create_token_row(&colors, !read_only));
+        groups.push(("auth tokens", token_group));
 
-        body.push(widgets::group_label("saved servers", &colors));
-        if saved.is_empty() {
-            body.push(widgets::no_saved_servers_row(&colors));
+        let saved_group = if saved.is_empty() {
+            vec![widgets::no_saved_servers_row(&colors)]
         } else {
-            body.extend(
-                saved
-                    .iter()
-                    .map(|server| widgets::saved_server_item(server, &colors)),
+            saved
+                .iter()
+                .map(|server| widgets::saved_server_item(server, &colors))
+                .collect()
+        };
+        groups.push(("saved servers", saved_group));
+
+        groups.push((
+            widgets::PRO_GROUP_LABEL,
+            widgets::pro_rows(entitlement, busy, &colors),
+        ));
+        groups.push((
+            "terminal appearance",
+            widgets::appearance_rows(&appearance, &colors),
+        ));
+        groups.push(("session poll", widgets::poll_rows(&poll, &colors)));
+
+        if responsive.is_tablet() {
+            return widgets::page_tone(
+                tablet_scroller(groups, responsive.is_full(), &colors),
+                &colors,
             );
         }
 
-        body.push(widgets::group_label(widgets::PRO_GROUP_LABEL, &colors));
-        body.extend(widgets::pro_rows(entitlement, &colors));
-
-        body.push(widgets::group_label("terminal appearance", &colors));
-        body.extend(widgets::appearance_rows(&appearance, &colors));
-
-        body.push(widgets::group_label("session poll", &colors));
-        body.extend(widgets::poll_rows(&poll, &colors));
-
+        let mut body = Vec::new();
+        for (label, rows) in groups {
+            body.push(widgets::group_label(label, &colors));
+            body.extend(rows);
+        }
         body.push(widgets::disconnect_button());
 
         // The *shell's* bar consumes the top window inset on this screen's
@@ -247,7 +274,7 @@ impl Component for SettingsScreen {
                 .cross_axis(CrossAxisAlignment::Stretch),
         )))
         .top(false));
-        let scroller = if is_wide {
+        let scroller = if responsive.wide_clamp {
             any(Align(
                 Alignment::CENTER,
                 SizedBox::<SettingsState>(Some(SETTINGS_CLAMP_WIDTH), None).child(scroller),
@@ -261,6 +288,104 @@ impl Component for SettingsScreen {
         // used to as well).
         widgets::page_tone(scroller, &colors)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Tablet card grid
+// ---------------------------------------------------------------------------
+
+/// One group as a Glyph card: the group label is the title, the rows the body.
+fn group_card(
+    label: &str,
+    rows: Vec<AnyView<SettingsState>>,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    any(glyph_card::<SettingsState>()
+        .title(widgets::group_label(label, colors))
+        .desc(
+            FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
+                .cross_axis(CrossAxisAlignment::Stretch),
+        ))
+}
+
+/// The closing full-width card: the label, the confirmation copy as the value
+/// and the danger button trailing.
+fn disconnect_card(colors: &Palette) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    let row = FlexView::new(
+        Axis::Horizontal,
+        vec![
+            flexible(
+                1,
+                text(DISCONNECT_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+            ),
+            inflexible(SizedBox::<SettingsState>(Some(CARD_GAP), None)),
+            inflexible(
+                button(DISCONNECT_LABEL, |state: &mut SettingsState| {
+                    open_disconnect_dialog(state)
+                })
+                .style(ButtonStyle::Danger),
+            ),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center);
+    any(glyph_card::<SettingsState>()
+        .title(widgets::group_label("disconnect", colors))
+        .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row)))
+}
+
+/// The Tablet body: the cards in two equal columns when `full`, one column
+/// otherwise, then the Disconnect card, centred at [`CARD_GRID_MAX_WIDTH`].
+fn tablet_scroller(
+    groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)>,
+    full: bool,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    let mut cards: Vec<AnyView<SettingsState>> = groups
+        .into_iter()
+        .map(|(label, rows)| group_card(label, rows, colors))
+        .collect();
+    let mut lines: Vec<AnyView<SettingsState>> = Vec::new();
+    if full {
+        while !cards.is_empty() {
+            let rest = cards.split_off(cards.len().min(2));
+            let mut pair: Vec<FlexChild<SettingsState>> = Vec::new();
+            for card in std::mem::replace(&mut cards, rest) {
+                if !pair.is_empty() {
+                    pair.push(inflexible(SizedBox::<SettingsState>(Some(CARD_GAP), None)));
+                }
+                pair.push(flexible(1, card));
+            }
+            lines.push(any(
+                FlexView::new(Axis::Horizontal, pair).cross_axis(CrossAxisAlignment::Start)
+            ));
+        }
+    } else {
+        lines = cards;
+    }
+    lines.push(disconnect_card(colors));
+
+    let mut column: Vec<FlexChild<SettingsState>> = Vec::new();
+    for line in lines {
+        if !column.is_empty() {
+            column.push(inflexible(SizedBox::<SettingsState>(None, Some(CARD_GAP))));
+        }
+        column.push(inflexible(line));
+    }
+    let grid = Padding(
+        EdgeInsets {
+            left: spacing::XL,
+            top: widgets::SCROLL_PAD_TOP,
+            right: spacing::XL,
+            bottom: widgets::SCROLL_PAD_BOTTOM,
+        },
+        FlexView::new(Axis::Vertical, column).cross_axis(CrossAxisAlignment::Stretch),
+    );
+    any(Align(
+        Alignment::CENTER,
+        SizedBox::<SettingsState>(Some(CARD_GRID_MAX_WIDTH), None)
+            .child(safe_area(scroll_view(grid)).top(false)),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -690,14 +815,30 @@ impl Actions {
         let app_nav = self.app_nav.clone();
         confirm_dialog(
             &self.overlays,
-            "Disconnect",
-            "You will need the server's token to attach again.",
-            "Disconnect",
+            DISCONNECT_LABEL,
+            DISCONNECT_COPY,
+            DISCONNECT_LABEL,
             move |_app: &mut AppState| {
                 connection.disconnect();
                 app_nav.go(CONNECT_ROUTE);
             },
         );
+    }
+
+    /// Restore prior purchases from the `muxr pro` group's `restore` row —
+    /// the sheet's own restore, sharing the controller's single-flight guard,
+    /// and its toasts for the exits that leave the sheet-less screen with
+    /// nothing else to say (a restored Pro just flips the plan row).
+    pub fn restore_purchases(&self) {
+        let pro = Arc::clone(&self.pro);
+        spawn_local(async move {
+            match pro.restore().await {
+                RestoreOutcome::Pending => app_toasts().show(PENDING_TOAST),
+                RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
+                RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
+                RestoreOutcome::Restored | RestoreOutcome::Failed(_) | RestoreOutcome::Busy => {}
+            }
+        });
     }
 
     /// Open the same paywall `connect`'s server-limit gate raises, from the
@@ -775,6 +916,11 @@ pub(super) fn open_delete_credential_dialog(state: &mut SettingsState, endpoint:
 /// A saved server's `forget` button.
 pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &str) {
     state.actions.open_forget_server_dialog(endpoint);
+}
+
+/// The `restore` button on the `muxr pro` group's restore row.
+pub(super) fn restore_purchases(state: &mut SettingsState) {
+    state.actions.restore_purchases();
 }
 
 /// The `Disconnect` button.

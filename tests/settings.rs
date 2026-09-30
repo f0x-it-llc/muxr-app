@@ -41,7 +41,7 @@ use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
-use muxr::features::pro::presentation::{NOT_NOW_LABEL, RESTORE_LABEL};
+use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
@@ -83,6 +83,8 @@ const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 /// (the screen's own width-clamp pass), transcribed (private to
 /// `presentation::pages`).
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
+/// The mock connection's latency reading, printed (private to `connection`).
+const MOCK_LATENCY_VALUE: &str = "36ms";
 /// `.disconnect-btn`'s own horizontal margin, transcribed (private to
 /// `presentation::widgets`) — what the Disconnect button spans the width
 /// *between*, inside whatever box the scroller itself is laid out at.
@@ -606,21 +608,34 @@ fn all_six_groups_and_the_disconnect_action_render() {
 }
 
 #[test]
-fn no_latency_is_printed_anywhere_on_this_screen() {
-    // The one deliberate omission from the mock's data set: a live round-trip
-    // time belongs beside the session list it gates (`/sessions`' own strip),
-    // not repeated here as a second, differently-stale copy.
+fn the_connection_group_prints_the_mocks_latency_after_the_tls_row() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
 
     let values = node_values(&h.root);
-    for value in &values {
-        assert!(
-            !value.contains("ms"),
-            "a latency reading leaked onto Settings: {value:?} in {values:?}"
-        );
-    }
+    let at = |needle: &str| {
+        values
+            .iter()
+            .position(|v| v == needle)
+            .unwrap_or_else(|| panic!("{needle:?} renders: {values:?}"))
+    };
+    assert!(at("latency") > at("tls certificate"), "{values:?}");
+    assert_eq!(at(MOCK_LATENCY_VALUE), at("latency") + 1, "{values:?}");
+}
+
+#[test]
+fn a_disconnected_latency_row_says_not_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::mount();
+
+    let values = node_values(&h.root);
+    let at = values
+        .iter()
+        .position(|v| v == "latency")
+        .unwrap_or_else(|| panic!("the latency row renders: {values:?}"));
+    assert_eq!(values[at + 1], "not connected", "{values:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2706,7 +2721,8 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
 fn wide_metrics_clamp_and_center_the_groups_column() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(support::metrics_at(SURFACE.width, SURFACE.height)));
+    // A phone in landscape: wide enough to clamp, too short to be a Tablet.
+    let mut h = mount_with_metrics(Some(support::metrics_at(SURFACE.width, 500.0)));
     h.frame();
 
     // Disconnect is the screen's last, full-width row — the cheapest honest
@@ -2746,6 +2762,102 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
         disconnect.width()
     );
     assert!((disconnect.x0 - ROW_PAD_X).abs() < 0.5, "{:?}", disconnect);
+}
+
+// ---------------------------------------------------------------------------
+// 7b — the Tablet card grid
+// ---------------------------------------------------------------------------
+
+/// The y-centre and x-centre of the first node printing `value`.
+fn value_center(h: &Harness, value: &str) -> Point {
+    h.center_of(value)
+}
+
+#[test]
+fn a_full_band_tablet_lays_the_cards_out_two_by_two() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
+    h.frame();
+
+    let values = node_values(&h.root);
+    for group in GROUPS {
+        assert!(values.iter().any(|v| v == group), "{group:?}: {values:?}");
+    }
+    let connection = value_center(&h, "CONNECTION");
+    let tokens = value_center(&h, "AUTH TOKENS");
+    assert!(
+        (connection.y - tokens.y).abs() < 0.5,
+        "the first pair shares a top edge: {connection:?} vs {tokens:?}"
+    );
+    assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
+    let saved = value_center(&h, "SAVED SERVERS");
+    assert!(saved.y > connection.y, "the second pair sits below");
+    assert!(
+        node_labels(&h.root).iter().any(|l| l == "Disconnect"),
+        "the Disconnect card's button renders"
+    );
+}
+
+#[test]
+fn a_collapsed_band_tablet_stacks_the_cards() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(support::metrics_at(720.0, 720.0)));
+    h.frame();
+
+    let connection = value_center(&h, "CONNECTION");
+    let tokens = value_center(&h, "AUTH TOKENS");
+    assert!(
+        (connection.x - tokens.x).abs() < 20.0,
+        "one column (title centres differ only by text width): {connection:?} vs {tokens:?}"
+    );
+    assert!(tokens.y > connection.y, "stacked: {tokens:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 7c — the `muxr pro` restore row
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_restore_row_restores_once_and_toasts_when_nothing_is_found() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    app_toasts().clear();
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == RESTORE_LABEL), "{values:?}");
+    h.tap_label("restore");
+    pump_until(&mut h, "the not-found toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(mock.restore_calls(), 1);
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec![NOTHING_TO_RESTORE_TOAST.to_string()]
+    );
+    assert_eq!(h.depth(), 1, "the row opens no sheet");
+}
+
+#[test]
+fn the_restore_row_is_absent_on_pro() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pro);
+    let controller = expect_pro_controller();
+    spawn_local(async move { controller.refresh().await });
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
+    });
+
+    let values = node_values(&h.root);
+    assert!(!values.iter().any(|v| v == RESTORE_LABEL), "{values:?}");
+    assert!(!node_labels(&h.root).iter().any(|l| l == "restore"));
 }
 
 // ---------------------------------------------------------------------------
