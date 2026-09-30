@@ -18,6 +18,7 @@
 //! | [`font_picker`] | the two-section font-family sheet, reusing `pickers`' row idiom |
 //! | [`saved_servers`] | the `saved servers` group, over `connect`'s own list |
 //! | [`pro`] | the `muxr pro` group: the plan row, which opens the paywall short of Pro |
+//! | [`cards`] | the Tablet card grid: group cards, the Disconnect card, the gap helper |
 //! | [`groups`] | the four groups' row lists, pure arrangement over the above |
 //! | [`misc`] | the bell row and Disconnect — the two rows outside every other cluster |
 //!
@@ -31,6 +32,7 @@
 //! single-font-safe text mark — **never an emoji** (`widgets::rows`' own
 //! doc has the tofu-on-iPhone story).
 
+mod cards;
 mod font_picker;
 mod groups;
 mod misc;
@@ -40,6 +42,7 @@ mod rows;
 mod saved_servers;
 mod tokens;
 
+pub(super) use cards::tablet_scroller;
 pub(super) use font_picker::{
     FONT_META_BUILT_IN, FONT_META_DOWNLOADED, FontPicker, FontRow, font_picker_sheet,
 };
