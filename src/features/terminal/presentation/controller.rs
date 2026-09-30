@@ -41,7 +41,7 @@ use std::time::Duration;
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
 use frust::authoring::text::FontFamily;
-use frust::{GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
+use frust::{Get, GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
 
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
@@ -102,6 +102,9 @@ pub struct TerminalController {
     pub lines: RwSignal<Vec<TermLine>>,
     /// The attached session's current name, for the rename dialog's seed.
     pub session_name: RwSignal<Option<String>>,
+    /// Whether the Tablet's key bar shows; the menu's "Show key bar" toggles it and
+    /// the key-bar card wires the bar to it.
+    pub key_bar_visible: RwSignal<bool>,
     /// Whether the first load has landed (the card body stays empty until it has).
     pub loaded: RwSignal<bool>,
     /// Whether the card is fullscreen. Controller state, not widget state: it drives
@@ -272,6 +275,7 @@ impl TerminalController {
             browsed_space_tabs: RwSignal::new(None),
             lines: RwSignal::new(Vec::new()),
             session_name: RwSignal::new(None),
+            key_bar_visible: RwSignal::new(true),
             loaded: RwSignal::new(false),
             fullscreen: RwSignal::new(false),
             reveal_epoch: RwSignal::new(0),
@@ -1201,6 +1205,29 @@ impl TerminalController {
             .get_untracked()
             .into_iter()
             .find(|tab| tab.key == key)
+    }
+
+    /// The card header's breadcrumb: session, then (herdr only) the selected
+    /// space, then the active tab. Tracked reads, so the header follows a switch;
+    /// a part not yet loaded is left out.
+    pub fn crumb_labels(&self) -> Vec<String> {
+        let space = self
+            .spaces
+            .get()
+            .into_iter()
+            .find(|space| space.selected)
+            .map(|space| space.name);
+        let key = self.active_tab.get();
+        let tab = self
+            .tabs
+            .get()
+            .into_iter()
+            .find(|tab| tab.key == key)
+            .map(|tab| tab.label);
+        [self.session_name.get(), space, tab]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Bump the reveal replay token: one rebuild per replay, zero per frame.

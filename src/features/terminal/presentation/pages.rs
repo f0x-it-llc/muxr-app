@@ -23,7 +23,7 @@ use frust::authoring::text::FontStyle;
 use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    IconData, NavigatorController, PopResult, RwSignal, SystemUiMode, WindowMetrics, any,
+    IconData, NavigatorController, PopResult, RwSignal, Set, SystemUiMode, WindowMetrics, any,
     component, container, flexible, icons, inflexible, on_cleanup, scroll_view, set_system_ui_mode,
     spawn_local, text, use_context,
 };
@@ -47,7 +47,7 @@ use crate::ui::sheet::SheetHandle;
 use crate::ui::side_sheet::show_side_sheet;
 use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
-use crate::ui::topbar::icon_button;
+use crate::ui::topbar::{BAR_HEIGHT, icon_button};
 
 use super::chrome::WRAP_PAD;
 use super::controller::{LiveSession, TerminalController};
@@ -61,7 +61,7 @@ use super::widgets::side_sheet_tree::{
     PressMenu, RowMenuChoice, RowTarget, TabPath, TreeActions, TreeData, TreeMode, TreeMutations,
     auto_expand_after_cascade, row_menu, row_menu_choice, tree_body,
 };
-use super::widgets::status::status_row;
+use super::widgets::status::{TerminalMenuChoice, status_row, terminal_menu, terminal_menu_choice};
 use super::widgets::util::{column, h_gap, row, sized, v_gap};
 
 /// How long the sheet stays up after a **pane row** is tapped, so the selection
@@ -176,6 +176,9 @@ pub struct Actions {
     grid_hooks: Rc<RefCell<Option<GridHooks>>>,
     /// Whether the last `build` laid out the Tablet structure (the docked rail).
     tablet: Rc<Cell<bool>>,
+    /// The bar's trailing slot in window coordinates, as the last `build` derived
+    /// it — the Tablet menu's anchor (the shell forwards the press with none).
+    menu_anchor: Rc<Cell<Rect>>,
 }
 
 /// A test/diagnostic handle onto the live pane's emulator + feed, reached through
@@ -269,10 +272,13 @@ pub fn debug_controller() -> Option<Arc<TerminalController>> {
 /// this action on `/terminal` alone).
 pub fn open_terminal_menu(_state: &mut AppState) {
     let actions = TERMINAL_CHROME.with(|cell| cell.borrow().clone());
-    // TODO(tsk_000001a0ee1a8a73DcrNH7sb): the Tablet kebab becomes a Glyph menu;
-    // until then it opens nothing there, the docked rail already being the tree.
-    if let Some(actions) = actions.filter(|actions| !actions.tablet.get()) {
-        actions.open_sheet();
+    // The Tablet's docked rail is the tree already, so its kebab is a menu.
+    if let Some(actions) = actions {
+        if actions.tablet.get() {
+            actions.open_terminal_menu();
+        } else {
+            actions.open_sheet();
+        }
     }
 }
 
@@ -327,6 +333,7 @@ impl Component for TerminalScreen {
             live_probe: Rc::new(RefCell::new(None)),
             grid_hooks: Rc::new(RefCell::new(None)),
             tablet: Rc::new(Cell::new(tablet)),
+            menu_anchor: Rc::new(Cell::new(Rect::ZERO)),
         };
         // Publish for the app bar's `⋮` (see [`Actions`]' own docs).
         TERMINAL_CHROME.with(|cell| *cell.borrow_mut() = Some(actions.clone()));
@@ -494,6 +501,9 @@ impl Component for TerminalScreen {
         let responsive = Responsive::of(use_context::<WindowMetrics>());
         let tablet = responsive.is_tablet();
         state.actions.tablet.set(tablet);
+        if let Some(metrics) = use_context::<WindowMetrics>() {
+            state.actions.menu_anchor.set(bar_trailing_slot(&metrics));
+        }
         if controller.set_docked(tablet) {
             let controller = Arc::clone(&controller);
             spawn_local(async move {
@@ -558,9 +568,17 @@ impl Component for TerminalScreen {
 
         // The link strip sits between the status row and the body, and only when
         // there is something to say: a healthy (or absent) link adds no child.
+        // Crumbs on the Tablet's Full band only; the collapsed band has no room.
+        let crumbs = if tablet && responsive.is_full() {
+            controller.crumb_labels()
+        } else {
+            Vec::new()
+        };
         let mut card_children = vec![inflexible(status_row(
             &title,
+            &crumbs,
             fullscreen,
+            read_only,
             &colors,
             &ink,
             toggle_fullscreen,
@@ -712,6 +730,20 @@ fn resolve_wheel_route(has_mouse_input: bool, active_tab: Option<&TabEntry>) -> 
         },
         None => WheelRoute::Drop,
     }
+}
+
+/// Glyph's bar icon slot (`.ab-icon` 40px) and its horizontal padding (6px),
+/// both private to the bar and transcribed for [`bar_trailing_slot`].
+const BAR_ICON_SLOT: f64 = 40.0;
+const BAR_PAD_X: f64 = 6.0;
+
+/// The bar's trailing icon slot in window coordinates: the last
+/// [`BAR_ICON_SLOT`] of the width inside the trailing safe inset and the bar's
+/// own padding, one bar tall below the top inset.
+fn bar_trailing_slot(metrics: &WindowMetrics) -> Rect {
+    let right = metrics.size.width - metrics.insets.view_padding.right - BAR_PAD_X;
+    let top = metrics.insets.view_padding.top;
+    Rect::new(right - BAR_ICON_SLOT, top, right, top + BAR_HEIGHT)
 }
 
 /// The expand button's press, as the screen-state shim its callback needs.
@@ -912,6 +944,35 @@ impl Actions {
             }
             after.land(&controller).await;
         });
+    }
+
+    /// The Tablet kebab's Glyph menu, anchored below the bar's trailing slot.
+    /// Its checked item and immersive mark are read as the menu opens.
+    fn open_terminal_menu(&self) {
+        let controller = &self.controller;
+        let (fullscreen, key_bar) = (
+            controller.fullscreen.get_untracked(),
+            controller.key_bar_visible.get_untracked(),
+        );
+        let actions = self.clone();
+        show_glyph_menu(
+            &self.overlays,
+            self.menu_anchor.get(),
+            move || terminal_menu(fullscreen, key_bar),
+            move |_app: &mut AppState, result: PopResult| match result
+                .take::<usize>()
+                .and_then(terminal_menu_choice)
+            {
+                Some(TerminalMenuChoice::Rename) => actions.open_rename_dialog(),
+                Some(TerminalMenuChoice::Immersive) => actions.toggle_fullscreen(),
+                Some(TerminalMenuChoice::KeyBar) => {
+                    let visible = &actions.controller.key_bar_visible;
+                    visible.set(!visible.get_untracked());
+                }
+                Some(TerminalMenuChoice::Detach) => actions.detach(),
+                None => {}
+            },
+        );
     }
 
     /// Open the docked rail's overflow menu for `target`, anchored at `anchor`,
