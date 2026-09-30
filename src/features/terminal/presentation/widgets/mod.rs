@@ -1,7 +1,7 @@
 //! The `/terminal` screen's widgets, transcribed from `docs/terminal.html` v2
 //! and its own side-sheet design mock. One module per cluster, one fn per
 //! visual element: [`card`] the card's `GlyphInk` ink and `.term-body`,
-//! [`status`] `.term-statusrow`, [`link_strip`] the live link band,
+//! [`status`] `.term-statusrow` (title, breadcrumb, read-only chip) and the Tablet kebab's menu, [`link_strip`] the live link band,
 //! [`side_sheet_tree`] the "panes & tabs" spaces → tabs → panes containment
 //! tree body (the phone's sheet and the Tablet's rail alike), [`rail`] the
 //! Tablet's docked rail and mini rail around it, [`new_tab_dialog`] the add-tab prompt, [`util`] the

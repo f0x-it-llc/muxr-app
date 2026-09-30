@@ -2857,14 +2857,124 @@ fn an_overflow_menus_rename_opens_the_rows_own_dialog() {
     assert!(h.shows("Rename tab"), "{:?}", h.values());
 }
 
+/// The Tablet kebab's menu entries, by index (Rename, Immersive, Show key bar,
+/// a separator, Detach).
+const MENU_IMMERSIVE: usize = 1;
+const MENU_KEY_BAR: usize = 2;
+const MENU_DETACH: usize = 4;
+
+impl Harness {
+    /// Press the kebab and pick entry `index` of the menu it opens.
+    fn choose_terminal_menu(&mut self, index: usize) {
+        open_terminal_menu(&mut self.state);
+        self.settle();
+        assert_eq!(self.depth(), REST_DEPTH + 1, "the Glyph menu is up");
+        self.nav.pop_with_result(PopResult::of(index));
+        self.flush();
+        self.settle();
+    }
+}
+
 #[test]
-fn the_tablet_kebab_opens_no_sheet() {
+fn the_tablet_kebab_opens_a_glyph_menu_and_no_sheet() {
     let _g = serial();
     let _ambient = setup();
     let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
 
     h.open_sheet();
-    assert_eq!(h.depth(), REST_DEPTH);
+    assert_eq!(h.depth(), REST_DEPTH + 1, "one page: the menu, not a sheet");
+}
+
+#[test]
+fn the_tablet_menu_toggles_the_key_bar_signal() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    let controller = debug_controller().expect("mounted");
+    assert!(controller.key_bar_visible.get_untracked(), "on by default");
+
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(!controller.key_bar_visible.get_untracked());
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(controller.key_bar_visible.get_untracked());
+}
+
+#[test]
+fn the_tablet_menu_toggles_immersive_mode() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.choose_terminal_menu(MENU_IMMERSIVE);
+    assert!(app_nav().bar().fullscreen);
+}
+
+#[test]
+fn the_tablet_menus_detach_pops_and_toasts() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    app_toasts().clear();
+
+    h.choose_terminal_menu(MENU_DETACH);
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while app_toasts().pending_untracked().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the detach"
+        );
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec![DETACHED_TOAST.to_string()]
+    );
+}
+
+#[test]
+fn the_tablet_header_carries_the_session_space_and_tab_crumbs() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+    let labels = node_labels(&h.root);
+    for crumb in [SESSION_NAME, "devbox"] {
+        assert!(labels.iter().any(|l| l == crumb), "{crumb}: {labels:?}");
+    }
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(controller.crumb_labels(), [SESSION_NAME, "devbox"]);
+
+    let mut h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    h.frame();
+    let crumbs = debug_controller().expect("mounted").crumb_labels();
+    assert!(
+        crumbs.ends_with(&["forgekit".to_string(), "devbox".to_string()]),
+        "space, tab: {crumbs:?}"
+    );
+    assert!(
+        crumbs
+            .iter()
+            .all(|name| node_labels(&h.root).contains(name))
+    );
+}
+
+#[test]
+fn the_collapsed_band_hides_the_crumbs() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.frame();
+    assert!(!node_labels(&h.root).iter().any(|l| l == SESSION_NAME));
+}
+
+#[test]
+fn a_read_only_credential_shows_the_chip_in_the_status_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(SESSION_ID);
+    assert!(!node_labels(&h.root).iter().any(|l| l == "read-only"));
+    make_read_only(&mut h);
+    assert!(node_labels(&h.root).iter().any(|l| l == "read-only"));
 }
 
 #[test]

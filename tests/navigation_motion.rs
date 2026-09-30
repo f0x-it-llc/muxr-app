@@ -875,6 +875,24 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
 const TERMINAL_MENU: &str = "Terminal menu";
 
 #[test]
+fn the_terminal_menu_button_keeps_its_name_on_a_tablet() {
+    let _g = serial();
+    let _ambient = setup();
+    let metrics = Some(support::metrics_at(1024.0, 720.0));
+    let mut h = support::mount_with_metrics(metrics, Harness::mount);
+    expect_connection_controller().connect(mock_target());
+    h.push("/sessions");
+    h.push("/terminal?session=s-1");
+    h.park();
+
+    assert!(
+        h.labels().iter().any(|l| l == TERMINAL_MENU),
+        "{:?}",
+        h.labels()
+    );
+}
+
+#[test]
 fn the_terminal_menu_button_opens_its_side_sheet_directly_and_gives_the_bar_back_after_it() {
     let _g = serial();
     let _ambient = setup();
