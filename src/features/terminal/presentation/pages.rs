@@ -291,6 +291,12 @@ impl Component for TerminalScreen {
         // The attached session's id, read **here** because `init` is the one
         // moment `Nav::param` is exact: this push is what recorded the query.
         let session = app_nav.param(crate::routes::TERMINAL_SESSION_QUERY_KEY);
+        let tab = app_nav
+            .param(crate::routes::TERMINAL_TAB_QUERY_KEY)
+            .and_then(|value| value.parse::<u32>().ok());
+        let pane = app_nav
+            .param(crate::routes::TERMINAL_PANE_QUERY_KEY)
+            .and_then(|value| value.parse::<u32>().ok());
         // The screen-scoped view model over the three app-scoped repositories
         // `di` published (`sessions`'/`settings`' through their own `di.rs` — the
         // sanctioned cross-feature widening). Auto-disposed on unmount.
@@ -302,6 +308,8 @@ impl Component for TerminalScreen {
                 session.clone(),
             )
         });
+
+        controller.set_attach_target(tab, pane);
 
         // Failure → toast, for this screen's lifetime.
         use_failure_listener(controller.core().failures(), |failure: AppFailure| {

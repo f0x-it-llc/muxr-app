@@ -174,6 +174,19 @@ pub struct TerminalController {
     /// Whether the tree is the Tablet's docked rail rather than the modal sheet —
     /// see [`settle_rest`](Self::settle_rest).
     docked: AtomicBool,
+    /// The one-shot pane a deep link asked to land on, until
+    /// [`apply_attach_target`](Self::apply_attach_target) consumes it.
+    attach_target: Mutex<Option<AttachTarget>>,
+}
+
+/// Where a deep link into `/terminal` asked to land: the wire tab **position**
+/// (0-based, `TabMsg.position`) and/or the wire pane id within that tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachTarget {
+    /// `TabMsg.position` — never the tab id, never a title.
+    pub tab_position: Option<u32>,
+    /// `PaneMsg.id` of a terminal pane.
+    pub pane_id: Option<u32>,
 }
 
 /// The shipped default font size, px — settings' own `Preferences::defaults()`,
@@ -300,6 +313,7 @@ impl TerminalController {
             layout_writes: AtomicU64::new(0),
             resume: Arc::new(ResumeSlot::default()),
             docked: AtomicBool::new(false),
+            attach_target: Mutex::new(None),
         }
     }
 
@@ -361,6 +375,83 @@ impl TerminalController {
         self.loaded.set(true);
         self.replay_reveal();
         if self.is_docked() {
+            self.settle_rest();
+        }
+        self.apply_attach_target().await;
+    }
+
+    /// Record where a deep link wants the terminal to land; a link naming neither
+    /// a tab nor a pane records nothing. Applied once by
+    /// [`apply_attach_target`](Self::apply_attach_target).
+    pub fn set_attach_target(&self, tab_position: Option<u32>, pane_id: Option<u32>) {
+        let target = (tab_position.is_some() || pane_id.is_some()).then_some(AttachTarget {
+            tab_position,
+            pane_id,
+        });
+        *self
+            .attach_target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = target;
+    }
+
+    /// Consume the [`AttachTarget`] and commit it the way a rail tap would. Runs
+    /// from the first load and from the handshake's reload, and acts only once the
+    /// first load has landed and — on a live mount — the handshake has settled
+    /// (a verb before it has no connection to route by); the later of the two
+    /// callers applies it. Taken exactly once: a poll or reconnect finds nothing.
+    /// A tab position or pane id the layout no longer carries drops the target
+    /// silently. Focus verbs are allowed for read-only tokens, so this applies there too.
+    pub async fn apply_attach_target(&self) {
+        let ready = self.loaded.try_get_untracked() == Some(true)
+            && (!self.live_attached.load(Ordering::Relaxed)
+                || self.attach_settled.load(Ordering::SeqCst));
+        if !ready {
+            return;
+        }
+        let Some(target) = self
+            .attach_target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        let (Some(tabs), Some(active)) = (
+            self.tabs.try_get_untracked(),
+            self.active_tab.try_get_untracked(),
+        ) else {
+            return;
+        };
+        // `TabEntry::index` is the 1-based position the pill prints.
+        let tab = match target.tab_position {
+            Some(position) => tabs
+                .iter()
+                .find(|tab| tab.index == position.saturating_add(1)),
+            None => tabs.iter().find(|tab| tab.key == active),
+        };
+        let Some(tab) = tab else {
+            log::debug!(
+                "attach target: no tab at {:?}, dropped",
+                target.tab_position
+            );
+            return;
+        };
+        let landed = match target.pane_id {
+            Some(pane_id) => {
+                if !tab
+                    .panes
+                    .iter()
+                    .any(|pane| pane.id == pane_id && !pane.is_plugin)
+                {
+                    log::debug!("attach target: no pane {pane_id} in tab, dropped");
+                    return;
+                }
+                self.commit_pane(tab.key.clone(), pane_id, false).await
+            }
+            None if tab.key != active => self.switch_tab(tab.key.clone()).await,
+            None => true,
+        };
+        if landed && self.is_docked() {
             self.settle_rest();
         }
     }
@@ -1554,7 +1645,10 @@ impl LiveSession {
                             // the layout, since the mount's own load went out with
                             // no connection id to route it by.
                             let settled = Arc::clone(&mirror);
-                            spawn_local(async move { settled.reload_tabs().await });
+                            spawn_local(async move {
+                                settled.reload_tabs().await;
+                                settled.apply_attach_target().await;
+                            });
                         }
                         if flag.swap(false, Ordering::AcqRel) {
                             expiry.on_session_expired();
