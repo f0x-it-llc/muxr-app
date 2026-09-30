@@ -16,9 +16,12 @@
 //! the actual `vt100::Screen` the mounted screen renders.
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use frust::input::TOUCH_SLOP;
@@ -36,6 +39,7 @@ use frust_text::TextContext;
 use kurbo::{Point, Size, Vec2};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle as SettingsCursorStyle,
@@ -45,7 +49,9 @@ use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     add_test_tab, clear_test_tabs, clear_verb_log, verb_log,
 };
+use muxr::features::terminal::di::expect_terminal_repository;
 use muxr::features::terminal::domain::feed::TerminalFeed;
+use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
     terminal_page,
@@ -1770,4 +1776,121 @@ fn a_deep_link_naming_no_such_tab_or_pane_sends_nothing() {
         assert!(verb_log().is_empty(), "{location}: {:?}", verb_log());
         drop(h);
     }
+}
+
+/// One controller call, boxed so a test can open it, leave it parked on its round
+/// trip, and land it later — the ordering a race needs, with no clock in it.
+type Step<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+/// Poll `step` once on `rt`: far enough to open its round trip, never to land it.
+fn start(rt: &tokio::runtime::Runtime, step: &mut Step<'_>) {
+    rt.block_on(std::future::poll_fn(|cx| {
+        assert!(
+            step.as_mut().poll(cx).is_pending(),
+            "parked on a round trip"
+        );
+        Poll::Ready(())
+    }));
+}
+
+/// A **live** controller for `?session=s-1&tab=2&pane=31` (gohora, tab id 3), over the
+/// composition root's own repositories but mounted nowhere, so the test alone decides
+/// when each layout fetch opens and lands.
+fn live_deep_link() -> Arc<TerminalController> {
+    let _state = MuxrApp.init();
+    let c = Arc::new(TerminalController::new(
+        expect_terminal_repository(),
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some(SESSION_ID.to_string()),
+    ));
+    c.set_attach_target(Some(2), Some(31));
+    c.attach_live();
+    c
+}
+
+#[test]
+fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reload() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log();
+    let c = live_deep_link();
+    let rt = runtime();
+
+    let mut load: Step = Box::pin(c.load());
+    start(&rt, &mut load);
+    assert!(c.mirror_link(FeedStatus::Connected, Some("c-1".to_string())));
+    let mut settled: Step = Box::pin(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    start(&rt, &mut settled);
+    rt.block_on(load);
+    assert!(verb_log().is_empty(), "the load's tabs were fenced out");
+    assert!(c.tabs.get_untracked().is_empty(), "…and never published");
+
+    rt.block_on(settled);
+    assert_eq!(verb_log(), ["go_to_tab:3", "focus_pane:31"]);
+    assert_eq!(c.active_tab.get_untracked(), "gohora");
+}
+
+#[test]
+fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log();
+    let c = live_deep_link();
+
+    runtime().block_on(async {
+        c.load().await;
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert!(verb_log().is_empty(), "{:?}", verb_log());
+    assert_eq!(
+        c.pending_attach_target(),
+        Some(AttachTarget {
+            tab_position: Some(2),
+            pane_id: Some(31),
+        }),
+        "still held for a settle that may yet come"
+    );
+}
+
+/// The supersede rule ([`AttachTarget`]'s doc): a move the user made after mount
+/// wins, so the link is dropped when that move claims — never lost to its claim.
+#[test]
+fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log();
+    let c = live_deep_link();
+    let rt = runtime();
+    rt.block_on(c.load());
+
+    let mut tap: Step = Box::pin(async {
+        assert!(c.commit_pane("btop".to_string(), 11, false).await);
+    });
+    start(&rt, &mut tap);
+    assert_eq!(
+        c.pending_attach_target(),
+        None,
+        "dropped as the move claimed"
+    );
+    assert!(c.mirror_link(FeedStatus::Connected, Some("c-1".to_string())));
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    rt.block_on(tap);
+
+    assert_eq!(verb_log(), ["go_to_tab:1", "focus_pane:11"]);
+    assert_eq!(c.active_tab.get_untracked(), "btop");
 }
