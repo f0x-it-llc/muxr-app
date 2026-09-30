@@ -82,6 +82,7 @@ pub struct TabEntry {
     pub panes: Vec<PaneEntry>,
     /// Whether this is the tab the card shows on arrival (`devbox`).
     pub active: bool,
+    pub has_bell: bool,
 }
 
 impl TabEntry {
@@ -204,6 +205,7 @@ mod tests {
             pane_path: "/home/ed".to_string(),
             panes: Vec::new(),
             active: true,
+            has_bell: false,
         };
         assert_eq!(tab.pill_label(), "4 devbox");
     }
@@ -235,6 +237,7 @@ mod tests {
             pane_path: String::new(),
             panes: Vec::new(),
             active,
+            has_bell: false,
         };
         let mut workspace = Workspace {
             tabs: vec![tab("a", false), tab("b", true)],
@@ -278,8 +281,10 @@ mod tests {
             pane_path: String::new(),
             panes: vec![pane.clone()],
             active: true,
+            has_bell: true,
         };
         assert_eq!(tab.panes, vec![pane]);
+        assert!(tab.has_bell);
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //! and its own side-sheet design mock. One module per cluster, one fn per
 //! visual element: [`card`] the card's `GlyphInk` ink and `.term-body`,
 //! [`status`] `.term-statusrow`, [`link_strip`] the live link band,
-//! [`side_sheet_tree`] the "panes & tabs" side sheet's spaces → tabs → panes
-//! containment tree body, [`new_tab_dialog`] the add-tab prompt, [`util`] the
+//! [`side_sheet_tree`] the "panes & tabs" spaces → tabs → panes containment
+//! tree body (the phone's sheet and the Tablet's rail alike), [`rail`] the
+//! Tablet's docked rail and mini rail around it, [`new_tab_dialog`] the add-tab prompt, [`util`] the
 //! row/column/gap/`TextStyle` helpers.
 //!
 //! **Page-coupled exception** (see `docs/FEATURES_ARCHITECTURE.md`'s
@@ -22,6 +23,7 @@
 pub(crate) mod card;
 pub(crate) mod link_strip;
 pub(crate) mod new_tab_dialog;
+pub(crate) mod rail;
 pub(crate) mod side_sheet_tree;
 pub(crate) mod status;
 pub(crate) mod util;
