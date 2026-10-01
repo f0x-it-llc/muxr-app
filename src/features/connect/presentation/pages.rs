@@ -11,7 +11,9 @@
 //! affordances belong to the screen, not the layout — the splash assembles
 //! into a fixed layer with nothing to scroll. That is the Compact tree; a
 //! Tablet window ([`Responsive`], read once per build) gets
-//! [`tablet_screen`] instead, assembled in [`super::widgets::tablet`].
+//! [`tablet_screen`] instead, assembled in [`super::widgets::tablet`], which
+//! the splash assembles on a Tablet window too, through that module's own
+//! seam.
 //!
 //! Handles are resolved once in [`Component::init`], never in a press handler.
 //! The credential dialogs live in [`super::widgets::credential_dialogs`], the
@@ -37,12 +39,13 @@ use super::widgets::layout::clamped_layout;
 pub use super::widgets::layout::connect_layout;
 use super::widgets::pro_gate::{gated_saved_row_tap, server_limit_prompt};
 use super::widgets::qr_affordance::{qr_affordance, qr_button};
-use super::widgets::tablet::tablet_screen;
-use super::widgets::{Live, connect_pieces_with};
+use super::widgets::tablet::{tablet_screen, tablet_splash_layout, tablet_splash_pieces};
+use super::widgets::{Live, connect_pieces, connect_pieces_with};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
+use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::expect_auth_tokens_repository;
@@ -54,6 +57,31 @@ use crate::ui::palette::active_theme;
 /// The Connect screen: the `/` route's page. See the [module docs](self).
 pub fn connect_page(overlays: frust::NavigatorController<AppState>) -> AnyView<AppState> {
     any(component(ConnectScreen { overlays }))
+}
+
+/// A class's layout function, boxed so [`splash_assembly`] can hand back
+/// either class's.
+pub type SplashLayout<S> = Box<dyn FnOnce(Vec<AnyView<S>>) -> AnyView<S>>;
+
+/// The splash's copy of this screen: its pieces in stagger order and the
+/// layout they assemble through, for the window's size class — read here,
+/// once per build, exactly as [`ConnectScreen`]'s own `build` reads it, so
+/// the overlay's last frame is the route's first on every class. `saved` is
+/// piece 7's rows (the parity contract).
+pub fn splash_assembly<S: 'static>(
+    theme: &frust::Theme,
+    saved: &[SavedServer],
+) -> (Vec<AnyView<S>>, SplashLayout<S>) {
+    let rule = Responsive::of(use_context::<WindowMetrics>());
+    if rule.is_tablet() {
+        let full = rule.is_full();
+        let assemble_theme = theme.clone();
+        return (
+            tablet_splash_pieces(theme, saved, full),
+            Box::new(move |pieces| tablet_splash_layout(&assemble_theme, full, pieces)),
+        );
+    }
+    (connect_pieces(theme, saved), Box::new(connect_layout::<S>))
 }
 
 /// Stateless configuration; everything retained lives in [`ConnectState`].

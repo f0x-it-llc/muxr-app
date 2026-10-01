@@ -48,7 +48,7 @@ use muxr::features::connect::presentation::controller::{
     ConnectController, ConnectRetry, CredentialOffer, GatePrompt, OfferPrompt, ServerLimitBlock,
     URL_ERROR_MESSAGE,
 };
-use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
+use muxr::features::connect::presentation::pages::{connect_layout, connect_page, splash_assembly};
 use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
 use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
 use muxr::features::connect::presentation::widgets::fields::{
@@ -60,6 +60,9 @@ use muxr::features::connect::presentation::widgets::pairing::{
 };
 use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
 use muxr::features::connect::presentation::widgets::saved::{NO_SAVED_SERVERS, PRO_TAG};
+use muxr::features::connect::presentation::widgets::tablet::{
+    tablet_splash_layout, tablet_splash_pieces,
+};
 use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
 use muxr::features::connect::presentation::widgets::{Live, connect_pieces, connect_pieces_with};
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
@@ -797,6 +800,11 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
         "the splash's assembly and the live screen must occupy the same \
          horizontal box on a wide window: splash {splash:?} vs live {live:?}"
     );
+    assert!(
+        (splash.y0 - live.y0).abs() < EPSILON,
+        "…and start at the same height — the static trust rows above the CTA \
+         are exactly as tall as the live radio rows: splash {splash:?} vs live {live:?}"
+    );
     // …and it really is the clamped one, not both being unclamped.
     let margin = (SURFACE.width - CONNECT_CLAMP_WIDTH) / 2.0;
     assert!(
@@ -831,6 +839,124 @@ fn narrow_metrics_leave_the_splash_assembly_full_bleed_too() {
     assert!(
         (splash.width() - layer).abs() < EPSILON && (splash.x0 - LAYER_PAD_X).abs() < EPSILON,
         "narrow metrics leave the splash unclamped: {splash:?}"
+    );
+}
+
+/// The CTA's and the saved header's boxes in a standalone mount of the
+/// **splash's Tablet** assembly path —
+/// `tablet_splash_layout(tablet_splash_pieces(..))` inside a `Stack`, what
+/// `crate::splash_overlay` hands the sequence on a Tablet window — laid out at
+/// `size` under whatever metrics are already in context.
+fn tablet_splash_bounds(size: Size, full: bool, saved: &[SavedServer]) -> (Rect, Rect) {
+    let theme = frust_glyph::baseline();
+    let saved = saved.to_vec();
+    let mut logic = move |_state: &mut ()| {
+        any(Stack(vec![tablet_splash_layout(
+            &theme,
+            full,
+            tablet_splash_pieces::<()>(&theme, &saved, full),
+        )]))
+    };
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut state = ();
+    let mut tcx = TextContext::new();
+    frame_sized(&mut root, &mut logic, &mut state, &mut tcx, size);
+    let semantics = root.semantics();
+    let find = |what: &str, pred: fn(&Node) -> bool| {
+        semantics
+            .nodes
+            .iter()
+            .find(|(_, node)| pred(node))
+            .and_then(|(_, node)| node.bounds())
+            .unwrap_or_else(|| panic!("the splash's Tablet assembly paints {what}"))
+    };
+    (
+        find("the CTA", connect_cta),
+        find("the saved header", saved_header),
+    )
+}
+
+/// Whether `a` and `b` are the same box, to [`EPSILON`].
+fn same_box(a: Rect, b: Rect) -> bool {
+    (a.x0 - b.x0).abs() < EPSILON
+        && (a.y0 - b.y0).abs() < EPSILON
+        && (a.x1 - b.x1).abs() < EPSILON
+        && (a.y1 - b.y1).abs() < EPSILON
+}
+
+#[test]
+fn the_splash_assembly_follows_the_windows_size_class() {
+    let _g = serial();
+    let _ambient = setup();
+    let theme = frust_glyph::baseline();
+    // Nine staggered pieces on the Full band, the eight-piece phone column on
+    // a Compact window — the one read that decides which screen the overlay
+    // hands off onto.
+    provide_context(support::metrics_at(FULL_TABLET.width, FULL_TABLET.height));
+    let (tablet, _) = splash_assembly::<()>(&theme, &[]);
+    assert_eq!(
+        tablet.len(),
+        9,
+        "the Full band's interleaved panel and form"
+    );
+    provide_context(compact_wide());
+    let (phone, _) = splash_assembly::<()>(&theme, &[]);
+    assert_eq!(
+        phone.len(),
+        8,
+        "the phone column, one piece per stagger slot"
+    );
+}
+
+#[test]
+fn the_full_tablet_splash_assembles_the_two_column_screen_in_place() {
+    let _g = serial();
+    let _ambient = setup();
+    // The live screen first: `sized` leaves its metrics in context, so the
+    // splash's mount below reads the same window.
+    let harness = sized(FULL_TABLET, Harness::mount);
+    let live_cta = harness.bounds("the connect CTA", connect_cta);
+    let live_header = harness.bounds("the saved header", saved_header);
+    let saved = expect_saved_servers().list().expect("the mock lists");
+
+    let (cta, header) = tablet_splash_bounds(FULL_TABLET, true, &saved);
+    assert!(
+        same_box(cta, live_cta),
+        "the splash's CTA lands on the live screen's box: {cta:?} vs {live_cta:?}"
+    );
+    assert!(
+        same_box(header, live_header),
+        "…and its saved header too: {header:?} vs {live_header:?}"
+    );
+    // …and it really is the two-column arrangement, not the phone column
+    // happening to agree: the list sits beside the form.
+    assert!(
+        header.x1 <= cta.x0,
+        "the splash assembles the list in the left panel: {header:?} vs {cta:?}"
+    );
+}
+
+#[test]
+fn the_collapsed_tablet_splash_folds_the_list_under_the_button_row_like_the_screen() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(COLLAPSED_TABLET, Harness::mount);
+    let live_cta = harness.bounds("the connect CTA", connect_cta);
+    let live_header = harness.bounds("the saved header", saved_header);
+    let saved = expect_saved_servers().list().expect("the mock lists");
+
+    let (cta, header) = tablet_splash_bounds(COLLAPSED_TABLET, false, &saved);
+    assert!(
+        same_box(cta, live_cta),
+        "the splash's CTA lands on the live screen's box: {cta:?} vs {live_cta:?}"
+    );
+    assert!(
+        same_box(header, live_header),
+        "…and its saved header too: {header:?} vs {live_header:?}"
+    );
+    assert!(
+        cta.y1 <= header.y0,
+        "the collapsed band's folded order, button row over the list: {cta:?} vs {header:?}"
     );
 }
 

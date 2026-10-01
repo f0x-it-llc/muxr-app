@@ -174,12 +174,12 @@ fn chips<S: 'static>(colors: &Palette, server: &SavedServer, locked: bool) -> Ve
 
 /// The Tablet variant of piece 7: the same header over card rows, or a muted
 /// line when nothing is saved. Tap, delete and chips wire exactly as the
-/// phone row's do.
+/// phone row's do, and `live` is `None` for the splash exactly as there.
 pub fn tablet_saved_list<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     servers: &[SavedServer],
-    live: &Live,
+    live: Option<&Live>,
 ) -> AnyView<S> {
     let now = epoch_millis();
     let mut children = vec![saved_header(theme, colors), v_gap(spacing::MD)];
@@ -208,7 +208,7 @@ fn tablet_saved_row<S: 'static>(
     servers: &[SavedServer],
     index: usize,
     now_ms: i64,
-    live: &Live,
+    live: Option<&Live>,
 ) -> AnyView<S> {
     let meta = format!(
         "{} · {} · {}",
@@ -237,17 +237,19 @@ fn tablet_saved_row<S: 'static>(
             ])),
         ),
     ];
-    items.extend(chips::<S>(
-        colors,
-        server,
-        locked(server, servers, Some(live)),
-    ));
-    let on_tap = Rc::clone(&live.on_saved_tap);
-    let body = GestureDetector(row::<S>(items)).on_tap(move |_state: &mut S| on_tap(index));
+    items.extend(chips::<S>(colors, server, locked(server, servers, live)));
+    let body = row::<S>(items);
+    let tappable: AnyView<S> = match live {
+        None => any(body),
+        Some(live) => {
+            let on_tap = Rc::clone(&live.on_saved_tap);
+            any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
+        }
+    };
     let content = row::<S>(vec![
-        flexible(1, any(body)),
+        flexible(1, tappable),
         inflexible(h_gap::<S>(spacing::MD)),
-        inflexible(delete_affordance(colors, server, index, Some(live))),
+        inflexible(delete_affordance(colors, server, index, live)),
     ]);
     let inset = EdgeInsets {
         left: spacing::BASE,

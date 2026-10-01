@@ -15,8 +15,7 @@ use std::rc::Rc;
 use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
 
 use features::connect::domain::entities::SavedServer;
-use features::connect::presentation::pages::connect_layout;
-use features::connect::presentation::widgets::connect_pieces;
+use features::connect::presentation::pages::splash_assembly;
 use features::connect::presentation::widgets::saved::splash_saved_servers;
 use ui::palette::active_theme;
 use ui::splash::icon_phase::{IconArt, splash_icon_art};
@@ -76,16 +75,18 @@ fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
         return None;
     }
     match cue.plan {
-        SplashPlan::Full => Some(splash_sequence(
-            cue.art.clone(),
-            SPLASH_SEED,
-            connect_pieces(&active_theme(), &cue.saved),
-            connect_layout,
-            cue.done,
-        )),
+        SplashPlan::Full => Some(full_splash(cue)),
         SplashPlan::Reduced => Some(reduced_splash(cue.art.clone(), cue.done)),
         SplashPlan::Skip => None,
     }
+}
+
+/// The full sequence over the screen the route will paint: Connect's own
+/// [`splash_assembly`] picks the phone column or the Tablet arrangement for
+/// the window's size class, so the overlay's last frame is the route's first.
+fn full_splash(cue: &SplashCue) -> AnyView<AppState> {
+    let (pieces, assemble) = splash_assembly(&active_theme(), &cue.saved);
+    splash_sequence(cue.art.clone(), SPLASH_SEED, pieces, assemble, cue.done)
 }
 
 #[derive(Default)]

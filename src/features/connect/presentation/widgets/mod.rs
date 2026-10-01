@@ -20,11 +20,14 @@
 //!    same repository.
 //! 2. The splash's fields are `read_only`, never `enabled(false)`: the same
 //!    focus gate without the dimming.
-//! 3. The responsive clamp lives in
-//!    [`connect_layout`](layout::connect_layout), the one function
-//!    both callers assemble through on Compact. The Tablet structure
-//!    ([`tablet_panel_pieces`], [`tablet_form_pieces`]) is the screen's
-//!    alone: the splash keeps the compact pieces on every class.
+//! 3. The layout is one function per size class, which both callers
+//!    assemble through: Compact's [`connect_layout`](layout::connect_layout)
+//!    owns the responsive clamp, and the Tablet structure
+//!    ([`tablet_panel_pieces`], [`tablet_form_pieces`]) goes through
+//!    `tablet::tablet_layout` for the screen and the splash alike
+//!    ([`tablet::tablet_splash_pieces`], [`tablet::tablet_splash_layout`]);
+//!    the page's `splash_assembly` reads the class once per build, as the
+//!    screen does, to pick the pair.
 //!
 //! One accepted difference: the saved rows' pro tag paints only under `Some(..)`,
 //! since the splash has no entitlement to read.
@@ -146,10 +149,11 @@ pub fn connect_pieces_with<S: 'static>(
 }
 
 /// The Tablet left panel, top to bottom: brand row, headline, the inline
-/// getting-started card, and the saved list.
+/// getting-started card, and the saved list. `live` is `None` for the splash
+/// (the parity contract).
 pub fn tablet_panel_pieces<S: 'static>(
     theme: &Theme,
-    live: &Live,
+    live: Option<&Live>,
     saved: &[SavedServer],
 ) -> Vec<AnyView<S>> {
     let colors = Palette::from_theme(theme);
@@ -167,21 +171,21 @@ pub fn tablet_panel_pieces<S: 'static>(
 
 /// The Tablet form column: the phone's form pieces, then the action block
 /// with `secondary` beside the CTA, then — when `folded` carries the list
-/// (the collapsed band) — the saved list under it.
+/// (the collapsed band) — the saved list under it. `live` is `None` for the
+/// splash (the parity contract).
 pub fn tablet_form_pieces<S: 'static>(
     theme: &Theme,
-    live: &Live,
+    live: Option<&Live>,
     folded: Option<&[SavedServer]>,
     secondary: AnyView<S>,
 ) -> Vec<AnyView<S>> {
     let colors = Palette::from_theme(theme);
-    let wired = Some(live);
     let mut pieces = vec![
         badge::heading(theme, &colors),
-        fields::server_url_field(theme, &colors, wired),
-        fields::token_field(theme, &colors, wired),
-        trust::remember_row(theme, &colors, wired),
-        cta::connect_actions(theme, &colors, wired, secondary),
+        fields::server_url_field(theme, &colors, live),
+        fields::token_field(theme, &colors, live),
+        trust::remember_row(theme, &colors, live),
+        cta::connect_actions(theme, &colors, live, secondary),
     ];
     if let Some(saved) = folded {
         pieces.push(saved::tablet_saved_list(theme, &colors, saved, live));
