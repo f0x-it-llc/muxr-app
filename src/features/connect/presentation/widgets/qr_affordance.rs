@@ -112,11 +112,21 @@ pub(crate) fn qr_button<S: 'static>(
     pending: &Rc<Cell<bool>>,
     pro: &Arc<ProController>,
 ) -> AnyView<S> {
-    any(
-        button(FAB_LABEL, qr_press(overlays, controller, pending, pro))
-            .style(ButtonStyle::Secondary)
-            .label_alignment(Alignment::CENTER),
-    )
+    styled_qr_button(qr_press(overlays, controller, pending, pro))
+}
+
+/// [`qr_button`] with nothing behind the press: the splash's copy of the
+/// Tablet action, the same pixels with no handles to fire (the parity
+/// contract — the overlay forwards no input anyway).
+pub(crate) fn splash_qr_button<S: 'static>() -> AnyView<S> {
+    styled_qr_button(|_state: &mut S| {})
+}
+
+/// The Tablet QR action's one styling, shared by its live and splash copies.
+fn styled_qr_button<S: 'static>(on_press: impl Fn(&mut S) + 'static) -> AnyView<S> {
+    any(button(FAB_LABEL, on_press)
+        .style(ButtonStyle::Secondary)
+        .label_alignment(Alignment::CENTER))
 }
 
 /// The press both QR affordances fire: busy, the free-tier gate, then
