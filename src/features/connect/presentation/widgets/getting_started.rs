@@ -11,8 +11,8 @@
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, Theme, any,
-    button, inflexible, safe_area, text,
+    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, Theme,
+    WindowMetrics, any, button, inflexible, safe_area, text, use_context,
 };
 use frust_glyph::{glyph_card, glyph_dialog, show_glyph_dialog};
 
@@ -63,10 +63,20 @@ pub(crate) fn info_affordance<S: 'static>(
 ) -> AnyView<S> {
     let overlays = overlays.clone();
     let colors = Palette::from_theme(&active_theme());
+    // The window-control corner (iPadOS 26+ windowed); zero everywhere else.
+    let corner = use_context::<WindowMetrics>()
+        .map(|metrics| metrics.insets.corner_insets.top_right)
+        .filter(|corner| corner.height > 0.0);
+    let (right, top) = corner.map_or((0.0, 0.0), |c| (c.width, c.height));
     any(safe_area(Align(
         Alignment::TOP_RIGHT,
         Padding(
-            EdgeInsets::all(MARGIN),
+            EdgeInsets {
+                top: MARGIN + top,
+                right: MARGIN + right,
+                bottom: MARGIN,
+                left: MARGIN,
+            },
             icon_button(INFO_MARK, INFO_LABEL, move |_state: &mut S| {
                 open_getting_started(&overlays);
             })

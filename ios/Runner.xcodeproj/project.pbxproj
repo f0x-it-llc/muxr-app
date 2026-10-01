@@ -277,7 +277,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -316,7 +316,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -356,7 +356,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Profile;
 		};
@@ -529,7 +529,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr.dev";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Debug-Develop";
 		};
@@ -569,7 +569,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr.dev";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Profile-Develop";
 		};
@@ -608,7 +608,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr.dev";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Release-Develop";
 		};
@@ -647,7 +647,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Debug-Production";
 		};
@@ -687,7 +687,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Profile-Production";
 		};
@@ -726,7 +726,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.it.f0x.muxr";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Release-Production";
 		};

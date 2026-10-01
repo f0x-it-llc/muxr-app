@@ -21,6 +21,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
+use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
 use frust::{
     Align, Alignment, AnyView, Component, Get, GetUntracked, NavigatorController, Set, SizedBox,
     Stack, WindowMetrics, any, navigator, provide_context,
@@ -4286,6 +4287,34 @@ fn assert_qr_beside_the_cta(harness: &Harness) {
     );
     assert!(qr.x0 > cta.x1, "…trailing it: {qr:?} vs {cta:?}");
     assert!(qr.height() >= MIN_TAP_TARGET, "{qr:?}");
+}
+
+#[test]
+fn the_compact_info_button_clears_a_top_trailing_window_control_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let plain = sized(PHONE, Harness::mount);
+    let flush = plain.bounds("the info button", info_button);
+
+    let corner = CornerInsets {
+        top_right: CornerInset::new(100.0, 40.0),
+        ..CornerInsets::ZERO
+    };
+    let insets = WindowInsets::default().with_corner_insets(corner);
+    let metrics = WindowMetrics::new(PHONE, 1.0, insets);
+    let mut shifted = mount_with_metrics(Some(metrics));
+    shifted.surface = PHONE;
+    shifted.settle();
+    let moved = shifted.bounds("the info button", info_button);
+
+    assert!(
+        PHONE.width - moved.x1 >= PHONE.width - flush.x1 + 100.0 - EPSILON,
+        "100px further from the trailing edge: {moved:?} vs {flush:?}"
+    );
+    assert!(
+        moved.y0 >= flush.y0 + 40.0 - EPSILON,
+        "40px lower: {moved:?} vs {flush:?}"
+    );
 }
 
 #[test]
