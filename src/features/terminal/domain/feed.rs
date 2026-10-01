@@ -1,8 +1,7 @@
 //! [`TerminalFeed`] — the byte-level port between a terminal session and the grid that paints it.
 //!
-//! Not part of [`repositories::TerminalRepository`](super::repositories): that contract speaks the
-//! screen's model (workspaces, tabs, transcript) and answers once per call; this is a live,
-//! unstructured byte stream in both directions.
+//! Not part of [`repositories::TerminalRepository`](super::repositories), which speaks the screen's
+//! model and answers once per call: this is a live, unstructured byte stream both ways.
 //!
 //! - **Pull, not push.** The pump owns the cadence — the repaint cap (`presentation::term`'s
 //!   `REPAINT_HZ`) is the only defence against a signal write per received chunk.
@@ -17,9 +16,25 @@
 //! carries it as its own `ClientFrame.mouse` variant, zero-based in the grid `resize` establishes.
 //! `&self`, not `&mut self`: sending one needs no exclusive access.
 
-/// Wheel direction [`TerminalFeed::send_mouse`] sends — mirrors the wire's
-/// `MouseKind`, which also reserves press/drag values for later; nothing on this
-/// screen produces anything but a wheel notch yet.
+/// Where a live feed's link stands — the link strip's and rail header's vocabulary. Plain
+/// state the screen polls, not a signal; the reconnect machinery behind it is `data`'s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkStatus {
+    /// Constructed; no stream opened yet.
+    #[default]
+    Idle,
+    /// An attach attempt is in flight, or a backoff step is being waited out.
+    Reconnecting,
+    /// The stream is open and delivering.
+    Connected,
+    /// Parked: the schedule ran out or the credential expired; the screen's retry resets it.
+    Disconnected,
+    /// The server said the session exited — nothing will arrive again.
+    Closed,
+}
+
+/// Wheel direction [`TerminalFeed::send_mouse`] sends — mirrors the wire's `MouseKind`,
+/// which also reserves press/drag values; this screen only produces a wheel notch yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WheelKind {
     /// One wheel notch up.
@@ -28,9 +43,7 @@ pub enum WheelKind {
     Down,
 }
 
-/// A live, bidirectional stream of terminal bytes.
-///
-/// See the [module docs](self) for why the shape is what it is.
+/// A live, bidirectional stream of terminal bytes; the [module docs](self) explain its shape.
 pub trait TerminalFeed {
     /// Hand every byte that arrived (or came due, for a replay) since the last call to `sink`;
     /// returns the write count the pump gates its single repaint on (`0` = no repaint). Counts

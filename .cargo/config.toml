@@ -1,0 +1,14 @@
+# Rust build-output location for this Frust app. `frust-drive`'s
+# `build_dirs::BuildLayout::rust_dir()` names `build/rust` as the DEFAULT
+# location cargo's compiled artifacts land under; this `[build]` table is what
+# makes a bare `cargo build`/`cargo run` here actually write there. The path is
+# resolved relative to THIS file's directory (the project root), per Cargo's
+# own `[build] target-dir` semantics.
+#
+# A `CARGO_TARGET_DIR` environment variable or a `--target-dir` CLI flag both
+# still take precedence over this key and override it entirely. Every frust
+# tool that needs the REAL directory a build wrote to resolves it via `cargo
+# metadata`'s `target_directory` field rather than assuming `build/rust` — so
+# under an override, `build/rust` itself stays empty, which is expected.
+[build]
+target-dir = "build/rust"

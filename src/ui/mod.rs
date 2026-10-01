@@ -8,6 +8,7 @@
 //! | [`dialogs`] | Confirm / name-input modal helpers over `frust_glyph`'s dialog |
 //! | [`paint`] | Cross-feature paint-primitive tokens (hairline, full-pill radius, status-dot glow, dashed-border step) shared by every feature's hand-rolled chrome |
 //! | [`palette`] | The app's one theme-derived colour vocabulary, union of the four per-feature `Palette`s — not yet adopted |
+//! | [`recency`] | The one coarse age wording ("2 hours ago", "yesterday"), framework-free so a `domain` entity may call it |
 //! | [`sheet`] | The modal bottom-sheet adapter over `frust_glyph`'s own sheet (`show_sheet`, over this module's own [`SheetHandle`]) |
 //! | [`side_sheet`] | The modal side-sheet adapter over `frust_glyph`'s own side sheet (`show_side_sheet`, the x-axis sibling of [`sheet::show_sheet`], over the same [`SheetHandle`]) |
 //! | [`spacing`] | Named spacing tokens on the measured de-facto scale — not yet adopted |
@@ -23,6 +24,7 @@ pub mod backdrop;
 pub mod dialogs;
 pub mod paint;
 pub mod palette;
+pub mod recency;
 pub mod sheet;
 pub mod side_sheet;
 pub mod spacing;

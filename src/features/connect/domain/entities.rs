@@ -10,9 +10,11 @@
 //! mapping layer — a documented layering exception; see
 //! `docs/FEATURES_ARCHITECTURE.md`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
+
+use crate::ui::recency;
 
 pub use crate::connection::TrustMode;
 
@@ -58,45 +60,12 @@ impl SavedServer {
             return NEVER_USED.to_string();
         }
         let elapsed = (now_ms - self.last_used_ms).max(0);
-        let minutes = elapsed / MS_PER_MINUTE;
-        if minutes < 1 {
-            return "just now".to_string();
-        }
-        let hours = minutes / 60;
-        if hours < 1 {
-            return plural(minutes, "minute");
-        }
-        let days = hours / 24;
-        if days < 1 {
-            return plural(hours, "hour");
-        }
-        if days < 2 {
-            return "yesterday".to_string();
-        }
-        let weeks = days / 7;
-        if weeks < 1 {
-            return plural(days, "day");
-        }
-        if weeks < 2 {
-            return "last week".to_string();
-        }
-        plural(weeks, "week")
+        recency::age_label(Duration::from_millis(elapsed.unsigned_abs()))
     }
 }
 
 /// Printed for a row that has never recorded a login.
 const NEVER_USED: &str = "not used yet";
-
-const MS_PER_MINUTE: i64 = 60_000;
-
-/// `"1 hour ago"` / `"3 hours ago"` — the one place the plural `s` is decided.
-fn plural(count: i64, unit: &str) -> String {
-    if count == 1 {
-        format!("1 {unit} ago")
-    } else {
-        format!("{count} {unit}s ago")
-    }
-}
 
 /// Ms since Unix epoch; an unset clock yields `0`, read as never-used.
 pub fn epoch_millis() -> i64 {

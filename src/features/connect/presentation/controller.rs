@@ -15,6 +15,8 @@ use crate::features::connect::domain::entities::{
 };
 use crate::features::connect::domain::use_cases::parse_endpoint::{Endpoint, parse_endpoint};
 use crate::features::connect::domain::use_cases::{SaveCredential, UnlockCredential};
+use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
+use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::SharedAuthTokensRepository;
 use crate::features::settings::domain::entities::CreateTokenRequest;
 use crate::routes::Nav;
@@ -33,11 +35,50 @@ pub struct CredentialOffer {
 /// overlay host this controller does not.
 pub type OfferPrompt = Rc<dyn Fn(CredentialOffer)>;
 
+/// Which connect a blocked dial re-runs once the paywall's answer clears it.
+/// The entry point rather than the target: each one re-reads its own source
+/// (the form, the stashed pairing, the row that was tapped).
+#[derive(Clone)]
+pub enum ConnectRetry {
+    Manual,
+    Pairing,
+    Saved(SavedServer),
+}
+
+/// What the free-tier server rule refused: the remembered rows standing in the
+/// way, and the connect to re-run once they no longer do.
+pub struct ServerLimitBlock {
+    pub to_forget: Vec<SavedServer>,
+    pub retry: ConnectRetry,
+}
+
+/// Callback a connect entry point invokes *instead of dialing* when the
+/// free-tier rule blocks it; supplied by the screen, which owns the paywall
+/// this controller cannot raise. Lent per call, exactly like [`OfferPrompt`].
+pub type GatePrompt = Rc<dyn Fn(ServerLimitBlock)>;
+
 /// The trust posture a fresh form starts on — the safe one.
 const DEFAULT_TRUST_MODE: TrustMode = TrustMode::System;
 
+/// The port a bare host dials under [`TrustMode::System`]: a publicly trusted
+/// certificate implies a TLS-terminating edge in front of `muxrd`, which this
+/// app's own demo deployment fronts on the standard HTTPS port.
+const PUBLIC_CA_DEFAULT_PORT: u16 = 443;
+
+/// The port a bare host dials under [`TrustMode::NoVerification`] or
+/// [`TrustMode::Pinned`]: `muxrd`'s own default bind port
+/// (`DEFAULT_BIND = "127.0.0.1:50051"` in `muxr-core/muxrd/src/config.rs`),
+/// dialed directly with no TLS-terminating edge in front of it.
+const MUXRD_DEFAULT_PORT: u16 = 50051;
+
 /// Whether a fresh form offers to remember the server. `true`, matching the mock.
 const DEFAULT_REMEMBER: bool = true;
+
+/// What a host:port parse reject says under the SERVER URL field.
+pub const URL_ERROR_MESSAGE: &str = concat!(
+    "Enter host:port, for example dev.home.local:50051. A bare host uses :443 ",
+    "under Public domain (CA) and :50051 under Trust anyway.",
+);
 
 /// The prefix every token this device mints for itself carries, so a server's
 /// token list says which device asked for each one.
@@ -55,6 +96,9 @@ pub struct ConnectController {
     save_credential: SaveCredential,
     unlock_credential: UnlockCredential,
     connection: Arc<ConnectionController>,
+    /// The app-scoped entitlement view model every dial's free-tier verdict is
+    /// asked of. `Arc<ProController>`, so this controller stays `Send + Sync`.
+    pro: Arc<ProController>,
     saving_credential: AtomicBool,
     pub url: RwSignal<String>,
     pub token: RwSignal<Zeroizing<String>>,
@@ -62,6 +106,10 @@ pub struct ConnectController {
     pub remember: RwSignal<bool>,
     pub saved: RwSignal<Vec<SavedServer>>,
     pub invalid: RwSignal<bool>,
+    /// The inline line under the URL field: set by a validation reject (which
+    /// raises no toast), cleared by a URL edit, an applied scanned payload and
+    /// the start of a dial.
+    pub url_error: RwSignal<Option<String>>,
     pub pending_pairing: RwSignal<Option<PairingPayload>>,
     pub unlocking: RwSignal<bool>,
     pub resolving_offer: RwSignal<bool>,
@@ -73,6 +121,7 @@ impl ConnectController {
         credentials: Credentials,
         tokens: SharedAuthTokensRepository,
         connection: Arc<ConnectionController>,
+        pro: Arc<ProController>,
     ) -> Self {
         let controller = Self {
             core: ControllerCore::new(),
@@ -82,6 +131,7 @@ impl ConnectController {
             credentials,
             tokens,
             connection,
+            pro,
             saving_credential: AtomicBool::new(false),
             url: RwSignal::new(String::new()),
             token: RwSignal::new(Zeroizing::new(String::new())),
@@ -89,6 +139,7 @@ impl ConnectController {
             remember: RwSignal::new(DEFAULT_REMEMBER),
             saved: RwSignal::new(Vec::new()),
             invalid: RwSignal::new(false),
+            url_error: RwSignal::new(None),
             pending_pairing: RwSignal::new(None),
             unlocking: RwSignal::new(false),
             resolving_offer: RwSignal::new(false),
@@ -122,9 +173,28 @@ impl ConnectController {
     pub fn set_url(&self, url: String) {
         self.invalidate_pairing_unless_covering(&url);
         self.url.set(url);
-        if self.invalid.get_untracked() {
-            self.invalid.set(false);
+        if self.invalid.get_untracked() || self.url_error.get_untracked().is_some() {
+            self.clear_url_validation();
         }
+    }
+
+    /// The one writer that rejects the URL: lights [`Self::invalid`] and sets
+    /// the inline line together, so the two signals never disagree.
+    fn reject_url(&self, message: &str) {
+        self.invalid.set(true);
+        self.url_error.set(Some(message.to_owned()));
+    }
+
+    /// The counterpart of [`Self::reject_url`]: clears both signals.
+    fn clear_url_validation(&self) {
+        self.invalid.set(false);
+        self.url_error.set(None);
+    }
+
+    /// The install's current entitlement, tracked — what the saved rows' pro
+    /// tags are computed from.
+    pub fn entitlement(&self) -> Entitlement {
+        self.pro.entitlement.get()
     }
 
     /// Sets the token field. A hand-typed token drops a live pairing — the
@@ -138,7 +208,23 @@ impl ConnectController {
         self.token.set(Zeroizing::new(String::new()));
     }
 
+    /// Sets the trust mode. A manual choice that disagrees with a stashed
+    /// pairing's own posture ([`pairing_trust_mode`]) drops the pairing first
+    /// (`clear_pending_pairing`, which also resets the mode to the default)
+    /// and only then applies the chosen one — mirroring [`Self::set_token`]/
+    /// [`Self::set_url`]: without this, the selector's radio would move while
+    /// both CTAs kept dialing the pairing's own posture underneath it.
+    /// Re-selecting the pairing's own posture is not an override, so the
+    /// pairing survives it.
     pub fn select_trust_mode(&self, mode: TrustMode) {
+        let overrides_pairing = self.pending_pairing.with(|pending| {
+            pending
+                .as_ref()
+                .is_some_and(|payload| pairing_trust_mode(&payload.trust) != mode)
+        });
+        if overrides_pairing {
+            self.clear_pending_pairing();
+        }
         self.trust_mode.set(mode);
     }
 
@@ -205,6 +291,50 @@ impl ConnectController {
     }
 
     // -----------------------------------------------------------------------
+    // The free-tier server gate (`features::pro`'s rule, ahead of every dial)
+    // -----------------------------------------------------------------------
+
+    /// The free-tier verdict for `endpoint`, raised on `gate_prompt` when it
+    /// refuses. `true` means the caller must return without dialing: a blocked
+    /// connect saves, unlocks, writes and toasts nothing, since the only place
+    /// a new saved row is written is a successful login.
+    fn blocked(&self, endpoint: &str, retry: ConnectRetry, gate_prompt: &GatePrompt) -> bool {
+        match self.pro.verdict_for(&self.saved.get_untracked(), endpoint) {
+            ServerLimitVerdict::Allowed => false,
+            ServerLimitVerdict::Blocked { to_forget } => {
+                gate_prompt(ServerLimitBlock { to_forget, retry });
+                true
+            }
+        }
+    }
+
+    /// [`Self::blocked`] for a tapped saved row, taken by the screen *ahead* of
+    /// [`Self::recover_and_connect`] rather than inside it: the row's own
+    /// no-verification confirmation sits between the two and dials through the
+    /// ungated method, so the verdict has to be taken before that dialog is
+    /// raised (`widgets::pro_gate` owns the ordering). A row with no stored
+    /// credential only refills the form, so there is nothing to judge.
+    pub fn saved_row_blocked(&self, server: &SavedServer, gate_prompt: &GatePrompt) -> bool {
+        if !server.has_credential {
+            return false;
+        }
+        self.blocked(
+            &server.endpoint(),
+            ConnectRetry::Saved(server.clone()),
+            gate_prompt,
+        )
+    }
+
+    /// Where `endpoint` sits in [`Self::saved`] now. A retry holds the row it
+    /// was blocked on across a forget, which moves every later row's index.
+    pub fn saved_row_index(&self, endpoint: &str) -> Option<usize> {
+        self.saved
+            .get_untracked()
+            .iter()
+            .position(|server| server.endpoint() == endpoint)
+    }
+
+    // -----------------------------------------------------------------------
     // The pairing path (see the module docs)
     // -----------------------------------------------------------------------
 
@@ -215,7 +345,7 @@ impl ConnectController {
         self.url.set(pairing_endpoint(&payload));
         self.token.set(payload.token.clone());
         self.trust_mode.set(pairing_trust_mode(&payload.trust));
-        self.invalid.set(false);
+        self.clear_url_validation();
         self.pending_pairing.set(Some(payload));
     }
 
@@ -232,11 +362,11 @@ impl ConnectController {
 
     /// Drop the stashed pairing unless `url` still names its host and port.
     fn invalidate_pairing_unless_covering(&self, url: &str) {
+        let default_port = default_port_for(self.trust_mode.get_untracked());
         let covered = self.pending_pairing.with(|pending| match pending {
             None => true,
-            Some(payload) => {
-                parse_endpoint(url).is_ok_and(|endpoint| pairing_covers(payload, &endpoint))
-            }
+            Some(payload) => parse_endpoint(url, default_port)
+                .is_ok_and(|endpoint| pairing_covers(payload, &endpoint)),
         });
         if !covered {
             self.clear_pending_pairing();
@@ -248,19 +378,27 @@ impl ConnectController {
     /// the token and raises the paired credential's one save prompt (session
     /// already live, so a denial changes nothing); on failure, leaves the form
     /// untouched for a one-tap retry.
-    pub fn connect_from_pairing(self: &Arc<Self>, nav: &Nav) {
+    pub fn connect_from_pairing(self: &Arc<Self>, nav: &Nav, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
         }
         let Some(payload) = self.pending_pairing.get_untracked() else {
             return;
         };
-        self.invalid.set(false);
+        let target = pairing_target(&payload);
+        if self.blocked(
+            &target_endpoint(&target),
+            ConnectRetry::Pairing,
+            &gate_prompt,
+        ) {
+            // The payload stays stashed, so the retry dials this same code.
+            return;
+        }
+        self.clear_url_validation();
         let nav = nav.clone();
         // Both `Copy`; the closure may outlive this borrow (see `Self::connect`).
         let token = self.token;
         let pending = self.pending_pairing;
-        let target = pairing_target(&payload);
         let upsert = self.login_upsert(&target);
         let controller = Arc::clone(self);
         // Stored as scanned — never re-minted; the QR already is the credential.
@@ -288,7 +426,8 @@ impl ConnectController {
     /// matching stashed pairing supplies its own posture and fingerprint (never
     /// offerable).
     pub fn validated_target(&self) -> Result<ConnectTarget, AppFailure> {
-        let endpoint = parse_endpoint(&self.url.get_untracked())?;
+        let default_port = default_port_for(self.trust_mode.get_untracked());
+        let endpoint = parse_endpoint(&self.url.get_untracked(), default_port)?;
         let saved = self.saved.get_untracked();
         let known = saved
             .iter()
@@ -336,15 +475,25 @@ impl ConnectController {
     /// `nav`/`offer_prompt` are lent, not held: both wrap `Rc`, so are neither
     /// `Send` nor `Sync`, while this controller must be both.
     ///
-    /// A rejection toasts and lights [`Self::invalid`]; a refused dial toasts and
-    /// leaves the form as typed, for a one-tap retry. Neither navigates.
-    pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt) {
+    /// A rejection sets [`Self::url_error`] and lights [`Self::invalid`], with
+    /// no toast; a refused dial toasts and leaves the form as typed, for a
+    /// one-tap retry. Neither navigates.
+    pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
         }
         match self.validated_target() {
             Ok(target) => {
-                self.invalid.set(false);
+                if self.blocked(
+                    &target_endpoint(&target),
+                    ConnectRetry::Manual,
+                    &gate_prompt,
+                ) {
+                    // Before `invalid` too: a blocked connect writes nothing at
+                    // all, and the form is left exactly as it was typed.
+                    return;
+                }
+                self.clear_url_validation();
                 let nav = nav.clone();
                 // Token's job ends once the connection opens with it; captured by
                 // value (`RwSignal` is `Copy`) since the closure may outlive this borrow.
@@ -371,8 +520,19 @@ impl ConnectController {
                 });
             }
             Err(failure) => {
-                self.invalid.set(true);
-                app_toasts().raise(&failure);
+                // Intentional: every validation reject takes the inline line, not a
+                // toast (the plan's Phase 2 decision), superseding "Compact
+                // byte-for-byte" for this behaviour. `validated_target`'s only
+                // failure today is the URL parse, so the fixed message is honest.
+                // `parse_endpoint` only ever fails as `Network`; a second source
+                // (any other kind) must not silently reuse the fixed message.
+                debug_assert!(
+                    matches!(failure, AppFailure::Network(_)),
+                    "validated_target gained a failure source besides the URL parse"
+                );
+                // Kind only: `AppFailure`'s `Debug` echoes the typed URL.
+                log::debug!("connect: form rejected: {}", failure_kind(&failure));
+                self.reject_url(URL_ERROR_MESSAGE);
             }
         }
     }
@@ -566,7 +726,9 @@ impl ConnectController {
     /// the credential. Ignored while busy.
     ///
     /// Callers own the no-verification confirmation — by the time this runs it
-    /// was either unnecessary or already given.
+    /// was either unnecessary or already given — and, for the same reason, the
+    /// free-tier verdict: `widgets::pro_gate` takes it through
+    /// [`Self::saved_row_blocked`] before the confirmation it sits ahead of.
     pub fn recover_and_connect(self: &Arc<Self>, server: SavedServer, nav: &Nav) {
         if self.busy_untracked() {
             return;
@@ -668,6 +830,27 @@ impl ConnectController {
         let controller = Arc::clone(self);
         spawn_local(async move {
             controller.forget_saved(server).await;
+        });
+    }
+
+    /// Forgets `rows` in turn, then runs `then` on the UI thread — the paywall's
+    /// forget-and-connect, whose retry must not start until the last row is
+    /// actually gone (the verdict it re-takes reads the same list). Each row
+    /// goes through [`Self::forget_saved`], so the semantics are
+    /// [`Self::forget_saved_server`]'s exactly, failures included: a row whose
+    /// secret refuses to delete toasts and keeps its row, and the retry still
+    /// runs — where the gate simply refuses again.
+    pub fn forget_saved_servers_then(
+        self: &Arc<Self>,
+        rows: Vec<SavedServer>,
+        then: Box<dyn FnOnce()>,
+    ) {
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            for server in rows {
+                controller.forget_saved(server).await;
+            }
+            then();
         });
     }
 
@@ -805,6 +988,12 @@ impl LoginUpsert {
     }
 }
 
+/// The `host:port` a target dials — the same key a saved row is written under
+/// ([`SavedServer::endpoint`]) and the free-tier rule is judged in.
+fn target_endpoint(target: &ConnectTarget) -> String {
+    format!("{}:{}", target.host, target.port)
+}
+
 /// `muxr-mobile-<label>-<base36 timestamp>` — the stamp keeps names unique
 /// since the daemon addresses tokens by name.
 fn minted_token_name(label: &str) -> String {
@@ -857,6 +1046,19 @@ fn base36(value: i64) -> String {
 impl AsRef<ControllerCore<AppFailure>> for ConnectController {
     fn as_ref(&self) -> &ControllerCore<AppFailure> {
         &self.core
+    }
+}
+
+/// The port a bare (no `:port`) host dials under `mode`: a publicly trusted
+/// certificate implies a TLS-terminating edge on the HTTPS port
+/// ([`PUBLIC_CA_DEFAULT_PORT`]); a self-verified or pinned connection dials
+/// `muxrd` directly on its own default ([`MUXRD_DEFAULT_PORT`]). A scanned
+/// pairing always prefills `host:port` explicitly, so this default never
+/// applies to it.
+fn default_port_for(mode: TrustMode) -> u16 {
+    match mode {
+        TrustMode::System => PUBLIC_CA_DEFAULT_PORT,
+        TrustMode::NoVerification | TrustMode::Pinned => MUXRD_DEFAULT_PORT,
     }
 }
 
@@ -927,6 +1129,16 @@ fn pairing_target(payload: &PairingPayload) -> ConnectTarget {
     }
 }
 
+/// The failure's variant name alone — safe to log where its payload is not.
+fn failure_kind(failure: &AppFailure) -> &'static str {
+    match failure {
+        AppFailure::Network(_) => "Network",
+        AppFailure::Auth(_) => "Auth",
+        AppFailure::Storage(_) => "Storage",
+        AppFailure::Internal(_) => "Internal",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -962,8 +1174,11 @@ mod tests {
     #[test]
     fn a_pairing_covers_exactly_the_address_it_was_scanned_for() {
         let payload = pinned("192.168.1.100", 50051, "ab");
+        // Every prefill below always carries an explicit port, so the default
+        // passed here never applies — any [`TrustMode`] would do.
         let at = |raw: &str| {
-            parse_endpoint(raw).is_ok_and(|endpoint| pairing_covers(&payload, &endpoint))
+            parse_endpoint(raw, default_port_for(TrustMode::System))
+                .is_ok_and(|endpoint| pairing_covers(&payload, &endpoint))
         };
         assert!(at("192.168.1.100:50051"), "the prefilled text itself");
         assert!(!at("192.168.1.100:50052"), "another port");
@@ -973,7 +1188,12 @@ mod tests {
     #[test]
     fn a_bracketed_ipv6_prefill_still_covers_its_own_payload() {
         let payload = pinned("fd00::1", 50051, "ab");
-        let endpoint = parse_endpoint(&pairing_endpoint(&payload)).expect("host:port parses");
+        // Explicit port again — the default passed here is never reached.
+        let endpoint = parse_endpoint(
+            &pairing_endpoint(&payload),
+            default_port_for(TrustMode::System),
+        )
+        .expect("host:port parses");
         assert!(pairing_covers(&payload, &endpoint));
     }
 
@@ -1003,6 +1223,34 @@ mod tests {
         assert_eq!(
             target.label, "rig.example.com:50051",
             "a QR that named no label still labels its saved row with something"
+        );
+    }
+
+    #[test]
+    fn default_port_for_every_trust_mode() {
+        assert_eq!(default_port_for(TrustMode::System), PUBLIC_CA_DEFAULT_PORT);
+        assert_eq!(
+            default_port_for(TrustMode::NoVerification),
+            MUXRD_DEFAULT_PORT
+        );
+        assert_eq!(default_port_for(TrustMode::Pinned), MUXRD_DEFAULT_PORT);
+    }
+
+    #[test]
+    fn a_bare_host_validates_to_each_trust_modes_own_default_port() {
+        assert_eq!(
+            parse_endpoint("demo.muxr.app", default_port_for(TrustMode::System)),
+            Ok(Endpoint {
+                host: "demo.muxr.app".to_string(),
+                port: PUBLIC_CA_DEFAULT_PORT,
+            })
+        );
+        assert_eq!(
+            parse_endpoint("demo.muxr.app", default_port_for(TrustMode::NoVerification)),
+            Ok(Endpoint {
+                host: "demo.muxr.app".to_string(),
+                port: MUXRD_DEFAULT_PORT,
+            })
         );
     }
 }

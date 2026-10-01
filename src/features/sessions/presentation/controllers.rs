@@ -5,7 +5,9 @@ use clean_signals::{ControllerCore, NoParams, RunOptions};
 use frust::{GetUntracked, RwSignal, Set};
 
 use crate::failure::AppFailure;
-use crate::features::sessions::domain::entities::{RenameRequest, Session};
+use crate::features::sessions::domain::entities::{
+    CreateSessionParams, RenameRequest, Session, SessionBackend,
+};
 use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::sessions::domain::use_cases::{
     CreateSession, KillSession, ListSessions, RenameSession,
@@ -28,6 +30,9 @@ pub struct SessionsController {
     /// Signals when the first `refresh()` has settled (completed, whether
     /// success or failure), releasing the overlay that holds the loading rain.
     pub first_load_settled: RwSignal<bool>,
+    /// The Tablet detail's selection, keyed by [`Session::id`] — cleared by a
+    /// load whose set no longer carries that id.
+    pub selected: RwSignal<Option<String>>,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
@@ -45,6 +50,7 @@ impl SessionsController {
             sessions: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
             first_load_settled: RwSignal::new(false),
+            selected: RwSignal::new(None),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
@@ -66,6 +72,7 @@ impl SessionsController {
             return;
         }
         if let Ok(sessions) = result {
+            self.forget_vanished_selection(&sessions);
             self.sessions.set(sessions);
             self.loaded.set(true);
         }
@@ -83,10 +90,38 @@ impl SessionsController {
         self.refresh().await;
     }
 
-    pub async fn create(&self, name: String) {
+    /// Re-runs a failed first load; its success sets `loaded`, the gate
+    /// [`take_poll_tick`](Self::take_poll_tick) reads, so the poll re-arms.
+    pub async fn retry_first_load(&self) {
+        if !self.loaded.get_untracked() {
+            self.refresh().await;
+        }
+    }
+
+    /// Points the Tablet detail at `id`. **Unchecked**: an id that is not in
+    /// the loaded set is stored as given (the detail pane tolerates an unknown
+    /// id and shows its empty state), and the next refresh forgets it.
+    pub fn select(&self, id: &str) {
+        if self.selected.get_untracked().as_deref() != Some(id) {
+            self.selected.set(Some(id.to_string()));
+        }
+    }
+
+    fn forget_vanished_selection(&self, sessions: &[Session]) {
+        let vanished = self
+            .selected
+            .get_untracked()
+            .is_some_and(|id| !sessions.iter().any(|s| s.id == id));
+        if vanished {
+            self.selected.set(None);
+        }
+    }
+
+    pub async fn create(&self, name: String, backend: SessionBackend) {
+        let params = CreateSessionParams { name, backend };
         if self
             .core
-            .run(&self.create, name, RunOptions::default())
+            .run(&self.create, params, RunOptions::default())
             .await
             .is_ok()
         {
@@ -95,16 +130,26 @@ impl SessionsController {
     }
 
     pub async fn rename(&self, id: String, name: String) {
-        if self
+        let was_selected = self.selected.get_untracked().as_deref() == Some(id.as_str());
+        let old_id = id.clone();
+        let renamed = self
             .core
             .run(
                 &self.rename,
                 RenameRequest { id, name },
                 RunOptions::default(),
             )
-            .await
-            .is_ok()
-        {
+            .await;
+        if let Ok(renamed) = renamed {
+            // The repository mints the id from the name (`<backend>:<name>`),
+            // so a rename moves it: follow it, or the refresh would find the
+            // old id gone and clear the selection. Only while the selection
+            // still holds the old id (or a refresh in flight cleared it as
+            // vanished): one the user moved elsewhere stays put.
+            let current = self.selected.get_untracked();
+            if was_selected && (current.is_none() || current.as_deref() == Some(old_id.as_str())) {
+                self.selected.set(Some(renamed.id));
+            }
             self.refresh().await;
         }
     }
@@ -181,8 +226,9 @@ impl AsRef<ControllerCore<AppFailure>> for SessionsController {
 mod tests {
     use super::*;
     use crate::features::sessions::data::repositories::MockSessionsRepository;
+    use crate::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
     use crate::features::sessions::domain::entities::{
-        LayoutSummary, SessionBackend, SessionStatus, ThirdMetric,
+        CreateSessionParams, LayoutSummary, SessionStatus, ThirdMetric,
     };
 
     /// How many sessions the mock repository seeds (the redesign's three
@@ -223,7 +269,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        block_on(c.create("staging".to_string()));
+        block_on(c.create("staging".to_string(), SessionBackend::Zellij));
 
         let names: Vec<String> = c
             .sessions
@@ -244,7 +290,7 @@ mod tests {
         block_on(c.rename(id.clone(), "dev-2".to_string()));
 
         assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
-        assert_eq!(c.session(&id).map(|s| s.name), Some("dev-2".to_string()));
+        assert!(c.sessions.get_untracked().iter().any(|s| s.name == "dev-2"));
     }
 
     #[test]
@@ -320,6 +366,122 @@ mod tests {
         assert!(c.is_polling());
     }
 
+    #[test]
+    fn a_selection_follows_a_rename_that_changes_the_id() {
+        let c = controller();
+        block_on(c.refresh());
+        let id = c.sessions.get_untracked()[0].id.clone();
+        c.select(&id);
+
+        block_on(c.rename(id.clone(), "dev-2".to_string()));
+        let renamed = c.selected.get_untracked().expect("still selected");
+        assert_ne!(renamed, id, "the mock mints the id from the new name");
+        assert_eq!(
+            c.session(&renamed).map(|s| s.name),
+            Some("dev-2".to_string())
+        );
+
+        block_on(c.refresh());
+        assert_eq!(c.selected.get_untracked(), Some(renamed));
+    }
+
+    #[test]
+    fn a_selection_made_during_a_rename_is_not_pulled_back() {
+        let c = controller();
+        block_on(c.refresh());
+        let sessions = c.sessions.get_untracked();
+        let (a, b) = (sessions[0].id.clone(), sessions[1].id.clone());
+        c.select(&a);
+
+        block_on(async {
+            tokio::join!(c.rename(a.clone(), "dev-2".to_string()), async {
+                c.select(&b);
+            });
+        });
+
+        assert_eq!(c.selected.get_untracked(), Some(b));
+    }
+
+    #[test]
+    fn renaming_another_session_leaves_the_selection_alone() {
+        let c = controller();
+        block_on(c.refresh());
+        let sessions = c.sessions.get_untracked();
+        c.select(&sessions[0].id);
+
+        block_on(c.rename(sessions[1].id.clone(), "other".to_string()));
+
+        assert_eq!(c.selected.get_untracked(), Some(sessions[0].id.clone()));
+    }
+
+    #[test]
+    fn a_selection_survives_a_failed_refresh() {
+        let c = SessionsController::new(Arc::new(FailOnceSessionsRepository::default()));
+        c.select(SEEDED_DEV_ID);
+
+        block_on(c.refresh());
+        assert!(!c.loaded.get_untracked(), "the first load failed");
+        assert_eq!(c.selected.get_untracked().as_deref(), Some(SEEDED_DEV_ID));
+
+        block_on(c.refresh());
+        assert_eq!(c.selected.get_untracked().as_deref(), Some(SEEDED_DEV_ID));
+    }
+
+    #[test]
+    fn killing_the_selected_session_clears_the_selection() {
+        let c = controller();
+        block_on(c.refresh());
+        let id = c.sessions.get_untracked()[1].id.clone();
+        c.select(&id);
+
+        block_on(c.kill(id));
+
+        assert_eq!(c.selected.get_untracked(), None);
+    }
+
+    #[test]
+    fn a_retry_after_a_failed_first_load_rearms_the_poll() {
+        let c = SessionsController::new(Arc::new(FailOnceSessionsRepository::default()));
+        block_on(c.refresh());
+        assert!(!c.take_poll_tick(), "no poll after a failed first load");
+
+        block_on(c.retry_first_load());
+
+        assert!(c.loaded.get_untracked());
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
+        assert!(c.take_poll_tick(), "the successful retry re-arms the poll");
+    }
+
+    /// Fails its first `list_sessions`, then answers like the seeded mock.
+    #[derive(Default)]
+    struct FailOnceSessionsRepository {
+        calls: AtomicUsize,
+        inner: MockSessionsRepository,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+    impl SessionsRepository for FailOnceSessionsRepository {
+        async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AppFailure::Network("first load".to_string()));
+            }
+            self.inner.list_sessions().await
+        }
+
+        async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
+            self.inner.create_session(params).await
+        }
+
+        async fn rename_session(&self, request: RenameRequest) -> Result<Session, AppFailure> {
+            self.inner.rename_session(request).await
+        }
+
+        async fn kill_session(&self, id: String) -> Result<(), AppFailure> {
+            self.inner.kill_session(id).await
+        }
+    }
+
     /// A test repository whose list_sessions returns an error.
     struct FailingSessionsRepository;
 
@@ -330,7 +492,10 @@ mod tests {
             Err(AppFailure::Network("simulated network error".to_string()))
         }
 
-        async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+        async fn create_session(
+            &self,
+            _params: CreateSessionParams,
+        ) -> Result<Session, AppFailure> {
             Err(AppFailure::Internal("not implemented".to_string()))
         }
 
@@ -416,11 +581,16 @@ mod tests {
             name: format!("call-{call}"),
             status: SessionStatus::Running,
             backend: SessionBackend::Zellij,
+            age_secs: 0,
+            has_bell: false,
+            is_current: false,
             layout: LayoutSummary {
                 tabs: 0,
                 panes: 0,
                 third: ThirdMetric::Clients(0),
                 preview: Vec::new(),
+                tabs_detail: Vec::new(),
+                space: None,
             },
         }
     }
@@ -437,7 +607,10 @@ mod tests {
             Ok(vec![gated_session(call)])
         }
 
-        async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+        async fn create_session(
+            &self,
+            _params: CreateSessionParams,
+        ) -> Result<Session, AppFailure> {
             Err(AppFailure::Internal("not implemented".to_string()))
         }
 

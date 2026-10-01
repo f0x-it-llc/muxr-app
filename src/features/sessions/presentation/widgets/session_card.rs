@@ -1,21 +1,25 @@
 //! `.sess-card` — one session card: the whole box is the control.
 //!
-//! **A tap attaches; a long-press opens the management sheet** — the
-//! redesign draws no per-card buttons. [`GestureDetector`]'s long-press
-//! fires on the first pointer event after the 500ms threshold and never
-//! also fires the tap, which is what makes "long-press must not attach" a
-//! property of the framework rather than a guard written here.
+//! **A tap attaches (on Tablet it selects instead); a long-press opens the
+//! management sheet** — the redesign draws no per-card buttons.
+//! [`GestureDetector`]'s long-press fires on the first pointer event after the
+//! 500ms threshold and never also fires the tap, which is what makes
+//! "long-press must not attach" a property of the framework rather than a
+//! guard written here.
 //!
 //! Running and idle differ in four places: the 2px `success` left accent
 //! (absent when idle, though its width is still reserved), the avatar's
 //! wash and ink, the status chip, and — idle only — a whole-card dim to
-//! [`IDLE_OPACITY`] plus no `.sess-panes` row at all.
+//! [`IDLE_OPACITY`] plus no `.sess-panes` row at all. A bell mark follows the
+//! name and an accent `● this device` span closes the meta row on every
+//! class; a Tablet selection repaints the card in the amber selection wash.
 
 use frust::authoring::Color;
+use frust::icons::NOTIFICATIONS;
 use frust::motion::AnimatedOpacity;
 use frust::{
     AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector, Padding,
-    SizedBox, View, any, container, flexible, inflexible, text,
+    SizedBox, View, any, container, flexible, icon, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, avatar, badge};
 
@@ -52,6 +56,19 @@ const PILL_PAD_Y: f64 = spacing::SM;
 pub(super) const IDLE_OPACITY: f64 = 0.55;
 /// How many `.pane-pill` previews a card shows (the redesign draws two).
 const MAX_PREVIEW_PILLS: usize = 2;
+/// The bell mark after a ringing session's name.
+pub(super) const BELL_ICON: f64 = 14.0;
+/// The meta span a session attached from this device carries.
+const THIS_DEVICE: &str = "\u{25cf} this device";
+
+/// How a card is placed: Compact's list, or the Tablet list column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::features::sessions::presentation) enum CardMode {
+    /// A tap attaches.
+    Compact,
+    /// A tap selects; `previews` is off on the collapsed band.
+    Tablet { selected: bool, previews: bool },
+}
 
 /// `.sess-card`'s surface (`fill`/`border`/`radius`) plus, for a live
 /// session, the 2px `success` left status accent — an accent-filled
@@ -68,6 +85,11 @@ const MAX_PREVIEW_PILLS: usize = 2;
 /// solid transparent}` — so an idle card's content still starts exactly
 /// where a running card's does and the list's left edge never jogs by 2px
 /// row to row.
+///
+/// `fill` must be opaque: the inner surface is all that hides the accent's
+/// solid colour, so a translucent wash here (the selected card once used
+/// `amber_faint`) lets the accent through and the whole card reads as a
+/// block of amber — hence the palette's opaque `amber_wash`.
 fn accented_card<State: 'static>(
     body: impl View<State>,
     fill: Color,
@@ -99,6 +121,7 @@ fn accented_card<State: 'static>(
 pub(in crate::features::sessions::presentation) fn session_card(
     session: &Session,
     colors: &Palette,
+    mode: CardMode,
 ) -> AnyView<SessionsState> {
     let theme = active_theme();
     let live = session.status.is_live();
@@ -108,7 +131,7 @@ pub(in crate::features::sessions::presentation) fn session_card(
         (colors.raised, colors.fg_muted)
     };
 
-    let top = row(vec![
+    let mut top = vec![
         inflexible(
             avatar(session.initial())
                 .size(AVATAR_SIZE)
@@ -123,6 +146,12 @@ pub(in crate::features::sessions::presentation) fn session_card(
             1,
             text(session.name.clone()).style(inked(&theme.type_scale.label_large, colors.fg)),
         ),
+    ];
+    if session.has_bell {
+        top.push(h_gap(PILL_GAP));
+        top.push(inflexible(bell_mark(colors)));
+    }
+    top.extend([
         h_gap(PILL_GAP),
         inflexible(badge(
             session.status.label(),
@@ -131,38 +160,62 @@ pub(in crate::features::sessions::presentation) fn session_card(
         h_gap(PILL_GAP),
         inflexible(badge(session.backend.label(), BadgeVariant::Neutral)),
     ]);
+    let top = row(top);
 
     let meta_style = inked(&theme.type_scale.label_small, colors.fg_dim);
-    let meta = row(vec![
+    let mut meta = vec![
         inflexible(text(session.layout.panes_label()).style(meta_style.clone())),
         h_gap(META_GAP),
         inflexible(text(session.layout.tabs_label()).style(meta_style.clone())),
         h_gap(META_GAP),
         inflexible(text(session.layout.third.label()).style(meta_style)),
-        spacer(),
-    ]);
+    ];
+    if session.is_current {
+        meta.push(h_gap(META_GAP));
+        meta.push(inflexible(
+            text(THIS_DEVICE).style(inked(&theme.type_scale.label_small, colors.amber)),
+        ));
+    }
+    meta.push(spacer());
+    let meta = row(meta);
 
+    let (selected, previews) = match mode {
+        CardMode::Compact => (false, true),
+        CardMode::Tablet { selected, previews } => (selected, previews),
+    };
     let mut lines = vec![any(top), any(meta)];
     // An idle card draws no pills at all, so liveness gates the row as well
     // as the preview being non-empty.
-    if live && !session.layout.preview.is_empty() {
+    if live && previews && !session.layout.preview.is_empty() {
         lines.push(any(pane_pills(&session.layout.preview, colors)));
     }
     let body = FlexView::new(Axis::Vertical, interleave(lines, CARD_LINE_GAP))
         .cross_axis(CrossAxisAlignment::Stretch);
 
+    let (fill, border, accent) = if selected {
+        (colors.amber_wash, colors.amber_border, Some(colors.amber))
+    } else {
+        (
+            colors.surface,
+            colors.outline,
+            live.then_some(colors.success),
+        )
+    };
     let card = accented_card(
         Padding(EdgeInsets::all(CARD_PAD), body),
-        colors.surface,
+        fill,
         theme.shape.medium,
-        colors.outline,
-        live.then_some(colors.success),
+        border,
+        accent,
     );
 
-    let attach_id = session.id.clone();
+    let tap_id = session.id.clone();
     let manage_id = session.id.clone();
     let pressable = GestureDetector(card)
-        .on_tap(move |state: &mut SessionsState| pages::attach(state, &attach_id))
+        .on_tap(move |state: &mut SessionsState| match mode {
+            CardMode::Compact => pages::attach(state, &tap_id),
+            CardMode::Tablet { .. } => pages::select(state, &tap_id),
+        })
         .on_long_press(move |state: &mut SessionsState| {
             pages::open_manage_sheet(state, &manage_id)
         });
@@ -178,9 +231,14 @@ pub(in crate::features::sessions::presentation) fn session_card(
     }
 }
 
+/// The warning-toned bell a ringing session or tab carries.
+pub(super) fn bell_mark(colors: &Palette) -> AnyView<SessionsState> {
+    any(icon(NOTIFICATIONS).size(BELL_ICON).color(colors.warning))
+}
+
 /// The hue a status chip prints in — `success` for the live one, a neutral
 /// wash for everything else. Never amber: a chip is not a selection.
-fn status_variant(status: SessionStatus) -> BadgeVariant {
+pub(super) fn status_variant(status: SessionStatus) -> BadgeVariant {
     if status.is_live() {
         BadgeVariant::Success
     } else {

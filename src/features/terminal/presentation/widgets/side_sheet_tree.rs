@@ -19,28 +19,41 @@
 //! **Accordion semantics belong to the controller** — at most one space and one
 //! tab expanded. This module renders what the signals say and never flips them.
 //!
+//! **Two mounts, one tree** ([`TreeMode`]): the phone's modal sheet, and the
+//! Tablet's docked rail, which adds the float/exited/bell marks and a per-row
+//! ⋯ overflow button opening a Glyph menu. App widgets get no hover state, so
+//! that button is always shown, in the dim ink, and takes the pane's cwd band.
+//!
 //! Two deliberate divergences from the design mock: its `:hover` accents have no
 //! touch counterpart, so an add row keeps its dim dashed edge throughout (the
 //! `status_row` precedent); and the reveal band's own top/bottom padding is not
 //! expressible through [`RevealGuide`] — an inset child would join the cascade —
 //! so only its leading indent is transcribed.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::text::{FontStyle, TextOverflow};
-use frust::authoring::{Color, DashPattern, View};
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, DashPattern, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, View, Widget,
+    build_child, rebuild_child, route_event_single, teardown_child,
+};
 use frust::{
-    Align, Alignment, AnyView, BorderStyle, EdgeInsets, FlexChild, GestureDetector, IconSource,
-    Padding, SizedBox, Theme, any, container, flexible, icon, inflexible, text,
+    Align, Alignment, AnyView, BorderStyle, EdgeInsets, FlexChild, FlexView, GestureDetector,
+    IconSource, Padding, SizedBox, Theme, any, container, flexible, icon, icons, inflexible, text,
 };
 use frust_glyph::motion::GlyphStagger;
-use frust_glyph::{RevealGuide, glyph_chevron, glyph_reveal};
+use frust_glyph::{
+    BadgeVariant, MenuEntry, RevealGuide, badge, glyph_chevron, glyph_reveal, menu_item,
+};
 
 use crate::features::terminal::domain::entities::{PaneEntry, Space, TabEntry};
 use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
+use crate::ui::topbar::icon_button;
 
 use super::util::{column, h_gap, row, sized, v_gap};
 
@@ -132,7 +145,7 @@ const PANES_GUIDE: RevealGuide = RevealGuide {
 /// The space row's leading mark — the mock's `◆` as a vector, since a font glyph
 /// is never chrome (`crate::ui::topbar`'s rule). Drawn on the icon catalog's own
 /// 24px design box so it scales like every other mark this app draws.
-const SPACE_DIAMOND: IconSource = IconSource {
+pub(crate) const SPACE_DIAMOND: IconSource = IconSource {
     d: "M 12 2 L 22 12 L 12 22 L 2 12 Z",
     design: 24.0,
 };
@@ -145,6 +158,89 @@ const ADD_TAB_LABEL: &str = "new tab";
 const ADD_PANE_LABEL: &str = "new pane";
 /// `.empty-hint` — a space that has been read and has nothing in it.
 const EMPTY_HINT: &str = "no tabs yet";
+
+/// `.r-act{width:28px;height:28px}` and its 14px mark.
+const OVERFLOW_BOX: f64 = 28.0;
+const OVERFLOW_MARK: f64 = 14.0;
+/// `.tab-row .bell .ic{width:13px}`.
+const BELL_MARK: f64 = 13.0;
+const BELL_LABEL: &str = "bell";
+const FLOAT_MARK: &str = "float";
+const EXITED_MARK: &str = "exited";
+
+/// Where the tree is mounted — see the [module docs](self).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TreeMode {
+    /// The phone's modal side sheet.
+    Sheet,
+    /// The Tablet's docked rail: marks and overflow menus on top of the sheet's rows.
+    Docked,
+}
+
+/// The row an overflow menu was opened on, carrying what its entries act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowTarget {
+    Space {
+        id: String,
+        name: String,
+    },
+    Tab {
+        path: TabPath,
+        tab_id: u64,
+        label: String,
+    },
+    Pane {
+        id: u32,
+        is_plugin: bool,
+        title: String,
+    },
+}
+
+/// What an overflow menu entry asks for — [`row_menu_choice`] maps a picked index here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowMenuChoice {
+    /// The row's own rename dialog.
+    Rename,
+    /// A tab under a space, or a pane under a tab.
+    NewHere,
+}
+
+/// The overflow menu's one table for `target`: each entry beside the choice it
+/// answers — rename everywhere, plus a create under a space or tab.
+fn row_menu_table(target: &RowTarget) -> Vec<(Option<RowMenuChoice>, MenuEntry)> {
+    let (rename, create) = match target {
+        RowTarget::Space { .. } => ("Rename space", Some("New tab here")),
+        RowTarget::Tab { .. } => ("Rename tab", Some("New pane here")),
+        RowTarget::Pane { .. } => ("Rename pane", None),
+    };
+    let mut entries = vec![(
+        Some(RowMenuChoice::Rename),
+        menu_item(rename).icon(icons::EDIT),
+    )];
+    entries.extend(create.map(|label| {
+        (
+            Some(RowMenuChoice::NewHere),
+            menu_item(label).icon(icons::ADD),
+        )
+    }));
+    entries
+}
+
+/// The overflow menu for `target`, straight from [`row_menu_table`].
+pub(crate) fn row_menu(target: &RowTarget) -> Vec<MenuEntry> {
+    row_menu_table(target)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// The [`RowMenuChoice`] behind entry `index` of [`row_menu`]`(target)`, read
+/// back through the same table.
+pub(crate) fn row_menu_choice(target: &RowTarget, index: usize) -> Option<RowMenuChoice> {
+    row_menu_table(target)
+        .get(index)
+        .and_then(|(choice, _)| *choice)
+}
 
 /// Which tab a pane row belongs to — the identifiers a commit needs, resolved
 /// once per row rather than re-derived inside a press handler.
@@ -214,6 +310,8 @@ pub(crate) type PressRenamePane<State> = Rc<dyn Fn(&mut State, u32, bool, &str)>
 pub(crate) type PressNewTab<State> = Rc<dyn Fn(&mut State, Option<&str>)>;
 /// A pane create, in a named tab.
 pub(crate) type PressNewPane<State> = Rc<dyn Fn(&mut State, &TabPath)>;
+/// An overflow button's press: its window rect (the menu's anchor) and its row.
+pub(crate) type PressMenu<State> = Rc<dyn Fn(&mut State, Rect, &RowTarget)>;
 
 /// Every gesture the tree can fire. The three browse callbacks are always
 /// wired; [`mutations`](Self::mutations) carries the rest.
@@ -236,6 +334,8 @@ pub(crate) struct TreeMutations<State: 'static> {
     pub on_new_space: Press<State>,
     pub on_new_tab: PressNewTab<State>,
     pub on_new_pane: PressNewPane<State>,
+    /// The docked rail's overflow menus; `None` draws no overflow button.
+    pub on_menu: Option<PressMenu<State>>,
 }
 
 /// The theme and palette, resolved once for a whole tree build rather than per
@@ -243,6 +343,7 @@ pub(crate) struct TreeMutations<State: 'static> {
 struct Tones<'a> {
     theme: &'a Theme,
     colors: Palette,
+    mode: TreeMode,
 }
 
 /// One level's box — the four things the three row shapes differ in.
@@ -266,11 +367,13 @@ struct RowLabel<'a> {
 pub(crate) fn tree_body<State: 'static>(
     data: &TreeData<'_>,
     actions: &TreeActions<State>,
+    mode: TreeMode,
 ) -> AnyView<State> {
     let theme = active_theme();
     let tones = Tones {
         colors: Palette::from_theme(&theme),
         theme: &theme,
+        mode,
     };
     let mut children: Vec<AnyView<State>> = Vec::new();
 
@@ -418,7 +521,7 @@ fn tab_group<State: 'static>(
         space_id: space_id.map(str::to_string),
         tab_key: tab.key.clone(),
     };
-    let head = tab_row(tab, promoted, expanded, tones, actions);
+    let head = tab_row(tab, &path, promoted, expanded, tones, actions);
 
     let mut kids: Vec<AnyView<State>> = tab
         .panes
@@ -463,7 +566,7 @@ fn space_row<State: 'static>(
                 .color(tones.colors.amber),
         )),
     );
-    let head = disclosure_row(
+    let content = disclosure_row(
         mark,
         RowLabel {
             name: &space.name,
@@ -471,8 +574,8 @@ fn space_row<State: 'static>(
             ink: tones.colors.fg,
             meta: tab_count.map(|count| count_label(count, "tab")),
         },
+        None,
         expanded,
-        card_box(expanded, false, tones),
         tones,
     );
 
@@ -483,10 +586,16 @@ fn space_row<State: 'static>(
         let (id, name) = (space.id.clone(), space.name.clone());
         Rc::new(move |state: &mut State| rename(state, &id, &name)) as Press<State>
     });
-    pressable(
-        head,
+    let target = RowTarget::Space {
+        id: space.id.clone(),
+        name: space.name.clone(),
+    };
+    boxed_row(
+        content,
+        card_box(expanded, false, tones),
         move |state: &mut State| toggle(state, &id, expanded),
         hold,
+        overflow(target, actions, tones),
     )
 }
 
@@ -494,6 +603,7 @@ fn space_row<State: 'static>(
 /// browses (never commits); a hold renames.
 fn tab_row<State: 'static>(
     tab: &TabEntry,
+    path: &TabPath,
     promoted: bool,
     expanded: bool,
     tones: &Tones<'_>,
@@ -507,7 +617,7 @@ fn tab_row<State: 'static>(
     } else {
         (tones.colors.raised, tones.colors.fg_dim)
     };
-    let badge = any(container(
+    let index_badge = any(container(
         SizedBox::<State>(Some(TAB_BADGE_BOX), Some(TAB_BADGE_BOX)).child(Align(
             Alignment::CENTER,
             text(tab.index.to_string()).style(sized(
@@ -538,8 +648,14 @@ fn tab_row<State: 'static>(
             pad: TAB_PAD,
         }
     };
-    let head = disclosure_row(
-        badge,
+    let bell = (tones.mode == TreeMode::Docked && tab.has_bell).then(|| {
+        any(icon(icons::NOTIFICATIONS)
+            .size(BELL_MARK)
+            .color(tones.colors.warning)
+            .label(BELL_LABEL))
+    });
+    let content = disclosure_row(
+        index_badge,
         RowLabel {
             name: &tab.label,
             size: if promoted {
@@ -552,8 +668,8 @@ fn tab_row<State: 'static>(
             // same trailing count — of what it actually holds.
             meta: promoted.then(|| count_label(tab.panes.len(), "pane")),
         },
+        bell,
         expanded,
-        boxed,
         tones,
     );
 
@@ -564,10 +680,17 @@ fn tab_row<State: 'static>(
         let (id, label) = (tab.tab_id, tab.label.clone());
         Rc::new(move |state: &mut State| rename(state, id, &label)) as Press<State>
     });
-    pressable(
-        head,
+    let target = RowTarget::Tab {
+        path: path.clone(),
+        tab_id: tab.tab_id,
+        label: tab.label.clone(),
+    };
+    boxed_row(
+        content,
+        boxed,
         move |state: &mut State| toggle(state, &key, expanded),
         hold,
+        overflow(target, actions, tones),
     )
 }
 
@@ -614,8 +737,18 @@ fn pane_row<State: 'static>(
                 .overflow(TextOverflow::Ellipsis),
         ),
     ];
-    // A backend that reports no cwd leaves no gutter reserved for one.
-    if !pane.cwd.is_empty() {
+    let docked = tones.mode == TreeMode::Docked;
+    if docked && pane.floating {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(badge(FLOAT_MARK, BadgeVariant::Info)));
+    }
+    if docked && pane.exited {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(badge(EXITED_MARK, BadgeVariant::Neutral)));
+    }
+    // A backend that reports no cwd leaves no gutter reserved for one; the rail
+    // gives the band to the overflow button (`.pane-row:hover .r-path`).
+    if !pane.cwd.is_empty() && !docked {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(
             SizedBox::<State>(Some(PATH_WIDTH), None).child(
@@ -639,10 +772,12 @@ fn pane_row<State: 'static>(
         ));
     }
 
-    let head = any(container(Padding(PANE_PAD, row(children)))
-        .fill(fill)
-        .radius(RADIUS_FULL)
-        .border(border, HAIRLINE));
+    let boxed = RowBox {
+        fill,
+        border,
+        radius: RADIUS_FULL,
+        pad: PANE_PAD,
+    };
 
     let commit = Rc::clone(&actions.on_pane);
     let (target, id, is_plugin) = (path.clone(), pane.id, pane.is_plugin);
@@ -651,22 +786,29 @@ fn pane_row<State: 'static>(
         let title = pane.title.clone();
         Rc::new(move |state: &mut State| rename(state, id, is_plugin, &title)) as Press<State>
     });
-    pressable(
-        head,
+    let menu_target = RowTarget::Pane {
+        id,
+        is_plugin,
+        title: pane.title.clone(),
+    };
+    boxed_row(
+        row(children),
+        boxed,
         move |state: &mut State| commit(state, &target, id, is_plugin),
         hold,
+        overflow(menu_target, actions, tones),
     )
 }
 
-/// The row body every disclosure level shares: leading mark, ellipsized name,
-/// optional trailing count, chevron.
+/// The row content every disclosure level shares: leading mark, ellipsized name,
+/// an optional mark after it, the optional trailing count, chevron.
 fn disclosure_row<State: 'static>(
     leading: AnyView<State>,
     label: RowLabel<'_>,
+    mark: Option<AnyView<State>>,
     expanded: bool,
-    boxed: RowBox,
     tones: &Tones<'_>,
-) -> AnyView<State> {
+) -> FlexView<State> {
     let mut children: Vec<FlexChild<State>> = vec![
         inflexible(leading),
         h_gap(ROW_GAP),
@@ -682,6 +824,10 @@ fn disclosure_row<State: 'static>(
                 .overflow(TextOverflow::Ellipsis),
         ),
     ];
+    if let Some(mark) = mark {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(mark));
+    }
     if let Some(meta) = label.meta {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(text(meta).style(sized(
@@ -692,11 +838,126 @@ fn disclosure_row<State: 'static>(
     }
     children.push(h_gap(ROW_GAP));
     children.push(inflexible(glyph_chevron(expanded)));
+    row(children)
+}
 
-    any(container(Padding(boxed.pad, row(children)))
-        .fill(boxed.fill)
-        .radius(boxed.radius)
-        .border(boxed.border, HAIRLINE))
+/// A row's `content` in its level's box, with its gestures: the whole box presses
+/// on the sheet; with an overflow button, the content alone does, so the button's
+/// own press never also taps the row it sits in.
+fn boxed_row<State: 'static>(
+    content: FlexView<State>,
+    boxed: RowBox,
+    on_tap: impl Fn(&mut State) + 'static,
+    on_hold: Option<Press<State>>,
+    overflow: Option<AnyView<State>>,
+) -> AnyView<State> {
+    let frame = |child: FlexView<State>| {
+        any(container(Padding(boxed.pad, child))
+            .fill(boxed.fill)
+            .radius(boxed.radius)
+            .border(boxed.border, HAIRLINE))
+    };
+    match overflow {
+        None => pressable(frame(content), on_tap, on_hold),
+        Some(button) => frame(row(vec![
+            flexible(1, pressable(content, on_tap, on_hold)),
+            h_gap(spacing::TIGHT),
+            inflexible(button),
+        ])),
+    }
+}
+
+/// The rail's ⋯ button for `target`, or `None` on the sheet and for a read-only
+/// credential (no [`TreeMutations::on_menu`]).
+fn overflow<State: 'static>(
+    target: RowTarget,
+    actions: &TreeActions<State>,
+    tones: &Tones<'_>,
+) -> Option<AnyView<State>> {
+    if tones.mode != TreeMode::Docked {
+        return None;
+    }
+    let open = Rc::clone(actions.mutations.as_ref()?.on_menu.as_ref()?);
+    let anchor = Rc::new(Cell::new(Rect::ZERO));
+    let at = Rc::clone(&anchor);
+    let label = match &target {
+        RowTarget::Space { name, .. } => format!("{name} actions"),
+        RowTarget::Tab { label, .. } => format!("{label} actions"),
+        RowTarget::Pane { title, .. } => format!("{title} actions"),
+    };
+    let button = icon_button(icons::MORE_HORIZ, label, move |state: &mut State| {
+        open(state, at.get(), &target)
+    })
+    .ink(tones.colors.fg_dim)
+    .icon_size(OVERFLOW_MARK)
+    .box_size(Size::new(OVERFLOW_BOX, OVERFLOW_BOX))
+    .radius(tones.theme.shape.small);
+    Some(any(AnchorProbe {
+        child: any(button),
+        anchor,
+    }))
+}
+
+/// Records its child's painted **window** rect into `anchor` — a Glyph menu is
+/// anchored in window space, and only paint learns where a widget landed.
+struct AnchorProbe<State: 'static> {
+    child: AnyView<State>,
+    anchor: Rc<Cell<Rect>>,
+}
+
+/// The retained half of [`AnchorProbe`].
+struct AnchorProbeWidget {
+    child: ChildPod,
+    anchor: Rc<Cell<Rect>>,
+}
+
+impl<State: 'static> View<State> for AnchorProbe<State> {
+    type Element = AnchorProbeWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {
+        AnchorProbeWidget {
+            child: build_child(&self.child, ctx),
+            anchor: Rc::clone(&self.anchor),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut AnchorProbeWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        // A press can land before the next paint: carry the last rect over.
+        self.anchor.set(element.anchor.get());
+        element.anchor = Rc::clone(&self.anchor);
+        rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut AnchorProbeWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for AnchorProbeWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.child.set_origin(Point::ZERO);
+        size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let rect = Rect::from_origin_size(ctx.origin(), self.child.size());
+        self.anchor.set(rect);
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.child.semantics_child(ctx);
+    }
 }
 
 /// The card level's box. Expansion raises the fill and accents the edge
@@ -880,6 +1141,7 @@ mod tests {
             pane_path: String::new(),
             panes,
             active,
+            has_bell: false,
         }
     }
 
@@ -935,6 +1197,7 @@ mod tests {
                 on_new_pane: Rc::new(|log: &mut Log, path: &TabPath| {
                     log.creates.push(format!("pane:{}", path.tab_key));
                 }),
+                on_menu: None,
             }),
         }
     }
@@ -1013,6 +1276,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1055,6 +1319,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1086,6 +1351,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1119,6 +1385,7 @@ mod tests {
                     has_spaces: false,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1155,6 +1422,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1220,6 +1488,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1265,6 +1534,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1294,6 +1564,7 @@ mod tests {
                     has_spaces: true,
                 },
                 &acts,
+                TreeMode::Sheet,
             )
         };
         let mut rig = Rig::new();
@@ -1340,5 +1611,23 @@ mod tests {
             Duration::from_secs_f64(0.220)
         );
         assert!(cascade_settle(8, 220.0, false) > Duration::from_secs_f64(0.220));
+    }
+
+    #[test]
+    fn a_rows_overflow_menu_renames_it_and_creates_one_level_down() {
+        let space = RowTarget::Space {
+            id: "ws-1".to_string(),
+            name: "one".to_string(),
+        };
+        let pane = RowTarget::Pane {
+            id: 3,
+            is_plugin: false,
+            title: "zsh".to_string(),
+        };
+        assert_eq!(row_menu(&space).len(), 2);
+        assert_eq!(row_menu(&pane).len(), 1, "a pane has nothing under it");
+        assert_eq!(row_menu_choice(&space, 0), Some(RowMenuChoice::Rename));
+        assert_eq!(row_menu_choice(&space, 1), Some(RowMenuChoice::NewHere));
+        assert_eq!(row_menu_choice(&pane, 1), None);
     }
 }

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use frust::authoring::Color;
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::{
     AnyView, EdgeInsets, GestureDetector, Get, Padding, Stack, Theme, any, colored_box, flexible,
     inflexible, text,
@@ -17,6 +19,11 @@ use crate::ui::spacing;
 const RADIO_PAD_Y: f64 = 9.0;
 /// Ring to its label.
 const RADIO_GAP: f64 = 9.0;
+/// The live row's label size — `frust_glyph::radio`'s own `LABEL_SIZE`, not
+/// exported, transcribed here so the splash's static row is exactly as tall
+/// as the live one and every piece below it lands on the same pixels at the
+/// handoff.
+const RADIO_LABEL_SIZE: f32 = 13.0;
 /// The ring's outer box.
 const RADIO_RING: f64 = 16.0;
 const RADIO_RING_BORDER: f64 = 1.5;
@@ -104,8 +111,10 @@ pub fn remember_row<S: 'static>(
 /// [`RADIO_GAP`]) was transcribed *from* this row (see that widget's own
 /// module docs), so the swap-in matches pixel-for-pixel. The splash's inert
 /// copy still hand-composes its ring+dot from [`frust::colored_box`] (see
-/// [`radio_dot`]): `frust_glyph::radio` always wires a working press and a
-/// `Role::RadioButton` node, which the splash's static art must never carry.
+/// [`radio_dot`]) and shapes its label at the radio's own metrics
+/// ([`radio_label_style`]): `frust_glyph::radio` always wires a working
+/// press and a `Role::RadioButton` node, which the splash's static art must
+/// never carry.
 fn trust_selector<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Live>) -> AnyView<S> {
     let selected = live.map_or(TrustMode::System, |live| live.controller.trust_mode.get());
     let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS
@@ -152,9 +161,7 @@ fn trust_row<S: 'static>(
         None => any(row::<S>(vec![
             inflexible(radio_dot::<S>(colors, selected)),
             inflexible(h_gap::<S>(RADIO_GAP)),
-            inflexible(any(
-                text(label).style(inked(&theme.type_scale.body_medium, colors.fg))
-            )),
+            inflexible(any(text(label).style(radio_label_style(theme, colors.fg)))),
         ])),
         Some(live) => {
             let controller = Arc::clone(&live.controller);
@@ -210,6 +217,17 @@ fn full_row_press<S: 'static>(
     let background =
         GestureDetector(colored_box::<S>().size(f64::INFINITY, ROW_PRESS_FLOOR)).on_tap(on_tap);
     any(Stack(vec![any(background), content]))
+}
+
+/// The static row's label at [`frust_glyph::radio`]'s own style — the
+/// theme's `bodyLarge` family at [`RADIO_LABEL_SIZE`], regular weight —
+/// inked `ink`; never used for the live row, which shapes its own.
+fn radio_label_style(theme: &Theme, ink: Color) -> TextStyle {
+    TextStyle {
+        family: theme.type_scale.body_large.family.clone(),
+        weight: FontWeight::REGULAR,
+        ..TextStyle::new(RADIO_LABEL_SIZE, ink)
+    }
 }
 
 /// A 16px ring whose selected state re-inks it amber and drops an inset amber

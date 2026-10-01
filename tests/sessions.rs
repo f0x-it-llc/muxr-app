@@ -22,23 +22,25 @@
 //! sheet. Every repository call is real async work on the UI-thread queue, so
 //! [`Harness::pump_until_values`] deadline-waits for a mutation.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, WindowMetrics,
     any, navigator, provide_context,
 };
-use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
+use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
-use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
+use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
 use muxr::features::sessions::di::SharedSessionsRepository;
 use muxr::features::sessions::domain::entities::{
-    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
+    CreateSessionParams, LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus,
+    ThirdMetric,
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
@@ -52,9 +54,9 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, added, by_width, center, char_key, frame, largest, long_press, named_key,
-    node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer, pump_frames,
-    serial, settle, setup, smallest, tap,
+    EPSILON, RecScene, added, by_width, center, char_key, frame_sized, largest, long_press,
+    named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer,
+    pump_frames, serial, settle_sized, setup, smallest, tap,
 };
 
 /// A point in the top-left corner — scrim on every overlay this screen pushes
@@ -81,6 +83,12 @@ const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 /// `crate::responsive::WIDE_BREAKPOINT_PX` — the responsive width-clamp pass
 /// — transcribed (the constant itself is private to `presentation::pages`).
 const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
+/// A landscape phone's height: wide enough to clamp, still Compact.
+const PHONE_LANDSCAPE_H: f64 = 390.0;
+/// The Tablet windows the master-detail suite lays out at, and a phone's.
+const FULL_TABLET: Size = Size::new(1024.0, 720.0);
+const COLLAPSED_TABLET: Size = Size::new(720.0, 720.0);
+const PHONE: Size = Size::new(390.0, 844.0);
 
 /// The seeded session names `data`'s mock repository ships — the redesign's
 /// three cards, in order.
@@ -107,19 +115,11 @@ fn mock_target(offer_credential: bool) -> ConnectTarget {
     }
 }
 
-/// A [`WindowMetrics`] whose size is `size` — see `mount_with_metrics`.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
-}
-
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
 /// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
-    if let Some(metrics) = metrics {
-        provide_context(metrics);
-    }
-    Harness::mount()
+    support::mount_with_metrics(metrics, Harness::mount)
 }
 
 /// The app-logic closure `RenderRoot::rebuild` drives.
@@ -132,15 +132,26 @@ struct Harness {
     logic: Logic,
     state: AppState,
     tcx: TextContext,
+    /// The size every frame lays out at.
+    surface: Size,
 }
 
 impl Harness {
     /// Mount the screen (see the [module docs](self) for the shape), leaving
     /// the connection **disconnected** and the first load un-awaited.
     fn mount() -> Self {
+        Harness::mount_over(None, support::surface())
+    }
+
+    /// [`mount`](Self::mount) laid out at `surface`, over `repository` in
+    /// place of the seeded mock when one is given.
+    fn mount_over(repository: Option<SharedSessionsRepository>, surface: Size) -> Self {
         // The real composition root, unbuilt: publishes DI including this
         // feature's repository, but never plays a splash.
         let state = MuxrApp.init();
+        if let Some(repository) = repository {
+            provide_context(repository);
+        }
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-points `routes::app_nav()` at this fixture's own navigator, real
         // route table and session guard included.
@@ -170,6 +181,7 @@ impl Harness {
             logic,
             state,
             tcx: TextContext::new(),
+            surface,
         };
         harness.frame();
         harness
@@ -185,22 +197,24 @@ impl Harness {
 
     /// One frame at the zero clock.
     fn frame(&mut self) -> RecScene {
-        frame(
+        frame_sized(
             &mut self.root,
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
+            self.surface,
         )
     }
 
     /// Drive a pushed/popped overlay past the navigator's input-blocking
     /// transition, returning the last frame's paint record.
     fn settle(&mut self) -> RecScene {
-        settle(
+        settle_sized(
             &mut self.root,
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
+            self.surface,
         )
     }
 
@@ -232,6 +246,10 @@ impl Harness {
                 &mut self.tcx,
                 1,
             );
+            // `pump_frames` lays out at the default surface.
+            if self.surface != support::surface() {
+                self.frame();
+            }
         }
     }
 
@@ -1046,7 +1064,9 @@ fn card_backs_in(scene: &RecScene, left: f64, width: f64) -> Vec<(Point, Size)> 
 fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(metrics_at(support::surface())));
+    // A phone on its side: wide, but its short side keeps it Compact (the
+    // 800×600 default surface would be a Tablet window).
+    let mut h = mount_with_metrics(Some(support::metrics_at(support::W, PHONE_LANDSCAPE_H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
 
@@ -1095,10 +1115,7 @@ fn narrow_metrics_leave_the_list_column_unclamped_like_no_metrics_at_all() {
     // Explicit narrow metrics, even though the harness still paints at the
     // full-width default surface — proving the branch keys on the
     // *published* width, not the paint surface.
-    let mut h = mount_with_metrics(Some(metrics_at(Size::new(
-        400.0,
-        support::surface().height,
-    ))));
+    let mut h = mount_with_metrics(Some(support::metrics_at(400.0, support::H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
 
@@ -1210,11 +1227,16 @@ fn stub_session(name: &str) -> Session {
         name: name.to_string(),
         status: SessionStatus::Running,
         backend: SessionBackend::Zellij,
+        age_secs: 0,
+        has_bell: false,
+        is_current: false,
         layout: LayoutSummary {
             tabs: 1,
             panes: 1,
             third: ThirdMetric::Clients(0),
             preview: Vec::new(),
+            tabs_detail: Vec::new(),
+            space: None,
         },
     }
 }
@@ -1246,7 +1268,7 @@ impl SessionsRepository for CountingSessionsRepo {
         Ok(Vec::new())
     }
 
-    async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
         unreachable!("not exercised by the poll/staleness tests")
     }
 
@@ -1323,7 +1345,7 @@ impl SessionsRepository for RaceSessionsRepo {
         }
     }
 
-    async fn create_session(&self, _name: String) -> Result<Session, AppFailure> {
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
         unreachable!("not exercised by the poll/staleness tests")
     }
 
@@ -1453,4 +1475,517 @@ async fn a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop(
     let interval = resolve_poll_interval(&preferences).await;
 
     assert_eq!(interval, Duration::from_secs(u64::from(POLL_PERIOD_SECS)));
+}
+
+// ---------------------------------------------------------------------------
+// 12 — Tablet master-detail: a card tap selects, the detail pane shows it
+// ---------------------------------------------------------------------------
+
+/// Mount at `size` (published as the window's metrics too) over `repository`,
+/// then connect.
+fn sized(size: Size, repository: Option<SharedSessionsRepository>) -> Harness {
+    let metrics = support::metrics_at(size.width, size.height);
+    let mut h =
+        support::mount_with_metrics(Some(metrics), || Harness::mount_over(repository, size));
+    expect_connection_controller().connect(mock_target(false));
+    h.frame();
+    h
+}
+
+fn count_values(h: &Harness, value: &str) -> usize {
+    node_values(&h.root).iter().filter(|v| *v == value).count()
+}
+
+fn has_label(h: &Harness, label: &str) -> bool {
+    node_labels(&h.root).iter().any(|l| l == label)
+}
+
+fn has_value(h: &Harness, value: &str) -> bool {
+    count_values(h, value) > 0
+}
+
+/// A stat card's printed value, read from its semantics description.
+fn stat_value(h: &Harness, label: &str) -> Option<String> {
+    h.root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(label) && node.description().is_some())
+        .and_then(|(_, node)| node.description().map(str::to_string))
+}
+
+/// Tap the **last** node printing `value` — the detail pane sits after the
+/// list column, so its copy of a repeated title is the later one.
+fn tap_last_value(h: &mut Harness, value: &str) {
+    let point = *node_centers_by_value(&h.root, value)
+        .last()
+        .unwrap_or_else(|| panic!("nothing printing {value:?}"));
+    h.tap(point);
+}
+
+#[test]
+fn a_tablet_card_tap_selects_it_and_the_detail_header_names_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    assert!(
+        has_value(&h, "loading sessions\u{2026}") && !has_label(&h, "Select a session"),
+        "the first load in flight: the column's loading line, skeletons in the detail"
+    );
+    h.await_sessions();
+    assert!(has_label(&h, "Select a session"), "nothing selected yet");
+    assert_eq!(count_values(&h, SEEDED[1]), 1, "only the card names it");
+
+    h.tap_value(SEEDED[1]);
+    h.settle();
+
+    assert_eq!(h.depth(), 1, "a Tablet tap selects, it never attaches");
+    assert_eq!(count_values(&h, SEEDED[1]), 2, "the header names it too");
+    let labels = node_labels(&h.root);
+    assert!(
+        labels.iter().any(|l| l.contains("attach")),
+        "the header's actions carry attach: {labels:?}"
+    );
+    assert!(!has_label(&h, "Select a session"));
+    // The second seeded card is the resurrectible one.
+    assert!(has_label(&h, "\u{2192} attach to resurrect"), "{labels:?}");
+    assert!(has_value(&h, "saved, not running"));
+    let values = node_values(&h.root);
+    assert!(
+        !values
+            .iter()
+            .any(|v| v.starts_with("tabs \u{2192} panes") || v.starts_with("active tab")),
+        "a resurrectible session draws no layout card: {values:?}"
+    );
+}
+
+#[test]
+fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    assert!(has_label(&h, "\u{2192} attach"));
+    assert!(has_value(&h, "tabs \u{2192} panes"));
+    assert!(has_value(&h, "active tab \u{b7} main"));
+    for tab in ["main", "build", "edit", "logs"] {
+        assert!(has_value(&h, tab), "every tab is listed: {tab}");
+    }
+    assert!(has_label(&h, "focused tab"));
+    assert!(has_label(&h, "float"), "the floating pane carries its tag");
+    assert!(has_value(&h, "scratch"), "the focused tab's pane pills");
+    assert!(
+        !has_value(&h, "cargo watch") && !has_value(&h, "journalctl"),
+        "only the focused tab is open"
+    );
+    // The counts are the layout summary's, not a wire zero.
+    assert_eq!(stat_value(&h, "tabs").as_deref(), Some("4"));
+    assert_eq!(stat_value(&h, "panes").as_deref(), Some("9"));
+    assert_eq!(stat_value(&h, "clients").as_deref(), Some("0"));
+    assert_eq!(stat_value(&h, "age").as_deref(), Some("3 hours ago"));
+
+    // A pane pill pushes the terminal route carrying its tab and pane id.
+    tap_last_value(&mut h, "scratch");
+    h.settle();
+    assert_eq!(h.depth(), 2, "a pane pill pushes the terminal route");
+    let nav = muxr::routes::app_nav();
+    let param = |key: &str| nav.param(key);
+    assert_eq!(
+        param(muxr::routes::TERMINAL_SESSION_QUERY_KEY).as_deref(),
+        Some(SEEDED_DEV_ID)
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_TAB_QUERY_KEY).as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_PANE_QUERY_KEY).as_deref(),
+        Some("2")
+    );
+}
+
+#[test]
+fn the_herdr_detail_names_its_space_on_the_collapsed_band() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(COLLAPSED_TABLET, None);
+    h.await_sessions();
+
+    h.tap_value(SEEDED[2]);
+    h.settle();
+
+    assert_eq!(h.depth(), 1);
+    assert!(has_value(&h, "space \u{b7} home \u{b7} tab \u{b7} work"));
+    assert!(has_value(&h, "tabs \u{2192} panes \u{b7} space home"));
+    assert_eq!(stat_value(&h, "spaces").as_deref(), Some("5"));
+}
+
+/// Fails its first `list_sessions`, then answers one session — and counts.
+struct FailFirstRepo {
+    calls: AtomicU32,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for FailFirstRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(AppFailure::Network("first load".to_string()));
+        }
+        Ok(vec![stub_session("alpha")])
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the retry test")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the retry test")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the retry test")
+    }
+}
+
+#[test]
+fn a_failed_first_load_offers_a_retry_that_reruns_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(FailFirstRepo {
+        calls: AtomicU32::new(0),
+    });
+    let mut h = sized(
+        FULL_TABLET,
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+    );
+    h.pump_until("the failed state", |h| {
+        has_label(h, "Couldn't load sessions")
+    });
+    assert!(has_label(&h, "Retry"));
+    assert!(
+        has_label(&h, "Select a session"),
+        "the detail shows no selection"
+    );
+    assert_eq!(repo.calls.load(Ordering::SeqCst), 1);
+
+    h.tap_label("Retry");
+    h.pump_until_values("the retried load", |values| {
+        values.iter().any(|v| v == "alpha")
+    });
+
+    assert_eq!(
+        repo.calls.load(Ordering::SeqCst),
+        2,
+        "Retry re-ran the load"
+    );
+    assert!(!has_label(&h, "Couldn't load sessions"));
+}
+
+/// Ed's iPad gate (2026-10-01): the selected card painted as a solid amber
+/// block because its translucent `amber_faint` fill sat straight over the
+/// accent-filled outer box. The fill is now the palette's opaque `amber_wash`,
+/// so the 2px strip is all the solid amber a selected card shows.
+#[test]
+fn a_selected_tablet_card_fills_with_the_opaque_amber_wash_not_a_translucent_tint() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    h.tap_value(SEEDED[1]);
+    let scene = h.settle();
+    let colors = muxr::ui::palette::Palette::from_theme(&frust_glyph::baseline());
+
+    let fills = &scene.rounded_fills;
+    let area = |s: &Size| s.width * s.height;
+    // The accent box is the largest amber rounded rect (the attach button is amber too, but small).
+    let (accent_idx, accent_origin, accent_size) = fills
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, _, c))| *c == colors.amber)
+        .map(|(i, (o, s, _, _))| (i, *o, *s))
+        .max_by(|a, b| area(&a.2).partial_cmp(&area(&b.2)).unwrap())
+        .expect("the selected card's accent box");
+    let inset_like = |o: &Point, s: &Size| {
+        (o.x - (accent_origin.x + 2.0)).abs() < EPSILON
+            && (o.y - accent_origin.y).abs() < EPSILON
+            && (s.height - accent_size.height).abs() < EPSILON
+    };
+    let wash_idx = fills
+        .iter()
+        .position(|(o, s, _, c)| *c == colors.amber_wash && inset_like(o, s))
+        .expect("the opaque amber wash inset by the strip");
+    assert!(accent_idx < wash_idx, "the wash paints over the accent box");
+    assert!(
+        !fills
+            .iter()
+            .any(|(o, s, _, c)| *c == colors.amber_faint && inset_like(o, s)),
+        "no translucent tint rides directly on the accent box any more"
+    );
+}
+
+#[test]
+fn read_only_on_tablet_chips_the_strip_and_leaves_only_attach_working() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+    assert!(has_label(&h, "read-only"), "the strip's read-only chip");
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+    let toasts = muxr::ui::toasts::app_toasts();
+    toasts.clear();
+    for action in ["rename", "kill"] {
+        h.tap_label(action);
+        h.settle();
+        assert_eq!(h.depth(), 1, "a read-only {action} opens nothing");
+    }
+    let raised = toasts.pending_untracked();
+    assert_eq!(raised.len(), 2, "each refusal says why: {raised:?}");
+    assert!(raised.iter().all(|t| t.starts_with("Read-only session")));
+
+    h.tap_label("\u{2192} attach");
+    h.settle();
+    assert_eq!(h.depth(), 2, "attach is never read-only-gated");
+}
+
+#[test]
+fn the_detail_headers_rename_opens_the_shared_dialog() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    h.tap_label("rename");
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the rename dialog is up");
+}
+
+#[test]
+fn renaming_the_selected_session_from_the_detail_keeps_the_detail_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    let before = h.frame();
+    h.tap_label("rename");
+    let after = h.settle();
+    let dialog = Chrome::diff(&before, &after);
+    let field = dialog.content_child();
+    h.tap(Point::new(
+        field.0.x + field.1.width - 4.0,
+        field.0.y + field.1.height / 2.0,
+    ));
+    h.type_text("-2");
+    h.press(NamedKey::Enter);
+    h.flush();
+    h.pump_until_values("the renamed card", |values| {
+        values.iter().any(|v| v == "dev-2")
+    });
+    h.settle();
+
+    assert!(
+        !has_label(&h, "Select a session"),
+        "the rename renamed the session's id too; the selection followed it"
+    );
+    assert_eq!(
+        count_values(&h, "dev-2"),
+        2,
+        "the list card and the detail header both show the renamed session"
+    );
+}
+
+#[test]
+fn read_only_adds_the_strip_chip_on_compact_too() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    assert!(!has_label(&h, "read-only"));
+
+    expect_connection_controller().is_read_only.set(true);
+    h.frame();
+
+    assert!(has_label(&h, "read-only"));
+}
+
+#[test]
+fn a_phone_card_tap_still_attaches_and_marks_this_device() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(PHONE, None);
+    h.await_sessions();
+    assert!(
+        !has_label(&h, "Select a session"),
+        "no detail pane on a phone"
+    );
+    assert_eq!(count_values(&h, "\u{25cf} this device"), 1);
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "a phone tap attaches");
+}
+
+// ---------------------------------------------------------------------------
+// 13 — the new-session dialog's backend choice
+// ---------------------------------------------------------------------------
+
+/// A repository that serves one card and records every create it is asked for.
+struct RecordingCreateRepo {
+    created: Mutex<Vec<CreateSessionParams>>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for RecordingCreateRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        let mut all = vec![stub_session("alpha")];
+        all.extend(
+            self.created
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|params| stub_session(&params.name)),
+        );
+        Ok(all)
+    }
+
+    async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
+        let session = stub_session(&params.name);
+        self.created.lock().unwrap().push(params);
+        Ok(session)
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the backend-choice tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the backend-choice tests")
+    }
+}
+
+/// Mount over a recording repository, connect offering `backends`, and wait
+/// for the one card to land.
+fn offering(backends: Vec<ServerBackend>) -> (Harness, Arc<RecordingCreateRepo>) {
+    let repo = Arc::new(RecordingCreateRepo {
+        created: Mutex::new(Vec::new()),
+    });
+    let mut h = sized(
+        FULL_TABLET,
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+    );
+    let connection = expect_connection_controller();
+    let mut info = connection
+        .server_info
+        .get_untracked()
+        .expect("the mock connect published server info");
+    info.available_backends = backends;
+    connection.server_info.set(Some(info));
+    h.pump_until_values("the seeded card", |values| {
+        values.iter().any(|v| v == "alpha")
+    });
+    (h, repo)
+}
+
+/// Type `name` into the open dialog's field and submit with Enter.
+fn create_named(h: &mut Harness, dialog: &Chrome, name: &str) {
+    h.tap(center(dialog.content_child()));
+    h.type_text(name);
+    h.press(NamedKey::Enter);
+    h.flush();
+    h.pump_until_values("the created card", |values| {
+        values.iter().any(|v| v == name)
+    });
+}
+
+#[test]
+fn two_offered_backends_show_the_choice_and_herdr_reaches_the_repository() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = offering(vec![ServerBackend::Zellij, ServerBackend::Herdr]);
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    assert!(
+        has_label(&h, "zellij") && has_label(&h, "herdr"),
+        "the segmented control is mounted"
+    );
+
+    // The segment nodes carry no bounds of their own, and the control packs
+    // its segments to the left: the selected pill (the first segment) is
+    // painted as the panel's last rounded rect, so "herdr" sits just past it.
+    let (pill_origin, pill_size) = *dialog.rounded.last().expect("the selected segment's pill");
+    let y = node_centers_by_label(&h.root, "herdr")[0].y;
+    h.tap(Point::new(pill_origin.x + pill_size.width + 20.0, y));
+    h.settle();
+    create_named(&mut h, &dialog, "on-herdr");
+
+    let created = repo.created.lock().unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].name, "on-herdr");
+    assert_eq!(created[0].backend, SessionBackend::Herdr);
+}
+
+#[test]
+fn two_offered_backends_default_to_zellij() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = offering(vec![ServerBackend::Herdr, ServerBackend::Zellij]);
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    create_named(&mut h, &dialog, "untouched");
+
+    assert_eq!(
+        repo.created.lock().unwrap()[0].backend,
+        SessionBackend::Zellij
+    );
+}
+
+#[test]
+fn a_lone_backend_mounts_no_choice_and_creates_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = offering(vec![ServerBackend::Zellij]);
+
+    let dialog = open_dialog_by_value(&mut h, "new session");
+    assert!(!has_label(&h, "herdr"), "no segmented control");
+    create_named(&mut h, &dialog, "plain");
+
+    assert_eq!(
+        repo.created.lock().unwrap()[0].backend,
+        SessionBackend::Zellij
+    );
+}
+
+#[test]
+fn a_blank_name_creates_nothing_with_or_without_the_choice() {
+    let _g = serial();
+    let _ambient = setup();
+    for backends in [
+        vec![ServerBackend::Zellij],
+        vec![ServerBackend::Zellij, ServerBackend::Herdr],
+    ] {
+        let (mut h, repo) = offering(backends);
+        let dialog = open_dialog_by_value(&mut h, "new session");
+        h.tap(center(dialog.content_child()));
+        h.type_text("   ");
+        h.press(NamedKey::Enter);
+        h.tap_label("Create");
+        h.flush();
+        assert_eq!(h.depth(), 2, "a blank name leaves the dialog open");
+        assert!(repo.created.lock().unwrap().is_empty());
+    }
 }

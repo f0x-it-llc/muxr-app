@@ -2,6 +2,7 @@ pub mod connection;
 pub mod failure;
 pub mod features;
 pub mod fonts;
+pub mod links;
 pub mod net;
 pub mod responsive;
 pub mod routes;
@@ -14,8 +15,7 @@ use std::rc::Rc;
 use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
 
 use features::connect::domain::entities::SavedServer;
-use features::connect::presentation::pages::connect_layout;
-use features::connect::presentation::widgets::connect_pieces;
+use features::connect::presentation::pages::splash_assembly;
 use features::connect::presentation::widgets::saved::splash_saved_servers;
 use ui::palette::active_theme;
 use ui::splash::icon_phase::{IconArt, splash_icon_art};
@@ -75,16 +75,18 @@ fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
         return None;
     }
     match cue.plan {
-        SplashPlan::Full => Some(splash_sequence(
-            cue.art.clone(),
-            SPLASH_SEED,
-            connect_pieces(&active_theme(), &cue.saved),
-            connect_layout,
-            cue.done,
-        )),
+        SplashPlan::Full => Some(full_splash(cue)),
         SplashPlan::Reduced => Some(reduced_splash(cue.art.clone(), cue.done)),
         SplashPlan::Skip => None,
     }
+}
+
+/// The full sequence over the screen the route will paint: Connect's own
+/// [`splash_assembly`] picks the phone column or the Tablet arrangement for
+/// the window's size class, so the overlay's last frame is the route's first.
+fn full_splash(cue: &SplashCue) -> AnyView<AppState> {
+    let (pieces, assemble) = splash_assembly(&active_theme(), &cue.saved);
+    splash_sequence(cue.art.clone(), SPLASH_SEED, pieces, assemble, cue.done)
 }
 
 #[derive(Default)]
@@ -103,9 +105,28 @@ impl Component for MuxrApp {
             .forget();
 
         features::connect::di::provide();
+        features::pro::di::provide();
         features::sessions::di::provide();
         features::terminal::di::provide();
         features::settings::di::provide();
+
+        // Resolved here, not inside the future: the poller driving it installs
+        // no ambient reactive owner, so a lookup deferred into the body would
+        // panic on its first poll. The store's failures that no caller owns
+        // bridge to toasts off this same instance — a restore's, which its
+        // callers never re-announce. A purchase reports through its outcome
+        // (the sheet announces it once), and the background refreshes and the
+        // offer lookup fail quietly, so the bridge never doubles a message.
+        let pro = features::pro::di::expect_pro_controller();
+
+        pro.core()
+            .failures()
+            .subscribe(|failure: &failure::AppFailure| ui::toasts::app_toasts().raise(failure))
+            .forget();
+
+        let follower = std::sync::Arc::clone(&pro);
+        frust::spawn_local(async move { pro.refresh().await });
+        frust::spawn_local(async move { follower.follow_store_changes().await });
 
         let controller = NavigatorController::new();
         let overlays = NavigatorController::new();

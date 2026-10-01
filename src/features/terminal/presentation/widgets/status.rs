@@ -8,13 +8,14 @@ use frust::{
     Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Stack, any,
     container, flexible, icons, inflexible, text,
 };
+use frust_glyph::{MenuEntry, breadcrumb, crumb, menu_item, menu_item_danger, menu_separator};
 
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 
 use super::super::chrome::{EXPAND_SIZE, expand_button};
 use super::card::CardInk;
-use super::util::{h_gap, row, sized};
+use super::util::{h_gap, read_only_badge, row, sized};
 
 /// `.term-statusrow{padding:14px 14px 14px 18px}` with the **vertical** pair
 /// tightened to 6px — the mock's 14px made a 56px chrome band. Horizontal
@@ -39,6 +40,77 @@ const TITLE_LINE_HEIGHT: f32 = 18.0;
 const EXPAND_LABEL: &str = "Fullscreen";
 const COLLAPSE_LABEL: &str = "Exit fullscreen";
 
+/// What the Tablet's terminal menu asks for — [`terminal_menu_choice`] maps a
+/// picked entry index here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalMenuChoice {
+    /// The existing rename dialog (or its read-only toast).
+    Rename,
+    /// The existing fullscreen toggle.
+    Immersive,
+    /// The key-bar visibility signal.
+    KeyBar,
+    /// The existing detach action.
+    Detach,
+}
+
+/// The kebab's one table: each entry beside the choice it answers (`None` for
+/// the separator, which still occupies an index). Glyph's menu has no
+/// checked-item variant, so "Show key bar" carries a leading check icon
+/// **only while it is on** (the menu is rebuilt on every open).
+fn terminal_menu_table(
+    fullscreen: bool,
+    key_bar_visible: bool,
+) -> Vec<(Option<TerminalMenuChoice>, MenuEntry)> {
+    let immersive = if fullscreen {
+        icons::FULLSCREEN_EXIT
+    } else {
+        icons::FULLSCREEN_EXPAND
+    };
+    let mut key_bar = menu_item("Show key bar");
+    if key_bar_visible {
+        key_bar = key_bar.icon(icons::CHECK);
+    }
+    vec![
+        (
+            Some(TerminalMenuChoice::Rename),
+            menu_item("Rename session").icon(icons::EDIT),
+        ),
+        (
+            Some(TerminalMenuChoice::Immersive),
+            menu_item("Immersive mode").icon(immersive),
+        ),
+        (Some(TerminalMenuChoice::KeyBar), key_bar),
+        (None, menu_separator()),
+        (
+            Some(TerminalMenuChoice::Detach),
+            menu_item_danger("Detach session").icon(icons::LOGOUT),
+        ),
+    ]
+}
+
+/// The Tablet kebab's menu entries, straight from [`terminal_menu_table`].
+pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<MenuEntry> {
+    terminal_menu_table(fullscreen, key_bar_visible)
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// The [`TerminalMenuChoice`] behind entry `index` of [`terminal_menu`], read
+/// back through the same table (the separator answers `None`).
+///
+/// The throwaway table built on every decode is deliberate: it is the single source
+/// of truth for both the builder and this decoder, so the two can never disagree on
+/// a position. Its flags only change how an entry is drawn (an icon), never its
+/// position or choice, so any pair decodes alike — `false, false` stands for the
+/// open menu's own.
+pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
+    terminal_menu_table(false, false)
+        .get(index)
+        .and_then(|(choice, _)| *choice)
+}
+
 /// `.term-statusrow` — the pane title (ellipsized, single line) and, at the
 /// trailing edge, the **one** fullscreen affordance: no menu row, no
 /// gesture ("one button, always in the same place").
@@ -53,9 +125,14 @@ const COLLAPSE_LABEL: &str = "Exit fullscreen";
 /// [`GestureDetector`] over the full-height box. Hit-testing runs
 /// topmost-first and stops at the first handler, so a press on the circle
 /// is the button's and a press above/below it is the detector's.
+///
+/// `crumbs` (empty hides it) is Glyph's breadcrumb after the title, and
+/// `read_only` adds the cyan chip before the button.
 pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     title: &str,
+    crumbs: &[String],
     fullscreen: bool,
+    read_only: bool,
     colors: &Palette,
     ink: &CardInk,
     on_toggle: F,
@@ -89,28 +166,38 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     let press_band = GestureDetector(SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)))
         .on_tap(move |state: &mut State| on_toggle(state));
 
-    any(container(row(vec![
-        flexible(
-            1,
-            Padding(
-                EdgeInsets {
-                    left: STATUS_PAD_LEFT,
-                    top: STATUS_PAD_TOP,
-                    right: 0.0,
-                    bottom: STATUS_PAD_TOP,
-                },
-                text(title)
-                    .style(title_style)
-                    .max_lines(1)
-                    .overflow(TextOverflow::Ellipsis),
-            ),
+    let mut children = vec![flexible(
+        1,
+        Padding(
+            EdgeInsets {
+                left: STATUS_PAD_LEFT,
+                top: STATUS_PAD_TOP,
+                right: 0.0,
+                bottom: STATUS_PAD_TOP,
+            },
+            text(title)
+                .style(title_style)
+                .max_lines(1)
+                .overflow(TextOverflow::Ellipsis),
         ),
-        h_gap(spacing::SM),
-        inflexible(Stack(vec![any(press_band), any(button)])),
-        // Trailing padding as a spacer — the button column owns the vertical padding.
-        h_gap(STATUS_PAD_RIGHT),
-    ]))
-    .fill(ink.head))
+    )];
+    if !crumbs.is_empty() {
+        children.push(h_gap(spacing::SM));
+        let trail = crumbs
+            .iter()
+            .map(|name| crumb::<State>(name.clone()))
+            .collect();
+        children.push(inflexible(breadcrumb(trail)));
+    }
+    if read_only {
+        children.push(h_gap(spacing::SM));
+        children.push(inflexible(read_only_badge()));
+    }
+    children.push(h_gap(spacing::SM));
+    children.push(inflexible(Stack(vec![any(press_band), any(button)])));
+    // Trailing padding as a spacer — the button column owns the vertical padding.
+    children.push(h_gap(STATUS_PAD_RIGHT));
+    any(container(row(children)).fill(ink.head))
 }
 
 #[cfg(test)]
@@ -126,6 +213,35 @@ mod tests {
                 "{label:?} is a name, not a mark"
             );
         }
+    }
+
+    #[test]
+    fn the_terminal_menu_composes_the_checked_item_from_a_leading_icon() {
+        let labels: Vec<_> = terminal_menu(false, true)
+            .iter()
+            .map(|entry| match entry {
+                MenuEntry::Item(item) => Some((item.label.clone(), item.icon.is_some())),
+                MenuEntry::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            labels[0].as_ref().map(|l| l.0.as_str()),
+            Some("Rename session")
+        );
+        assert_eq!(
+            labels[1].as_ref().map(|l| l.0.as_str()),
+            Some("Immersive mode")
+        );
+        assert_eq!(labels[2], Some(("Show key bar".to_string(), true)));
+        assert_eq!(labels[3], None);
+        assert_eq!(
+            labels[4].as_ref().map(|l| l.0.as_str()),
+            Some("Detach session")
+        );
+        let off = terminal_menu(false, false);
+        assert!(matches!(&off[2], MenuEntry::Item(item) if item.icon.is_none()));
+        assert_eq!(terminal_menu_choice(3), None);
+        assert_eq!(terminal_menu_choice(4), Some(TerminalMenuChoice::Detach));
     }
 
     #[test]

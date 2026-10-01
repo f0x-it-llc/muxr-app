@@ -21,12 +21,13 @@
 //! # The handoff
 //!
 //! The overlay sits in a [`Stack`] above the live navigator, already
-//! rendering `/`. Its assembly lays out the same
-//! [`connect_pieces`](crate::features::connect::presentation::widgets::connect_pieces)
-//! through the same
-//! [`connect_layout`](crate::features::connect::presentation::pages::connect_layout)
-//! the route uses, width clamp included, each piece wrapped in
-//! [`piece_entry`] (paint-time transform, no geometry change) — so when
+//! rendering `/`. Its assembly lays out the same pieces through the same
+//! layout function the route uses for the window's size class — Compact's
+//! `connect_pieces`/`connect_layout` (width clamp included) or Tablet's
+//! `tablet_splash_pieces`/`tablet_splash_layout` (`widgets::tablet`), the
+//! page's `splash_assembly` reading the class once per build as it does —
+//! each piece wrapped in [`piece_entry`] (paint-time transform, no geometry
+//! change) — so when
 //! [`Cue`] flips `done` and the shell drops the overlay, the pixels beneath
 //! are the ones already there. Nothing here forwards input to the assembly
 //! either: [`DelayedWidget`] has no `Widget::event` of its own, and the

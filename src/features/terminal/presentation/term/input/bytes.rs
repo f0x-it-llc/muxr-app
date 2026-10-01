@@ -39,6 +39,9 @@ pub const FORWARD_DELETE: &[u8] = b"\x1b[3~";
 pub const HOME: &[u8] = b"\x1b[H";
 /// End, same mode as [`HOME`].
 pub const END: &[u8] = b"\x1b[F";
+/// Insert (`CSI 2 ~`). Its clipboard siblings (`Copy`/`Cut`/`Paste`) send
+/// nothing — see [`named_key_bytes`].
+pub const INSERT: &[u8] = b"\x1b[2~";
 
 /// `CBT` — back-tab, what Shift+`Tab` sends (the bar's `Shift` armed over
 /// [`TAB`], and a desktop Shift+Tab).
@@ -59,13 +62,55 @@ pub const SHIFT_PAGE_DOWN: &[u8] = b"\x1b[6;2~";
 /// Shift+`Del` — see [`SHIFT_PAGE_UP`].
 pub const SHIFT_FORWARD_DELETE: &[u8] = b"\x1b[3;2~";
 
-/// Every sequence that has a Shift variant, as `(plain, shifted)` — the whole
-/// of the modifier arithmetic this module performs on a sequence key. Keyed
-/// on the **bytes**, not a key enum, so the bar's `↑` and a hardware `↑` send
-/// the same thing shifted as they do plain, through one table. Deliberately
-/// not exhaustive: [`ESC`], [`HOME`] and [`END`] have no row and are sent
-/// unmodified with Shift armed, and **no other modifier is parameterized at
-/// all** (see [`ModifierLatch`]).
+/// F1–F12's chosen forms, one row per key, columns [`PLAIN`], [`SHIFT`], [`ALT`],
+/// [`CTRL`]. F1–F4 are SS3 (`ESC O P`–`S`) plain and xterm's `CSI 1 ; m` form once
+/// modified; F5 up are the tilde form, the modifier code riding as the second
+/// parameter exactly as in [`SHIFT_PAGE_UP`] (2 Shift, 3 Alt, 5 Ctrl). xterm's
+/// numbering skips 16 and 22.
+const F_KEYS: [[&[u8]; 4]; 12] = [
+    [b"\x1bOP", b"\x1b[1;2P", b"\x1b[1;3P", b"\x1b[1;5P"],
+    [b"\x1bOQ", b"\x1b[1;2Q", b"\x1b[1;3Q", b"\x1b[1;5Q"],
+    [b"\x1bOR", b"\x1b[1;2R", b"\x1b[1;3R", b"\x1b[1;5R"],
+    [b"\x1bOS", b"\x1b[1;2S", b"\x1b[1;3S", b"\x1b[1;5S"],
+    [b"\x1b[15~", b"\x1b[15;2~", b"\x1b[15;3~", b"\x1b[15;5~"],
+    [b"\x1b[17~", b"\x1b[17;2~", b"\x1b[17;3~", b"\x1b[17;5~"],
+    [b"\x1b[18~", b"\x1b[18;2~", b"\x1b[18;3~", b"\x1b[18;5~"],
+    [b"\x1b[19~", b"\x1b[19;2~", b"\x1b[19;3~", b"\x1b[19;5~"],
+    [b"\x1b[20~", b"\x1b[20;2~", b"\x1b[20;3~", b"\x1b[20;5~"],
+    [b"\x1b[21~", b"\x1b[21;2~", b"\x1b[21;3~", b"\x1b[21;5~"],
+    [b"\x1b[23~", b"\x1b[23;2~", b"\x1b[23;3~", b"\x1b[23;5~"],
+    [b"\x1b[24~", b"\x1b[24;2~", b"\x1b[24;3~", b"\x1b[24;5~"],
+];
+/// [`F_KEYS`]' columns.
+const PLAIN: usize = 0;
+const SHIFT: usize = 1;
+const ALT: usize = 2;
+const CTRL: usize = 3;
+
+/// The printed label (and accessible name) of each F-key, in [`F_KEYS`] order.
+const F_LABELS: [&str; 12] = [
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+];
+
+/// `F(n)`'s row in [`F_KEYS`], or `None` outside 1..=12.
+fn f_index(n: u8) -> Option<usize> {
+    (1..=12).contains(&n).then(|| usize::from(n) - 1)
+}
+
+/// The `column` form of the F-key whose plain form is `sequence`, if it is one.
+fn f_key_form(sequence: &[u8], column: usize) -> Option<&'static [u8]> {
+    F_KEYS
+        .iter()
+        .find(|row| row[PLAIN] == sequence)
+        .map(|row| row[column])
+}
+
+/// Every non-F-key sequence that has a Shift variant, as `(plain, shifted)`.
+/// Keyed on the **bytes**, not a key enum, so the bar's `↑` and a hardware `↑`
+/// send the same thing shifted as they do plain, through one table.
+/// Deliberately not exhaustive: [`ESC`], [`HOME`] and [`END`] have no row and are
+/// sent unmodified with Shift armed. Ctrl and Alt are parameterized on the
+/// F-keys alone ([`modified_sequence`]).
 const SHIFTED_SEQUENCES: [(&[u8], &[u8]); 8] = [
     (TAB, BACK_TAB),
     (ARROW_UP, SHIFT_ARROW_UP),
@@ -86,6 +131,40 @@ pub fn shifted_sequence(sequence: &[u8]) -> Option<&'static [u8]> {
         .iter()
         .find(|(plain, _)| *plain == sequence)
         .map(|(_, shifted)| *shifted)
+        .or_else(|| f_key_form(sequence, SHIFT))
+}
+
+/// The one chosen variant `latch` selects for `sequence`, with the single flag
+/// choosing it spends. At most one parameter per emission, tried Shift, Ctrl,
+/// then Alt: no chord arithmetic (see [`ModifierLatch`]), so an unchosen flag
+/// stays armed. Only the F-keys have Ctrl/Alt forms.
+pub fn modified_sequence(
+    sequence: &[u8],
+    latch: ModifierLatch,
+) -> Option<(&'static [u8], ModifierLatch)> {
+    const NONE: ModifierLatch = ModifierLatch::NONE;
+    if latch.shift
+        && let Some(variant) = shifted_sequence(sequence)
+    {
+        return Some((
+            variant,
+            ModifierLatch {
+                shift: true,
+                ..NONE
+            },
+        ));
+    }
+    if latch.ctrl
+        && let Some(variant) = f_key_form(sequence, CTRL)
+    {
+        return Some((variant, ModifierLatch { ctrl: true, ..NONE }));
+    }
+    if latch.alt
+        && let Some(variant) = f_key_form(sequence, ALT)
+    {
+        return Some((variant, ModifierLatch { alt: true, ..NONE }));
+    }
+    None
 }
 
 /// The bytes a committed run of text sends: its UTF-8, with every `\n` translated
@@ -97,11 +176,11 @@ pub fn text_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// One key of the terminal key bar — the twelve keys a soft keyboard has no room
-/// for, in the order the incumbent draws them.
+/// One key of the terminal key bar — the keys a soft keyboard has no room for.
 /// [`Ctrl`](Self::Ctrl)/[`Alt`](Self::Alt)/[`Shift`](Self::Shift) send nothing:
 /// they toggle the [`ModifierLatch`] the *next* emission passes through, wherever
-/// that emission comes from.
+/// that emission comes from. [`Fn`](Self::Fn) sends nothing either: the Tablet
+/// bar's own toggle for its [`FN_ROW`](Self::FN_ROW).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarKey {
     /// Arms/disarms the one-shot `Ctrl`.
@@ -131,6 +210,14 @@ pub enum BarKey {
     /// Forward delete — the one destructive key, and the one drawn in the
     /// danger tone.
     Del,
+    /// Home (Tablet only).
+    Home,
+    /// End (Tablet only).
+    End,
+    /// Shows/hides the Tablet bar's F-key row; never reaches the session.
+    Fn,
+    /// Function key `F(n)`, 1..=12; any other `n` sends nothing.
+    F(u8),
 }
 
 impl BarKey {
@@ -151,6 +238,39 @@ impl BarKey {
         BarKey::Del,
     ];
 
+    /// The Tablet tier's row: the latches and `Esc`, │ `Tab`, `Home`, `End`, the
+    /// page keys and `Del`, │ `Fn`. Its arrows are an inverted-T cluster laid out
+    /// apart; [`ORDER`](Self::ORDER) stays the Compact row.
+    pub const TABLET_ORDER: [BarKey; 11] = [
+        BarKey::Ctrl,
+        BarKey::Alt,
+        BarKey::Shift,
+        BarKey::Esc,
+        BarKey::Tab,
+        BarKey::Home,
+        BarKey::End,
+        BarKey::PageUp,
+        BarKey::PageDown,
+        BarKey::Del,
+        BarKey::Fn,
+    ];
+
+    /// The row [`Fn`](Self::Fn) reveals.
+    pub const FN_ROW: [BarKey; 12] = [
+        BarKey::F(1),
+        BarKey::F(2),
+        BarKey::F(3),
+        BarKey::F(4),
+        BarKey::F(5),
+        BarKey::F(6),
+        BarKey::F(7),
+        BarKey::F(8),
+        BarKey::F(9),
+        BarKey::F(10),
+        BarKey::F(11),
+        BarKey::F(12),
+    ];
+
     /// The cap's printed label.
     pub fn label(self) -> &'static str {
         match self {
@@ -166,6 +286,10 @@ impl BarKey {
             BarKey::PageUp => "PgUp",
             BarKey::PageDown => "PgDn",
             BarKey::Del => "Del",
+            BarKey::Home => "Home",
+            BarKey::End => "End",
+            BarKey::Fn => "Fn",
+            BarKey::F(n) => f_index(n).map_or("", |i| F_LABELS[i]),
         }
     }
 
@@ -185,15 +309,22 @@ impl BarKey {
             BarKey::PageUp => "Page up",
             BarKey::PageDown => "Page down",
             BarKey::Del => "Delete",
+            BarKey::Home => "Home",
+            BarKey::End => "End",
+            BarKey::Fn => "Function keys",
+            BarKey::F(_) => self.label(),
         }
     }
 
-    /// The bytes this key sends **unmodified**, or `None` for the three latch keys.
-    /// An armed `Shift` picks a different sequence for some — see
-    /// [`shifted_sequence`], which the source applies on the way out.
+    /// The bytes this key sends **unmodified**, or `None` for the three latch keys
+    /// and [`Fn`](Self::Fn). An armed modifier picks a different sequence for
+    /// some — see [`modified_sequence`], which the source applies on the way out.
     pub fn sequence(self) -> Option<&'static [u8]> {
         match self {
-            BarKey::Ctrl | BarKey::Alt | BarKey::Shift => None,
+            BarKey::Ctrl | BarKey::Alt | BarKey::Shift | BarKey::Fn => None,
+            BarKey::Home => Some(HOME),
+            BarKey::End => Some(END),
+            BarKey::F(n) => f_index(n).map(|i| F_KEYS[i][PLAIN]),
             BarKey::Esc => Some(ESC),
             BarKey::Tab => Some(TAB),
             BarKey::Up => Some(ARROW_UP),
@@ -208,7 +339,7 @@ impl BarKey {
 
     /// Whether this key toggles the latch rather than sending anything.
     pub fn is_latch(self) -> bool {
-        self.sequence().is_none()
+        matches!(self, BarKey::Ctrl | BarKey::Alt | BarKey::Shift)
     }
 
     /// Whether this key is drawn in the danger tone (`Del` alone).
@@ -220,6 +351,12 @@ impl BarKey {
     /// three rules of the incumbent's bar.
     pub fn separator_before(self) -> bool {
         matches!(self, BarKey::Tab | BarKey::PageUp | BarKey::Del)
+    }
+
+    /// [`separator_before`](Self::separator_before) on the
+    /// [`TABLET_ORDER`](Self::TABLET_ORDER) row: before `Tab` and before `Fn`.
+    pub fn tablet_separator_before(self) -> bool {
+        matches!(self, BarKey::Tab | BarKey::Fn)
     }
 
     /// Whether this key is currently armed, given `latch`. Only the three latch
@@ -239,6 +376,10 @@ impl BarKey {
 /// so a new [`NamedKey`] variant is a compile error, not a silently dropped
 /// key. Shares its sequences with [`BarKey`]: the bar's `↑` and a physical
 /// `↑` send the same three bytes, and the same six shifted ones.
+/// `Copy`/`Cut`/`Paste` deliberately send **nothing** — not a silent drop:
+/// the shell already decodes that hardware key onto `InputEvent::EditCommand`
+/// before a widget sees `InputEvent::Key`, so a byte here would double-handle
+/// the keypress (handled instead by `InputSeam::absorb`/`edit_command`).
 pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
     match key {
         NamedKey::Enter => &[ENTER_BYTE],
@@ -252,6 +393,8 @@ pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
         NamedKey::End => END,
         NamedKey::Escape => ESC,
         NamedKey::Tab => TAB,
+        NamedKey::Insert => INSERT,
+        NamedKey::Copy | NamedKey::Cut | NamedKey::Paste => &[],
     }
 }
 
@@ -313,6 +456,117 @@ mod tests {
         assert!(shifted_sequence(END).is_none());
     }
 
+    /// One F-key's expected forms: `(key, plain, Shift, Alt, Ctrl)`.
+    type FRow = (u8, Seq, Seq, Seq, Seq);
+    type Seq = &'static [u8];
+
+    /// Every F-key's chosen forms, spelled out rather than read back from [`F_KEYS`].
+    const F_EXPECTED: [FRow; 12] = [
+        (1, b"\x1bOP", b"\x1b[1;2P", b"\x1b[1;3P", b"\x1b[1;5P"),
+        (2, b"\x1bOQ", b"\x1b[1;2Q", b"\x1b[1;3Q", b"\x1b[1;5Q"),
+        (3, b"\x1bOR", b"\x1b[1;2R", b"\x1b[1;3R", b"\x1b[1;5R"),
+        (4, b"\x1bOS", b"\x1b[1;2S", b"\x1b[1;3S", b"\x1b[1;5S"),
+        (5, b"\x1b[15~", b"\x1b[15;2~", b"\x1b[15;3~", b"\x1b[15;5~"),
+        (6, b"\x1b[17~", b"\x1b[17;2~", b"\x1b[17;3~", b"\x1b[17;5~"),
+        (7, b"\x1b[18~", b"\x1b[18;2~", b"\x1b[18;3~", b"\x1b[18;5~"),
+        (8, b"\x1b[19~", b"\x1b[19;2~", b"\x1b[19;3~", b"\x1b[19;5~"),
+        (9, b"\x1b[20~", b"\x1b[20;2~", b"\x1b[20;3~", b"\x1b[20;5~"),
+        (10, b"\x1b[21~", b"\x1b[21;2~", b"\x1b[21;3~", b"\x1b[21;5~"),
+        (11, b"\x1b[23~", b"\x1b[23;2~", b"\x1b[23;3~", b"\x1b[23;5~"),
+        (12, b"\x1b[24~", b"\x1b[24;2~", b"\x1b[24;3~", b"\x1b[24;5~"),
+    ];
+
+    /// One tap of `key` on a fresh source with `latches` armed from the bar first.
+    fn tap_with(latches: &[BarKey], key: BarKey) -> (Vec<u8>, ModifierLatch) {
+        let mut source = KeystrokeSource::new();
+        for latch in latches {
+            source.on_bar_key(*latch);
+        }
+        let bytes = source.on_bar_key(key).bytes;
+        (bytes, source.latch())
+    }
+
+    #[test]
+    fn every_f_key_sends_its_xterm_form_plain_and_under_each_modifier() {
+        for (n, plain, shift, alt, ctrl) in F_EXPECTED {
+            let key = BarKey::F(n);
+            assert_eq!(key.sequence(), Some(plain), "{key:?}");
+            assert_eq!(tap_with(&[], key).0, plain, "{key:?}");
+            for (latch, form) in [
+                (BarKey::Shift, shift),
+                (BarKey::Alt, alt),
+                (BarKey::Ctrl, ctrl),
+            ] {
+                let (bytes, left) = tap_with(&[latch], key);
+                assert_eq!(bytes, form, "{latch:?}+{key:?}");
+                assert!(!left.armed(), "{latch:?}+{key:?} spends its one shot");
+            }
+            assert_eq!(key.label(), format!("F{n}"));
+            assert_eq!(key.name(), key.label());
+        }
+    }
+
+    #[test]
+    fn home_and_end_send_the_hardware_keys_bytes_and_have_no_shifted_form() {
+        assert_eq!(tap_with(&[], BarKey::Home).0, b"\x1b[H");
+        assert_eq!(tap_with(&[], BarKey::End).0, b"\x1b[F");
+        assert_eq!(
+            BarKey::Home.sequence(),
+            Some(named_key_bytes(NamedKey::Home))
+        );
+        assert_eq!(BarKey::End.sequence(), Some(named_key_bytes(NamedKey::End)));
+        // No Shift row, so an armed Shift leaves the bytes (and itself) alone,
+        // as it does for every multi-unit sequence without a variant.
+        let (bytes, left) = tap_with(&[BarKey::Shift], BarKey::Home);
+        assert_eq!(bytes, b"\x1b[H");
+        assert!(left.shift);
+    }
+
+    #[test]
+    fn one_parameter_per_f_key_shift_first_and_the_rest_stays_armed() {
+        let (bytes, left) = tap_with(&[BarKey::Ctrl, BarKey::Shift], BarKey::F(5));
+        assert_eq!(bytes, b"\x1b[15;2~", "Shift's form, no Ctrl folded in");
+        assert!(left.ctrl && !left.shift);
+        let (bytes, left) = tap_with(&[BarKey::Alt, BarKey::Ctrl], BarKey::F(5));
+        assert_eq!(bytes, b"\x1b[15;5~", "Ctrl before Alt");
+        assert!(left.alt && !left.ctrl);
+        // Ctrl/Alt forms exist on the F-keys alone: an arrow keeps both armed.
+        let (bytes, left) = tap_with(&[BarKey::Ctrl, BarKey::Alt], BarKey::Up);
+        assert_eq!(bytes, ARROW_UP);
+        assert!(left.ctrl && left.alt);
+    }
+
+    #[test]
+    fn fn_and_an_out_of_range_f_key_send_nothing_and_arm_nothing() {
+        for key in [BarKey::Fn, BarKey::F(0), BarKey::F(13)] {
+            let mut source = KeystrokeSource::new();
+            let emission = source.on_bar_key(key);
+            assert!(emission.bytes.is_empty(), "{key:?}");
+            assert_eq!(emission.class, super::super::source::InputClass::None);
+            assert!(!source.latch().armed());
+            assert!(!key.is_latch());
+        }
+        assert_eq!(BarKey::F(13).label(), "");
+    }
+
+    #[test]
+    fn the_tablet_row_and_the_fn_row_keep_their_own_order() {
+        assert_eq!(
+            BarKey::TABLET_ORDER.map(BarKey::label),
+            [
+                "Ctrl", "Alt", "Shift", "Esc", "Tab", "Home", "End", "PgUp", "PgDn", "Del", "Fn"
+            ]
+        );
+        let rules: Vec<&str> = BarKey::TABLET_ORDER
+            .iter()
+            .filter(|key| key.tablet_separator_before())
+            .map(|key| key.label())
+            .collect();
+        assert_eq!(rules, ["Tab", "Fn"]);
+        assert_eq!(BarKey::FN_ROW.map(BarKey::label), F_LABELS);
+        assert_eq!(BarKey::ORDER.len(), 12, "the Compact row is untouched");
+    }
+
     #[test]
     fn the_bar_order_and_grouping_match_the_incumbent() {
         assert_eq!(
@@ -361,5 +615,22 @@ mod tests {
             shifted_sequence(named_key_bytes(NamedKey::Enter)).is_none(),
             "Return has no shifted form here"
         );
+    }
+
+    #[test]
+    fn insert_sends_the_conventional_csi_sequence() {
+        assert_eq!(named_key_bytes(NamedKey::Insert), INSERT);
+        assert_eq!(hex(INSERT), "1b5b327e");
+    }
+
+    #[test]
+    fn the_clipboard_named_keys_send_nothing_here_deliberately() {
+        // Handled on the `EditCommand` path instead (see `named_key_bytes`).
+        for key in [NamedKey::Copy, NamedKey::Cut, NamedKey::Paste] {
+            assert!(
+                named_key_bytes(key).is_empty(),
+                "{key:?} is handled via EditCommand, not re-sent as bytes"
+            );
+        }
     }
 }

@@ -31,7 +31,11 @@ use peniko::Color;
 use muxr::features::connect::domain::entities::SavedServer;
 use muxr::features::connect::presentation::pages::connect_layout;
 use muxr::features::connect::presentation::widgets::connect_pieces;
+use muxr::features::connect::presentation::widgets::getting_started::GETTING_STARTED_BODY;
 use muxr::features::connect::presentation::widgets::saved::splash_saved_servers;
+use muxr::features::connect::presentation::widgets::tablet::{
+    tablet_splash_layout, tablet_splash_pieces,
+};
 use muxr::ui::backdrop::page_backdrop;
 use muxr::ui::splash::icon_phase::{IconArt, splash_icon_art};
 use muxr::ui::splash::sequence::{
@@ -64,6 +68,9 @@ const RESTING_SHADOWS: usize = 3;
 const RAIN_FREE_CEILING: usize = 44;
 /// The burst's particle count (`spec::BURST_COUNT`, also `pub(crate)`).
 const BURST_COUNT: usize = 14;
+/// A full-band Tablet window (`tests/connect.rs`'s `FULL_TABLET`): the class the composition
+/// root hands the sequence the Tablet pieces on.
+const FULL_TABLET: Size = Size::new(1024.0, 720.0);
 
 /// A recording paint target: the flattened glyph-id stream, plus a count of every other draw kind.
 #[derive(Default)]
@@ -138,6 +145,18 @@ fn drive_clock<V: View<AppState>>(
     state: &mut AppState,
     theme: Theme,
 ) -> Vec<(Recorder, bool)> {
+    drive_clock_sized(clock, logic, state, theme, SURFACE)
+}
+
+/// [`drive_clock`] laid out at an explicit `surface` — a Tablet window, where the phone's
+/// [`SURFACE`] could not hold the two-column arrangement.
+fn drive_clock_sized<V: View<AppState>>(
+    clock: &[u64],
+    logic: &mut impl FnMut(&mut AppState) -> V,
+    state: &mut AppState,
+    theme: Theme,
+    surface: Size,
+) -> Vec<(Recorder, bool)> {
     let mut root: RenderRoot<AppState, V> = RenderRoot::new();
     let mut text_ctx = TextContext::new();
     root.set_theme(Box::new(theme));
@@ -147,7 +166,7 @@ fn drive_clock<V: View<AppState>>(
         .map(|at| {
             root.rebuild(logic, state);
             let text_any: &mut dyn Any = &mut text_ctx;
-            root.layout_with_text(SURFACE, text_any);
+            root.layout_with_text(surface, text_any);
             let mut scene = Recorder::default();
             let outcome = root.paint(&mut scene, FrameTime::from_nanos(*at));
             (scene, outcome.needs_frame)
@@ -230,6 +249,17 @@ fn occurrences(haystack: &[u32], needle: &[u32]) -> usize {
 fn heading_ids() -> Vec<u32> {
     let theme = frust_glyph::baseline();
     glyph_ids("Connect to server", &theme.type_scale.title_medium)
+}
+
+/// The opening of the Tablet panel's orientation card at its exact style, so its shaped ids
+/// match what `widgets::getting_started::getting_started_card` paints — the one piece on screen
+/// only in the Tablet arrangement (the phone keeps that paragraph in a dialog). A prefix well
+/// inside the card's first line, so no soft wrap can split the fingerprint.
+fn orientation_ids() -> Vec<u32> {
+    const OPENING: &str = "Muxr is the mobile client";
+    assert!(GETTING_STARTED_BODY.starts_with(OPENING));
+    let theme = frust_glyph::baseline();
+    glyph_ids(OPENING, &theme.type_scale.body_small)
 }
 
 /// How many of `scene`'s glyphs came from the burst's particle alphabet (`spec::BURST_CHARS`).
@@ -383,6 +413,75 @@ fn the_sequence_walks_icon_then_burst_and_assembly_off_one_clock() {
         last.shadows, RESTING_SHADOWS,
         "every land flash has faded, leaving only the saved row's own dot glow"
     );
+    assert!(
+        !needs_frame,
+        "a finished sequence stops requesting frames — nothing left to animate"
+    );
+    assert!(done.get(), "and cues its own unmount");
+}
+
+#[test]
+fn a_tablet_window_assembles_the_tablet_screen_rather_than_the_phone_column() {
+    let _g = serial();
+    let _ambient = setup();
+
+    // What the composition root hands the sequence on a full-band Tablet window (its own read of
+    // the class), mounted under that window's metrics and laid out at that window.
+    let mut state = MuxrApp.init();
+    let saved = splash_saved_servers();
+    let art = decoded_icon();
+    let done = RwSignal::new(false);
+    let baseline = frust_glyph::baseline();
+    let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
+        let assemble_theme = baseline.clone();
+        splash_sequence(
+            art.clone(),
+            7,
+            tablet_splash_pieces(&baseline, &saved, true),
+            move |pieces| tablet_splash_layout(&assemble_theme, true, pieces),
+            done,
+        )
+    };
+    let metrics = support::metrics_at(FULL_TABLET.width, FULL_TABLET.height);
+    let frames = support::mount_with_metrics(Some(metrics), || {
+        drive_clock_sized(
+            &steady_clock(FRAME_NS, frame_at(sequence_end_ms() + 200.0)),
+            &mut logic,
+            &mut state,
+            theme(false),
+            FULL_TABLET,
+        )
+    });
+    let orientation = orientation_ids();
+    let heading = heading_ids();
+
+    // Icon beat: the screen has not started.
+    assert_eq!(
+        frames[frame_at(500.0)].0.glyph_runs,
+        0,
+        "nothing of the screen draws during the icon beat"
+    );
+    // The card is the panel's third piece: cued with the rest, staggered behind the brand row.
+    let gate = &frames[frame_at(assembly_start_ms() + 60.0)].0;
+    assert_eq!(
+        occurrences(&gate.glyph_ids, &orientation),
+        0,
+        "the orientation card waits for its own stagger"
+    );
+
+    // End: the Tablet screen, assembled — the panel's orientation card beside the form's heading.
+    let (last, needs_frame) = frames.last().expect("frames were painted");
+    assert_eq!(
+        occurrences(&last.glyph_ids, &orientation),
+        1,
+        "the finished overlay is the Tablet screen: its panel's orientation card is painted"
+    );
+    assert_eq!(
+        occurrences(&last.glyph_ids, &heading),
+        1,
+        "…beside the form's heading"
+    );
+    assert_eq!(last.images, 0, "the icon is long gone");
     assert!(
         !needs_frame,
         "a finished sequence stops requesting frames — nothing left to animate"

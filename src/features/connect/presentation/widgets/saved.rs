@@ -5,17 +5,18 @@ use std::rc::Rc;
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Theme, any,
-    colored_box, flexible, icon, icons, inflexible, text,
+    Align, Alignment, AnyView, EdgeInsets, FlexChild, GestureDetector, Padding, SizedBox, Theme,
+    any, colored_box, container, flexible, icon, icons, inflexible, text,
 };
-use frust_glyph::{BadgeVariant, badge};
+use frust_glyph::{BadgeVariant, avatar, badge};
 
 use super::pairing::READ_ONLY_CHIP;
+use super::pro_gate::row_is_locked;
 use super::{Live, backed, column, h_gap, row, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
-use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV};
+use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV, HAIRLINE};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
@@ -33,6 +34,14 @@ const DELETE_MARK: f64 = 18.0;
 /// The chip a saved row carries when a gated credential is stored for it — also
 /// what says a tap will raise a prompt rather than refill the form.
 pub const CREDENTIAL_CHIP: &str = "credential";
+/// What the Tablet list says in place of rows when nothing is saved.
+pub const NO_SAVED_SERVERS: &str = "no saved servers";
+/// The tag a row past the free tier's limit carries, beside its lock mark.
+pub const PRO_TAG: &str = "pro";
+/// The lock mark leading the pro tag.
+const LOCK_MARK: f64 = 12.0;
+/// The Tablet row's leading initial box.
+const AVATAR: f64 = 26.0;
 
 /// Piece 7 — the saved-server list, each row tappable to refill the form.
 /// `servers` is handed down rather than read here (the parity contract); an
@@ -47,7 +56,7 @@ pub fn saved_address<S: 'static>(
     let now = epoch_millis();
     let mut children = vec![saved_header(theme, colors), v_gap(spacing::MICRO)];
     for (index, server) in servers.iter().enumerate() {
-        children.push(saved_row(theme, colors, server, index, now, live));
+        children.push(saved_row(theme, colors, server, servers, index, now, live));
     }
     backed(column::<S>(children), colors)
 }
@@ -89,6 +98,7 @@ fn saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     server: &SavedServer,
+    servers: &[SavedServer],
     index: usize,
     now_ms: i64,
     live: Option<&Live>,
@@ -116,20 +126,7 @@ fn saved_row<S: 'static>(
             ])),
         ),
     ];
-    if server.has_credential {
-        items.push(inflexible(h_gap::<S>(spacing::MD)));
-        items.push(inflexible(any(badge(
-            CREDENTIAL_CHIP,
-            BadgeVariant::Neutral,
-        ))));
-    }
-    if server.read_only {
-        items.push(inflexible(h_gap::<S>(spacing::MD)));
-        items.push(inflexible(any(badge(
-            READ_ONLY_CHIP,
-            BadgeVariant::Neutral,
-        ))));
-    }
+    items.extend(chips::<S>(colors, server, locked(server, servers, live)));
     let body = Padding(EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y), row::<S>(items));
     let tappable: AnyView<S> = match live {
         None => any(body),
@@ -143,6 +140,127 @@ fn saved_row<S: 'static>(
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),
     ]))
+}
+
+/// Whether the row wears the pro tag. The splash has no controller, so no
+/// entitlement to judge by, and paints none.
+fn locked(server: &SavedServer, servers: &[SavedServer], live: Option<&Live>) -> bool {
+    live.is_some_and(|live| row_is_locked(server, servers, live.controller.entitlement()))
+}
+
+/// The credential and read-only chips a row carries, then the pro tag when
+/// `locked`, each led by its gap.
+fn chips<S: 'static>(colors: &Palette, server: &SavedServer, locked: bool) -> Vec<FlexChild<S>> {
+    let mut items = Vec::new();
+    for (shown, chip) in [
+        (server.has_credential, CREDENTIAL_CHIP),
+        (server.read_only, READ_ONLY_CHIP),
+    ] {
+        if shown {
+            items.push(inflexible(h_gap::<S>(spacing::MD)));
+            items.push(inflexible(any(badge(chip, BadgeVariant::Neutral))));
+        }
+    }
+    if locked {
+        items.push(inflexible(h_gap::<S>(spacing::MD)));
+        items.push(inflexible(any(icon(icons::LOCK)
+            .size(LOCK_MARK)
+            .color(colors.amber))));
+        items.push(inflexible(h_gap::<S>(spacing::MICRO)));
+        items.push(inflexible(any(badge(PRO_TAG, BadgeVariant::Accent))));
+    }
+    items
+}
+
+/// The Tablet variant of piece 7: the same header over card rows, or a muted
+/// line when nothing is saved. Tap, delete and chips wire exactly as the
+/// phone row's do, and `live` is `None` for the splash exactly as there.
+pub fn tablet_saved_list<S: 'static>(
+    theme: &Theme,
+    colors: &Palette,
+    servers: &[SavedServer],
+    live: Option<&Live>,
+) -> AnyView<S> {
+    let now = epoch_millis();
+    let mut children = vec![saved_header(theme, colors), v_gap(spacing::MD)];
+    if servers.is_empty() {
+        children.push(any(
+            text(NO_SAVED_SERVERS).style(inked(&theme.type_scale.body_small, colors.fg_muted))
+        ));
+    }
+    for (index, server) in servers.iter().enumerate() {
+        if index > 0 {
+            children.push(v_gap(spacing::SM));
+        }
+        children.push(tablet_saved_row(
+            theme, colors, server, servers, index, now, live,
+        ));
+    }
+    any(column::<S>(children))
+}
+
+/// A bordered card row: the label's initial, the label over
+/// `host:port · trust · recency`, the chips, and the delete target.
+fn tablet_saved_row<S: 'static>(
+    theme: &Theme,
+    colors: &Palette,
+    server: &SavedServer,
+    servers: &[SavedServer],
+    index: usize,
+    now_ms: i64,
+    live: Option<&Live>,
+) -> AnyView<S> {
+    let meta = format!(
+        "{} · {} · {}",
+        server.endpoint(),
+        trust_meta_label(server.trust_mode),
+        server.last_used_label(now_ms)
+    );
+    let initial: String = server
+        .label
+        .chars()
+        .chain(server.host.chars())
+        .next()
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    let mut items = vec![
+        // The label beside it already names the row.
+        inflexible(any(avatar(initial).size(AVATAR).decorative())),
+        inflexible(h_gap::<S>(spacing::MD)),
+        flexible(
+            1,
+            any(column::<S>(vec![
+                any(text(server.label.clone())
+                    .style(inked(&theme.type_scale.body_small, colors.fg))),
+                v_gap::<S>(spacing::MICRO),
+                any(text(meta).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+            ])),
+        ),
+    ];
+    items.extend(chips::<S>(colors, server, locked(server, servers, live)));
+    let body = row::<S>(items);
+    let tappable: AnyView<S> = match live {
+        None => any(body),
+        Some(live) => {
+            let on_tap = Rc::clone(&live.on_saved_tap);
+            any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
+        }
+    };
+    let content = row::<S>(vec![
+        flexible(1, tappable),
+        inflexible(h_gap::<S>(spacing::MD)),
+        inflexible(delete_affordance(colors, server, index, live)),
+    ]);
+    let inset = EdgeInsets {
+        left: spacing::BASE,
+        top: spacing::XS,
+        right: spacing::TIGHT,
+        bottom: spacing::XS,
+    };
+    any(container(Padding(inset, content))
+        .fill(colors.surface)
+        .radius(theme.shape.medium)
+        .border(colors.outline, HAIRLINE))
 }
 
 /// A dim [`icons::DELETE`] mark in a [`DELETE_TARGET`]-square press target,

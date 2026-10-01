@@ -12,14 +12,18 @@
 		ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */; };
 		ABCDABCDABCDABCDABCD0033 /* FrustEmbedding in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */; };
 		ABCDABCDABCDABCDABCD0034 /* FrustCamera in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0035 /* FrustCamera */; };
+		ABCDABCDABCDABCDABCD0037 /* FrustIap in Frameworks */ = {isa = PBXBuildFile; productRef = ABCDABCDABCDABCDABCD0038 /* FrustIap */; };
+		ABCDABCDABCDABCDABCD003B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = ABCDABCDABCDABCDABCD003A /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		6444DA7C30690BF0000A8DDE /* Muxr.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = Muxr.storekit; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0003 /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABCDABCDABCDABCDABCD0010 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ABCDABCDABCDABCDABCD003A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -29,6 +33,7 @@
 			files = (
 				ABCDABCDABCDABCDABCD0033 /* FrustEmbedding in Frameworks */,
 				ABCDABCDABCDABCDABCD0034 /* FrustCamera in Frameworks */,
+				ABCDABCDABCDABCDABCD0037 /* FrustIap in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -40,6 +45,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				ABCDABCDABCDABCDABCD0027 /* Assets.xcassets in Resources */,
+				ABCDABCDABCDABCDABCD003B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -49,6 +55,7 @@
 		ABCDABCDABCDABCDABCD0007 = {
 			isa = PBXGroup;
 			children = (
+				6444DA7C30690BF0000A8DDE /* Muxr.storekit */,
 				ABCDABCDABCDABCDABCD0009 /* Runner */,
 				ABCDABCDABCDABCDABCD0008 /* Products */,
 			);
@@ -69,6 +76,7 @@
 				ABCDABCDABCDABCDABCD0011 /* SceneDelegate.swift */,
 				ABCDABCDABCDABCDABCD0014 /* Info.plist */,
 				ABCDABCDABCDABCDABCD0017 /* Assets.xcassets */,
+				ABCDABCDABCDABCDABCD003A /* PrivacyInfo.xcprivacy */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -93,6 +101,7 @@
 			packageProductDependencies = (
 				ABCDABCDABCDABCDABCD0032 /* FrustEmbedding */,
 				ABCDABCDABCDABCDABCD0035 /* FrustCamera */,
+				ABCDABCDABCDABCDABCD0038 /* FrustIap */,
 			);
 			productName = Runner;
 			productReference = ABCDABCDABCDABCDABCD0003 /* Runner.app */;
@@ -124,6 +133,7 @@
 			packageReferences = (
 				ABCDABCDABCDABCDABCD0031 /* XCLocalSwiftPackageReference "FrustEmbedding" */,
 				ABCDABCDABCDABCDABCD0036 /* XCLocalSwiftPackageReference "FrustCamera" */,
+				ABCDABCDABCDABCDABCD0039 /* XCLocalSwiftPackageReference "FrustIap" */,
 			);
 			productRefGroup = ABCDABCDABCDABCDABCD0008 /* Products */;
 			projectDirPath = "";
@@ -148,7 +158,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nCARGO_FEATURES=\"\"\nif [ -n \"${FRUST_FEATURES:-}\" ]; then\nCARGO_FEATURES=\"--features $(echo \"$FRUST_FEATURES\" | base64 -d)\"\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS $CARGO_FEATURES\ncp \"target/$TRIPLE/$PROFILE_DIR/libmuxr.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
+			shellScript = "set -e\n# Xcode runs script phases with its own PATH, which lacks rustup's bin dir.\nexport PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\"\ncase \"$PLATFORM_NAME\" in\niphonesimulator)\nif [ \"$ARCHS\" = \"x86_64\" ]; then TRIPLE=\"x86_64-apple-ios\"; else TRIPLE=\"aarch64-apple-ios-sim\"; fi\n;;\n*)\nTRIPLE=\"aarch64-apple-ios\"\n;;\nesac\ncase \"$CONFIGURATION\" in\nRelease*)\nPROFILE_DIR=\"release\"\nCARGO_FLAGS=\"--release\"\n;;\nProfile*)\nPROFILE_DIR=\"profile\"\nCARGO_FLAGS=\"--profile profile\"\n;;\n*)\nPROFILE_DIR=\"debug\"\nCARGO_FLAGS=\"\"\n;;\nesac\nif [ -n \"${FRUST_DEFINES:-}\" ]; then\nfor kv in $(echo \"$FRUST_DEFINES\" | base64 -d | tr ';' ' '); do export \"$kv\"; done\nfi\nCARGO_FEATURES=\"\"\nif [ -n \"${FRUST_FEATURES:-}\" ]; then\nCARGO_FEATURES=\"--features $(echo \"$FRUST_FEATURES\" | base64 -d)\"\nfi\nexport IPHONEOS_DEPLOYMENT_TARGET\ncd \"$SRCROOT/..\"\ncargo build --target \"$TRIPLE\" $CARGO_FLAGS $CARGO_FEATURES\nTARGET_DIR=\"${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*\"target_directory\":\"\\([^\"]*\\)\".*/\\1/p')}\"\nif [ -z \"$TARGET_DIR\" ]; then\necho \"error: could not resolve cargo target directory\" >&2\nexit 1\nfi\ncp \"$TARGET_DIR/$TRIPLE/$PROFILE_DIR/libmuxr.a\" \"$BUILT_PRODUCTS_DIR/\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -760,11 +770,15 @@
 /* Begin XCLocalSwiftPackageReference section */
 		ABCDABCDABCDABCDABCD0031 /* XCLocalSwiftPackageReference "FrustEmbedding" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../platform/ios/FrustEmbedding";
+			relativePath = "../../../frust/platform/ios/FrustEmbedding";
 		};
 		ABCDABCDABCDABCDABCD0036 /* XCLocalSwiftPackageReference "FrustCamera" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../crates/frust/../../plugins/camera/platform/ios";
+			relativePath = "../../../frust/crates/frust/../../plugins/camera/platform/ios";
+		};
+		ABCDABCDABCDABCDABCD0039 /* XCLocalSwiftPackageReference "FrustIap" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../frust/plugins/iap/platform/ios/FrustIap";
 		};
 /* End XCLocalSwiftPackageReference section */
 
@@ -776,6 +790,10 @@
 		ABCDABCDABCDABCDABCD0035 /* FrustCamera */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FrustCamera;
+		};
+		ABCDABCDABCDABCDABCD0038 /* FrustIap */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FrustIap;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

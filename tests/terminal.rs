@@ -6,7 +6,7 @@
 //! invisible to the accessibility tree. Two navigators, deliberately: the **mounted** one stands
 //! in for the app's root overlay host the screen pushes overlays through (exercised end to end,
 //! located by painted geometry); the **record-only** one carries the app's `Nav` handle, so
-//! pushing `/terminal?session=s-1` records that query in the route-meta mirror (the only way
+//! pushing `/terminal?session=zellij:dev` records that query in the route-meta mirror (the only way
 //! this screen learns its session id) while the page op it enqueues is never drained. Without the
 //! split, that push would build a second terminal screen inside the mounted navigator and the
 //! two would fight over the published chrome.
@@ -26,16 +26,20 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, Theme,
+    AnyView, Component, GetUntracked, NavigatorController, PopResult, Set, SizedBox, Stack, Theme,
     WindowMetrics, any, navigator, provide_context,
 };
-use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP, WindowInsets};
+use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
 use muxr::features::sessions::di::expect_sessions_repository;
+use muxr::features::terminal::data::repositories::mock_terminal_repository::{
+    clear_verb_log_for_tests, verb_log_for_tests,
+};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, open_terminal_menu, terminal_page,
 };
@@ -62,7 +66,7 @@ const PANEL_PADDING: f64 = 20.0;
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The session the suite attaches to — the sessions mock's first seeded one.
-const SESSION_ID: &str = "s-1";
+const SESSION_ID: &str = SEEDED_DEV_ID;
 const SESSION_NAME: &str = "dev";
 
 /// `docs/terminal.html`'s `TABS`, as the screen must print them.
@@ -171,11 +175,6 @@ fn mock_target() -> ConnectTarget {
     }
 }
 
-/// A [`WindowMetrics`] whose size is `size` — see `Harness::mount_with_metrics`.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
-}
-
 /// The screen, an overlay navigator over it, and everything a frame needs.
 struct Harness {
     /// The **mounted** navigator: the screen's overlays land here.
@@ -202,10 +201,7 @@ impl Harness {
     /// `None` leaves context unset, exactly the state every other test in this
     /// suite mounts under, so this is purely additive.
     fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Self {
-        if let Some(metrics) = metrics {
-            provide_context(metrics);
-        }
-        Self::mount()
+        support::mount_with_metrics(metrics, Self::mount)
     }
 
     /// [`mount`](Self::mount) attached to `session` instead of [`SESSION_ID`] —
@@ -803,7 +799,7 @@ fn the_card_paints_glyphs_terminal_ink_and_not_the_mocks_hexes() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
 
     let ink = frust_glyph::baseline()
         .extension::<frust_glyph::GlyphInk>()
@@ -1407,7 +1403,7 @@ fn the_sheets_close_button_dismisses_it() {
     // The close button is the sheet's one *labelled* control — a real
     // `Role::Button`, unlike the pills (which are gesture targets over runs).
     // It lives inside the navigator, so it is tapped by the rect it paints.
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
     let close = scene
         .rounded
         .iter()
@@ -1968,7 +1964,7 @@ fn a_read_only_credential_withdraws_the_trees_three_create_rows() {
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
+fn a_read_only_credential_navigates_across_spaces() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
@@ -1980,15 +1976,42 @@ fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
     // on ("forgekit") — expanding it is a read-only-safe peek, and its own
     // active tab cascades open on its own.
     h.tap(h.value_point("zelli_mobile"));
-    h.pump_until("zelli_mobile's own tab to auto-expand", |h| {
-        h.shows("ed@zelli zsh")
+    // Waited on through the controller's own signal, NOT painted geometry: the
+    // space this connection is already on ("forgekit") has its own settled
+    // reveal to collapse first, and `pump_until`'s pinned-zero paint clock never
+    // advances that tween — so forgekit's stale rows would still be sitting
+    // exactly where zelli_mobile's are about to land, and row [0] below would be
+    // devbox's pane instead of this browse's.
+    h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
+        debug_controller()
+            .expect("mounted")
+            .expanded_tab
+            .get_untracked()
+            .as_deref()
+            == Some("logs")
     });
-    let scene = h.frame();
+    // Runs those reveals forward for real so this frame paints the settled
+    // result rather than forgekit's stale geometry.
+    //
+    // Settled three times over: on a read-only tree one settle still paints a
+    // single pane row while the tap lands on forgekit's not-yet-retracted one,
+    // so the commit targets the space the connection is already on (measured:
+    // `commit_pane_in_space("forgekit")`, no switch, no toast).
+    h.settle_motion(0.0);
+    h.settle_motion(2_000.0);
+    let scene = h.settle_motion(4_000.0);
     h.tap(center(tree_pane_rows(&scene)[0]));
-    h.pump_for(2 * CLOSE_DELAY);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
 
-    let selected: Vec<String> = debug_controller()
-        .expect("mounted")
+    // A read-only credential can navigate across spaces: `SwitchSpace` carries
+    // no read-only gate on the wire (muxrd/src/grpc/space_ops.rs).
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        controller.active_tab.get_untracked(),
+        "logs",
+        "the commit's `switch_space` landed — the connection followed it"
+    );
+    let selected: Vec<String> = controller
         .spaces
         .get_untracked()
         .into_iter()
@@ -1997,22 +2020,13 @@ fn a_read_only_credential_refuses_a_cross_space_commit_and_says_why() {
         .collect();
     assert_eq!(
         selected,
-        ["forgekit"],
-        "`SwitchSpace` is MUTATING, so the commit is turned back here rather \
-         than at the server"
-    );
-    assert!(
-        app_toasts()
-            .pending_untracked()
-            .iter()
-            .any(|message| message == READ_ONLY_TOAST),
-        "…and it says why: {:?}",
-        app_toasts().pending_untracked()
+        ["zelli_mobile"],
+        "…and the sheet's own space list followed it"
     );
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
+fn a_read_only_credential_navigates_across_tabs() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -2034,28 +2048,23 @@ fn a_read_only_credential_refuses_a_commit_that_would_move_tabs() {
         app_toasts().pending_untracked()
     );
 
-    // A commit that has to move tabs first is `GoToTab`, which is MUTATING —
-    // so the row stays on screen and says why, and nothing moves.
+    // A read-only credential can navigate across tabs: `GoToTab` carries no
+    // read-only gate on the wire (muxrd/src/grpc/tab_ops.rs).
     h.open_sheet();
     h.tap(h.value_point("btop"));
     let scene = h.settle();
     h.tap(center(tree_pane_rows(&scene)[0]));
-    h.pump_for(2 * CLOSE_DELAY);
 
-    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
-    assert!(h.shows(DEVBOX_TITLE), "…and the card never moved");
-    assert!(
-        app_toasts()
-            .pending_untracked()
-            .iter()
-            .any(|message| message == READ_ONLY_TOAST),
-        "the row says why: {:?}",
-        app_toasts().pending_untracked()
-    );
+    h.pump_until_values("the btop tab", |values| {
+        values.iter().any(|v| v == BTOP_TITLE)
+    });
+    assert!(h.shows(BTOP_TITLE), "the commit's `go_to_tab` landed");
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert_eq!(h.depth(), REST_DEPTH, "…and the sheet closed behind it");
 }
 
 #[test]
-fn a_read_only_credential_refuses_a_herdr_commit_inside_the_active_tab_too() {
+fn a_read_only_credential_navigates_panes_on_herdr() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session(HERDR_SESSION_ID);
@@ -2064,25 +2073,17 @@ fn a_read_only_credential_refuses_a_herdr_commit_inside_the_active_tab_too() {
 
     let (_before, after) = h.open_sheet();
 
-    // Inside the browsed tab, so the wire call is `FocusPane` alone — which a
-    // herdr relay drops for a read-only client without a word. The refusal is
-    // the client's, ahead of that silence: the row stays up and says why.
+    // A read-only credential can navigate panes on herdr: `FocusPane` carries
+    // no read-only gate on the wire (muxrd/src/grpc/pane_ops.rs).
     h.tap(center(tree_pane_rows(&after)[1]));
-    h.pump_for(2 * CLOSE_DELAY);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == REST_DEPTH);
+    assert_eq!(h.depth(), REST_DEPTH, "the sheet closed");
 
-    assert_eq!(h.depth(), REST_DEPTH + 1, "the sheet is still up");
+    let (_, reopened) = h.open_sheet();
     assert_eq!(
-        tree_focused_row(&h.frame()),
-        Some(0),
-        "…and the focused pane never moved"
-    );
-    assert!(
-        app_toasts()
-            .pending_untracked()
-            .iter()
-            .any(|message| message == READ_ONLY_TOAST),
-        "the row says why: {:?}",
-        app_toasts().pending_untracked()
+        tree_focused_row(&reopened),
+        Some(1),
+        "the focused pane moved with the commit"
     );
 }
 
@@ -2160,7 +2161,7 @@ fn every_affordance_on_this_screen_is_a_vector_and_announces_a_word() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
 
     // The expand button draws exactly one filled path (its mark) and no glyph
     // of its own — the "chrome icons are vectors" rule, as geometry.
@@ -2209,7 +2210,8 @@ fn the_screen_reads_the_attached_session_off_the_route_it_was_pushed_with() {
 
     // The proof is exact, if indirect: the rename dialog seeds itself with the
     // attached session's *current* name, which the screen can only know from
-    // `?session=s-1`. So delete one character and submit.
+    // `?session=zellij:dev`, the name-derived id the mock mints. So delete one
+    // character and submit.
     let before = h.frame();
     h.open_sheet();
     let after = h.tap_footer_rename();
@@ -2263,11 +2265,15 @@ fn a_frame_needs_no_settling_before_the_first_load_lands() {
 
 // 10 — responsive width-clamp pass.
 
+/// A phone in landscape: past the clamp tier's width, short of the Tablet class.
+const PHONE_LANDSCAPE_H: f64 = 390.0;
+
 #[test]
 fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
+    let mut h =
+        Harness::mount_with_metrics(Some(support::metrics_at(SURFACE.width, PHONE_LANDSCAPE_H)));
 
     let (origin, size, _) = card(&h.frame());
     assert!(
@@ -2294,7 +2300,8 @@ fn wide_metrics_grow_the_wrap_padding_but_keep_the_card_full_bleed() {
 fn fullscreen_stays_edge_to_edge_even_with_wide_metrics() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(SURFACE)));
+    let mut h =
+        Harness::mount_with_metrics(Some(support::metrics_at(SURFACE.width, PHONE_LANDSCAPE_H)));
 
     h.tap_label(EXPAND);
     // Mid-flight first: the wide branch's extra padding changes value on the
@@ -2328,7 +2335,7 @@ fn narrow_metrics_leave_the_wrap_padding_unchanged_like_no_metrics_at_all() {
     // Explicit narrow metrics, even though the harness still paints at the
     // full-width `SURFACE` — proving the branch keys on the *published*
     // width, not the paint surface.
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let mut h = Harness::mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
 
     let (origin, size, radius) = card(&h.frame());
     assert!(
@@ -2343,7 +2350,7 @@ fn narrow_metrics_leave_the_wrap_padding_unchanged_like_no_metrics_at_all() {
 fn narrow_metrics_lift_the_card_off_the_bar_by_the_portrait_gap() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let mut h = Harness::mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
 
     // Portrait used to sit flush under the floating bar while landscape read
     // as spaced — the gap is the *top* inset only, so the sides stay at the
@@ -2651,7 +2658,7 @@ fn holding_a_pane_row_renames_it_without_committing_it() {
     );
 
     // A plain tap on the same row still commits it.
-    let scene = h.frame();
+    let scene = h.settle_motion(0.0);
     h.tap(center(tree_pane_rows(&scene)[1]));
     // `floor - 1`: depth is already `floor` (the sheet, still up) before this
     // tap — the wait has to watch for the sheet's own pop, not the level it is
@@ -2708,4 +2715,638 @@ fn a_read_only_credential_withdraws_every_rows_press_and_hold() {
         floor,
         "a read-only session offers no rename affordance anywhere on the sheet"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The Tablet's docked rail
+// ---------------------------------------------------------------------------
+
+/// `docs/tablet.html`'s three frame sizes: landscape (Full band) and the
+/// collapsed band's square. The paint surface stays [`SURFACE`]; only the
+/// published metrics pick the structure.
+const TABLET_FULL: (f64, f64) = (1024.0, 720.0);
+const TABLET_COLLAPSED: (f64, f64) = (720.0, 720.0);
+/// The zellij mock's header line (four tabs, two panes apiece).
+const RAIL_SUMMARY: &str = "4 tabs \u{b7} 8 panes";
+const EXIT_IMMERSIVE: &str = "Exit immersive";
+
+/// [`Harness::mount_session`] under Tablet metrics of `size`.
+fn mount_tablet(session: &str, (width, height): (f64, f64)) -> Harness {
+    let metrics = Some(support::metrics_at(width, height));
+    support::mount_with_metrics(metrics, || Harness::mount_session(session))
+}
+
+fn expanded(
+    controller: &muxr::features::terminal::presentation::controller::TerminalController,
+) -> (Option<String>, Option<String>) {
+    (
+        controller.expanded_space.get_untracked(),
+        controller.expanded_tab.get_untracked(),
+    )
+}
+
+#[test]
+fn a_tablet_docks_the_rail_resting_on_the_active_tab_without_a_cascade() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    let first = h.frame_at(0.0);
+    assert!(
+        h.shows(SESSION_NAME) && h.shows(RAIL_SUMMARY),
+        "{:?}",
+        h.values()
+    );
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(expanded(&controller).1.as_deref(), Some("devbox"));
+    assert_eq!(
+        tree_pane_rows(&first).len(),
+        2,
+        "devbox's panes are on screen in the first frame, not cascading in"
+    );
+    assert_eq!(h.depth(), REST_DEPTH, "docked, not raised");
+}
+
+#[test]
+fn a_tablet_pane_tap_commits_and_the_rail_stays_resting_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.tap(h.value_point("btop"));
+    h.settle_motion(0.0);
+    h.tap(h.value_point("ed@precision zsh"));
+    h.pump_until_values("the btop tab", |values| {
+        values.iter().any(|v| v == BTOP_TITLE)
+    });
+    h.pump_for(2 * CLOSE_DELAY);
+
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(expanded(&controller).1.as_deref(), Some("btop"));
+    assert!(h.shows(RAIL_SUMMARY), "the rail is still mounted");
+    assert_eq!(h.depth(), REST_DEPTH, "nothing closed, nothing opened");
+}
+
+#[test]
+fn the_rails_rows_carry_the_float_tag_the_exited_mark_and_the_bell() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == "float"), "{labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "bell"),
+        "gohora rings: {labels:?}"
+    );
+    h.tap(h.value_point("btop"));
+    h.settle_motion(0.0);
+    assert!(node_labels(&h.root).iter().any(|l| l == "exited"));
+}
+
+#[test]
+fn the_compact_sheet_draws_none_of_the_rails_marks_or_menus() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.open_sheet();
+
+    let labels = node_labels(&h.root);
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l == "float" || l == "bell" || l.ends_with(" actions")),
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn a_read_only_rail_withdraws_add_rows_and_overflow_buttons_but_still_browses() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    make_read_only(&mut h);
+    h.frame();
+
+    assert!(!h.shows(ADD_TAB_LABEL) && !h.shows(NEW_PANE_LABEL) && !h.shows(ADD_SPACE_LABEL));
+    assert!(!node_labels(&h.root).iter().any(|l| l.ends_with(" actions")));
+    assert!(h.shows("read-only: browse and switch only"));
+    h.tap(h.value_point("btop"));
+    h.settle_motion(0.0);
+    assert!(h.shows("ed@precision zsh"), "the browse moved");
+}
+
+#[test]
+fn an_overflow_menus_rename_opens_the_rows_own_dialog() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+
+    h.tap_label("devbox actions");
+    h.settle();
+    assert_eq!(h.depth(), REST_DEPTH + 1, "the Glyph menu is up");
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        expanded(&controller).1.as_deref(),
+        Some("devbox"),
+        "the button's press never also toggled its row"
+    );
+    h.nav.pop_with_result(PopResult::of(0_usize));
+    h.flush();
+    h.settle();
+    assert!(h.shows("Rename tab"), "{:?}", h.values());
+}
+
+/// The Tablet kebab's menu entries, by index (Rename, Immersive, Show key bar,
+/// a separator, Detach).
+const MENU_IMMERSIVE: usize = 1;
+const MENU_KEY_BAR: usize = 2;
+const MENU_DETACH: usize = 4;
+
+impl Harness {
+    /// Press the kebab and pick entry `index` of the menu it opens.
+    fn choose_terminal_menu(&mut self, index: usize) {
+        open_terminal_menu(&mut self.state);
+        self.settle();
+        assert_eq!(self.depth(), REST_DEPTH + 1, "the Glyph menu is up");
+        self.nav.pop_with_result(PopResult::of(index));
+        self.flush();
+        self.settle();
+    }
+}
+
+#[test]
+fn the_tablet_kebab_opens_a_glyph_menu_and_no_sheet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.open_sheet();
+    assert_eq!(h.depth(), REST_DEPTH + 1, "one page: the menu, not a sheet");
+}
+
+#[test]
+fn the_tablet_menu_toggles_the_key_bar_signal() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    let controller = debug_controller().expect("mounted");
+    assert!(controller.key_bar_visible.get_untracked(), "on by default");
+
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(!controller.key_bar_visible.get_untracked());
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(controller.key_bar_visible.get_untracked());
+}
+
+#[test]
+fn the_tablet_menu_toggles_immersive_mode() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.choose_terminal_menu(MENU_IMMERSIVE);
+    assert!(app_nav().bar().fullscreen);
+}
+
+#[test]
+fn the_tablet_menus_detach_pops_and_toasts() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    app_toasts().clear();
+
+    h.choose_terminal_menu(MENU_DETACH);
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while app_toasts().pending_untracked().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the detach"
+        );
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec![DETACHED_TOAST.to_string()]
+    );
+}
+
+#[test]
+fn the_tablet_header_carries_the_session_space_and_tab_crumbs() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+    let labels = node_labels(&h.root);
+    for crumb in [SESSION_NAME, "devbox"] {
+        assert!(labels.iter().any(|l| l == crumb), "{crumb}: {labels:?}");
+    }
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(controller.crumb_labels(), [SESSION_NAME, "devbox"]);
+
+    let mut h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    h.frame();
+    let crumbs = debug_controller().expect("mounted").crumb_labels();
+    assert!(
+        crumbs.ends_with(&["forgekit".to_string(), "devbox".to_string()]),
+        "space, tab: {crumbs:?}"
+    );
+    assert!(
+        crumbs
+            .iter()
+            .all(|name| node_labels(&h.root).contains(name))
+    );
+}
+
+#[test]
+fn the_collapsed_band_hides_the_crumbs() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.frame();
+    assert!(!node_labels(&h.root).iter().any(|l| l == SESSION_NAME));
+}
+
+#[test]
+fn a_read_only_credential_shows_the_chip_in_the_status_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(SESSION_ID);
+    assert!(!node_labels(&h.root).iter().any(|l| l == "read-only"));
+    make_read_only(&mut h);
+    assert!(node_labels(&h.root).iter().any(|l| l == "read-only"));
+}
+
+#[test]
+fn the_collapsed_band_mounts_the_mini_rail_instead() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.frame();
+
+    assert!(!h.shows(RAIL_SUMMARY), "no full rail");
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == "ed@devbox zsh"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == EXIT_IMMERSIVE));
+
+    let point = h.label_point("ed@devbox zsh");
+    h.tap(point);
+    h.pump_until("the mini rail's commit", |_| {
+        verb_log_for_tests()
+            .iter()
+            .any(|verb| verb == "focus_pane:41")
+    });
+}
+
+#[test]
+fn immersive_on_a_tablet_keeps_the_mini_rail_and_its_way_out() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.tap_label(EXPAND);
+    h.settle_motion(1_000.0);
+    assert!(
+        !h.shows(RAIL_SUMMARY),
+        "the full rail folds to the mini rail"
+    );
+    h.tap_label(EXIT_IMMERSIVE);
+    assert!(
+        !app_nav().bar().fullscreen,
+        "…whose last button leaves immersive"
+    );
+}
+
+/// The read-only cross-space commit that once dropped when the tap followed
+/// the browse closely, on the docked rail: the commit lands in order, and the
+/// rail rests on where it landed.
+#[test]
+fn a_read_only_rail_lands_a_pane_tap_right_behind_a_space_browse() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    make_read_only(&mut h);
+    clear_verb_log_for_tests();
+
+    h.tap(h.value_point("zelli_mobile"));
+    h.pump_until("zelli_mobile's own tab to auto-expand", |_| {
+        debug_controller()
+            .expect("mounted")
+            .expanded_tab
+            .get_untracked()
+            .as_deref()
+            == Some("logs")
+    });
+    // The space's and then the tab's reveal, each run out on the paint clock.
+    h.settle_motion(0.0);
+    h.settle_motion(2_000.0);
+    h.tap(h.value_point("ed@zelli zsh"));
+    h.pump_until("the commit", |_| verb_log_for_tests().len() >= 2);
+    h.pump_for(2 * CLOSE_DELAY);
+
+    assert_eq!(
+        verb_log_for_tests(),
+        ["switch_space:zelli_mobile", "focus_pane:11"]
+    );
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        expanded(&controller),
+        (Some("zelli_mobile".to_string()), Some("logs".to_string()))
+    );
+    assert_eq!(h.depth(), REST_DEPTH);
+}
+
+/// Tab keys are unique only within one layout (an unnamed tab is keyed by its display
+/// name), so a browsed space can carry a tab keyed like the resting one. The mock's
+/// poll always reports `devbox` active: to a rail resting on `btop`, another client
+/// moving the focus back.
+#[test]
+fn a_docked_poll_follows_focus_only_while_resting_never_into_a_same_keyed_browse() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    let c = debug_controller().expect("mounted");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime");
+    let at = |space: &str, tab: &str| (Some(space.to_string()), Some(tab.to_string()));
+    let rest_on_btop = || {
+        assert!(rt.block_on(c.switch_tab("btop".to_string())));
+        c.settle_rest();
+        assert_eq!(expanded(&c), at("forgekit", "btop"));
+    };
+    let poll = || {
+        assert!(c.take_layout_poll_tick());
+        rt.block_on(c.refresh_layout_from_poll());
+    };
+
+    rest_on_btop();
+    rt.block_on(c.expand_space("zelli_mobile".to_string()));
+    let (space, mut tabs) = c.browsed_space_tabs.get_untracked().expect("browsed");
+    tabs[0].key = "btop".to_string();
+    c.browsed_space_tabs.set(Some((space, tabs)));
+    c.expand_tab("btop".to_string());
+    poll();
+    assert_eq!(
+        expanded(&c),
+        at("zelli_mobile", "btop"),
+        "a browse is the user's"
+    );
+
+    rest_on_btop();
+    poll();
+    assert_eq!(
+        expanded(&c),
+        at("forgekit", "devbox"),
+        "nothing browsed: it follows"
+    );
+}
+
+/// A current-thread runtime to drive one controller call to completion.
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+/// Browsing another space caches its tabs; re-expanding the selected one (the rail's
+/// auto-drill reopening the active tab) puts the rail back at rest, so a poll that
+/// reports another client's focus must be followed despite that cache.
+#[test]
+fn a_docked_poll_follows_focus_after_browsing_b_then_re_expanding_a() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    let at = |space: &str, tab: &str| (Some(space.to_string()), Some(tab.to_string()));
+    assert!(rt.block_on(c.switch_tab("btop".to_string())));
+    c.settle_rest();
+
+    rt.block_on(c.expand_space("zelli_mobile".to_string()));
+    assert!(c.browsed_space_tabs.get_untracked().is_some(), "B browsed");
+    rt.block_on(c.expand_space("forgekit".to_string()));
+    c.expand_tab("btop".to_string());
+    assert_eq!(expanded(&c), at("forgekit", "btop"));
+
+    assert!(c.take_layout_poll_tick());
+    rt.block_on(c.refresh_layout_from_poll());
+    assert_eq!(
+        expanded(&c),
+        at("forgekit", "devbox"),
+        "back at rest on A: the rail follows the poll's focus"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The deep link's supersede rule
+// ---------------------------------------------------------------------------
+
+/// Only a move that lands supersedes the deep link: one whose RPC fails — a space
+/// switch or a tree commit (both claimed), or a grid tap (no claim: a failed verb never
+/// lands) — leaves it pending for the next publish.
+#[test]
+fn a_claimed_move_whose_rpc_fails_keeps_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = Harness::mount_session(HERDR_SESSION_ID);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    let active = c.active_tab.get_untracked();
+    let kept = |landed: bool, step: &str| {
+        assert!(!landed, "{step}: the mock refuses it");
+        assert!(
+            c.pending_attach_target_for_tests().is_some(),
+            "{step}: still pending"
+        );
+    };
+
+    c.set_attach_target(Some(1), Some(21));
+    kept(
+        rt.block_on(c.select_space("nowhere".to_string())),
+        "space switch",
+    );
+    kept(rt.block_on(c.commit_pane(active, 999, false)), "commit");
+    kept(rt.block_on(c.focus_pane_from_tap(999, false)), "tap");
+}
+
+/// A space create moves no focus, so it keeps the deep link — even with its claim won.
+/// The mock refuses the create itself; the controller's unit suite pins the landed case.
+#[test]
+fn a_space_create_keeps_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = Harness::mount_session(HERDR_SESSION_ID);
+    let c = debug_controller().expect("mounted");
+
+    c.set_attach_target(Some(1), Some(21));
+    current_thread().block_on(c.create_space("scratch".to_string()));
+    assert!(c.pending_attach_target_for_tests().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// The key bar's two tiers
+// ---------------------------------------------------------------------------
+
+/// The Tablet tier's `Home` cap and its `Fn` cap, by accessible name.
+const HOME_CAP: &str = "Home";
+const FN_CAP: &str = "Function keys";
+
+impl Harness {
+    /// Enter the fixture replay (the live pane) and settle the build that mounts it.
+    fn enter_live(&mut self) {
+        debug_controller().expect("mounted").enter_live();
+        self.flush();
+    }
+
+    /// Whether a node labelled `label` is on the tree.
+    fn labelled(&self, label: &str) -> bool {
+        node_labels(&self.root).iter().any(|l| l == label)
+    }
+}
+
+#[test]
+fn a_live_tablet_shows_the_key_bar_with_no_keyboard_behind_the_menu_toggle() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.enter_live();
+    assert!(h.labelled(HOME_CAP) && h.labelled("End") && h.labelled(FN_CAP));
+
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(!h.labelled(HOME_CAP) && !h.labelled("Escape"), "hidden");
+    h.choose_terminal_menu(MENU_KEY_BAR);
+    assert!(h.labelled(HOME_CAP), "and back");
+}
+
+#[test]
+fn a_collapsed_tablet_drops_home_and_end_from_its_key_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.enter_live();
+    assert!(!h.labelled(HOME_CAP) && !h.labelled("End"));
+    assert!(h.labelled("Page up") && h.labelled(FN_CAP));
+}
+
+#[test]
+fn the_tablet_fn_cap_mounts_the_f_key_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.enter_live();
+    assert!(!h.labelled("F1"));
+
+    h.tap_label(FN_CAP);
+    h.frame();
+    assert!(h.labelled("F1") && h.labelled("F12"));
+    let controller = debug_controller().expect("mounted");
+    assert!(controller.fn_row_visible.get_untracked());
+}
+
+#[test]
+fn a_read_only_tablet_mounts_no_key_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    make_read_only(&mut h);
+    h.enter_live();
+    assert!(!h.labelled(HOME_CAP) && !h.labelled("Escape"));
+}
+
+#[test]
+fn a_live_phone_keeps_the_ime_only_compact_bar() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session(SESSION_ID);
+    h.enter_live();
+    assert!(!h.labelled("Escape"), "no keyboard, no bar");
+
+    provide_context(support::ime_bottom_inset(300.0));
+    h.frame();
+    assert!(h.labelled("Escape"), "the keyboard is up");
+    assert!(!h.labelled(HOME_CAP), "the Compact tier: no Home cap");
+}
+
+#[test]
+fn a_mini_rail_tab_cell_is_a_named_button_and_taps_by_its_label() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_COLLAPSED);
+    h.frame();
+    clear_verb_log_for_tests();
+
+    assert!(node_labels(&h.root).iter().any(|l| l == "minefit-api"));
+    h.tap_label("minefit-api");
+    h.pump_until("the tab commit", |_| {
+        verb_log_for_tests()
+            .iter()
+            .any(|verb| verb == "go_to_tab:2")
+    });
+}
+
+#[test]
+fn every_kebab_index_decodes_to_the_entry_its_table_declares() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    let controller = debug_controller().expect("mounted");
+
+    open_terminal_menu(&mut h.state);
+    h.settle();
+    let labels = node_labels(&h.root);
+    for entry in [
+        "Rename session",
+        "Immersive mode",
+        "Show key bar",
+        "Detach session",
+    ] {
+        assert!(labels.iter().any(|l| l == entry), "{entry}: {labels:?}");
+    }
+    h.nav.pop_with_result(PopResult::of(3_usize));
+    h.flush();
+    h.settle();
+    assert_eq!(h.depth(), REST_DEPTH, "the separator picks nothing");
+    assert!(controller.key_bar_visible.get_untracked());
+    assert!(!app_nav().bar().fullscreen);
+
+    h.choose_terminal_menu(5);
+    assert_eq!(h.depth(), REST_DEPTH, "past the table picks nothing");
+
+    h.choose_terminal_menu(0);
+    assert_eq!(h.depth(), REST_DEPTH + 1, "entry 0 is the rename dialog");
+}
+
+#[test]
+fn every_row_menu_index_decodes_to_the_entry_its_table_declares() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+
+    h.tap_label("devbox actions");
+    h.settle();
+    let labels = node_labels(&h.root);
+    for entry in ["Rename tab", "New pane here"] {
+        assert!(labels.iter().any(|l| l == entry), "{entry}: {labels:?}");
+    }
+    h.nav.pop_with_result(PopResult::of(2_usize));
+    h.flush();
+    h.settle();
+    assert_eq!(h.depth(), REST_DEPTH, "past the table picks nothing");
+}
+
+#[test]
+fn the_read_only_chip_shows_on_a_tablet_through_the_shared_helper() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.frame();
+    assert!(!node_labels(&h.root).iter().any(|l| l == "read-only"));
+    make_read_only(&mut h);
+    assert!(node_labels(&h.root).iter().any(|l| l == "read-only"));
 }

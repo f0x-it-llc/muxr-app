@@ -40,9 +40,11 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 /// How a dialled server's certificate is verified.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrustConfig {
-    /// The platform's own trust store validates the chain and the name
-    /// (`rustls-platform-verifier`: Security.framework on Apple targets,
-    /// Android's trust manager on Android).
+    /// A publicly trusted certificate chain. On Apple targets the platform's
+    /// own trust store validates chain and name (`rustls-platform-verifier`
+    /// over Security.framework). On Android, rustls' WebPKI verifier over the
+    /// bundled Mozilla root program (`webpki-roots`) does instead — see
+    /// [`system_ca_verifier`] for why the platform verifier is not used there.
     SystemCa,
     /// Accept any certificate. Dev servers only — this is the one mode with no
     /// authentication of the peer at all.
@@ -94,7 +96,7 @@ impl TrustConfig {
         }
 
         let mut digest = [0u8; PIN_LEN];
-        for (slot, pair) in digest.iter_mut().zip(bytes.chunks_exact(2)) {
+        for (slot, pair) in digest.iter_mut().zip(bytes.as_chunks::<2>().0) {
             let high = hex_nibble(pair[0]).ok_or(PinError::NotHex)?;
             let low = hex_nibble(pair[1]).ok_or(PinError::NotHex)?;
             *slot = (high << 4) | low;
@@ -103,9 +105,8 @@ impl TrustConfig {
     }
 
     /// The `rustls` verifier this mode installs on a client config. Fallible
-    /// only for [`TrustConfig::SystemCa`] (its platform verifier can fail to
-    /// construct; on Android it needs JNI handles the shell installs — see
-    /// [`ensure_platform_verifier_ready`]).
+    /// only for [`TrustConfig::SystemCa`], whose verifier is built rather than
+    /// constructed inline — see [`system_ca_verifier`].
     pub fn verifier(&self) -> Result<Arc<dyn ServerCertVerifier>, AppFailure> {
         let provider = crypto_provider();
         match self {
@@ -114,12 +115,7 @@ impl TrustConfig {
                 provider,
             })),
             TrustConfig::InsecureAcceptAny => Ok(Arc::new(AcceptAnyVerifier { provider })),
-            TrustConfig::SystemCa => {
-                ensure_platform_verifier_ready()?;
-                let verifier = rustls_platform_verifier::Verifier::new(provider)
-                    .map_err(|err| AppFailure::Network(format!("platform verifier: {err}")))?;
-                Ok(Arc::new(verifier))
-            }
+            TrustConfig::SystemCa => system_ca_verifier(provider),
         }
     }
 }
@@ -186,45 +182,57 @@ fn crypto_provider() -> Arc<CryptoProvider> {
         .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
 }
 
-/// Off-Android the platform verifier needs no setup.
+/// [`TrustConfig::SystemCa`] off Android: the platform's own trust store,
+/// through `rustls-platform-verifier` (Security.framework on Apple targets).
 #[cfg(not(target_os = "android"))]
-fn ensure_platform_verifier_ready() -> Result<(), AppFailure> {
-    Ok(())
+fn system_ca_verifier(
+    provider: Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, AppFailure> {
+    let verifier = rustls_platform_verifier::Verifier::new(provider)
+        .map_err(|err| AppFailure::Network(format!("platform verifier: {err}")))?;
+    Ok(Arc::new(verifier))
 }
 
-/// Hands `rustls-platform-verifier` the JNI env + application `Context` it
-/// needs before its first handshake, via
-/// `frust_plugin::android::with_jni_env` (the sanctioned accessor;
-/// `new_local_ref` because the initializer wants an owned local reference).
+/// [`TrustConfig::SystemCa`] on Android: rustls' own WebPKI verifier over the
+/// Mozilla root program — deliberately *not* the platform verifier.
 ///
-/// Only success is cached: a dial racing the shell's own handle install
-/// reports `NotInitialized`, and caching that would leave system-CA trust
-/// broken for the rest of the process. A failure is retried on the next
-/// dial — safe, since the verifier's own initializer is idempotent.
+/// `rustls-platform-verifier`'s Android component enables revocation checking
+/// with OCSP tried first and no CRL preference, and Android's checker raises
+/// a hard `CertPathValidatorException: Certificate does not specify OCSP
+/// responder` for any certificate carrying no OCSP URI — which the verifier
+/// then reports as `Revoked` and the handshake fails. Google Trust Services
+/// and Let's Encrypt have both dropped OCSP for CRLs, so that is now the
+/// ordinary shape of a public certificate, and every "Public domain (CA)"
+/// dial failed on it (observed against the demo's GTS WE1 chain). Upstream
+/// tracks it as rustls-platform-verifier PR #34, unreleased as of 0.7.0.
+///
+/// The trade: this trusts the bundled Mozilla roots, not the device's own
+/// store, so a user-installed or enterprise root is not honoured on Android —
+/// a server under one needs a pin (a scanned `fp`) instead. Revocation is not
+/// checked, which matches what browsers do for these certificates today.
 #[cfg(target_os = "android")]
-fn ensure_platform_verifier_ready() -> Result<(), AppFailure> {
-    use std::sync::atomic::{AtomicBool, Ordering};
+fn system_ca_verifier(
+    provider: Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, AppFailure> {
+    webpki_roots_verifier(provider)
+}
 
-    static READY: AtomicBool = AtomicBool::new(false);
+/// rustls' WebPKI verifier over `webpki-roots`' bundled Mozilla trust
+/// anchors. Android's [`system_ca_verifier`]; compiled under `test` too so
+/// the host suite exercises the exact verifier a device installs.
+#[cfg(any(target_os = "android", test))]
+fn webpki_roots_verifier(
+    provider: Arc<CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>, AppFailure> {
+    use rustls::RootCertStore;
+    use rustls::client::WebPkiServerVerifier;
 
-    if READY.load(Ordering::Acquire) {
-        return Ok(());
-    }
-
-    let attached = frust_plugin::android::with_jni_env(|env, context| {
-        let context = env.new_local_ref(context).map_err(|err| err.to_string())?;
-        rustls_platform_verifier::android::init_with_env(env, context)
-            .map_err(|err| err.to_string())
-    });
-
-    // Outer error: the handle accessor's; inner: the verifier's own initializer.
-    let outcome = match attached {
-        Ok(inner) => inner,
-        Err(err) => Err(err.to_string()),
-    };
-    outcome
-        .map(|()| READY.store(true, Ordering::Release))
-        .map_err(|err| AppFailure::Network(format!("platform verifier init: {err}")))
+    let roots: RootCertStore = webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect();
+    let verifier: Arc<dyn ServerCertVerifier> =
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+            .build()
+            .map_err(|err| AppFailure::Network(format!("system-CA verifier: {err}")))?;
+    Ok(verifier)
 }
 
 /// Accepts exactly the leaf certificate whose DER bytes hash to [`Self::pin`].
@@ -428,6 +436,35 @@ mod tests {
         ] {
             assert!(mode.verifier().is_ok(), "{mode:?} built no verifier");
         }
+    }
+
+    /// The verifier Android installs for `SystemCa` builds on the host too,
+    /// and it is a real WebPKI verifier over a non-empty root set: a leaf
+    /// nobody signed is refused, not waved through, and the refusal is not
+    /// the platform verifier's `Revoked` — the failure this path exists to
+    /// avoid.
+    #[test]
+    fn the_webpki_roots_verifier_refuses_an_unknown_issuer() {
+        assert!(
+            !webpki_roots::TLS_SERVER_ROOTS.is_empty(),
+            "the bundled root program is empty"
+        );
+        let verifier = webpki_roots_verifier(crypto_provider()).expect("builds on the host");
+
+        let leaf = CertificateDer::from(b"not a certificate anyone signed".to_vec());
+        let name = ServerName::try_from("demo.example").expect("a DNS name");
+        let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000));
+
+        let refused = verifier
+            .verify_server_cert(&leaf, &[], &name, &[], now)
+            .expect_err("an unsigned leaf must be refused");
+        assert!(
+            !matches!(
+                refused,
+                RustlsError::InvalidCertificate(CertificateError::Revoked)
+            ),
+            "the WebPKI path must never surface the platform verifier's Revoked: {refused:?}"
+        );
     }
 
     /// The pinned verifier answers on the certificate it was pinned to and

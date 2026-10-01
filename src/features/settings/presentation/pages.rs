@@ -1,6 +1,6 @@
-//! The `/settings` route: muxr's server-settings screen — five groups
-//! (`connection`, `auth tokens`, `saved servers`, `terminal appearance`,
-//! `session poll`) plus Disconnect, following `docs/ARCHITECTURE.md`'s
+//! The `/settings` route: muxr's server-settings screen — six groups
+//! (`connection`, `auth tokens`, `saved servers`, `muxr pro`, `terminal
+//! appearance`, `session poll`) plus Disconnect, following `docs/ARCHITECTURE.md`'s
 //! canonical screen shape (a per-screen [`Component`] hosting
 //! [`SettingsController`] via `use_controller`, `build` a pure arrangement
 //! over [`widgets`]).
@@ -26,12 +26,13 @@
 //! both halves deliberate, since the router's session guard only fires at
 //! navigation time, never reactively.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, NavigatorController, Padding, SizedBox, WindowMetrics, any, component,
+    GetUntracked, NavigatorController, Padding, Set, SizedBox, WindowMetrics, any, component,
     inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
@@ -39,11 +40,16 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
+use crate::features::pro::di::expect_pro_controller;
+use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
+use crate::features::pro::presentation::{
+    NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY, UpgradeContext, show_upgrade_sheet,
+};
 use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
-use crate::responsive::WIDE_BREAKPOINT_PX;
+use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
@@ -52,7 +58,9 @@ use crate::ui::toasts::app_toasts;
 
 use super::controller::SettingsController;
 use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
-use super::widgets::{self, FontPicker, FontRow, Picker, PickerKind, RowAction};
+use super::widgets::{
+    self, DISCONNECT_COPY, DISCONNECT_LABEL, FontPicker, FontRow, Picker, PickerKind, RowAction,
+};
 
 /// Where Disconnect lands — the same location `crate::routes`' guard bounces
 /// an unauthenticated push to.
@@ -63,6 +71,10 @@ const CONNECT_ROUTE: &str = "/";
 const READ_ONLY_TOKEN_TOAST: &str =
     "Read-only session \u{2014} reconnect with a read-write token to change this";
 
+/// What tapping `restore` says when a purchase or another restore already
+/// holds the store.
+const STORE_BUSY_TOAST: &str = "A store operation is already running";
+
 /// The font sheet's scroll-region reserve: the window's own height minus this
 /// estimate of everything outside the scrollable band. Generous and
 /// community-approximate rather than imported from `ui/sheet.rs`'s private
@@ -71,11 +83,25 @@ const READ_ONLY_TOKEN_TOAST: &str =
 /// a broken one.
 const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
 const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
+/// A generous per-row estimate for sizing an option list that fits: the band
+/// never exceeds the rows' own height, so short lists do not gain blank space.
+/// 48 px is the Glyph list-row estimate. The band is a one-time snapshot of
+/// `WindowMetrics` taken when the sheet opens (the sheet host offers no
+/// reactive metrics), so a resize while it is open does not re-size it.
+const PICK_ROW_ESTIMATE_PX: f64 = 48.0;
 
-/// The groups column's max width past [`WIDE_BREAKPOINT_PX`] — a
-/// tablet/landscape/desktop window centers the whole scrolling group list
-/// rather than stretching it edge to edge. A plain width clamp, not a
-/// structural layout switch (no design mock exists for one here).
+/// The scroll band's height for a sheet holding `rows_height` of rows: the
+/// window's height less [`SHEET_SCROLL_RESERVE_PX`], never below
+/// [`SHEET_SCROLL_FLOOR_PX`], and never taller than the rows themselves.
+fn sheet_band_height(metrics: &WindowMetrics, rows_height: f64) -> f64 {
+    (metrics.size.height - SHEET_SCROLL_RESERVE_PX)
+        .max(SHEET_SCROLL_FLOOR_PX)
+        .min(rows_height)
+}
+
+/// The groups column's max width on a phone-landscape window
+/// (`Responsive::wide_clamp` without Tablet) — the flat group list centres
+/// rather than stretching edge to edge.
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The Settings screen's route entry point.
@@ -111,6 +137,9 @@ pub struct Actions {
     /// The app-scoped connection handle: the `connection` group reads it,
     /// and Disconnect clears it.
     pub connection: Arc<ConnectionController>,
+    /// The app-scoped entitlement handle: the `muxr pro` group reads its
+    /// `entitlement`, and both of that group's actions run through it.
+    pub pro: Arc<ProController>,
     /// The revoke animations in flight — screen-scoped presentation state,
     /// not the controller's (see [`RevokeAnimations`]).
     pub(super) scrambles: RevokeAnimations,
@@ -139,12 +168,20 @@ impl Component for SettingsScreen {
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
+        // Refresh the entitlement on every Settings mount, beside the
+        // screen's own first load — two paywalls (this row and `connect`'s
+        // gate) must not be able to disagree with a stale cached answer.
+        let pro = expect_pro_controller();
+        let pro_refresh = Arc::clone(&pro);
+        spawn_local(async move { pro_refresh.refresh().await });
+
         SettingsState {
             actions: Actions {
                 overlays: self.overlays.clone(),
                 app_nav: app_nav(),
                 controller,
                 connection: expect_connection_controller(),
+                pro,
                 scrambles: RevokeAnimations::new(),
             },
         }
@@ -157,6 +194,7 @@ impl Component for SettingsScreen {
         let saved = state.actions.controller.saved.get();
         let appearance = state.actions.controller.appearance.get();
         let poll = state.actions.controller.poll.get();
+        let entitlement = state.actions.pro.entitlement.get();
 
         let theme = active_theme();
         let colors = Palette::from_theme(&theme);
@@ -165,13 +203,14 @@ impl Component for SettingsScreen {
         // constant, never touch layout again. `None` (no shell has
         // published metrics yet, or a bare test harness) takes the same
         // branch as a genuinely narrow window.
-        let metrics = use_context::<WindowMetrics>();
-        let is_wide = metrics
-            .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
-            .unwrap_or(false);
+        let responsive = Responsive::of(use_context::<WindowMetrics>());
+        let restoring = state.actions.controller.restoring.get();
 
-        let mut body = vec![widgets::group_label("connection", &colors)];
-        body.extend(widgets::connection_rows(info.as_ref(), &colors));
+        let mut groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)> = Vec::new();
+        groups.push((
+            "connection",
+            widgets::connection_rows(info.as_ref(), &colors),
+        ));
 
         // The revoke timelines in flight, and what each renders this frame.
         // Tracked: starting one — and its RPC answering — is what wakes this
@@ -191,27 +230,42 @@ impl Component for SettingsScreen {
             spawn_local(async move { scrambles.sweep(reduce_motion) });
         }
 
-        body.push(widgets::group_label("auth tokens", &colors));
-        body.extend(widgets::token_rows(&tokens, &showing, read_only, &colors));
-        body.push(widgets::create_token_row(&colors, !read_only));
+        let mut token_group = widgets::token_rows(&tokens, &showing, read_only, &colors);
+        token_group.push(widgets::create_token_row(&colors, !read_only));
+        groups.push(("auth tokens", token_group));
 
-        body.push(widgets::group_label("saved servers", &colors));
-        if saved.is_empty() {
-            body.push(widgets::no_saved_servers_row(&colors));
+        let saved_group = if saved.is_empty() {
+            vec![widgets::no_saved_servers_row(&colors)]
         } else {
-            body.extend(
-                saved
-                    .iter()
-                    .map(|server| widgets::saved_server_item(server, &colors)),
+            saved
+                .iter()
+                .map(|server| widgets::saved_server_item(server, &colors))
+                .collect()
+        };
+        groups.push(("saved servers", saved_group));
+
+        groups.push((
+            widgets::PRO_GROUP_LABEL,
+            widgets::pro_rows(entitlement, restoring, &colors),
+        ));
+        groups.push((
+            "terminal appearance",
+            widgets::appearance_rows(&appearance, &colors),
+        ));
+        groups.push(("session poll", widgets::poll_rows(&poll, &colors)));
+
+        if responsive.is_tablet() {
+            return widgets::page_tone(
+                widgets::tablet_scroller(groups, responsive.is_full(), &colors),
+                &colors,
             );
         }
 
-        body.push(widgets::group_label("terminal appearance", &colors));
-        body.extend(widgets::appearance_rows(&appearance, &colors));
-
-        body.push(widgets::group_label("session poll", &colors));
-        body.extend(widgets::poll_rows(&poll, &colors));
-
+        let mut body = Vec::new();
+        for (label, rows) in groups {
+            body.push(widgets::group_label(label, &colors));
+            body.extend(rows);
+        }
         body.push(widgets::disconnect_button());
 
         // The *shell's* bar consumes the top window inset on this screen's
@@ -228,7 +282,7 @@ impl Component for SettingsScreen {
                 .cross_axis(CrossAxisAlignment::Stretch),
         )))
         .top(false));
-        let scroller = if is_wide {
+        let scroller = if responsive.wide_clamp {
             any(Align(
                 Alignment::CENTER,
                 SizedBox::<SettingsState>(Some(SETTINGS_CLAMP_WIDTH), None).child(scroller),
@@ -314,10 +368,14 @@ impl Actions {
                     .position(|secs| *secs == poll.layout_refresh_secs),
             ),
         };
+        let rows_height = options.len() as f64 * PICK_ROW_ESTIMATE_PX;
+        let max_height =
+            use_context::<WindowMetrics>().map(|metrics| sheet_band_height(&metrics, rows_height));
         Picker {
             title: kind.title(),
             options,
             selected,
+            max_height,
         }
     }
 
@@ -452,9 +510,8 @@ impl Actions {
             .collect();
 
         // `None` in every headless suite, which leaves the region unbounded.
-        let max_height = use_context::<WindowMetrics>().map(|metrics| {
-            (metrics.size.height - SHEET_SCROLL_RESERVE_PX).max(SHEET_SCROLL_FLOOR_PX)
-        });
+        let max_height = use_context::<WindowMetrics>()
+            .map(|metrics| sheet_band_height(&metrics, f64::INFINITY));
 
         FontPicker {
             installed,
@@ -671,12 +728,63 @@ impl Actions {
         let app_nav = self.app_nav.clone();
         confirm_dialog(
             &self.overlays,
-            "Disconnect",
-            "You will need the server's token to attach again.",
-            "Disconnect",
+            DISCONNECT_LABEL,
+            DISCONNECT_COPY,
+            DISCONNECT_LABEL,
             move |_app: &mut AppState| {
                 connection.disconnect();
                 app_nav.go(CONNECT_ROUTE);
+            },
+        );
+    }
+
+    /// Restore prior purchases from the `muxr pro` group's `restore` row —
+    /// the sheet's own restore, sharing the controller's single-flight guard,
+    /// and its toasts for the exits that leave the sheet-less screen with
+    /// nothing else to say (a restored Pro just flips the plan row).
+    pub fn restore_purchases(&self) {
+        let pro = Arc::clone(&self.pro);
+        let restoring = self.controller.restoring;
+        spawn_local(async move {
+            // Only a restore the controller accepts owns the flag: a refused
+            // tap must not clear the one still in flight. The check and
+            // `restore`'s own guard read run in the same poll.
+            let accepted = !pro.busy.get_untracked();
+            if accepted {
+                restoring.set(true);
+            }
+            let outcome = pro.restore().await;
+            if accepted {
+                restoring.set(false);
+            }
+            match outcome {
+                RestoreOutcome::Pending => app_toasts().show(PENDING_TOAST),
+                RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
+                RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
+                // A failure is announced once already: the app bridges the
+                // pro controller's failure sink to a toast (`MuxrApp::init`);
+                // `a_failed_restore_from_the_row_toasts_the_failure_message_once`
+                // in `tests/settings.rs` pins that, so a bridge change trips it.
+                RestoreOutcome::Failed(_) => {}
+                RestoreOutcome::Busy => app_toasts().show(STORE_BUSY_TOAST),
+                RestoreOutcome::Restored => {}
+            }
+        });
+    }
+
+    /// Open the same paywall `connect`'s server-limit gate raises, from the
+    /// `muxr pro` group's plan row tap. Nothing to unlock and no forget-and-
+    /// connect retry — Settings has neither a follow-on nor a blocked dial to
+    /// resume, unlike the gate. `on_unlocked` is a state-free `Rc<dyn Fn()>`
+    /// because the sheet's follow-on runs after the staged close with no
+    /// `AppState` in hand, so a no-op is all Settings needs to pass.
+    pub fn open_upgrade_sheet(&self) {
+        show_upgrade_sheet(
+            &self.overlays,
+            Arc::clone(&self.pro),
+            UpgradeContext {
+                on_unlocked: Rc::new(|| {}),
+                server_limit: None,
             },
         );
     }
@@ -717,6 +825,7 @@ pub(super) fn row_tapped(state: &mut SettingsState, action: RowAction) {
         // silently doing nothing.
         RowAction::Static => {}
         RowAction::Picker(kind) => state.actions.open_picker(kind),
+        RowAction::UpgradeSheet => state.actions.open_upgrade_sheet(),
     }
 }
 
@@ -740,7 +849,42 @@ pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &st
     state.actions.open_forget_server_dialog(endpoint);
 }
 
+/// The `restore` button on the `muxr pro` group's restore row.
+pub(super) fn restore_purchases(state: &mut SettingsState) {
+    state.actions.restore_purchases();
+}
+
 /// The `Disconnect` button.
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust::authoring::WindowInsets;
+    use kurbo::Size;
+
+    fn window(height: f64) -> WindowMetrics {
+        WindowMetrics::new(Size::new(800.0, height), 1.0, WindowInsets::default())
+    }
+
+    #[test]
+    fn a_short_window_holds_the_band_at_its_floor() {
+        let band = sheet_band_height(&window(390.0), f64::INFINITY);
+        assert_eq!(band, SHEET_SCROLL_FLOOR_PX);
+    }
+
+    #[test]
+    fn a_tall_window_leaves_the_reserve_and_never_outgrows_its_rows() {
+        let metrics = window(1200.0);
+        assert_eq!(
+            sheet_band_height(&metrics, f64::INFINITY),
+            1200.0 - SHEET_SCROLL_RESERVE_PX
+        );
+        assert_eq!(
+            sheet_band_height(&metrics, 4.0 * PICK_ROW_ESTIMATE_PX),
+            192.0
+        );
+    }
 }
