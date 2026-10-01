@@ -35,7 +35,9 @@ use muxr::features::pro::di::{
     SharedEntitlementRepository, expect_entitlement_repository, expect_pro_controller,
     mock_entitlement,
 };
-use muxr::features::pro::domain::entities::{Entitlement, PurchaseOutcome, ServerLimitVerdict};
+use muxr::features::pro::domain::entities::{
+    Entitlement, PurchaseOutcome, ServerLimitVerdict, row_is_beyond_free_tier,
+};
 use muxr::features::pro::domain::use_cases::check_server_limit;
 use muxr::features::pro::domain::use_cases::check_server_limit::check_new_server_limit;
 use muxr::features::pro::presentation::controller::{ProController, RestoreOutcome};
@@ -178,6 +180,36 @@ fn an_unsettled_purchase_is_judged_exactly_as_free() {
         check_server_limit(Entitlement::Pending, &[row(A)], A),
         ServerLimitVerdict::Allowed
     );
+}
+
+/// The saved row's pro tag reads [`row_is_beyond_free_tier`] while the tap gate
+/// takes [`check_server_limit`]'s verdict: they must agree on every row, so the
+/// two cannot drift apart silently.
+#[test]
+fn the_pro_tag_is_true_exactly_when_the_gate_blocks() {
+    let two = vec![row(A), row(B)];
+    let one = vec![row(A)];
+    let cases: [(Entitlement, &[SavedServer]); 5] = [
+        (Entitlement::Free, &two),
+        (Entitlement::Free, &one),
+        (Entitlement::Pro, &two),
+        (Entitlement::Pending, &two),
+        (Entitlement::Free, &[]),
+    ];
+    for (entitlement, saved) in cases {
+        for endpoint in [A, B, "c.example:1"] {
+            let blocked = matches!(
+                check_server_limit(entitlement, saved, endpoint),
+                ServerLimitVerdict::Blocked { .. }
+            );
+            assert_eq!(
+                row_is_beyond_free_tier(entitlement, saved, endpoint),
+                blocked,
+                "{entitlement:?} over {} rows at {endpoint}",
+                saved.len()
+            );
+        }
+    }
 }
 
 /// [`check_new_server_limit`]'s own three answers — asked with no target

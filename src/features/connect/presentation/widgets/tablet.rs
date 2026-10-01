@@ -8,15 +8,16 @@
 //! would repeat it.
 
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox, Stack, Theme, any,
-    colored_box, container, flexible, inflexible, safe_area, scroll_view,
+    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox, Stack, Theme,
+    WindowMetrics, any, colored_box, container, flexible, inflexible, safe_area, scroll_view,
+    use_context,
 };
 
 use super::getting_started::info_affordance;
+use super::layout::{clamp, gapped};
 use super::{Live, tablet_form_pieces, tablet_panel_pieces};
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
-use crate::features::connect::presentation::pages::{clamp, gapped};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::Palette;
@@ -66,9 +67,15 @@ fn tablet_body<S: 'static>(
         return form_column;
     }
     let colors = Palette::from_theme(theme);
+    // The iPadOS top-left window control sits over the brand tile; clear it.
+    // Zero corners (every other platform) leave the padding untouched.
+    let corner = use_context::<WindowMetrics>()
+        .map(|metrics| metrics.insets.corner_insets.top_left)
+        .filter(|corner| corner.height > 0.0);
+    let (corner_w, corner_h) = corner.map_or((0.0, 0.0), |c| (c.width, c.height));
     let inset = EdgeInsets {
-        left: spacing::HERO,
-        top: spacing::HERO,
+        left: spacing::HERO + corner_w,
+        top: spacing::HERO + corner_h,
         right: spacing::HERO,
         bottom: spacing::SHEET,
     };

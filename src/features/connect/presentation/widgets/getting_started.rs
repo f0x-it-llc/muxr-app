@@ -63,7 +63,11 @@ pub(crate) fn info_affordance<S: 'static>(
 ) -> AnyView<S> {
     let overlays = overlays.clone();
     let colors = Palette::from_theme(&active_theme());
-    // The window-control corner (iPadOS 26+ windowed); zero everywhere else.
+    // The window-control corner (iPadOS 26+ windowed); zero everywhere else. A
+    // live read on purpose: the screen's builder re-runs on every resize, so
+    // the corner never goes stale. Both axes shift the mark (width trailing,
+    // height top), mirroring the app bar's width shift and staying clear of a
+    // wider control.
     let corner = use_context::<WindowMetrics>()
         .map(|metrics| metrics.insets.corner_insets.top_right)
         .filter(|corner| corner.height > 0.0);

@@ -97,10 +97,10 @@ pub(crate) fn gated_saved_row_tap(
     handle_saved_row_tap(controller, overlays, nav, index);
 }
 
-/// Whether tapping `server` raises the paywall while `saved` is remembered:
-/// the domain's [`row_is_beyond_free_tier`], so the pro tag marks exactly the
-/// rows [`gated_saved_row_tap`] gates. Under Free with two or more rows that is
-/// every row.
+/// Whether connecting to `server`'s endpoint raises the paywall while `saved`
+/// is remembered ([`row_is_beyond_free_tier`]). The pro tag means that, not
+/// "this tap is gated": a credential-less row is tagged too, though its tap
+/// only refills the form and the paywall fires at Connect.
 pub(crate) fn row_is_locked(
     server: &SavedServer,
     saved: &[SavedServer],
