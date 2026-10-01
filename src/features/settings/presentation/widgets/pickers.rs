@@ -10,7 +10,11 @@
 
 use std::rc::Rc;
 
-use frust::authoring::Color;
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, build_child,
+    rebuild_child, route_event_single, teardown_child,
+};
 use frust::icons::CHECK;
 use frust::{
     AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible,
@@ -102,7 +106,7 @@ pub(in super::super) fn picker_sheet(
             },
         ));
     }
-    let scroller = scroll_view(column(children));
+    let scroller = bleeding_scroll(children);
     let list: AnyView<AppState> = match picker.max_height {
         // A fixed height, not a flex share: the sheet body is unbounded in
         // height, so a `flexible` child would divide zero free space.
@@ -112,6 +116,86 @@ pub(in super::super) fn picker_sheet(
     let mut body = head;
     body.push(list);
     any(column(body))
+}
+
+/// `children` in a vertical scroll region whose *viewport* is [`PICK_BLEED`]
+/// wider than the sheet's content gutter on each side, with the content padded
+/// back in by the same amount: rows lay out exactly as before, but the
+/// selected row's painted bleed now lies inside the viewport's clip.
+pub(super) fn bleeding_scroll(children: Vec<AnyView<AppState>>) -> AnyView<AppState> {
+    any(WidenedView {
+        child: any(scroll_view(Padding(
+            EdgeInsets::symmetric(PICK_BLEED, 0.0),
+            column(children),
+        ))),
+        by: PICK_BLEED,
+    })
+}
+
+/// Lays its child out `by` wider than itself on each side — frust's `Padding`
+/// clamps a negative inset, so this is the one way to give a clipping child
+/// the sheet gutter back. Reports its own (unwidened) width to the parent.
+struct WidenedView<State: 'static> {
+    child: AnyView<State>,
+    by: f64,
+}
+
+struct WidenedWidget {
+    child: ChildPod,
+    by: f64,
+}
+
+impl<State: 'static> View<State> for WidenedView<State> {
+    type Element = WidenedWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> WidenedWidget {
+        WidenedWidget {
+            child: build_child(&self.child, ctx),
+            by: self.by,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut WidenedWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        element.by = self.by;
+        rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut WidenedWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for WidenedWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let width = bc.max().width;
+        // An unbounded width has no edge to widen past.
+        let by = if width.is_finite() { self.by } else { 0.0 };
+        let wide = width + 2.0 * by;
+        let child_bc = BoxConstraints::new(
+            Size::new(wide, bc.min().height),
+            Size::new(wide, bc.max().height),
+        );
+        let size = self.child.layout_child(ctx, &child_bc);
+        self.child.set_origin(Point::new(-by, 0.0));
+        bc.constrain(Size::new(width, size.height))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.child.semantics_child(ctx);
+    }
 }
 
 /// One `.pick-row`. The selected one fills `--amber-faint` past the sheet's

@@ -58,7 +58,9 @@ use crate::ui::toasts::app_toasts;
 
 use super::controller::SettingsController;
 use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
-use super::widgets::{self, FontPicker, FontRow, Picker, PickerKind, RowAction};
+use super::widgets::{
+    self, DISCONNECT_COPY, DISCONNECT_LABEL, FontPicker, FontRow, Picker, PickerKind, RowAction,
+};
 
 /// Where Disconnect lands — the same location `crate::routes`' guard bounces
 /// an unauthenticated push to.
@@ -83,18 +85,24 @@ const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
 const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
 /// A generous per-row estimate for sizing an option list that fits: the band
 /// never exceeds the rows' own height, so short lists do not gain blank space.
+/// 48 px is the Glyph list-row estimate. The band is a one-time snapshot of
+/// `WindowMetrics` taken when the sheet opens (the sheet host offers no
+/// reactive metrics), so a resize while it is open does not re-size it.
 const PICK_ROW_ESTIMATE_PX: f64 = 48.0;
+
+/// The scroll band's height for a sheet holding `rows_height` of rows: the
+/// window's height less [`SHEET_SCROLL_RESERVE_PX`], never below
+/// [`SHEET_SCROLL_FLOOR_PX`], and never taller than the rows themselves.
+fn sheet_band_height(metrics: &WindowMetrics, rows_height: f64) -> f64 {
+    (metrics.size.height - SHEET_SCROLL_RESERVE_PX)
+        .max(SHEET_SCROLL_FLOOR_PX)
+        .min(rows_height)
+}
 
 /// The groups column's max width on a phone-landscape window
 /// (`Responsive::wide_clamp` without Tablet) — the flat group list centres
 /// rather than stretching edge to edge.
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
-
-/// The Disconnect confirmation's body copy, shared by the dialog and the
-/// Tablet card's row value.
-pub(super) const DISCONNECT_COPY: &str = "You will need the server's token to attach again.";
-/// The Disconnect action's label, on the Tablet card's button and the dialog.
-pub(super) const DISCONNECT_LABEL: &str = "Disconnect";
 
 /// The Settings screen's route entry point.
 pub fn settings_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
@@ -361,11 +369,8 @@ impl Actions {
             ),
         };
         let rows_height = options.len() as f64 * PICK_ROW_ESTIMATE_PX;
-        let max_height = use_context::<WindowMetrics>().map(|metrics| {
-            (metrics.size.height - SHEET_SCROLL_RESERVE_PX)
-                .max(SHEET_SCROLL_FLOOR_PX)
-                .min(rows_height)
-        });
+        let max_height =
+            use_context::<WindowMetrics>().map(|metrics| sheet_band_height(&metrics, rows_height));
         Picker {
             title: kind.title(),
             options,
@@ -505,9 +510,8 @@ impl Actions {
             .collect();
 
         // `None` in every headless suite, which leaves the region unbounded.
-        let max_height = use_context::<WindowMetrics>().map(|metrics| {
-            (metrics.size.height - SHEET_SCROLL_RESERVE_PX).max(SHEET_SCROLL_FLOOR_PX)
-        });
+        let max_height = use_context::<WindowMetrics>()
+            .map(|metrics| sheet_band_height(&metrics, f64::INFINITY));
 
         FontPicker {
             installed,
@@ -742,15 +746,25 @@ impl Actions {
         let pro = Arc::clone(&self.pro);
         let restoring = self.controller.restoring;
         spawn_local(async move {
-            restoring.set(true);
+            // Only a restore the controller accepts owns the flag: a refused
+            // tap must not clear the one still in flight. The check and
+            // `restore`'s own guard read run in the same poll.
+            let accepted = !pro.busy.get_untracked();
+            if accepted {
+                restoring.set(true);
+            }
             let outcome = pro.restore().await;
-            restoring.set(false);
+            if accepted {
+                restoring.set(false);
+            }
             match outcome {
                 RestoreOutcome::Pending => app_toasts().show(PENDING_TOAST),
                 RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
                 RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
                 // A failure is announced once already: the app bridges the
-                // pro controller's failure sink to a toast (`MuxrApp::init`).
+                // pro controller's failure sink to a toast (`MuxrApp::init`);
+                // `a_failed_restore_from_the_row_toasts_the_failure_message_once`
+                // in `tests/settings.rs` pins that, so a bridge change trips it.
                 RestoreOutcome::Failed(_) => {}
                 RestoreOutcome::Busy => app_toasts().show(STORE_BUSY_TOAST),
                 RestoreOutcome::Restored => {}
@@ -843,4 +857,34 @@ pub(super) fn restore_purchases(state: &mut SettingsState) {
 /// The `Disconnect` button.
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust::authoring::WindowInsets;
+    use kurbo::Size;
+
+    fn window(height: f64) -> WindowMetrics {
+        WindowMetrics::new(Size::new(800.0, height), 1.0, WindowInsets::default())
+    }
+
+    #[test]
+    fn a_short_window_holds_the_band_at_its_floor() {
+        let band = sheet_band_height(&window(390.0), f64::INFINITY);
+        assert_eq!(band, SHEET_SCROLL_FLOOR_PX);
+    }
+
+    #[test]
+    fn a_tall_window_leaves_the_reserve_and_never_outgrows_its_rows() {
+        let metrics = window(1200.0);
+        assert_eq!(
+            sheet_band_height(&metrics, f64::INFINITY),
+            1200.0 - SHEET_SCROLL_RESERVE_PX
+        );
+        assert_eq!(
+            sheet_band_height(&metrics, 4.0 * PICK_ROW_ESTIMATE_PX),
+            192.0
+        );
+    }
 }

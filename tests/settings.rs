@@ -22,7 +22,11 @@
 //! row on the screen behind changing. Row *k* is addressed relative to the
 //! selected row's own height, since every `.pick-row` is one line tall.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use clean_signals::Failure;
@@ -40,8 +44,15 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
-use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
-use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::data::repositories::MockEntitlementRepository;
+use muxr::features::pro::di::{
+    SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
+};
+use muxr::features::pro::domain::entities::{
+    Entitlement, ProOffer, PurchaseOutcome, RestoreResult,
+};
+use muxr::features::pro::domain::repositories::EntitlementRepository;
+use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
@@ -327,6 +338,19 @@ impl Harness {
             )
         });
         self.tap(point);
+    }
+
+    /// The smallest scroll viewport holding the point `(x, y)`.
+    fn viewport_around(&self, x: f64, y: f64) -> Rect {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node): &&(_, Node)| node.role() == Role::ScrollView)
+            .filter_map(|(_, node)| node.bounds())
+            .filter(|b| b.x0 <= x && x <= b.x1 && b.y0 <= y && y <= b.y1)
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("no scroll viewport holds ({x}, {y})"))
     }
 
     /// Where the first node printing `value` sits.
@@ -1759,6 +1783,16 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
             (size.width - panel_size.width).abs() < EPSILON,
             "{row}: …and spans its whole width"
         );
+        // The scroll viewport clips what it holds, so the fill must lie inside
+        // it — the bleed past the sheet's own gutter included.
+        let viewport = h.viewport_around(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+        assert!(
+            viewport.x0 <= origin.x + EPSILON
+                && origin.x + size.width <= viewport.x1 + EPSILON
+                && viewport.y0 <= origin.y + EPSILON
+                && origin.y + size.height <= viewport.y1 + EPSILON,
+            "{row}: the fill {origin:?} {size:?} escapes the scroll viewport {viewport:?}"
+        );
         // Row 0's top edge is the same distance above the selected row for
         // every picker, so a wrong `selected` shows up as a shifted fill.
         let first_row_top = origin.y - selected as f64 * size.height;
@@ -2952,6 +2986,110 @@ fn a_failed_restore_from_the_row_toasts_the_failure_message_once() {
         app_toasts().pending_untracked(),
         vec![failure.user_message()]
     );
+}
+
+/// A store whose restore stays open until its [`Gate`] is opened — the mock
+/// resolves without ever yielding, so an in-flight restore needs this.
+struct GatedStore {
+    inner: MockEntitlementRepository,
+    gate: Arc<Gate>,
+}
+
+/// One-shot latch: `UntilOpen` parks its waker here, `open` wakes it.
+#[derive(Default)]
+struct Gate {
+    open: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl Gate {
+    fn open(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
+}
+
+struct UntilOpen(Arc<Gate>);
+
+impl Future for UntilOpen {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0.open.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        *self.0.waker.lock().unwrap() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl EntitlementRepository for GatedStore {
+    fn cached(&self) -> Entitlement {
+        self.inner.cached()
+    }
+
+    async fn refresh(&self) -> Result<Entitlement, AppFailure> {
+        self.inner.refresh().await
+    }
+
+    async fn offer(&self) -> Result<Option<ProOffer>, AppFailure> {
+        self.inner.offer().await
+    }
+
+    async fn purchase(&self) -> Result<PurchaseOutcome, AppFailure> {
+        self.inner.purchase().await
+    }
+
+    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
+        UntilOpen(Arc::clone(&self.gate)).await;
+        self.inner.restore().await
+    }
+}
+
+#[test]
+fn a_second_restore_tap_while_the_first_is_in_flight_leaves_restoring_standing() {
+    let _g = serial();
+    let _ambient = setup();
+    let gate = Arc::new(Gate::default());
+    let gated = Arc::clone(&gate);
+    let mut h = Harness::mount_seeded(move || {
+        let store: SharedEntitlementRepository = Arc::new(GatedStore {
+            inner: MockEntitlementRepository::free(),
+            gate: gated,
+        });
+        provide_context(Arc::new(ProController::new(store)));
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.await_tokens();
+    let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
+    app_toasts().clear();
+
+    h.tap_label("restore");
+    h.pump_until_values("the first restore to be in flight", |values| {
+        restoring(values)
+    });
+    h.tap_label("restore");
+    pump_until(&mut h, "the second tap's busy toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec!["A store operation is already running".to_string()]
+    );
+    h.pump_once();
+    assert!(
+        restoring(&node_values(&h.root)),
+        "the first restore is still running: {:?}",
+        node_values(&h.root)
+    );
+
+    gate.open();
+    h.pump_until_values("the first restore to land", |values| !restoring(values));
+    assert_eq!(app_toasts().pending_untracked().len(), 2);
 }
 
 #[test]
