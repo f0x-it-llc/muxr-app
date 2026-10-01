@@ -1,5 +1,6 @@
-//! The Tablet card grid: each settings group as a Glyph card, paired into two
-//! columns on a full-width window, closed by the Disconnect card.
+//! The Tablet card grid: each settings group as a Glyph card, packed into two
+//! independent columns on a full-width window (a short card never holds its
+//! neighbour's row open), closed by the Disconnect card.
 
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
@@ -82,8 +83,10 @@ fn interleave_gaps(
     out
 }
 
-/// The Tablet body: the cards in two equal columns when `full`, one column
-/// otherwise, then the Disconnect card, centred at [`CARD_GRID_MAX_WIDTH`].
+/// The Tablet body: the cards packed into two equal columns when `full` —
+/// even indices left, odd right, each column stacking its own cards at
+/// [`CARD_GAP`] — one column otherwise, then the Disconnect card, centred at
+/// [`CARD_GRID_MAX_WIDTH`].
 pub(in super::super) fn tablet_scroller(
     groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)>,
     full: bool,
@@ -94,17 +97,22 @@ pub(in super::super) fn tablet_scroller(
         .map(|(label, rows)| group_card(label, rows, colors))
         .collect();
     let mut lines: Vec<AnyView<SettingsState>> = if full {
-        let mut cards = cards.into_iter().peekable();
-        let mut pairs = Vec::new();
-        while cards.peek().is_some() {
-            let pair: Vec<_> = cards.by_ref().take(2).collect();
-            pairs.push(any(FlexView::new(
-                Axis::Horizontal,
-                interleave_gaps(pair, Axis::Horizontal, Some(1)),
+        let (left, right): (Vec<_>, Vec<_>) = cards
+            .into_iter()
+            .enumerate()
+            .partition(|(index, _)| index % 2 == 0);
+        let column = |cards: Vec<(usize, AnyView<SettingsState>)>| {
+            let cards = cards.into_iter().map(|(_, card)| card).collect();
+            any(
+                FlexView::new(Axis::Vertical, interleave_gaps(cards, Axis::Vertical, None))
+                    .cross_axis(CrossAxisAlignment::Stretch),
             )
-            .cross_axis(CrossAxisAlignment::Start)));
-        }
-        pairs
+        };
+        vec![any(FlexView::new(
+            Axis::Horizontal,
+            interleave_gaps(vec![column(left), column(right)], Axis::Horizontal, Some(1)),
+        )
+        .cross_axis(CrossAxisAlignment::Start))]
     } else {
         cards
     };
