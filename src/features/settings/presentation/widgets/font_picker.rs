@@ -10,8 +10,7 @@ use std::rc::Rc;
 use frust::authoring::Color;
 use frust::icons::CHECK;
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible,
-    scroll_view, text,
+    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible, text,
 };
 
 use crate::AppState;
@@ -19,7 +18,7 @@ use crate::fonts::catalog::{CatalogStatus, FontState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
-use super::pickers::{CHECK_SIZE, PICK_BLEED, PICK_PAD_X, PICK_PAD_Y, PickerKind};
+use super::pickers::{CHECK_SIZE, PICK_BLEED, PICK_PAD_X, PICK_PAD_Y, PickerKind, bleeding_scroll};
 use super::rows::{
     GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, column, h_gap, rounded_fill, row,
 };
@@ -142,7 +141,7 @@ pub(in super::super) fn font_picker_sheet(
         ));
     }
 
-    let scroller = scroll_view(column(body));
+    let scroller = bleeding_scroll(body);
     let scroll_body: AnyView<AppState> = match picker.max_height {
         // A fixed height rather than a flex share: the sheet body's own
         // constraint is unbounded in height, and a `flexible` child under an

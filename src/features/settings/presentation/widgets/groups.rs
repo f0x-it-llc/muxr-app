@@ -61,7 +61,7 @@ pub(in super::super) fn token_rows(
     rows
 }
 
-/// The `connection` group: the endpoint, the TLS posture, and one version row
+/// The `connection` group: the endpoint, the TLS posture, the latency, and one version row
 /// per backend the server reports. Every value is read off `info`; `None`
 /// prints [`DISCONNECTED_VALUE`] rather than nothing.
 pub(in super::super) fn connection_rows(
@@ -76,6 +76,10 @@ pub(in super::super) fn connection_rows(
         Some(info) => tls_posture(info.trust_mode),
         None => (DISCONNECTED_VALUE, ValueTone::Plain),
     };
+    let latency = info.map_or_else(
+        || DISCONNECTED_VALUE.to_string(),
+        |info| format!("{}ms", info.latency_ms),
+    );
     let mut rows = vec![
         settings_row(
             rows::MARK_SERVER_URL,
@@ -90,6 +94,14 @@ pub(in super::super) fn connection_rows(
             "tls certificate",
             tls_value,
             tls_tone,
+            RowAction::Static,
+            colors,
+        ),
+        settings_row(
+            rows::MARK_LATENCY,
+            "latency",
+            latency,
+            ValueTone::Plain,
             RowAction::Static,
             colors,
         ),

@@ -12,11 +12,11 @@ publish = false
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-frust = { path = "../../crates/frust", default-features = false }
-frust-glyph = { path = "../../plugins/glyph" }
-clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
-frust-clipboard = { path = "../../plugins/clipboard" }
-frust-haptics = { path = "../../plugins/haptics" }
+frust = { path = "../../frust/crates/frust", default-features = false }
+frust-glyph = { path = "../../frust/plugins/glyph" }
+clean-signals-frust = { path = "../../frust/plugins/clean-signals-frust" }
+frust-clipboard = { path = "../../frust/plugins/clipboard" }
+frust-haptics = { path = "../../frust/plugins/haptics" }
 clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 
 log = "0.4"
@@ -38,14 +38,19 @@ sha2 = "0.10"
 base64 = "0.22"
 percent-encoding = "2"
 arc-swap = "1"
-frust-plugin = { path = "../../crates/frust-plugin" }
-frust-shared-preferences = { path = "../../plugins/shared-preferences" }
-frust-secure-storage = { path = "../../plugins/secure-storage" }
-frust-camera = { path = "../../plugins/camera" }
+frust-plugin = { path = "../../frust/crates/frust-plugin" }
+frust-shared-preferences = { path = "../../frust/plugins/shared-preferences" }
+frust-secure-storage = { path = "../../frust/plugins/secure-storage" }
+frust-camera = { path = "../../frust/plugins/camera" }
+frust-iap = { path = "../../frust/plugins/iap" }
+frust-url-launcher = { path = "../../frust/plugins/url-launcher" }
+# `frust-iap` models the per-platform `requestPurchase` payloads as raw
+# `serde_json::Value` by design, so a caller has to build them itself.
+serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-webpki-roots-no-provider",
 ] }
-frust-paths = { path = "../../crates/frust-paths" }
+frust-paths = { path = "../../frust/crates/frust-paths" }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
 
@@ -55,11 +60,11 @@ protox = "0.9"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-frust-core = { path = "../../crates/frust-core", features = ["test-support"] }
-frust-reactive = { path = "../../crates/frust-reactive" }
-frust-scene = { path = "../../crates/frust-scene" }
-frust-shell-common = { path = "../../crates/frust-shell-common" }
-frust-text = { path = "../../crates/frust-text" }
+frust-core = { path = "../../frust/crates/frust-core", features = ["test-support"] }
+frust-reactive = { path = "../../frust/crates/frust-reactive" }
+frust-scene = { path = "../../frust/crates/frust-scene" }
+frust-shell-common = { path = "../../frust/crates/frust-shell-common" }
+frust-text = { path = "../../frust/crates/frust-text" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
 reactive_graph = "0.2"
@@ -78,6 +83,11 @@ rcgen = { version = "0.14", default-features = false, features = [
 
 [features]
 lean = ["log/release_max_level_warn"]
+# Desktop preview of the purchase flow: `cargo run --features mock-iap` keeps
+# `pro::di` on the scripted in-memory entitlement store, since no desktop
+# platform can sell. Never passed by a device build — the CLI only ever selects
+# `lean` (release) or `frust/perf-trace` (debug/profile).
+mock-iap = []
 
 
 [profile.release]

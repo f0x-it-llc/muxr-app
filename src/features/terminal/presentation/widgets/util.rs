@@ -8,6 +8,8 @@ use frust::{
     AnyView, Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, Theme, any, inflexible,
 };
 
+use frust_glyph::{BadgeVariant, badge};
+
 use crate::ui::palette::inked;
 
 use super::super::chrome::LineStyles;
@@ -22,6 +24,15 @@ pub(crate) fn sized(style: &TextStyle, size: f32, color: Color) -> TextStyle {
     style.size = size;
     style
 }
+
+/// The read-only chip — the one place its word and variant live, so the status
+/// row and the rail cannot drift apart.
+pub(crate) fn read_only_badge<State: 'static>() -> AnyView<State> {
+    any(badge(READ_ONLY_CHIP, BadgeVariant::Info))
+}
+
+/// The read-only chip's word.
+const READ_ONLY_CHIP: &str = "read-only";
 
 /// A `gap`-wide horizontal spacer.
 pub(crate) fn h_gap<State: 'static>(gap: f64) -> FlexChild<State> {

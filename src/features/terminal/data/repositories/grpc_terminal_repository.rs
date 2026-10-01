@@ -398,6 +398,7 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
                 pane_path: pane.map(|pane| pane.cwd.clone()).unwrap_or_default(),
                 panes: tab.panes.iter().map(map_pane).collect(),
                 active: tab.active,
+                has_bell: tab.has_bell,
             }
         })
         .collect()
@@ -623,7 +624,7 @@ mod tests {
             position,
             name: name.to_string(),
             active,
-            has_bell: false,
+            has_bell: tab_id == BELL_TAB_ID,
             panes_to_hide: 0,
             tab_id,
             panes,
@@ -807,6 +808,21 @@ mod tests {
             !mapped_second.focused,
             "only the first pane above was marked focused"
         );
+    }
+
+    /// The fixture tab id [`tab`] marks as ringing.
+    const BELL_TAB_ID: u32 = 7;
+
+    #[test]
+    fn a_layout_carries_each_tabs_bell_flag_rather_than_dropping_it() {
+        let tabs = map_tabs(Layout {
+            tabs: vec![
+                tab(0, BELL_TAB_ID, "btop", false, Vec::new()),
+                tab(1, 9, "devbox", true, Vec::new()),
+            ],
+        });
+        assert!(tabs[0].has_bell);
+        assert!(!tabs[1].has_bell);
     }
 
     #[test]

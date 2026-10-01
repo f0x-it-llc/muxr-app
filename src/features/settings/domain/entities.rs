@@ -174,9 +174,22 @@ pub struct AppearancePrefs {
     pub cursor_style: CursorStyle,
 }
 
+/// The smallest font size the picker offers, in px.
+pub const FONT_SIZE_MIN_PX: u32 = 10;
+/// The largest font size the picker offers, in px.
+pub const FONT_SIZE_MAX_PX: u32 = 24;
+
 impl AppearancePrefs {
-    /// The font sizes the picker offers, in px (`10px`–`14px`).
-    pub const FONT_SIZES_PX: [u32; 5] = [10, 11, 12, 13, 14];
+    /// The font sizes the picker offers, in px (`10px`–`24px`).
+    pub const FONT_SIZES_PX: [u32; (FONT_SIZE_MAX_PX - FONT_SIZE_MIN_PX + 1) as usize] = {
+        let mut sizes = [0; (FONT_SIZE_MAX_PX - FONT_SIZE_MIN_PX + 1) as usize];
+        let mut index = 0;
+        while index < sizes.len() {
+            sizes[index] = FONT_SIZE_MIN_PX + index as u32;
+            index += 1;
+        }
+        sizes
+    };
 
     /// This preference's `.set-value` text — `12px`.
     pub fn font_size_label(&self) -> String {
@@ -322,7 +335,12 @@ mod tests {
     fn the_pickers_option_lists_are_the_redesigns() {
         // The font family has no list here at all: the picker sources it from
         // `crate::fonts` (installed faces, bundled or downloaded).
-        assert_eq!(AppearancePrefs::FONT_SIZES_PX, [10, 11, 12, 13, 14]);
+        assert!(
+            AppearancePrefs::FONT_SIZES_PX
+                .iter()
+                .copied()
+                .eq(FONT_SIZE_MIN_PX..=FONT_SIZE_MAX_PX)
+        );
         assert_eq!(PollPrefs::REFRESH_CHOICES_SECS, [1, 3, 5, 10]);
         assert_eq!(
             CursorStyle::ALL.map(CursorStyle::option_label),

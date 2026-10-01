@@ -18,15 +18,16 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
+use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
 use frust::{
     Align, Alignment, AnyView, Component, Get, GetUntracked, NavigatorController, Set, SizedBox,
     Stack, WindowMetrics, any, navigator, provide_context,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{FrameTime, NamedKey, PaintScene, RenderRoot, WindowInsets};
+use frust_core::{FrameTime, NamedKey, PaintScene, PointerPhase, RenderRoot};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -43,20 +44,36 @@ use muxr::features::connect::domain::entities::{
 };
 use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
-use muxr::features::connect::presentation::controller::{ConnectController, CredentialOffer};
-use muxr::features::connect::presentation::pages::{connect_layout, connect_page};
+use muxr::features::connect::presentation::controller::{
+    ConnectController, ConnectRetry, CredentialOffer, GatePrompt, OfferPrompt, ServerLimitBlock,
+    URL_ERROR_MESSAGE,
+};
+use muxr::features::connect::presentation::pages::{connect_layout, connect_page, splash_assembly};
 use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
 use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
 use muxr::features::connect::presentation::widgets::fields::{
     SERVER_URL_PLACEHOLDER, TOKEN_PLACEHOLDER, field_text_style,
 };
+use muxr::features::connect::presentation::widgets::getting_started::GETTING_STARTED_BODY;
 use muxr::features::connect::presentation::widgets::pairing::{
-    PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
+    PAIRED_CONNECT_LABEL, PAIRING_CAPTION, PINNED_CONNECT_LABEL, READ_ONLY_CHIP,
 };
 use muxr::features::connect::presentation::widgets::qr_sheet::{NO_CAMERA, qr_sheet_body};
+use muxr::features::connect::presentation::widgets::saved::{NO_SAVED_SERVERS, PRO_TAG};
+use muxr::features::connect::presentation::widgets::tablet::{
+    tablet_splash_layout, tablet_splash_pieces,
+};
 use muxr::features::connect::presentation::widgets::trust::{PAIRED_CAPTION, PINNED_CAPTION};
 use muxr::features::connect::presentation::widgets::{Live, connect_pieces, connect_pieces_with};
+use muxr::features::pro::data::repositories::MockEntitlementRepository;
+use muxr::features::pro::di::{
+    SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
+};
+use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::presentation::RESTORE_LABEL;
+use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
+use muxr::links::set_link_opener_for_tests;
 use muxr::routes::{app_nav, install_app_router};
 use muxr::ui::palette::Palette;
 use muxr::ui::toasts::app_toasts;
@@ -64,8 +81,8 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, char_key, frame_sized, named_key, node_labels, serial, settle_sized, setup,
-    tap,
+    EPSILON, RecScene, char_key, frame_sized, named_key, node_labels, pointer, serial,
+    settle_sized, setup, tap,
 };
 
 /// The test surface: wide enough for the CTA to sit clear of the edges, and
@@ -77,13 +94,17 @@ const SURFACE: Size = Size::new(800.0, 1200.0);
 /// bottom-anchored), and nothing at all on the screen itself.
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 
+/// How many pump-and-settle rounds [`Harness::flush`] runs — comfortably more
+/// than the paywall's spawn → store answer → staged close → completion-frame
+/// chain needs (`tests/pro.rs`'s own count).
+const FLUSH_ROUNDS: usize = 4;
+
 /// The URL the happy path types — the mock's own placeholder.
 const VALID_URL: &str = SERVER_URL_PLACEHOLDER;
-/// …and one that cannot be a dial target (no `:port`).
-const INVALID_URL: &str = "not-an-endpoint";
-
-/// `AppFailure::Network`'s user-facing message — what a rejected form toasts.
-const NETWORK_TOAST: &str = "Connection problem — please try again.";
+/// …and one that still cannot be a dial target: a bare host now parses (its
+/// posture's own default port applies), so this keeps its explicit `:port`
+/// but makes that port unparseable.
+const INVALID_URL: &str = "not-an-endpoint:not-a-port";
 
 /// The trust selector's **two** rows (`widgets::trust`'s `trust_option_label`) — the
 /// mock's own pair. `TrustMode::Pinned` is deliberately not one of them; see
@@ -98,6 +119,16 @@ const INSECURE_CHIP: &str = "insecure";
 /// this one is the button's *name* — a test that imported it could not catch
 /// it changing). See [`BANNED_GLYPH`] for why it is words, not a mark.
 const QR_LABEL: &str = "Pair by QR code";
+/// The getting-started affordance's accessible name, its dialog's title and
+/// the two actions — transcribed for the reason [`QR_LABEL`] is: the words a
+/// user reads. The title differs from the button's name on purpose, so a
+/// title on screen can only mean the dialog is up.
+const INFO_LABEL: &str = "Getting started";
+const GETTING_STARTED_TITLE: &str = "Getting started with Muxr";
+const OPEN_GUIDE_LABEL: &str = "Open guide";
+const CLOSE_LABEL: &str = "Close";
+/// Where the guide action lands.
+const DOCS_URL: &str = "https://muxr.app/docs.html";
 
 /// `.connect{padding:30px 22px}` — the layer's horizontal inset, transcribed
 /// (the constant itself is private to `presentation::pages`). What the CTA
@@ -139,17 +170,50 @@ fn empty_base_page() -> AnyView<AppState> {
 /// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
 /// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
-    if let Some(metrics) = metrics {
-        provide_context(metrics);
-    }
-    Harness::mount()
+    support::mount_with_metrics(metrics, Harness::mount)
 }
 
-/// A [`WindowMetrics`] whose size is [`SURFACE`] itself — a shell reporting
-/// the same window this harness actually paints at, so a clamp's centering
-/// math is checkable against real recorded geometry.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
+/// `mount` under `size`'s metrics, every frame then laid out at `size` too —
+/// how the size-class cases see the structure a real window of that shape gets.
+fn sized(size: Size, mount: impl FnOnce() -> Harness) -> Harness {
+    let metrics = support::metrics_at(size.width, size.height);
+    let mut harness = support::mount_with_metrics(Some(metrics), mount);
+    harness.surface = size;
+    harness.settle();
+    harness
+}
+
+/// How a mounted fixture's install is entitled.
+///
+/// Every case but the free-tier gate's own mounts [`Tier::Pro`]: the app's
+/// seeded store holds three rows, which a *free* install may not connect to at
+/// all (`features::pro`'s one-server rule), and every one of those cases is
+/// about something else. The gate's own cases mount [`Tier::Free`] over a store
+/// they seed themselves ([`mount_limited`]).
+#[derive(Clone, Copy)]
+enum Tier {
+    Free,
+    Pro,
+}
+
+impl Tier {
+    fn entitlement(self) -> Entitlement {
+        match self {
+            Tier::Free => Entitlement::Free,
+            Tier::Pro => Entitlement::Pro,
+        }
+    }
+}
+
+/// Publish `tier` on both halves of the seam, inside [`Harness::mount_seeded`]'s
+/// window: the scriptable store, so `MuxrApp::init`'s own launch refresh
+/// republishes the same answer, and the live signal, since the first verdict is
+/// taken long before that refresh lands.
+fn entitle(tier: Tier) {
+    mock_entitlement()
+        .expect("tests/support opted this process into the scriptable store")
+        .set_entitlement(tier.entitlement());
+    expect_pro_controller().entitlement.set(tier.entitlement());
 }
 
 /// The Connect screen plus a live navigator over the same controller.
@@ -159,6 +223,8 @@ struct Harness {
     logic: Logic,
     state: AppState,
     tcx: TextContext,
+    /// What every frame lays out at: [`SURFACE`] unless [`sized`] said otherwise.
+    surface: Size,
 }
 
 impl Harness {
@@ -176,7 +242,14 @@ impl Harness {
     /// controller loads its list once at construction, so a row written after
     /// the mount is invisible until something reloads.
     fn mount_seeded(seed: impl FnOnce()) -> Self {
+        Self::mount_tiered(Tier::Pro, seed)
+    }
+
+    /// [`Harness::mount_seeded`] over an install entitled as `tier` — see
+    /// [`Tier`] for why every case but the gate's own mounts entitled.
+    fn mount_tiered(tier: Tier, seed: impl FnOnce()) -> Self {
         let state = MuxrApp.init();
+        entitle(tier);
         seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-points `routes::app_nav()` at this fixture's own navigator, guard
@@ -196,6 +269,7 @@ impl Harness {
             logic,
             state,
             tcx: TextContext::new(),
+            surface: SURFACE,
         };
         harness.settle();
         harness
@@ -212,7 +286,7 @@ impl Harness {
             &mut self.logic,
             &mut self.state,
             &mut self.tcx,
-            SURFACE,
+            self.surface,
         )
     }
 
@@ -240,6 +314,24 @@ impl Harness {
             std::thread::sleep(std::time::Duration::from_millis(1));
             self.settle();
         }
+    }
+
+    /// Pump the UI-thread queue and settle the frames [`FLUSH_ROUNDS`] times,
+    /// then deliver a pop's result with a harmless `Move`.
+    ///
+    /// [`Harness::settle`] alone carries a dialog, but not the paywall: its
+    /// store lookup, its staged close and the follow-on that close chains are
+    /// three separate queued steps (`tests/pro.rs` documents the chain).
+    fn flush(&mut self) {
+        let runtime =
+            frust_reactive::ReactiveRuntime::get().expect("setup() installed the runtime");
+        for _ in 0..FLUSH_ROUNDS {
+            runtime.pump_local();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.settle();
+        }
+        self.root
+            .event(&mut self.state, &pointer(PointerPhase::Move, SCRIM_POINT));
     }
 
     /// Tap the first node matching `pred`, panicking with `what` if the tree
@@ -609,11 +701,17 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
 // Responsive width-clamp pass
 // ---------------------------------------------------------------------------
 
+/// Phone-landscape metrics as wide as [`SURFACE`]: past the wide breakpoint
+/// but Compact (shortest side under 600), the one shape the clamp serves.
+fn compact_wide() -> WindowMetrics {
+    support::metrics_at(SURFACE.width, 390.0)
+}
+
 #[test]
 fn wide_metrics_clamp_and_center_the_content_column() {
     let _g = serial();
     let _ambient = setup();
-    let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
+    let harness = mount_with_metrics(Some(compact_wide()));
 
     // The CTA is the layer's own full-bleed piece (see the test above), so its
     // box is the cheapest honest read on where the *clamped* layer itself
@@ -645,7 +743,7 @@ fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
     // width, not the paint surface, and lands exactly where the no-metrics
     // baseline (`the_cta_spans_the_layer_and_clears_the_minimum_tap_target`)
     // already does.
-    let harness = mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let harness = mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
 
     let cta = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
@@ -691,7 +789,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     // The clamp lives in `connect_layout`, the one function both renderings
     // assemble through, so this asserts the two land on the same horizontal
     // box rather than that each happens to satisfy the same arithmetic.
-    let harness = mount_with_metrics(Some(metrics_at(SURFACE)));
+    let harness = mount_with_metrics(Some(compact_wide()));
     let live = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
@@ -701,6 +799,11 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
         (splash.x0 - live.x0).abs() < EPSILON && (splash.x1 - live.x1).abs() < EPSILON,
         "the splash's assembly and the live screen must occupy the same \
          horizontal box on a wide window: splash {splash:?} vs live {live:?}"
+    );
+    assert!(
+        (splash.y0 - live.y0).abs() < EPSILON,
+        "…and start at the same height — the static trust rows above the CTA \
+         are exactly as tall as the live radio rows: splash {splash:?} vs live {live:?}"
     );
     // …and it really is the clamped one, not both being unclamped.
     let margin = (SURFACE.width - CONNECT_CLAMP_WIDTH) / 2.0;
@@ -713,7 +816,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
     // height-bounded `Stack`, so a vertically-centered alignment would drop the
     // whole column down the screen and trade the width jump for a taller one.
     // Wide and narrow must therefore agree on where the column starts.
-    provide_context(metrics_at(Size::new(400.0, SURFACE.height)));
+    provide_context(support::metrics_at(400.0, SURFACE.height));
     let narrow = splash_cta_bounds(&[]);
     assert!(
         (splash.y0 - narrow.y0).abs() < EPSILON,
@@ -726,7 +829,7 @@ fn the_splash_assembly_clamps_exactly_like_the_live_screen() {
 fn narrow_metrics_leave_the_splash_assembly_full_bleed_too() {
     let _g = serial();
     let _ambient = setup();
-    provide_context(metrics_at(Size::new(400.0, SURFACE.height)));
+    provide_context(support::metrics_at(400.0, SURFACE.height));
 
     // The other half of the branch: below the breakpoint the splash spans the
     // layer exactly as the live screen does (the shared function takes one
@@ -736,6 +839,124 @@ fn narrow_metrics_leave_the_splash_assembly_full_bleed_too() {
     assert!(
         (splash.width() - layer).abs() < EPSILON && (splash.x0 - LAYER_PAD_X).abs() < EPSILON,
         "narrow metrics leave the splash unclamped: {splash:?}"
+    );
+}
+
+/// The CTA's and the saved header's boxes in a standalone mount of the
+/// **splash's Tablet** assembly path —
+/// `tablet_splash_layout(tablet_splash_pieces(..))` inside a `Stack`, what
+/// `crate::splash_overlay` hands the sequence on a Tablet window — laid out at
+/// `size` under whatever metrics are already in context.
+fn tablet_splash_bounds(size: Size, full: bool, saved: &[SavedServer]) -> (Rect, Rect) {
+    let theme = frust_glyph::baseline();
+    let saved = saved.to_vec();
+    let mut logic = move |_state: &mut ()| {
+        any(Stack(vec![tablet_splash_layout(
+            &theme,
+            full,
+            tablet_splash_pieces::<()>(&theme, &saved, full),
+        )]))
+    };
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut state = ();
+    let mut tcx = TextContext::new();
+    frame_sized(&mut root, &mut logic, &mut state, &mut tcx, size);
+    let semantics = root.semantics();
+    let find = |what: &str, pred: fn(&Node) -> bool| {
+        semantics
+            .nodes
+            .iter()
+            .find(|(_, node)| pred(node))
+            .and_then(|(_, node)| node.bounds())
+            .unwrap_or_else(|| panic!("the splash's Tablet assembly paints {what}"))
+    };
+    (
+        find("the CTA", connect_cta),
+        find("the saved header", saved_header),
+    )
+}
+
+/// Whether `a` and `b` are the same box, to [`EPSILON`].
+fn same_box(a: Rect, b: Rect) -> bool {
+    (a.x0 - b.x0).abs() < EPSILON
+        && (a.y0 - b.y0).abs() < EPSILON
+        && (a.x1 - b.x1).abs() < EPSILON
+        && (a.y1 - b.y1).abs() < EPSILON
+}
+
+#[test]
+fn the_splash_assembly_follows_the_windows_size_class() {
+    let _g = serial();
+    let _ambient = setup();
+    let theme = frust_glyph::baseline();
+    // Nine staggered pieces on the Full band, the eight-piece phone column on
+    // a Compact window — the one read that decides which screen the overlay
+    // hands off onto.
+    provide_context(support::metrics_at(FULL_TABLET.width, FULL_TABLET.height));
+    let (tablet, _) = splash_assembly::<()>(&theme, &[]);
+    assert_eq!(
+        tablet.len(),
+        9,
+        "the Full band's interleaved panel and form"
+    );
+    provide_context(compact_wide());
+    let (phone, _) = splash_assembly::<()>(&theme, &[]);
+    assert_eq!(
+        phone.len(),
+        8,
+        "the phone column, one piece per stagger slot"
+    );
+}
+
+#[test]
+fn the_full_tablet_splash_assembles_the_two_column_screen_in_place() {
+    let _g = serial();
+    let _ambient = setup();
+    // The live screen first: `sized` leaves its metrics in context, so the
+    // splash's mount below reads the same window.
+    let harness = sized(FULL_TABLET, Harness::mount);
+    let live_cta = harness.bounds("the connect CTA", connect_cta);
+    let live_header = harness.bounds("the saved header", saved_header);
+    let saved = expect_saved_servers().list().expect("the mock lists");
+
+    let (cta, header) = tablet_splash_bounds(FULL_TABLET, true, &saved);
+    assert!(
+        same_box(cta, live_cta),
+        "the splash's CTA lands on the live screen's box: {cta:?} vs {live_cta:?}"
+    );
+    assert!(
+        same_box(header, live_header),
+        "…and its saved header too: {header:?} vs {live_header:?}"
+    );
+    // …and it really is the two-column arrangement, not the phone column
+    // happening to agree: the list sits beside the form.
+    assert!(
+        header.x1 <= cta.x0,
+        "the splash assembles the list in the left panel: {header:?} vs {cta:?}"
+    );
+}
+
+#[test]
+fn the_collapsed_tablet_splash_folds_the_list_under_the_button_row_like_the_screen() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(COLLAPSED_TABLET, Harness::mount);
+    let live_cta = harness.bounds("the connect CTA", connect_cta);
+    let live_header = harness.bounds("the saved header", saved_header);
+    let saved = expect_saved_servers().list().expect("the mock lists");
+
+    let (cta, header) = tablet_splash_bounds(COLLAPSED_TABLET, false, &saved);
+    assert!(
+        same_box(cta, live_cta),
+        "the splash's CTA lands on the live screen's box: {cta:?} vs {live_cta:?}"
+    );
+    assert!(
+        same_box(header, live_header),
+        "…and its saved header too: {header:?} vs {live_header:?}"
+    );
+    assert!(
+        cta.y1 <= header.y0,
+        "the collapsed band's folded order, button row over the list: {cta:?} vs {header:?}"
     );
 }
 
@@ -759,16 +980,16 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
     // else on Connect paints one at all: every other piece is rounded rects
     // (swatches, panels, the CTA bar) and stroked borders. So "the affordance
     // is a vector" is literally "there is a filled path inside the FAB" — one
-    // of exactly as many paths as this screen has vector marks: the FAB, plus
-    // one delete affordance per saved row.
+    // of exactly as many paths as this screen has vector marks: the FAB, the
+    // getting-started mark, plus one delete affordance per saved row.
     let rows = expect_saved_servers()
         .list()
         .expect("the mock store never fails")
         .len();
     assert_eq!(
         scene.paths.len(),
-        rows + 1,
-        "every vector on the screen is the FAB's mark or a row's delete mark: {:?}",
+        rows + 2,
+        "every vector on the screen is the FAB's mark, the getting-started mark or a row's delete mark: {:?}",
         scene.paths
     );
     let (origin, size) = *scene
@@ -817,8 +1038,106 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The getting-started affordance
+// ---------------------------------------------------------------------------
+
+fn info_button(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(INFO_LABEL)
+}
+
 #[test]
-fn an_invalid_url_toasts_and_never_navigates() {
+fn the_getting_started_affordance_sits_in_the_top_trailing_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+
+    // Opposite the QR FAB: a store-front visitor's first tap, clear of the
+    // form and of the mark at the top of the column.
+    let info = harness.bounds("the getting-started affordance", info_button);
+    assert!(
+        info.x0 > SURFACE.width / 2.0,
+        "in the trailing half of the surface: {info:?}"
+    );
+    assert!(
+        info.y1 < SURFACE.height / 4.0,
+        "at the top of the surface: {info:?}"
+    );
+    assert!(
+        info.width() >= MIN_TAP_TARGET && info.height() >= MIN_TAP_TARGET,
+        "clears the {MIN_TAP_TARGET}px platform minimum tap target: {info:?}"
+    );
+}
+
+#[test]
+fn tapping_the_affordance_raises_the_getting_started_dialog_and_close_dismisses_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+    let before = harness.nav.depth();
+    assert!(
+        !shows_text(&harness, GETTING_STARTED_TITLE),
+        "nothing explains itself until asked"
+    );
+
+    harness.tap_node("the getting-started affordance", info_button);
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the dialog is pushed as its own page"
+    );
+    assert!(
+        shows_text(&harness, GETTING_STARTED_TITLE),
+        "…and it is the orientation dialog"
+    );
+    assert!(
+        shows_text(&harness, OPEN_GUIDE_LABEL),
+        "…offering the guide as an action"
+    );
+
+    harness.tap_node("the dialog's Close action", |node| {
+        node.role() == Role::Button && node.label() == Some(CLOSE_LABEL)
+    });
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "Close pops the dialog and nothing else"
+    );
+}
+
+#[test]
+fn the_guide_action_hands_the_docs_url_to_the_link_opener_and_closes() {
+    let _g = serial();
+    let _ambient = setup();
+    let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&opened);
+    set_link_opener_for_tests(move |url| {
+        sink.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(url.to_string());
+    });
+    let mut harness = Harness::mount();
+    let before = harness.nav.depth();
+
+    harness.tap_node("the getting-started affordance", info_button);
+    harness.tap_node("the dialog's guide action", |node| {
+        node.role() == Role::Button && node.label() == Some(OPEN_GUIDE_LABEL)
+    });
+
+    assert_eq!(
+        *opened.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![DOCS_URL.to_string()],
+        "exactly one launch, of the setup guide"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…and the dialog closed behind it"
+    );
+}
+
+#[test]
+fn an_invalid_url_shows_the_inline_line_and_never_toasts_or_navigates() {
     let _g = serial();
     let _ambient = setup();
     let mut harness = Harness::mount();
@@ -832,20 +1151,91 @@ fn an_invalid_url_toasts_and_never_navigates() {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
 
-    assert_eq!(
-        app_toasts().pending_untracked(),
-        vec![NETWORK_TOAST.to_string()],
-        "the rejection surfaced as the failure's user message, not its detail"
-    );
     assert!(
-        !app_toasts().pending_untracked()[0].contains(INVALID_URL),
-        "…and never echoes what was typed"
+        app_toasts().pending_untracked().is_empty(),
+        "a validation reject is the inline line, never a toast"
+    );
+    assert!(harness.shows_value(URL_ERROR_MESSAGE), "the inline line");
+    assert!(
+        !harness
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() != Role::TextInput)
+            .any(|(_, node)| node.value().is_some_and(|v| v.contains(INVALID_URL))),
+        "…which never echoes what was typed (the field itself holds it, nothing else)"
     );
     assert_eq!(harness.nav.depth(), 1, "nothing was pushed");
     assert!(
         !expect_connection_controller().connected.get_untracked(),
         "and no connection was opened"
     );
+}
+
+#[test]
+fn editing_the_url_clears_the_inline_line() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    type_url(&mut harness, INVALID_URL);
+    harness.tap_node("the connect CTA", |node| {
+        node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+    });
+    assert!(harness.shows_value(URL_ERROR_MESSAGE));
+
+    harness.tap_node("the server URL field", |node| {
+        node.role() == Role::TextInput
+    });
+    harness.type_text("x");
+    assert!(!harness.shows_value(URL_ERROR_MESSAGE), "an edit clears it");
+}
+
+#[test]
+fn a_rejected_url_then_a_successful_connect_leaves_no_inline_line() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    creds.controller.set_url(INVALID_URL.to_string());
+    creds
+        .controller
+        .connect(&app_nav(), Rc::new(|_offer: CredentialOffer| {}), ungated());
+    assert!(creds.controller.invalid.get_untracked());
+    assert_eq!(
+        creds.controller.url_error.get_untracked().as_deref(),
+        Some(URL_ERROR_MESSAGE)
+    );
+
+    // Written straight to the signal: `set_url` would clear the line itself,
+    // and this case is about the dial clearing it.
+    creds.controller.url.set(VALID_URL.to_string());
+    creds
+        .controller
+        .connect(&app_nav(), Rc::new(|_offer: CredentialOffer| {}), ungated());
+
+    assert!(creds.connection.connected.get_untracked(), "it dialed");
+    assert!(!creds.controller.invalid.get_untracked());
+    assert_eq!(creds.controller.url_error.get_untracked(), None);
+}
+
+#[test]
+fn applying_a_scanned_payload_clears_a_rejected_url() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(Vec::new());
+    creds.controller.set_url(INVALID_URL.to_string());
+    creds
+        .controller
+        .connect(&app_nav(), Rc::new(|_offer: CredentialOffer| {}), ungated());
+    assert!(creds.controller.url_error.get_untracked().is_some());
+
+    creds
+        .controller
+        .apply_scanned_payload(scanned_payload(false));
+
+    assert!(!creds.controller.invalid.get_untracked());
+    assert_eq!(creds.controller.url_error.get_untracked(), None);
 }
 
 #[test]
@@ -1157,6 +1547,16 @@ fn scanned_payload(read_only: bool) -> PairingPayload {
     parse_pairing_uri(&uri).expect("the fixture URI is a well-formed pairing code")
 }
 
+/// [`scanned_payload`]'s `tm=ca` sibling, for the same [`PAIRED_ENDPOINT`] and
+/// token — the demo QR's own shape (`ca`, not `pin`).
+fn scanned_payload_ca(read_only: bool) -> PairingPayload {
+    let ro = u8::from(read_only);
+    let uri = format!(
+        "muxr://pair?v=2&h=192.168.1.100&p=50051&t={PAIRED_TOKEN_B64}&ro={ro}&n=Home%20Rig&tm=ca"
+    );
+    parse_pairing_uri(&uri).expect("the fixture URI is a well-formed pairing code")
+}
+
 /// The endpoint [`scanned_payload`] pairs with — deliberately **not** one of
 /// the seeded saved servers, so nothing about the prefill can come from the
 /// saved list.
@@ -1292,6 +1692,29 @@ impl Form {
             .map(|(_, node)| node.is_selected() == Some(true))
             .unwrap_or_else(|| panic!("no trust row labelled {label:?}"))
     }
+
+    /// Tap the trust-selector row labelled `label` and render the frame after
+    /// it — [`Self::tap_button`]'s twin for a `Role::RadioButton` node.
+    fn tap_trust_row(&mut self, label: &str) {
+        let point = self
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                if node.role() != Role::RadioButton || node.label() != Some(label) {
+                    return None;
+                }
+                let bounds = node.bounds()?;
+                Some(Point::new(
+                    (bounds.x0 + bounds.x1) / 2.0,
+                    (bounds.y0 + bounds.y1) / 2.0,
+                ))
+            })
+            .unwrap_or_else(|| panic!("no trust row labelled {label:?}"));
+        tap(&mut self.root, &mut self.state, point);
+        self.frame();
+    }
 }
 
 /// A controller over an **empty** saved-server store and the app-scoped
@@ -1305,7 +1728,33 @@ fn pairing_controller() -> Arc<ConnectController> {
     )
 }
 
-/// A [`ConnectController`] over explicit stores — the same four dependencies
+/// A [`GatePrompt`] that fails the test if it is ever raised. Every case
+/// outside the free-tier gate's own section connects well inside the one-server
+/// rule, so a block reaching this is a regression rather than a state to
+/// handle.
+fn ungated() -> GatePrompt {
+    Rc::new(|block: ServerLimitBlock| {
+        panic!(
+            "the free-tier gate refused this connect, asking to forget {:?}",
+            block
+                .to_forget
+                .iter()
+                .map(SavedServer::endpoint)
+                .collect::<Vec<String>>()
+        )
+    })
+}
+
+/// A [`ProController`] over a free-tier store of its own. The fixtures below
+/// build their dependencies by hand rather than through `MuxrApp::init`, so
+/// there is no app-scoped one to resolve — and free is the tier whose rule
+/// there is anything to test.
+fn free_pro() -> Arc<ProController> {
+    let repository = Arc::new(MockEntitlementRepository::free()) as SharedEntitlementRepository;
+    Arc::new(ProController::new(repository))
+}
+
+/// A [`ConnectController`] over explicit stores — the same five dependencies
 /// the screen's own `init` resolves, with the token store always the seeded
 /// mock (a save mints through it, and every assertion about a revoke reads it
 /// back through `MockAuthTokensRepository::snapshot`).
@@ -1319,22 +1768,26 @@ fn controller_over(
         credentials,
         Arc::new(MockAuthTokensRepository::seeded()),
         connection,
+        free_pro(),
     )
 }
 
-/// [`controller_over`] with the token store handed in, for the flows that
-/// assert on what was minted or revoked.
+/// [`controller_over`] with the token store and the entitlement handed in, for
+/// the flows that assert on what was minted or revoked, and for the free-tier
+/// gate's own cases.
 fn controller_with_tokens(
     servers: Arc<MockSavedServersRepository>,
     credentials: Arc<MockCredentialService>,
     tokens: Arc<MockAuthTokensRepository>,
     connection: Arc<ConnectionController>,
+    pro: Arc<ProController>,
 ) -> Arc<ConnectController> {
     Arc::new(ConnectController::new(
         servers,
         credentials,
         tokens,
         connection,
+        pro,
     ))
 }
 
@@ -1477,7 +1930,7 @@ fn the_pinned_cta_connects_with_the_codes_own_trust_and_token() {
     );
     let pinned = {
         let controller = Arc::clone(&controller);
-        Rc::new(move || controller.connect_from_pairing(&app_nav()))
+        Rc::new(move || controller.connect_from_pairing(&app_nav(), ungated()))
     };
     let mut form = Form::mount(&controller, pinned);
 
@@ -1546,7 +1999,7 @@ fn a_failed_pinned_connect_keeps_the_form_filled_and_the_cta_up() {
     );
     let pinned = {
         let controller = Arc::clone(&controller);
-        Rc::new(move || controller.connect_from_pairing(&app_nav()))
+        Rc::new(move || controller.connect_from_pairing(&app_nav(), ungated()))
     };
     let mut form = Form::mount(&controller, pinned);
 
@@ -1664,6 +2117,72 @@ fn the_ordinary_cta_still_connects_while_a_matching_pairing_is_stashed() {
     );
 }
 
+#[test]
+fn choosing_a_trust_mode_by_hand_drops_the_pairing() {
+    // The defect this fixes: `select_trust_mode` only moved the radio, while
+    // both CTAs kept reading the stashed pairing's own posture underneath
+    // it — "Trust anyway" over a `tm=ca` scan never actually dialed
+    // insecurely, no matter which row the selector showed selected.
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload_ca(false));
+    form.frame();
+    assert!(form.button(PAIRED_CONNECT_LABEL).is_some());
+
+    form.tap_trust_row(INSECURE_TRUST);
+
+    assert_eq!(
+        controller.pending_pairing.get_untracked(),
+        None,
+        "a manual posture that disagrees with the pairing's own drops it"
+    );
+    assert_eq!(
+        controller
+            .validated_target()
+            .expect("the prefilled endpoint is still dialable")
+            .trust_mode,
+        TrustMode::NoVerification,
+        "…and the chosen posture is what a dial actually uses"
+    );
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        PAIRED_TOKEN,
+        "the scanned token stays typed even though the pairing itself is gone"
+    );
+    assert_eq!(
+        form.button(PAIRED_CONNECT_LABEL),
+        None,
+        "the paired CTA goes with the pairing it depended on"
+    );
+}
+
+#[test]
+fn re_selecting_the_pairings_own_trust_keeps_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let controller = pairing_controller();
+    let mut form = Form::mount(&controller, Rc::new(|| {}));
+
+    controller.apply_scanned_payload(scanned_payload_ca(false));
+    form.frame();
+    assert!(form.button(PAIRED_CONNECT_LABEL).is_some());
+
+    // `tm=ca` maps onto `TrustMode::System` — already the selected row.
+    form.tap_trust_row(SYSTEM_TRUST);
+
+    assert!(
+        controller.pending_pairing.get_untracked().is_some(),
+        "re-picking the pairing's own posture is not a manual override"
+    );
+    assert!(
+        form.button(PAIRED_CONNECT_LABEL).is_some(),
+        "…so the paired CTA stays up"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Credentials: the gate's outcome table, and the four flows around it
 // ---------------------------------------------------------------------------
@@ -1703,6 +2222,9 @@ struct Creds {
     servers: Arc<MockSavedServersRepository>,
     tokens: Arc<MockAuthTokensRepository>,
     connection: Arc<ConnectionController>,
+    /// The free-tier entitlement the controller takes every verdict from —
+    /// held so a gate case can publish a landed purchase mid-flight.
+    pro: Arc<ProController>,
     /// The app's real route table over this fixture's own navigator — held
     /// because `routes::app_nav()` resolves through it and a dropped router
     /// would take the handle's table with it. Type-erased because
@@ -1720,11 +2242,13 @@ fn credential_fixture(rows: Vec<SavedServer>) -> Creds {
     let servers = Arc::new(MockSavedServersRepository::with_servers(rows));
     let credentials = Arc::new(MockCredentialService::new());
     let tokens = Arc::new(MockAuthTokensRepository::seeded());
+    let pro = free_pro();
     let controller = controller_with_tokens(
         Arc::clone(&servers),
         Arc::clone(&credentials),
         Arc::clone(&tokens),
         Arc::clone(&connection),
+        Arc::clone(&pro),
     );
     Creds {
         controller,
@@ -1732,6 +2256,7 @@ fn credential_fixture(rows: Vec<SavedServer>) -> Creds {
         servers,
         tokens,
         connection,
+        pro,
         _router: router,
     }
 }
@@ -1972,6 +2497,7 @@ fn connect_fixture(creds: &Creds) -> Rc<RefCell<Vec<(String, bool)>>> {
         Rc::new(move |offer: CredentialOffer| {
             record.borrow_mut().push((offer.label, offer.replacing))
         }),
+        ungated(),
     );
     assert!(
         creds.connection.connected.get_untracked(),
@@ -2165,7 +2691,7 @@ fn a_successful_pairing_stores_the_scanned_token_behind_one_prompt() {
     creds
         .controller
         .apply_scanned_payload(scanned_payload(false));
-    creds.controller.connect_from_pairing(&app_nav());
+    creds.controller.connect_from_pairing(&app_nav(), ungated());
     pump_until_done("the paired credential save", || {
         creds.credentials.stored(PAIRED_ENDPOINT).is_some()
     });
@@ -2206,7 +2732,7 @@ fn a_denied_pairing_gate_leaves_the_session_live_and_the_row_unsaved() {
     creds
         .controller
         .apply_scanned_payload(scanned_payload(false));
-    creds.controller.connect_from_pairing(&app_nav());
+    creds.controller.connect_from_pairing(&app_nav(), ungated());
     pump_until_done("the denied pairing gate", || {
         !creds.credentials.prompts().is_empty()
     });
@@ -3193,6 +3719,1144 @@ fn a_manual_connect_at_a_server_with_a_stored_credential_asks_to_replace_it() {
 }
 
 // ---------------------------------------------------------------------------
+// The free-tier server gate (`features::pro`'s one-server rule)
+// ---------------------------------------------------------------------------
+
+/// The gate cases' own two endpoints. Neither is a seeded row — every case
+/// below replaces the seeded store outright ([`only_saved`]), since three rows
+/// block a free install's every connect on their own.
+const LIMIT_A: &str = "limit-a.example:50051";
+const LIMIT_B: &str = "limit-b.example:50051";
+/// Their row labels, which are what the paywall's forget action names.
+const LIMIT_A_LABEL: &str = "Limit rig";
+const LIMIT_B_LABEL: &str = "Other rig";
+
+/// The paywall's heading and the three actions a blocked connect can take,
+/// transcribed rather than imported for the reason [`QR_LABEL`] is: these are
+/// the words a user reads, and a test that imported them could not catch them
+/// changing. [`PAYWALL_NOT_NOW`] reads the same as the offer dialog's own
+/// decline by coincidence, not by sharing anything with it.
+const UPGRADE_TITLE: &str = "Muxr Pro";
+const UPGRADE_ACTION: &str = "Upgrade \u{b7} $4.99";
+const FORGET_LIMIT_A: &str = "Forget Limit rig and connect";
+const FORGET_LIMIT_B: &str = "Forget Other rig and connect";
+const PAYWALL_NOT_NOW: &str = "Not now";
+
+/// A saved row for `endpoint`, carrying a stored credential when
+/// `has_credential` — which is what makes the row's own tap dial rather than
+/// refill the form.
+fn limit_row(endpoint: &str, label: &str, has_credential: bool) -> SavedServer {
+    let (host, port) = endpoint.rsplit_once(':').expect("host:port");
+    SavedServer {
+        host: host.to_string(),
+        port: port.parse().expect("a port"),
+        trust_mode: TrustMode::System,
+        label: label.to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: false,
+        has_credential,
+        token_name: None,
+        fingerprint: None,
+    }
+}
+
+/// [`limit_row`] stamped an hour ago. The list is most-recently-used first, so
+/// a row built this way sits *behind* one stamped now — which is what makes the
+/// retry's index shift after a forget real rather than incidental.
+fn older_limit_row(endpoint: &str, label: &str, has_credential: bool) -> SavedServer {
+    SavedServer {
+        last_used_ms: epoch_millis() - 60 * 60 * 1000,
+        ..limit_row(endpoint, label, has_credential)
+    }
+}
+
+/// Replace the app's own saved-server store with exactly `rows`, in
+/// [`Harness::mount_seeded`]'s window.
+fn only_saved(rows: Vec<SavedServer>) {
+    let store = expect_saved_servers();
+    for existing in store.list().expect("the mock store never fails") {
+        store
+            .remove(&existing.endpoint())
+            .expect("the mock store never fails");
+    }
+    for row in rows {
+        store.save(row).expect("the mock store never fails");
+    }
+}
+
+/// Mount the real screen as a `tier` install remembering exactly `rows`.
+fn mount_limited(tier: Tier, rows: Vec<SavedServer>) -> Harness {
+    Harness::mount_tiered(tier, move || only_saved(rows))
+}
+
+/// [`mount_limited`] at the free tier's ceiling: one remembered server, its
+/// credential seeded, so a forget has both halves to drop.
+fn mount_at_the_limit() -> Harness {
+    Harness::mount_tiered(Tier::Free, || {
+        only_saved(vec![limit_row(LIMIT_A, LIMIT_A_LABEL, true)]);
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed(LIMIT_A, CRED_TOKEN);
+    })
+}
+
+/// [`mount_at_the_limit`]'s legacy sibling: a free install remembering *two*
+/// servers, both credentials seeded — a state a free install can only have
+/// arrived at before the rule existed. [`LIMIT_A`] is the older of the two, so
+/// it sits second and the retry that re-enters by row has an index shift to
+/// survive.
+fn mount_over_the_limit() -> Harness {
+    Harness::mount_tiered(Tier::Free, || {
+        only_saved(vec![
+            older_limit_row(LIMIT_A, LIMIT_A_LABEL, true),
+            limit_row(LIMIT_B, LIMIT_B_LABEL, true),
+        ]);
+        let credentials =
+            mock_credentials().expect("tests/support opted this process into the mock");
+        credentials.seed(LIMIT_A, CRED_TOKEN);
+        credentials.seed(LIMIT_B, CRED_TOKEN);
+    })
+}
+
+/// Every endpoint the app's own store holds, in list order.
+fn app_saved_endpoints() -> Vec<String> {
+    expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .map(SavedServer::endpoint)
+        .collect()
+}
+
+/// …sorted, for the cases where two rows survive and their order is the
+/// store's business rather than the assertion's.
+fn app_saved_endpoints_sorted() -> Vec<String> {
+    let mut endpoints = app_saved_endpoints();
+    endpoints.sort();
+    endpoints
+}
+
+/// A [`GatePrompt`] that records what it refused instead of raising the sheet —
+/// the controller-level half of the gate, driven with no overlay host at all
+/// ([`connect_fixture`]'s recorder shape).
+fn recording_gate(seen: &Rc<RefCell<Vec<ServerLimitBlock>>>) -> GatePrompt {
+    let seen = Rc::clone(seen);
+    Rc::new(move |block: ServerLimitBlock| seen.borrow_mut().push(block))
+}
+
+/// The endpoints each recorded block asked to forget, in order.
+fn blocked_endpoints(seen: &Rc<RefCell<Vec<ServerLimitBlock>>>) -> Vec<Vec<String>> {
+    seen.borrow()
+        .iter()
+        .map(|block| block.to_forget.iter().map(SavedServer::endpoint).collect())
+        .collect()
+}
+
+/// Answer the save offer a retried connect raises with "not now" — these cases
+/// are about the dial behind it, and the offer's own behavior is covered above.
+fn decline_the_offer(harness: &mut Harness) {
+    assert!(
+        offer_dialog_up(harness),
+        "the dial went through and asked: {:?}",
+        node_labels(&harness.root)
+    );
+    harness.tap_node("the offer's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(OFFER_NOT_NOW)
+    });
+}
+
+#[test]
+fn a_free_installs_second_server_raises_the_paywall_instead_of_dialing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+    let before = harness.nav.depth();
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "the verdict runs ahead of the dial, so nothing was connected"
+    );
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall is the whole answer: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        shows_text(&harness, FORGET_LIMIT_A),
+        "…naming the one row standing in the way"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the sheet is the only page pushed — nothing landed on /sessions"
+    );
+    assert_eq!(
+        app_saved_endpoints(),
+        vec![LIMIT_A.to_string()],
+        "and nothing was remembered: the only place a new row is written is a \
+         successful login"
+    );
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a refusal is the sheet, never a toast"
+    );
+}
+
+#[test]
+fn forgetting_the_row_in_the_way_dials_and_leaves_only_the_new_server_saved() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+    let credentials = mock_credentials().expect("tests/support opted this process into the mock");
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+    harness.tap_node("the paywall's forget-and-connect action", |node| {
+        node.role() == Role::Button && node.label() == Some(FORGET_LIMIT_A)
+    });
+    harness.flush();
+    decline_the_offer(&mut harness);
+
+    assert!(
+        expect_connection_controller().connected.get_untracked(),
+        "the same connect the sheet refused went through behind it"
+    );
+    assert_eq!(harness.nav.depth(), 2, "…and landed on /sessions");
+    assert_eq!(
+        app_saved_endpoints(),
+        vec![LIMIT_B.to_string()],
+        "the forgotten row is gone and the dialed one took its place"
+    );
+    assert_eq!(
+        credentials.stored(LIMIT_A),
+        None,
+        "…secret and all (this device only, as every forget is)"
+    );
+}
+
+#[test]
+fn a_free_install_may_still_reconnect_to_the_one_server_it_remembers() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+
+    connect_through_the_cta(&mut harness, LIMIT_A);
+    harness.flush();
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "the row being dialed is the row a free install is allowed to keep"
+    );
+    decline_the_offer(&mut harness);
+    assert!(expect_connection_controller().connected.get_untracked());
+    assert_eq!(app_saved_endpoints(), vec![LIMIT_A.to_string()]);
+}
+
+#[test]
+fn an_entitled_install_connects_to_a_second_server_and_keeps_both() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Pro, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "Pro lifts the rule rather than raising the bar"
+    );
+    decline_the_offer(&mut harness);
+    assert!(expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        app_saved_endpoints_sorted(),
+        vec![LIMIT_A.to_string(), LIMIT_B.to_string()]
+    );
+}
+
+#[test]
+fn buying_pro_from_the_paywall_closes_it_and_lets_the_blocked_connect_through() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+    harness.tap_node("the paywall's Upgrade action", |node| {
+        node.role() == Role::Button && node.label() == Some(UPGRADE_ACTION)
+    });
+    harness.flush();
+    decline_the_offer(&mut harness);
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "the sheet closed behind the purchase"
+    );
+    assert_eq!(
+        expect_pro_controller().entitlement.get_untracked(),
+        Entitlement::Pro
+    );
+    assert!(expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        app_saved_endpoints_sorted(),
+        vec![LIMIT_A.to_string(), LIMIT_B.to_string()],
+        "nothing was forgotten — the limit was lifted, not met"
+    );
+}
+
+#[test]
+fn not_now_leaves_the_paywall_closed_the_form_typed_and_nothing_dialed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_at_the_limit();
+    let before = harness.nav.depth();
+
+    connect_through_the_cta(&mut harness, LIMIT_B);
+    harness.flush();
+    harness.tap_node("the paywall's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(PAYWALL_NOT_NOW)
+    });
+    harness.flush();
+
+    assert!(!shows_text(&harness, UPGRADE_TITLE), "the sheet is gone");
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…and it was the only page there was"
+    );
+    assert!(!expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(LIMIT_B),
+        "the form is exactly as it was typed, one tap from trying again"
+    );
+    assert_eq!(app_saved_endpoints(), vec![LIMIT_A.to_string()]);
+}
+
+#[test]
+fn a_two_row_free_install_is_told_which_row_to_forget_before_any_unlock() {
+    // The tap is on the row it may keep, so the *other* one is what stands in
+    // the way.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_over_the_limit();
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    harness.tap_node("the saved row carrying a credential", |node| {
+        node.value() == Some(LIMIT_A)
+    });
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "a saved row's own tap is gated too: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(
+        shows_text(&harness, FORGET_LIMIT_B),
+        "the row being connected to is never one of the rows to forget"
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "the verdict runs ahead of the unlock, so no biometric prompt fired"
+    );
+    assert!(!expect_connection_controller().connected.get_untracked());
+}
+
+#[test]
+fn a_saved_row_tapped_mid_dial_raises_no_paywall_and_forgets_nothing() {
+    // The mock backend settles a dial before `connect_with` returns, so an
+    // in-flight one is staged by holding the very signal a real dial holds
+    // (`tests/pro.rs`'s idiom for an overlapping call). Without the busy check
+    // ahead of the verdict, this tap would raise a paywall whose
+    // forget-and-connect drops a row and its secret for a dial that
+    // `recover_and_connect` then refuses — destructive, and connected to
+    // nothing.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_over_the_limit();
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+    expect_connection_controller().connecting.set(true);
+
+    harness.tap_node("the older saved row", |node| node.value() == Some(LIMIT_A));
+    harness.flush();
+
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "a tap the busy guard refuses never reaches the verdict: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…so nothing was pushed over the screen at all"
+    );
+    assert_eq!(
+        app_saved_endpoints_sorted(),
+        vec![LIMIT_A.to_string(), LIMIT_B.to_string()],
+        "and both rows are still remembered"
+    );
+    for endpoint in [LIMIT_A, LIMIT_B] {
+        assert_eq!(
+            credentials.stored(endpoint).as_deref(),
+            Some(CRED_TOKEN),
+            "…secrets and all"
+        );
+    }
+    assert!(
+        credentials.prompts().is_empty(),
+        "no unlock was started either"
+    );
+}
+
+#[test]
+fn forgetting_from_a_saved_rows_paywall_dials_that_row_after_the_index_shift() {
+    // The retry holds the *row* it was blocked on, not its index: forgetting
+    // the row ahead of it moves it from second to first, and a retry that had
+    // kept the index would unlock the wrong row or none at all.
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_over_the_limit();
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    harness.tap_node("the older saved row", |node| node.value() == Some(LIMIT_A));
+    harness.flush();
+    assert!(
+        shows_text(&harness, FORGET_LIMIT_B),
+        "the paywall names the row ahead of the one being connected to: {:?}",
+        node_labels(&harness.root)
+    );
+
+    harness.tap_node("the paywall's forget-and-connect action", |node| {
+        node.role() == Role::Button && node.label() == Some(FORGET_LIMIT_B)
+    });
+    harness.flush();
+    harness.pump_until("the retried row's own connect", |_| {
+        expect_connection_controller().connected.get_untracked()
+    });
+
+    assert_eq!(
+        app_saved_endpoints(),
+        vec![LIMIT_A.to_string()],
+        "the forgotten row is gone and the tapped one is what dialed"
+    );
+    assert_eq!(credentials.stored(LIMIT_B), None, "…secret and all");
+    assert_eq!(
+        credentials.stored(LIMIT_A).as_deref(),
+        Some(CRED_TOKEN),
+        "while the row that was retried kept its own"
+    );
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "exactly one unlock ran — the retry's, on the row the tap named"
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "…and it landed on /sessions (a recovered credential offers no save)"
+    );
+}
+
+#[test]
+fn a_blocked_pairing_dials_nothing_and_connects_once_the_row_is_forgotten() {
+    // The controller's own half of the pairing gate: the sheet is covered by
+    // the cases above (and `tests/pro.rs`), so this one lends a recorder and
+    // runs the two actions that sheet offers.
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+    let blocks: Rc<RefCell<Vec<ServerLimitBlock>>> = Rc::new(RefCell::new(Vec::new()));
+    let gate = recording_gate(&blocks);
+    creds
+        .controller
+        .apply_scanned_payload(scanned_payload(false));
+
+    creds
+        .controller
+        .connect_from_pairing(&app_nav(), Rc::clone(&gate));
+
+    assert!(
+        !creds.connection.connected.get_untracked(),
+        "a scan that lands on the limit dials nothing"
+    );
+    assert_eq!(blocked_endpoints(&blocks), vec![vec![LIMIT_A.to_string()]]);
+    assert!(
+        matches!(blocks.borrow()[0].retry, ConnectRetry::Pairing),
+        "…and the retry re-runs the pairing, not the form"
+    );
+    assert!(
+        creds.controller.pending_pairing.get_untracked().is_some(),
+        "the payload that retry dials is still stashed"
+    );
+
+    let to_forget = blocks.borrow()[0].to_forget.clone();
+    let retry_controller = Arc::clone(&creds.controller);
+    creds.controller.forget_saved_servers_then(
+        to_forget,
+        Box::new(move || retry_controller.connect_from_pairing(&app_nav(), gate)),
+    );
+    pump_until_done("the forget-and-connect retry", || {
+        creds.connection.connected.get_untracked()
+    });
+
+    assert_eq!(
+        blocks.borrow().len(),
+        1,
+        "the retry was let through rather than refused again"
+    );
+    assert_eq!(
+        fixture_rows(&creds.servers)
+            .iter()
+            .map(SavedServer::endpoint)
+            .collect::<Vec<String>>(),
+        vec![PAIRED_ENDPOINT.to_string()],
+        "the forgotten row is gone and the scanned one took its place"
+    );
+}
+
+#[test]
+fn a_blocked_connect_leaves_nothing_in_flight_and_the_unlocked_retry_dials_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = credential_fixture(vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+    let blocks: Rc<RefCell<Vec<ServerLimitBlock>>> = Rc::new(RefCell::new(Vec::new()));
+    let gate = recording_gate(&blocks);
+    let offered: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let offer_prompt: OfferPrompt = {
+        let record = Rc::clone(&offered);
+        Rc::new(move |offer: CredentialOffer| record.borrow_mut().push(offer.label))
+    };
+    creds.controller.set_url(LIMIT_B.to_string());
+
+    creds
+        .controller
+        .connect(&app_nav(), Rc::clone(&offer_prompt), Rc::clone(&gate));
+
+    assert_eq!(blocks.borrow().len(), 1, "the connect was refused");
+    assert!(!creds.connection.connected.get_untracked());
+    assert!(
+        offered.borrow().is_empty(),
+        "nothing dialed, so nothing was offered to save"
+    );
+    assert!(
+        !creds.controller.busy(),
+        "a blocked connect leaves no dial, unlock or unanswered offer behind — \
+         the paywall's own retry would otherwise be swallowed by the busy guard"
+    );
+
+    // What a landed purchase publishes on the controller the gate reads.
+    creds.pro.entitlement.set(Entitlement::Pro);
+    creds.controller.connect(&app_nav(), offer_prompt, gate);
+
+    assert_eq!(
+        blocks.borrow().len(),
+        1,
+        "…and the unlocked retry is not refused a second time"
+    );
+    assert!(creds.connection.connected.get_untracked());
+    assert_eq!(offered.borrow().len(), 1, "the retry dialed exactly once");
+}
+
+/// The QR affordance's own gate: a free install already remembering a server
+/// takes the free-tier verdict at the tap, before the scanner ever mounts.
+#[test]
+fn a_free_installs_qr_tap_raises_the_paywall_when_a_server_is_already_saved() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+    let before = harness.nav.depth();
+
+    harness.tap_node("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall is the whole answer: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        harness.nav.depth(),
+        before + 1,
+        "the sheet is the only page pushed"
+    );
+    assert!(
+        !shows_text(&harness, NO_CAMERA),
+        "the scanner never mounted behind the paywall"
+    );
+    assert!(
+        !shows_text(&harness, FORGET_LIMIT_A),
+        "there is no dial to retry, so no forget-and-connect action is offered"
+    );
+
+    harness.tap_node("the paywall's Not now action", |node| {
+        node.role() == Role::Button && node.label() == Some(PAYWALL_NOT_NOW)
+    });
+    harness.flush();
+
+    assert_eq!(
+        harness.nav.depth(),
+        before,
+        "…and it was the only page there was"
+    );
+}
+
+#[test]
+fn a_free_install_remembering_nothing_scans_straight_away() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Free, vec![]);
+
+    harness.tap_node("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "the sheet is pushed as its own page"
+    );
+    assert!(
+        shows_text(&harness, NO_CAMERA),
+        "nothing stood in the way, so the scanner mounted off-device: {:?}",
+        node_labels(&harness.root)
+    );
+    assert!(!shows_text(&harness, UPGRADE_TITLE));
+}
+
+#[test]
+fn unlocking_from_the_qr_paywall_lands_in_the_scanner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)]);
+
+    harness.tap_node("the QR affordance", |node| {
+        node.role() == Role::Button && node.label() == Some(QR_LABEL)
+    });
+    harness.flush();
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall is up before the unlock: {:?}",
+        node_labels(&harness.root)
+    );
+
+    mock_entitlement()
+        .expect("tests/support opted this process into the scriptable store")
+        .set_entitlement(Entitlement::Pro);
+    harness.tap_node("the paywall's Restore action", |node| {
+        node.role() == Role::Button && node.label() == Some(RESTORE_LABEL)
+    });
+    harness.pump_until("the scanner to land after the unlock", |harness| {
+        shows_text(harness, NO_CAMERA)
+    });
+
+    assert_eq!(
+        harness.nav.depth(),
+        2,
+        "the unlock's own scan is the only push"
+    );
+    assert!(!shows_text(&harness, UPGRADE_TITLE), "the paywall is gone");
+}
+
+// ---------------------------------------------------------------------------
+// The Tablet structure: two panels on the full band, folded when collapsed
+// ---------------------------------------------------------------------------
+
+/// `docs/tablet.html`'s landscape frame: Tablet, full band.
+const FULL_TABLET: Size = Size::new(1024.0, 720.0);
+/// Tablet (shortest side 600 or more) on the collapsed band (under 840 wide).
+const COLLAPSED_TABLET: Size = Size::new(720.0, 720.0);
+/// A phone in portrait: Compact.
+const PHONE: Size = Size::new(390.0, 844.0);
+/// The saved list's header run, as `widgets::saved` paints it.
+const SAVED_HEADER: &str = "SAVED SERVERS";
+/// The seeded store's pinned row's label — the Tablet row's primary line.
+const PINNED_LABEL: &str = "herdr staging";
+
+fn qr_action(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(QR_LABEL)
+}
+
+fn connect_cta(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
+}
+
+fn saved_header(node: &Node) -> bool {
+    node.value() == Some(SAVED_HEADER)
+}
+
+/// How many nodes on screen match `pred`.
+fn count(harness: &Harness, pred: impl Fn(&Node) -> bool) -> usize {
+    harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| pred(node))
+        .count()
+}
+
+/// The QR action sits in the CTA's own row, trailing it — the in-flow
+/// button, not the corner FAB.
+fn assert_qr_beside_the_cta(harness: &Harness) {
+    assert_eq!(count(harness, qr_action), 1, "one QR action, no FAB");
+    let qr = harness.bounds("the QR button", qr_action);
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    assert!(
+        (qr.y0 - cta.y0).abs() < EPSILON && (qr.y1 - cta.y1).abs() < EPSILON,
+        "the QR button shares the CTA's row: {qr:?} vs {cta:?}"
+    );
+    assert!(qr.x0 > cta.x1, "…trailing it: {qr:?} vs {cta:?}");
+    assert!(qr.height() >= MIN_TAP_TARGET, "{qr:?}");
+}
+
+#[test]
+fn the_compact_info_button_clears_a_top_trailing_window_control_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let plain = sized(PHONE, Harness::mount);
+    let flush = plain.bounds("the info button", info_button);
+
+    let corner = CornerInsets {
+        top_right: CornerInset::new(100.0, 40.0),
+        ..CornerInsets::ZERO
+    };
+    let insets = WindowInsets::default().with_corner_insets(corner);
+    let metrics = WindowMetrics::new(PHONE, 1.0, insets);
+    let mut shifted = mount_with_metrics(Some(metrics));
+    shifted.surface = PHONE;
+    shifted.settle();
+    let moved = shifted.bounds("the info button", info_button);
+
+    assert!(
+        PHONE.width - moved.x1 >= PHONE.width - flush.x1 + 100.0 - EPSILON,
+        "100px further from the trailing edge: {moved:?} vs {flush:?}"
+    );
+    assert!(
+        moved.y0 >= flush.y0 + 40.0 - EPSILON,
+        "40px lower: {moved:?} vs {flush:?}"
+    );
+}
+
+/// `size`'s metrics carrying `corner` as the top-right window-control corner.
+fn corner_metrics(size: Size, corner: CornerInsets) -> WindowMetrics {
+    WindowMetrics::new(
+        size,
+        1.0,
+        WindowInsets::default().with_corner_insets(corner),
+    )
+}
+
+const TOP_RIGHT_CORNER: CornerInsets = CornerInsets {
+    top_right: CornerInset::new(100.0, 40.0),
+    ..CornerInsets::ZERO
+};
+
+#[test]
+fn a_resize_that_adds_a_corner_moves_the_info_button_live() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(PHONE, Harness::mount);
+    let flush = harness.bounds("the info button", info_button);
+
+    support::reprovide_metrics(corner_metrics(PHONE, TOP_RIGHT_CORNER));
+    for _ in 0..3 {
+        harness.settle();
+    }
+    let moved = harness.bounds("the info button", info_button);
+
+    assert!(
+        moved.x1 <= flush.x1 - 100.0 + EPSILON && moved.y0 >= flush.y0 + 40.0 - EPSILON,
+        "the builder re-read the corner on resize: {moved:?} vs {flush:?}"
+    );
+}
+
+#[test]
+fn a_collapsed_tablet_info_button_clears_the_top_trailing_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let plain = sized(COLLAPSED_TABLET, Harness::mount);
+    let flush = plain.bounds("the info button", info_button);
+
+    let mut shifted = mount_with_metrics(Some(corner_metrics(COLLAPSED_TABLET, TOP_RIGHT_CORNER)));
+    shifted.surface = COLLAPSED_TABLET;
+    shifted.settle();
+    let moved = shifted.bounds("the info button", info_button);
+
+    assert!(
+        flush.x1 - moved.x1 >= 100.0 - EPSILON && moved.y0 - flush.y0 >= 40.0 - EPSILON,
+        "at least the corner's width and height: {moved:?} vs {flush:?}"
+    );
+}
+
+#[test]
+fn a_full_tablet_mounts_no_info_button_even_with_a_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_metrics(Some(corner_metrics(FULL_TABLET, TOP_RIGHT_CORNER)));
+    harness.surface = FULL_TABLET;
+    harness.settle();
+
+    assert_eq!(
+        count(&harness, info_button),
+        0,
+        "the panel carries the copy"
+    );
+}
+
+#[test]
+fn a_top_left_corner_pushes_the_full_panels_brand_tile_clear_of_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let corner = CornerInsets {
+        top_left: CornerInset::new(66.0, 43.0),
+        ..CornerInsets::ZERO
+    };
+    let mut harness = mount_with_metrics(Some(corner_metrics(FULL_TABLET, corner)));
+    harness.surface = FULL_TABLET;
+    let scene = harness.settle();
+
+    let tile = scene
+        .rounded_fills
+        .iter()
+        .find(|(_, size, _, _)| {
+            (size.width - 60.0).abs() < EPSILON && (size.height - 60.0).abs() < EPSILON
+        })
+        .map(|(origin, size, _, _)| (*origin, *size))
+        .expect("the panel's 60x60 brand tile is painted");
+    let (origin, _) = tile;
+    let overlaps = origin.x < 66.0 && origin.y < 43.0;
+    assert!(!overlaps, "the tile clears the window control: {tile:?}");
+}
+
+#[test]
+fn a_credential_less_row_past_the_free_tier_is_tagged_refills_on_tap_and_gates_at_connect() {
+    let _g = serial();
+    let _ambient = setup();
+    let rows = vec![
+        limit_row(LIMIT_A, LIMIT_A_LABEL, false),
+        older_limit_row(LIMIT_B, LIMIT_B_LABEL, false),
+    ];
+    let mut harness = sized(FULL_TABLET, || mount_limited(Tier::Free, rows));
+    assert_eq!(pro_tags(&harness), 2, "both rows are past the free tier");
+
+    harness.tap_node("the credential-less row", |node| {
+        node.role() == Role::Label && node.value() == Some(LIMIT_A_LABEL)
+    });
+    harness.flush();
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "the tap only refills: there is no credential to dial with"
+    );
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(LIMIT_A),
+        "the form took the row's endpoint"
+    );
+
+    harness.tap_node("the connect CTA", connect_cta);
+    harness.flush();
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall fires at Connect: {:?}",
+        node_labels(&harness.root)
+    );
+}
+
+#[test]
+fn a_full_tablet_puts_orientation_and_saved_servers_beside_the_form() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(FULL_TABLET, Harness::mount);
+
+    assert!(
+        harness.shows_value(GETTING_STARTED_BODY),
+        "the orientation paragraph is inline: {:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(
+        count(&harness, |node| node.label() == Some(INFO_LABEL)),
+        0,
+        "…so the corner affordance that raised it is not mounted"
+    );
+    assert_eq!(count(&harness, saved_header), 1, "one saved-servers header");
+    assert_qr_beside_the_cta(&harness);
+
+    let header = harness.bounds("the saved header", saved_header);
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    assert!(
+        header.x1 <= cta.x0,
+        "the saved list sits in the left panel, beside the form: {header:?} vs {cta:?}"
+    );
+}
+
+#[test]
+fn a_collapsed_tablet_folds_the_saved_list_under_the_button_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(COLLAPSED_TABLET, Harness::mount);
+
+    assert!(
+        !harness.shows_value(GETTING_STARTED_BODY),
+        "no left panel, so no paragraph until asked"
+    );
+    assert_eq!(
+        count(&harness, |node| node.label() == Some(INFO_LABEL)),
+        1,
+        "the info mark keeps the orientation reachable"
+    );
+    assert_eq!(count(&harness, saved_header), 1, "one saved-servers header");
+    assert_qr_beside_the_cta(&harness);
+
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    let header = harness.bounds("the saved header", saved_header);
+    let row = harness.bounds("the pinned row", |node| node.value() == Some(PINNED_LABEL));
+    assert!(
+        cta.y1 <= header.y0 && header.y1 <= row.y0,
+        "the phone's order: button row, header, rows: {cta:?} / {header:?} / {row:?}"
+    );
+}
+
+#[test]
+fn a_collapsed_tablet_raises_the_getting_started_dialog_from_the_info_mark() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(COLLAPSED_TABLET, Harness::mount);
+    let before = harness.nav.depth();
+
+    harness.tap_node("the getting-started affordance", info_button);
+    assert_eq!(harness.nav.depth(), before + 1, "the dialog is pushed");
+    assert!(shows_text(&harness, GETTING_STARTED_TITLE));
+    assert!(harness.shows_value(GETTING_STARTED_BODY));
+}
+
+#[test]
+fn a_phone_keeps_the_corner_affordances_and_no_inline_paragraph() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(PHONE, Harness::mount);
+
+    assert!(!harness.shows_value(GETTING_STARTED_BODY));
+    assert_eq!(count(&harness, info_button), 1, "the info mark is up");
+    assert_eq!(count(&harness, qr_action), 1);
+    assert_eq!(count(&harness, saved_header), 1);
+    let fab = harness.bounds("the QR affordance", qr_action);
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    assert!(
+        fab.width() < PHONE.width / 2.0 && (cta.x1 - cta.x0) > fab.width(),
+        "the QR action is still the corner FAB, the CTA still full-bleed: {fab:?} vs {cta:?}"
+    );
+}
+
+/// How many `pro` tags the screen shows.
+fn pro_tags(harness: &Harness) -> usize {
+    count(harness, |node| {
+        node.role() == Role::Status && node.label() == Some(PRO_TAG)
+    })
+}
+
+#[test]
+fn a_free_install_with_two_rows_tags_both_on_both_classes() {
+    let _g = serial();
+    let _ambient = setup();
+    let rows = || {
+        vec![
+            limit_row(LIMIT_A, LIMIT_A_LABEL, false),
+            older_limit_row(LIMIT_B, LIMIT_B_LABEL, false),
+        ]
+    };
+    for size in [PHONE, FULL_TABLET] {
+        let harness = sized(size, || mount_limited(Tier::Free, rows()));
+        assert_eq!(pro_tags(&harness), 2, "free at {size:?}");
+    }
+}
+
+#[test]
+fn a_free_install_with_one_row_tags_none_on_both_classes() {
+    let _g = serial();
+    let _ambient = setup();
+    for size in [PHONE, FULL_TABLET] {
+        let harness = sized(size, || {
+            mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)])
+        });
+        assert_eq!(pro_tags(&harness), 0, "free at {size:?}");
+    }
+}
+
+#[test]
+fn a_pro_install_tags_no_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let rows = vec![
+        limit_row(LIMIT_A, LIMIT_A_LABEL, false),
+        older_limit_row(LIMIT_B, LIMIT_B_LABEL, false),
+    ];
+    let harness = sized(FULL_TABLET, || mount_limited(Tier::Pro, rows));
+    assert_eq!(pro_tags(&harness), 0);
+}
+
+#[test]
+fn an_empty_tablet_list_says_so_under_its_header() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = sized(FULL_TABLET, || mount_limited(Tier::Pro, vec![]));
+
+    assert_eq!(count(&harness, saved_header), 1);
+    assert!(
+        harness.shows_value(NO_SAVED_SERVERS),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+}
+
+#[test]
+fn a_tablet_saved_row_leads_with_its_label_and_refills_the_form_like_the_phone_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, Harness::mount);
+
+    let meta_prefix = format!("{PINNED_ENDPOINT} · pinned TLS · ");
+    assert!(
+        harness
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.value().is_some_and(|v| v.starts_with(&meta_prefix))),
+        "the meta line leads with host:port: {:?}",
+        node_labels(&harness.root)
+    );
+
+    harness.tap_node("the pinned row", |node| {
+        node.role() == Role::Label && node.value() == Some(PINNED_LABEL)
+    });
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(PINNED_ENDPOINT),
+        "the row filled the server-URL field"
+    );
+    assert!(
+        harness.shows_value(PINNED_CAPTION),
+        "…and its pinned posture"
+    );
+}
+
+#[test]
+fn a_tablet_rows_delete_target_raises_the_same_remove_confirmation() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, mount_with_credential_row);
+    let before = harness.nav.depth();
+
+    let target = harness.bounds("the row's delete target", |node| {
+        node.role() == Role::Button && node.label() == Some(DELETE_CRED_LABEL)
+    });
+    assert!(
+        target.width() >= MIN_TAP_TARGET && target.height() >= MIN_TAP_TARGET,
+        "{target:?}"
+    );
+    harness.tap_node("the row's delete target", |node| {
+        node.role() == Role::Button && node.label() == Some(DELETE_CRED_LABEL)
+    });
+    assert_eq!(harness.nav.depth(), before + 1);
+    assert!(shows_text(&harness, REMOVE_TITLE));
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "the row's own tap never fired"
+    );
+}
+
+#[test]
+fn a_tablet_credential_row_unlocks_and_lands_on_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, mount_with_credential_row);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let before = harness.nav.depth();
+
+    harness.tap_node("the credential row", |node| {
+        node.role() == Role::Label && node.value() == Some("Cred rig")
+    });
+    pump_until_done("the recovered connect", || {
+        expect_connection_controller().connected.get_untracked()
+    });
+    harness.settle();
+
+    assert_eq!(credentials.prompts().len(), 1, "exactly one prompt");
+    assert!(harness.nav.depth() > before, "…and landed on /sessions");
+}
+
+#[test]
+fn the_tablet_guide_button_hands_the_docs_url_to_the_link_opener() {
+    let _g = serial();
+    let _ambient = setup();
+    let opened: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&opened);
+    set_link_opener_for_tests(move |url| {
+        sink.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(url.to_string());
+    });
+    let mut harness = sized(FULL_TABLET, Harness::mount);
+    let before = harness.nav.depth();
+
+    harness.tap_node("the inline guide button", |node| {
+        node.role() == Role::Button && node.label() == Some(OPEN_GUIDE_LABEL)
+    });
+
+    assert_eq!(
+        *opened.lock().unwrap_or_else(|e| e.into_inner()),
+        vec![DOCS_URL.to_string()]
+    );
+    assert_eq!(harness.nav.depth(), before, "no dialog in between");
+}
+
+#[test]
+fn the_tablet_qr_button_opens_the_scanner_like_the_fab() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(COLLAPSED_TABLET, || mount_limited(Tier::Free, vec![]));
+
+    harness.tap_node("the QR button", qr_action);
+
+    assert_eq!(harness.nav.depth(), 2, "the sheet is pushed");
+    assert!(
+        shows_text(&harness, NO_CAMERA),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+}
+
+#[test]
+fn the_tablet_qr_button_takes_the_fabs_free_tier_gate() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(FULL_TABLET, || {
+        mount_limited(Tier::Free, vec![limit_row(LIMIT_A, LIMIT_A_LABEL, false)])
+    });
+    let before = harness.nav.depth();
+
+    harness.tap_node("the QR button", qr_action);
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+    assert_eq!(harness.nav.depth(), before + 1);
+    assert!(
+        !shows_text(&harness, NO_CAMERA),
+        "the scanner never mounted"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The splash's static mock fields
 // ---------------------------------------------------------------------------
 
@@ -3218,10 +4882,17 @@ fn the_live_screens_fields_stay_enabled() {
 }
 
 #[test]
-fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
+fn the_static_splash_mocks_fields_refuse_editing_on_tap() {
     // `connect_pieces` (== `connect_pieces_with(theme, None, saved)`) is what
     // the cold-start splash assembles — no navigator, no controller — so a
     // bare `()` state and a standalone `RenderRoot` reproduce it directly.
+    //
+    // frust's read-only contract (`TextInput: a read-only field is focusable
+    // and copyable`) means a tap here MAY claim focus now — that alone is not
+    // the defect this guards. What must still never happen is a stray tap
+    // during the splash's staggering entrance caret-editing or accepting
+    // input into a field with nothing behind it: no keystroke may land, and
+    // any IME session the field publishes must keep the soft keyboard down.
     let _g = serial();
     let _ambient = setup();
 
@@ -3242,9 +4913,7 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
     assert_eq!(fields.len(), 2, "the splash mock still renders both fields");
     assert!(
         fields.iter().all(|(_, _, read_only)| *read_only),
-        "the splash's static fields must present as read-only — a stray tap \
-         during the staggering entrance must not focus or caret a field with \
-         nothing behind it: {fields:?}"
+        "the splash's static fields must present as read-only: {fields:?}"
     );
     assert!(
         fields.iter().all(|(_, disabled, _)| !*disabled),
@@ -3253,8 +4922,6 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
          screen took over: {fields:?}"
     );
 
-    // Read-only hangs off the same focus gate `enabled(false)` did
-    // (`TextInputWidget::interactive` is `enabled && !read_only`).
     let centers: Vec<Point> = root
         .semantics()
         .nodes
@@ -3266,12 +4933,35 @@ fn the_static_splash_mocks_fields_refuse_focus_on_tap() {
     assert_eq!(centers.len(), 2, "both fields carry bounds to tap");
     for point in centers {
         tap(&mut root, &mut state, point);
+        frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+
+        // A focused read-only field may publish a keyboard-suppressed IME
+        // session (for copy); it must never ask for the keyboard itself.
+        if let Some(ime) = root.ime_state() {
+            assert!(
+                ime.suppress_soft_keyboard,
+                "a focused read-only splash field must never raise its \
+                 keyboard: {ime:?}"
+            );
+        }
+
+        // Either way, a stray keystroke must never land on a field with
+        // nothing behind it.
+        root.event(&mut state, &char_key("x"));
     }
     frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);
+
+    let values: Vec<Option<String>> = root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.role(), Role::TextInput | Role::PasswordInput))
+        .map(|(_, node)| node.value().map(str::to_string))
+        .collect();
     assert!(
-        root.semantics().focus.is_none(),
-        "a read-only field must not become the tree's focus node after a \
-         direct tap"
+        values.iter().all(|value| value.as_deref() == Some("")),
+        "a stray tap during the splash's staggering entrance must never let a \
+         keystroke reach a field with nothing behind it: {values:?}"
     );
 }
 

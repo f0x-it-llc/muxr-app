@@ -27,10 +27,11 @@ use frust::authoring::{
     LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, build_child,
     rebuild_child, route_event_single, teardown_child,
 };
-use frust::icons::{CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH};
+use frust::icons::{CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH, SCHEDULE};
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    IconSource, Padding, SizedBox, any, container, divider, flexible, icon, inflexible, text,
+    AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
+    GestureDetector, IconSource, Padding, SizedBox, any, button, container, divider, flexible,
+    icon, inflexible, text,
 };
 
 use crate::features::settings::presentation::pages::{self, SettingsState};
@@ -300,12 +301,16 @@ pub(in super::super) enum RowAction {
     Static,
     /// A chevron row that opens a picker sheet.
     Picker(PickerKind),
+    /// A chevron row raising `features::pro`'s paywall — the `plan` row,
+    /// short of Pro.
+    UpgradeSheet,
 }
 
 /// One `.set-row`: the mark tile, the label over its value, and a trailing
-/// chevron for anything that leads somewhere. For [`RowAction::Picker`] the
-/// **whole row** is the tap target — the mock draws no separate hit area, and
-/// a 28px chevron alone would be unreachable on a phone.
+/// chevron for anything that leads somewhere. For [`RowAction::Picker`] and
+/// [`RowAction::UpgradeSheet`] the **whole row** is the tap target — the mock
+/// draws no separate hit area, and a 28px chevron alone would be unreachable
+/// on a phone.
 pub(super) fn settings_row(
     mark: RowMark,
     label: &'static str,
@@ -349,9 +354,42 @@ pub(super) fn settings_row(
 
     match action {
         RowAction::Static => any(box_),
-        RowAction::Picker(_) => any(GestureDetector(box_)
+        RowAction::Picker(_) | RowAction::UpgradeSheet => any(GestureDetector(box_)
             .on_tap(move |state: &mut SettingsState| pages::row_tapped(state, action))),
     }
+}
+
+/// A row whose trailing slot is a ghost button rather than a chevron: the
+/// mark tile, the label over its `subtitle`, and `action_label` running
+/// `on_tap`. Only the button is a tap target — the row itself is inert.
+pub(super) fn button_row(
+    mark: RowMark,
+    label: &'static str,
+    subtitle: &'static str,
+    action_label: &'static str,
+    on_tap: impl Fn(&mut SettingsState) + 'static,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    let body = column(vec![
+        any(text(label).style(inked(&theme.type_scale.label_large, colors.fg))),
+        any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
+        any(text(subtitle).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
+    ]);
+    let children = vec![
+        inflexible(mark_tile(mark, colors)),
+        h_gap(ROW_GAP),
+        flexible(1, any(body)),
+        h_gap(ROW_GAP),
+        inflexible(any(button(action_label, on_tap).style(ButtonStyle::Ghost))),
+    ];
+    any(column(vec![
+        any(Padding(
+            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+            row(children),
+        )),
+        any(divider(colors.rule)),
+    ]))
 }
 
 /// `.set-ic` — the 28px raised tile holding a row's mark. Shared with
@@ -376,7 +414,7 @@ pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> AnyView<SettingsStat
 fn trailing_slot(action: RowAction, colors: &Palette) -> Option<AnyView<SettingsState>> {
     match action {
         RowAction::Static => None,
-        RowAction::Picker(_) => Some(any(icon(CHEVRON_RIGHT)
+        RowAction::Picker(_) | RowAction::UpgradeSheet => Some(any(icon(CHEVRON_RIGHT)
             .size(CHEVRON)
             .color(colors.fg_faintest))),
     }
@@ -407,6 +445,8 @@ pub(super) const MARK_FONT_SIZE: RowMark = RowMark::Vector(FORMAT_SIZE);
 pub(super) const MARK_CURSOR: RowMark = RowMark::Text("\u{25ae}");
 /// …for `layout refresh` — the mock's `↻` as a vector.
 pub(super) const MARK_REFRESH: RowMark = RowMark::Vector(REFRESH);
+/// …for `latency` — a clock, the round trip the heartbeat measures.
+pub(super) const MARK_LATENCY: RowMark = RowMark::Vector(SCHEDULE);
 /// …for `bell notifications` — the mock's 🔔 as a vector.
 pub(super) const MARK_BELL: RowMark = RowMark::Vector(NOTIFICATIONS);
 
@@ -542,6 +582,7 @@ mod tests {
             MARK_FONT_SIZE,
             MARK_CURSOR,
             MARK_REFRESH,
+            MARK_LATENCY,
             MARK_BELL,
         ] {
             let RowMark::Text(glyph) = mark else {

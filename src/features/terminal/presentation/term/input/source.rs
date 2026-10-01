@@ -30,7 +30,7 @@ use std::hash::BuildHasher;
 use frust::authoring::{EditingState, Key, Modifiers, NamedKey};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::bytes::{BACKSPACE_BYTE, BarKey, named_key_bytes, shifted_sequence, text_bytes};
+use super::bytes::{BACKSPACE_BYTE, BarKey, modified_sequence, named_key_bytes, text_bytes};
 use super::latch::{ModifierLatch, apply_latch, single_unit};
 use super::utf16::{clamp_front, clamp_index, diff, len_utf16, utf16_prefix, utf16_suffix};
 
@@ -536,20 +536,20 @@ impl KeystrokeSource {
     }
 
     /// Emit one **sequence** key — a bar cap's or a hardware [`NamedKey`]'s —
-    /// choosing its Shift variant where an armed `Shift` has one
-    /// ([`shifted_sequence`]). Separate from [`emit`](Self::emit)'s transform,
+    /// choosing the one variant an armed modifier has for it
+    /// ([`modified_sequence`]). Separate from [`emit`](Self::emit)'s transform,
     /// which only rewrites a **single code unit**, where most of these are
     /// longer (even `Tab` answers Shift with a whole other sequence, not a
-    /// modified byte). Choosing one consumes the latch's `shift`; `Ctrl`/`Alt`
-    /// are deliberately *not* consumed here and never reach the bytes (see
-    /// [`ModifierLatch`]).
+    /// modified byte). Choosing one consumes that flag alone; a flag with no
+    /// variant here (`Ctrl`/`Alt` on anything but an F-key) is *not* consumed
+    /// and never reaches the bytes (see [`ModifierLatch`]).
     fn emit_sequence(&mut self, sequence: &'static [u8], transient: ModifierLatch) -> Vec<u8> {
-        let shifted = (self.latch.shift || transient.shift)
-            .then(|| shifted_sequence(sequence))
-            .flatten();
-        let out = self.emit(shifted.unwrap_or(sequence), transient);
-        if shifted.is_some() {
-            self.latch.shift = false;
+        let chosen = modified_sequence(sequence, self.latch.union(transient));
+        let out = self.emit(chosen.map_or(sequence, |(variant, _)| variant), transient);
+        if let Some((_, spent)) = chosen {
+            self.latch.shift &= !spent.shift;
+            self.latch.ctrl &= !spent.ctrl;
+            self.latch.alt &= !spent.alt;
         }
         out
     }
@@ -805,29 +805,28 @@ impl KeystrokeSource {
     }
 
     /// A key-bar tap: a latch toggle, or a control sequence sent through the same
-    /// choke point every other emission uses.
+    /// choke point every other emission uses. `Fn` (the bar's own row toggle,
+    /// never routed here by the bar) and an out-of-range `F(n)` derive nothing.
     pub fn on_bar_key(&mut self, key: BarKey) -> Emission {
-        match key.sequence() {
-            None => {
-                match key {
-                    BarKey::Ctrl => self.latch.ctrl = !self.latch.ctrl,
-                    BarKey::Alt => self.latch.alt = !self.latch.alt,
-                    BarKey::Shift => self.latch.shift = !self.latch.shift,
-                    // Unreachable: only the three latch keys have no sequence.
-                    _ => {}
-                }
-                self.revision += 1;
-                Emission::inert(InputClass::Latch)
-            }
-            Some(sequence) => {
+        let latch = match key {
+            BarKey::Ctrl => &mut self.latch.ctrl,
+            BarKey::Alt => &mut self.latch.alt,
+            BarKey::Shift => &mut self.latch.shift,
+            _ => {
+                let Some(sequence) = key.sequence() else {
+                    return Emission::inert(InputClass::None);
+                };
                 let bytes = self.emit_sequence(sequence, ModifierLatch::NONE);
-                Emission {
+                return Emission {
                     bytes,
                     reconciled: false,
                     class: InputClass::Sequence,
-                }
+                };
             }
-        }
+        };
+        *latch = !*latch;
+        self.revision += 1;
+        Emission::inert(InputClass::Latch)
     }
 }
 

@@ -224,10 +224,11 @@ impl PreferencesRepository for PrefsRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::settings::domain::entities::{FONT_SIZE_MAX_PX, FONT_SIZE_MIN_PX};
 
     #[test]
     fn font_size_bounds_are_the_domains_own_min_and_max() {
-        assert_eq!(font_size_bounds(), (10, 14));
+        assert_eq!(font_size_bounds(), (FONT_SIZE_MIN_PX, FONT_SIZE_MAX_PX));
     }
 
     #[test]
@@ -257,8 +258,35 @@ mod tests {
             clamped.font_family, "FiraCode Nerd Font Mono",
             "the family is stored as given"
         );
-        assert_eq!(clamped.font_size_px, 14, "clamped to the domain's own max");
+        assert_eq!(
+            clamped.font_size_px, FONT_SIZE_MAX_PX,
+            "clamped to the domain's own max"
+        );
         assert_eq!(clamped.cursor_style, CursorStyle::Bar, "left alone");
+    }
+
+    #[test]
+    fn clamp_appearance_clamps_oversized_and_undersized_font_sizes() {
+        // A persisted value outside the offered range is clamped to the nearest bound.
+        let over_clamped = clamp_appearance(AppearancePrefs {
+            font_family: "JetBrains Mono".to_string(),
+            font_size_px: 30,
+            cursor_style: CursorStyle::Block,
+        });
+        assert_eq!(
+            over_clamped.font_size_px, FONT_SIZE_MAX_PX,
+            "clamped to the domain's max"
+        );
+
+        let under_clamped = clamp_appearance(AppearancePrefs {
+            font_family: "JetBrains Mono".to_string(),
+            font_size_px: 6,
+            cursor_style: CursorStyle::Block,
+        });
+        assert_eq!(
+            under_clamped.font_size_px, FONT_SIZE_MIN_PX,
+            "clamped to the domain's min"
+        );
     }
 
     #[test]

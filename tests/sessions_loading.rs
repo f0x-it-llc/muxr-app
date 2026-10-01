@@ -32,8 +32,8 @@ use kurbo::{Rect, Size};
 use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
-use muxr::features::sessions::di::expect_sessions_repository;
-use muxr::features::sessions::domain::entities::RenameRequest;
+use muxr::features::sessions::di::{expect_mock_sessions_repository, expect_sessions_repository};
+use muxr::features::sessions::domain::entities::{CreateSessionParams, SessionBackend};
 use muxr::features::sessions::presentation::pages::{sessions_page, set_loading_rain_for_tests};
 use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::Preferences;
@@ -83,6 +83,9 @@ const SEED: u64 = 0x6C6F_6164;
 #[derive(Default)]
 struct Recorder {
     glyph_ids: Vec<u32>,
+    /// Each painted run's own glyph ids, so a name is matched as a whole run
+    /// and never as a substring of another (`dev` inside `device`).
+    runs: Vec<Vec<u32>>,
     glyph_runs: usize,
     /// Every `fill_rect`, paint order — the overlay's tone is the only fill the
     /// standalone rig paints at all.
@@ -102,10 +105,19 @@ impl PaintScene for Recorder {
     fn draw_text(&mut self, _origin: Point, _text: &str) {}
     fn draw_glyph_run(&mut self, run: GlyphRun) {
         self.glyph_runs += 1;
-        self.glyph_ids
-            .extend(run.glyphs.iter().map(|glyph| glyph.id));
+        let ids: Vec<u32> = run.glyphs.iter().map(|glyph| glyph.id).collect();
+        self.glyph_ids.extend(&ids);
+        self.runs.push(ids);
     }
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
+}
+
+impl Recorder {
+    /// How many painted runs are exactly `needle` — a whole card name, never a
+    /// run that merely contains it.
+    fn whole_runs(&self, needle: &[u32]) -> usize {
+        self.runs.iter().filter(|run| *run == needle).count()
+    }
 }
 
 fn theme(reduce_motion: bool) -> Theme {
@@ -695,8 +707,8 @@ const BAND_LANDED_MS: f64 =
 /// [`seed_extra_session`]'s name — distinct from every [`SEEDED`] name and
 /// backend/status text, so [`occurrences`] counts it cleanly.
 const FOURTH_NAME: &str = "late-arrival";
-/// [`rename_session`]'s replacement name, distinct for the same reason.
-const CHURNED_NAME: &str = "renamed-in-the-tail";
+/// The pane label [`churn_session`] gives the seeded "dev" card (9 panes -> 10).
+const CHURNED_PANES: &str = "\u{25a3} 10 panes";
 
 /// The glyph ids a card's name paints — `session_card` inks the theme's
 /// `label_large` slot, and inking replaces only the color.
@@ -752,7 +764,10 @@ fn seed_extra_session(name: &str) {
     let owned = name.to_string();
     spawn_local(async move {
         repository
-            .create_session(owned)
+            .create_session(CreateSessionParams {
+                name: owned,
+                backend: SessionBackend::Zellij,
+            })
             .await
             .expect("the mock never rejects a real name");
         flag.set(true);
@@ -766,39 +781,12 @@ fn seed_extra_session(name: &str) {
     }
 }
 
-/// Renames the session called `from` straight in the shared mock repository,
+/// Churns the session called `name` straight in the shared mock repository,
 /// like [`seed_extra_session`] and for the same reason. The id ladder is
 /// untouched: the live band's list differs from the frozen one in a field the
-/// overlay is not keyed on, which is what telemetry churn looks like here (the
-/// mock exposes no pane-count mutation of its own).
-fn rename_session(from: &str, to: &str) {
-    let repository = expect_sessions_repository();
-    let done = Rc::new(Cell::new(false));
-    let flag = Rc::clone(&done);
-    let (old_name, new_name) = (from.to_string(), to.to_string());
-    spawn_local(async move {
-        let sessions = repository
-            .list_sessions()
-            .await
-            .expect("the mock always lists");
-        let id = sessions
-            .iter()
-            .find(|session| session.name == old_name)
-            .map(|session| session.id.clone())
-            .unwrap_or_else(|| panic!("no session named {old_name:?} to rename"));
-        repository
-            .rename_session(RenameRequest { id, name: new_name })
-            .await
-            .expect("the mock never rejects a real name");
-        flag.set(true);
-    });
-    let runtime = ReactiveRuntime::get().expect("ReactiveRuntime::init must have run");
-    let deadline = Instant::now() + PUMP_DEADLINE;
-    while !done.get() {
-        assert!(Instant::now() < deadline, "timed out renaming {from:?}");
-        runtime.pump_local();
-        std::thread::sleep(Duration::from_millis(1));
-    }
+/// overlay is not keyed on, which is what telemetry churn looks like here.
+fn churn_session(name: &str) {
+    expect_mock_sessions_repository().churn(name);
 }
 
 /// The `/sessions` screen mounted the way `tests/sessions.rs`' harness mounts
@@ -973,7 +961,7 @@ fn the_band_opens_under_the_rain_and_swallows_a_tap_meant_for_a_card() {
     );
     for name in SEEDED {
         assert_eq!(
-            occurrences(&opening.glyph_ids, &name_ids(name)),
+            opening.whole_runs(&name_ids(name)),
             0,
             "{name} cannot be painted before the first load has landed"
         );
@@ -1013,7 +1001,7 @@ fn the_overlay_hands_the_band_over_to_live_cards_when_its_sequence_ends() {
     );
     for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
         assert_eq!(
-            occurrences(&handed_over.glyph_ids, &name_ids(name)),
+            handed_over.whole_runs(&name_ids(name)),
             copies,
             "exactly one band prints {name} once the overlay has unmounted"
         );
@@ -1041,7 +1029,7 @@ fn a_tap_reaches_the_live_card_once_the_assembly_has_landed() {
     let scene = band.drive_to(BAND_LANDED_MS + 100.0);
     for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
         assert_eq!(
-            occurrences(&scene.glyph_ids, &name_ids(name)),
+            scene.whole_runs(&name_ids(name)),
             2 * copies,
             "the overlay is still up, printing its landed copy of {name} over the live one"
         );
@@ -1107,7 +1095,7 @@ fn mid_assembly_the_landing_copy_paints_over_the_live_one() {
     let scene = band.drive_to(landed);
     for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
         assert_eq!(
-            occurrences(&scene.glyph_ids, &name_ids(name)),
+            scene.whole_runs(&name_ids(name)),
             2 * copies,
             "both bands print {name} mid-assembly: the landing copy over the live one"
         );
@@ -1123,25 +1111,17 @@ fn a_churn_only_poll_inside_the_tail_still_hands_the_tap_over() {
     band.settle_first_load();
     band.drive_to(BAND_LANDED_MS + 100.0);
 
-    rename_session(SEEDED[1], CHURNED_NAME);
-    band.wait_for_poll(CHURNED_NAME);
+    churn_session(SEEDED[0]);
+    band.wait_for_poll(CHURNED_PANES);
 
     let mid_tail = band.step();
-    assert_eq!(
-        occurrences(&mid_tail.glyph_ids, &name_ids(SEEDED[0])),
-        2 * BAND_COPIES[0],
-        "the untouched card is still printed by both bands"
-    );
-    assert_eq!(
-        occurrences(&mid_tail.glyph_ids, &name_ids(SEEDED[1])),
-        1,
-        "the old name is the frozen assembly's alone"
-    );
-    assert_eq!(
-        occurrences(&mid_tail.glyph_ids, &name_ids(CHURNED_NAME)),
-        1,
-        "and the new one the live band's"
-    );
+    for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
+        assert_eq!(
+            mid_tail.whole_runs(&name_ids(name)),
+            2 * copies,
+            "every card is still printed by both bands"
+        );
+    }
 
     let before = band.depth();
     let card = band.center_of(SEEDED[0]);
@@ -1171,13 +1151,13 @@ fn a_poll_landing_inside_the_tail_reaches_only_the_live_band() {
     let mid_tail = band.step();
     for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
         assert_eq!(
-            occurrences(&mid_tail.glyph_ids, &name_ids(name)),
+            mid_tail.whole_runs(&name_ids(name)),
             2 * copies,
             "the frozen assembly still prints {name} over the live band"
         );
     }
     assert_eq!(
-        occurrences(&mid_tail.glyph_ids, &name_ids(FOURTH_NAME)),
+        mid_tail.whole_runs(&name_ids(FOURTH_NAME)),
         1,
         "the fourth name is the live band's alone — the assembly never mounted it"
     );
@@ -1201,13 +1181,13 @@ fn a_poll_landing_inside_the_tail_reaches_only_the_live_band() {
     );
     for (name, copies) in SEEDED.iter().zip(BAND_COPIES) {
         assert_eq!(
-            occurrences(&handed_over.glyph_ids, &name_ids(name)),
+            handed_over.whole_runs(&name_ids(name)),
             copies,
             "exactly one band prints {name} once the overlay has unmounted"
         );
     }
     assert_eq!(
-        occurrences(&handed_over.glyph_ids, &name_ids(FOURTH_NAME)),
+        handed_over.whole_runs(&name_ids(FOURTH_NAME)),
         1,
         "the live band shows every session once the handoff completes"
     );

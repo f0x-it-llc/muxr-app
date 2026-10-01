@@ -1,12 +1,12 @@
 //! The Connect screen's widgets: the eight staggered pieces, plus the screen's
-//! own QR and credential chrome.
+//! own QR, credential, free-tier-gate and getting-started chrome.
 //!
 //! [`connect_pieces_with`] returns the eight pieces in stagger order:
 //! [`mark::connect_mark`], [`badge::server_badge`], [`badge::heading`],
 //! [`fields::server_url_field`], [`fields::token_field`],
 //! [`trust::remember_row`], [`cta::connect_button`], [`saved::saved_address`].
-//! [`qr_affordance`], [`qr_sheet`] and [`credential_dialogs`] are screen
-//! chrome, never staggered pieces.
+//! [`qr_affordance`], [`qr_sheet`], [`credential_dialogs`], [`pro_gate`] and
+//! [`getting_started`] are screen chrome, never staggered pieces.
 //!
 //! # The parity contract
 //!
@@ -20,9 +20,17 @@
 //!    same repository.
 //! 2. The splash's fields are `read_only`, never `enabled(false)`: the same
 //!    focus gate without the dimming.
-//! 3. The responsive clamp lives in
-//!    [`connect_layout`](super::pages::connect_layout), the one function
-//!    both callers assemble through.
+//! 3. The layout is one function per size class, which both callers
+//!    assemble through: Compact's [`connect_layout`](layout::connect_layout)
+//!    owns the responsive clamp, and the Tablet structure
+//!    ([`tablet_panel_pieces`], [`tablet_form_pieces`]) goes through
+//!    `tablet::tablet_layout` for the screen and the splash alike
+//!    ([`tablet::tablet_splash_pieces`], [`tablet::tablet_splash_layout`]);
+//!    the page's `splash_assembly` reads the class once per build, as the
+//!    screen does, to pick the pair.
+//!
+//! One accepted difference: the saved rows' pro tag paints only under `Some(..)`,
+//! since the splash has no entitlement to read.
 //!
 //! Every piece is `<State>`-generic (the splash composes under
 //! [`crate::AppState`], the screen under its own `ConnectState`), reads no
@@ -32,11 +40,15 @@ pub mod badge;
 pub mod credential_dialogs;
 pub mod cta;
 pub mod fields;
+pub mod getting_started;
+pub mod layout;
 pub mod mark;
 pub mod pairing;
+pub mod pro_gate;
 pub mod qr_affordance;
 pub mod qr_sheet;
 pub mod saved;
+pub mod tablet;
 pub mod trust;
 
 use std::rc::Rc;
@@ -49,6 +61,7 @@ use frust::{
 use super::controller::ConnectController;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::ui::palette::Palette;
+use crate::ui::spacing;
 
 /// What a piece needs to be a control rather than a picture: the screen's
 /// hosted controller, plus the four actions it cannot express itself.
@@ -133,6 +146,51 @@ pub fn connect_pieces_with<S: 'static>(
         cta::connect_button(theme, &colors, live),
         saved::saved_address(theme, &colors, saved, live),
     ]
+}
+
+/// The Tablet left panel, top to bottom: brand row, headline, the inline
+/// getting-started card, and the saved list. `live` is `None` for the splash
+/// (the parity contract).
+pub fn tablet_panel_pieces<S: 'static>(
+    theme: &Theme,
+    live: Option<&Live>,
+    saved: &[SavedServer],
+) -> Vec<AnyView<S>> {
+    let colors = Palette::from_theme(theme);
+    vec![
+        any(row::<S>(vec![
+            inflexible(mark::connect_mark(theme, &colors)),
+            inflexible(h_gap::<S>(spacing::LG)),
+            inflexible(badge::server_badge(theme, &colors)),
+        ])),
+        getting_started::tablet_headline(theme, &colors),
+        getting_started::getting_started_card(theme, &colors),
+        saved::tablet_saved_list(theme, &colors, saved, live),
+    ]
+}
+
+/// The Tablet form column: the phone's form pieces, then the action block
+/// with `secondary` beside the CTA, then — when `folded` carries the list
+/// (the collapsed band) — the saved list under it. `live` is `None` for the
+/// splash (the parity contract).
+pub fn tablet_form_pieces<S: 'static>(
+    theme: &Theme,
+    live: Option<&Live>,
+    folded: Option<&[SavedServer]>,
+    secondary: AnyView<S>,
+) -> Vec<AnyView<S>> {
+    let colors = Palette::from_theme(theme);
+    let mut pieces = vec![
+        badge::heading(theme, &colors),
+        fields::server_url_field(theme, &colors, live),
+        fields::token_field(theme, &colors, live),
+        trust::remember_row(theme, &colors, live),
+        cta::connect_actions(theme, &colors, live, secondary),
+    ];
+    if let Some(saved) = folded {
+        pieces.push(saved::tablet_saved_list(theme, &colors, saved, live));
+    }
+    pieces
 }
 
 /// The eight pieces with no live wiring — the shared splash/route seam.

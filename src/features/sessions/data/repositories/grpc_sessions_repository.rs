@@ -32,9 +32,9 @@
 //! production-facing ever renders their return value. Rather than pay a
 //! second `ListSessions` round trip just to populate one, both construct
 //! their [`Session`] optimistically from what the request already
-//! establishes: a created session is created zellij (mirroring
-//! [`MockSessionsRepository`](super::MockSessionsRepository)'s own
-//! `new_session` — no backend picker yet), and a renamed session's id is
+//! establishes: a created session carries the backend the request asked for
+//! (`params.backend`, which [`MockSessionsRepository`](super::MockSessionsRepository)'s
+//! own `new_session` honours too), and a renamed session's id is
 //! *reconciled* — the `<backend>:<name>` convention lets this file recompute
 //! the id from the old id's own backend prefix plus the new name, no round
 //! trip needed. Every other field on the optimistic [`Session`] is a
@@ -74,7 +74,8 @@ use tonic::Status;
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
-    LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus, ThirdMetric,
+    CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionBackend,
+    SessionStatus, TabSummary, ThirdMetric,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::net::proto::{
@@ -107,6 +108,7 @@ struct LayoutDerived {
     tabs: u32,
     panes: u32,
     preview: Vec<String>,
+    tabs_detail: Vec<TabSummary>,
 }
 
 /// The real [`SessionsRepository`], over a live `muxrd` connection. See the
@@ -191,17 +193,13 @@ impl SessionsRepository for GrpcSessionsRepository {
         Ok(sessions)
     }
 
-    async fn create_session(&self, name: String) -> Result<Session, AppFailure> {
-        let name = name.trim().to_string();
+    async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {
+        let name = params.name.trim().to_string();
         if name.is_empty() {
             return Err(AppFailure::Internal(BLANK_NAME.to_string()));
         }
         let client = self.client()?;
-        let request = CreateSessionReq {
-            name: name.clone(),
-            layout: String::new(),
-            backend: Backend::Zellij as i32,
-        };
+        let request = create_request(&name, params.backend);
         let ack = client
             .authed()
             .create_session(request)
@@ -210,9 +208,9 @@ impl SessionsRepository for GrpcSessionsRepository {
             .into_inner();
         error::ack_result(&ack)?;
         Ok(optimistic_session(
-            format!("zellij:{name}"),
+            format!("{}:{name}", params.backend.label()),
             name,
-            SessionBackend::Zellij,
+            params.backend,
         ))
     }
 
@@ -287,12 +285,16 @@ fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
             panes: derived.panes,
             third,
             preview: derived.preview,
+            tabs_detail: derived.tabs_detail,
+            space: None,
         },
         _ => LayoutSummary {
             tabs: info.tab_count,
             panes: info.pane_count,
             third,
             preview: Vec::new(),
+            tabs_detail: Vec::new(),
+            space: None,
         },
     };
     Session {
@@ -300,7 +302,23 @@ fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
         name: info.name,
         status,
         backend,
+        age_secs: info.age_secs,
+        has_bell: info.has_bell,
+        is_current: info.is_current,
         layout,
+    }
+}
+
+/// The wire's `CreateSessionReq` for `name` on `backend`.
+fn create_request(name: &str, backend: SessionBackend) -> CreateSessionReq {
+    let wire = match backend {
+        SessionBackend::Zellij => Backend::Zellij,
+        SessionBackend::Herdr => Backend::Herdr,
+    };
+    CreateSessionReq {
+        name: name.to_string(),
+        layout: String::new(),
+        backend: wire as i32,
     }
 }
 
@@ -355,10 +373,34 @@ fn layout_derived_from(layout: Layout) -> LayoutDerived {
                 .collect()
         })
         .unwrap_or_default();
+    let tabs_detail = layout
+        .tabs
+        .iter()
+        .map(|tab| TabSummary {
+            index: tab.position,
+            name: tab.name.clone(),
+            focused: tab.active,
+            has_bell: tab.has_bell,
+            panes: tab
+                .panes
+                .iter()
+                .filter(|pane| !pane.is_plugin)
+                .map(|pane| PaneSummary {
+                    id: pane.id,
+                    title: pane.title.clone(),
+                    cwd: Some(pane.cwd.clone()).filter(|cwd| !cwd.is_empty()),
+                    focused: pane.is_focused,
+                    floating: pane.is_floating,
+                    exited: pane.exited,
+                })
+                .collect(),
+        })
+        .collect();
     LayoutDerived {
         tabs: layout.tabs.len() as u32,
         panes,
         preview,
+        tabs_detail,
     }
 }
 
@@ -397,11 +439,16 @@ fn optimistic_session(id: String, name: String, backend: SessionBackend) -> Sess
         name,
         status: SessionStatus::Running,
         backend,
+        age_secs: 0,
+        has_bell: false,
+        is_current: false,
         layout: LayoutSummary {
             tabs: 1,
             panes: 1,
             third,
             preview: Vec::new(),
+            tabs_detail: Vec::new(),
+            space: None,
         },
     }
 }
@@ -441,6 +488,13 @@ mod tests {
             backend,
             id: id.to_string(),
             space_count: 0,
+        }
+    }
+
+    fn params(name: &str) -> CreateSessionParams {
+        CreateSessionParams {
+            name: name.to_string(),
+            backend: SessionBackend::Zellij,
         }
     }
 
@@ -547,6 +601,7 @@ mod tests {
                 tabs: 1,
                 panes: 2,
                 preview: vec!["btop".to_string()],
+                tabs_detail: Vec::new(),
             }),
         );
         assert_eq!(session.layout.tabs, 1);
@@ -562,6 +617,7 @@ mod tests {
                 tabs: 0,
                 panes: 0,
                 preview: Vec::new(),
+                tabs_detail: Vec::new(),
             }),
         );
         assert_eq!(session.layout.tabs, 4);
@@ -596,6 +652,107 @@ mod tests {
         );
         assert_eq!(session.layout.tabs, 1);
         assert_eq!(session.layout.panes, 2);
+    }
+
+    #[test]
+    fn create_sends_the_chosen_backend_on_the_wire() {
+        let zellij = create_request("dev", SessionBackend::Zellij);
+        assert_eq!(zellij.backend, Backend::Zellij as i32);
+        let herdr = create_request("work", SessionBackend::Herdr);
+        assert_eq!(herdr.backend, Backend::Herdr as i32);
+        assert_eq!(herdr.name, "work");
+    }
+
+    #[test]
+    fn age_bell_and_current_flags_map_from_the_wire() {
+        let mut source = info("zellij:dev", "dev", Backend::Zellij as i32, false);
+        source.age_secs = 7200;
+        source.has_bell = true;
+        source.is_current = true;
+        let session = map_session(source, None);
+        assert_eq!(session.age_secs, 7200);
+        assert!(session.has_bell);
+        assert!(session.is_current);
+        assert_eq!(session.age_label(), "2 hours ago");
+    }
+
+    #[test]
+    fn tabs_detail_carries_names_positions_focus_and_pane_flags() {
+        let mut first = tab(vec![pane("btop"), pane("shell")]);
+        first.name = "ops".to_string();
+        first.position = 0;
+        first.active = false;
+        let mut second = tab(vec![pane("editor")]);
+        second.name = "code".to_string();
+        second.position = 1;
+        second.active = true;
+        second.has_bell = true;
+        second.panes[0].cwd = "/srv/app".to_string();
+        second.panes[0].is_focused = true;
+        second.panes[0].is_floating = true;
+        second.panes[0].exited = true;
+
+        let derived = layout_derived_from(Layout {
+            tabs: vec![first, second],
+        });
+        assert_eq!((derived.tabs, derived.panes), (2, 3));
+        let detail = derived.tabs_detail;
+        assert_eq!(detail.len(), 2);
+        assert_eq!((detail[0].index, detail[0].name.as_str()), (0, "ops"));
+        assert!(!detail[0].focused);
+        assert_eq!(detail[0].panes.len(), 2);
+        assert_eq!(detail[0].panes[0].cwd, None);
+        assert_eq!((detail[1].index, detail[1].name.as_str()), (1, "code"));
+        assert!(detail[1].focused && detail[1].has_bell);
+        let pane = &detail[1].panes[0];
+        assert_eq!(pane.title, "editor");
+        assert_eq!(pane.cwd.as_deref(), Some("/srv/app"));
+        assert!(pane.focused && pane.floating && pane.exited);
+    }
+
+    #[test]
+    fn a_plugin_pane_is_left_out_of_the_tab_summary() {
+        let mut bar = pane("tab-bar");
+        bar.is_plugin = true;
+        let derived = layout_derived_from(Layout {
+            tabs: vec![tab(vec![bar, pane("shell")])],
+        });
+        let titles: Vec<&str> = derived.tabs_detail[0]
+            .panes
+            .iter()
+            .map(|p| p.title.as_str())
+            .collect();
+        assert_eq!(titles, ["shell"]);
+    }
+
+    #[test]
+    fn zero_wire_counts_with_a_three_tab_layout_yield_three_tabs() {
+        // Regression for act_000001a0876d5ad36zYz7IOo: ListSessions ships
+        // zeros for live sessions, so the GetLayout counts must win.
+        let mut source = info("zellij:dev", "dev", Backend::Zellij as i32, false);
+        source.tab_count = 0;
+        source.pane_count = 0;
+        let layout = Layout {
+            tabs: vec![
+                tab(vec![pane("a")]),
+                tab(vec![pane("b")]),
+                tab(vec![pane("c")]),
+            ],
+        };
+        let session = map_session(source, Some(layout_derived_from(layout)));
+        assert_eq!(session.layout.tabs, 3);
+        assert_eq!(session.layout.panes, 3);
+        assert_eq!(session.layout.tabs_detail.len(), 3);
+    }
+
+    #[test]
+    fn a_resurrectible_session_keeps_an_empty_tab_summary() {
+        let session = map_session(
+            info("zellij:idle", "idle", Backend::Zellij as i32, true),
+            None,
+        );
+        assert!(session.layout.tabs_detail.is_empty());
+        assert_eq!(session.layout.space, None);
     }
 
     // -- GetLayout's pure half ------------------------------------------------
@@ -710,7 +867,7 @@ mod tests {
             Err(AppFailure::Network(_))
         ));
         assert!(matches!(
-            block_on(repo.create_session("dev".to_string())),
+            block_on(repo.create_session(params("dev"))),
             Err(AppFailure::Network(_))
         ));
         assert!(matches!(
@@ -730,7 +887,7 @@ mod tests {
     fn create_and_rename_reject_a_blank_name_before_ever_touching_the_client() {
         let repo = GrpcSessionsRepository::new(Arc::new(ConnectionController::detached()));
 
-        let failure = block_on(repo.create_session("   ".to_string())).expect_err("blank rejected");
+        let failure = block_on(repo.create_session(params("   "))).expect_err("blank rejected");
         assert!(matches!(failure, AppFailure::Internal(_)));
 
         let failure = block_on(repo.rename_session(RenameRequest {

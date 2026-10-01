@@ -9,7 +9,7 @@
 //! exercised end to end through a real navigator and located by painted
 //! geometry.
 //!
-//! Five groups plus Disconnect run past 1000px, so every frame here lays out at
+//! Six groups plus Disconnect run past 1000px, so every frame here lays out at
 //! [`SURFACE`], not `support::surface()`'s default — hence this file's own
 //! [`Harness::pump_once`] rather than `support::pump_frames`, which frames at
 //! the default (smaller) size and would silently re-layout what the next probe
@@ -22,15 +22,20 @@
 //! row on the screen behind changing. Row *k* is addressed relative to the
 //! selected row's own height, since every `.pick-row` is one line tall.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use clean_signals::Failure;
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
-    WindowMetrics, any, navigator, provide_context,
+    WindowMetrics, any, navigator, provide_context, spawn_local,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
-use frust_core::{NamedKey, PointerPhase, RenderRoot, WindowInsets};
+use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot, ScrollDelta};
 use frust_reactive::ReactiveRuntime;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
@@ -39,15 +44,28 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::pro::data::repositories::MockEntitlementRepository;
+use muxr::features::pro::di::{
+    SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
+};
+use muxr::features::pro::domain::entities::{
+    Entitlement, ProOffer, PurchaseOutcome, RestoreResult,
+};
+use muxr::features::pro::domain::repositories::EntitlementRepository;
+use muxr::features::pro::presentation::controller::ProController;
+use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
-use muxr::features::settings::domain::entities::{AuthToken, CreateTokenRequest, MintedToken};
+use muxr::features::settings::domain::entities::{
+    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken,
+};
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
 };
+use muxr::features::settings::presentation::widgets::{PLAN_LABEL, PRO_GROUP_LABEL};
 use muxr::fonts::catalog::{CatalogStatus, FontState};
 use muxr::fonts::source::FontSource;
 use muxr::routes::{app_nav, install_app_router};
@@ -62,7 +80,7 @@ use support::{
 };
 
 /// The surface every frame here lays out at — tall enough that the whole screen
-/// (five groups, the dashed create row, the saved-server rows and Disconnect)
+/// (six groups, the dashed create row, the saved-server rows and Disconnect)
 /// is on it at once. See the [module docs](self).
 const SURFACE: Size = Size::new(800.0, 1700.0);
 
@@ -79,6 +97,8 @@ const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 /// (the screen's own width-clamp pass), transcribed (private to
 /// `presentation::pages`).
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
+/// The mock connection's latency reading, printed (private to `connection`).
+const MOCK_LATENCY_VALUE: &str = "36ms";
 /// `.disconnect-btn`'s own horizontal margin, transcribed (private to
 /// `presentation::widgets`) — what the Disconnect button spans the width
 /// *between*, inside whatever box the scroller itself is laid out at.
@@ -87,12 +107,13 @@ const ROW_PAD_X: f64 = 16.0;
 /// The seeded token names `data`'s mock repository ships — the redesign's two
 /// `.token-item`s, in order.
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-/// The five group labels, as the screen prints them (the source's
+/// The six group labels, as the screen prints them (the source's
 /// `text-transform:uppercase`, applied in Rust — `text` carries no transform).
-const GROUPS: [&str; 5] = [
+const GROUPS: [&str; 6] = [
     "CONNECTION",
     "AUTH TOKENS",
     "SAVED SERVERS",
+    "MUXR PRO",
     "TERMINAL APPEARANCE",
     "SESSION POLL",
 ];
@@ -126,19 +147,11 @@ fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
     }
 }
 
-/// A [`WindowMetrics`] whose size is `size` — see `mount_with_metrics`.
-fn metrics_at(size: Size) -> WindowMetrics {
-    WindowMetrics::new(size, 1.0, WindowInsets::default())
-}
-
 /// [`Harness::mount`], first publishing `metrics` into context when `Some` —
 /// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
 /// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
-    if let Some(metrics) = metrics {
-        provide_context(metrics);
-    }
-    Harness::mount()
+    support::mount_with_metrics(metrics, Harness::mount)
 }
 
 /// The bounds of the first node labelled `label` — `tests/connect.rs`'s
@@ -325,6 +338,19 @@ impl Harness {
             )
         });
         self.tap(point);
+    }
+
+    /// The smallest scroll viewport holding the point `(x, y)`.
+    fn viewport_around(&self, x: f64, y: f64) -> Rect {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .filter(|(_, node): &&(_, Node)| node.role() == Role::ScrollView)
+            .filter_map(|(_, node)| node.bounds())
+            .filter(|b| b.x0 <= x && x <= b.x1 && b.y0 <= y && y <= b.y1)
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
+            .unwrap_or_else(|| panic!("no scroll viewport holds ({x}, {y})"))
     }
 
     /// Where the first node printing `value` sits.
@@ -560,10 +586,16 @@ fn confirm(h: &mut Harness, dialog: &Chrome) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_five_groups_and_the_disconnect_action_render() {
+fn all_six_groups_and_the_disconnect_action_render() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
+
+    // The literal `GROUPS` entry is what the screen actually renders
+    // (`text-transform:uppercase` applied in Rust); tying it back to
+    // `PRO_GROUP_LABEL` here is what makes a drift between the two a test
+    // failure instead of a silent mismatch.
+    assert_eq!(PRO_GROUP_LABEL.to_uppercase(), "MUXR PRO");
 
     let values = node_values(&h.root);
     for group in GROUPS {
@@ -581,6 +613,7 @@ fn all_five_groups_and_the_disconnect_action_render() {
         "server url",
         "tls certificate",
         "zellij version",
+        PLAN_LABEL,
         "font family",
         "font size",
         "cursor style",
@@ -595,26 +628,41 @@ fn all_five_groups_and_the_disconnect_action_render() {
     // The dashed create row and the Disconnect button (a real `frust::button`,
     // so a label rather than a value).
     assert!(values.iter().any(|v| v == "create new token"), "{values:?}");
+    // The freshly-mocked install is Free, so the plan row prints it.
+    assert!(values.iter().any(|v| v == "Free"), "{values:?}");
     let labels = node_labels(&h.root);
     assert!(labels.iter().any(|l| l == "Disconnect"), "{labels:?}");
 }
 
 #[test]
-fn no_latency_is_printed_anywhere_on_this_screen() {
-    // The one deliberate omission from the mock's data set: a live round-trip
-    // time belongs beside the session list it gates (`/sessions`' own strip),
-    // not repeated here as a second, differently-stale copy.
+fn the_connection_group_prints_the_mocks_latency_after_the_tls_row() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
 
     let values = node_values(&h.root);
-    for value in &values {
-        assert!(
-            !value.contains("ms"),
-            "a latency reading leaked onto Settings: {value:?} in {values:?}"
-        );
-    }
+    let at = |needle: &str| {
+        values
+            .iter()
+            .position(|v| v == needle)
+            .unwrap_or_else(|| panic!("{needle:?} renders: {values:?}"))
+    };
+    assert!(at("latency") > at("tls certificate"), "{values:?}");
+    assert_eq!(at(MOCK_LATENCY_VALUE), at("latency") + 1, "{values:?}");
+}
+
+#[test]
+fn a_disconnected_latency_row_says_not_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::mount();
+
+    let values = node_values(&h.root);
+    let at = values
+        .iter()
+        .position(|v| v == "latency")
+        .unwrap_or_else(|| panic!("the latency row renders: {values:?}"));
+    assert_eq!(values[at + 1], "not connected", "{values:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,6 +1610,129 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
 }
 
 // ---------------------------------------------------------------------------
+// 3c — the `muxr pro` group
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_pro_group_prints_free_and_its_plan_row_opens_the_paywall() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == "Free"), "{values:?}");
+    let labels = node_labels(&h.root);
+    assert!(
+        !labels.iter().any(|l| l == "Upgrade to Pro"),
+        "the actions line is gone: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "Restore purchases"),
+        "…both of them: {labels:?}"
+    );
+
+    h.tap_value(PLAN_LABEL);
+    h.settle();
+
+    assert_eq!(
+        h.depth(),
+        2,
+        "the plan row opens the paywall as its own page"
+    );
+    assert!(
+        node_center_by_label(&h.root, NOT_NOW_LABEL).is_some(),
+        "the sheet's own dismissal action is reachable: {:?}",
+        node_labels(&h.root)
+    );
+
+    h.tap_label(NOT_NOW_LABEL);
+    h.flush();
+
+    assert_eq!(h.depth(), 1, "Not now dismisses the sheet");
+}
+
+#[test]
+fn a_pro_entitlement_prints_pro_and_the_plan_row_leads_nowhere() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pro);
+
+    let controller = expect_pro_controller();
+    spawn_local(async move { controller.refresh().await });
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
+    });
+
+    h.tap_value(PLAN_LABEL);
+    h.settle();
+
+    assert_eq!(h.depth(), 1, "an entitled plan row opens nothing");
+    let labels = node_labels(&h.root);
+    assert!(
+        !labels.iter().any(|l| l == "Upgrade to Pro"),
+        "an entitled install offers nothing to buy: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "Restore purchases"),
+        "…nor anything to restore: {labels:?}"
+    );
+}
+
+#[test]
+fn restoring_from_the_paywall_flips_the_plan_row_and_closes_the_sheet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pro);
+
+    h.tap_value(PLAN_LABEL);
+    h.settle();
+
+    h.tap_label(RESTORE_LABEL);
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
+    });
+    // The value flip lands on the restore's own reactive write; the sheet's
+    // `close_then` still has to play out its staged close before the pop
+    // actually lands — the same clock-driven finish `flush` gives Not now.
+    h.flush();
+
+    assert_eq!(mock.restore_calls(), 1);
+    assert_eq!(
+        h.depth(),
+        1,
+        "the sheet's own close_then lands behind the restore"
+    );
+}
+
+#[test]
+fn mounting_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_refresh() {
+    // `MuxrApp::init` already fires one launch refresh of its own
+    // (`tests/pro.rs`'s `app_init_publishes_the_pro_seam_and_fires_one_launch_refresh`);
+    // this pins the *second* call — Settings' own refresh of the entitlement
+    // on every mount — landing beside it, not in place of it.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+
+    pump_until(
+        &mut h,
+        "both the app's launch refresh and Settings' own mount refresh",
+        || mock.refresh_calls() >= 2,
+    );
+
+    assert_eq!(
+        mock.refresh_calls(),
+        2,
+        "one from MuxrApp::init's launch refresh, one from Settings' own mount"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 4 — the picker sheets (screen 6)
 // ---------------------------------------------------------------------------
 
@@ -1574,7 +1745,7 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
 /// downloadable catalog, so it has a sheet of its own — covered by section 4b
 /// below.
 const PICKERS: [(&str, usize, usize, &str); 3] = [
-    ("font size", 5, 2, "14px"),
+    ("font size", 15, 2, "24px"),
     ("cursor style", 3, 0, "bar"),
     ("layout refresh", 4, 1, "every 10s"),
 ];
@@ -1611,6 +1782,16 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
         assert!(
             (size.width - panel_size.width).abs() < EPSILON,
             "{row}: …and spans its whole width"
+        );
+        // The scroll viewport clips what it holds, so the fill must lie inside
+        // it — the bleed past the sheet's own gutter included.
+        let viewport = h.viewport_around(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
+        assert!(
+            viewport.x0 <= origin.x + EPSILON
+                && origin.x + size.width <= viewport.x1 + EPSILON
+                && viewport.y0 <= origin.y + EPSILON
+                && origin.y + size.height <= viewport.y1 + EPSILON,
+            "{row}: the fill {origin:?} {size:?} escapes the scroll viewport {viewport:?}"
         );
         // Row 0's top edge is the same distance above the selected row for
         // every picker, so a wrong `selected` shows up as a shifted fill.
@@ -1693,6 +1874,76 @@ fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
         "the check moved two rows down: {moved} vs {}",
         2.0 * row_height.height
     );
+}
+
+#[test]
+fn picking_font_size_20px_through_the_picker_persists_and_reads_back() {
+    // The range now spans 10–24, so 20px sits in the middle. Verify the picker
+    // can select and persist values beyond the old max of 14px.
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let sheet = open_picker(&mut h, "font size");
+    // 20px is at index 10 in [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, ...]
+    // The default (currently selected) is at index 2 (12px); pick from there to index 10.
+    pick(&mut h, &sheet, 2, 10);
+
+    h.pump_until_values("20px", |values| values.iter().any(|v| v == "20px"));
+    assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
+}
+
+/// Mount at `width`×`height`, open the font-size picker, wheel its list until
+/// the last size is reachable, pick it, and read it back from the row.
+fn picks_the_largest_font_size_at(width: f64, height: f64) {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(support::metrics_at(width, height)));
+    h.frame();
+    let last = format!(
+        "{}px",
+        AppearancePrefs::FONT_SIZES_PX[AppearancePrefs::FONT_SIZES_PX.len() - 1]
+    );
+
+    h.tap_value("font size");
+    h.settle();
+    let first = h.center_of(&format!("{}px", AppearancePrefs::FONT_SIZES_PX[0]));
+    let band_span = h.center_of(&last).y - first.y;
+    assert!(
+        band_span > height - 220.0,
+        "the list overflows its band, so it must scroll: {band_span}"
+    );
+    for _ in 0..40 {
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: first,
+                delta: ScrollDelta::Lines(0.0, 3.0),
+            },
+        );
+        h.settle();
+    }
+    let reached = h.center_of(&last);
+    assert!(
+        reached.y - first.y < band_span - 100.0,
+        "wheeling moved the list: {reached:?} vs {band_span}"
+    );
+    h.tap(reached);
+    h.flush();
+    h.pump_until_values(&last, |values| {
+        values.iter().filter(|v| **v == last).count() == 1
+    });
+    assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
+}
+
+#[test]
+fn the_font_size_picker_scrolls_to_24px_on_a_phone_in_landscape() {
+    picks_the_largest_font_size_at(844.0, 390.0);
+}
+
+#[test]
+fn the_font_size_picker_scrolls_to_24px_on_the_smallest_tablet() {
+    picks_the_largest_font_size_at(1024.0, 720.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2577,7 +2828,8 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
 fn wide_metrics_clamp_and_center_the_groups_column() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(metrics_at(SURFACE)));
+    // A phone in landscape: wide enough to clamp, too short to be a Tablet.
+    let mut h = mount_with_metrics(Some(support::metrics_at(SURFACE.width, 500.0)));
     h.frame();
 
     // Disconnect is the screen's last, full-width row — the cheapest honest
@@ -2606,7 +2858,7 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
     // Explicit narrow metrics, even though the harness still paints at the
     // full-width `SURFACE` — proving the branch keys on the *published*
     // width, not the paint surface.
-    let mut h = mount_with_metrics(Some(metrics_at(Size::new(400.0, SURFACE.height))));
+    let mut h = mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
     h.frame();
 
     let disconnect = bounds_by_label(&h.root, "Disconnect");
@@ -2617,6 +2869,270 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
         disconnect.width()
     );
     assert!((disconnect.x0 - ROW_PAD_X).abs() < 0.5, "{:?}", disconnect);
+}
+
+// ---------------------------------------------------------------------------
+// 7b — the Tablet card grid
+// ---------------------------------------------------------------------------
+
+/// The y-centre and x-centre of the first node printing `value`.
+fn value_center(h: &Harness, value: &str) -> Point {
+    h.center_of(value)
+}
+
+#[test]
+fn a_full_band_tablet_packs_the_cards_into_two_columns() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
+    h.frame();
+
+    let values = node_values(&h.root);
+    for group in GROUPS {
+        assert!(values.iter().any(|v| v == group), "{group:?}: {values:?}");
+    }
+    let connection = value_center(&h, "CONNECTION");
+    let tokens = value_center(&h, "AUTH TOKENS");
+    assert!(
+        (connection.y - tokens.y).abs() < 0.5,
+        "the first pair shares a top edge: {connection:?} vs {tokens:?}"
+    );
+    assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
+    let saved = value_center(&h, "SAVED SERVERS");
+    assert!(saved.y > connection.y, "the left column stacks downward");
+    // Packed columns, not rows: the short Auth tokens card does not hold the
+    // row open, so Muxr Pro climbs above Saved servers (Ed's iPad gate).
+    let pro = value_center(&h, "MUXR PRO");
+    assert!(
+        pro.y < saved.y - 100.0,
+        "the right column packs upward: pro {pro:?} vs saved {saved:?}"
+    );
+    assert!(
+        node_labels(&h.root).iter().any(|l| l == "Disconnect"),
+        "the Disconnect card's button renders"
+    );
+}
+
+#[test]
+fn a_collapsed_band_tablet_stacks_the_cards() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_with_metrics(Some(support::metrics_at(720.0, 720.0)));
+    h.frame();
+
+    let connection = value_center(&h, "CONNECTION");
+    let tokens = value_center(&h, "AUTH TOKENS");
+    assert!(
+        (connection.x - tokens.x).abs() < 20.0,
+        "one column (title centres differ only by text width): {connection:?} vs {tokens:?}"
+    );
+    assert!(tokens.y > connection.y, "stacked: {tokens:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 7c — the `muxr pro` restore row
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_restore_row_restores_once_and_toasts_when_nothing_is_found() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    app_toasts().clear();
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == RESTORE_LABEL), "{values:?}");
+    h.tap_label("restore");
+    pump_until(&mut h, "the not-found toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(mock.restore_calls(), 1);
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec![NOTHING_TO_RESTORE_TOAST.to_string()]
+    );
+    assert_eq!(h.depth(), 1, "the row opens no sheet");
+}
+
+#[test]
+fn the_restore_row_is_absent_on_pro() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    mock.set_entitlement(Entitlement::Pro);
+    let controller = expect_pro_controller();
+    spawn_local(async move { controller.refresh().await });
+    h.pump_until_values("the plan row to flip to Pro", |values| {
+        values.iter().any(|v| v == "Pro")
+    });
+
+    let values = node_values(&h.root);
+    assert!(!values.iter().any(|v| v == RESTORE_LABEL), "{values:?}");
+    assert!(!node_labels(&h.root).iter().any(|l| l == "restore"));
+}
+
+#[test]
+fn a_failed_restore_from_the_row_toasts_the_failure_message_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let mock = mock_entitlement().expect("tests/support opted this process into the mock");
+    let failure = AppFailure::Network("store unreachable".to_string());
+    mock.fail_next_restore(failure.clone());
+    app_toasts().clear();
+
+    h.tap_label("restore");
+    pump_until(&mut h, "the failure toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec![failure.user_message()]
+    );
+}
+
+/// A store whose restore stays open until its [`Gate`] is opened — the mock
+/// resolves without ever yielding, so an in-flight restore needs this.
+struct GatedStore {
+    inner: MockEntitlementRepository,
+    gate: Arc<Gate>,
+}
+
+/// One-shot latch: `UntilOpen` parks its waker here, `open` wakes it.
+#[derive(Default)]
+struct Gate {
+    open: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl Gate {
+    fn open(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+    }
+}
+
+struct UntilOpen(Arc<Gate>);
+
+impl Future for UntilOpen {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0.open.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        *self.0.waker.lock().unwrap() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl EntitlementRepository for GatedStore {
+    fn cached(&self) -> Entitlement {
+        self.inner.cached()
+    }
+
+    async fn refresh(&self) -> Result<Entitlement, AppFailure> {
+        self.inner.refresh().await
+    }
+
+    async fn offer(&self) -> Result<Option<ProOffer>, AppFailure> {
+        self.inner.offer().await
+    }
+
+    async fn purchase(&self) -> Result<PurchaseOutcome, AppFailure> {
+        self.inner.purchase().await
+    }
+
+    async fn restore(&self) -> Result<RestoreResult, AppFailure> {
+        UntilOpen(Arc::clone(&self.gate)).await;
+        self.inner.restore().await
+    }
+}
+
+#[test]
+fn a_second_restore_tap_while_the_first_is_in_flight_leaves_restoring_standing() {
+    let _g = serial();
+    let _ambient = setup();
+    let gate = Arc::new(Gate::default());
+    let gated = Arc::clone(&gate);
+    let mut h = Harness::mount_seeded(move || {
+        let store: SharedEntitlementRepository = Arc::new(GatedStore {
+            inner: MockEntitlementRepository::free(),
+            gate: gated,
+        });
+        provide_context(Arc::new(ProController::new(store)));
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.await_tokens();
+    let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
+    app_toasts().clear();
+
+    h.tap_label("restore");
+    h.pump_until_values("the first restore to be in flight", |values| {
+        restoring(values)
+    });
+    h.tap_label("restore");
+    pump_until(&mut h, "the second tap's busy toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+    assert_eq!(
+        app_toasts().pending_untracked(),
+        vec!["A store operation is already running".to_string()]
+    );
+    h.pump_once();
+    assert!(
+        restoring(&node_values(&h.root)),
+        "the first restore is still running: {:?}",
+        node_values(&h.root)
+    );
+
+    gate.open();
+    h.pump_until_values("the first restore to land", |values| !restoring(values));
+    assert_eq!(app_toasts().pending_untracked().len(), 2);
+}
+
+#[test]
+fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
+
+    // A purchase elsewhere holds the pro controller's busy flag.
+    let pro = expect_pro_controller();
+    pro.busy.set(true);
+    h.pump_once();
+    h.pump_once();
+    assert!(
+        !restoring(&node_values(&h.root)),
+        "a purchase is not a restore"
+    );
+
+    // Tapping restore meanwhile is refused with a toast, not a restoring row.
+    app_toasts().clear();
+    h.tap_label("restore");
+    pump_until(&mut h, "the busy toast", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+    assert_eq!(app_toasts().pending_untracked().len(), 1);
+    assert!(!restoring(&node_values(&h.root)), "a refused restore");
+    pro.busy.set(false);
+
+    // A landed restore leaves the row as it found it.
+    app_toasts().clear();
+    h.tap_label("restore");
+    pump_until(&mut h, "the restore to land", || {
+        !app_toasts().pending_untracked().is_empty()
+    });
+    assert!(!restoring(&node_values(&h.root)), "released once it lands");
 }
 
 // ---------------------------------------------------------------------------

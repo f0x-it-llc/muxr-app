@@ -16,9 +16,12 @@
 //! the actual `vt100::Screen` the mounted screen renders.
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use frust::input::TOUCH_SLOP;
@@ -36,16 +39,21 @@ use frust_text::TextContext;
 use kurbo::{Point, Size, Vec2};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::failure::AppFailure;
+use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle as SettingsCursorStyle,
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
-use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, clear_test_tabs,
+    add_test_tab, clear_test_tabs, clear_verb_log_for_tests, verb_log_for_tests,
 };
-use muxr::features::terminal::domain::feed::TerminalFeed;
+use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
+use muxr::features::terminal::domain::entities::{Space, TabEntry, TermLine};
+use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
+use muxr::features::terminal::domain::repositories::TerminalRepository;
+use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
     terminal_page,
@@ -117,12 +125,17 @@ impl Harness {
     /// a **herdr** session, whose id prefix is the one thing the sheet's
     /// spaces section is gated on.
     fn mount_session(session: &str) -> Self {
+        Self::mount_at(&format!("/terminal?session={session}"))
+    }
+
+    /// [`mount`](Self::mount) at the full `location`, query included.
+    fn mount_at(location: &str) -> Self {
         let state = MuxrApp.init();
         let nav: NavigatorController<AppState> = NavigatorController::new();
         let record_only: NavigatorController<AppState> = NavigatorController::new();
         let _router = install_app_router(&record_only, &nav, expect_connection_controller());
         expect_connection_controller().connect(mock_target());
-        app_nav().push(&format!("/terminal?session={session}"));
+        app_nav().push(location);
 
         let mounted = Rc::new(Cell::new(true));
         let logic_nav = nav.clone();
@@ -852,7 +865,7 @@ const LINK_RETRY: &str = "Retry";
 const LINK_LEAVE: &str = "Back to sessions";
 
 /// Publish `status` as the mounted screen's link state and rebuild.
-fn publish_link(h: &mut Harness, status: Option<FeedStatus>) {
+fn publish_link(h: &mut Harness, status: Option<LinkStatus>) {
     debug_controller()
         .expect("a terminal screen is mounted")
         .link
@@ -867,7 +880,7 @@ fn a_healthy_or_absent_link_says_nothing_at_all() {
     let mut h = Harness::mount();
     h.enter_demo();
 
-    for status in [None, Some(FeedStatus::Idle), Some(FeedStatus::Connected)] {
+    for status in [None, Some(LinkStatus::Idle), Some(LinkStatus::Connected)] {
         publish_link(&mut h, status);
         let values = support::node_values(&h.root);
         assert!(
@@ -891,7 +904,7 @@ fn a_reconnecting_link_says_so_and_offers_nothing_to_interrupt_it() {
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
-    publish_link(&mut h, Some(FeedStatus::Reconnecting));
+    publish_link(&mut h, Some(LinkStatus::Reconnecting));
 
     let values = support::node_values(&h.root);
     assert!(
@@ -912,7 +925,7 @@ fn a_disconnected_link_offers_the_retry_that_re_arms_it() {
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
-    publish_link(&mut h, Some(FeedStatus::Disconnected));
+    publish_link(&mut h, Some(LinkStatus::Disconnected));
 
     assert!(
         support::node_values(&h.root)
@@ -938,7 +951,7 @@ fn a_closed_link_offers_the_only_thing_left_the_way_back_to_the_list() {
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
-    publish_link(&mut h, Some(FeedStatus::Closed));
+    publish_link(&mut h, Some(LinkStatus::Closed));
 
     assert!(
         support::node_values(&h.root)
@@ -1704,5 +1717,314 @@ fn the_sheet_body_composes_a_scroll_container() {
         support::node_roles(&h.root).contains(&Role::ScrollView),
         "the sheet body has no scroll container: {:?}",
         support::node_roles(&h.root)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Attach into a pane: the `tab`/`pane` deep-link params.
+// ---------------------------------------------------------------------------
+
+/// The focused pane id of the tab keyed `key`, off the mounted controller.
+fn focused_pane_of(key: &str) -> Option<u32> {
+    let tabs = debug_controller().expect("mounted").tabs.get_untracked();
+    let tab = tabs.into_iter().find(|tab| tab.key == key)?;
+    tab.panes
+        .iter()
+        .find(|pane| pane.focused)
+        .map(|pane| pane.id)
+}
+
+#[test]
+fn a_deep_link_lands_on_its_tab_and_pane_once() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    // Position 2 is gohora (tab id 3); pane 31 is its unfocused sibling.
+    let mut h = Harness::mount_at("/terminal?session=s-1&tab=2&pane=31");
+    h.pump_until("the target", |_| verb_log_for_tests().len() >= 2);
+    h.pump_for(Duration::from_millis(100));
+
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
+    let c = debug_controller().expect("mounted");
+    assert_eq!(c.active_tab.get_untracked(), "gohora");
+    assert_eq!(focused_pane_of("gohora"), Some(31));
+
+    let again = Arc::clone(&c);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(async move {
+            again.reload_tabs().await;
+            let _ = again.mirror_link(LinkStatus::Connected, Some("c-2".to_string()));
+            again.apply_attach_target().await;
+        });
+    h.pump_for(Duration::from_millis(100));
+    assert_eq!(
+        verb_log_for_tests(),
+        ["go_to_tab:3", "focus_pane:31"],
+        "no re-apply"
+    );
+}
+
+#[test]
+fn a_deep_link_naming_no_such_tab_or_pane_sends_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    for location in [
+        "/terminal?session=s-1&tab=9&pane=31",
+        "/terminal?session=s-1&tab=2&pane=99",
+        "/terminal?session=s-1&tab=x&pane=y",
+    ] {
+        clear_verb_log_for_tests();
+        let mut h = Harness::mount_at(location);
+        // A fixed settle: the harness has no "mock idle" signal to pump until, and a
+        // negative can only wait out the window a wrong apply would land in.
+        h.pump_for(Duration::from_millis(150));
+        assert!(
+            verb_log_for_tests().is_empty(),
+            "{location}: {:?}",
+            verb_log_for_tests()
+        );
+        drop(h);
+    }
+}
+
+/// One controller call, boxed so a test can open it, leave it parked on its round
+/// trip, and land it later — the ordering a race needs, with no clock in it.
+type Step<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+/// Poll `step` once on `rt`: far enough to open its round trip, never to land it.
+fn start(rt: &tokio::runtime::Runtime, step: &mut Step<'_>) {
+    rt.block_on(std::future::poll_fn(|cx| {
+        assert!(
+            step.as_mut().poll(cx).is_pending(),
+            "parked on a round trip"
+        );
+        Poll::Ready(())
+    }));
+}
+
+/// A **live** controller for `?session=s-1&tab=2&pane=31` (gohora, tab id 3), over the
+/// composition root's own repositories but mounted nowhere, so the test alone decides
+/// when each layout fetch opens and lands.
+fn live_deep_link() -> Arc<TerminalController> {
+    let _state = MuxrApp.init();
+    live_deep_link_over(expect_terminal_repository())
+}
+
+/// [`live_deep_link`] over `repository` (the context must already be initialised).
+fn live_deep_link_over(repository: SharedTerminalRepository) -> Arc<TerminalController> {
+    let c = Arc::new(TerminalController::new(
+        repository,
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some(SESSION_ID.to_string()),
+    ));
+    c.set_attach_target(Some(2), Some(31));
+    c.attach_live();
+    c
+}
+
+#[test]
+fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reload() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let c = live_deep_link();
+    let rt = runtime();
+
+    let mut load: Step = Box::pin(c.load());
+    start(&rt, &mut load);
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    let mut settled: Step = Box::pin(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    start(&rt, &mut settled);
+    rt.block_on(load);
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "the load's tabs were fenced out"
+    );
+    assert!(c.tabs.get_untracked().is_empty(), "…and never published");
+
+    rt.block_on(settled);
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
+    assert_eq!(c.active_tab.get_untracked(), "gohora");
+}
+
+#[test]
+fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let c = live_deep_link();
+
+    runtime().block_on(async {
+        c.load().await;
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "{:?}",
+        verb_log_for_tests()
+    );
+    assert_eq!(
+        c.pending_attach_target_for_tests(),
+        Some(AttachTarget {
+            tab_position: Some(2),
+            pane_id: Some(31),
+        }),
+        "still held for a settle that may yet come"
+    );
+}
+
+/// The supersede rule ([`AttachTarget`]'s doc): a move the user made after mount
+/// wins, so the link is dropped once that move lands; while it is in flight its
+/// claim only defers the link.
+#[test]
+fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let c = live_deep_link();
+    let rt = runtime();
+    rt.block_on(c.load());
+
+    let mut tap: Step = Box::pin(async {
+        assert!(c.commit_pane("btop".to_string(), 11, false).await);
+    });
+    start(&rt, &mut tap);
+    assert!(
+        c.pending_attach_target_for_tests().is_some(),
+        "kept while the move is in flight"
+    );
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    rt.block_on(tap);
+    assert_eq!(
+        c.pending_attach_target_for_tests(),
+        None,
+        "dropped once the move landed"
+    );
+
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
+    assert_eq!(c.active_tab.get_untracked(), "btop");
+}
+
+/// A grid tap takes no claim, yet while its verb is in flight the settled link
+/// must neither fire nor drop; only the landed tap supersedes it.
+#[test]
+fn a_grid_tap_in_flight_at_the_settle_defers_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let c = live_deep_link();
+    let rt = runtime();
+    rt.block_on(c.load());
+    let pane = 11;
+
+    let mut tap: Step = Box::pin(async {
+        assert!(c.focus_pane_from_tap(pane, false).await);
+    });
+    start(&rt, &mut tap);
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert!(
+        c.pending_attach_target_for_tests().is_some(),
+        "kept while the tap is in flight"
+    );
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "no verb has landed, the link's included: {:?}",
+        verb_log_for_tests()
+    );
+
+    rt.block_on(tap);
+    assert_eq!(c.pending_attach_target_for_tests(), None, "the landed tap");
+    assert_eq!(verb_log_for_tests(), ["focus_pane:11"]);
+}
+
+/// The mock answers `new_tab` as unsupported, so this wraps it with a create that
+/// parks on a timer, as the wire's does.
+struct SlowCreate(SharedTerminalRepository);
+
+#[clean_signals::async_trait]
+impl TerminalRepository for SlowCreate {
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        self.0.list_spaces().await
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs().await
+    }
+    async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
+        self.0.tab_lines(key).await
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.0.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.0.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.0.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.0.focus_pane(pane_id, is_plugin).await
+    }
+    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(Duration::from_millis(20)).await;
+        Ok(())
+    }
+}
+
+/// `new_tab` holds only the create claim; its in-flight verb still defers the link,
+/// and the landed create then supersedes it.
+#[test]
+fn a_new_tab_in_flight_at_the_settle_defers_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let _state = MuxrApp.init();
+    let c = live_deep_link_over(Arc::new(SlowCreate(expect_terminal_repository())));
+    let rt = runtime();
+    rt.block_on(c.load());
+
+    let mut create: Step = Box::pin(async {
+        c.new_tab("x".to_string()).await;
+    });
+    start(&rt, &mut create);
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "no deep-link verbs while the create is in flight: {:?}",
+        verb_log_for_tests()
+    );
+    assert!(c.pending_attach_target_for_tests().is_some());
+
+    rt.block_on(create);
+    assert_eq!(
+        c.pending_attach_target_for_tests(),
+        None,
+        "the landed create"
     );
 }

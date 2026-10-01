@@ -1,5 +1,21 @@
-/target
+# All generated/compiled build output for a Frust app lands under this one
+# project-relative root (kept in sync with `crates/frust-drive`'s
+# `build_dirs::BuildLayout`, and with `frust clean`'s
+# `build_dirs::{CLEAN_DIRS, LEGACY_CLEAN_DIRS}`) — Rust artifacts
+# (`build/rust`, the `[build] target-dir` set in this project's
+# `.cargo/config.toml`), Android's Gradle output (`build/android`), iOS's
+# `xcodebuild` output (`build/ios`), and desktop bundles (`build/desktop`).
 /build
+
+# Cargo's own compiled-artifact cache. Deliberately NOT part of
+# `build_dirs::BuildLayout`/`CLEAN_DIRS` — it is never removed by path, only
+# by `cargo clean`/CARGO_TARGET_DIR override — but it still needs to be
+# gitignored here: a `cargo build`/`cargo run` invoked with `--manifest-path`
+# from outside this project directory, or an explicit `--target-dir target`,
+# never reads this project's own `.cargo/config.toml` (config discovery walks
+# up from the CURRENT directory, not the manifest), so it falls back to cargo's
+# plain `target/` default instead of `build/rust`.
+/target
 .DS_Store
 
 # workflow/ is a separate private repo (nested checkout, same convention as
@@ -12,15 +28,29 @@ key.properties
 *.jks
 *.keystore
 
-# CLI-generated build output (kept in sync with `frust clean`'s REMOVED_DIRS).
-# `android/build/` is the `:frust-embedding` module's redirected output — see
-# android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block.
+# Written by `frust build`/`frust run --release` with the signing values the
+# CLI gate resolved (plaintext passwords, owner-only) and deleted again the
+# moment Gradle returns. One should only ever exist mid-build — if you see it
+# in `git status`, a build was killed hard; delete it.
+android/.frust-signing.properties
+
+# legacy layout — harmless to keep: build-output paths from before the
+# `build/` root migration (kept in sync with `build_dirs::LEGACY_CLEAN_DIRS`,
+# which `frust clean` still removes). Nothing writes here any more: every
+# Gradle module's output is redirected under `build/android/` by
+# android/settings.gradle.kts' `gradle.lifecycle.beforeProject` block, and
+# `cargo ndk` stages the `.so`s under `build/android/jniLibs`.
 android/app/build/
 android/build/
 android/.gradle/
+android/app/src/main/jniLibs/
+dist/
 
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
 
-# Rust-built JNI libraries copied in by the gradle preBuild step — build output, never commit.
-android/app/src/main/jniLibs/
+# Xcode's per-user state: window layout, breakpoints, scheme order. Written
+# into the .xcodeproj/.xcworkspace (and beside local Swift packages under
+# .swiftpm/) whenever the project is opened in Xcode; never shared config.
+xcuserdata/
+.swiftpm/
