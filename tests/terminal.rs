@@ -35,6 +35,7 @@ use kurbo::{Point, Size};
 use peniko::Color;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     clear_verb_log_for_tests, verb_log_for_tests,
@@ -65,7 +66,7 @@ const PANEL_PADDING: f64 = 20.0;
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The session the suite attaches to — the sessions mock's first seeded one.
-const SESSION_ID: &str = "zellij:dev";
+const SESSION_ID: &str = SEEDED_DEV_ID;
 const SESSION_NAME: &str = "dev";
 
 /// `docs/terminal.html`'s `TABS`, as the screen must print them.

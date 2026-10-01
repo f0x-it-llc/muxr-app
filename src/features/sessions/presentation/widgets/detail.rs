@@ -84,17 +84,92 @@ pub(in crate::features::sessions::presentation) fn detail_pane(
     full: bool,
     colors: &Palette,
 ) -> AnyView<SessionsState> {
-    let body = match phase {
-        LoadPhase::Loading => loading_body(full),
-        LoadPhase::Loaded if sessions.is_empty() => hint(EMPTY_TITLE, EMPTY_DESC),
-        LoadPhase::Failed | LoadPhase::Loaded => {
-            match selected.and_then(|id| sessions.iter().find(|s| s.id == id)) {
-                Some(session) => return selected_detail(session, read_only, full, colors),
-                None => hint(SELECT_TITLE, SELECT_DESC),
-            }
+    let body = match pane_state(phase, sessions.len(), selected_index(sessions, selected)) {
+        PaneState::Loading => loading_body(full),
+        PaneState::Empty => hint(EMPTY_TITLE, EMPTY_DESC),
+        PaneState::Selected(index) => {
+            return selected_detail(&sessions[index], read_only, full, colors);
         }
+        PaneState::NoSelection => hint(SELECT_TITLE, SELECT_DESC),
     };
     any(container(body).fill(colors.base))
+}
+
+/// What the pane shows, before any widget is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneState {
+    Loading,
+    Empty,
+    /// The selected session's detail, at its index in the list.
+    Selected(usize),
+    NoSelection,
+}
+
+/// Which state the pane draws: the load phase first, then an empty list,
+/// then whether the selection (an index into the list) still resolves. A
+/// failed first load behaves like a loaded one — its list is just empty
+/// until a refresh lands.
+fn pane_state(phase: LoadPhase, session_count: usize, selected: Option<usize>) -> PaneState {
+    match phase {
+        LoadPhase::Loading => PaneState::Loading,
+        LoadPhase::Loaded if session_count == 0 => PaneState::Empty,
+        LoadPhase::Failed | LoadPhase::Loaded => {
+            selected.map_or(PaneState::NoSelection, PaneState::Selected)
+        }
+    }
+}
+
+fn selected_index(sessions: &[Session], selected: Option<&str>) -> Option<usize> {
+    selected.and_then(|id| sessions.iter().position(|s| s.id == id))
+}
+
+/// Which cards a selected session's body carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyKind {
+    /// Not running: the resurrect card above the overview.
+    Resurrect,
+    /// Running but no tab detail reported: the overview alone.
+    OverviewOnly,
+    /// Overview beside the active tab, over the tabs tree.
+    Full,
+}
+
+fn body_kind(live: bool, has_tabs: bool) -> BodyKind {
+    if !live {
+        BodyKind::Resurrect
+    } else if !has_tabs {
+        BodyKind::OverviewOnly
+    } else {
+        BodyKind::Full
+    }
+}
+
+/// How the active tab's panes tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TileLayout {
+    None,
+    One,
+    Two,
+    /// A 2fr tile beside a column of the rest.
+    Stacked,
+}
+
+fn tile_layout(pane_count: usize) -> TileLayout {
+    match pane_count {
+        0 => TileLayout::None,
+        1 => TileLayout::One,
+        2 => TileLayout::Two,
+        _ => TileLayout::Stacked,
+    }
+}
+
+/// Pane pills per row on the full or collapsed band.
+fn pills_per_row(full: bool) -> usize {
+    if full {
+        PILLS_PER_ROW_FULL
+    } else {
+        PILLS_PER_ROW_COLLAPSED
+    }
 }
 
 /// A centered Glyph empty state.
@@ -130,15 +205,19 @@ fn selected_detail(
     colors: &Palette,
 ) -> AnyView<SessionsState> {
     let overview = overview_card(session, colors);
-    let cards = if !session.status.is_live() {
-        vec![resurrect_card(session, colors), grid(vec![overview], full)]
-    } else if session.layout.tabs_detail.is_empty() {
-        vec![grid(vec![overview], full)]
-    } else {
-        vec![
+    let kind = body_kind(
+        session.status.is_live(),
+        !session.layout.tabs_detail.is_empty(),
+    );
+    let cards = match kind {
+        BodyKind::Resurrect => {
+            vec![resurrect_card(session, colors), grid(vec![overview], full)]
+        }
+        BodyKind::OverviewOnly => vec![grid(vec![overview], full)],
+        BodyKind::Full => vec![
             grid(vec![overview, active_tab_card(session, colors)], full),
             tree_card(session, full, colors),
-        ]
+        ],
     };
     any(container(
         FlexView::new(
@@ -341,14 +420,14 @@ fn active_tab_card(session: &Session, colors: &Palette) -> AnyView<SessionsState
         None => format!("active tab{SEP}{tab_name}"),
     };
     let panes = tab.map_or(&[][..], |tab| tab.panes.as_slice());
-    let tiles: AnyView<SessionsState> = match panes {
-        [] => card_title("no panes reported", colors),
-        [only] => tile(only, colors),
-        [a, b] => any(tile_row(vec![
+    let tiles: AnyView<SessionsState> = match (tile_layout(panes.len()), panes) {
+        (TileLayout::None, _) => card_title("no panes reported", colors),
+        (TileLayout::One, [only]) => tile(only, colors),
+        (TileLayout::Two, [a, b]) => any(tile_row(vec![
             flexible(1, tile(a, colors)),
             flexible(1, tile(b, colors)),
         ])),
-        [first, rest @ ..] => {
+        (_, [first, rest @ ..]) => {
             let stacked = rest.iter().map(|pane| flexible(1, tile(pane, colors)));
             let stack = FlexView::new(Axis::Vertical, spaced(stacked.collect(), false))
                 .cross_axis(CrossAxisAlignment::Stretch);
@@ -357,6 +436,7 @@ fn active_tab_card(session: &Session, colors: &Palette) -> AnyView<SessionsState
                 flexible(1, stack),
             ]))
         }
+        (_, []) => card_title("no panes reported", colors),
     };
     any(glyph_card()
         .title(card_title(title, colors))
@@ -486,11 +566,7 @@ fn panes_count(count: usize) -> String {
 
 /// The tab's pills in equal-width rows, the last row padded with blanks.
 fn pane_pills(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> AnyView<SessionsState> {
-    let per_row = if full {
-        PILLS_PER_ROW_FULL
-    } else {
-        PILLS_PER_ROW_COLLAPSED
-    };
+    let per_row = pills_per_row(full);
     let rows = tab
         .panes
         .chunks(per_row)
@@ -573,5 +649,59 @@ mod tests {
         assert_eq!(third_stat(ThirdMetric::Clients(2)), ("clients", 2));
         assert_eq!(third_stat(ThirdMetric::Spaces(5)), ("spaces", 5));
         assert_eq!(third_stat(ThirdMetric::TabsSaved(0)), ("tabs saved", 0));
+    }
+
+    #[test]
+    fn the_pane_state_follows_phase_then_emptiness_then_selection() {
+        assert_eq!(pane_state(LoadPhase::Loading, 0, None), PaneState::Loading);
+        assert_eq!(
+            pane_state(LoadPhase::Loading, 3, Some(1)),
+            PaneState::Loading,
+            "loading wins over a stale selection"
+        );
+        assert_eq!(pane_state(LoadPhase::Loaded, 0, None), PaneState::Empty);
+        assert_eq!(
+            pane_state(LoadPhase::Loaded, 3, None),
+            PaneState::NoSelection
+        );
+        assert_eq!(
+            pane_state(LoadPhase::Loaded, 3, Some(2)),
+            PaneState::Selected(2)
+        );
+    }
+
+    #[test]
+    fn a_failed_first_load_asks_for_a_selection_rather_than_claiming_emptiness() {
+        assert_eq!(
+            pane_state(LoadPhase::Failed, 0, None),
+            PaneState::NoSelection
+        );
+        assert_eq!(
+            pane_state(LoadPhase::Failed, 2, Some(0)),
+            PaneState::Selected(0)
+        );
+    }
+
+    #[test]
+    fn the_body_carries_the_cards_its_session_state_earns() {
+        assert_eq!(body_kind(false, true), BodyKind::Resurrect);
+        assert_eq!(body_kind(false, false), BodyKind::Resurrect);
+        assert_eq!(body_kind(true, false), BodyKind::OverviewOnly);
+        assert_eq!(body_kind(true, true), BodyKind::Full);
+    }
+
+    #[test]
+    fn panes_tile_one_two_or_a_stack_by_count() {
+        assert_eq!(tile_layout(0), TileLayout::None);
+        assert_eq!(tile_layout(1), TileLayout::One);
+        assert_eq!(tile_layout(2), TileLayout::Two);
+        assert_eq!(tile_layout(3), TileLayout::Stacked);
+        assert_eq!(tile_layout(9), TileLayout::Stacked);
+    }
+
+    #[test]
+    fn the_full_band_fits_one_more_pill_per_row() {
+        assert_eq!(pills_per_row(true), PILLS_PER_ROW_FULL);
+        assert_eq!(pills_per_row(false), PILLS_PER_ROW_COLLAPSED);
     }
 }

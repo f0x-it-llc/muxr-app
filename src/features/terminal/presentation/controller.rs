@@ -1931,6 +1931,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::features::sessions::data::repositories::MockSessionsRepository;
+    use crate::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
     use crate::features::settings::data::repositories::MockPreferencesRepository;
     use crate::features::settings::domain::entities::AppearancePrefs;
     use crate::features::terminal::data::feeds::grpc_feed::ResumeTarget;
@@ -1957,7 +1958,7 @@ mod tests {
 
     #[test]
     fn a_load_lands_on_the_mocks_active_tab() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         assert!(!c.loaded.get_untracked());
 
         block_on(c.load());
@@ -1987,7 +1988,7 @@ mod tests {
         assert!(herdr.has_spaces());
         assert_eq!(herdr.spaces.get_untracked().len(), 3);
 
-        let zellij = controller(Some("zellij:dev"));
+        let zellij = controller(Some(SEEDED_DEV_ID));
         block_on(zellij.load());
         assert!(!zellij.has_spaces());
         assert!(zellij.spaces.get_untracked().is_empty());
@@ -2086,7 +2087,7 @@ mod tests {
             Arc::new(MockTerminalRepository::seeded()),
             Arc::clone(&sessions) as Arc<dyn SessionsRepository + Send + Sync>,
             Arc::new(MockPreferencesRepository::seeded()),
-            Some("zellij:dev".to_string()),
+            Some(SEEDED_DEV_ID.to_string()),
         );
         block_on(c.load());
 
@@ -2113,7 +2114,7 @@ mod tests {
 
     #[test]
     fn detach_needs_an_attached_session() {
-        let attached = controller(Some("zellij:dev"));
+        let attached = controller(Some(SEEDED_DEV_ID));
         assert!(block_on(attached.detach()));
 
         let bare = controller(None);
@@ -2142,15 +2143,15 @@ mod tests {
     fn only_attaching_claims_the_live_pane_for_a_real_session() {
         // The demo row mounts the fixture replay on a screen that could attach
         // — the entry, not the screen, is what decides which feed it gets.
-        let demo = controller(Some("zellij:dev"));
+        let demo = controller(Some(SEEDED_DEV_ID));
         demo.enter_live();
         assert!(demo.live.get_untracked());
         assert_eq!(demo.attached_session(), None);
 
-        let attached = controller(Some("zellij:dev"));
+        let attached = controller(Some(SEEDED_DEV_ID));
         attached.attach_live();
         assert!(attached.live.get_untracked());
-        assert_eq!(attached.attached_session().as_deref(), Some("zellij:dev"));
+        assert_eq!(attached.attached_session().as_deref(), Some(SEEDED_DEV_ID));
     }
 
     #[test]
@@ -2165,7 +2166,7 @@ mod tests {
         // Spaces, the resume hint a landed commit records and the grid's tap
         // hook all branch on this one answer.
         assert!(is_herdr("herdr:work"));
-        assert!(!is_herdr("zellij:dev"));
+        assert!(!is_herdr(SEEDED_DEV_ID));
         assert!(!is_herdr("dev"));
 
         let c = controller(Some("herdr:work"));
@@ -2175,13 +2176,13 @@ mod tests {
              about whether a stream is open onto it"
         );
         assert!(c.has_spaces());
-        assert!(!controller(Some("zellij:dev")).is_herdr_session());
+        assert!(!controller(Some(SEEDED_DEV_ID)).is_herdr_session());
         assert!(!controller(None).is_herdr_session());
     }
 
     #[test]
     fn a_tab_switch_reports_whether_it_landed() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         block_on(c.load());
         assert!(block_on(c.switch_tab("btop".to_string())));
         assert_eq!(c.active_tab.get_untracked(), "btop");
@@ -2202,7 +2203,7 @@ mod tests {
 
     #[test]
     fn the_link_starts_unreported_and_mirrors_read_compare_then_write() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         assert_eq!(
             c.link.get_untracked(),
             None,
@@ -2225,7 +2226,7 @@ mod tests {
             Arc::clone(&repository) as Arc<dyn TerminalRepository + Send + Sync>,
             Arc::new(MockSessionsRepository::seeded()),
             Arc::new(MockPreferencesRepository::seeded()),
-            Some("zellij:dev".to_string()),
+            Some(SEEDED_DEV_ID.to_string()),
         );
         assert_eq!(
             repository.binds(),
@@ -2600,7 +2601,7 @@ mod tests {
 
     #[test]
     fn a_docked_rail_follows_another_clients_focus_only_while_resting() {
-        let (c, repository) = docked("zellij:dev");
+        let (c, repository) = docked(SEEDED_DEV_ID);
         repository.report_active("beta");
         block_on(c.reload_tabs());
         assert_eq!(c.expanded_tab.get_untracked().as_deref(), Some("beta"));
@@ -2617,7 +2618,7 @@ mod tests {
 
     #[test]
     fn the_sheet_never_follows_a_moved_focus() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         c.seed_expansion();
         repository.report_active("beta");
         block_on(c.reload_tabs());
@@ -2647,7 +2648,7 @@ mod tests {
 
     #[test]
     fn a_zellij_commit_inside_the_active_tab_focuses_the_pane_and_nothing_else() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
 
@@ -2661,7 +2662,7 @@ mod tests {
 
     #[test]
     fn a_zellij_commit_across_tabs_moves_the_tab_first_then_the_pane() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
 
@@ -2713,7 +2714,7 @@ mod tests {
 
     #[test]
     fn a_commit_re_reads_nothing_behind_it_on_either_backend() {
-        for session in ["zellij:dev", "herdr:work"] {
+        for session in [SEEDED_DEV_ID, "herdr:work"] {
             let (c, repository) = recorded(session);
             c.attach_live();
             let after_load = repository.calls().len();
@@ -2733,7 +2734,7 @@ mod tests {
 
     #[test]
     fn a_refused_tab_step_stops_the_commit_before_the_pane_focus() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("go_to_tab");
 
         assert!(!block_on(c.commit_pane("beta".to_string(), 21, false)));
@@ -2753,7 +2754,7 @@ mod tests {
 
     #[test]
     fn a_refused_pane_focus_writes_no_optimistic_state() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("focus_pane");
 
         assert!(!block_on(c.commit_pane("alpha".to_string(), 11, false)));
@@ -2987,7 +2988,7 @@ mod tests {
 
     #[test]
     fn seed_expansion_opens_only_the_active_tab_on_zellij() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         block_on(c.load());
 
         c.seed_expansion();
@@ -3254,7 +3255,7 @@ mod tests {
 
     #[test]
     fn a_grid_tap_focus_never_switches_tabs_and_reloads_after() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         let after_load = repository.calls();
 
         assert!(block_on(c.focus_pane_from_tap(11, false)));
@@ -3277,7 +3278,7 @@ mod tests {
 
     #[test]
     fn a_refused_grid_tap_focus_writes_no_optimistic_state_and_reloads_nothing() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("focus_pane");
 
         assert!(!block_on(c.focus_pane_from_tap(11, false)));
@@ -3294,7 +3295,7 @@ mod tests {
 
     #[test]
     fn a_wheel_scroll_fallback_calls_scroll_pane_and_ignores_its_answer() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         block_on(c.scroll_pane_from_wheel(21, false, ScrollStep::Up));
 
@@ -3429,7 +3430,7 @@ mod tests {
 
     #[test]
     fn a_zellij_commit_records_no_resume_hint() {
-        let (c, _repository) = recorded("zellij:dev");
+        let (c, _repository) = recorded(SEEDED_DEV_ID);
 
         assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
 
@@ -3524,7 +3525,7 @@ mod tests {
 
     #[test]
     fn a_new_tab_carries_its_dialog_name_through_and_reloads_the_workspace() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         block_on(c.new_tab("build".to_string()));
 
@@ -3543,7 +3544,7 @@ mod tests {
 
     #[test]
     fn a_blank_dialog_confirm_creates_an_unnamed_tab() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         block_on(c.new_tab(String::new()));
 
@@ -3557,7 +3558,7 @@ mod tests {
 
     #[test]
     fn a_refused_new_tab_reloads_nothing() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("new_tab");
         let tabs = c.tabs.get_untracked();
 
@@ -3569,7 +3570,7 @@ mod tests {
 
     #[test]
     fn a_pane_tap_opens_a_tiled_pane_and_a_long_press_opens_a_floating_one() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         block_on(c.new_pane(false));
         block_on(c.new_pane(true));
@@ -3583,7 +3584,7 @@ mod tests {
 
     #[test]
     fn a_refused_new_pane_reloads_nothing() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("new_pane");
         let tabs = c.tabs.get_untracked();
 
@@ -3664,7 +3665,7 @@ mod tests {
 
     #[test]
     fn an_add_pane_row_under_the_tab_the_session_is_on_creates_straight_away() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         let after_load = repository.calls().len();
 
         block_on(c.new_pane_in(None, "alpha".to_string(), false));
@@ -3771,7 +3772,7 @@ mod tests {
 
     #[test]
     fn renaming_a_tab_reloads_only_the_tab_list() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         let active = c.active_tab.get_untracked();
         let epoch = c.reveal_epoch.get_untracked();
 
@@ -3788,7 +3789,7 @@ mod tests {
 
     #[test]
     fn a_refused_tab_rename_reloads_nothing() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("rename_tab");
         let tabs = c.tabs.get_untracked();
 
@@ -3800,7 +3801,7 @@ mod tests {
 
     #[test]
     fn renaming_a_pane_reloads_the_tab_list_too() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         block_on(c.rename_pane(10, false, "renamed".to_string()));
 
@@ -3813,7 +3814,7 @@ mod tests {
 
     #[test]
     fn a_refused_pane_rename_reloads_nothing() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("rename_pane");
         let tabs = c.tabs.get_untracked();
 
@@ -3863,7 +3864,7 @@ mod tests {
 
     #[test]
     fn an_earlier_layout_fetch_landing_late_never_clobbers_the_fresher_one() {
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.stamp_lists();
         // The first reload parks and the second answers immediately, so the
         // round trip that *started* first lands last.
@@ -3908,7 +3909,7 @@ mod tests {
 
     #[test]
     fn a_layout_poll_tick_needs_a_landed_load_and_never_stacks_two_reloads() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         assert!(
             !c.take_layout_poll_tick(),
             "no poll before the first load has landed"
@@ -3927,7 +3928,7 @@ mod tests {
 
     #[test]
     fn a_poll_tick_whose_answer_has_not_moved_writes_nothing() {
-        let (c, _repository) = recorded("zellij:dev");
+        let (c, _repository) = recorded(SEEDED_DEV_ID);
         let after_load = c.layout_writes();
 
         block_on(c.refresh_layout_from_poll());
@@ -3943,7 +3944,7 @@ mod tests {
 
     #[test]
     fn a_reload_heals_an_empty_active_tab_snapshot() {
-        let (c, _repository) = recorded("zellij:dev");
+        let (c, _repository) = recorded(SEEDED_DEV_ID);
 
         // A snapshot that landed empty (what a load racing the attach
         // handshake leaves) recovers on the next reload.
@@ -3957,7 +3958,7 @@ mod tests {
         /// Unmistakable against instant mock calls, short enough not to pad.
         const SETTLE: Duration = Duration::from_millis(80);
         let _override = SettleOverride::install(SETTLE);
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
 
         let started = std::time::Instant::now();
         block_on(c.new_tab(String::new()));
@@ -3982,7 +3983,7 @@ mod tests {
     #[test]
     fn a_second_create_press_while_one_is_in_flight_is_dropped_not_queued() {
         let _override = SettleOverride::install(Duration::ZERO);
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         // The first create parks, so the second press arrives while it is
         // genuinely in flight — the rapid double-tap this coalesces.
         repository.delay_calls([Duration::from_millis(60)]);
@@ -4005,7 +4006,7 @@ mod tests {
     #[test]
     fn a_refused_create_re_arms_the_affordance_it_claimed() {
         let _override = SettleOverride::install(Duration::ZERO);
-        let (c, repository) = recorded("zellij:dev");
+        let (c, repository) = recorded(SEEDED_DEV_ID);
         repository.refuse("new_pane");
 
         block_on(c.new_pane(false));
@@ -4020,7 +4021,7 @@ mod tests {
 
     #[test]
     fn the_attach_handshake_settles_exactly_once_per_mount() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         assert!(
             !c.mirror_link(LinkStatus::Idle, None),
             "nothing has connected yet"
@@ -4044,7 +4045,7 @@ mod tests {
 
     #[test]
     fn a_connected_status_settles_the_attach_even_with_no_id_to_show_for_it() {
-        let c = controller(Some("zellij:dev"));
+        let c = controller(Some(SEEDED_DEV_ID));
         assert!(c.mirror_link(LinkStatus::Connected, None));
         assert!(!c.mirror_link(LinkStatus::Connected, None));
     }
@@ -4057,7 +4058,7 @@ mod tests {
             Arc::clone(&repository) as Arc<dyn TerminalRepository + Send + Sync>,
             Arc::new(MockSessionsRepository::seeded()),
             Arc::new(MockPreferencesRepository::seeded()),
-            Some("zellij:dev".to_string()),
+            Some(SEEDED_DEV_ID.to_string()),
         ));
         c.set_attach_target(Some(1), Some(21));
         c.attach_live();
