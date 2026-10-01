@@ -34,7 +34,7 @@ use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Code;
 
-use crate::features::terminal::domain::feed::{TerminalFeed, WheelKind};
+use crate::features::terminal::domain::feed::{LinkStatus, TerminalFeed, WheelKind};
 use crate::net::MuxrClient;
 use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::{
@@ -47,7 +47,7 @@ use crate::net::proto::{
 /// A stream that errors or ends takes the next step; the counter resets on the first render
 /// frame after a (re)connect (a stream that opens and delivers nothing has proved nothing) and
 /// on [`reset_backoff`](GrpcTerminalFeed::reset_backoff), the manual retry. Running off the end
-/// parks the loop at [`FeedStatus::Disconnected`]. A drop reports [`FeedStatus::Reconnecting`]
+/// parks the loop at [`LinkStatus::Disconnected`]. A drop reports [`LinkStatus::Reconnecting`]
 /// for the whole step, nap included, since the link strip renders nothing for `Connected` and
 /// would otherwise leave a frozen grid with no banner for up to 16 seconds. `UNAUTHENTICATED`
 /// short-circuits all of it: the loop stops at once and invokes the injected auth-expired
@@ -84,26 +84,6 @@ pub const INBOUND_HIGH_WATER_FRAMES: usize = 4096;
 /// Queued inbound frames the drain side must bring the queue back under before the pump resumes
 /// — a quarter of [`INBOUND_HIGH_WATER_FRAMES`], for the reason [`INBOUND_LOW_WATER`] records.
 pub const INBOUND_LOW_WATER_FRAMES: usize = INBOUND_HIGH_WATER_FRAMES / 4;
-
-/// Where a feed's session currently stands. Plain shared state, polled by the
-/// screen that owns the feed — deliberately not a signal.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FeedStatus {
-    /// Constructed; the pump has not opened its first stream yet.
-    #[default]
-    Idle,
-    /// An attach attempt is in flight, or the loop is waiting out a backoff
-    /// step.
-    Reconnecting,
-    /// The stream is open and delivering.
-    Connected,
-    /// No further attempt will be made on its own: the schedule ran out, or the
-    /// credential expired. The screen's retry is
-    /// [`GrpcTerminalFeed::reset_backoff`].
-    Disconnected,
-    /// The server said [`CONTROL_EXIT`]. Terminal — nothing will arrive again.
-    Closed,
-}
 
 /// Where a fresh attach should land, as far as this client knows: the space/tab/pane the user
 /// last moved to themselves.
@@ -214,7 +194,7 @@ impl GrpcTerminalFeed {
     }
 
     /// Where this session stands right now.
-    pub fn status(&self) -> FeedStatus {
+    pub fn status(&self) -> LinkStatus {
         self.shared.state().status
     }
 
@@ -228,7 +208,7 @@ impl GrpcTerminalFeed {
 
     /// Reset the backoff to its first step and, if the loop has parked on an
     /// exhausted schedule, re-arm it — the manual "retry" the screen offers on
-    /// [`FeedStatus::Disconnected`]. A no-op once the session has ended for good.
+    /// [`LinkStatus::Disconnected`]. A no-op once the session has ended for good.
     pub fn reset_backoff(&self) {
         self.shared.retry.store(true, Ordering::Release);
         self.shared.wake.notify_one();
@@ -379,7 +359,7 @@ impl TerminalFeed for GrpcTerminalFeed {
     /// Whether the pump can still deliver anything. `false` only once the session
     /// ended for good — a server [`CONTROL_EXIT`], an expired credential, or a
     /// [`shutdown`](GrpcTerminalFeed::shutdown) — **and** the last frames have
-    /// drained. A [`FeedStatus::Disconnected`] feed is still open: its pump is
+    /// drained. A [`LinkStatus::Disconnected`] feed is still open: its pump is
     /// parked, not gone, and `reset_backoff` re-arms the same session.
     fn is_open(&self) -> bool {
         let state = self.shared.state();
@@ -451,7 +431,7 @@ struct State {
     /// control bounds, kept alongside rather than recomputed, since the pump
     /// consults it before every read.
     inbound_bytes: usize,
-    status: FeedStatus,
+    status: LinkStatus,
     connection_id: Option<String>,
     cols: u16,
     rows: u16,
@@ -519,7 +499,7 @@ impl Shared {
             state: Mutex::new(State {
                 inbound: VecDeque::new(),
                 inbound_bytes: 0,
-                status: FeedStatus::Idle,
+                status: LinkStatus::Idle,
                 connection_id: None,
                 cols,
                 rows,
@@ -543,7 +523,7 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn set_status(&self, status: FeedStatus) {
+    fn set_status(&self, status: LinkStatus) {
         self.state().status = status;
     }
 
@@ -627,8 +607,8 @@ impl Shared {
     /// answer, since the server said why.
     fn retire(&self) {
         let mut state = self.state();
-        if self.shutdown.load(Ordering::Acquire) && state.status != FeedStatus::Closed {
-            state.status = FeedStatus::Disconnected;
+        if self.shutdown.load(Ordering::Acquire) && state.status != LinkStatus::Closed {
+            state.status = LinkStatus::Disconnected;
         }
         state.outbound = None;
         state.finished = true;
@@ -648,17 +628,17 @@ async fn run_pump(pump: Pump) {
     } = pump;
 
     while !shared.shutdown.load(Ordering::Acquire) {
-        shared.set_status(FeedStatus::Reconnecting);
+        shared.set_status(LinkStatus::Reconnecting);
         match attach(&client, &session, &shared).await {
             // Back to `Reconnecting` before the nap below, not after it: a stream
             // that dropped once `attach` had published `Connected` would otherwise
             // keep claiming to be connected for the whole backoff step, and the link
             // strip renders nothing at all for a connected feed.
-            Attempt::Dropped => shared.set_status(FeedStatus::Reconnecting),
+            Attempt::Dropped => shared.set_status(LinkStatus::Reconnecting),
             Attempt::Closed | Attempt::Shutdown => break,
             Attempt::AuthExpired => {
                 // One credential the server refuses will be refused four more times.
-                shared.set_status(FeedStatus::Disconnected);
+                shared.set_status(LinkStatus::Disconnected);
                 on_auth_expired();
                 break;
             }
@@ -673,7 +653,7 @@ async fn run_pump(pump: Pump) {
             None => {
                 // Out of schedule: stop attempting, and wait for the screen's retry
                 // rather than hammering a server that is plainly down.
-                shared.set_status(FeedStatus::Disconnected);
+                shared.set_status(LinkStatus::Disconnected);
                 park(&shared).await
             }
         };
@@ -732,7 +712,7 @@ async fn attach(client: &MuxrClient, session: &str, shared: &Shared) -> Attempt 
         }
     };
 
-    shared.set_status(FeedStatus::Connected);
+    shared.set_status(LinkStatus::Connected);
     let outcome = pump_stream(stream, shared).await;
     shared.set_outbound(None);
     outcome
@@ -776,7 +756,7 @@ async fn pump_stream(mut stream: tonic::Streaming<ServerFrame>, shared: &Shared)
             Some(server_frame::Kind::Control(event)) => match event.kind.as_str() {
                 CONTROL_CONNECTION_ID => shared.set_connection_id(event.payload),
                 CONTROL_EXIT => {
-                    shared.set_status(FeedStatus::Closed);
+                    shared.set_status(LinkStatus::Closed);
                     return Attempt::Closed;
                 }
                 // An unknown control kind is a newer server, not an error.
@@ -1038,7 +1018,7 @@ mod tests {
         );
 
         wait_until("the feed reports itself connected", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
         assert!(feed.is_open());
@@ -1054,7 +1034,7 @@ mod tests {
         let resume = Arc::new(ResumeSlot::default());
         let (feed, _) = rig.feed_resuming(80, 24, &TEST_BACKOFF, Arc::clone(&resume));
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
         assert_eq!(
@@ -1159,7 +1139,7 @@ mod tests {
         let script = rig.script();
         let (mut feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1196,7 +1176,7 @@ mod tests {
         let script = rig.script();
         let (mut feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1230,7 +1210,7 @@ mod tests {
         let script = rig.script();
         let (feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1284,13 +1264,13 @@ mod tests {
         let script = rig.script();
         let (feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
         script.send_exit();
         wait_until("the feed observes the close", || {
-            feed.status() == FeedStatus::Closed
+            feed.status() == LinkStatus::Closed
         })
         .await;
         wait_until("the pump returns", || !feed.is_open()).await;
@@ -1309,7 +1289,7 @@ mod tests {
         let script = rig.script();
         let (feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1325,7 +1305,7 @@ mod tests {
 
         // …and one render frame is all it takes to earn a fresh schedule.
         wait_until("the third stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
         script.push_render(b"live\r\n".to_vec());
@@ -1342,15 +1322,15 @@ mod tests {
         let script = rig.script();
         let (feed, _) = rig.feed_with(80, 24, &LONG_BACKOFF);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
         script.kill();
-        wait_until("the drop lands", || feed.status() != FeedStatus::Connected).await;
+        wait_until("the drop lands", || feed.status() != LinkStatus::Connected).await;
         assert_eq!(
             feed.status(),
-            FeedStatus::Reconnecting,
+            LinkStatus::Reconnecting,
             "a feed waiting out a backoff step is reconnecting, not connected"
         );
         assert_eq!(
@@ -1368,7 +1348,7 @@ mod tests {
         let script = rig.script();
         let (mut feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1393,7 +1373,7 @@ mod tests {
         .await;
         assert_eq!(
             feed.status(),
-            FeedStatus::Connected,
+            LinkStatus::Connected,
             "the session is intact"
         );
     }
@@ -1408,7 +1388,7 @@ mod tests {
         let script = rig.script();
         let (mut feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1436,7 +1416,7 @@ mod tests {
         .await;
         assert_eq!(
             feed.status(),
-            FeedStatus::Connected,
+            LinkStatus::Connected,
             "the session is intact"
         );
     }
@@ -1449,7 +1429,7 @@ mod tests {
         let script = rig.script();
         let (mut feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1482,14 +1462,14 @@ mod tests {
         let script = rig.script();
         let (feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
         flood_until_paused(&script, &feed).await;
 
         feed.shutdown();
         wait_until("the pump returns without a drain", || {
-            feed.status() == FeedStatus::Disconnected
+            feed.status() == LinkStatus::Disconnected
         })
         .await;
         assert_eq!(script.attach_count(), 1, "a shutdown never reconnects");
@@ -1504,7 +1484,7 @@ mod tests {
         let script = rig.script();
         let (mut feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
         flood_until_paused(&script, &feed).await;
@@ -1512,14 +1492,14 @@ mod tests {
         script.send_exit();
         assert_eq!(
             feed.status(),
-            FeedStatus::Connected,
+            LinkStatus::Connected,
             "a paused reader reads nothing at all, control frames included"
         );
 
         let mut received = 0;
         wait_until("the close lands once draining resumes the reader", || {
             received += drained_bytes(&mut feed);
-            feed.status() == FeedStatus::Closed
+            feed.status() == LinkStatus::Closed
         })
         .await;
         received += drained_bytes(&mut feed);
@@ -1541,13 +1521,13 @@ mod tests {
         // Two steps, so the third drop runs off the end.
         for attach in 1..=3 {
             wait_until("the stream is up", || {
-                script.attach_count() == attach && feed.status() == FeedStatus::Connected
+                script.attach_count() == attach && feed.status() == LinkStatus::Connected
             })
             .await;
             script.kill();
         }
         wait_until("the schedule runs out", || {
-            feed.status() == FeedStatus::Disconnected
+            feed.status() == LinkStatus::Disconnected
         })
         .await;
         assert_eq!(script.attach_count(), 3, "the loop stopped attempting");
@@ -1574,7 +1554,7 @@ mod tests {
         let (feed, expiries) = rig.feed(80, 24);
 
         wait_until("the feed gives up", || {
-            feed.status() == FeedStatus::Disconnected
+            feed.status() == LinkStatus::Disconnected
         })
         .await;
         wait_until("the pump returns", || !feed.is_open()).await;
@@ -1604,7 +1584,7 @@ mod tests {
         let script = rig.script();
         let (feed, _) = rig.feed(80, 24);
         wait_until("the stream is up", || {
-            feed.status() == FeedStatus::Connected
+            feed.status() == LinkStatus::Connected
         })
         .await;
 
@@ -1613,7 +1593,7 @@ mod tests {
         assert_eq!(script.attach_count(), 1, "a shutdown never reconnects");
         assert_eq!(
             feed.status(),
-            FeedStatus::Disconnected,
+            LinkStatus::Disconnected,
             "a torn-down feed stops claiming to be connected"
         );
 

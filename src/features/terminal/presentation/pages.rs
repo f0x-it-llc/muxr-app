@@ -3,7 +3,8 @@
 //! app bar's menu button opens the "panes & tabs" side sheet directly
 //! (`crate::shell` forwards its press to [`open_terminal_menu`]); the pane
 //! title sits in the card's status row. On a Tablet the tree is docked
-//! instead, as [`super::widgets::rail`] beside the card.
+//! instead, as [`super::widgets::rail`] beside the card ([`super::actions`]
+//! holds that rail's glue).
 //!
 //! [`terminal_page`] is what `crate::routes` mounts — a per-screen
 //! [`Component`] whose `init` hosts a [`TerminalController`] via
@@ -35,7 +36,6 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
-use crate::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::{PaneEntry, ScrollStep, TabEntry};
 use crate::features::terminal::domain::feed::WheelKind;
@@ -49,6 +49,7 @@ use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::{BAR_HEIGHT, icon_button};
 
+use super::actions::{AfterCommit, rail_view};
 use super::chrome::WRAP_PAD;
 use super::controller::{LiveSession, TerminalController};
 use super::keybar;
@@ -56,10 +57,10 @@ use super::term;
 use super::widgets::card::{CardInk, card_body};
 use super::widgets::link_strip::link_strip;
 use super::widgets::new_tab_dialog::new_tab_dialog;
-use super::widgets::rail::{MiniActions, MiniData, RailHead, docked_rail, mini_rail, rail_summary};
+use super::widgets::rail::MiniActions;
 use super::widgets::side_sheet_tree::{
-    PressMenu, RowMenuChoice, RowTarget, TabPath, TreeActions, TreeData, TreeMode, TreeMutations,
-    auto_expand_after_cascade, row_menu, row_menu_choice, tree_body,
+    PressMenu, RowTarget, TabPath, TreeActions, TreeData, TreeMode, TreeMutations,
+    auto_expand_after_cascade, tree_body,
 };
 use super::widgets::status::{TerminalMenuChoice, status_row, terminal_menu, terminal_menu_choice};
 use super::widgets::util::{column, h_gap, row, sized, v_gap};
@@ -67,7 +68,7 @@ use super::widgets::util::{column, h_gap, row, sized, v_gap};
 /// How long the sheet stays up after a **pane row** is tapped, so the selection
 /// visibly moves before it closes — `setTimeout(closeSheet, 260)` in the mock. A
 /// pane tap is the sheet's one dismissing gesture ([`Actions::commit_pane`]).
-const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(260);
+pub(super) const SHEET_CLOSE_DELAY: std::time::Duration = std::time::Duration::from_millis(260);
 
 /// The side sheet's header label.
 const SHEET_TITLE: &str = "panes & tabs";
@@ -987,51 +988,9 @@ impl Actions {
         );
     }
 
-    /// Open the docked rail's overflow menu for `target`, anchored at `anchor`,
-    /// and run whichever [`RowMenuChoice`] it answers with.
-    fn open_row_menu(&self, anchor: Rect, target: &RowTarget) {
-        let (entries, target) = (target.clone(), target.clone());
-        let actions = self.clone();
-        show_glyph_menu(
-            &self.overlays,
-            anchor,
-            move || row_menu(&entries),
-            move |_app: &mut AppState, result: PopResult| {
-                let choice = result
-                    .take::<usize>()
-                    .and_then(|index| row_menu_choice(&target, index));
-                match (choice, &target) {
-                    (Some(RowMenuChoice::Rename), RowTarget::Space { id, name }) => {
-                        actions.open_rename_space_dialog(id, name);
-                    }
-                    (Some(RowMenuChoice::Rename), RowTarget::Tab { tab_id, label, .. }) => {
-                        actions.open_rename_tab_dialog(*tab_id, label);
-                    }
-                    (
-                        Some(RowMenuChoice::Rename),
-                        RowTarget::Pane {
-                            id,
-                            is_plugin,
-                            title,
-                        },
-                    ) => {
-                        actions.open_rename_pane_dialog(*id, *is_plugin, title);
-                    }
-                    (Some(RowMenuChoice::NewHere), RowTarget::Space { id, .. }) => {
-                        actions.open_new_tab_dialog_in(Some(id));
-                    }
-                    (Some(RowMenuChoice::NewHere), RowTarget::Tab { path, .. }) => {
-                        actions.new_tree_pane(path);
-                    }
-                    _ => {}
-                }
-            },
-        );
-    }
-
     /// The mini rail's presses: a space is adopted (its load re-rests the rail),
     /// a tab or pane commits exactly as a tree pane row does.
-    fn mini_actions(&self) -> MiniActions<TerminalState> {
+    pub(super) fn mini_actions(&self) -> MiniActions<TerminalState> {
         let (space, tab, pane, exit) = (self.clone(), self.clone(), self.clone(), self.clone());
         MiniActions {
             on_space: Rc::new(move |_state: &mut TerminalState, id: &str| {
@@ -1268,7 +1227,11 @@ fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> 
 /// The tree over the controller's tracked signals — the [`TreeData`] borrow
 /// [`tree_body`] renders from — in `mode`, committing with `after`. A free fn
 /// since it borrows four owned locals across the call.
-fn tree_view<S: 'static>(actions: &Actions, mode: TreeMode, after: AfterCommit) -> AnyView<S> {
+pub(super) fn tree_view<S: 'static>(
+    actions: &Actions,
+    mode: TreeMode,
+    after: AfterCommit,
+) -> AnyView<S> {
     let controller = &actions.controller;
     let spaces = controller.spaces.get();
     let tabs = controller.tabs.get();
@@ -1286,72 +1249,6 @@ fn tree_view<S: 'static>(actions: &Actions, mode: TreeMode, after: AfterCommit) 
     };
     let docked = mode == TreeMode::Docked;
     tree_body(&data, &tree_actions(actions, after, docked), mode)
-}
-
-/// The Tablet's rail beside the card: the full rail, or the mini rail in the
-/// collapsed band and in immersive (`mini`), so the tree is never out of reach.
-fn rail_view(
-    actions: &Actions,
-    mini: bool,
-    fullscreen: bool,
-    read_only: bool,
-    link: Option<FeedStatus>,
-) -> AnyView<TerminalState> {
-    let controller = &actions.controller;
-    let top = match use_context::<WindowInsets>() {
-        Some(insets) if fullscreen => insets.padding().top,
-        _ => 0.0,
-    };
-    let tabs = controller.tabs.get();
-    if mini {
-        let (spaces, active_tab) = (controller.spaces.get(), controller.active_tab.get());
-        let data = MiniData {
-            spaces: &spaces,
-            tabs: &tabs,
-            active_tab: &active_tab,
-            fullscreen,
-            top,
-        };
-        return mini_rail(&data, &actions.mini_actions());
-    }
-    let spaces = controller
-        .has_spaces()
-        .then(|| controller.spaces.get().len());
-    let name = controller
-        .session_name
-        .get()
-        .or_else(|| controller.session_id())
-        .unwrap_or_default();
-    let head = RailHead {
-        name: &name,
-        summary: rail_summary(spaces, &tabs),
-        link,
-        read_only,
-    };
-    let detach = actions.clone();
-    docked_rail(
-        &head,
-        tree_view(actions, TreeMode::Docked, AfterCommit::Rest),
-        top,
-        move |_state: &mut TerminalState| detach.detach(),
-    )
-}
-
-/// What a landed tree commit does next: the sheet closes a beat later, the
-/// docked rail stays and re-rests on where the session now is.
-#[derive(Clone)]
-enum AfterCommit {
-    Close(SheetHandle),
-    Rest,
-}
-
-impl AfterCommit {
-    async fn land(&self, controller: &TerminalController) {
-        match self {
-            AfterCommit::Close(sheet) => sheet.close_after(SHEET_CLOSE_DELAY).await,
-            AfterCommit::Rest => controller.settle_rest(),
-        }
-    }
 }
 
 /// Wire the tree's [`TreeActions`]/[`TreeMutations`] onto this screen's

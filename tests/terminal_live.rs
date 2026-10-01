@@ -45,12 +45,11 @@ use muxr::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle as SettingsCursorStyle,
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
-use muxr::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     add_test_tab, clear_test_tabs, clear_verb_log_for_tests, verb_log_for_tests,
 };
 use muxr::features::terminal::di::expect_terminal_repository;
-use muxr::features::terminal::domain::feed::TerminalFeed;
+use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
@@ -863,7 +862,7 @@ const LINK_RETRY: &str = "Retry";
 const LINK_LEAVE: &str = "Back to sessions";
 
 /// Publish `status` as the mounted screen's link state and rebuild.
-fn publish_link(h: &mut Harness, status: Option<FeedStatus>) {
+fn publish_link(h: &mut Harness, status: Option<LinkStatus>) {
     debug_controller()
         .expect("a terminal screen is mounted")
         .link
@@ -878,7 +877,7 @@ fn a_healthy_or_absent_link_says_nothing_at_all() {
     let mut h = Harness::mount();
     h.enter_demo();
 
-    for status in [None, Some(FeedStatus::Idle), Some(FeedStatus::Connected)] {
+    for status in [None, Some(LinkStatus::Idle), Some(LinkStatus::Connected)] {
         publish_link(&mut h, status);
         let values = support::node_values(&h.root);
         assert!(
@@ -902,7 +901,7 @@ fn a_reconnecting_link_says_so_and_offers_nothing_to_interrupt_it() {
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
-    publish_link(&mut h, Some(FeedStatus::Reconnecting));
+    publish_link(&mut h, Some(LinkStatus::Reconnecting));
 
     let values = support::node_values(&h.root);
     assert!(
@@ -923,7 +922,7 @@ fn a_disconnected_link_offers_the_retry_that_re_arms_it() {
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
-    publish_link(&mut h, Some(FeedStatus::Disconnected));
+    publish_link(&mut h, Some(LinkStatus::Disconnected));
 
     assert!(
         support::node_values(&h.root)
@@ -949,7 +948,7 @@ fn a_closed_link_offers_the_only_thing_left_the_way_back_to_the_list() {
     let _ambient = setup();
     let mut h = Harness::mount();
     h.enter_demo();
-    publish_link(&mut h, Some(FeedStatus::Closed));
+    publish_link(&mut h, Some(LinkStatus::Closed));
 
     assert!(
         support::node_values(&h.root)
@@ -1754,7 +1753,7 @@ fn a_deep_link_lands_on_its_tab_and_pane_once() {
         .expect("a current-thread runtime")
         .block_on(async move {
             again.reload_tabs().await;
-            let _ = again.mirror_link(FeedStatus::Connected, Some("c-2".to_string()));
+            let _ = again.mirror_link(LinkStatus::Connected, Some("c-2".to_string()));
             again.apply_attach_target().await;
         });
     h.pump_for(Duration::from_millis(100));
@@ -1836,7 +1835,7 @@ fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reloa
 
     let mut load: Step = Box::pin(c.load());
     start(&rt, &mut load);
-    assert!(c.mirror_link(FeedStatus::Connected, Some("c-1".to_string())));
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
     let mut settled: Step = Box::pin(async {
         c.reload_tabs().await;
         c.apply_attach_target().await;
@@ -1872,7 +1871,7 @@ fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
         verb_log_for_tests()
     );
     assert_eq!(
-        c.pending_attach_target(),
+        c.pending_attach_target_for_tests(),
         Some(AttachTarget {
             tab_position: Some(2),
             pane_id: Some(31),
@@ -1882,7 +1881,8 @@ fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
 }
 
 /// The supersede rule ([`AttachTarget`]'s doc): a move the user made after mount
-/// wins, so the link is dropped when that move claims — never lost to its claim.
+/// wins, so the link is dropped once that move lands; while it is in flight its
+/// claim only defers the link.
 #[test]
 fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
     let _g = serial();
@@ -1896,17 +1896,21 @@ fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
         assert!(c.commit_pane("btop".to_string(), 11, false).await);
     });
     start(&rt, &mut tap);
-    assert_eq!(
-        c.pending_attach_target(),
-        None,
-        "dropped as the move claimed"
+    assert!(
+        c.pending_attach_target_for_tests().is_some(),
+        "kept while the move is in flight"
     );
-    assert!(c.mirror_link(FeedStatus::Connected, Some("c-1".to_string())));
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
     rt.block_on(async {
         c.reload_tabs().await;
         c.apply_attach_target().await;
     });
     rt.block_on(tap);
+    assert_eq!(
+        c.pending_attach_target_for_tests(),
+        None,
+        "dropped once the move landed"
+    );
 
     assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
     assert_eq!(c.active_tab.get_untracked(), "btop");

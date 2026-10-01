@@ -25,8 +25,8 @@ use frust::{
 };
 use frust_glyph::{BadgeVariant, badge, tooltip};
 
-use crate::features::terminal::data::feeds::grpc_feed::FeedStatus;
 use crate::features::terminal::domain::entities::{PaneEntry, Space, TabEntry};
+use crate::features::terminal::domain::feed::LinkStatus;
 use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
@@ -82,7 +82,7 @@ pub(crate) struct RailHead<'a> {
     pub name: &'a str,
     /// `"3 spaces · 8 panes"` — see [`rail_summary`].
     pub summary: String,
-    pub link: Option<FeedStatus>,
+    pub link: Option<LinkStatus>,
     pub read_only: bool,
 }
 
@@ -104,12 +104,12 @@ fn plural(count: usize, unit: &str) -> String {
 
 /// The status chip: the attached stream's link, or `running` for a session
 /// with no stream to report (the mock transcript).
-fn status_chip(link: Option<FeedStatus>) -> (&'static str, BadgeVariant) {
+fn status_chip(link: Option<LinkStatus>) -> (&'static str, BadgeVariant) {
     match link {
-        None | Some(FeedStatus::Connected) => ("running", BadgeVariant::Success),
-        Some(FeedStatus::Idle | FeedStatus::Reconnecting) => ("connecting", BadgeVariant::Warning),
-        Some(FeedStatus::Disconnected) => ("offline", BadgeVariant::Error),
-        Some(FeedStatus::Closed) => ("exited", BadgeVariant::Neutral),
+        None | Some(LinkStatus::Connected) => ("running", BadgeVariant::Success),
+        Some(LinkStatus::Idle | LinkStatus::Reconnecting) => ("connecting", BadgeVariant::Warning),
+        Some(LinkStatus::Disconnected) => ("offline", BadgeVariant::Error),
+        Some(LinkStatus::Closed) => ("exited", BadgeVariant::Neutral),
     }
 }
 
@@ -451,13 +451,13 @@ mod tests {
     #[test]
     fn the_status_chip_reads_the_link_and_a_streamless_session_as_running() {
         assert_eq!(status_chip(None).0, "running");
-        assert_eq!(status_chip(Some(FeedStatus::Connected)).0, "running");
+        assert_eq!(status_chip(Some(LinkStatus::Connected)).0, "running");
         assert_eq!(
-            status_chip(Some(FeedStatus::Reconnecting)).1,
+            status_chip(Some(LinkStatus::Reconnecting)).1,
             BadgeVariant::Warning
         );
         assert_eq!(
-            status_chip(Some(FeedStatus::Disconnected)).1,
+            status_chip(Some(LinkStatus::Disconnected)).1,
             BadgeVariant::Error
         );
     }

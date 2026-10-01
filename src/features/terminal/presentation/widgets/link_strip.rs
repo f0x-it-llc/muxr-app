@@ -3,7 +3,7 @@
 
 use frust::{AnyView, any, button};
 
-use crate::features::terminal::data::feeds::grpc_feed::FeedStatus;
+use crate::features::terminal::domain::feed::LinkStatus;
 use crate::ui::palette::{Palette, active_theme, inked};
 
 use super::super::chrome::status_strip;
@@ -29,14 +29,14 @@ const LINK_LEAVE: &str = "Back to sessions";
 /// the card, not the sheet: `retry` needs the live session, which is screen
 /// state.
 pub(crate) fn link_strip(
-    link: Option<FeedStatus>,
+    link: Option<LinkStatus>,
     colors: &Palette,
     ink: &CardInk,
 ) -> Option<AnyView<TerminalState>> {
     let (message, action): (&str, Option<AnyView<TerminalState>>) = match link? {
-        FeedStatus::Idle | FeedStatus::Connected => return None,
-        FeedStatus::Reconnecting => (LINK_RECONNECTING, None),
-        FeedStatus::Disconnected => (
+        LinkStatus::Idle | LinkStatus::Connected => return None,
+        LinkStatus::Reconnecting => (LINK_RECONNECTING, None),
+        LinkStatus::Disconnected => (
             LINK_DISCONNECTED,
             Some(any(button(LINK_RETRY, |state: &mut TerminalState| {
                 if let Some(session) = state.live.as_ref() {
@@ -44,7 +44,7 @@ pub(crate) fn link_strip(
                 }
             }))),
         ),
-        FeedStatus::Closed => (
+        LinkStatus::Closed => (
             LINK_CLOSED,
             Some(any(button(LINK_LEAVE, |state: &mut TerminalState| {
                 state.actions.app_nav.pop();

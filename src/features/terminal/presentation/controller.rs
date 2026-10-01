@@ -46,11 +46,11 @@ use frust::{Get, GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
-use crate::features::terminal::data::feeds::grpc_feed::{FeedStatus, GrpcTerminalFeed, ResumeSlot};
+use crate::features::terminal::data::feeds::grpc_feed::{GrpcTerminalFeed, ResumeSlot};
 use crate::features::terminal::domain::entities::{
     PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
 };
-use crate::features::terminal::domain::feed::TerminalFeed;
+use crate::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use crate::features::terminal::domain::repositories::{
     PreferencesRepository, SessionsRepository, TerminalRepository,
 };
@@ -124,7 +124,7 @@ pub struct TerminalController {
     /// claimed it for a real session, `false` for the fixture replay.
     live_attached: AtomicBool,
     /// Where a live session's stream stands, mirrored off the feed on the UI thread.
-    pub link: RwSignal<Option<FeedStatus>>,
+    pub link: RwSignal<Option<LinkStatus>>,
     /// The connection id last handed to the repository, so an unchanged one re-binds
     /// nothing. A `Mutex`, not a `Cell`: this type is `Send + Sync` under the bound.
     bound_connection_id: Mutex<String>,
@@ -193,10 +193,13 @@ pub struct TerminalController {
 /// (0-based, `TabMsg.position`) and/or the wire pane id within that tab.
 ///
 /// Applied at most once, and only against a tab list a fetch published once the
-/// link could route — see [`TerminalController::apply_attach_target`]. **A
-/// user-driven move or create made after mount supersedes it**: the claim that
-/// verb takes drops the target, so the link never yanks the user back from, or
-/// resolves inside, a place they moved to themselves.
+/// link could route — see [`TerminalController::apply_attach_target`].
+///
+/// **Supersede rule**: only an action that actually moves this connection's focus
+/// supersedes the [`AttachTarget`], once its verb lands
+/// ([`tell_move`](TerminalController::tell_move)); a refused claim, a failed move and a
+/// space create keep it. So the link never yanks the user back from, or resolves
+/// inside, a place they moved to themselves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttachTarget {
     /// `TabMsg.position` — never the tab id, never a title.
@@ -410,15 +413,18 @@ impl TerminalController {
             .unwrap_or_else(PoisonError::into_inner) = target;
     }
 
-    /// The deep link still waiting to apply, if any — a test/diagnostic accessor.
-    pub fn pending_attach_target(&self) -> Option<AttachTarget> {
+    /// The deep link still waiting to apply, if any. Test-only, never read by
+    /// production code; `pub` rather than `#[cfg(test)]` like every `*_for_tests`
+    /// seam here, since `tests/*.rs` link the normal build.
+    #[doc(hidden)]
+    pub fn pending_attach_target_for_tests(&self) -> Option<AttachTarget> {
         *self
             .attach_target
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Drop the [`AttachTarget`]: a user-driven move or create supersedes it.
+    /// Drop the [`AttachTarget`] — [`tell_move`](Self::tell_move)'s landed half.
     fn supersede_attach_target(&self) {
         self.set_attach_target(None, None);
     }
@@ -643,7 +649,7 @@ impl TerminalController {
         };
         // The focus move first: a switch the backend refused must not leave the
         // card showing a tab the session is not on.
-        if !self.tell(self.terminal.go_to_tab(tab_id)).await {
+        if !self.tell_move(self.terminal.go_to_tab(tab_id)).await {
             return false;
         }
         let Ok(lines) = self
@@ -706,7 +712,7 @@ impl TerminalController {
             return false;
         }
         if !self
-            .tell(self.terminal.focus_pane(pane_id, is_plugin))
+            .tell_move(self.terminal.focus_pane(pane_id, is_plugin))
             .await
         {
             return false;
@@ -762,7 +768,7 @@ impl TerminalController {
             return false;
         };
         if !self
-            .tell(self.terminal.switch_space(space_id.clone()))
+            .tell_move(self.terminal.switch_space(space_id.clone()))
             .await
         {
             return false;
@@ -853,13 +859,13 @@ impl TerminalController {
     /// content-tap hook's route, never wired for herdr. Unlike
     /// [`commit_pane`](Self::commit_pane), a tap never crosses tabs, so this
     /// skips the switch step and reloads on landing to converge the tap's
-    /// rects with the sheet's badge. A refused call writes nothing. A user-driven
-    /// move, so it supersedes the [`AttachTarget`].
+    /// rects with the sheet's badge. A refused call writes nothing. A landed tap
+    /// moves this connection's focus, so it supersedes the [`AttachTarget`] — a
+    /// refused one keeps it ([`tell_move`](Self::tell_move)).
     pub async fn focus_pane_from_tap(&self, pane_id: u32, is_plugin: bool) -> bool {
-        self.supersede_attach_target();
         let tab_key = self.active_tab.get_untracked();
         if !self
-            .tell(self.terminal.focus_pane(pane_id, is_plugin))
+            .tell_move(self.terminal.focus_pane(pane_id, is_plugin))
             .await
         {
             return false;
@@ -939,7 +945,7 @@ impl TerminalController {
     /// than re-claiming what they are holding, the same shape
     /// [`commit_pane_unclaimed`](Self::commit_pane_unclaimed) takes.
     async fn select_space_unclaimed(&self, id: String) -> bool {
-        if !self.tell(self.terminal.switch_space(id.clone())).await {
+        if !self.tell_move(self.terminal.switch_space(id.clone())).await {
             return false;
         }
         if self.is_herdr_session() {
@@ -1013,7 +1019,7 @@ impl TerminalController {
         let Some(_claim) = self.claim_create() else {
             return;
         };
-        if self.tell(self.terminal.new_tab(name)).await {
+        if self.tell_move(self.terminal.new_tab(name)).await {
             self.settle_create().await;
             self.load().await;
         }
@@ -1058,7 +1064,7 @@ impl TerminalController {
         let Some(_claim) = self.claim_create() else {
             return;
         };
-        if self.tell(self.terminal.new_pane(floating)).await {
+        if self.tell_move(self.terminal.new_pane(floating)).await {
             self.settle_create().await;
             self.load().await;
         }
@@ -1239,14 +1245,13 @@ impl TerminalController {
         }
     }
 
-    /// Whether the tree's expansion sits in the selected space with nothing browsed —
-    /// what the rail's follow-focus requires, since tab keys are unique only within
-    /// one layout: a same-keyed tab under a browsed space is not the resting one.
+    /// Whether the tree's expansion sits in the selected space — what the rail's
+    /// follow-focus requires, since tab keys are unique only within one layout: a
+    /// same-keyed tab under a browsed space is not the resting one. Reads the
+    /// expansion alone, never [`browsed_space_tabs`](Self::browsed_space_tabs): that
+    /// cache outlives a browse the user has since left by re-expanding the selected space.
     fn expansion_on_selected_space(&self) -> bool {
-        let browsing = self.browsed_space_tabs.with_untracked(Option::is_some);
-        !browsing
-            && (!self.is_herdr_session()
-                || self.expanded_space.get_untracked() == self.selected_space_id())
+        !self.is_herdr_session() || self.expanded_space.get_untracked() == self.selected_space_id()
     }
 
     /// Whether this controller's reactive state is still alive — `false` once the mount
@@ -1260,22 +1265,26 @@ impl TerminalController {
     }
 
     /// Claim the one in-flight create slot, or `None` when a create is already running.
-    /// The claim releases on drop, so a refused create re-arms the affordance. A won
-    /// claim supersedes the [`AttachTarget`]: the server focuses what it creates.
+    /// The claim releases on drop, so a refused create re-arms the affordance.
+    ///
+    /// **Supersede rule**: only an action that actually moves this connection's focus
+    /// supersedes the [`AttachTarget`], once its verb lands
+    /// ([`tell_move`](Self::tell_move)); a refused claim, a failed move and a
+    /// space create keep it. Taking this claim drops nothing.
     fn claim_create(&self) -> Option<FlightClaim<'_>> {
-        let claim = (!self.create_in_flight.swap(true, Ordering::SeqCst))
-            .then(|| FlightClaim(&self.create_in_flight))?;
-        self.supersede_attach_target();
-        Some(claim)
+        (!self.create_in_flight.swap(true, Ordering::SeqCst))
+            .then(|| FlightClaim(&self.create_in_flight))
     }
 
-    /// [`claim_move`](Self::claim_move) for a **user-driven** move, which also
-    /// supersedes the [`AttachTarget`];
+    /// [`claim_move`](Self::claim_move) for a **user-driven** move;
     /// [`apply_attach_target`](Self::apply_attach_target) takes the plain claim.
+    ///
+    /// **Supersede rule**: only an action that actually moves this connection's focus
+    /// supersedes the [`AttachTarget`], once its verb lands
+    /// ([`tell_move`](Self::tell_move)); a refused claim, a failed move and a
+    /// space create keep it. Taking this claim drops nothing.
     fn claim_user_move(&self) -> Option<FlightClaim<'_>> {
-        let claim = self.claim_move()?;
-        self.supersede_attach_target();
-        Some(claim)
+        self.claim_move()
     }
 
     /// [`claim_create`](Self::claim_create)'s counterpart for a **move** — the same
@@ -1348,6 +1357,17 @@ impl TerminalController {
                 false
             }
         }
+    }
+
+    /// [`tell`](Self::tell) for a verb that moves this connection's focus — a focus,
+    /// tab or space switch, or a tab/pane create (the server focuses what it makes) —
+    /// superseding the [`AttachTarget`] once it lands. The one place that rule acts.
+    async fn tell_move(&self, work: impl Future<Output = Result<(), AppFailure>>) -> bool {
+        let landed = self.tell(work).await;
+        if landed {
+            self.supersede_attach_target();
+        }
+        landed
     }
 
     /// Rename the attached session to `name`, writing through the **sessions**
@@ -1461,7 +1481,7 @@ impl TerminalController {
     /// signal the caller uses to fire a catch-up
     /// [`reload_tabs`](Self::reload_tabs), since the mount's own load went
     /// out with no connection id to route by.
-    pub fn mirror_link(&self, status: FeedStatus, connection_id: Option<String>) -> bool {
+    pub fn mirror_link(&self, status: LinkStatus, connection_id: Option<String>) -> bool {
         if self.link.get_untracked() != Some(status) {
             self.link.set(Some(status));
         }
@@ -1475,7 +1495,7 @@ impl TerminalController {
             self.terminal
                 .bind(self.session_id.clone(), Some(connection_id.clone()));
         }
-        let settled = (!connection_id.is_empty() || status == FeedStatus::Connected)
+        let settled = (!connection_id.is_empty() || status == LinkStatus::Connected)
             && self
                 .attach_settled
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1633,7 +1653,7 @@ impl LiveFeed {
     }
 
     /// Where a real session's stream stands, or `None` for the demo replay.
-    pub fn status(&self) -> Option<FeedStatus> {
+    pub fn status(&self) -> Option<LinkStatus> {
         match self {
             LiveFeed::Demo(_) => None,
             LiveFeed::Grpc(feed) => Some(feed.borrow().status()),
@@ -1794,7 +1814,7 @@ impl LiveSession {
     }
 
     /// Where this session's stream stands — [`LiveFeed::status`], forwarded.
-    pub fn status(&self) -> Option<FeedStatus> {
+    pub fn status(&self) -> Option<LinkStatus> {
         self.feed.status()
     }
 
@@ -2189,11 +2209,11 @@ mod tests {
             "a screen with no live session reports no link"
         );
 
-        c.mirror_link(FeedStatus::Reconnecting, None);
-        assert_eq!(c.link.get_untracked(), Some(FeedStatus::Reconnecting));
+        c.mirror_link(LinkStatus::Reconnecting, None);
+        assert_eq!(c.link.get_untracked(), Some(LinkStatus::Reconnecting));
 
-        c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string()));
-        assert_eq!(c.link.get_untracked(), Some(FeedStatus::Connected));
+        c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string()));
+        assert_eq!(c.link.get_untracked(), Some(LinkStatus::Connected));
     }
 
     #[test]
@@ -2213,15 +2233,15 @@ mod tests {
             "construction binds the session, before any stream exists"
         );
 
-        c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string()));
+        c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string()));
         assert_eq!(repository.binds(), 2);
-        c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string()));
-        c.mirror_link(FeedStatus::Reconnecting, Some("conn-1".to_string()));
+        c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string()));
+        c.mirror_link(LinkStatus::Reconnecting, Some("conn-1".to_string()));
         assert_eq!(repository.binds(), 2, "an unchanged id re-binds nothing");
 
         // A re-attach mints a fresh id, and every later request must route to
         // it rather than to the stream that is gone.
-        c.mirror_link(FeedStatus::Connected, Some("conn-2".to_string()));
+        c.mirror_link(LinkStatus::Connected, Some("conn-2".to_string()));
         assert_eq!(repository.binds(), 3);
         assert_eq!(repository.last_binding(), Some("conn-2".to_string()));
     }
@@ -4002,22 +4022,22 @@ mod tests {
     fn the_attach_handshake_settles_exactly_once_per_mount() {
         let c = controller(Some("zellij:dev"));
         assert!(
-            !c.mirror_link(FeedStatus::Idle, None),
+            !c.mirror_link(LinkStatus::Idle, None),
             "nothing has connected yet"
         );
-        assert!(!c.mirror_link(FeedStatus::Reconnecting, None));
+        assert!(!c.mirror_link(LinkStatus::Reconnecting, None));
 
         assert!(
-            c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string())),
+            c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string())),
             "the stream minted an id: the layout read that raced it needs \
              doing again"
         );
         assert!(
-            !c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string())),
+            !c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string())),
             "…and it is said once"
         );
         assert!(
-            !c.mirror_link(FeedStatus::Connected, Some("conn-2".to_string())),
+            !c.mirror_link(LinkStatus::Connected, Some("conn-2".to_string())),
             "a re-attach re-binds the repository but does not re-settle"
         );
     }
@@ -4025,8 +4045,8 @@ mod tests {
     #[test]
     fn a_connected_status_settles_the_attach_even_with_no_id_to_show_for_it() {
         let c = controller(Some("zellij:dev"));
-        assert!(c.mirror_link(FeedStatus::Connected, None));
-        assert!(!c.mirror_link(FeedStatus::Connected, None));
+        assert!(c.mirror_link(LinkStatus::Connected, None));
+        assert!(!c.mirror_link(LinkStatus::Connected, None));
     }
 
     /// A **live** zellij controller over a fresh [`RecordingRepository`], deep-linked
@@ -4050,13 +4070,13 @@ mod tests {
     fn a_live_deep_link_waits_for_a_list_published_after_the_settle() {
         let (c, repository) = live_deep_link();
         block_on(c.load());
-        assert!(c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string())));
+        assert!(c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string())));
         block_on(c.apply_attach_target());
         assert!(
             repository.actions().is_empty(),
             "a pre-handshake list never counts"
         );
-        assert!(c.pending_attach_target().is_some());
+        assert!(c.pending_attach_target_for_tests().is_some());
 
         block_on(c.reload_tabs());
         assert_eq!(repository.actions(), DEEP_LINK);
@@ -4069,12 +4089,12 @@ mod tests {
     fn a_held_move_claim_leaves_the_deep_link_for_the_next_publish() {
         let (c, repository) = live_deep_link();
         block_on(c.load());
-        c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string()));
+        c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string()));
         let held = c.claim_move();
         block_on(c.reload_tabs());
         assert!(repository.actions().is_empty());
         assert!(
-            c.pending_attach_target().is_some(),
+            c.pending_attach_target_for_tests().is_some(),
             "not lost to the refusal"
         );
 
@@ -4088,8 +4108,8 @@ mod tests {
         let (c, repository) = live_deep_link();
         block_on(c.load());
         assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
-        assert_eq!(c.pending_attach_target(), None);
-        c.mirror_link(FeedStatus::Connected, Some("conn-1".to_string()));
+        assert_eq!(c.pending_attach_target_for_tests(), None);
+        c.mirror_link(LinkStatus::Connected, Some("conn-1".to_string()));
         block_on(c.reload_tabs());
         assert_eq!(repository.actions(), ["focus_pane(11,false)"]);
 
@@ -4097,9 +4117,30 @@ mod tests {
         let (c, _repository) = live_deep_link();
         block_on(c.new_tab(String::new()));
         assert_eq!(
-            c.pending_attach_target(),
+            c.pending_attach_target_for_tests(),
             None,
             "a create moves the focus too"
+        );
+    }
+
+    #[test]
+    fn a_refused_move_and_a_landed_space_create_keep_the_deep_link() {
+        let (c, repository) = live_deep_link();
+        block_on(c.load());
+        repository.refuse("focus_pane");
+        assert!(!block_on(c.commit_pane("alpha".to_string(), 11, false)));
+        assert!(c.pending_attach_target_for_tests().is_some());
+
+        let _override = SettleOverride::install(Duration::ZERO);
+        block_on(c.create_space("scratch".to_string()));
+        assert!(
+            repository
+                .actions()
+                .contains(&"create_space(scratch)".to_string())
+        );
+        assert!(
+            c.pending_attach_target_for_tests().is_some(),
+            "a space create moves no focus"
         );
     }
 

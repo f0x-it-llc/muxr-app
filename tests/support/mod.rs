@@ -11,10 +11,10 @@
 //! use the recorded-geometry helpers (`largest`/`smallest`/`by_width`/`added`) for a pushed page.
 //!
 //! **Window metrics:** [`metrics_at`]/[`mount_with_metrics`]/[`reprovide_metrics`] publish a resize
-//! exactly as a shell does. It reaches `build` on the next frames without a probe: every [`frame`]
-//! runs `RenderRoot::rebuild` (frust-core `app.rs:1189`), as the shell driver does on each frame it
-//! runs (frust-shell-ios `app/frame.rs:348`), and a resize reopens the frame gate's
-//! `WARMUP_FRAMES = 3` window (frust-shell-common `frame_gate.rs:82`, `:483`).
+//! as a shell does, and require [`setup`] to have run first (its owner holds what they publish).
+//! It reaches `build` on the next frames, no probe: every [`frame`] runs `RenderRoot::rebuild`
+//! (frust-core `app.rs:1189`) as the shell driver does (frust-shell-ios `app/frame.rs:348`), and a
+//! resize reopens the `WARMUP_FRAMES = 3` window (frust-shell-common `frame_gate.rs:82`/`:483`).
 #![allow(dead_code)]
 
 use std::any::Any;
