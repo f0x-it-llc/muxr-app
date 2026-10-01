@@ -6,7 +6,7 @@
 //! invisible to the accessibility tree. Two navigators, deliberately: the **mounted** one stands
 //! in for the app's root overlay host the screen pushes overlays through (exercised end to end,
 //! located by painted geometry); the **record-only** one carries the app's `Nav` handle, so
-//! pushing `/terminal?session=s-1` records that query in the route-meta mirror (the only way
+//! pushing `/terminal?session=zellij:dev` records that query in the route-meta mirror (the only way
 //! this screen learns its session id) while the page op it enqueues is never drained. Without the
 //! split, that push would build a second terminal screen inside the mounted navigator and the
 //! two would fight over the published chrome.
@@ -2209,7 +2209,8 @@ fn the_screen_reads_the_attached_session_off_the_route_it_was_pushed_with() {
 
     // The proof is exact, if indirect: the rename dialog seeds itself with the
     // attached session's *current* name, which the screen can only know from
-    // `?session=s-1`. So delete one character and submit.
+    // `?session=zellij:dev`, the name-derived id the mock mints. So delete one
+    // character and submit.
     let before = h.frame();
     h.open_sheet();
     let after = h.tap_footer_rename();
@@ -3101,6 +3102,88 @@ fn a_docked_poll_follows_focus_only_while_resting_never_into_a_same_keyed_browse
         at("forgekit", "devbox"),
         "nothing browsed: it follows"
     );
+}
+
+/// A current-thread runtime to drive one controller call to completion.
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+/// Browsing another space caches its tabs; re-expanding the selected one (the rail's
+/// auto-drill reopening the active tab) puts the rail back at rest, so a poll that
+/// reports another client's focus must be followed despite that cache.
+#[test]
+fn a_docked_poll_follows_focus_after_browsing_b_then_re_expanding_a() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    let at = |space: &str, tab: &str| (Some(space.to_string()), Some(tab.to_string()));
+    assert!(rt.block_on(c.switch_tab("btop".to_string())));
+    c.settle_rest();
+
+    rt.block_on(c.expand_space("zelli_mobile".to_string()));
+    assert!(c.browsed_space_tabs.get_untracked().is_some(), "B browsed");
+    rt.block_on(c.expand_space("forgekit".to_string()));
+    c.expand_tab("btop".to_string());
+    assert_eq!(expanded(&c), at("forgekit", "btop"));
+
+    assert!(c.take_layout_poll_tick());
+    rt.block_on(c.refresh_layout_from_poll());
+    assert_eq!(
+        expanded(&c),
+        at("forgekit", "devbox"),
+        "back at rest on A: the rail follows the poll's focus"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The deep link's supersede rule
+// ---------------------------------------------------------------------------
+
+/// Only a move that lands supersedes the deep link: one whose RPC fails — a space
+/// switch, a tree commit, a content tap — leaves it pending for the next publish.
+#[test]
+fn a_claimed_move_whose_rpc_fails_keeps_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = Harness::mount_session(HERDR_SESSION_ID);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    let active = c.active_tab.get_untracked();
+    let kept = |landed: bool, step: &str| {
+        assert!(!landed, "{step}: the mock refuses it");
+        assert!(
+            c.pending_attach_target_for_tests().is_some(),
+            "{step}: still pending"
+        );
+    };
+
+    c.set_attach_target(Some(1), Some(21));
+    kept(
+        rt.block_on(c.select_space("nowhere".to_string())),
+        "space switch",
+    );
+    kept(rt.block_on(c.commit_pane(active, 999, false)), "commit");
+    kept(rt.block_on(c.focus_pane_from_tap(999, false)), "tap");
+}
+
+/// A space create moves no focus, so it keeps the deep link — even with its claim won.
+/// The mock refuses the create itself; the controller's unit suite pins the landed case.
+#[test]
+fn a_space_create_keeps_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    let _h = Harness::mount_session(HERDR_SESSION_ID);
+    let c = debug_controller().expect("mounted");
+
+    c.set_attach_target(Some(1), Some(21));
+    current_thread().block_on(c.create_space("scratch".to_string()));
+    assert!(c.pending_attach_target_for_tests().is_some());
 }
 
 // ---------------------------------------------------------------------------

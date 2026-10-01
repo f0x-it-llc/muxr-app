@@ -4,6 +4,7 @@
 //! | Module | What it owns |
 //! |---|---|
 //! | [`pages`] | `terminal_page` (the route's `Component`), its `Actions` bundle, and the overflow menu |
+//! | [`actions`] | the Tablet's action glue: `rail_view`, `AfterCommit` and the rail rows' overflow-menu dispatch |
 //! | [`controller`] | `TerminalController` — the screen's view model, hosted by `use_controller` |
 //! | [`widgets`] | one module per visual cluster of `docs/terminal.html` v2 — the card, the status row, the pills/panes, the "panes & tabs" sheet and its dialog |
 //! | [`chrome`] | the hand-rolled `View`/`Widget` pairs those widgets are built from, and the three vector marks `frust::icons` lacks |
@@ -15,6 +16,7 @@
 //! [`term`] are the card body's two halves — mock transcript by default,
 //! [`term::terminal_surface`] once `pages`' pane-content switch enters live.
 
+pub mod actions;
 pub mod chrome;
 pub mod controller;
 pub mod keybar;

@@ -99,6 +99,12 @@ pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<Menu
 
 /// The [`TerminalMenuChoice`] behind entry `index` of [`terminal_menu`], read
 /// back through the same table (the separator answers `None`).
+///
+/// The throwaway table built on every decode is deliberate: it is the single source
+/// of truth for both the builder and this decoder, so the two can never disagree on
+/// a position. Its flags only change how an entry is drawn (an icon), never its
+/// position or choice, so any pair decodes alike — `false, false` stands for the
+/// open menu's own.
 pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
     terminal_menu_table(false, false)
         .get(index)

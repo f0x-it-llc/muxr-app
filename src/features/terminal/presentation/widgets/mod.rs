@@ -12,8 +12,8 @@
 //! (its Retry callback needs screen state). Everything else, [`side_sheet_tree`]
 //! included, takes only resolved colours/callbacks — the side sheet's own
 //! `Actions`-coupled bridge (building its `TreeData`/`TreeActions` off the
-//! controller, and its sticky footer) is `pages.rs`'s own action wiring, not a
-//! widgets/ module.
+//! controller, and its sticky footer) is `pages.rs`'s own action wiring, and the
+//! rail's (`rail_view`, the row-menu dispatch) is `actions.rs`' — not a widgets/ module.
 //!
 //! **Two colour vocabularies**: the card inks from the brightness-invariant
 //! [`card::CardInk`] (over `GlyphInk`); everything else resolves
