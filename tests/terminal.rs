@@ -3147,7 +3147,8 @@ fn a_docked_poll_follows_focus_after_browsing_b_then_re_expanding_a() {
 // ---------------------------------------------------------------------------
 
 /// Only a move that lands supersedes the deep link: one whose RPC fails — a space
-/// switch, a tree commit, a content tap — leaves it pending for the next publish.
+/// switch or a tree commit (both claimed), or a grid tap (no claim: a failed verb never
+/// lands) — leaves it pending for the next publish.
 #[test]
 fn a_claimed_move_whose_rpc_fails_keeps_the_deep_link() {
     let _g = serial();

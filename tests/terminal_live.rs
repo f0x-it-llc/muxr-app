@@ -39,6 +39,7 @@ use frust_text::TextContext;
 use kurbo::{Point, Size, Vec2};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::failure::AppFailure;
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::settings::di::expect_preferences_repository;
 use muxr::features::settings::domain::entities::{
@@ -48,8 +49,10 @@ use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     add_test_tab, clear_test_tabs, clear_verb_log_for_tests, verb_log_for_tests,
 };
-use muxr::features::terminal::di::expect_terminal_repository;
+use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
+use muxr::features::terminal::domain::entities::{Space, TabEntry, TermLine};
 use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
+use muxr::features::terminal::domain::repositories::TerminalRepository;
 use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
@@ -1814,8 +1817,13 @@ fn start(rt: &tokio::runtime::Runtime, step: &mut Step<'_>) {
 /// when each layout fetch opens and lands.
 fn live_deep_link() -> Arc<TerminalController> {
     let _state = MuxrApp.init();
+    live_deep_link_over(expect_terminal_repository())
+}
+
+/// [`live_deep_link`] over `repository` (the context must already be initialised).
+fn live_deep_link_over(repository: SharedTerminalRepository) -> Arc<TerminalController> {
     let c = Arc::new(TerminalController::new(
-        expect_terminal_repository(),
+        repository,
         expect_sessions_repository(),
         expect_preferences_repository(),
         Some(SESSION_ID.to_string()),
@@ -1914,4 +1922,109 @@ fn a_user_move_in_flight_at_the_settle_supersedes_the_deep_link() {
 
     assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
     assert_eq!(c.active_tab.get_untracked(), "btop");
+}
+
+/// A grid tap takes no claim, yet while its verb is in flight the settled link
+/// must neither fire nor drop; only the landed tap supersedes it.
+#[test]
+fn a_grid_tap_in_flight_at_the_settle_defers_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let c = live_deep_link();
+    let rt = runtime();
+    rt.block_on(c.load());
+    let pane = 11;
+
+    let mut tap: Step = Box::pin(async {
+        assert!(c.focus_pane_from_tap(pane, false).await);
+    });
+    start(&rt, &mut tap);
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert!(
+        c.pending_attach_target_for_tests().is_some(),
+        "kept while the tap is in flight"
+    );
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "no verb has landed, the link's included: {:?}",
+        verb_log_for_tests()
+    );
+
+    rt.block_on(tap);
+    assert_eq!(c.pending_attach_target_for_tests(), None, "the landed tap");
+    assert_eq!(verb_log_for_tests(), ["focus_pane:11"]);
+}
+
+/// The mock answers `new_tab` as unsupported, so this wraps it with a create that
+/// parks on a timer, as the wire's does.
+struct SlowCreate(SharedTerminalRepository);
+
+#[clean_signals::async_trait]
+impl TerminalRepository for SlowCreate {
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        self.0.list_spaces().await
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs().await
+    }
+    async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
+        self.0.tab_lines(key).await
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.0.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.0.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.0.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.0.focus_pane(pane_id, is_plugin).await
+    }
+    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(Duration::from_millis(20)).await;
+        Ok(())
+    }
+}
+
+/// `new_tab` holds only the create claim; its in-flight verb still defers the link,
+/// and the landed create then supersedes it.
+#[test]
+fn a_new_tab_in_flight_at_the_settle_defers_the_deep_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let _state = MuxrApp.init();
+    let c = live_deep_link_over(Arc::new(SlowCreate(expect_terminal_repository())));
+    let rt = runtime();
+    rt.block_on(c.load());
+
+    let mut create: Step = Box::pin(async {
+        c.new_tab("x".to_string()).await;
+    });
+    start(&rt, &mut create);
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "no deep-link verbs while the create is in flight: {:?}",
+        verb_log_for_tests()
+    );
+    assert!(c.pending_attach_target_for_tests().is_some());
+
+    rt.block_on(create);
+    assert_eq!(
+        c.pending_attach_target_for_tests(),
+        None,
+        "the landed create"
+    );
 }

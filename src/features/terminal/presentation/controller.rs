@@ -34,7 +34,7 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -161,6 +161,9 @@ pub struct TerminalController {
     /// two moves racing would leave the connection on one space with another
     /// space's tab world published.
     move_in_flight: AtomicBool,
+    /// Focus-moving verbs currently inside [`tell_move`](Self::tell_move); while
+    /// non-zero [`apply_attach_target`](Self::apply_attach_target) defers.
+    focus_verbs_in_flight: AtomicUsize,
     /// Whether the attached stream's handshake has settled —
     /// [`mirror_link`](Self::mirror_link) answers `true` on the wake that flips this.
     attach_settled: AtomicBool,
@@ -199,7 +202,8 @@ pub struct TerminalController {
 /// supersedes the [`AttachTarget`], once its verb lands
 /// ([`tell_move`](TerminalController::tell_move)); a refused claim, a failed move and a
 /// space create keep it. So the link never yanks the user back from, or resolves
-/// inside, a place they moved to themselves.
+/// inside, a place they moved to themselves. It also waits out any such verb
+/// still in flight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttachTarget {
     /// `TabMsg.position` — never the tab id, never a title.
@@ -328,6 +332,7 @@ impl TerminalController {
             layout_poll_in_flight: AtomicBool::new(false),
             create_in_flight: AtomicBool::new(false),
             move_in_flight: AtomicBool::new(false),
+            focus_verbs_in_flight: AtomicUsize::new(0),
             attach_settled: AtomicBool::new(false),
             settle_generation: AtomicU64::new(0),
             published_generation: AtomicU64::new(0),
@@ -437,9 +442,9 @@ impl TerminalController {
     /// target, so a claim held elsewhere leaves it for the next publish. A tab
     /// position or pane id the layout does not carry drops it silently — a
     /// deliberate fail-safe. Focus verbs are allowed for read-only tokens, so this
-    /// applies there too.
+    /// applies there too. It defers while any focus-moving verb is in flight.
     pub async fn apply_attach_target(&self) {
-        if !self.attach_target_ready() {
+        if !self.attach_target_ready() || self.focus_verbs_in_flight.load(Ordering::SeqCst) != 0 {
             return;
         }
         let Some(_claim) = self.claim_move() else {
@@ -1361,8 +1366,11 @@ impl TerminalController {
 
     /// [`tell`](Self::tell) for a verb that moves this connection's focus — a focus,
     /// tab or space switch, or a tab/pane create (the server focuses what it makes) —
-    /// superseding the [`AttachTarget`] once it lands. The one place that rule acts.
+    /// superseding the [`AttachTarget`] once it lands. The one place that rule acts,
+    /// and it holds `focus_verbs_in_flight` across `work`.
     async fn tell_move(&self, work: impl Future<Output = Result<(), AppFailure>>) -> bool {
+        self.focus_verbs_in_flight.fetch_add(1, Ordering::SeqCst);
+        let _in_flight = VerbGuard(&self.focus_verbs_in_flight);
         let landed = self.tell(work).await;
         if landed {
             self.supersede_attach_target();
@@ -1561,6 +1569,15 @@ struct FlightClaim<'a>(&'a AtomicBool);
 impl Drop for FlightClaim<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Releases one `focus_verbs_in_flight` count on every exit path.
+struct VerbGuard<'a>(&'a AtomicUsize);
+
+impl Drop for VerbGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
