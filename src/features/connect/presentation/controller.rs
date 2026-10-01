@@ -524,7 +524,14 @@ impl ConnectController {
                 // toast (the plan's Phase 2 decision), superseding "Compact
                 // byte-for-byte" for this behaviour. `validated_target`'s only
                 // failure today is the URL parse, so the fixed message is honest.
-                log::debug!("connect: form rejected: {failure:?}");
+                // `parse_endpoint` only ever fails as `Network`; a second source
+                // (any other kind) must not silently reuse the fixed message.
+                debug_assert!(
+                    matches!(failure, AppFailure::Network(_)),
+                    "validated_target gained a failure source besides the URL parse"
+                );
+                // Kind only: `AppFailure`'s `Debug` echoes the typed URL.
+                log::debug!("connect: form rejected: {}", failure_kind(&failure));
                 self.reject_url(URL_ERROR_MESSAGE);
             }
         }
@@ -1119,6 +1126,16 @@ fn pairing_target(payload: &PairingPayload) -> ConnectTarget {
         token: payload.token.clone(),
         remember: true,
         fingerprint: pinned_fingerprint(payload),
+    }
+}
+
+/// The failure's variant name alone — safe to log where its payload is not.
+fn failure_kind(failure: &AppFailure) -> &'static str {
+    match failure {
+        AppFailure::Network(_) => "Network",
+        AppFailure::Auth(_) => "Auth",
+        AppFailure::Storage(_) => "Storage",
+        AppFailure::Internal(_) => "Internal",
     }
 }
 

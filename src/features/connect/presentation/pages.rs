@@ -1,6 +1,7 @@
 //! The `/` route's page: the Connect screen scaffold.
 //!
-//! [`connect_page`] is the route seam; [`connect_layout`] is the arrangement
+//! [`connect_page`] is the route seam; [`connect_layout`] (re-exported from
+//! [`super::widgets::layout`]) is the arrangement
 //! half, split out because the cold-start splash lays the same pieces out
 //! through the same function, so the frame it finishes on and the frame the
 //! route paints are one picture.
@@ -25,14 +26,15 @@ use std::sync::Arc;
 
 use clean_signals_frust::use_controller;
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, Padding, SizedBox, Stack, WindowMetrics, any, component, inflexible, safe_area,
-    scroll_view, use_context,
+    AnyView, Component, Get, GetUntracked, Stack, WindowMetrics, any, component, scroll_view,
+    use_context,
 };
 
 use super::controller::ConnectController;
 use super::widgets::credential_dialogs::{credential_offer_prompt, handle_saved_row_delete};
 use super::widgets::getting_started::info_affordance;
+use super::widgets::layout::clamped_layout;
+pub use super::widgets::layout::connect_layout;
 use super::widgets::pro_gate::{gated_saved_row_tap, server_limit_prompt};
 use super::widgets::qr_affordance::{qr_affordance, qr_button};
 use super::widgets::tablet::tablet_screen;
@@ -48,66 +50,6 @@ use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
 use crate::ui::backdrop::page_backdrop;
 use crate::ui::palette::active_theme;
-use crate::ui::spacing;
-
-/// The content column's max width past
-/// [`WIDE_BREAKPOINT_PX`](crate::responsive::WIDE_BREAKPOINT_PX): a wide window
-/// centers the form rather than stretching it edge to edge. A plain clamp, not
-/// a layout switch (see `crate::responsive`).
-const CONNECT_CLAMP_WIDTH: f64 = 520.0;
-/// Where the clamped column sits in a wide window: centered horizontally,
-/// top-anchored vertically. Not [`Alignment::CENTER`] — the splash assembles
-/// into a bounded `Stack` layer, and `CENTER` there would trade this clamp's
-/// horizontal jump for a vertical one.
-const CLAMP_ALIGNMENT: Alignment = Alignment { x: 0.0, y: -1.0 };
-/// Arranges `pieces` into a safe-area-inset, padded, top-anchored column with
-/// [`spacing::SHEET`] between them, each stretched to the layer width — and,
-/// past the wide breakpoint, clamped to [`CONNECT_CLAMP_WIDTH`] and
-/// centered.
-///
-/// Takes the pieces already built, so the splash can pass its wrapped copies
-/// and the screen its live ones. The clamp lives here rather than in the
-/// screen's own `build`, so the splash and the route agree on layout without
-/// a jump between them.
-pub fn connect_layout<S: 'static>(pieces: Vec<AnyView<S>>) -> AnyView<S> {
-    // `None` (no shell published metrics yet, or a bare test harness) takes the
-    // same branch as a genuinely narrow window.
-    let wide_clamp = Responsive::of(use_context::<WindowMetrics>()).wide_clamp;
-    clamped_layout(pieces, wide_clamp)
-}
-
-/// [`connect_layout`] with the clamp decided by the caller — the screen's
-/// Compact branch, which has already read its [`Responsive`] once.
-fn clamped_layout<S: 'static>(pieces: Vec<AnyView<S>>, wide_clamp: bool) -> AnyView<S> {
-    let layer = any(safe_area(Padding(
-        EdgeInsets::symmetric(spacing::SHEET, spacing::HERO),
-        gapped(pieces, spacing::SHEET),
-    )));
-    if !wide_clamp {
-        return layer;
-    }
-    clamp(layer)
-}
-
-/// Centers `child` at no more than [`CONNECT_CLAMP_WIDTH`], top-anchored.
-pub(super) fn clamp<S: 'static>(child: AnyView<S>) -> AnyView<S> {
-    any(Align(
-        CLAMP_ALIGNMENT,
-        SizedBox::<S>(Some(CONNECT_CLAMP_WIDTH), None).child(child),
-    ))
-}
-
-/// `pieces` stacked full-width with `gap` between them.
-pub(super) fn gapped<S: 'static>(pieces: Vec<AnyView<S>>, gap: f64) -> FlexView<S> {
-    let mut children = Vec::with_capacity(pieces.len() * 2);
-    for (index, piece) in pieces.into_iter().enumerate() {
-        if index > 0 {
-            children.push(inflexible(any(SizedBox::<S>(None, Some(gap)))));
-        }
-        children.push(inflexible(piece));
-    }
-    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
-}
 
 /// The Connect screen: the `/` route's page. See the [module docs](self).
 pub fn connect_page(overlays: frust::NavigatorController<AppState>) -> AnyView<AppState> {

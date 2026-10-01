@@ -1,6 +1,10 @@
 import UIKit
 import FrustEmbedding
 
+// Tablet plan D11/R4: the floor for a usable terminal; iPadOS enforces it on
+// the resize handle.
+private let minimumSceneSize = CGSize(width: 480, height: 480)
+
 class SceneDelegate: FrustSceneDelegate {
     override func scene(
         _ scene: UIScene,
@@ -8,9 +12,9 @@ class SceneDelegate: FrustSceneDelegate {
         options connectionOptions: UIScene.ConnectionOptions
     ) {
         super.scene(scene, willConnectTo: session, options: connectionOptions)
-        // A resizable iPad window never shrinks below a usable terminal.
+        // A resizable iPad window never shrinks below `minimumSceneSize`.
         if let ws = scene as? UIWindowScene {
-            ws.sizeRestrictions?.minimumSize = CGSize(width: 480, height: 480)
+            ws.sizeRestrictions?.minimumSize = minimumSceneSize
         }
     }
 }

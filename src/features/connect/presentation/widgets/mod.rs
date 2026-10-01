@@ -21,7 +21,7 @@
 //! 2. The splash's fields are `read_only`, never `enabled(false)`: the same
 //!    focus gate without the dimming.
 //! 3. The responsive clamp lives in
-//!    [`connect_layout`](super::pages::connect_layout), the one function
+//!    [`connect_layout`](layout::connect_layout), the one function
 //!    both callers assemble through on Compact. The Tablet structure
 //!    ([`tablet_panel_pieces`], [`tablet_form_pieces`]) is the screen's
 //!    alone: the splash keeps the compact pieces on every class.
@@ -38,6 +38,7 @@ pub mod credential_dialogs;
 pub mod cta;
 pub mod fields;
 pub mod getting_started;
+pub mod layout;
 pub mod mark;
 pub mod pairing;
 pub mod pro_gate;

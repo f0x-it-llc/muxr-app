@@ -4317,6 +4317,131 @@ fn the_compact_info_button_clears_a_top_trailing_window_control_corner() {
     );
 }
 
+/// `size`'s metrics carrying `corner` as the top-right window-control corner.
+fn corner_metrics(size: Size, corner: CornerInsets) -> WindowMetrics {
+    WindowMetrics::new(
+        size,
+        1.0,
+        WindowInsets::default().with_corner_insets(corner),
+    )
+}
+
+const TOP_RIGHT_CORNER: CornerInsets = CornerInsets {
+    top_right: CornerInset::new(100.0, 40.0),
+    ..CornerInsets::ZERO
+};
+
+#[test]
+fn a_resize_that_adds_a_corner_moves_the_info_button_live() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = sized(PHONE, Harness::mount);
+    let flush = harness.bounds("the info button", info_button);
+
+    support::reprovide_metrics(corner_metrics(PHONE, TOP_RIGHT_CORNER));
+    for _ in 0..3 {
+        harness.settle();
+    }
+    let moved = harness.bounds("the info button", info_button);
+
+    assert!(
+        moved.x1 <= flush.x1 - 100.0 + EPSILON && moved.y0 >= flush.y0 + 40.0 - EPSILON,
+        "the builder re-read the corner on resize: {moved:?} vs {flush:?}"
+    );
+}
+
+#[test]
+fn a_collapsed_tablet_info_button_clears_the_top_trailing_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let plain = sized(COLLAPSED_TABLET, Harness::mount);
+    let flush = plain.bounds("the info button", info_button);
+
+    let mut shifted = mount_with_metrics(Some(corner_metrics(COLLAPSED_TABLET, TOP_RIGHT_CORNER)));
+    shifted.surface = COLLAPSED_TABLET;
+    shifted.settle();
+    let moved = shifted.bounds("the info button", info_button);
+
+    assert!(
+        flush.x1 - moved.x1 >= 100.0 - EPSILON && moved.y0 - flush.y0 >= 40.0 - EPSILON,
+        "at least the corner's width and height: {moved:?} vs {flush:?}"
+    );
+}
+
+#[test]
+fn a_full_tablet_mounts_no_info_button_even_with_a_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = mount_with_metrics(Some(corner_metrics(FULL_TABLET, TOP_RIGHT_CORNER)));
+    harness.surface = FULL_TABLET;
+    harness.settle();
+
+    assert_eq!(
+        count(&harness, info_button),
+        0,
+        "the panel carries the copy"
+    );
+}
+
+#[test]
+fn a_top_left_corner_pushes_the_full_panels_brand_tile_clear_of_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let corner = CornerInsets {
+        top_left: CornerInset::new(66.0, 43.0),
+        ..CornerInsets::ZERO
+    };
+    let mut harness = mount_with_metrics(Some(corner_metrics(FULL_TABLET, corner)));
+    harness.surface = FULL_TABLET;
+    let scene = harness.settle();
+
+    let tile = scene
+        .rounded_fills
+        .iter()
+        .find(|(_, size, _, _)| {
+            (size.width - 60.0).abs() < EPSILON && (size.height - 60.0).abs() < EPSILON
+        })
+        .map(|(origin, size, _, _)| (*origin, *size))
+        .expect("the panel's 60x60 brand tile is painted");
+    let (origin, _) = tile;
+    let overlaps = origin.x < 66.0 && origin.y < 43.0;
+    assert!(!overlaps, "the tile clears the window control: {tile:?}");
+}
+
+#[test]
+fn a_credential_less_row_past_the_free_tier_is_tagged_refills_on_tap_and_gates_at_connect() {
+    let _g = serial();
+    let _ambient = setup();
+    let rows = vec![
+        limit_row(LIMIT_A, LIMIT_A_LABEL, false),
+        older_limit_row(LIMIT_B, LIMIT_B_LABEL, false),
+    ];
+    let mut harness = sized(FULL_TABLET, || mount_limited(Tier::Free, rows));
+    assert_eq!(pro_tags(&harness), 2, "both rows are past the free tier");
+
+    harness.tap_node("the credential-less row", |node| {
+        node.role() == Role::Label && node.value() == Some(LIMIT_A_LABEL)
+    });
+    harness.flush();
+    assert!(
+        !shows_text(&harness, UPGRADE_TITLE),
+        "the tap only refills: there is no credential to dial with"
+    );
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(LIMIT_A),
+        "the form took the row's endpoint"
+    );
+
+    harness.tap_node("the connect CTA", connect_cta);
+    harness.flush();
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "the paywall fires at Connect: {:?}",
+        node_labels(&harness.root)
+    );
+}
+
 #[test]
 fn a_full_tablet_puts_orientation_and_saved_servers_beside_the_form() {
     let _g = serial();
