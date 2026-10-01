@@ -7,12 +7,11 @@ use frust::{
 };
 use frust_glyph::glyph_card;
 
-use crate::features::settings::presentation::pages::{
-    DISCONNECT_COPY, DISCONNECT_LABEL, SettingsState, open_disconnect_dialog,
-};
+use crate::features::settings::presentation::pages::{SettingsState, open_disconnect_dialog};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
+use super::misc::{DISCONNECT_COPY, DISCONNECT_LABEL};
 use super::rows::{SCROLL_PAD_BOTTOM, SCROLL_PAD_TOP, group_label};
 
 /// The card grid's content max width on Tablet, centred in the window.

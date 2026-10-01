@@ -22,8 +22,13 @@ const DISCONNECT_MARGIN_BOTTOM: f64 = spacing::TIGHT;
 /// The bell row's `.set-value` — copy, not a preference: the switch beside it
 /// is the state, and this says what being on *means*.
 const BELL_VALUE: &str = "haptic + badge";
-/// `.disconnect-btn`'s label.
-const DISCONNECT_LABEL: &str = "Disconnect";
+/// The Disconnect confirmation's body copy, shared by the dialog and the
+/// Tablet card's row value.
+pub(in super::super) const DISCONNECT_COPY: &str =
+    "You will need the server's token to attach again.";
+/// The Disconnect action's label: the button, the Tablet card's button and the
+/// dialog's own title and confirm.
+pub(in super::super) const DISCONNECT_LABEL: &str = "Disconnect";
 
 /// A complete row with mark tile, flexible label/subtitle column, and the
 /// real, themed `frust_glyph::toggle` — structured like [`super::rows::settings_row`]

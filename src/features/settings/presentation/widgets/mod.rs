@@ -47,7 +47,7 @@ pub(super) use font_picker::{
     FONT_META_BUILT_IN, FONT_META_DOWNLOADED, FontPicker, FontRow, font_picker_sheet,
 };
 pub(super) use groups::{appearance_rows, connection_rows, poll_rows, token_rows};
-pub(super) use misc::disconnect_button;
+pub(super) use misc::{DISCONNECT_COPY, DISCONNECT_LABEL, disconnect_button};
 pub(super) use pickers::{Picker, PickerKind, picker_sheet};
 pub(super) use pro::pro_rows;
 // Test-visible: `tests/settings.rs` imports these directly rather than
