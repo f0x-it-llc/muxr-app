@@ -1686,6 +1686,48 @@ fn a_failed_first_load_offers_a_retry_that_reruns_it() {
     assert!(!has_label(&h, "Couldn't load sessions"));
 }
 
+/// Ed's iPad gate (2026-10-01): the selected card painted as a solid amber
+/// block because its translucent `amber_faint` fill sat straight over the
+/// accent-filled outer box. The fill is now the palette's opaque `amber_wash`,
+/// so the 2px strip is all the solid amber a selected card shows.
+#[test]
+fn a_selected_tablet_card_fills_with_the_opaque_amber_wash_not_a_translucent_tint() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+    h.tap_value(SEEDED[1]);
+    let scene = h.settle();
+    let colors = muxr::ui::palette::Palette::from_theme(&frust_glyph::baseline());
+
+    let fills = &scene.rounded_fills;
+    let area = |s: &Size| s.width * s.height;
+    // The accent box is the largest amber rounded rect (the attach button is amber too, but small).
+    let (accent_idx, accent_origin, accent_size) = fills
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, _, c))| *c == colors.amber)
+        .map(|(i, (o, s, _, _))| (i, *o, *s))
+        .max_by(|a, b| area(&a.2).partial_cmp(&area(&b.2)).unwrap())
+        .expect("the selected card's accent box");
+    let inset_like = |o: &Point, s: &Size| {
+        (o.x - (accent_origin.x + 2.0)).abs() < EPSILON
+            && (o.y - accent_origin.y).abs() < EPSILON
+            && (s.height - accent_size.height).abs() < EPSILON
+    };
+    let wash_idx = fills
+        .iter()
+        .position(|(o, s, _, c)| *c == colors.amber_wash && inset_like(o, s))
+        .expect("the opaque amber wash inset by the strip");
+    assert!(accent_idx < wash_idx, "the wash paints over the accent box");
+    assert!(
+        !fills
+            .iter()
+            .any(|(o, s, _, c)| *c == colors.amber_faint && inset_like(o, s)),
+        "no translucent tint rides directly on the accent box any more"
+    );
+}
+
 #[test]
 fn read_only_on_tablet_chips_the_strip_and_leaves_only_attach_working() {
     let _g = serial();

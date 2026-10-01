@@ -23,6 +23,10 @@ pub struct Palette {
     pub amber: Color,
     pub amber_dim: Color,
     pub amber_faint: Color,
+    /// [`Self::amber_faint`] already composited over [`Self::surface`]: an
+    /// opaque wash for a fill that must hide whatever is painted beneath it
+    /// (the selected session card sits on its accent-filled box).
+    pub amber_wash: Color,
     pub amber_border: Color,
     pub fg: Color,
     pub fg_muted: Color,
@@ -53,6 +57,7 @@ impl Palette {
             amber: scheme.primary,
             amber_dim: scheme.primary_fixed_dim,
             amber_faint: scheme.primary.with_alpha(AMBER_FAINT_ALPHA),
+            amber_wash: washed(scheme.surface, scheme.primary, AMBER_FAINT_ALPHA),
             amber_border: scheme.primary.with_alpha(AMBER_BORDER_ALPHA),
             fg: scheme.on_surface,
             fg_muted: scheme.on_surface_variant,
@@ -77,6 +82,14 @@ pub fn inked(style: &TextStyle, color: Color) -> TextStyle {
     let mut style = style.clone();
     style.color = color;
     style
+}
+
+/// `tint` at `alpha` composited over the opaque `base` — the colour the GPU
+/// would show for the translucent wash, folded into one opaque fill.
+fn washed(base: Color, tint: Color, alpha: f32) -> Color {
+    let (b, t) = (base.components, tint.components);
+    let mix = |i: usize| b[i] * (1.0 - alpha) + t[i] * alpha;
+    Color::new([mix(0), mix(1), mix(2), 1.0])
 }
 
 #[cfg(test)]
@@ -184,5 +197,24 @@ mod tests {
         assert_eq!(recolored.color, Color::from_rgb8(1, 2, 3));
         assert_eq!(recolored.size, style.size);
         assert_eq!(recolored.family, style.family);
+    }
+
+    #[test]
+    fn amber_wash_is_the_faint_amber_folded_opaquely_over_the_surface() {
+        let theme = frust_glyph::baseline();
+        let palette = Palette::from_theme(&theme);
+        let (s, a) = (
+            theme.scheme().surface.components,
+            theme.scheme().primary.components,
+        );
+        for i in 0..3 {
+            let expected = s[i] * (1.0 - AMBER_FAINT_ALPHA) + a[i] * AMBER_FAINT_ALPHA;
+            assert!((palette.amber_wash.components[i] - expected).abs() < 1e-6);
+        }
+        assert_eq!(palette.amber_wash.components[3], 1.0, "opaque");
+        assert_ne!(
+            palette.amber_wash, palette.amber,
+            "a wash, not the solid accent"
+        );
     }
 }
