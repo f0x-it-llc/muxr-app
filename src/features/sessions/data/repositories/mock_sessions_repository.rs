@@ -22,7 +22,9 @@
 //! This is the feature's single failure-mapping site into
 //! [`AppFailure`]: an unknown id maps to [`AppFailure::Internal`] (a bug — the
 //! screen only ever addresses ids it just rendered) and a blank name to the
-//! same, since the dialog that collects one cannot submit blank text. A real
+//! same, since the dialog that collects one cannot submit blank text. A
+//! create or rename onto an id already in use maps to [`AppFailure::Network`],
+//! the shape the daemon's refusal of a duplicate name takes. A real
 //! gRPC client maps transport errors to [`AppFailure::Network`] and a rejected
 //! token to [`AppFailure::Auth`] in exactly this spot.
 //!
@@ -47,6 +49,13 @@ use crate::features::sessions::domain::repositories::SessionsRepository;
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
+
+/// The seeded `dev` session's id (`<backend>:<name>`).
+pub const SEEDED_DEV_ID: &str = "zellij:dev";
+/// The seeded idle `jumping-peach` session's id.
+pub const SEEDED_PEACH_ID: &str = "zellij:jumping-peach";
+/// The seeded herdr session's id.
+pub const SEEDED_HERDR_ID: &str = "herdr:herdr";
 
 /// An in-memory [`SessionsRepository`]. See the [module docs](self).
 pub struct MockSessionsRepository {
@@ -102,6 +111,11 @@ impl Default for MockSessionsRepository {
 /// here exactly as it does there.
 fn session_id(backend: SessionBackend, name: &str) -> String {
     format!("{}:{name}", backend.label())
+}
+
+/// The daemon's refusal of a name already in use on that backend.
+fn duplicate(name: &str) -> AppFailure {
+    AppFailure::Network(format!("a session named {name:?} already exists"))
 }
 
 /// A terminal pane fixture.
@@ -300,7 +314,11 @@ impl SessionsRepository for MockSessionsRepository {
             ));
         }
         let session = new_session(name, params.backend);
-        self.lock().push(session.clone());
+        let mut sessions = self.lock();
+        if sessions.iter().any(|s| s.id == session.id) {
+            return Err(duplicate(&session.name));
+        }
+        sessions.push(session.clone());
         Ok(session)
     }
 
@@ -313,13 +331,24 @@ impl SessionsRepository for MockSessionsRepository {
             ));
         }
         let mut sessions = self.lock();
-        let Some(session) = sessions.iter_mut().find(|s| s.id == request.id) else {
+        let Some(backend) = sessions
+            .iter()
+            .find(|s| s.id == request.id)
+            .map(|s| s.backend)
+        else {
             return Err(AppFailure::Internal(format!(
                 "rename_session: no session {}",
                 request.id
             )));
         };
-        session.id = session_id(session.backend, &name);
+        let id = session_id(backend, &name);
+        if sessions.iter().any(|s| s.id == id && s.id != request.id) {
+            return Err(duplicate(&name));
+        }
+        let Some(session) = sessions.iter_mut().find(|s| s.id == request.id) else {
+            unreachable!("the id was found above under the same lock");
+        };
+        session.id = id;
         session.name = name;
         Ok(session.clone())
     }
@@ -436,7 +465,7 @@ mod tests {
     fn rename_changes_the_name_and_mints_the_id_from_it() {
         let repo = MockSessionsRepository::seeded();
         let renamed = block_on(repo.rename_session(RenameRequest {
-            id: "zellij:dev".to_string(),
+            id: SEEDED_DEV_ID.to_string(),
             name: "  dev-2  ".to_string(),
         }))
         .expect("rename succeeds");
@@ -468,17 +497,17 @@ mod tests {
     #[test]
     fn kill_removes_exactly_one_session() {
         let repo = MockSessionsRepository::seeded();
-        block_on(repo.kill_session("zellij:jumping-peach".to_string())).expect("kill succeeds");
+        block_on(repo.kill_session(SEEDED_PEACH_ID.to_string())).expect("kill succeeds");
 
         let sessions = repo.snapshot();
         assert_eq!(sessions.len(), SEEDED_COUNT - 1);
-        assert!(sessions.iter().all(|s| s.id != "zellij:jumping-peach"));
+        assert!(sessions.iter().all(|s| s.id != SEEDED_PEACH_ID));
     }
 
     #[test]
     fn killing_every_session_empties_the_store() {
         let repo = MockSessionsRepository::seeded();
-        for id in ["zellij:dev", "zellij:jumping-peach", "herdr:herdr"] {
+        for id in [SEEDED_DEV_ID, SEEDED_PEACH_ID, SEEDED_HERDR_ID] {
             block_on(repo.kill_session(id.to_string())).expect("kill succeeds");
         }
 
@@ -492,5 +521,33 @@ mod tests {
 
         assert!(matches!(failure, AppFailure::Internal(_)));
         assert_eq!(repo.snapshot().len(), SEEDED_COUNT);
+    }
+
+    #[test]
+    fn the_seeded_id_constants_name_the_seeded_sessions() {
+        let ids: Vec<String> = seed().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, [SEEDED_DEV_ID, SEEDED_PEACH_ID, SEEDED_HERDR_ID]);
+    }
+
+    #[test]
+    fn a_duplicate_backend_and_name_is_rejected_on_create_and_rename() {
+        let repo = MockSessionsRepository::seeded();
+
+        let created = block_on(repo.create_session(params("dev"))).expect_err("dev exists");
+        assert!(matches!(created, AppFailure::Network(_)));
+
+        let renamed = block_on(repo.rename_session(RenameRequest {
+            id: SEEDED_PEACH_ID.to_string(),
+            name: "dev".to_string(),
+        }))
+        .expect_err("dev exists");
+        assert!(matches!(renamed, AppFailure::Network(_)));
+
+        assert_eq!(repo.snapshot().len(), SEEDED_COUNT, "nothing changed");
+        block_on(repo.rename_session(RenameRequest {
+            id: SEEDED_DEV_ID.to_string(),
+            name: "dev".to_string(),
+        }))
+        .expect("renaming a session to its own name is not a duplicate");
     }
 }

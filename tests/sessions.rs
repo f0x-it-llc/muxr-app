@@ -36,6 +36,7 @@ use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
+use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
 use muxr::features::sessions::di::SharedSessionsRepository;
 use muxr::features::sessions::domain::entities::{
     CreateSessionParams, LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus,
@@ -1595,7 +1596,7 @@ fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
     let param = |key: &str| nav.param(key);
     assert_eq!(
         param(muxr::routes::TERMINAL_SESSION_QUERY_KEY).as_deref(),
-        Some("zellij:dev")
+        Some(SEEDED_DEV_ID)
     );
     assert_eq!(
         param(muxr::routes::TERMINAL_TAB_QUERY_KEY).as_deref(),

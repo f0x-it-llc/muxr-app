@@ -131,6 +131,7 @@ impl SessionsController {
 
     pub async fn rename(&self, id: String, name: String) {
         let was_selected = self.selected.get_untracked().as_deref() == Some(id.as_str());
+        let old_id = id.clone();
         let renamed = self
             .core
             .run(
@@ -142,8 +143,11 @@ impl SessionsController {
         if let Ok(renamed) = renamed {
             // The repository mints the id from the name (`<backend>:<name>`),
             // so a rename moves it: follow it, or the refresh would find the
-            // old id gone and clear the selection.
-            if was_selected {
+            // old id gone and clear the selection. Only while the selection
+            // still holds the old id (or a refresh in flight cleared it as
+            // vanished): one the user moved elsewhere stays put.
+            let current = self.selected.get_untracked();
+            if was_selected && (current.is_none() || current.as_deref() == Some(old_id.as_str())) {
                 self.selected.set(Some(renamed.id));
             }
             self.refresh().await;
@@ -222,6 +226,7 @@ impl AsRef<ControllerCore<AppFailure>> for SessionsController {
 mod tests {
     use super::*;
     use crate::features::sessions::data::repositories::MockSessionsRepository;
+    use crate::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
     use crate::features::sessions::domain::entities::{
         CreateSessionParams, LayoutSummary, SessionStatus, ThirdMetric,
     };
@@ -381,6 +386,23 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_made_during_a_rename_is_not_pulled_back() {
+        let c = controller();
+        block_on(c.refresh());
+        let sessions = c.sessions.get_untracked();
+        let (a, b) = (sessions[0].id.clone(), sessions[1].id.clone());
+        c.select(&a);
+
+        block_on(async {
+            tokio::join!(c.rename(a.clone(), "dev-2".to_string()), async {
+                c.select(&b);
+            });
+        });
+
+        assert_eq!(c.selected.get_untracked(), Some(b));
+    }
+
+    #[test]
     fn renaming_another_session_leaves_the_selection_alone() {
         let c = controller();
         block_on(c.refresh());
@@ -395,14 +417,14 @@ mod tests {
     #[test]
     fn a_selection_survives_a_failed_refresh() {
         let c = SessionsController::new(Arc::new(FailOnceSessionsRepository::default()));
-        c.select("zellij:dev");
+        c.select(SEEDED_DEV_ID);
 
         block_on(c.refresh());
         assert!(!c.loaded.get_untracked(), "the first load failed");
-        assert_eq!(c.selected.get_untracked().as_deref(), Some("zellij:dev"));
+        assert_eq!(c.selected.get_untracked().as_deref(), Some(SEEDED_DEV_ID));
 
         block_on(c.refresh());
-        assert_eq!(c.selected.get_untracked().as_deref(), Some("zellij:dev"));
+        assert_eq!(c.selected.get_untracked().as_deref(), Some(SEEDED_DEV_ID));
     }
 
     #[test]

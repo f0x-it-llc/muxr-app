@@ -3,6 +3,10 @@
 //! renders from it. Real repository and mock alike map a session proto onto
 //! these field by field, with no presentation-layer change.
 
+use std::time::Duration;
+
+use crate::ui::recency;
+
 /// One remote multiplexer session, as the sessions list renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
@@ -40,43 +44,9 @@ impl Session {
             .unwrap_or_else(|| "?".to_string())
     }
 
-    /// Coarse age wording: "just now", "N minutes ago", "N hours ago",
-    /// "yesterday", "N days ago", "last week", "N weeks ago". The same
-    /// bands as the saved-server recency label, kept local so the two
-    /// features stay independent.
+    /// Coarse age wording — the app-wide bands of [`crate::ui::recency`].
     pub fn age_label(&self) -> String {
-        let minutes = self.age_secs / 60;
-        if minutes < 1 {
-            return "just now".to_string();
-        }
-        let hours = minutes / 60;
-        if hours < 1 {
-            return plural(minutes, "minute");
-        }
-        let days = hours / 24;
-        if days < 1 {
-            return plural(hours, "hour");
-        }
-        if days < 2 {
-            return "yesterday".to_string();
-        }
-        let weeks = days / 7;
-        if weeks < 1 {
-            return plural(days, "day");
-        }
-        if weeks < 2 {
-            return "last week".to_string();
-        }
-        plural(weeks, "week")
-    }
-}
-
-/// `"1 hour ago"` / `"3 hours ago"` — the one place the plural `s` is decided.
-fn plural(count: u64, unit: &str) -> String {
-    if count == 1 {
-        format!("1 {unit} ago")
-    } else {
-        format!("{count} {unit}s ago")
+        recency::age_label(Duration::from_secs(self.age_secs))
     }
 }
 
