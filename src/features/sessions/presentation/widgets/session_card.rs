@@ -85,6 +85,11 @@ pub(in crate::features::sessions::presentation) enum CardMode {
 /// solid transparent}` — so an idle card's content still starts exactly
 /// where a running card's does and the list's left edge never jogs by 2px
 /// row to row.
+///
+/// `fill` must be opaque: the inner surface is all that hides the accent's
+/// solid colour, so a translucent wash here (the selected card once used
+/// `amber_faint`) lets the accent through and the whole card reads as a
+/// block of amber — hence the palette's opaque `amber_wash`.
 fn accented_card<State: 'static>(
     body: impl View<State>,
     fill: Color,
@@ -188,7 +193,7 @@ pub(in crate::features::sessions::presentation) fn session_card(
         .cross_axis(CrossAxisAlignment::Stretch);
 
     let (fill, border, accent) = if selected {
-        (colors.amber_faint, colors.amber_border, Some(colors.amber))
+        (colors.amber_wash, colors.amber_border, Some(colors.amber))
     } else {
         (
             colors.surface,
