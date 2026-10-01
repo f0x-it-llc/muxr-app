@@ -2881,7 +2881,7 @@ fn value_center(h: &Harness, value: &str) -> Point {
 }
 
 #[test]
-fn a_full_band_tablet_lays_the_cards_out_two_by_two() {
+fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     let _g = serial();
     let _ambient = setup();
     let mut h = mount_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
@@ -2899,7 +2899,14 @@ fn a_full_band_tablet_lays_the_cards_out_two_by_two() {
     );
     assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
     let saved = value_center(&h, "SAVED SERVERS");
-    assert!(saved.y > connection.y, "the second pair sits below");
+    assert!(saved.y > connection.y, "the left column stacks downward");
+    // Packed columns, not rows: the short Auth tokens card does not hold the
+    // row open, so Muxr Pro climbs above Saved servers (Ed's iPad gate).
+    let pro = value_center(&h, "MUXR PRO");
+    assert!(
+        pro.y < saved.y - 100.0,
+        "the right column packs upward: pro {pro:?} vs saved {saved:?}"
+    );
     assert!(
         node_labels(&h.root).iter().any(|l| l == "Disconnect"),
         "the Disconnect card's button renders"
