@@ -12,7 +12,9 @@ mod shell;
 
 use std::rc::Rc;
 
-use frust::{AnyView, Component, Get, NavigatorController, Router, RwSignal, any, overlay_host};
+use frust::{
+    AnyView, Component, Get, NavigatorController, Router, RwSignal, Stack, any, overlay_host,
+};
 
 use features::connect::domain::entities::SavedServer;
 use features::connect::presentation::pages::splash_assembly;
@@ -146,19 +148,24 @@ impl Component for MuxrApp {
         }
     }
 
+    /// The overlay host, and the toast layer stacked above it. Sheets, side
+    /// sheets and dialogs are pages the host paints over its root page, so a
+    /// toast mounted inside that page would sit behind every one of them.
+    /// Both children keep their index: `Stack` reconciles positionally.
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
         let controller = state.nav.controller().clone();
         let overlays = state.overlays.clone();
         let cue = state.splash_cue();
 
-        any(overlay_host(&state.overlays, move || {
+        let host = overlay_host(&state.overlays, move || {
             let initial_overlays = overlays.clone();
             shell::root_view(
                 &controller,
                 move || routes::home_page(initial_overlays.clone()),
                 cue.as_ref().and_then(splash_overlay),
             )
-        }))
+        });
+        any(Stack(vec![any(host), ui::toasts::toast_layer()]))
     }
 }
 

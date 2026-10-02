@@ -37,7 +37,8 @@ use muxr::{AppState, MuxrApp};
 mod support;
 use support::{
     EPSILON, RecScene, alpha_of, by_width, center, char_key, fills_at, frame, frame_at, largest,
-    ms, named_key, node_labels, pointer, pump_frames, serial, settle, setup, smallest, tap,
+    ms, named_key, node_center_by_label, node_labels, pointer, pump_frames, serial, settle, setup,
+    smallest, tap,
 };
 
 use std::cell::{Cell, RefCell};
@@ -933,9 +934,9 @@ fn a_later_close_after_call_re_times_the_pending_close_rather_than_stacking_a_se
 /// must never show.
 const INTERNAL_DETAIL: &str = "tls handshake to 10.0.0.4:50051 timed out";
 
-/// The toast layer alone (the view `shell::root_view` stacks at index 2, over the navigator and
-/// floating bar) over its own root: asserts the bridge, not the shell wiring, and keeps the host
-/// out of a navigator whose missing `semantics` would otherwise hide the toast's own node.
+/// The toast layer alone (the view `MuxrApp::build` stacks over the root overlay host) over its
+/// own root: asserts the bridge, not the app wiring, and keeps the host out of a navigator whose
+/// covered pages would otherwise hide the toast's own node.
 struct ToastHarness {
     root: RenderRoot<State, AnyView<State>>,
     logic: ToastLogic,
@@ -992,12 +993,12 @@ fn a_raised_failure_surfaces_its_user_message_and_never_its_internals() {
 }
 
 #[test]
-fn the_shell_mounts_the_toast_layer_over_the_navigator() {
+fn the_app_root_mounts_the_toast_layer_over_the_overlay_host() {
     let _g = serial();
     let _ambient = setup();
 
     // The real composition root this time: a failure raised anywhere in the app must surface
-    // through the layer `shell::root_view` stacks at index 2, with no per-screen wiring.
+    // through the layer `MuxrApp::build` stacks over the overlay host, with no per-screen wiring.
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     let mut state = MuxrApp.init();
     let mut logic = |s: &mut AppState| MuxrApp.build(s);
@@ -1012,7 +1013,57 @@ fn the_shell_mounts_the_toast_layer_over_the_navigator() {
         labels
             .iter()
             .any(|l| l == "Couldn't save your data — please try again."),
-        "the app shell mounts the toast layer itself: {labels:?}"
+        "the app root mounts the toast layer itself: {labels:?}"
+    );
+}
+
+/// A sheet body's one control, and the toast raised while that sheet is up.
+const SHEET_ACTION: &str = "Restore purchases";
+const SHEET_TOAST: &str = "Nothing to restore";
+
+#[test]
+fn a_toast_surfaces_over_an_open_sheet_and_leaves_it_tappable() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
+    let mut state = MuxrApp.init();
+    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut tcx = TextContext::new();
+    frame(&mut root, &mut logic, &mut state, &mut tcx);
+
+    // The app's own path: a sheet is a page pushed onto the root overlay host.
+    let pressed = Rc::new(Cell::new(0_u32));
+    let sink = Rc::clone(&pressed);
+    show_sheet(&state.overlays, move |_sheet| {
+        let sink = Rc::clone(&sink);
+        any(button(SHEET_ACTION, move |_state: &mut AppState| {
+            sink.set(sink.get() + 1);
+        }))
+    });
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    app_toasts().show(SHEET_TOAST);
+    frame(&mut root, &mut logic, &mut state, &mut tcx);
+
+    // An open overlay drops the host's whole root page from the tree, so a toast still listed is
+    // mounted outside the host; listed after the sheet's control, it is stacked above the sheet.
+    let labels = node_labels(&root);
+    let action = labels.iter().position(|l| l == SHEET_ACTION);
+    let toast = labels.iter().position(|l| l == SHEET_TOAST);
+    assert!(action.is_some(), "the sheet is the routed page: {labels:?}");
+    assert!(
+        toast > action,
+        "the toast surfaces over the open sheet: {labels:?}"
+    );
+
+    let target =
+        node_center_by_label(&root, SHEET_ACTION).expect("the sheet's control is laid out");
+    tap(&mut root, &mut state, target);
+    assert_eq!(
+        pressed.get(),
+        1,
+        "the toast layer over the sheet swallows no tap"
     );
 }
 
@@ -1024,8 +1075,8 @@ fn the_toast_layer_is_input_transparent() {
     app_toasts().show("saved");
     h.frame();
 
-    // The shell stacks this layer *over* the navigator; if the host ever handled pointer events,
-    // every tap on every screen would be swallowed.
+    // The app root stacks this layer *over* everything; if the host ever handled pointer events,
+    // every tap on every screen and sheet would be swallowed.
     let outcome = h.root.event(
         &mut h.state,
         &pointer(PointerPhase::Down, Point::new(support::W / 2.0, 560.0)),
