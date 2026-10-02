@@ -1,4 +1,4 @@
-//! The app's root composition, and the shell page the route table hangs the
+//! The overlay host's root page, and the shell page the route table hangs the
 //! three bar-bearing routes off.
 
 use frust::{AnyView, Location, NavigatorController, Stack, any, icons, navigator};
@@ -11,29 +11,26 @@ use crate::routes::{
     BarAction, BarDirection, BarLeading, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
     route_transition,
 };
-use crate::ui::toasts::toast_layer;
 use crate::ui::topbar::{BACK_LABEL, bar_icon, brand_leading};
 
 const SETTINGS_LABEL: &str = "Settings";
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 
-/// The app's entire root content: the outer navigator, the app-wide toast layer
-/// over it, and `overlay` (the cold-start splash) stacked over both.
+/// The overlay host's root page: the outer navigator, and `overlay` (the
+/// cold-start splash) stacked over it. The toast layer is not here: the app
+/// root mounts it above the host, so a toast also paints over the splash.
 ///
-/// The bar is no slot here — it belongs to [`shell_page`]'s scaffold, one page
-/// down, which is what keeps it off every in-shell navigation. `Stack`
-/// reconciles positionally and a child that changes index is torn down, so the
-/// two fixed children keep their indices for the process lifetime and only the
-/// overlay's pod is created and destroyed.
+/// The bar belongs to [`shell_page`]'s scaffold, one page down, which keeps it
+/// off every in-shell navigation. `Stack` reconciles positionally, so the
+/// navigator keeps index 0 and only the overlay's pod is created and destroyed.
 pub fn root_view(
     controller: &NavigatorController<AppState>,
     initial: impl Fn() -> AnyView<AppState> + 'static,
     overlay: Option<AnyView<AppState>>,
 ) -> AnyView<AppState> {
-    let mut children = vec![
-        any(navigator(controller, initial).root_route(Location::parse(CONNECT_LOCATION))),
-        toast_layer(),
-    ];
+    let mut children = vec![any(
+        navigator(controller, initial).root_route(Location::parse(CONNECT_LOCATION))
+    )];
     children.extend(overlay);
     any(Stack(children))
 }
