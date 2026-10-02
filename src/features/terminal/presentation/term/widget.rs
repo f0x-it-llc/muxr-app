@@ -620,6 +620,9 @@ impl Widget for TerminalGridWidget {
             // non-owner falls through, and there is no owner here to fall
             // through to.
             InputEvent::Overlay(_) => EventResult::Ignored,
+            // The root unwraps a contact into `Pointer` before any widget sees
+            // it, and the grid has no pinch gesture: a scale bubbles past it.
+            InputEvent::PointerContact { .. } | InputEvent::Scale(_) => EventResult::Ignored,
         }
     }
 
