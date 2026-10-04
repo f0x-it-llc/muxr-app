@@ -12,12 +12,12 @@ publish = false
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-frust = { path = "../../frust/crates/frust", default-features = false }
-frust-glyph = { path = "../../frust/plugins/glyph" }
-clean-signals-frust = { path = "../../frust/plugins/clean-signals-frust" }
-frust-clipboard = { path = "../../frust/plugins/clipboard" }
-frust-haptics = { path = "../../frust/plugins/haptics" }
-clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
+frust = { package = "frust-ui", version = "0.5.1", default-features = false }
+frust-glyph = "0.5.1"
+clean-signals-frust = "0.5.1"
+frust-clipboard = "0.5.1"
+frust-haptics = "0.5.1"
+clean-signals = "0.1.0"
 
 log = "0.4"
 zeroize = "1"
@@ -38,19 +38,19 @@ sha2 = "0.10"
 base64 = "0.22"
 percent-encoding = "2"
 arc-swap = "1"
-frust-plugin = { path = "../../frust/crates/frust-plugin" }
-frust-shared-preferences = { path = "../../frust/plugins/shared-preferences" }
-frust-secure-storage = { path = "../../frust/plugins/secure-storage" }
-frust-camera = { path = "../../frust/plugins/camera" }
-frust-iap = { path = "../../frust/plugins/iap" }
-frust-url-launcher = { path = "../../frust/plugins/url-launcher" }
+frust-plugin = "0.5.1"
+frust-shared-preferences = "0.5.1"
+frust-secure-storage = "0.5.1"
+frust-camera = "0.5.1"
+frust-iap = "0.5.1"
+frust-url-launcher = "0.5.1"
 # `frust-iap` models the per-platform `requestPurchase` payloads as raw
 # `serde_json::Value` by design, so a caller has to build them itself.
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-webpki-roots-no-provider",
 ] }
-frust-paths = { path = "../../frust/crates/frust-paths" }
+frust-paths = "0.5.1"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
 
@@ -60,11 +60,11 @@ protox = "0.9"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-frust-core = { path = "../../frust/crates/frust-core", features = ["test-support"] }
-frust-reactive = { path = "../../frust/crates/frust-reactive" }
-frust-scene = { path = "../../frust/crates/frust-scene" }
-frust-shell-common = { path = "../../frust/crates/frust-shell-common" }
-frust-text = { path = "../../frust/crates/frust-text" }
+frust-core = { version = "0.5.1", features = ["test-support"] }
+frust-reactive = "0.5.1"
+frust-scene = "0.5.1"
+frust-shell-common = "0.5.1"
+frust-text = "0.5.1"
 kurbo = "0.13.1"
 peniko = "0.6.1"
 reactive_graph = "0.2"

@@ -864,7 +864,8 @@ dependencies = [
 [[package]]
 name = "clean-signals"
 version = "0.1.0"
-source = "git+https://github.com/f0x-it-llc/clean-signals-rs?rev=910f626#910f626f28adceeb88a3c8de96cfa844dc4f911a"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "128b4d6acf95bd72f703869088f8b4e307160076f7531f257c9e7b4d19e3c311"
 dependencies = [
  "any_spawner",
  "async-trait",
@@ -877,10 +878,12 @@ dependencies = [
 
 [[package]]
 name = "clean-signals-frust"
-version = "0.1.0"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66e4a9e842f0fd4a87f96bba0559f6f4d2cd9134167a7cc364e72053614ee313"
 dependencies = [
  "clean-signals",
- "frust",
+ "frust-ui",
 ]
 
 [[package]]
@@ -1398,8 +1401,415 @@ dependencies = [
 ]
 
 [[package]]
-name = "frust"
-version = "0.1.0"
+name = "frust-camera"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5615eade4c1929caa50a9cd578bfb5f957b4e16dc6d8c88f5434a582f4878c7d"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "log",
+ "objc2 0.6.4",
+ "objc2-av-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "rqrr",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-clipboard"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d51d7a2b02fb4918e937c9fbd84c2f6ea20c7bca6a7079a5b5ba8605677caeb"
+dependencies = [
+ "arboard",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-core"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c37298665b4a3c0513f33c1e841f5d8056da9a8269c48363e4490518e528a04"
+dependencies = [
+ "accesskit",
+ "frust-scene",
+ "kurbo",
+ "peniko",
+ "reactive_graph",
+ "tree_arena",
+]
+
+[[package]]
+name = "frust-engine"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5953337aa023e70f2dc950079d0427b321325ea39aed773858aac0d7180e866c"
+dependencies = [
+ "bytemuck",
+ "frust-gpu",
+ "frust-scene",
+ "glifo",
+ "kurbo",
+ "log",
+ "peniko",
+ "thiserror 2.0.19",
+ "vello_common",
+ "wgpu",
+]
+
+[[package]]
+name = "frust-glyph"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4178029c24bebd17b50dd7448107a887880609abcdbd213eafcb37fff8b13d2"
+dependencies = [
+ "frust-ui",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
+name = "frust-gpu"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1850e90418288b62dc72f628e6c04367db0511f19a40d86e92688f837a26a3e5"
+dependencies = [
+ "android_system_properties",
+ "anyhow",
+ "bytemuck",
+ "kurbo",
+ "log",
+ "peniko",
+ "wgpu",
+]
+
+[[package]]
+name = "frust-haptics"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0142c6ba71b0cf3330a88bc1b4011557b3ce4256707ebd3da09e80334df6f42"
+dependencies = [
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-iap"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e8fa562227f1e85a8ec8dcd85dadada38fe8b562467c453c159b13c4141beee"
+dependencies = [
+ "block2 0.6.2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "log",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-paths"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e899b60d8334f3a36ffe8936dbd13a4822b69f948a5dd0c0e8bc821d22a7f54f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "frust-plugin"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c392559a3af4dfec3e837c38e07dc16b1ec0a56cbf9d44c39e781a1610c2aa9"
+dependencies = [
+ "jni 0.22.4",
+ "ndk-context",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-reactive"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a56db81277d363dfb7e1bd9dbe6a5beb9e7840ff4cef232fca00ce626aa85bf"
+dependencies = [
+ "any_spawner",
+ "futures",
+ "reactive_graph",
+ "tokio",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "frust-render"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d27f686b525dda818b3fd3e8baa8995a48ff3c9a473c97eeefe8279df5abe872"
+dependencies = [
+ "android_system_properties",
+ "anyhow",
+ "frust-engine",
+ "frust-gpu",
+ "frust-scene",
+ "kurbo",
+ "log",
+ "peniko",
+ "wgpu",
+]
+
+[[package]]
+name = "frust-scene"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f1cac40fdc95b945d8a7f878f9c4966c3a7c3667f53767fad0e54aa8fc3a662"
+dependencies = [
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
+name = "frust-secure-storage"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f50af9657abc5396fae889c559ac626bae384790beee63e502285e3503b0e1f"
+dependencies = [
+ "frust-plugin",
+ "jni 0.22.4",
+ "keyring-core",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-local-authentication",
+ "objc2-security",
+ "serde_json",
+ "thiserror 2.0.19",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
+name = "frust-shared-preferences"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ed079d923d9cfb16656d7b7c359029c22682a0347f9b1f11000f6967bd8f5de"
+dependencies = [
+ "frust-paths",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-shell-android"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d062f73835416fa0eab5302f74c59effdc11c0fa76852680888e8876f33e239"
+dependencies = [
+ "accesskit_android",
+ "android_logger",
+ "anyhow",
+ "frust-core",
+ "frust-paths",
+ "frust-plugin",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
+ "jni 0.22.4",
+ "kurbo",
+ "libc",
+ "log",
+ "ndk",
+ "ndk-sys",
+ "peniko",
+ "pollster",
+]
+
+[[package]]
+name = "frust-shell-common"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "820abe314497c84ee25a8cda28d393b0c3cc663e342c432042dd7c50746e5bb9"
+dependencies = [
+ "frust-core",
+ "frust-scene",
+ "frust-text",
+ "frust-theme",
+ "kurbo",
+ "log",
+]
+
+[[package]]
+name = "frust-shell-desktop"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2db8cd5a6e6c0f193c972d0f1cdd4c189ef9bc6e858ad94ef8bcda8fc3d77c7c"
+dependencies = [
+ "accesskit_winit",
+ "anyhow",
+ "arboard",
+ "frust-core",
+ "frust-paths",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
+ "kurbo",
+ "log",
+ "peniko",
+ "pollster",
+ "winit",
+]
+
+[[package]]
+name = "frust-shell-ios"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "301eab8f632bbd92cb833d36f76003e7f799de02f94feb2d27e25f8c1e157ea9"
+dependencies = [
+ "accesskit",
+ "accesskit_ios",
+ "anyhow",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
+ "kurbo",
+ "libc",
+ "log",
+ "objc2 0.6.4",
+ "peniko",
+ "pollster",
+]
+
+[[package]]
+name = "frust-shell-linux"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "549b013ecd726dee3ae4578e55c0b26a74078ff3a8f3d1b19ec9c25fc3739276"
+dependencies = [
+ "frust-shell-desktop",
+ "log",
+ "winit",
+]
+
+[[package]]
+name = "frust-shell-macos"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ced28ea88c4b400c9edfd0f94621dcf1b3937571e5f0f6aac204fd1218ef4f0"
+dependencies = [
+ "frust-plugin",
+ "frust-reactive",
+ "frust-shell-common",
+ "frust-shell-desktop",
+ "kurbo",
+ "log",
+ "muda",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "winit",
+]
+
+[[package]]
+name = "frust-shell-web"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e917f4a3a92ca6ba038ecd064d3f772226f60d95346c9b951eb1d4f723a78cd8"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "frust-core",
+ "frust-reactive",
+ "frust-render",
+ "frust-scene",
+ "frust-shell-common",
+ "frust-text",
+ "frust-theme",
+ "js-sys",
+ "kurbo",
+ "log",
+ "peniko",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "winit",
+]
+
+[[package]]
+name = "frust-shell-windows"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07704c9217211c4b7dd5c26292b043180e72c075280ba64a9dfe9326cf0fc478"
+dependencies = [
+ "frust-reactive",
+ "frust-shell-desktop",
+ "frust-theme",
+ "log",
+ "muda",
+ "windows-sys 0.61.2",
+ "winit",
+]
+
+[[package]]
+name = "frust-text"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c726d348cc584a36be016ea4a35f9fc894715248fa91545cfdfcc02a2d970ddb"
+dependencies = [
+ "frust-scene",
+ "kurbo",
+ "parley",
+ "peniko",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "frust-theme"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "062cc429ea28536f679ddc400b38aa7ea33f0066e5b8b991a3b5de75d5ca7124"
+dependencies = [
+ "frust-core",
+ "frust-text",
+ "peniko",
+]
+
+[[package]]
+name = "frust-ui"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19ed5ad226a2e128ed35d4f2d04ac3c4e9484764d5c0bac940935ddfe6ac83b3"
 dependencies = [
  "any_spawner",
  "anyhow",
@@ -1428,363 +1838,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "frust-camera"
-version = "0.1.0"
-dependencies = [
- "block2 0.6.2",
- "dispatch2",
- "frust-plugin",
- "jni 0.22.4",
- "log",
- "objc2 0.6.4",
- "objc2-av-foundation",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
- "rqrr",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-clipboard"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "frust-plugin",
- "jni 0.22.4",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
- "objc2-ui-kit 0.3.2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-core"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "frust-scene",
- "kurbo",
- "peniko",
- "reactive_graph",
- "tree_arena",
-]
-
-[[package]]
-name = "frust-engine"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "frust-gpu",
- "frust-scene",
- "glifo",
- "kurbo",
- "log",
- "peniko",
- "thiserror 2.0.19",
- "vello_common",
- "wgpu",
-]
-
-[[package]]
-name = "frust-glyph"
-version = "0.1.0"
-dependencies = [
- "frust",
- "kurbo",
- "peniko",
-]
-
-[[package]]
-name = "frust-gpu"
-version = "0.1.0"
-dependencies = [
- "android_system_properties",
- "anyhow",
- "bytemuck",
- "kurbo",
- "log",
- "peniko",
- "wgpu",
-]
-
-[[package]]
-name = "frust-haptics"
-version = "0.1.0"
-dependencies = [
- "dispatch2",
- "frust-plugin",
- "jni 0.22.4",
- "objc2 0.6.4",
- "objc2-ui-kit 0.3.2",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-iap"
-version = "0.1.0"
-dependencies = [
- "block2 0.6.2",
- "frust-plugin",
- "jni 0.22.4",
- "log",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-paths"
-version = "0.1.0"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "frust-plugin"
-version = "0.1.0"
-dependencies = [
- "jni 0.22.4",
- "ndk-context",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-reactive"
-version = "0.1.0"
-dependencies = [
- "any_spawner",
- "futures",
- "reactive_graph",
- "tokio",
- "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "frust-render"
-version = "0.1.0"
-dependencies = [
- "android_system_properties",
- "anyhow",
- "frust-engine",
- "frust-gpu",
- "frust-scene",
- "kurbo",
- "log",
- "peniko",
- "wgpu",
-]
-
-[[package]]
-name = "frust-scene"
-version = "0.1.0"
-dependencies = [
- "kurbo",
- "peniko",
-]
-
-[[package]]
-name = "frust-secure-storage"
-version = "0.1.0"
-dependencies = [
- "frust-plugin",
- "jni 0.22.4",
- "keyring-core",
- "objc2 0.6.4",
- "objc2-core-foundation",
- "objc2-foundation 0.3.2",
- "objc2-local-authentication",
- "objc2-security",
- "serde_json",
- "thiserror 2.0.19",
- "windows-native-keyring-store",
- "zbus-secret-service-keyring-store",
-]
-
-[[package]]
-name = "frust-shared-preferences"
-version = "0.1.0"
-dependencies = [
- "frust-paths",
- "frust-plugin",
- "jni 0.22.4",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-shell-android"
-version = "0.1.0"
-dependencies = [
- "accesskit_android",
- "android_logger",
- "anyhow",
- "frust-core",
- "frust-paths",
- "frust-plugin",
- "frust-reactive",
- "frust-render",
- "frust-scene",
- "frust-shell-common",
- "frust-text",
- "frust-theme",
- "jni 0.22.4",
- "kurbo",
- "libc",
- "log",
- "ndk",
- "ndk-sys",
- "peniko",
- "pollster",
-]
-
-[[package]]
-name = "frust-shell-common"
-version = "0.1.0"
-dependencies = [
- "frust-core",
- "frust-scene",
- "frust-text",
- "frust-theme",
- "kurbo",
- "log",
-]
-
-[[package]]
-name = "frust-shell-desktop"
-version = "0.1.0"
-dependencies = [
- "accesskit_winit",
- "anyhow",
- "arboard",
- "frust-core",
- "frust-paths",
- "frust-reactive",
- "frust-render",
- "frust-scene",
- "frust-shell-common",
- "frust-text",
- "frust-theme",
- "kurbo",
- "log",
- "peniko",
- "pollster",
- "winit",
-]
-
-[[package]]
-name = "frust-shell-ios"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "accesskit_ios",
- "anyhow",
- "frust-core",
- "frust-reactive",
- "frust-render",
- "frust-scene",
- "frust-shell-common",
- "frust-text",
- "frust-theme",
- "kurbo",
- "libc",
- "log",
- "objc2 0.6.4",
- "peniko",
- "pollster",
-]
-
-[[package]]
-name = "frust-shell-linux"
-version = "0.1.0"
-dependencies = [
- "frust-shell-desktop",
- "log",
- "winit",
-]
-
-[[package]]
-name = "frust-shell-macos"
-version = "0.1.0"
-dependencies = [
- "frust-plugin",
- "frust-reactive",
- "frust-shell-common",
- "frust-shell-desktop",
- "kurbo",
- "log",
- "muda",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "winit",
-]
-
-[[package]]
-name = "frust-shell-web"
-version = "0.1.0"
-dependencies = [
- "console_error_panic_hook",
- "console_log",
- "frust-core",
- "frust-reactive",
- "frust-render",
- "frust-scene",
- "frust-shell-common",
- "frust-text",
- "frust-theme",
- "js-sys",
- "kurbo",
- "log",
- "peniko",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
- "winit",
-]
-
-[[package]]
-name = "frust-shell-windows"
-version = "0.1.0"
-dependencies = [
- "frust-reactive",
- "frust-shell-desktop",
- "frust-theme",
- "log",
- "muda",
- "windows-sys 0.61.2",
- "winit",
-]
-
-[[package]]
-name = "frust-text"
-version = "0.1.0"
-dependencies = [
- "frust-scene",
- "kurbo",
- "parley",
- "peniko",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "frust-theme"
-version = "0.1.0"
-dependencies = [
- "frust-core",
- "frust-text",
- "peniko",
-]
-
-[[package]]
 name = "frust-url-launcher"
-version = "0.1.0"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af5a7d51eaf282a206692455b2f4586f1e47f95c5dcc01938c7bd019cf48240e"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -1798,7 +1855,9 @@ dependencies = [
 
 [[package]]
 name = "frust-widgets"
-version = "0.1.0"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acc7099cba6658f73ea1d8451dd4767d6f8508d75794b4d7979385370d8a55b3"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -3177,7 +3236,6 @@ dependencies = [
  "base64",
  "clean-signals",
  "clean-signals-frust",
- "frust",
  "frust-camera",
  "frust-clipboard",
  "frust-core",
@@ -3192,6 +3250,7 @@ dependencies = [
  "frust-shared-preferences",
  "frust-shell-common",
  "frust-text",
+ "frust-ui",
  "frust-url-launcher",
  "jni 0.22.4",
  "kurbo",
