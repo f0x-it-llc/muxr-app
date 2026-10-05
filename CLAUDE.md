@@ -26,6 +26,7 @@ The project documents live in Zabin, not in this repository: project `prj_000001
 | Coding conventions beyond frust's `docs/CODE_STANDARDS.md` | `docs/APP_CODE_STANDARDS.md` |
 | Build, run, test, flavors | `docs/APP_DEVELOPMENT.md` |
 | Signing, Play Console, release | `docs/APP_RELEASE_ANDROID.md` |
+| Signing, App Store Connect, iOS release | `docs/APP_RELEASE_IOS.md` |
 | Cross-system shape, shared gates, review focus, doc budgets | `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/REVIEW_FOCUS.md`, `docs/DOC_POLICY.md` |
 
 Frust's own coding conventions apply here; see the frust checkout's `docs/CODE_STANDARDS.md`. This
@@ -42,7 +43,8 @@ This is the app's verify gate — run it before committing. `cargo run` launches
 preview. Device builds go through the `frust` CLI: `frust run --flavor develop` or
 `frust run --flavor production` (Android: builds the matching Gradle flavor; iOS: builds the
 `Develop`/`Production` Xcode scheme). See the Zabin `docs/APP_DEVELOPMENT.md` for the full command
-set, flavor identifiers, and the test rig; `docs/APP_RELEASE_ANDROID.md` for signing and release.
+set, flavor identifiers, and the test rig; `docs/APP_RELEASE_ANDROID.md` and
+`docs/APP_RELEASE_IOS.md` for signing and release.
 
 ## Agent Guardrails
 
