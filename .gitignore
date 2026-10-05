@@ -46,7 +46,9 @@ android/.gradle/
 android/app/src/main/jniLibs/
 dist/
 
-# Machine-local Android SDK path + CLI-written version stamps.
+# Machine-local: the Android SDK path, the CLI-written version stamps, and
+# the directory of every Frust Gradle module (`frust.embedding.dir`,
+# `frust.plugin.<module>.dir`) that `settings.gradle.kts` reads.
 android/local.properties
 
 # Xcode's per-user state: window layout, breakpoints, scheme order. Written
@@ -54,3 +56,10 @@ android/local.properties
 # .swiftpm/) whenever the project is opened in Xcode; never shared config.
 xcuserdata/
 .swiftpm/
+
+# Machine-local symlinks to the local Swift packages the Xcode project
+# references by name — `FrustEmbedding` (the `frust-shell-ios` crate's) and
+# one per plugin package (`FrustIap`, `FrustCamera`) — refreshed by
+# `frust run` / `frust build`; each target is wherever cargo resolved that
+# crate.
+/ios/Frust*
