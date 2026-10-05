@@ -16,14 +16,34 @@ dependencyResolutionManagement {
 rootProject.name = "muxr"
 include(":app")
 
+// Machine-local directories — the `:frust-embedding` module below and every
+// plugin module `frust plugin add` includes — never live in this tracked
+// file. They sit in the gitignored `local.properties` beside it, written by
+// `frust create` / `frust plugin add` and refreshed by every `frust run` /
+// `frust build` from wherever cargo resolves each crate for this project, so
+// they follow a `cargo update` or a move to another machine. A key that is
+// missing fails here, naming the command that writes it.
+val frustLocalPropertiesFile = rootDir.resolve("local.properties")
+val frustLocalProperties = java.util.Properties().apply {
+    if (frustLocalPropertiesFile.isFile) frustLocalPropertiesFile.inputStream().use { load(it) }
+}
+
+fun frustLocalDir(key: String): java.io.File {
+    val dir = frustLocalProperties.getProperty(key)
+        ?: throw org.gradle.api.GradleException(
+            "`$key` is not set in $frustLocalPropertiesFile. Run `frust run` or `frust build` " +
+                "for Android in the project directory: it writes the machine-local directory " +
+                "of every Frust module there."
+        )
+    return frustLocalPropertiesFile.parentFile.resolve(dir)
+}
+
 // Frust's Android embedding (the Kotlin host: FrustActivity, FrustSurfaceView,
 // FrustViewHost, the accesskit delegate) is a `com.android.library` module
-// consumed by path out of the frust checkout. `frust.embedding.dir` lives in
-// `gradle.properties` — the single line to edit when this project moves to
-// another machine. It becomes a published Maven coordinate post-crates.io.
+// consumed by path out of the `frust-shell-android` crate cargo resolves for
+// this project. It becomes a published Maven coordinate later.
 include(":frust-embedding")
-project(":frust-embedding").projectDir =
-    file(providers.gradleProperty("frust.embedding.dir").get())
+project(":frust-embedding").projectDir = frustLocalDir("frust.embedding.dir")
 
 // Keep the shared frust checkout pristine AND keep this app's source tree
 // clean: every Gradle build directory this project has — the root project's,
@@ -57,14 +77,16 @@ gradle.lifecycle.beforeProject {
 // frust:plugin-includes — plugin-contributed `include(...)` lines go below.
 // `frust plugin add` appends each plugin's Android library module here with
 // the same include/projectDir/build-dir-redirect trio as `:frust-embedding`
-// above, so every module this project ever gains — built-in or
-// plugin-contributed — stays under THIS app's `build/android/` root.
+// above (its directory read through `frustLocalDir`, its key
+// `frust.plugin.<module>.dir`), so every module this project ever gains —
+// built-in or plugin-contributed — stays under THIS app's `build/android/`
+// root.
 
 // Added by `frust` Add Plugin: a plugin's Android library module,
-// included by path out of the frust checkout (the same derivation
-// `frust.embedding.dir` and the plugin's Cargo path dep use).
+// included from the plugin package cargo resolves for this app (its
+// directory is machine-local: `frust.plugin.frust-camera.dir` in local.properties).
 include(":frust-camera")
-project(":frust-camera").projectDir = file("../../../frust/plugins/camera/platform/android")
+project(":frust-camera").projectDir = frustLocalDir("frust.plugin.frust-camera.dir")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-camera") {
@@ -73,10 +95,10 @@ gradle.lifecycle.beforeProject {
 }
 
 // Added by `frust` Add Plugin: a plugin's Android library module,
-// included by path out of the frust checkout (the same derivation
-// `frust.embedding.dir` and the plugin's Cargo path dep use).
+// included from the plugin package cargo resolves for this app (its
+// directory is machine-local: `frust.plugin.frust-secure-storage.dir` in local.properties).
 include(":frust-secure-storage")
-project(":frust-secure-storage").projectDir = file("../../../frust/plugins/secure-storage/platform/android")
+project(":frust-secure-storage").projectDir = frustLocalDir("frust.plugin.frust-secure-storage.dir")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-secure-storage") {
@@ -85,10 +107,10 @@ gradle.lifecycle.beforeProject {
 }
 
 // Added by `frust` Add Plugin: a plugin's Android library module,
-// included by path out of the frust checkout (the same derivation
-// `frust.embedding.dir` and the plugin's Cargo path dep use).
+// included from the plugin package cargo resolves for this app (its
+// directory is machine-local: `frust.plugin.frust-iap.dir` in local.properties).
 include(":frust-iap")
-project(":frust-iap").projectDir = file("../../../frust/plugins/iap/platform/android")
+project(":frust-iap").projectDir = frustLocalDir("frust.plugin.frust-iap.dir")
 
 gradle.lifecycle.beforeProject {
     if (path == ":frust-iap") {
