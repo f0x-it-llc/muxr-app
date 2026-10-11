@@ -420,7 +420,7 @@ impl Component for SessionsScreen {
 
         // Both renderings assemble the same pieces through the same band; the
         // live one adds `scroll_view`, a pass-through at offset 0.
-        let live_scroller = list_view(
+        let live_scroller = arranged_list(
             list_pieces(&sessions, loaded, settled, read_only, &colors, &layout),
             &layout,
             true,
@@ -454,7 +454,7 @@ impl Component for SessionsScreen {
                 LOADING_RAIN_SEED,
                 tone,
                 overlay_pieces,
-                move |pieces| list_view(pieces, &overlay_layout, false),
+                move |pieces| arranged_list(pieces, &overlay_layout, false),
                 settled,
                 stale,
                 state.loading_done,
@@ -551,7 +551,7 @@ fn list_pieces(
 
 /// `pieces` laid out for `layout`, scrolling when `scroll` (the live band; the
 /// loading overlay's picture does not scroll).
-fn list_view(
+fn arranged_list(
     pieces: Vec<AnyView<SessionsState>>,
     layout: &ListLayout,
     scroll: bool,
