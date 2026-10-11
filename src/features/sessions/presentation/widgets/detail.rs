@@ -14,9 +14,9 @@
 use frust::authoring::text::TextOverflow;
 use frust::icons::PANE_MARK;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Padding, SizedBox, View, any, button, column, container, divider,
-    flexible, icon, inflexible, row, scroll_view, text,
+    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
+    FlexChild, FlexView, GestureDetector, Padding, SizedBox, View, any, button, column, container,
+    divider, flexible, icon, inflexible, row, scroll_view, text,
 };
 use frust_glyph::{BadgeVariant, badge, empty_state, glyph_card, skeleton, stat_card, tag};
 
@@ -203,40 +203,38 @@ fn selected_detail(
     full: bool,
     colors: &Palette,
 ) -> impl View<SessionsState> {
-    container(
-        column()
-            .child(header(session, read_only, colors))
-            .child(divider(colors.rule))
-            .flex(1, body_scroller(body_cards(session, full, colors)))
-            .cross_axis(CrossAxisAlignment::Stretch),
-    )
-    .fill(colors.base)
-}
-
-/// The cards under the header, as the session's state earns them.
-fn body_cards(session: &Session, full: bool, colors: &Palette) -> Vec<AnyView<SessionsState>> // erasure: keep accumulator into Vec<AnyView>
-{
     let overview = overview_card(session, colors);
     let kind = body_kind(
         session.status.is_live(),
         !session.layout.tabs_detail.is_empty(),
     );
-    match kind {
+    let cards = match kind {
         BodyKind::Resurrect => {
             vec![
-                any(resurrect_card(session, colors)),
-                any(grid(vec![overview], full)),
+                any(resurrect_card(session, colors)), // erasure: keep accumulator into Vec<AnyView>
+                any(grid(vec![overview], full)),      // erasure: keep accumulator into Vec<AnyView>
             ]
         }
-        BodyKind::OverviewOnly => vec![any(grid(vec![overview], full))],
+        BodyKind::OverviewOnly => vec![any(grid(vec![overview], full))], // erasure: keep accumulator into Vec<AnyView>
         BodyKind::Full => vec![
             any(grid(
-                vec![any(overview), any(active_tab_card(session, colors))],
+                vec![
+                    Either::Left(overview),
+                    Either::Right(active_tab_card(session, colors)),
+                ],
                 full,
             )),
-            any(tree_card(session, full, colors)),
+            any(tree_card(session, full, colors)), // erasure: keep accumulator into Vec<AnyView>
         ],
-    }
+    };
+    container(
+        column()
+            .child(header(session, read_only, colors))
+            .child(divider(colors.rule))
+            .flex(1, body_scroller(cards))
+            .cross_axis(CrossAxisAlignment::Stretch),
+    )
+    .fill(colors.base)
 }
 
 fn body_scroller(cards: Vec<AnyView<SessionsState>>) -> impl View<SessionsState> {
@@ -424,17 +422,9 @@ fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsSta
         None => format!("active tab{SEP}{tab_name}"),
     };
     let panes = tab.map_or(&[][..], |tab| tab.panes.as_slice());
-    glyph_card()
-        .title(card_title(title, colors))
-        .desc(SizedBox::<SessionsState>(None, Some(TILES_HEIGHT)).child(tile_band(panes, colors)))
-}
-
-/// `panes` tiled by [`tile_layout`], or the "no panes" line.
-fn tile_band(panes: &[PaneSummary], colors: &Palette) -> AnyView<SessionsState> // erasure: keep 3+-arm body
-{
-    match (tile_layout(panes.len()), panes) {
-        (TileLayout::None, _) => any(card_title("no panes reported", colors)),
-        (TileLayout::One, [only]) => any(tile(only, colors)),
+    let tiles: AnyView<SessionsState> = match (tile_layout(panes.len()), panes) {
+        (TileLayout::None, _) => any(card_title("no panes reported", colors)), // erasure: keep 3+-arm body
+        (TileLayout::One, [only]) => any(tile(only, colors)), // erasure: keep 3+-arm body
         (TileLayout::Two, [a, b]) => any(tile_row(vec![
             flexible(1, tile(a, colors)),
             flexible(1, tile(b, colors)),
@@ -448,8 +438,11 @@ fn tile_band(panes: &[PaneSummary], colors: &Palette) -> AnyView<SessionsState> 
                 flexible(1, stack),
             ]))
         }
-        (_, []) => any(card_title("no panes reported", colors)),
-    }
+        (_, []) => any(card_title("no panes reported", colors)), // erasure: keep 3+-arm body
+    };
+    glyph_card()
+        .title(card_title(title, colors))
+        .desc(SizedBox::<SessionsState>(None, Some(TILES_HEIGHT)).child(tiles))
 }
 
 fn tile_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
