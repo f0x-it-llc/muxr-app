@@ -15,7 +15,7 @@ use crate::ui::spacing;
 
 use super::super::chrome::{EXPAND_SIZE, expand_button};
 use super::card::CardInk;
-use super::util::{h_gap, read_only_badge, row, sized};
+use super::util::{centered_row, h_gap, read_only_badge, sized};
 
 /// `.term-statusrow{padding:14px 14px 14px 18px}` with the **vertical** pair
 /// tightened to 6px — the mock's 14px made a 56px chrome band. Horizontal
@@ -197,7 +197,7 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     children.push(inflexible(Stack(vec![any(press_band), any(button)])));
     // Trailing padding as a spacer — the button column owns the vertical padding.
     children.push(h_gap(STATUS_PAD_RIGHT));
-    any(container(row(children)).fill(ink.head))
+    any(container(centered_row(children)).fill(ink.head))
 }
 
 #[cfg(test)]

@@ -55,7 +55,7 @@ use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
-use super::util::{column, h_gap, row, sized, v_gap};
+use super::util::{centered_row, h_gap, sized, stretch_column, v_gap};
 
 /// `.space-row{border-radius:13px}` — the card level, worn by a space and by a
 /// promoted zellij tab.
@@ -413,7 +413,7 @@ pub(crate) fn tree_body<State: 'static>(
         ));
     }
 
-    any(column(children))
+    any(stretch_column(children))
 }
 
 /// The auto-expansion a landed space cascade schedules: which tab opens, and how
@@ -498,7 +498,7 @@ fn space_group<State: 'static>(
         ));
     }
 
-    any(column(vec![
+    any(stretch_column(vec![
         head,
         any(glyph_reveal(kids)
             .expanded(expanded)
@@ -540,7 +540,7 @@ fn tab_group<State: 'static>(
         ));
     }
 
-    any(column(vec![
+    any(stretch_column(vec![
         head,
         any(glyph_reveal(kids)
             .expanded(expanded)
@@ -792,7 +792,7 @@ fn pane_row<State: 'static>(
         title: pane.title.clone(),
     };
     boxed_row(
-        row(children),
+        centered_row(children),
         boxed,
         move |state: &mut State| commit(state, &target, id, is_plugin),
         hold,
@@ -838,7 +838,7 @@ fn disclosure_row<State: 'static>(
     }
     children.push(h_gap(ROW_GAP));
     children.push(inflexible(glyph_chevron(expanded)));
-    row(children)
+    centered_row(children)
 }
 
 /// A row's `content` in its level's box, with its gestures: the whole box presses
@@ -859,7 +859,7 @@ fn boxed_row<State: 'static>(
     };
     match overflow {
         None => pressable(frame(content), on_tap, on_hold),
-        Some(button) => frame(row(vec![
+        Some(button) => frame(centered_row(vec![
             flexible(1, pressable(content, on_tap, on_hold)),
             h_gap(spacing::TIGHT),
             inflexible(button),
@@ -1002,7 +1002,7 @@ fn add_row<State: 'static, F: Fn(&mut State) + 'static>(
         ADD_SIZE,
         tones.colors.fg_dim,
     );
-    let content = row(vec![
+    let content = centered_row(vec![
         inflexible(text(ADD_PLUS).style(plus)),
         h_gap(spacing::TIGHT),
         inflexible(text(label).style(body)),
