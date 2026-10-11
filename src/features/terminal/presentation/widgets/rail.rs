@@ -33,7 +33,7 @@ use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
 use super::side_sheet_tree::SPACE_DIAMOND;
-use super::util::{h_gap, read_only_badge, row, sized, v_gap};
+use super::util::{centered_row, h_gap, read_only_badge, sized, v_gap};
 
 /// `.rail{width:264px}`.
 pub(crate) const RAIL_WIDTH: f64 = 264.0;
@@ -171,7 +171,7 @@ pub(crate) fn docked_rail<State: 'static>(
         Axis::Vertical,
         vec![
             inflexible(SizedBox::<State>(None, Some(top))),
-            inflexible(Padding(HEAD_PAD, row(chips))),
+            inflexible(Padding(HEAD_PAD, centered_row(chips))),
             inflexible(rule(None, Some(HAIRLINE), &colors)),
             flexible(1, scroll_view(Padding(TREE_PAD, tree))),
             inflexible(rule(None, Some(HAIRLINE), &colors)),
@@ -179,7 +179,7 @@ pub(crate) fn docked_rail<State: 'static>(
         ],
     )
     .cross_axis(CrossAxisAlignment::Stretch);
-    panel(RAIL_WIDTH, any(body), &colors)
+    rail_panel(RAIL_WIDTH, any(body), &colors)
 }
 
 /// What the mini rail draws: every space, the selected space's tabs, and the
@@ -296,7 +296,7 @@ pub(crate) fn mini_rail<State: 'static>(
         column.push(inflexible(item));
     }
     let body = FlexView::new(Axis::Vertical, column).cross_axis(CrossAxisAlignment::Center);
-    panel(
+    rail_panel(
         MINI_RAIL_WIDTH,
         any(scroll_view(Padding(
             EdgeInsets::symmetric(0.0, spacing::MD),
@@ -307,7 +307,11 @@ pub(crate) fn mini_rail<State: 'static>(
 }
 
 /// The rail's column at `width` on the surface tone, with its hairline right edge.
-fn panel<State: 'static>(width: f64, body: AnyView<State>, colors: &Palette) -> AnyView<State> {
+fn rail_panel<State: 'static>(
+    width: f64,
+    body: AnyView<State>,
+    colors: &Palette,
+) -> AnyView<State> {
     let column = container(SizedBox::<State>(Some(width), None).child(body)).fill(colors.surface);
     any(FlexView::new(
         Axis::Horizontal,

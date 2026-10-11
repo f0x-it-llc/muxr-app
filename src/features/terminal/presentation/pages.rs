@@ -63,7 +63,7 @@ use super::widgets::side_sheet_tree::{
     auto_expand_after_cascade, tree_body,
 };
 use super::widgets::status::{TerminalMenuChoice, status_row, terminal_menu, terminal_menu_choice};
-use super::widgets::util::{column, h_gap, row, sized, v_gap};
+use super::widgets::util::{centered_row, h_gap, sized, stretch_column, v_gap};
 
 /// How long the sheet stays up after a **pane row** is tapped, so the selection
 /// visibly moves before it closes — `setTimeout(closeSheet, 260)` in the mock. A
@@ -824,7 +824,7 @@ impl Actions {
             &self.overlays,
             SHEET_TITLE,
             move |sheet| sheet_tree_body(&body_actions, sheet),
-            move |sheet| sheet_footer(&footer_actions, sheet),
+            move |sheet| tree_sheet_footer(&footer_actions, sheet),
             move || reset_controller.reset_browse(),
         );
         let controller = Arc::clone(&self.controller);
@@ -1214,7 +1214,7 @@ fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> 
     // up). One untracked liveness check ahead of the tracked reads below, which
     // panic on a disposed owner; nothing follows it that could dispose one.
     if !actions.controller.signals_alive() {
-        return any(column(Vec::new()));
+        return any(stretch_column(Vec::new()));
     }
     // The side sheet hands its body slot a tight extent and clips whatever
     // overflows it — the tree itself scrolls no more than `tree_body` on its
@@ -1331,7 +1331,7 @@ fn tree_actions<S: 'static>(actions: &Actions, after: AfterCommit, docked: bool)
 /// orphaned footer's rename would seed itself off a disposed signal and its
 /// detach would pop a stack no longer carrying `/terminal`. Quiet no-ops
 /// instead — the tree above them has already emptied itself.
-fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
+fn tree_sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
 
@@ -1378,10 +1378,10 @@ fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
         )
     };
 
-    any(column(vec![
+    any(stretch_column(vec![
         any(text(FOOTER_TIP).style(tip_style)),
         v_gap(spacing::SM),
-        any(row(vec![
+        any(centered_row(vec![
             inflexible(rename),
             h_gap(spacing::MD),
             inflexible(detach),

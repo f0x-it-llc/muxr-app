@@ -45,12 +45,12 @@ pub(crate) fn v_gap<State: 'static>(gap: f64) -> AnyView<State> {
 }
 
 /// A vertically-centred row.
-pub(crate) fn row<State: 'static>(children: Vec<FlexChild<State>>) -> FlexView<State> {
+pub(crate) fn centered_row<State: 'static>(children: Vec<FlexChild<State>>) -> FlexView<State> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A column whose children each fill the available width.
-pub(crate) fn column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+pub(crate) fn stretch_column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
     FlexView::new(
         Axis::Vertical,
         children.into_iter().map(inflexible).collect(),
