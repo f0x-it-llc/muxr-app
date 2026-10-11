@@ -167,7 +167,7 @@ pub(crate) fn docked_rail<State: 'static>(
         .child(rule(None, Some(HAIRLINE), &colors))
         .child(Padding(FOOT_PAD, footer))
         .cross_axis(CrossAxisAlignment::Stretch);
-    any(rail_panel(RAIL_WIDTH, body, &colors))
+    any(panel(RAIL_WIDTH, body, &colors))
 }
 
 /// What the mini rail draws: every space, the selected space's tabs, and the
@@ -284,7 +284,7 @@ pub(crate) fn mini_rail<State: 'static>(
         column.push(inflexible(item));
     }
     let body = FlexView::new(Axis::Vertical, column).cross_axis(CrossAxisAlignment::Center);
-    any(rail_panel(
+    any(panel(
         MINI_RAIL_WIDTH,
         scroll_view(Padding(EdgeInsets::symmetric(0.0, spacing::MD), body)),
         &colors,
@@ -292,11 +292,7 @@ pub(crate) fn mini_rail<State: 'static>(
 }
 
 /// The rail's column at `width` on the surface tone, with its hairline right edge.
-fn rail_panel<State: 'static>(
-    width: f64,
-    body: impl View<State>,
-    colors: &Palette,
-) -> impl View<State> {
+fn panel<State: 'static>(width: f64, body: impl View<State>, colors: &Palette) -> impl View<State> {
     let column = container(SizedBox::<State>(Some(width), None).child(body)).fill(colors.surface);
     row()
         .child(column)

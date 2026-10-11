@@ -391,14 +391,13 @@ pub(crate) fn tree_body<State: 'static>(
         }
         if let Some(mutations) = &actions.mutations {
             let create = Rc::clone(&mutations.on_new_tab);
-            let add = add_row(
+            children.push(any(add_row(
                 ADD_TAB_LABEL,
                 CARD_RADIUS,
                 CARD_PAD,
                 &tones,
                 move |state: &mut State| create(state, None),
-            );
-            children.push(any(add)); // erasure: keep accumulator into Vec<AnyView>
+            )));
         }
     }
     // The space level's own create row closes the tree on either shape: nested,
@@ -406,14 +405,13 @@ pub(crate) fn tree_body<State: 'static>(
     // first space back.
     if let Some(mutations) = actions.mutations.as_ref().filter(|_| data.has_spaces) {
         let create = Rc::clone(&mutations.on_new_space);
-        let add = add_row(
+        children.push(any(add_row(
             ADD_SPACE_LABEL,
             CARD_RADIUS,
             CARD_PAD,
             &tones,
             move |state: &mut State| create(state),
-        );
-        children.push(any(add)); // erasure: keep accumulator into Vec<AnyView>
+        )));
     }
 
     stretch_column(children)
@@ -477,15 +475,14 @@ fn space_group<State: 'static>(
         Some(tabs) => {
             for tab in tabs {
                 let tab_expanded = expanded && data.expanded_tab == Some(tab.key.as_str());
-                let group = tab_group(
+                kids.push(any(tab_group(
                     tab,
                     Some(space.id.as_str()),
                     false,
                     tab_expanded,
                     tones,
                     actions,
-                );
-                kids.push(any(group)); // erasure: keep accumulator into Vec<AnyView>
+                )));
             }
         }
         None => {}
@@ -493,14 +490,13 @@ fn space_group<State: 'static>(
     if let Some(mutations) = &actions.mutations {
         let create = Rc::clone(&mutations.on_new_tab);
         let id = space.id.clone();
-        let add = add_row(
+        kids.push(any(add_row(
             ADD_TAB_LABEL,
             ADD_RADIUS,
             ADD_PAD,
             tones,
             move |state: &mut State| create(state, Some(&id)),
-        );
-        kids.push(any(add)); // erasure: keep accumulator into Vec<AnyView>
+        )));
     }
 
     column()
@@ -538,14 +534,13 @@ fn tab_group<State: 'static>(
     if let Some(mutations) = &actions.mutations {
         let create = Rc::clone(&mutations.on_new_pane);
         let path = path.clone();
-        let add = add_row(
+        kids.push(any(add_row(
             ADD_PANE_LABEL,
             RADIUS_FULL,
             ADD_PAD,
             tones,
             move |state: &mut State| create(state, &path),
-        );
-        kids.push(any(add)); // erasure: keep accumulator into Vec<AnyView>
+        )));
     }
 
     column()

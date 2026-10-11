@@ -824,7 +824,7 @@ impl Actions {
             &self.overlays,
             SHEET_TITLE,
             move |sheet| any(sheet_tree_body(&body_actions, sheet)), // erasure: keep stored view table/registry
-            move |sheet| any(tree_sheet_footer(&footer_actions, sheet)), // erasure: keep stored view table/registry
+            move |sheet| any(sheet_footer(&footer_actions, sheet)), // erasure: keep stored view table/registry
             move || reset_controller.reset_browse(),
         );
         let controller = Arc::clone(&self.controller);
@@ -1331,7 +1331,7 @@ fn tree_actions<S: 'static>(actions: &Actions, after: AfterCommit, docked: bool)
 /// orphaned footer's rename would seed itself off a disposed signal and its
 /// detach would pop a stack no longer carrying `/terminal`. Quiet no-ops
 /// instead — the tree above them has already emptied itself.
-fn tree_sheet_footer(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> {
+fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
 

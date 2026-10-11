@@ -376,19 +376,18 @@ impl<'a> Kit<'a> {
         pad_y: f64,
         content: impl View<State>,
     ) -> impl View<State> {
-        let padded = Padding(
-            EdgeInsets {
-                left: pad_x,
-                top: pad_y,
-                right: pad_x,
-                bottom: pad_y + keyboard_inset(),
-            },
-            content,
-        );
         BarBackdropView {
             fill: self.ink.head,
             hairline: self.ink.card_border,
-            child: any(padded), // erasure: keep ChildPod-fed
+            child: any(Padding(
+                EdgeInsets {
+                    left: pad_x,
+                    top: pad_y,
+                    right: pad_x,
+                    bottom: pad_y + keyboard_inset(),
+                },
+                content,
+            )),
         }
     }
 
