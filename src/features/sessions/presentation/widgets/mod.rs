@@ -24,8 +24,8 @@ mod new_session_dialog;
 mod server_strip;
 mod session_card;
 
-use frust::AnyView;
-use frust::{Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, any, container, inflexible};
+use frust::View;
+use frust::{Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, container, inflexible};
 
 use crate::ui::palette::Palette;
 
@@ -66,27 +66,34 @@ impl LoadPhase {
 /// Page tone behind `body`: `--bg-base`, not the shell's `--bg-surface`
 /// clear colour — without it, cards would show no visible edge against an
 /// unpainted background.
-pub(in crate::features::sessions::presentation) fn page_tone(
-    body: impl frust::View<SessionsState>,
+pub(in crate::features::sessions::presentation) fn page_tone<V: View<SessionsState>>(
+    body: V,
     colors: &Palette,
-) -> AnyView<SessionsState> {
-    any(container(body).fill(colors.base))
+) -> impl View<SessionsState> + use<V> {
+    container(body).fill(colors.base)
 }
 
 pub(super) fn h_gap(gap: f64) -> FlexChild<SessionsState> {
     inflexible(SizedBox::<SessionsState>(Some(gap), None))
 }
 
-pub(super) fn row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
+pub(super) fn centered_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
+pub(super) fn v_gap(gap: f64) -> FlexChild<SessionsState> {
+    inflexible(SizedBox::<SessionsState>(None, Some(gap)))
+}
+
 /// `views` stacked and stretched, with a `gap`-tall spacer between neighbours.
-pub(super) fn column(views: Vec<AnyView<SessionsState>>, gap: f64) -> FlexView<SessionsState> {
+pub(super) fn gapped_column<V: View<SessionsState>>(
+    views: Vec<V>,
+    gap: f64,
+) -> FlexView<SessionsState> {
     let mut children = Vec::with_capacity(views.len() * 2);
     for (index, view) in views.into_iter().enumerate() {
         if index > 0 {
-            children.push(inflexible(SizedBox::<SessionsState>(None, Some(gap))));
+            children.push(v_gap(gap));
         }
         children.push(inflexible(view));
     }

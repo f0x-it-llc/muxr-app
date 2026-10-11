@@ -14,9 +14,9 @@
 use frust::authoring::text::TextOverflow;
 use frust::icons::PANE_MARK;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Padding, SizedBox, any, button, container, divider, flexible, icon,
-    inflexible, scroll_view, text,
+    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
+    FlexChild, FlexView, GestureDetector, Padding, SizedBox, View, any, button, column, container,
+    divider, flexible, icon, inflexible, row, scroll_view, text,
 };
 use frust_glyph::{BadgeVariant, badge, empty_state, glyph_card, skeleton, stat_card, tag};
 
@@ -29,7 +29,7 @@ use crate::ui::spacing;
 
 use super::super::pages::{self, SessionsState};
 use super::session_card::{bell_mark, status_variant};
-use super::{LoadPhase, active_theme, column, h_gap, row};
+use super::{LoadPhase, active_theme, centered_row, gapped_column, h_gap, v_gap};
 
 /// `.d-body{padding:20px;gap:14px}`.
 const BODY_PAD: f64 = spacing::XXL;
@@ -83,14 +83,15 @@ pub(in crate::features::sessions::presentation) fn detail_pane(
     read_only: bool,
     full: bool,
     colors: &Palette,
-) -> AnyView<SessionsState> {
+) -> AnyView<SessionsState> // erasure: keep 3+-arm body
+{
     let body = match pane_state(phase, sessions.len(), selected_index(sessions, selected)) {
-        PaneState::Loading => loading_body(full),
-        PaneState::Empty => hint(EMPTY_TITLE, EMPTY_DESC),
+        PaneState::Loading => any(loading_body(full)),
+        PaneState::Empty => any(hint(EMPTY_TITLE, EMPTY_DESC)),
         PaneState::Selected(index) => {
-            return selected_detail(&sessions[index], read_only, full, colors);
+            return any(selected_detail(&sessions[index], read_only, full, colors));
         }
-        PaneState::NoSelection => hint(SELECT_TITLE, SELECT_DESC),
+        PaneState::NoSelection => any(hint(SELECT_TITLE, SELECT_DESC)),
     };
     any(container(body).fill(colors.base))
 }
@@ -173,15 +174,15 @@ fn pills_per_row(full: bool) -> usize {
 }
 
 /// A centered Glyph empty state.
-fn hint(title: &str, desc: &str) -> AnyView<SessionsState> {
-    any(Align(
+fn hint(title: &str, desc: &str) -> impl View<SessionsState> {
+    Align(
         Alignment::CENTER,
         empty_state(title, desc).glyph("\u{25e7}"),
-    ))
+    )
 }
 
 /// The list's first load in flight: skeleton cards in the detail's grid.
-fn loading_body(full: bool) -> AnyView<SessionsState> {
+fn loading_body(full: bool) -> impl View<SessionsState> {
     let stretch = f64::INFINITY;
     let overview = glyph_card()
         .title(skeleton(stretch, SKELETON_TITLE))
@@ -189,11 +190,9 @@ fn loading_body(full: bool) -> AnyView<SessionsState> {
     let layout = glyph_card()
         .title(skeleton(stretch, SKELETON_TITLE))
         .desc(skeleton(stretch, TILES_HEIGHT));
-    let rows = (0..3)
-        .map(|_| any(skeleton(stretch, SKELETON_ROW)))
-        .collect();
-    let tree = glyph_card().desc(column(rows, spacing::SM));
-    let cards = vec![grid(vec![any(overview), any(layout)], full), any(tree)];
+    let rows = (0..3).map(|_| skeleton(stretch, SKELETON_ROW)).collect();
+    let tree = glyph_card().desc(gapped_column(rows, spacing::SM));
+    let cards = vec![any(grid(vec![overview, layout], full)), any(tree)]; // erasure: keep accumulator into Vec<AnyView>
     body_scroller(cards)
 }
 
@@ -203,7 +202,7 @@ fn selected_detail(
     read_only: bool,
     full: bool,
     colors: &Palette,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let overview = overview_card(session, colors);
     let kind = body_kind(
         session.status.is_live(),
@@ -211,57 +210,65 @@ fn selected_detail(
     );
     let cards = match kind {
         BodyKind::Resurrect => {
-            vec![resurrect_card(session, colors), grid(vec![overview], full)]
+            vec![
+                any(resurrect_card(session, colors)), // erasure: keep accumulator into Vec<AnyView>
+                any(grid(vec![overview], full)),      // erasure: keep accumulator into Vec<AnyView>
+            ]
         }
-        BodyKind::OverviewOnly => vec![grid(vec![overview], full)],
+        BodyKind::OverviewOnly => vec![any(grid(vec![overview], full))], // erasure: keep accumulator into Vec<AnyView>
         BodyKind::Full => vec![
-            grid(vec![overview, active_tab_card(session, colors)], full),
-            tree_card(session, full, colors),
+            any(grid(
+                vec![
+                    Either::Left(overview),
+                    Either::Right(active_tab_card(session, colors)),
+                ],
+                full,
+            )),
+            any(tree_card(session, full, colors)), // erasure: keep accumulator into Vec<AnyView>
         ],
     };
-    any(container(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(header(session, read_only, colors)),
-                inflexible(divider(colors.rule)),
-                flexible(1, body_scroller(cards)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
+    container(
+        column()
+            .child(header(session, read_only, colors))
+            .child(divider(colors.rule))
+            .flex(1, body_scroller(cards))
+            .cross_axis(CrossAxisAlignment::Stretch),
     )
-    .fill(colors.base))
+    .fill(colors.base)
 }
 
-fn body_scroller(cards: Vec<AnyView<SessionsState>>) -> AnyView<SessionsState> {
-    any(scroll_view(Padding(
+fn body_scroller(cards: Vec<AnyView<SessionsState>>) -> impl View<SessionsState> {
+    scroll_view(Padding(
         EdgeInsets::all(BODY_PAD),
-        column(cards, GRID_GAP),
-    )))
+        gapped_column(cards, GRID_GAP),
+    ))
 }
 
 /// Two cards to a row on the full band, one on the collapsed band.
-fn grid(cards: Vec<AnyView<SessionsState>>, full: bool) -> AnyView<SessionsState> {
+fn grid<V: View<SessionsState>>(cards: Vec<V>, full: bool) -> FlexView<SessionsState> {
     if !full {
-        return any(column(cards, GRID_GAP));
+        return gapped_column(cards, GRID_GAP);
     }
     let mut rows = Vec::new();
     let mut cards = cards.into_iter();
     while let Some(first) = cards.next() {
-        let second = cards
-            .next()
-            .unwrap_or_else(|| any(SizedBox::<SessionsState>(None, None)));
-        rows.push(any(FlexView::new(
-            Axis::Horizontal,
-            vec![flexible(1, first), h_gap(GRID_GAP), flexible(1, second)],
-        )
-        .cross_axis(CrossAxisAlignment::Start)));
+        let second = match cards.next() {
+            Some(second) => flexible(1, second),
+            None => flexible(1, SizedBox::<SessionsState>(None, None)),
+        };
+        rows.push(
+            row()
+                .flex(1, first)
+                .push(h_gap(GRID_GAP))
+                .push(second)
+                .cross_axis(CrossAxisAlignment::Start),
+        );
     }
-    any(column(rows, GRID_GAP))
+    gapped_column(rows, GRID_GAP)
 }
 
 /// `.d-top`: the name and chips, then the actions trailing on their own row.
-fn header(session: &Session, read_only: bool, colors: &Palette) -> AnyView<SessionsState> {
+fn header(session: &Session, read_only: bool, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let mut chips = vec![
         flexible(
@@ -290,7 +297,7 @@ fn header(session: &Session, read_only: bool, colors: &Palette) -> AnyView<Sessi
         chips.push(h_gap(CHIP_GAP));
         chips.push(inflexible(badge("bell", BadgeVariant::Warning)));
     }
-    let actions = row(vec![
+    let actions = centered_row(vec![
         flexible(1, SizedBox::<SessionsState>(None, None)),
         inflexible(mutation_button(
             "rename",
@@ -310,11 +317,11 @@ fn header(session: &Session, read_only: bool, colors: &Palette) -> AnyView<Sessi
         h_gap(CHIP_GAP),
         inflexible(attach_button(session)),
     ]);
-    any(container(Padding(
+    container(Padding(
         EdgeInsets::symmetric(HEAD_PAD_X, HEAD_PAD_Y),
-        column(vec![any(row(chips)), any(actions)], HEAD_GAP),
+        gapped_column(vec![centered_row(chips), actions], HEAD_GAP),
     ))
-    .fill(colors.surface))
+    .fill(colors.surface)
 }
 
 /// Rename or kill: `style` normally, ghost under read-only, where the page's
@@ -325,54 +332,51 @@ fn mutation_button(
     read_only: bool,
     session: &Session,
     press: fn(&mut SessionsState, &str),
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let id = session.id.clone();
     let style = if read_only { ButtonStyle::Ghost } else { style };
-    any(button(label, move |state: &mut SessionsState| press(state, &id)).style(style))
+    button(label, move |state: &mut SessionsState| press(state, &id)).style(style)
 }
 
 /// The primary `→ attach`, worded for a resurrect when nothing is running.
-fn attach_button(session: &Session) -> AnyView<SessionsState> {
+fn attach_button(session: &Session) -> impl View<SessionsState> {
     let label = if session.status.is_live() {
         "\u{2192} attach"
     } else {
         "\u{2192} attach to resurrect"
     };
     let id = session.id.clone();
-    any(button(label, move |state: &mut SessionsState| {
+    button(label, move |state: &mut SessionsState| {
         pages::attach(state, &id)
-    }))
+    })
 }
 
 /// A card's dim lowercase heading (`.card-title`).
-fn card_title(title: impl Into<String>, colors: &Palette) -> AnyView<SessionsState> {
+fn card_title(title: impl Into<String>, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
-    any(text(title.into()).style(inked(&theme.type_scale.label_small, colors.fg_dim)))
+    text(title.into()).style(inked(&theme.type_scale.label_small, colors.fg_dim))
 }
 
 /// Tabs, panes and the backend's third metric, then the age on its own row
 /// (the age wording is the widest value).
-fn overview_card(session: &Session, colors: &Palette) -> AnyView<SessionsState> {
+fn overview_card(session: &Session, colors: &Palette) -> impl View<SessionsState> {
     let layout = &session.layout;
     let (third_label, third_value) = third_stat(layout.third);
-    let counts = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, stat_card("tabs", layout.tabs.to_string())),
-            h_gap(STAT_GAP),
-            flexible(1, stat_card("panes", layout.panes.to_string())),
-            h_gap(STAT_GAP),
-            flexible(1, stat_card(third_label, third_value.to_string())),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch);
-    let stats = column(
-        vec![any(counts), any(stat_card("age", session.age_label()))],
-        STAT_GAP,
-    );
-    any(glyph_card()
+    let counts = row()
+        .flex(1, stat_card("tabs", layout.tabs.to_string()))
+        .push(h_gap(STAT_GAP))
+        .flex(1, stat_card("panes", layout.panes.to_string()))
+        .push(h_gap(STAT_GAP))
+        .flex(1, stat_card(third_label, third_value.to_string()))
+        .cross_axis(CrossAxisAlignment::Stretch);
+    let stats = column()
+        .child(counts)
+        .push(v_gap(STAT_GAP))
+        .child(stat_card("age", session.age_label()))
+        .cross_axis(CrossAxisAlignment::Stretch);
+    glyph_card()
         .title(card_title("overview", colors))
-        .desc(stats))
+        .desc(stats)
 }
 
 /// The third metric as a stat's label and value.
@@ -385,21 +389,19 @@ fn third_stat(third: ThirdMetric) -> (&'static str, u32) {
 }
 
 /// `.resurrect`: what a saved session is, and the attach that revives it.
-fn resurrect_card(session: &Session, colors: &Palette) -> AnyView<SessionsState> {
+fn resurrect_card(session: &Session, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
-    let desc = column(
-        vec![
-            any(text(RESURRECT_DESC).style(inked(&theme.type_scale.body_small, colors.fg_muted))),
-            any(row(vec![
-                inflexible(attach_button(session)),
-                flexible(1, SizedBox::<SessionsState>(None, None)),
-            ])),
-        ],
-        spacing::BASE,
-    );
-    any(glyph_card()
+    let desc = column()
+        .child(text(RESURRECT_DESC).style(inked(&theme.type_scale.body_small, colors.fg_muted)))
+        .push(v_gap(spacing::BASE))
+        .child(centered_row(vec![
+            inflexible(attach_button(session)),
+            flexible(1, SizedBox::<SessionsState>(None, None)),
+        ]))
+        .cross_axis(CrossAxisAlignment::Stretch);
+    glyph_card()
         .title(card_title(RESURRECT_TITLE, colors))
-        .desc(desc))
+        .desc(desc)
 }
 
 /// `space · <space> · ` on herdr when the layout names its space.
@@ -412,7 +414,7 @@ fn space_prefix(session: &Session) -> Option<String> {
 
 /// The focused tab's panes as tiles: one full, two equal, three or more as
 /// a 2fr tile beside a stacked column.
-fn active_tab_card(session: &Session, colors: &Palette) -> AnyView<SessionsState> {
+fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsState> {
     let tab = session.layout.focused_tab();
     let tab_name = tab.map_or("\u{2014}", |tab| tab.name.as_str());
     let title = match space_prefix(session) {
@@ -421,8 +423,8 @@ fn active_tab_card(session: &Session, colors: &Palette) -> AnyView<SessionsState
     };
     let panes = tab.map_or(&[][..], |tab| tab.panes.as_slice());
     let tiles: AnyView<SessionsState> = match (tile_layout(panes.len()), panes) {
-        (TileLayout::None, _) => card_title("no panes reported", colors),
-        (TileLayout::One, [only]) => tile(only, colors),
+        (TileLayout::None, _) => any(card_title("no panes reported", colors)), // erasure: keep 3+-arm body
+        (TileLayout::One, [only]) => any(tile(only, colors)), // erasure: keep 3+-arm body
         (TileLayout::Two, [a, b]) => any(tile_row(vec![
             flexible(1, tile(a, colors)),
             flexible(1, tile(b, colors)),
@@ -436,11 +438,11 @@ fn active_tab_card(session: &Session, colors: &Palette) -> AnyView<SessionsState
                 flexible(1, stack),
             ]))
         }
-        (_, []) => card_title("no panes reported", colors),
+        (_, []) => any(card_title("no panes reported", colors)), // erasure: keep 3+-arm body
     };
-    any(glyph_card()
+    glyph_card()
         .title(card_title(title, colors))
-        .desc(SizedBox::<SessionsState>(None, Some(TILES_HEIGHT)).child(tiles)))
+        .desc(SizedBox::<SessionsState>(None, Some(TILES_HEIGHT)).child(tiles))
 }
 
 fn tile_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
@@ -464,7 +466,7 @@ fn spaced(children: Vec<FlexChild<SessionsState>>, across: bool) -> Vec<FlexChil
 }
 
 /// `.lp`: one pane tile, amber when focused.
-fn tile(pane: &PaneSummary, colors: &Palette) -> AnyView<SessionsState> {
+fn tile(pane: &PaneSummary, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let (fill, border, ink) = if pane.focused {
         (colors.amber_faint, colors.amber_border, colors.amber)
@@ -475,17 +477,17 @@ fn tile(pane: &PaneSummary, colors: &Palette) -> AnyView<SessionsState> {
         .style(inked(&theme.type_scale.label_small, ink))
         .max_lines(1)
         .overflow(TextOverflow::Ellipsis);
-    any(container(Padding(
+    container(Padding(
         EdgeInsets::all(TILE_PAD),
         Align(Alignment::TOP_LEFT, title),
     ))
     .fill(fill)
     .border(border, HAIRLINE)
-    .radius(theme.shape.extra_small))
+    .radius(theme.shape.extra_small)
 }
 
 /// Every tab as a rectangle, the focused one open on its pane pills.
-fn tree_card(session: &Session, full: bool, colors: &Palette) -> AnyView<SessionsState> {
+fn tree_card(session: &Session, full: bool, colors: &Palette) -> impl View<SessionsState> {
     let title = match space_prefix(session) {
         Some(space) => format!("tabs \u{2192} panes{SEP}space {space}"),
         None => "tabs \u{2192} panes".to_string(),
@@ -496,13 +498,13 @@ fn tree_card(session: &Session, full: bool, colors: &Palette) -> AnyView<Session
         .iter()
         .map(|tab| tab_rect(&session.id, tab, full, colors))
         .collect();
-    any(glyph_card()
+    glyph_card()
         .title(card_title(title, colors))
-        .desc(column(tabs, spacing::SM)))
+        .desc(gapped_column(tabs, spacing::SM))
 }
 
 /// `.tree-tab`: index badge, name, one chip, and the focused tab's pills.
-fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> AnyView<SessionsState> {
+fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let position = (tab.index + 1).to_string();
     let index_variant = if tab.focused {
@@ -528,32 +530,31 @@ fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> AnyView
     head.push(inflexible(tab_chip(tab)));
     let mut parts = vec![any(Padding(
         EdgeInsets::symmetric(TAB_PAD_X, TAB_PAD_Y),
-        row(head),
+        centered_row(head),
     ))];
     if tab.focused && !tab.panes.is_empty() {
-        parts.push(any(divider(colors.rule)));
+        parts.push(any(divider(colors.rule))); // erasure: keep accumulator into Vec<AnyView>
         parts.push(any(container(Padding(
             EdgeInsets::symmetric(TAB_PAD_X, TAB_PAD_Y),
             pane_pills(id, tab, full, colors),
         ))
         .fill(colors.base)));
     }
-    any(container(column(parts, 0.0))
+    container(gapped_column(parts, 0.0))
         .fill(colors.surface)
         .border(colors.outline, HAIRLINE)
-        .radius(theme.shape.small))
+        .radius(theme.shape.small)
 }
 
 /// `focused tab` | `bell` | `N panes`.
-fn tab_chip(tab: &TabSummary) -> AnyView<SessionsState> {
-    let chip = if tab.focused {
+fn tab_chip(tab: &TabSummary) -> impl View<SessionsState> {
+    if tab.focused {
         badge("focused tab", BadgeVariant::Accent)
     } else if tab.has_bell {
         badge("bell", BadgeVariant::Warning)
     } else {
         badge(panes_count(tab.panes.len()), BadgeVariant::Neutral)
-    };
-    any(chip)
+    }
 }
 
 fn panes_count(count: usize) -> String {
@@ -565,7 +566,12 @@ fn panes_count(count: usize) -> String {
 }
 
 /// The tab's pills in equal-width rows, the last row padded with blanks.
-fn pane_pills(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> AnyView<SessionsState> {
+fn pane_pills(
+    id: &str,
+    tab: &TabSummary,
+    full: bool,
+    colors: &Palette,
+) -> impl View<SessionsState> {
     let per_row = pills_per_row(full);
     let rows = tab
         .panes
@@ -581,15 +587,15 @@ fn pane_pills(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> AnyVi
                     None => flexible(1, SizedBox::<SessionsState>(None, None)),
                 });
             }
-            any(row(cells))
+            centered_row(cells)
         })
         .collect();
-    any(column(rows, PILL_GAP))
+    gapped_column(rows, PILL_GAP)
 }
 
 /// `.pp`: pane mark, title, cwd, `float` — a tap attaches with the pane's
 /// `(tab, id)` target (see the module docs for who honours it).
-fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> AnyView<SessionsState> {
+fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let (fill, border, ink) = if pane.focused {
         (colors.amber_faint, colors.amber_border, colors.amber)
@@ -623,15 +629,15 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> AnyVie
     }
     let pill = container(Padding(
         EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
-        row(parts),
+        centered_row(parts),
     ))
     .fill(fill)
     .border(border, HAIRLINE)
     .radius(RADIUS_FULL);
     let id = id.to_string();
     let pane_id = pane.id;
-    any(GestureDetector(pill)
-        .on_tap(move |state: &mut SessionsState| pages::attach_pane(state, &id, tab, pane_id)))
+    GestureDetector(pill)
+        .on_tap(move |state: &mut SessionsState| pages::attach_pane(state, &id, tab, pane_id))
 }
 
 #[cfg(test)]
