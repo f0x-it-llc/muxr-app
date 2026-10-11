@@ -196,12 +196,12 @@ fn cap_weight(key: BarKey) -> u32 {
 ///
 /// **Reads `seam.revision` tracked**, so a latch change wakes the rebuild
 /// that repaints the armed pips. Mount from a `Component::build`.
-pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State> {
+pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> impl View<State> + use<State> {
     // Read unconditionally, before the inactive early-out, so the
     // subscription exists on the frame the bar is still hidden.
     let _revision = seam.revision.get();
     if !active {
-        return any(SizedBox::<State>(None, Some(0.0)));
+        return Either::Left(SizedBox::<State>(None, Some(0.0)));
     }
 
     let kit = Kit::new(seam);
@@ -222,7 +222,7 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
     }
 
     let row = FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center);
-    any(kit.band(BAR_PAD_X, BAR_PAD_Y, row))
+    Either::Right(kit.band(BAR_PAD_X, BAR_PAD_Y, row))
 }
 
 /// The keyboard's own inset a bar docks on; zero in a headless test/desktop.
@@ -246,11 +246,11 @@ pub fn tablet_key_bar<State: 'static>(
     band: WidthBand,
     fn_row: RwSignal<bool>,
     seam: &InputSeam,
-) -> AnyView<State> {
+) -> impl View<State> + use<State> {
     let _revision = seam.revision.get();
     let fn_open = fn_row.get();
     if !shown || seam.read_only() {
-        return any(SizedBox::<State>(None, Some(keyboard_inset())));
+        return Either::Left(SizedBox::<State>(None, Some(keyboard_inset())));
     }
 
     let kit = Kit::new(seam);
@@ -296,7 +296,7 @@ pub fn tablet_key_bar<State: 'static>(
         rows.push(inflexible(FlexView::new(Axis::Horizontal, keys)));
     }
     let column = FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch);
-    any(kit.band(spacing::BASE, spacing::SM, column))
+    Either::Right(kit.band(spacing::BASE, spacing::SM, column))
 }
 
 /// A Tablet cap's width: its label plus [`TABLET_CAP_PAD_X`] a side, never
@@ -370,12 +370,12 @@ impl<'a> Kit<'a> {
     /// The bar's band around `content`: fill and top hairline outside, padding
     /// inside, so full-bleed chrome reaches both screen edges, keyboard inset
     /// included.
-    fn band<State: 'static>(
+    fn band<State: 'static, Content: View<State>>(
         &self,
         pad_x: f64,
         pad_y: f64,
-        content: impl View<State>,
-    ) -> impl View<State> {
+        content: Content,
+    ) -> impl View<State> + use<State, Content> {
         BarBackdropView {
             fill: self.ink.head,
             hairline: self.ink.card_border,

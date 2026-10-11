@@ -115,12 +115,12 @@ fn status_chip(link: Option<LinkStatus>) -> (&'static str, BadgeVariant) {
 
 /// The full rail: header, the scrolling `tree`, and the footer's tip and one
 /// `detach` button. `top` clears a status-bar inset the app bar no longer does.
-pub(crate) fn docked_rail<State: 'static>(
+pub(crate) fn docked_rail<State: 'static, Tree: View<State>, Detach: Fn(&mut State) + 'static>(
     head: &RailHead<'_>,
-    tree: impl View<State>,
+    tree: Tree,
     top: f64,
-    on_detach: impl Fn(&mut State) + 'static,
-) -> AnyView<State> {
+    on_detach: Detach,
+) -> impl View<State> + use<State, Tree, Detach> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
 
@@ -167,7 +167,7 @@ pub(crate) fn docked_rail<State: 'static>(
         .child(rule(None, Some(HAIRLINE), &colors))
         .child(Padding(FOOT_PAD, footer))
         .cross_axis(CrossAxisAlignment::Stretch);
-    any(panel(RAIL_WIDTH, body, &colors))
+    panel(RAIL_WIDTH, body, &colors)
 }
 
 /// What the mini rail draws: every space, the selected space's tabs, and the
@@ -201,7 +201,7 @@ pub(crate) struct MiniActions<State: 'static> {
 pub(crate) fn mini_rail<State: 'static>(
     data: &MiniData<'_>,
     actions: &MiniActions<State>,
-) -> AnyView<State> {
+) -> impl View<State> + use<State> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
     let mark = |source: IconData, label: &str, active: bool, press: Rc<dyn Fn(&mut State)>| {
@@ -216,7 +216,7 @@ pub(crate) fn mini_rail<State: 'static>(
             .icon_size(MINI_MARK)
             .box_size(Size::new(MINI_BUTTON, MINI_BUTTON))
             .radius(theme.shape.medium);
-        any(tooltip(target, label.to_string()))
+        any(tooltip(target, label.to_string())) // erasure: keep accumulator into Vec<AnyView>
     };
 
     let mut items: Vec<AnyView<State>> = Vec::new();
@@ -232,7 +232,7 @@ pub(crate) fn mini_rail<State: 'static>(
         ));
     }
     if !data.spaces.is_empty() {
-        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors)));
+        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors))); // erasure: keep accumulator into Vec<AnyView>
     }
     for tab in data.tabs {
         let active = tab.key == data.active_tab;
@@ -251,10 +251,10 @@ pub(crate) fn mini_rail<State: 'static>(
         )
         .on_tap(move |state: &mut State| open(state, &target));
         let cell = labelled_button(tab.label.clone(), cell);
-        items.push(any(tooltip(cell, tab.label.clone())));
+        items.push(any(tooltip(cell, tab.label.clone()))); // erasure: keep accumulator into Vec<AnyView>
     }
     if let Some(tab) = data.tabs.iter().find(|tab| tab.key == data.active_tab) {
-        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors)));
+        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors))); // erasure: keep accumulator into Vec<AnyView>
         for pane in &tab.panes {
             let open = Rc::clone(&actions.on_pane);
             let (key, target) = (tab.key.clone(), pane.clone());
@@ -284,15 +284,19 @@ pub(crate) fn mini_rail<State: 'static>(
         column.push(inflexible(item));
     }
     let body = FlexView::new(Axis::Vertical, column).cross_axis(CrossAxisAlignment::Center);
-    any(panel(
+    panel(
         MINI_RAIL_WIDTH,
         scroll_view(Padding(EdgeInsets::symmetric(0.0, spacing::MD), body)),
         &colors,
-    ))
+    )
 }
 
 /// The rail's column at `width` on the surface tone, with its hairline right edge.
-fn panel<State: 'static>(width: f64, body: impl View<State>, colors: &Palette) -> impl View<State> {
+fn panel<State: 'static, Body: View<State>>(
+    width: f64,
+    body: Body,
+    colors: &Palette,
+) -> impl View<State> + use<State, Body> {
     let column = container(SizedBox::<State>(Some(width), None).child(body)).fill(colors.surface);
     row()
         .child(column)
