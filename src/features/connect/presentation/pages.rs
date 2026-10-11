@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use clean_signals_frust::use_controller;
 use frust::{
-    AnyView, Component, Get, GetUntracked, Stack, View, WindowMetrics, any, component, scroll_view,
-    use_context,
+    AnyView, Component, Either, Get, GetUntracked, View, WindowMetrics, any, component,
+    scroll_view, stack, use_context,
 };
 
 use super::controller::ConnectController;
@@ -55,7 +55,8 @@ use crate::ui::backdrop::page_backdrop;
 use crate::ui::palette::active_theme;
 
 /// The Connect screen: the `/` route's page. See the [module docs](self).
-pub fn connect_page(overlays: frust::NavigatorController<AppState>) -> AnyView<AppState> {
+pub fn connect_page(overlays: frust::NavigatorController<AppState>) -> AnyView<AppState> // erasure: keep accumulator into Vec<AnyView>
+{
     any(component(ConnectScreen { overlays }))
 }
 
@@ -208,23 +209,31 @@ impl Component for ConnectScreen {
                 &state.qr_permission_pending,
                 &state.pro,
             );
-            return tablet_screen(&theme, &live, &saved, rule.is_full(), qr, &state.overlays);
+            return Either::Left(tablet_screen(
+                &theme,
+                &live,
+                &saved,
+                rule.is_full(),
+                qr,
+                &state.overlays,
+            ));
         }
         let content = clamped_layout(
             connect_pieces_with(&theme, Some(&live), &saved),
             rule.wide_clamp,
         );
 
-        any(Stack(vec![
-            any(page_backdrop::<ConnectState>()),
-            any(scroll_view(content)),
-            qr_affordance(
-                &state.overlays,
-                &state.controller,
-                &state.qr_permission_pending,
-                &state.pro,
-            ),
-            info_affordance(&state.overlays),
-        ]))
+        Either::Right(
+            stack()
+                .child(page_backdrop::<ConnectState>())
+                .child(scroll_view(content))
+                .child(qr_affordance(
+                    &state.overlays,
+                    &state.controller,
+                    &state.qr_permission_pending,
+                    &state.pro,
+                ))
+                .child(info_affordance(&state.overlays)),
+        )
     }
 }

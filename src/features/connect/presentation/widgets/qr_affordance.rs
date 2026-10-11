@@ -30,8 +30,7 @@ use std::sync::Arc;
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, Padding, any, button, icons, safe_area,
-    spawn_local,
+    Align, Alignment, ButtonStyle, EdgeInsets, Padding, View, button, icons, safe_area, spawn_local,
 };
 use frust_camera::{CameraError, PermissionStatus};
 
@@ -80,10 +79,10 @@ pub(crate) fn qr_affordance<S: 'static>(
     controller: &Arc<ConnectController>,
     pending: &Rc<Cell<bool>>,
     pro: &Arc<ProController>,
-) -> AnyView<S> {
+) -> impl View<S> {
     let theme = active_theme();
     let scheme = theme.scheme();
-    any(safe_area(Align(
+    safe_area(Align(
         Alignment::BOTTOM_RIGHT,
         Padding(
             EdgeInsets::all(FAB_MARGIN),
@@ -98,7 +97,7 @@ pub(crate) fn qr_affordance<S: 'static>(
             .box_size(Size::new(FAB_BOX, FAB_BOX))
             .radius(FAB_BOX / 2.0),
         ),
-    )))
+    ))
 }
 
 /// The Tablet form's in-flow QR action: a secondary button under the FAB's
@@ -111,22 +110,22 @@ pub(crate) fn qr_button<S: 'static>(
     controller: &Arc<ConnectController>,
     pending: &Rc<Cell<bool>>,
     pro: &Arc<ProController>,
-) -> AnyView<S> {
+) -> impl View<S> {
     styled_qr_button(qr_press(overlays, controller, pending, pro))
 }
 
 /// [`qr_button`] with nothing behind the press: the splash's copy of the
 /// Tablet action, the same pixels with no handles to fire (the parity
 /// contract — the overlay forwards no input anyway).
-pub(crate) fn splash_qr_button<S: 'static>() -> AnyView<S> {
+pub(crate) fn splash_qr_button<S: 'static>() -> impl View<S> {
     styled_qr_button(|_state: &mut S| {})
 }
 
 /// The Tablet QR action's one styling, shared by its live and splash copies.
-fn styled_qr_button<S: 'static>(on_press: impl Fn(&mut S) + 'static) -> AnyView<S> {
-    any(button(FAB_LABEL, on_press)
+fn styled_qr_button<S: 'static>(on_press: impl Fn(&mut S) + 'static) -> impl View<S> {
+    button(FAB_LABEL, on_press)
         .style(ButtonStyle::Secondary)
-        .label_alignment(Alignment::CENTER))
+        .label_alignment(Alignment::CENTER)
 }
 
 /// The press both QR affordances fire: busy, the free-tier gate, then

@@ -11,8 +11,8 @@
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, AnyView, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, Theme,
-    WindowMetrics, any, button, inflexible, safe_area, text, use_context,
+    Align, Alignment, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, Theme, View,
+    WindowMetrics, button, inflexible, safe_area, text, use_context,
 };
 use frust_glyph::{glyph_card, glyph_dialog, show_glyph_dialog};
 
@@ -60,7 +60,7 @@ const MARK: f64 = 22.0;
 /// raises [`open_getting_started`]'s dialog over `overlays`.
 pub(crate) fn info_affordance<S: 'static>(
     overlays: &frust::NavigatorController<AppState>,
-) -> AnyView<S> {
+) -> impl View<S> {
     let overlays = overlays.clone();
     let colors = Palette::from_theme(&active_theme());
     // The window-control corner (iPadOS 26+ windowed); zero everywhere else. A
@@ -72,7 +72,7 @@ pub(crate) fn info_affordance<S: 'static>(
         .map(|metrics| metrics.insets.corner_insets.top_right)
         .filter(|corner| corner.height > 0.0);
     let (right, top) = corner.map_or((0.0, 0.0), |c| (c.width, c.height));
-    any(safe_area(Align(
+    safe_area(Align(
         Alignment::TOP_RIGHT,
         Padding(
             EdgeInsets {
@@ -89,32 +89,30 @@ pub(crate) fn info_affordance<S: 'static>(
             .box_size(Size::new(BOX, BOX))
             .radius(BOX / 2.0),
         ),
-    )))
+    ))
 }
 
 /// The Tablet panel's headline in the display face, the backend names in the
 /// accent. `text` carries one style per run, so each colour is its own run.
-pub(crate) fn tablet_headline<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
+pub(crate) fn tablet_headline<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> {
     let run = |copy: &str, ink| {
-        inflexible(any(
-            text(copy).style(inked(&theme.type_scale.headline_small, ink))
-        ))
+        inflexible(text(copy).style(inked(&theme.type_scale.headline_small, ink)))
     };
-    any(block_column::<S>(vec![
-        any(text("attach to a").style(inked(&theme.type_scale.headline_small, colors.fg))),
-        any(centered_row::<S>(vec![
+    block_column::<S, _>((
+        text("attach to a").style(inked(&theme.type_scale.headline_small, colors.fg)),
+        centered_row::<S>(vec![
             run("herdr", colors.amber),
             run(" or", colors.fg),
             run(" zellij", colors.amber),
             run(" session", colors.fg),
-        ])),
-    ]))
+        ]),
+    ))
 }
 
 /// The Tablet panel's inline orientation: the dialog's paragraph in a Glyph
 /// card with **Open guide** under it, through the same link seam.
-pub(crate) fn getting_started_card<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
-    any(glyph_card::<S>()
+pub(crate) fn getting_started_card<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> {
+    glyph_card::<S>()
         .desc(
             text(GETTING_STARTED_BODY).style(inked(&theme.type_scale.body_small, colors.fg_muted)),
         )
@@ -123,7 +121,7 @@ pub(crate) fn getting_started_card<S: 'static>(theme: &Theme, colors: &Palette) 
             button(OPEN_GUIDE_LABEL, |_state: &mut S| open_external(DOCS_URL))
                 .style(ButtonStyle::Secondary)
                 .small(),
-        )))
+        ))
 }
 
 /// Push the orientation dialog as a page of `overlays`: one paragraph, a
@@ -139,20 +137,21 @@ pub(crate) fn open_getting_started(overlays: &frust::NavigatorController<AppStat
             glyph_dialog()
                 .title(GETTING_STARTED_TITLE)
                 .body(GETTING_STARTED_BODY)
-                .action(any(button(CLOSE_LABEL, move |_state: &mut AppState| {
-                    close_nav.pop();
-                })
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button(
-                    OPEN_GUIDE_LABEL,
-                    move |_state: &mut AppState| {
+                .action(
+                    button(CLOSE_LABEL, move |_state: &mut AppState| {
+                        close_nav.pop();
+                    })
+                    .style(ButtonStyle::Ghost)
+                    .small(),
+                )
+                .action(
+                    button(OPEN_GUIDE_LABEL, move |_state: &mut AppState| {
                         open_external(DOCS_URL);
                         guide_nav.pop();
-                    },
+                    })
+                    .style(ButtonStyle::Primary)
+                    .small(),
                 )
-                .style(ButtonStyle::Primary)
-                .small()))
         },
         |_state: &mut AppState, _result: PopResult| {},
     );
