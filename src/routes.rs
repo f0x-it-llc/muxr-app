@@ -48,8 +48,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    AnyView, BackPolicy, Either, Get, GetUntracked, Location, NavigatorController, PushOptions,
-    Resolution, ResolvedPage, Route, RouteObserver, RouteParams, Router, RwSignal, Set, SizedBox,
+    BackPolicy, Either, Get, GetUntracked, Location, NavigatorController, PushOptions, Resolution,
+    ResolvedPage, Route, RouteObserver, RouteParams, Router, RwSignal, Set, SizedBox,
     TransitionSpec, View, shell_route,
 };
 
@@ -76,7 +76,7 @@ pub const TERMINAL_TAB_QUERY_KEY: &str = "tab";
 pub const TERMINAL_PANE_QUERY_KEY: &str = "pane";
 
 /// The `/` route (and the outer navigator's initial page): Connect.
-pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
+pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
     connect_page(overlays)
 }
 

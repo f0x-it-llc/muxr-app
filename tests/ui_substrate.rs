@@ -948,7 +948,7 @@ impl ToastHarness {
     fn mount() -> Self {
         let mut harness = ToastHarness {
             root: RenderRoot::new(),
-            logic: Box::new(|_state: &mut State| toast_layer::<State>()),
+            logic: Box::new(|_state: &mut State| AnyView::new(toast_layer::<State>())),
             state: State::default(),
             tcx: TextContext::new(),
         };

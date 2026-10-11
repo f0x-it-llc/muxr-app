@@ -13,7 +13,7 @@ mod shell;
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Component, Get, NavigatorController, Router, RwSignal, View, overlay_host, stack,
+    AnyView, Component, Get, NavigatorController, Router, RwSignal, View, any, overlay_host, stack,
 };
 
 use features::connect::domain::entities::SavedServer;
@@ -77,8 +77,8 @@ fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
         return None;
     }
     match cue.plan {
-        SplashPlan::Full => Some(full_splash(cue)),
-        SplashPlan::Reduced => Some(reduced_splash(cue.art.clone(), cue.done)),
+        SplashPlan::Full => Some(any(full_splash(cue))), // erasure: keep accumulator into Vec<AnyView>
+        SplashPlan::Reduced => Some(any(reduced_splash(cue.art.clone(), cue.done))), // erasure: keep accumulator into Vec<AnyView>
         SplashPlan::Skip => None,
     }
 }
@@ -86,7 +86,7 @@ fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
 /// The full sequence over the screen the route will paint: Connect's own
 /// [`splash_assembly`] picks the phone column or the Tablet arrangement for
 /// the window's size class, so the overlay's last frame is the route's first.
-fn full_splash(cue: &SplashCue) -> AnyView<AppState> {
+fn full_splash(cue: &SplashCue) -> impl View<AppState> {
     let (pieces, assemble) = splash_assembly(&active_theme(), &cue.saved);
     splash_sequence(cue.art.clone(), SPLASH_SEED, pieces, assemble, cue.done)
 }
@@ -161,7 +161,7 @@ impl Component for MuxrApp {
             let initial_overlays = overlays.clone();
             shell::root_view(
                 &controller,
-                move || routes::home_page(initial_overlays.clone()),
+                move || any(routes::home_page(initial_overlays.clone())), // erasure: keep stored view table/registry
                 cue.as_ref().and_then(splash_overlay),
             )
         });

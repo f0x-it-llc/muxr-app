@@ -144,7 +144,7 @@ impl Harness {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             let screen: AnyView<AppState> = if logic_mounted.get() {
-                terminal_page(screen_nav)
+                any(terminal_page(screen_nav))
             } else {
                 any(SizedBox::<AppState>(Some(0.0), Some(0.0)))
             };

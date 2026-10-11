@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use clean_signals::Failure;
-use frust::{AnyView, Get, GetUntracked, RwSignal, Update, any};
+use frust::{Get, GetUntracked, RwSignal, Update, View};
 use frust_glyph::toast_host;
 
 use crate::failure::AppFailure;
@@ -59,6 +59,6 @@ impl FailureToasts {
     }
 }
 
-pub fn toast_layer<State: 'static>() -> AnyView<State> {
-    any(toast_host(app_toasts().pending()))
+pub fn toast_layer<State: 'static>() -> impl View<State> {
+    toast_host(app_toasts().pending())
 }

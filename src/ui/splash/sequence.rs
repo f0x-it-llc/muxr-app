@@ -194,7 +194,7 @@ pub fn splash_sequence<State: 'static>(
     pieces: Vec<AnyView<State>>,
     assemble: impl FnOnce(Vec<AnyView<State>>) -> AnyView<State>,
     done: RwSignal<bool>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let staggered = pieces
         .into_iter()
         .enumerate()
@@ -205,7 +205,7 @@ pub fn splash_sequence<State: 'static>(
     // Bottom-to-top, matching the source's z-index ladder: the ui-layer (5)
     // under the burst particles (8), under the icon (10). The backdrop is
     // below all of it.
-    any(stack()
+    stack()
         .child(page_backdrop::<State>().block_input(true))
         // The end cue rides the assembly's gate, clocking from the pieces' own
         // first frame: a gap straddling the gate delays both together, so the
@@ -224,7 +224,7 @@ pub fn splash_sequence<State: 'static>(
             dissolve_cue_ms(),
             super::burst::burst::<State>(seed),
         ))
-        .child(icon_phase::<State>(art)))
+        .child(icon_phase::<State>(art))
 }
 
 /// The reduced-motion fallback: the static app icon over the page backdrop
@@ -242,7 +242,7 @@ pub fn splash_sequence<State: 'static>(
 /// only ever mounted when `reduce_motion` is on, so honoring it would fire
 /// on the first painted frame and unmount the hold ~16ms after it
 /// appeared — a flicker where the design reference has a 200ms beat.
-pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> AnyView<State> {
+pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> impl View<State> {
     let mut layers: Vec<AnyView<State>> = vec![any(page_backdrop::<State>().block_input(true))]; // erasure: keep accumulator into Vec<AnyView>
     if let IconArt::Image(source) = art {
         layers.push(any(Align(
@@ -254,7 +254,7 @@ pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> Any
     layers.push(any(
         cue::<State>(spec::REDUCED_HOLD_MS, done).honor_reduce_motion(false)
     ));
-    any(Stack(layers))
+    Stack(layers)
 }
 
 // ---------------------------------------------------------------------------

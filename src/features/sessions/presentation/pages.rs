@@ -108,12 +108,11 @@ pub fn set_loading_rain_for_tests(enabled: bool) {
 pub fn sessions_page(
     controller: NavigatorController<AppState>,
     overlays: NavigatorController<AppState>,
-) -> AnyView<AppState> // erasure: keep accumulator into Vec<AnyView>
-{
-    any(component(SessionsScreen {
+) -> impl View<AppState> {
+    component(SessionsScreen {
         nav: controller,
         overlays,
-    }))
+    })
 }
 
 /// The Sessions screen `Component`. Stateless configuration — everything
