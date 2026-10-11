@@ -28,7 +28,7 @@ use frust::authoring::{
     EditingState, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
 };
 use frust::{
-    AnyView, Axis, Component, FlexView, Get, RwSignal, Set, View, any, component, flexible,
+    AnyView, Axis, Component, Either, FlexView, Get, RwSignal, Set, View, any, component, flexible,
     inflexible,
 };
 use frust_core::RenderRoot;
@@ -124,9 +124,14 @@ impl Component for TermScreen {
             // No IME wait on a Tablet: only the toggle and read-only gate it.
             Some(tablet) => {
                 let shown = tablet.shown.get() && (!self.read_only || self.force_bar);
-                tablet_key_bar::<Self::State>(shown, tablet.band, tablet.fn_row, &self.seam)
+                Either::Left(tablet_key_bar::<Self::State>(
+                    shown,
+                    tablet.band,
+                    tablet.fn_row,
+                    &self.seam,
+                ))
             }
-            None => key_bar::<Self::State>(active, &self.seam),
+            None => Either::Right(key_bar::<Self::State>(active, &self.seam)),
         };
         any(FlexView::new(
             Axis::Vertical,
