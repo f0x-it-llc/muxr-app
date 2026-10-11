@@ -35,8 +35,8 @@ use std::time::Duration;
 use clean_signals_frust::use_interval;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, FlexView, Get,
-    RwSignal, Set, SizedBox, Theme, any, button, component, container, icon, icons, inflexible,
-    on_cleanup, platform_view, spawn_blocking, spawn_local, text,
+    RwSignal, Set, SizedBox, Theme, View, any, button, component, container, icon, icons,
+    inflexible, on_cleanup, platform_view, spawn_blocking, spawn_local, text,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat};
 use frust_camera::{BarcodeStreamOptions, CameraError, CameraSession, DetectionPolicy};
@@ -170,7 +170,7 @@ impl Component for QrScanSheet {
         }
     }
 
-    fn build(&self, state: &mut QrSheetState) -> AnyView<QrSheetState> {
+    fn build(&self, state: &mut QrSheetState) -> impl View<QrSheetState> {
         let theme = active_theme();
         open_camera_once(state);
         match sheet_stage(state) {

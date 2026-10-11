@@ -32,7 +32,7 @@ use std::sync::Arc;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, NavigatorController, Padding, Set, SizedBox, WindowMetrics, any, component,
+    GetUntracked, NavigatorController, Padding, Set, SizedBox, View, WindowMetrics, any, component,
     inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
@@ -187,7 +187,7 @@ impl Component for SettingsScreen {
         }
     }
 
-    fn build(&self, state: &mut SettingsState) -> AnyView<SettingsState> {
+    fn build(&self, state: &mut SettingsState) -> impl View<SettingsState> {
         let info = state.actions.connection.server_info.get();
         let read_only = state.actions.connection.is_read_only.get();
         let tokens = state.actions.controller.tokens.get();
