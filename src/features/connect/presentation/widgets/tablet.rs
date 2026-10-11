@@ -14,8 +14,8 @@
 //! (`connect_pieces`/`connect_layout` is the Compact half).
 
 use frust::{
-    AnyView, CrossAxisAlignment, EdgeInsets, Either, Padding, SizedBox, Stack, Theme, View,
-    WindowMetrics, any, colored_box, container, row, safe_area, scroll_view, use_context,
+    AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, Stack, Theme, View, WindowMetrics,
+    any, colored_box, container, row, safe_area, scroll_view, use_context,
 };
 
 use super::getting_started::info_affordance;
@@ -69,17 +69,16 @@ pub fn tablet_screen<S: 'static, Q: View<S>>(
     full: bool,
     qr: Q,
     overlays: &frust::NavigatorController<AppState>,
-) -> impl View<S> + use<S, Q> // erasure: keep accumulator into Vec<AnyView>
-{
+) -> impl View<S> + use<S, Q> {
     let folded = (!full).then_some(saved);
     let form = tablet_form_pieces(theme, Some(live), folded, qr);
     let panel = full.then(|| tablet_panel_pieces(theme, Some(live), saved));
     let mut layers = vec![
-        any(page_backdrop::<S>()),
-        any(tablet_layout(theme, panel, form)),
+        any(page_backdrop::<S>()), // erasure: keep accumulator into Vec<AnyView>
+        any(tablet_layout(theme, panel, form)), // erasure: keep accumulator into Vec<AnyView>
     ];
     if !full {
-        layers.push(any(info_affordance(overlays)));
+        layers.push(any(info_affordance(overlays))); // erasure: keep accumulator into Vec<AnyView>
     }
     Stack(layers)
 }
@@ -152,7 +151,7 @@ fn tablet_layout<S: 'static>(
         clamp(gapped(form, spacing::XL)),
     ));
     let Some(panel) = panel else {
-        return Either::Left(safe_area(form_column));
+        return safe_area(form_column);
     };
     let colors = Palette::from_theme(theme);
     // The iPadOS top-left window control sits over the brand tile; clear it.
@@ -170,13 +169,13 @@ fn tablet_layout<S: 'static>(
     let panel =
         container(scroll_view(Padding(inset, gapped(panel, spacing::XL)))).fill(colors.base);
     let edge = colored_box::<S>().size(HAIRLINE, 0.0).fill(colors.rule);
-    Either::Right(safe_area(
+    safe_area(
         row()
             .child(SizedBox::<S>(Some(LEFT_PANEL_WIDTH), None).child(panel))
             .child(edge)
             .flex(1, form_column)
             .cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    )
 }
 
 #[cfg(test)]

@@ -1042,8 +1042,8 @@ fn pressable<State: 'static, V: View<State> + 'static>(
 ) -> impl View<State> {
     let detector = GestureDetector(child).on_tap(on_tap);
     match on_hold {
-        Some(hold) => Either::Left(detector.on_long_press(move |state: &mut State| hold(state))),
-        None => Either::Right(detector),
+        Some(hold) => detector.on_long_press(move |state: &mut State| hold(state)),
+        None => detector,
     }
 }
 
