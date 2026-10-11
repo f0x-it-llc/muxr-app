@@ -20,7 +20,8 @@ use crate::ui::spacing;
 
 use super::pickers::{CHECK_SIZE, PICK_BLEED, PICK_PAD_X, PICK_PAD_Y, PickerKind, bleeding_scroll};
 use super::rows::{
-    GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, column, h_gap, rounded_fill, row,
+    GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, centered_row, h_gap, rounded_fill,
+    stretch_column,
 };
 
 /// The sheet's caption, under its title.
@@ -153,7 +154,7 @@ pub(in super::super) fn font_picker_sheet(
 
     let mut children = head;
     children.push(scroll_body);
-    any(column(children))
+    any(stretch_column(children))
 }
 
 /// The one-line note the `available` section leads with, if any.
@@ -195,7 +196,7 @@ fn font_pick_row(
 ) -> AnyView<AppState> {
     let theme = active_theme();
     let ink = if selected { colors.amber } else { colors.fg };
-    let body = column(vec![
+    let body = stretch_column(vec![
         any(text(entry.display.clone()).style(inked(&theme.type_scale.label_large, ink))),
         any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
         any(text(entry.meta.clone()).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
@@ -220,7 +221,10 @@ fn font_pick_row(
         Color::TRANSPARENT
     };
     let mut box_ = rounded_fill(
-        Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
+        Padding(
+            EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
+            centered_row(children),
+        ),
         fill,
         theme.shape.small,
     );

@@ -73,12 +73,12 @@ pub(super) fn spacer<S: 'static>() -> FlexChild<S> {
 }
 
 /// A vertically-centered row.
-pub(super) fn row<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<S> {
+pub(super) fn centered_row<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A column whose children each fill the available width.
-pub(super) fn column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
+pub(super) fn stretch_column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
     FlexView::new(
         Axis::Vertical,
         children.into_iter().map(inflexible).collect(),
@@ -325,7 +325,7 @@ pub(super) fn settings_row(
         ValueTone::Ok => colors.success,
         ValueTone::Warn => colors.warning,
     };
-    let body = column(vec![
+    let body = stretch_column(vec![
         any(text(label).style(inked(&theme.type_scale.label_large, colors.fg))),
         any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
         any(text(value.into()).style(inked(&theme.type_scale.body_small, value_ink))),
@@ -344,10 +344,10 @@ pub(super) fn settings_row(
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — the row's own `border-bottom` — rather than reaching
     // for `rounded_fill` at all (see this module's own doc).
-    let box_ = column(vec![
+    let box_ = stretch_column(vec![
         any(Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            row(children),
+            centered_row(children),
         )),
         any(divider(colors.rule)),
     ]);
@@ -371,7 +371,7 @@ pub(super) fn button_row(
     colors: &Palette,
 ) -> AnyView<SettingsState> {
     let theme = active_theme();
-    let body = column(vec![
+    let body = stretch_column(vec![
         any(text(label).style(inked(&theme.type_scale.label_large, colors.fg))),
         any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
         any(text(subtitle).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
@@ -383,10 +383,10 @@ pub(super) fn button_row(
         h_gap(ROW_GAP),
         inflexible(any(button(action_label, on_tap).style(ButtonStyle::Ghost))),
     ];
-    any(column(vec![
+    any(stretch_column(vec![
         any(Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            row(children),
+            centered_row(children),
         )),
         any(divider(colors.rule)),
     ]))

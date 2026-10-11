@@ -184,7 +184,7 @@ fn upgrade_sheet_body(
         }
     }
     children.push(not_now_action(sheet));
-    any(column(children))
+    any(stretch_column(children))
 }
 
 /// The offer band's three states: still looking (a Glyph skeleton beside its
@@ -340,7 +340,7 @@ fn gap(height: f64) -> AnyView<AppState> {
 }
 
 /// A column whose children each fill the sheet's width.
-fn column(children: Vec<AnyView<AppState>>) -> FlexView<AppState> {
+fn stretch_column(children: Vec<AnyView<AppState>>) -> FlexView<AppState> {
     let children: Vec<FlexChild<AppState>> = children.into_iter().map(inflexible).collect();
     FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }

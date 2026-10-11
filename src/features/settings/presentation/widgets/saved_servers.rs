@@ -27,7 +27,9 @@ use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
-use super::rows::{RADIUS_FULL, ROW_GAP, ROW_PAD_X, ROW_PAD_Y, column, h_gap, row, spacer};
+use super::rows::{
+    RADIUS_FULL, ROW_GAP, ROW_PAD_X, ROW_PAD_Y, centered_row, h_gap, spacer, stretch_column,
+};
 
 /// The vertical rhythm inside this card's three rows — modeled on the
 /// sessions screen's own taller-card precedent (`CARD_LINE_GAP`, 8px) rather
@@ -64,7 +66,7 @@ pub(in super::super) fn saved_server_item(
     }
 
     let meta_text = format!("{} · {}", endpoint, server.last_used_label(epoch_millis()));
-    let meta = row(vec![flexible(
+    let meta = centered_row(vec![flexible(
         1,
         text(meta_text).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
     )]);
@@ -90,15 +92,15 @@ pub(in super::super) fn saved_server_item(
         .small(),
     ));
 
-    any(column(vec![
+    any(stretch_column(vec![
         any(Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            column(vec![
-                any(row(identity)),
+            stretch_column(vec![
+                any(centered_row(identity)),
                 any(SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP))),
                 any(meta),
                 any(SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP))),
-                any(row(actions)),
+                any(centered_row(actions)),
             ]),
         )),
         any(divider(colors.rule)),

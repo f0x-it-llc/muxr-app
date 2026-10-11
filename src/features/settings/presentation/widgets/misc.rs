@@ -13,7 +13,8 @@ use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
 use super::rows::{
-    MARK_BELL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, column, h_gap, mark_tile, row,
+    MARK_BELL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, centered_row, h_gap, mark_tile,
+    stretch_column,
 };
 
 /// `.disconnect-btn{margin:20px 16px 4px}`.
@@ -46,7 +47,7 @@ pub(super) fn bell_notifications_row(
         move |state: &mut SettingsState, _requested: bool| on_toggle(state),
     )
     .label("bell notifications"));
-    let label_column = column(vec![
+    let label_column = stretch_column(vec![
         any(text("bell notifications").style(inked(&theme.type_scale.label_large, colors.fg))),
         any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
         any(text(BELL_VALUE).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
@@ -61,10 +62,10 @@ pub(super) fn bell_notifications_row(
 
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — see `widgets::rows`' own doc.
-    let box_ = column(vec![
+    let box_ = stretch_column(vec![
         any(Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            row(children),
+            centered_row(children),
         )),
         any(divider(colors.rule)),
     ]);
