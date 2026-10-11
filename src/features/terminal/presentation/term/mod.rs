@@ -37,9 +37,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use frust::authoring::{
-    EditCommand, EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect, any,
+    EditCommand, EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect,
 };
-use frust::{GestureDetector, GetUntracked, RwSignal, Set, Stack, StackView};
+use frust::{GestureDetector, GetUntracked, RwSignal, Set, StackView, stack};
 use frust::{on_cleanup, spawn_blocking, spawn_local};
 use frust_haptics::{HapticEffect, Haptics};
 
@@ -568,11 +568,12 @@ pub fn terminal_surface<State: 'static>(
     chip: CopyChipView,
 ) -> StackView<State> {
     let armed = seam.clone();
-    Stack(vec![
-        any(GestureDetector::<State, _>(grid.selection(seam))
-            .on_long_press(move |_state: &mut State| armed.begin())),
-        any(chip),
-    ])
+    stack()
+        .child(
+            GestureDetector::<State, _>(grid.selection(seam))
+                .on_long_press(move |_state: &mut State| armed.begin()),
+        )
+        .child(chip)
 }
 
 /// A VT emulator sized to the grid on screen: a thin wrapper over `vt100::Parser`
