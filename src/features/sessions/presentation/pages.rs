@@ -744,8 +744,13 @@ impl Actions {
         let name = session.name;
         let id = id.to_string();
         show_sheet(&self.overlays, move |sheet| {
-            let body = widgets::sheet_body(&actions, sheet, &id, name.clone(), read_only);
-            any(body) // erasure: keep stored view table/registry
+            any(widgets::sheet_body(
+                &actions,
+                sheet,
+                &id,
+                name.clone(),
+                read_only,
+            ))
         });
     }
 }

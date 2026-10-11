@@ -528,19 +528,17 @@ fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> impl Vi
         head.push(h_gap(CHIP_GAP));
     }
     head.push(inflexible(tab_chip(tab)));
-    let head = Padding(
+    let mut parts = vec![any(Padding(
         EdgeInsets::symmetric(TAB_PAD_X, TAB_PAD_Y),
         centered_row(head),
-    );
-    let mut parts = vec![any(head)]; // erasure: keep accumulator into Vec<AnyView>
+    ))];
     if tab.focused && !tab.panes.is_empty() {
-        let pills = container(Padding(
+        parts.push(any(divider(colors.rule))); // erasure: keep accumulator into Vec<AnyView>
+        parts.push(any(container(Padding(
             EdgeInsets::symmetric(TAB_PAD_X, TAB_PAD_Y),
             pane_pills(id, tab, full, colors),
         ))
-        .fill(colors.base);
-        parts.push(any(divider(colors.rule))); // erasure: keep accumulator into Vec<AnyView>
-        parts.push(any(pills)); // erasure: keep accumulator into Vec<AnyView>
+        .fill(colors.base)));
     }
     container(gapped_column(parts, 0.0))
         .fill(colors.surface)
