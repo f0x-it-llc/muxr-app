@@ -51,13 +51,12 @@ pub fn saved_address<S: 'static>(
     colors: &Palette,
     servers: &[SavedServer],
     live: Option<&Live>,
-) -> impl View<S> + use<S> // erasure: keep accumulator into Vec<AnyView>
-{
+) -> impl View<S> + use<S> {
     // One clock read for the whole list — every row's recency measured against it.
     let now = epoch_millis();
     let mut children = vec![
-        any(saved_header::<S>(theme, colors)),
-        any(v_gap::<S>(spacing::MICRO)),
+        any(saved_header::<S>(theme, colors)), // erasure: keep accumulator into Vec<AnyView>
+        any(v_gap::<S>(spacing::MICRO)),       // erasure: keep accumulator into Vec<AnyView>
     ];
     for (index, server) in servers.iter().enumerate() {
         children.push(any(saved_row(
@@ -191,12 +190,11 @@ pub fn tablet_saved_list<S: 'static>(
     colors: &Palette,
     servers: &[SavedServer],
     live: Option<&Live>,
-) -> impl View<S> + use<S> // erasure: keep accumulator into Vec<AnyView>
-{
+) -> impl View<S> + use<S> {
     let now = epoch_millis();
     let mut children = vec![
-        any(saved_header::<S>(theme, colors)),
-        any(v_gap::<S>(spacing::MD)),
+        any(saved_header::<S>(theme, colors)), // erasure: keep accumulator into Vec<AnyView>
+        any(v_gap::<S>(spacing::MD)),          // erasure: keep accumulator into Vec<AnyView>
     ];
     if servers.is_empty() {
         children.push(any(
@@ -205,7 +203,7 @@ pub fn tablet_saved_list<S: 'static>(
     }
     for (index, server) in servers.iter().enumerate() {
         if index > 0 {
-            children.push(any(v_gap::<S>(spacing::SM)));
+            children.push(any(v_gap::<S>(spacing::SM))); // erasure: keep accumulator into Vec<AnyView>
         }
         children.push(any(tablet_saved_row(
             theme, colors, server, servers, index, now, live,
