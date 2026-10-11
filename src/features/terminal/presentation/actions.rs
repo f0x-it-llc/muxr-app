@@ -5,7 +5,7 @@
 //! [`Actions`] bundle; nothing holds state of its own.
 
 use frust::authoring::{Rect, WindowInsets};
-use frust::{AnyView, Get, PopResult, use_context};
+use frust::{Either, Get, PopResult, View, use_context};
 use frust_glyph::show_glyph_menu;
 
 use crate::AppState;
@@ -71,7 +71,7 @@ pub(super) fn rail_view(
     fullscreen: bool,
     read_only: bool,
     link: Option<LinkStatus>,
-) -> AnyView<TerminalState> {
+) -> impl View<TerminalState> + use<> {
     let controller = &actions.controller;
     let top = match use_context::<WindowInsets>() {
         Some(insets) if fullscreen => insets.padding().top,
@@ -87,7 +87,7 @@ pub(super) fn rail_view(
             fullscreen,
             top,
         };
-        return mini_rail(&data, &actions.mini_actions());
+        return Either::Left(mini_rail(&data, &actions.mini_actions()));
     }
     let spaces = controller
         .has_spaces()
@@ -104,12 +104,12 @@ pub(super) fn rail_view(
         read_only,
     };
     let detach = actions.clone();
-    docked_rail(
+    Either::Right(docked_rail(
         &head,
         tree_view(actions, TreeMode::Docked, AfterCommit::Rest),
         top,
         move |_state: &mut TerminalState| detach.detach(),
-    )
+    ))
 }
 
 /// What a landed tree commit does next: the sheet closes a beat later, the
