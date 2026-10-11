@@ -18,7 +18,7 @@
 //! under.
 
 use frust::{
-    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, container, divider, flexible,
+    ButtonStyle, EdgeInsets, Padding, SizedBox, View, button, container, divider, flexible,
     inflexible, text,
 };
 
@@ -52,7 +52,7 @@ const NO_SAVED_SERVERS: &str = "no saved servers";
 pub(in super::super) fn saved_server_item(
     server: &SavedServer,
     colors: &Palette,
-) -> AnyView<SettingsState> {
+) -> impl View<SettingsState> {
     let theme = active_theme();
     let endpoint = server.endpoint();
 
@@ -92,40 +92,40 @@ pub(in super::super) fn saved_server_item(
         .small(),
     ));
 
-    any(stretch_column(vec![
-        any(Padding(
+    stretch_column((
+        Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            stretch_column(vec![
-                any(centered_row(identity)),
-                any(SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP))),
-                any(meta),
-                any(SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP))),
-                any(centered_row(actions)),
-            ]),
-        )),
-        any(divider(colors.rule)),
-    ]))
+            stretch_column((
+                centered_row(identity),
+                SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP)),
+                meta,
+                SizedBox::<SettingsState>(None, Some(SAVED_SERVER_LINE_GAP)),
+                centered_row(actions),
+            )),
+        ),
+        divider(colors.rule),
+    ))
 }
 
 /// The `saved servers` group with nothing in it — a plain muted line, in the
 /// same box a row would occupy.
-pub(in super::super) fn no_saved_servers_row(colors: &Palette) -> AnyView<SettingsState> {
+pub(in super::super) fn no_saved_servers_row(colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
-    any(Padding(
+    Padding(
         EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
         text(NO_SAVED_SERVERS).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
-    ))
+    )
 }
 
 /// The `credential saved` pill — hand-composed like a token's scope chip, in
 /// the cyan/info hue that chip reserves for a fact about a credential rather
 /// than about a token's power.
-fn credential_chip(colors: &Palette) -> AnyView<SettingsState> {
+fn credential_chip(colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
-    any(container(Padding(
+    container(Padding(
         EdgeInsets::symmetric(CHIP_PAD_X, CHIP_PAD_Y),
         text(CREDENTIAL_CHIP).style(inked(&theme.type_scale.label_small, colors.cyan)),
     ))
     .fill(colors.cyan_faint)
-    .radius(RADIUS_FULL))
+    .radius(RADIUS_FULL)
 }

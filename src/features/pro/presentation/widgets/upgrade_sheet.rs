@@ -31,7 +31,8 @@ use frust::authoring::text::TextStyle;
 use frust::icons::LINK;
 use frust::{
     AnyView, Axis, ButtonStyle, CrossAxisAlignment, FlexChild, FlexView, Get, GetUntracked,
-    IconSource, NavigatorController, SizedBox, any, button, icon, inflexible, spawn_local, text,
+    IconSource, NavigatorController, SizedBox, View, any, button, icon, inflexible, row,
+    spawn_local, text,
 };
 use frust_glyph::{dots_loader, skeleton};
 
@@ -134,7 +135,7 @@ pub fn show_upgrade_sheet(
         spawn_local(async move { loading.load_offer().await });
     }
     show_sheet(overlays, move |sheet| {
-        upgrade_sheet_body(&pro, sheet, &context)
+        any(upgrade_sheet_body(&pro, sheet, &context)) // erasure: keep stored view table/registry
     });
 }
 
@@ -144,30 +145,33 @@ fn upgrade_sheet_body(
     pro: &Arc<ProController>,
     sheet: &SheetHandle,
     context: &UpgradeContext,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
     let entitled = pro.entitlement.get().is_pro();
 
+    let title = text(UPGRADE_SHEET_TITLE).style(inked(&theme.type_scale.title_medium, colors.fg));
+    let subtitle = text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim));
+    let benefit = benefit_row(
+        MULTIPLE_SERVERS_COPY,
+        LINK,
+        &theme.type_scale.body_medium,
+        &colors,
+    );
     let mut children = vec![
-        any(text(UPGRADE_SHEET_TITLE).style(inked(&theme.type_scale.title_medium, colors.fg))),
-        gap(TITLE_GAP),
-        any(text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
-        gap(SECTION_GAP),
-        benefit_row(
-            MULTIPLE_SERVERS_COPY,
-            LINK,
-            &theme.type_scale.body_medium,
-            &colors,
-        ),
-        gap(SECTION_GAP),
+        any(title),            // erasure: keep accumulator into Vec<AnyView>
+        any(gap(TITLE_GAP)),   // erasure: keep accumulator into Vec<AnyView>
+        any(subtitle),         // erasure: keep accumulator into Vec<AnyView>
+        any(gap(SECTION_GAP)), // erasure: keep accumulator into Vec<AnyView>
+        any(benefit),          // erasure: keep accumulator into Vec<AnyView>
+        any(gap(SECTION_GAP)), // erasure: keep accumulator into Vec<AnyView>
     ];
 
     if entitled {
-        children.push(any(
-            text(ALREADY_PRO_COPY).style(inked(&theme.type_scale.body_medium, colors.success))
-        ));
-        children.push(gap(SECTION_GAP));
+        let already =
+            text(ALREADY_PRO_COPY).style(inked(&theme.type_scale.body_medium, colors.success));
+        children.push(any(already)); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(gap(SECTION_GAP))); // erasure: keep accumulator into Vec<AnyView>
     } else {
         children.push(offer_action(
             pro,
@@ -175,16 +179,16 @@ fn upgrade_sheet_body(
             context,
             inked(&theme.type_scale.body_small, colors.fg_dim),
         ));
-        children.push(gap(ROW_GAP));
-        children.push(restore_action(pro, sheet, context));
-        children.push(gap(ROW_GAP));
+        children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(restore_action(pro, sheet, context))); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
         if let Some(limit) = &context.server_limit {
-            children.push(forget_and_connect_action(sheet, limit));
-            children.push(gap(ROW_GAP));
+            children.push(any(forget_and_connect_action(sheet, limit))); // erasure: keep accumulator into Vec<AnyView>
+            children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
         }
     }
-    children.push(not_now_action(sheet));
-    any(stretch_column(children))
+    children.push(any(not_now_action(sheet))); // erasure: keep accumulator into Vec<AnyView>
+    stretch_column(children)
 }
 
 /// The offer band's three states: still looking (a Glyph skeleton beside its
@@ -195,19 +199,16 @@ fn offer_action(
     sheet: &SheetHandle,
     context: &UpgradeContext,
     unavailable_style: TextStyle,
-) -> AnyView<AppState> {
+) -> AnyView<AppState> // erasure: keep 3+-arm body
+{
     let busy = pro.busy.get();
     match (pro.offer.get(), pro.offer_settled.get()) {
-        (Some(offer), _) => upgrade_action(pro, sheet, context, &offer, busy),
-        (None, false) => any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(skeleton(OFFER_SKELETON_WIDTH, OFFER_SKELETON_HEIGHT)),
-                inflexible(SizedBox::<AppState>(Some(ROW_GAP), None)),
-                inflexible(dots_loader()),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center)),
+        (Some(offer), _) => any(upgrade_action(pro, sheet, context, &offer, busy)),
+        (None, false) => any(row()
+            .child(skeleton(OFFER_SKELETON_WIDTH, OFFER_SKELETON_HEIGHT))
+            .child(SizedBox::<AppState>(Some(ROW_GAP), None))
+            .child(dots_loader())
+            .cross_axis(CrossAxisAlignment::Center)),
         (None, true) => any(text(UNAVAILABLE_COPY).style(unavailable_style)),
     }
 }
@@ -221,11 +222,11 @@ fn upgrade_action(
     context: &UpgradeContext,
     offer: &ProOffer,
     busy: bool,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let pro = Arc::clone(pro);
     let sheet = sheet.clone();
     let on_unlocked = Rc::clone(&context.on_unlocked);
-    any(button(upgrade_label(offer), move |_app: &mut AppState| {
+    button(upgrade_label(offer), move |_app: &mut AppState| {
         if busy {
             return;
         }
@@ -254,7 +255,7 @@ fn upgrade_action(
         ButtonStyle::Ghost
     } else {
         ButtonStyle::Primary
-    }))
+    })
 }
 
 /// Restore, which unlocks exactly when the store account already owns Pro —
@@ -263,11 +264,11 @@ fn restore_action(
     pro: &Arc<ProController>,
     sheet: &SheetHandle,
     context: &UpgradeContext,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let pro = Arc::clone(pro);
     let sheet = sheet.clone();
     let on_unlocked = Rc::clone(&context.on_unlocked);
-    any(button(RESTORE_LABEL, move |_app: &mut AppState| {
+    button(RESTORE_LABEL, move |_app: &mut AppState| {
         let pro = Arc::clone(&pro);
         let sheet = sheet.clone();
         let on_unlocked = Rc::clone(&on_unlocked);
@@ -289,31 +290,34 @@ fn restore_action(
             }
         });
     })
-    .style(ButtonStyle::Ghost))
+    .style(ButtonStyle::Ghost)
 }
 
 /// The Connect gate's own way out: drop the rows the free tier cannot keep
 /// and dial again, chained onto the sheet's exit.
-fn forget_and_connect_action(sheet: &SheetHandle, limit: &ServerLimitContext) -> AnyView<AppState> {
+fn forget_and_connect_action(
+    sheet: &SheetHandle,
+    limit: &ServerLimitContext,
+) -> impl View<AppState> {
     let sheet = sheet.clone();
     let retry = Rc::clone(&limit.on_forget_and_connect);
-    any(button(
+    button(
         forget_and_connect_label(&limit.to_forget),
         move |_app: &mut AppState| {
             let retry = Rc::clone(&retry);
             sheet.close_then(move || retry());
         },
     )
-    .style(ButtonStyle::Danger))
+    .style(ButtonStyle::Danger)
 }
 
 /// The plain dismissal.
-fn not_now_action(sheet: &SheetHandle) -> AnyView<AppState> {
+fn not_now_action(sheet: &SheetHandle) -> impl View<AppState> {
     let sheet = sheet.clone();
-    any(button(NOT_NOW_LABEL, move |_app: &mut AppState| {
+    button(NOT_NOW_LABEL, move |_app: &mut AppState| {
         sheet.close();
     })
-    .style(ButtonStyle::Ghost))
+    .style(ButtonStyle::Ghost)
 }
 
 /// One benefit line: a `frust::icons` vector mark and its text.
@@ -322,21 +326,17 @@ fn benefit_row(
     mark: IconSource,
     style: &TextStyle,
     colors: &Palette,
-) -> AnyView<AppState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(icon(mark).size(BENEFIT_MARK).color(colors.amber)),
-            inflexible(SizedBox::<AppState>(Some(BENEFIT_MARK_GAP), None)),
-            inflexible(text(label.to_string()).style(inked(style, colors.fg))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+) -> impl View<AppState> {
+    row()
+        .child(icon(mark).size(BENEFIT_MARK).color(colors.amber))
+        .child(SizedBox::<AppState>(Some(BENEFIT_MARK_GAP), None))
+        .child(text(label.to_string()).style(inked(style, colors.fg)))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A vertical spacer between bands.
-fn gap(height: f64) -> AnyView<AppState> {
-    any(SizedBox::<AppState>(None, Some(height)))
+fn gap(height: f64) -> impl View<AppState> {
+    SizedBox::<AppState>(None, Some(height))
 }
 
 /// A column whose children each fill the sheet's width.
@@ -350,7 +350,7 @@ mod tests {
     use super::*;
     use crate::features::connect::domain::entities::TrustMode;
 
-    fn row(label: &str) -> SavedServer {
+    fn saved_row(label: &str) -> SavedServer {
         SavedServer {
             host: "a.example".to_string(),
             port: 50051,
@@ -378,11 +378,11 @@ mod tests {
     #[test]
     fn one_row_to_forget_is_named_and_several_are_counted() {
         assert_eq!(
-            forget_and_connect_label(&[row("Home rig")]),
+            forget_and_connect_label(&[saved_row("Home rig")]),
             "Forget Home rig and connect"
         );
         assert_eq!(
-            forget_and_connect_label(&[row("Home rig"), row("Office")]),
+            forget_and_connect_label(&[saved_row("Home rig"), saved_row("Office")]),
             "Forget 2 saved servers and connect"
         );
     }
