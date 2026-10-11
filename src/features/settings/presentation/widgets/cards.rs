@@ -4,7 +4,8 @@
 
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Padding, SizedBox, any, button, flexible, inflexible, safe_area, scroll_view, text,
+    FlexView, Padding, SizedBox, View, any, button, flexible, inflexible, row, safe_area,
+    scroll_view, text,
 };
 use frust_glyph::glyph_card;
 
@@ -25,45 +26,41 @@ fn group_card(
     label: &str,
     rows: Vec<AnyView<SettingsState>>,
     colors: &Palette,
-) -> AnyView<SettingsState> {
-    any(glyph_card::<SettingsState>()
+) -> impl View<SettingsState> {
+    glyph_card::<SettingsState>()
         .title(group_label(label, colors))
         .desc(
             FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
                 .cross_axis(CrossAxisAlignment::Stretch),
-        ))
+        )
 }
 
 /// The closing full-width card: the label, the confirmation copy as the value
 /// and the danger button trailing.
-fn disconnect_card(colors: &Palette) -> AnyView<SettingsState> {
+fn disconnect_card(colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
-    let row = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(
-                1,
-                text(DISCONNECT_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
-            ),
-            inflexible(SizedBox::<SettingsState>(Some(CARD_GAP), None)),
-            inflexible(
-                button(DISCONNECT_LABEL, |state: &mut SettingsState| {
-                    open_disconnect_dialog(state)
-                })
-                .style(ButtonStyle::Danger),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
-    any(glyph_card::<SettingsState>()
+    let row = row()
+        .flex(
+            1,
+            text(DISCONNECT_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+        )
+        .child(SizedBox::<SettingsState>(Some(CARD_GAP), None))
+        .child(
+            button(DISCONNECT_LABEL, |state: &mut SettingsState| {
+                open_disconnect_dialog(state)
+            })
+            .style(ButtonStyle::Danger),
+        )
+        .cross_axis(CrossAxisAlignment::Center);
+    glyph_card::<SettingsState>()
         .title(group_label("disconnect", colors))
-        .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row)))
+        .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row))
 }
 
 /// `children` with a [`CARD_GAP`] spacer between each neighbour, running
 /// along `axis`; `flex` is each child's flex factor (`None` = inflexible).
-fn interleave_gaps(
-    children: Vec<AnyView<SettingsState>>,
+fn interleave_gaps<V: View<SettingsState>>(
+    children: Vec<V>,
     axis: Axis,
     flex: Option<u32>,
 ) -> Vec<FlexChild<SettingsState>> {
@@ -91,10 +88,10 @@ pub(in super::super) fn tablet_scroller(
     groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)>,
     full: bool,
     colors: &Palette,
-) -> AnyView<SettingsState> {
+) -> impl View<SettingsState> + use<> {
     let cards: Vec<AnyView<SettingsState>> = groups
         .into_iter()
-        .map(|(label, rows)| group_card(label, rows, colors))
+        .map(|(label, rows)| any(group_card(label, rows, colors))) // erasure: keep accumulator into Vec<AnyView>
         .collect();
     let mut lines: Vec<AnyView<SettingsState>> = if full {
         let (left, right): (Vec<_>, Vec<_>) = cards
@@ -103,10 +100,8 @@ pub(in super::super) fn tablet_scroller(
             .partition(|(index, _)| index % 2 == 0);
         let column = |cards: Vec<(usize, AnyView<SettingsState>)>| {
             let cards = cards.into_iter().map(|(_, card)| card).collect();
-            any(
-                FlexView::new(Axis::Vertical, interleave_gaps(cards, Axis::Vertical, None))
-                    .cross_axis(CrossAxisAlignment::Stretch),
-            )
+            FlexView::new(Axis::Vertical, interleave_gaps(cards, Axis::Vertical, None))
+                .cross_axis(CrossAxisAlignment::Stretch)
         };
         vec![any(FlexView::new(
             Axis::Horizontal,
@@ -116,7 +111,7 @@ pub(in super::super) fn tablet_scroller(
     } else {
         cards
     };
-    lines.push(disconnect_card(colors));
+    lines.push(any(disconnect_card(colors))); // erasure: keep accumulator into Vec<AnyView>
 
     let grid = Padding(
         EdgeInsets {
@@ -128,9 +123,9 @@ pub(in super::super) fn tablet_scroller(
         FlexView::new(Axis::Vertical, interleave_gaps(lines, Axis::Vertical, None))
             .cross_axis(CrossAxisAlignment::Stretch),
     );
-    any(Align(
+    Align(
         Alignment::CENTER,
         SizedBox::<SettingsState>(Some(CARD_GRID_MAX_WIDTH), None)
             .child(safe_area(scroll_view(grid)).top(false)),
-    ))
+    )
 }

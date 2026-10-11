@@ -10,7 +10,8 @@ use std::rc::Rc;
 use frust::authoring::Color;
 use frust::icons::CHECK;
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible, text,
+    EdgeInsets, Either, GestureDetector, Padding, SizedBox, View, any, flexible, icon, inflexible,
+    text,
 };
 
 use crate::AppState;
@@ -20,7 +21,8 @@ use crate::ui::spacing;
 
 use super::pickers::{CHECK_SIZE, PICK_BLEED, PICK_PAD_X, PICK_PAD_Y, PickerKind, bleeding_scroll};
 use super::rows::{
-    GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, column, h_gap, rounded_fill, row,
+    GROUP_PAD_BOTTOM, GROUP_PAD_TOP, ROW_GAP, ROW_LINE_GAP, centered_row, h_gap, rounded_fill,
+    stretch_column,
 };
 
 /// The sheet's caption, under its title.
@@ -93,35 +95,27 @@ pub(in super::super) fn font_picker_sheet(
     colors: &Palette,
     on_select: impl Fn(&mut AppState, String) + 'static,
     on_download: impl Fn(&mut AppState, String) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
     let on_select: OnFont = Rc::new(on_select);
     let on_download: OnFont = Rc::new(on_download);
 
-    let head = vec![
-        any(text(PickerKind::FontFamily.title())
-            .style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
-        any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
-        any(text(FONT_SHEET_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
-        any(SizedBox::<AppState>(None, Some(FONT_CAPTION_GAP))),
-    ];
-
-    let mut body = vec![font_section_label(FONT_SECTION_INSTALLED, colors)];
+    let mut body = vec![any(font_section_label(FONT_SECTION_INSTALLED, colors))]; // erasure: keep accumulator into Vec<AnyView>
     let last_installed = picker.installed.len().saturating_sub(1);
     for (index, row) in picker.installed.iter().enumerate() {
         let selected = row.family == picker.selected;
         let on_select = Rc::clone(&on_select);
         let family = row.family.clone();
-        body.push(font_pick_row(
+        body.push(any(font_pick_row(
             row,
             selected,
             index < last_installed,
             colors,
             move |state: &mut AppState| on_select(state, family.clone()),
-        ));
+        )));
     }
 
-    body.push(font_section_label(FONT_SECTION_AVAILABLE, colors));
+    body.push(any(font_section_label(FONT_SECTION_AVAILABLE, colors))); // erasure: keep accumulator into Vec<AnyView>
     if let Some(note) = catalog_note(picker) {
         body.push(any(Padding(
             EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
@@ -132,28 +126,33 @@ pub(in super::super) fn font_picker_sheet(
     for (index, row) in picker.available.iter().enumerate() {
         let on_download = Rc::clone(&on_download);
         let family = row.family.clone();
-        body.push(font_pick_row(
+        body.push(any(font_pick_row(
             row,
             false,
             index < last_available,
             colors,
             move |state: &mut AppState| on_download(state, family.clone()),
-        ));
+        )));
     }
 
     let scroller = bleeding_scroll(body);
-    let scroll_body: AnyView<AppState> = match picker.max_height {
+    let scroll_body = match picker.max_height {
         // A fixed height rather than a flex share: the sheet body's own
         // constraint is unbounded in height, and a `flexible` child under an
         // unbounded main axis divides zero free space — the tight-constraint
         // trap `examples/glyph-catalog`'s device gate documents.
-        Some(height) => any(SizedBox::<AppState>(None, Some(height)).child(scroller)),
-        None => any(scroller),
+        Some(height) => Either::Left(SizedBox::<AppState>(None, Some(height)).child(scroller)),
+        None => Either::Right(scroller),
     };
 
-    let mut children = head;
-    children.push(scroll_body);
-    any(column(children))
+    stretch_column((
+        text(PickerKind::FontFamily.title())
+            .style(inked(&theme.type_scale.title_small_emphasized, colors.fg)),
+        SizedBox::<AppState>(None, Some(ROW_LINE_GAP)),
+        text(FONT_SHEET_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        SizedBox::<AppState>(None, Some(FONT_CAPTION_GAP)),
+        scroll_body,
+    ))
 }
 
 /// The one-line note the `available` section leads with, if any.
@@ -169,9 +168,9 @@ fn catalog_note(picker: &FontPicker) -> Option<&'static str> {
 /// A section heading inside the sheet — the screen's own `.set-group-lbl`
 /// treatment, over `AppState` and without the row gutter (the sheet supplies
 /// its own).
-fn font_section_label(label: &str, colors: &Palette) -> AnyView<AppState> {
+fn font_section_label(label: &str, colors: &Palette) -> impl View<AppState> {
     let theme = active_theme();
-    any(Padding(
+    Padding(
         EdgeInsets {
             left: PICK_PAD_X,
             top: GROUP_PAD_TOP,
@@ -179,7 +178,7 @@ fn font_section_label(label: &str, colors: &Palette) -> AnyView<AppState> {
             bottom: GROUP_PAD_BOTTOM,
         },
         text(label.to_uppercase()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
-    ))
+    )
 }
 
 /// One font row: the display name over its meta line, a trailing `✓` when
@@ -192,15 +191,15 @@ fn font_pick_row(
     ruled: bool,
     colors: &Palette,
     on_tap: impl Fn(&mut AppState) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
     let ink = if selected { colors.amber } else { colors.fg };
-    let body = column(vec![
-        any(text(entry.display.clone()).style(inked(&theme.type_scale.label_large, ink))),
-        any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
-        any(text(entry.meta.clone()).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
-    ]);
-    let mut children = vec![flexible(1, any(body))];
+    let body = stretch_column((
+        text(entry.display.clone()).style(inked(&theme.type_scale.label_large, ink)),
+        SizedBox::<AppState>(None, Some(ROW_LINE_GAP)),
+        text(entry.meta.clone()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+    ));
+    let mut children = vec![flexible(1, body)];
     if selected {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(icon(CHECK).size(CHECK_SIZE).color(colors.amber)));
@@ -220,7 +219,10 @@ fn font_pick_row(
         Color::TRANSPARENT
     };
     let mut box_ = rounded_fill(
-        Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
+        Padding(
+            EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
+            centered_row(children),
+        ),
         fill,
         theme.shape.small,
     );
@@ -230,7 +232,7 @@ fn font_pick_row(
     if ruled {
         box_ = box_.bottom_rule(colors.rule);
     }
-    any(GestureDetector(box_).on_tap(on_tap))
+    GestureDetector(box_).on_tap(on_tap)
 }
 
 /// The trailing affordance a non-selected row carries, and its ink — `None`
