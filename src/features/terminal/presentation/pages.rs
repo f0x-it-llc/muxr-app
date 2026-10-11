@@ -23,9 +23,9 @@ use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::text::FontStyle;
 use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView, Get, GetUntracked,
-    IconData, NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics,
-    any, column, component, container, flexible, icons, inflexible, on_cleanup, row, scroll_view,
+    Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView, Get, GetUntracked, IconData,
+    NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics, any, column,
+    component, container, flexible, icons, inflexible, on_cleanup, row, scroll_view,
     set_system_ui_mode, spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
@@ -114,9 +114,8 @@ const _: () = {
 
 /// The Terminal screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner`.
-pub fn terminal_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> // erasure: keep stored view table/registry
-{
-    any(component(TerminalScreen { overlays }))
+pub fn terminal_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
+    component(TerminalScreen { overlays })
 }
 
 /// The Terminal screen `Component`. Stateless configuration — everything

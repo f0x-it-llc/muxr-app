@@ -116,7 +116,8 @@ pub fn loading_sequence<State: 'static>(
     released: bool,
     stale: bool,
     done: RwSignal<bool>,
-) -> AnyView<State> {
+) -> AnyView<State> // erasure: keep accumulator into Vec<AnyView>
+{
     let cell = Rc::new(Cell::new(0.0));
     let piece_count = pieces.len();
     let staggered = pieces

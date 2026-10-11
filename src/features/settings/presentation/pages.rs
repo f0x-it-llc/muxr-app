@@ -105,9 +105,8 @@ fn sheet_band_height(metrics: &WindowMetrics, rows_height: f64) -> f64 {
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The Settings screen's route entry point.
-pub fn settings_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> // erasure: keep accumulator into Vec<AnyView>
-{
-    any(component(SettingsScreen { overlays }))
+pub fn settings_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
+    component(SettingsScreen { overlays })
 }
 
 /// The Settings screen `Component`. Stateless configuration — everything

@@ -240,7 +240,7 @@ impl Harness {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             let screen: AnyView<AppState> = if logic_mounted.get() {
-                terminal_page(screen_nav)
+                any(terminal_page(screen_nav))
             } else {
                 any(SizedBox::<AppState>(Some(0.0), Some(0.0)))
             };
@@ -2247,7 +2247,8 @@ fn a_frame_needs_no_settling_before_the_first_load_lands() {
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     root.set_theme(Box::new(frust_glyph::baseline()));
     let logic_nav = nav.clone();
-    let mut logic: Logic = Box::new(move |_state: &mut AppState| terminal_page(logic_nav.clone()));
+    let mut logic: Logic =
+        Box::new(move |_state: &mut AppState| AnyView::new(terminal_page(logic_nav.clone())));
     let mut tcx = TextContext::new();
     let mut state = state;
 

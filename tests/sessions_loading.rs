@@ -825,7 +825,7 @@ impl Band {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             any(Stack(vec![
-                sessions_page(screen_nav, logic_nav.clone()),
+                any(sessions_page(screen_nav, logic_nav.clone())),
                 any(navigator(&overlay_nav, || {
                     any(SizedBox::<AppState>(
                         Some(f64::INFINITY),

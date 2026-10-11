@@ -259,7 +259,7 @@ impl Harness {
         let nav_for_screen = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             any(Stack(vec![
-                connect_page(nav_for_screen.clone()),
+                any(connect_page(nav_for_screen.clone())),
                 any(navigator(&nav_for_navigator, empty_base_page)),
             ]))
         });

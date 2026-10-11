@@ -38,7 +38,7 @@ pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S>
 /// The title centers as a block ([`Align`]); the subtitle wraps on a phone
 /// and centers per line via `TextView`'s own `.align(TextAlign::Center)`, now
 /// that `text` carries a paragraph alignment.
-pub fn heading<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> // erasure: keep stored view table/registry
+pub fn heading<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> // erasure: keep accumulator into Vec<AnyView>
 {
     any(backed(
         block_column::<S, _>((

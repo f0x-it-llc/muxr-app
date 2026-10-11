@@ -310,13 +310,13 @@ fn mount_sequence_on(
     let art = decoded_icon();
     let done = RwSignal::new(false);
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
-        splash_sequence(
+        AnyView::new(splash_sequence(
             art.clone(),
             7,
             connect_pieces(&frust_glyph::baseline(), &saved),
             connect_layout,
             done,
-        )
+        ))
     };
     let frames = drive_clock(clock, &mut logic, &mut state, theme(reduce_motion));
     (frames, done)
@@ -434,13 +434,13 @@ fn a_tablet_window_assembles_the_tablet_screen_rather_than_the_phone_column() {
     let baseline = frust_glyph::baseline();
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
         let assemble_theme = baseline.clone();
-        splash_sequence(
+        AnyView::new(splash_sequence(
             art.clone(),
             7,
             tablet_splash_pieces(&baseline, &saved, true),
             move |pieces| tablet_splash_layout(&assemble_theme, true, pieces),
             done,
-        )
+        ))
     };
     let metrics = support::metrics_at(FULL_TABLET.width, FULL_TABLET.height);
     let frames = support::mount_with_metrics(Some(metrics), || {
@@ -726,7 +726,7 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
         if done.get() {
             any(page_backdrop::<AppState>())
         } else {
-            reduced_splash(art.clone(), done)
+            any(reduced_splash(art.clone(), done))
         }
     };
     let frames = drive(
