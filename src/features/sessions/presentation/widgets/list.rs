@@ -7,8 +7,8 @@ use frust::authoring::DashPattern;
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, BorderStyle, ButtonStyle, CrossAxisAlignment, EdgeInsets,
-    FlexView, GestureDetector, Padding, SizedBox, any, button, colored_box, container, divider,
-    flexible, inflexible, safe_area, text,
+    Either, FlexView, GestureDetector, Padding, SizedBox, View, any, button, colored_box,
+    container, divider, flexible, inflexible, row, safe_area, text,
 };
 use frust_glyph::empty_state;
 
@@ -51,7 +51,7 @@ const COLUMN_GAP: f64 = spacing::SM;
 pub(in crate::features::sessions::presentation) fn new_session_row(
     colors: &Palette,
     read_only: bool,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let theme = active_theme();
     let label = centered_row(vec![
         inflexible(text(NEW_SESSION_PLUS).style(inked(&theme.type_scale.body_small, colors.amber))),
@@ -75,9 +75,9 @@ pub(in crate::features::sessions::presentation) fn new_session_row(
         }
     });
     if read_only {
-        any(AnimatedOpacity(IDLE_OPACITY, dashed))
+        Either::Left(AnimatedOpacity(IDLE_OPACITY, dashed))
     } else {
-        any(dashed)
+        Either::Right(dashed)
     }
 }
 
@@ -86,15 +86,15 @@ pub(in crate::features::sessions::presentation) fn new_session_row(
 /// and no action — nothing here is pressable yet.
 pub(in crate::features::sessions::presentation) fn loading_view(
     colors: &Palette,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let theme = active_theme();
-    any(Padding(
+    Padding(
         EdgeInsets::all(NEW_ROW_PAD),
         Align(
             Alignment::CENTER,
             text(LOADING_LABEL).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
         ),
-    ))
+    )
 }
 
 /// The Tablet list column's children: a card per session (a tap selects),
@@ -107,21 +107,26 @@ pub(in crate::features::sessions::presentation) fn tablet_list_pieces(
     selected: Option<&str>,
     previews: bool,
     colors: &Palette,
-) -> Vec<AnyView<SessionsState>> {
+) -> Vec<AnyView<SessionsState>> // erasure: keep accumulator into Vec<AnyView>
+{
     match phase {
-        LoadPhase::Failed => return vec![failed_view()],
-        LoadPhase::Loaded if sessions.is_empty() => return vec![empty_view(read_only)],
+        LoadPhase::Failed => return vec![any(failed_view())],
+        LoadPhase::Loaded if sessions.is_empty() => return vec![any(empty_view(read_only))],
         LoadPhase::Loaded | LoadPhase::Loading => {}
     }
     let mut pieces: Vec<AnyView<SessionsState>> = sessions
         .iter()
         .map(|session| {
             let selected = selected == Some(session.id.as_str());
-            session_card(session, colors, CardMode::Tablet { selected, previews })
+            any(session_card(
+                session,
+                colors,
+                CardMode::Tablet { selected, previews },
+            ))
         })
         .collect();
     if phase == LoadPhase::Loading {
-        pieces.push(loading_view(colors));
+        pieces.push(any(loading_view(colors)));
     }
     pieces
 }
@@ -129,24 +134,24 @@ pub(in crate::features::sessions::presentation) fn tablet_list_pieces(
 /// The Tablet list's `pieces` as the column's padded, gapped stack.
 pub(in crate::features::sessions::presentation) fn tablet_list(
     pieces: Vec<AnyView<SessionsState>>,
-) -> AnyView<SessionsState> {
-    any(Padding(
+) -> impl View<SessionsState> {
+    Padding(
         EdgeInsets::all(COLUMN_PAD),
         gapped_column(pieces, COLUMN_GAP),
-    ))
+    )
 }
 
 /// The Tablet body: the list column (`strip` over `list`, `footer` under a
 /// rule once there is one) on the surface tone with a hairline right edge,
 /// and `detail` taking the rest of the width.
 pub(in crate::features::sessions::presentation) fn master_detail(
-    strip: AnyView<SessionsState>,
-    list: AnyView<SessionsState>,
-    footer: Option<AnyView<SessionsState>>,
-    detail: AnyView<SessionsState>,
+    strip: impl View<SessionsState>,
+    list: impl View<SessionsState>,
+    footer: Option<impl View<SessionsState>>,
+    detail: impl View<SessionsState>,
     full: bool,
     colors: &Palette,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let mut side = vec![inflexible(strip), flexible(1, list)];
     if let Some(footer) = footer {
         side.push(inflexible(divider(colors.rule)));
@@ -163,22 +168,18 @@ pub(in crate::features::sessions::presentation) fn master_detail(
     let edge = colored_box::<SessionsState>()
         .size(HAIRLINE, 0.0)
         .fill(colors.rule);
-    let body = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(SizedBox::<SessionsState>(Some(width), None).child(side)),
-            inflexible(edge),
-            flexible(1, detail),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch);
-    any(safe_area(body).top(false))
+    let body = row()
+        .child(SizedBox::<SessionsState>(Some(width), None).child(side))
+        .child(edge)
+        .flex(1, detail)
+        .cross_axis(CrossAxisAlignment::Stretch);
+    safe_area(body).top(false)
 }
 
 /// A first load that failed: Glyph's [`empty_state`] with a Retry that
 /// re-runs it.
-fn failed_view() -> AnyView<SessionsState> {
-    any(empty_state(
+fn failed_view() -> impl View<SessionsState> {
+    empty_state(
         "Couldn't load sessions",
         "Connection problem \u{2014} please try again.",
     )
@@ -188,7 +189,7 @@ fn failed_view() -> AnyView<SessionsState> {
             pages::retry_first_load(state)
         })
         .style(ButtonStyle::Secondary),
-    ))
+    )
 }
 
 /// What the list shows once every session has been killed — Glyph's own
@@ -196,25 +197,23 @@ fn failed_view() -> AnyView<SessionsState> {
 /// `read_only` disables the action the same way [`new_session_row`] does.
 pub(in crate::features::sessions::presentation) fn empty_view(
     read_only: bool,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let style = if read_only {
         ButtonStyle::Ghost
     } else {
         ButtonStyle::Primary
     };
-    any(
-        empty_state("No sessions", "Create one to start working on this server.")
-            .glyph("\u{25a3}")
-            .action(
-                button(
-                    format!("{NEW_SESSION_PLUS} {NEW_SESSION_LABEL}"),
-                    move |state: &mut SessionsState| {
-                        if !read_only {
-                            pages::open_create_dialog(state);
-                        }
-                    },
-                )
-                .style(style),
-            ),
-    )
+    empty_state("No sessions", "Create one to start working on this server.")
+        .glyph("\u{25a3}")
+        .action(
+            button(
+                format!("{NEW_SESSION_PLUS} {NEW_SESSION_LABEL}"),
+                move |state: &mut SessionsState| {
+                    if !read_only {
+                        pages::open_create_dialog(state);
+                    }
+                },
+            )
+            .style(style),
+        )
 }

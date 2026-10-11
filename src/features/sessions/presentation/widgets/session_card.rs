@@ -18,8 +18,8 @@ use frust::authoring::Color;
 use frust::icons::NOTIFICATIONS;
 use frust::motion::AnimatedOpacity;
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector, Padding,
-    SizedBox, View, any, container, flexible, icon, inflexible, text,
+    Axis, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView, GestureDetector, Padding,
+    SizedBox, View, container, flexible, icon, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, avatar, badge};
 
@@ -96,7 +96,7 @@ fn accented_card<State: 'static>(
     radius: f64,
     border: Color,
     accent: Option<Color>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let surface = container(body)
         .fill(fill)
         .border(border, HAIRLINE)
@@ -114,7 +114,7 @@ fn accented_card<State: 'static>(
     if let Some(accent) = accent {
         outer = outer.fill(accent);
     }
-    any(outer)
+    outer
 }
 
 /// See the [module docs](self).
@@ -122,7 +122,7 @@ pub(in crate::features::sessions::presentation) fn session_card(
     session: &Session,
     colors: &Palette,
     mode: CardMode,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let theme = active_theme();
     let live = session.status.is_live();
     let (avatar_bg, avatar_ink) = if live {
@@ -183,11 +183,11 @@ pub(in crate::features::sessions::presentation) fn session_card(
         CardMode::Compact => (false, true),
         CardMode::Tablet { selected, previews } => (selected, previews),
     };
-    let mut lines = vec![any(top), any(meta)];
+    let mut lines = vec![top, meta];
     // An idle card draws no pills at all, so liveness gates the row as well
     // as the preview being non-empty.
     if live && previews && !session.layout.preview.is_empty() {
-        lines.push(any(pane_pills(&session.layout.preview, colors)));
+        lines.push(pane_pills(&session.layout.preview, colors));
     }
     let body = FlexView::new(Axis::Vertical, interleave(lines, CARD_LINE_GAP))
         .cross_axis(CrossAxisAlignment::Stretch);
@@ -221,19 +221,19 @@ pub(in crate::features::sessions::presentation) fn session_card(
         });
 
     if live {
-        any(pressable)
+        Either::Left(pressable)
     } else {
         // Frust has no *static* opacity wrapper; `AnimatedOpacity` settles at
         // its initial target with no animate-in, so a pinned constant costs
         // one layer push and no extra frames. A card that later stops
         // running fades, which is the right behaviour anyway.
-        any(AnimatedOpacity(IDLE_OPACITY, pressable))
+        Either::Right(AnimatedOpacity(IDLE_OPACITY, pressable))
     }
 }
 
 /// The warning-toned bell a ringing session or tab carries.
-pub(super) fn bell_mark(colors: &Palette) -> AnyView<SessionsState> {
-    any(icon(NOTIFICATIONS).size(BELL_ICON).color(colors.warning))
+pub(super) fn bell_mark(colors: &Palette) -> impl View<SessionsState> {
+    icon(NOTIFICATIONS).size(BELL_ICON).color(colors.warning)
 }
 
 /// The hue a status chip prints in — `success` for the live one, a neutral
@@ -277,7 +277,7 @@ fn spacer() -> FlexChild<SessionsState> {
 
 /// `[a, b, c]` with a `gap`-tall spacer between consecutive items, as flex
 /// children.
-fn interleave(views: Vec<AnyView<SessionsState>>, gap: f64) -> Vec<FlexChild<SessionsState>> {
+fn interleave<V: View<SessionsState>>(views: Vec<V>, gap: f64) -> Vec<FlexChild<SessionsState>> {
     let mut children = Vec::with_capacity(views.len() * 2);
     for (index, view) in views.into_iter().enumerate() {
         if index > 0 {

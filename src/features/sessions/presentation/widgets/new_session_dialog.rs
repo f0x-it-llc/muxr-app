@@ -10,7 +10,7 @@
 
 use frust::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, Get, GetUntracked, NavigatorController,
-    PopResult, RwSignal, Set, SizedBox, any, button, inflexible, text_input,
+    PopResult, RwSignal, Set, SizedBox, button, inflexible, text_input,
 };
 use frust_glyph::{glyph_dialog, segmented_control, show_glyph_dialog};
 
@@ -90,29 +90,31 @@ pub(in crate::features::sessions::presentation) fn open_new_session_dialog(
             }
             glyph_dialog()
                 .title(TITLE)
-                .content(any(
-                    FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch)
-                ))
-                .action(any(button(CANCEL_LABEL, move |_state: &mut AppState| {
-                    cancel_nav.pop()
-                })
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button(SUBMIT_LABEL, move |_state: &mut AppState| {
-                    if can_submit {
-                        submit(
-                            &submit_nav,
-                            &submit_current,
-                            chosen(&submit_backends, choice),
-                        );
-                    }
-                })
-                .style(if can_submit {
-                    ButtonStyle::Primary
-                } else {
-                    ButtonStyle::Ghost
-                })
-                .small()))
+                .content(
+                    FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch),
+                )
+                .action(
+                    button(CANCEL_LABEL, move |_state: &mut AppState| cancel_nav.pop())
+                        .style(ButtonStyle::Ghost)
+                        .small(),
+                )
+                .action(
+                    button(SUBMIT_LABEL, move |_state: &mut AppState| {
+                        if can_submit {
+                            submit(
+                                &submit_nav,
+                                &submit_current,
+                                chosen(&submit_backends, choice),
+                            );
+                        }
+                    })
+                    .style(if can_submit {
+                        ButtonStyle::Primary
+                    } else {
+                        ButtonStyle::Ghost
+                    })
+                    .small(),
+                )
         },
         move |state: &mut AppState, result: PopResult| {
             if let Some((typed, backend)) = result.take::<(String, SessionBackend)>() {

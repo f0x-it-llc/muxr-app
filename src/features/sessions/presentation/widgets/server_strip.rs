@@ -17,8 +17,7 @@
 //! the worse failure if it ever were.
 
 use frust::{
-    AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, any, divider, flexible, inflexible,
-    text,
+    CrossAxisAlignment, EdgeInsets, Padding, View, column, divider, flexible, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, badge};
 
@@ -55,7 +54,7 @@ pub(in crate::features::sessions::presentation) fn server_strip(
     beat: HeartbeatVisual,
     read_only: bool,
     colors: &Palette,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let theme = active_theme();
     let content = match info {
         None => centered_row(vec![inflexible(
@@ -99,13 +98,12 @@ pub(in crate::features::sessions::presentation) fn server_strip(
     // bottom-rule option by design (see `frust-widgets::container`'s module
     // docs), so the rule composes as an ordinary second child instead of a
     // paint-time overlay.
-    any(Column(vec![
-        any(Padding(
+    column()
+        .child(Padding(
             EdgeInsets::symmetric(STRIP_PAD_X, STRIP_PAD_Y),
             content.cross_axis(CrossAxisAlignment::Center),
-        )),
-        any(divider(colors.rule)),
-    ]))
+        ))
+        .child(divider(colors.rule))
 }
 
 /// The strip's dim meta text: every backend the handshake detected, as
