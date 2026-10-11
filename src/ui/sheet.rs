@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, PopResult, any,
+    AnyView, CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, PopResult, View, column,
     safe_area,
 };
 use frust_glyph::{GlyphSheetHandle, glyph_sheet, show_glyph_sheet};
@@ -42,19 +42,19 @@ pub fn show_sheet<State: 'static>(
     *glyph_handle.borrow_mut() = Some(handle);
 }
 
-fn sheet_content<State: 'static>(body: AnyView<State>) -> AnyView<State> {
-    any(safe_area(Padding(
+fn sheet_content<State: 'static>(body: AnyView<State>) -> impl View<State> {
+    safe_area(Padding(
         EdgeInsets {
             left: PANEL_PAD,
             top: 0.0,
             right: PANEL_PAD,
             bottom: PANEL_PAD,
         },
-        Column(vec![body]).cross_axis(CrossAxisAlignment::Stretch),
+        column().child(body).cross_axis(CrossAxisAlignment::Stretch),
     ))
     .top(false)
     .left(false)
-    .right(false))
+    .right(false)
 }
 
 #[cfg(test)]

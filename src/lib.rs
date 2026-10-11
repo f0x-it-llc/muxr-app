@@ -13,7 +13,7 @@ mod shell;
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Component, Get, NavigatorController, Router, RwSignal, Stack, View, any, overlay_host,
+    AnyView, Component, Get, NavigatorController, Router, RwSignal, View, overlay_host, stack,
 };
 
 use features::connect::domain::entities::SavedServer;
@@ -165,7 +165,7 @@ impl Component for MuxrApp {
                 cue.as_ref().and_then(splash_overlay),
             )
         });
-        any(Stack(vec![any(host), ui::toasts::toast_layer()]))
+        stack().child(host).child(ui::toasts::toast_layer())
     }
 }
 

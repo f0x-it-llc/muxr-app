@@ -122,10 +122,10 @@ pub fn loading_sequence<State: 'static>(
     let staggered = pieces
         .into_iter()
         .enumerate()
-        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece)))
+        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece))) // erasure: keep accumulator into Vec<AnyView>
         .collect();
     any(LoadingView {
-        rain: any(super::rain::rain::<State>(seed).clock_cell(Rc::clone(&cell))),
+        rain: any(super::rain::rain::<State>(seed).clock_cell(Rc::clone(&cell))), // erasure: keep ChildPod-fed
         assembly: assemble(staggered),
         cell,
         piece_count,
@@ -355,8 +355,8 @@ mod tests {
     /// overlay's own and not a child's.
     fn inert_view(released: bool, tone: Color, stale: bool) -> LoadingView<()> {
         LoadingView {
-            rain: any(SizedBox::<()>(None, None)),
-            assembly: any(SizedBox::<()>(None, None)),
+            rain: any(SizedBox::<()>(None, None)), // erasure: keep ChildPod-fed
+            assembly: any(SizedBox::<()>(None, None)), // erasure: keep ChildPod-fed
             cell: Rc::new(Cell::new(0.0)),
             piece_count: 1,
             tone,
