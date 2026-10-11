@@ -1,5 +1,5 @@
 //! `.set-row`/`.set-group-lbl` — the row primitive every group is built from,
-//! plus the shared layout helpers ([`h_gap`]/[`spacer`]/[`row`]/[`column`])
+//! plus the shared layout helpers ([`h_gap`]/[`spacer`]/[`centered_row`]/[`stretch_column`])
 //! and the screen's page tone ([`page_tone`]) every other `widgets` module
 //! draws with.
 //!
@@ -29,9 +29,9 @@ use frust::authoring::{
 };
 use frust::icons::{CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH, SCHEDULE};
 use frust::{
-    AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    GestureDetector, IconSource, Padding, SizedBox, any, button, container, divider, flexible,
-    icon, inflexible, text,
+    AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView,
+    GestureDetector, IconSource, Padding, SizedBox, ViewSeq, any, button, column, container,
+    divider, flexible, icon, inflexible, text,
 };
 
 use crate::features::settings::presentation::pages::{self, SettingsState};
@@ -78,22 +78,20 @@ pub(super) fn centered_row<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<
 }
 
 /// A column whose children each fill the available width.
-pub(super) fn stretch_column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
-    FlexView::new(
-        Axis::Vertical,
-        children.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Stretch)
+pub(super) fn stretch_column<S: 'static, M>(children: impl ViewSeq<S, M>) -> FlexView<S> {
+    column()
+        .children(children)
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The screen's page tone behind `body` — `--bg-base`, which the shell's own
 /// clear colour (`--bg-surface`) is not. Zero radius: [`rounded_fill`] keeps
 /// this out of every rounded-rect probe (see its own doc).
-pub(in super::super) fn page_tone(
-    body: impl View<SettingsState>,
+pub(in super::super) fn page_tone<B: View<SettingsState>>(
+    body: B,
     colors: &Palette,
-) -> AnyView<SettingsState> {
-    any(rounded_fill(body, colors.base, 0.0))
+) -> impl View<SettingsState> + use<B> {
+    rounded_fill(body, colors.base, 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +139,7 @@ pub(super) fn rounded_fill<State: 'static, V: View<State>>(
     radius: f64,
 ) -> RoundedFillView<State> {
     RoundedFillView {
-        child: any(child),
+        child: any(child), // erasure: keep ChildPod-fed
         fill,
         radius,
         bleed: 0.0,
@@ -260,9 +258,9 @@ impl Widget for RoundedFillWidget {
 
 /// The band above each group — 10px dim, letter-spaced, uppercased here since
 /// `text` carries no CSS `text-transform`.
-pub(in super::super) fn group_label(label: &str, colors: &Palette) -> AnyView<SettingsState> {
+pub(in super::super) fn group_label(label: &str, colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
-    any(Padding(
+    Padding(
         EdgeInsets {
             left: ROW_PAD_X,
             top: GROUP_PAD_TOP,
@@ -270,7 +268,7 @@ pub(in super::super) fn group_label(label: &str, colors: &Palette) -> AnyView<Se
             bottom: GROUP_PAD_BOTTOM,
         },
         text(label.to_uppercase()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
-    ))
+    )
 }
 
 /// What sits in a row's 28px `.set-ic` tile — a vendored vector, or a
@@ -318,23 +316,24 @@ pub(super) fn settings_row(
     tone: ValueTone,
     action: RowAction,
     colors: &Palette,
-) -> AnyView<SettingsState> {
+) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     let theme = active_theme();
     let value_ink = match tone {
         ValueTone::Plain => colors.fg_dim,
         ValueTone::Ok => colors.success,
         ValueTone::Warn => colors.warning,
     };
-    let body = stretch_column(vec![
-        any(text(label).style(inked(&theme.type_scale.label_large, colors.fg))),
-        any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
-        any(text(value.into()).style(inked(&theme.type_scale.body_small, value_ink))),
-    ]);
+    let body = stretch_column((
+        text(label).style(inked(&theme.type_scale.label_large, colors.fg)),
+        SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP)),
+        text(value.into()).style(inked(&theme.type_scale.body_small, value_ink)),
+    ));
 
     let mut children = vec![
         inflexible(mark_tile(mark, colors)),
         h_gap(ROW_GAP),
-        flexible(1, any(body)),
+        flexible(1, body),
     ];
     if let Some(trailing) = trailing_slot(action, colors) {
         children.push(h_gap(ROW_GAP));
@@ -344,13 +343,13 @@ pub(super) fn settings_row(
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — the row's own `border-bottom` — rather than reaching
     // for `rounded_fill` at all (see this module's own doc).
-    let box_ = stretch_column(vec![
-        any(Padding(
+    let box_ = stretch_column((
+        Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
             centered_row(children),
-        )),
-        any(divider(colors.rule)),
-    ]);
+        ),
+        divider(colors.rule),
+    ));
 
     match action {
         RowAction::Static => any(box_),
@@ -369,54 +368,57 @@ pub(super) fn button_row(
     action_label: &'static str,
     on_tap: impl Fn(&mut SettingsState) + 'static,
     colors: &Palette,
-) -> AnyView<SettingsState> {
+) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     let theme = active_theme();
-    let body = stretch_column(vec![
-        any(text(label).style(inked(&theme.type_scale.label_large, colors.fg))),
-        any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
-        any(text(subtitle).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
-    ]);
+    let body = stretch_column((
+        text(label).style(inked(&theme.type_scale.label_large, colors.fg)),
+        SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP)),
+        text(subtitle).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+    ));
     let children = vec![
         inflexible(mark_tile(mark, colors)),
         h_gap(ROW_GAP),
-        flexible(1, any(body)),
+        flexible(1, body),
         h_gap(ROW_GAP),
-        inflexible(any(button(action_label, on_tap).style(ButtonStyle::Ghost))),
+        inflexible(button(action_label, on_tap).style(ButtonStyle::Ghost)),
     ];
-    any(stretch_column(vec![
-        any(Padding(
+    any(stretch_column((
+        Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
             centered_row(children),
-        )),
-        any(divider(colors.rule)),
-    ]))
+        ),
+        divider(colors.rule),
+    )))
 }
 
 /// `.set-ic` — the 28px raised tile holding a row's mark. Shared with
 /// `widgets::misc::bell_notifications_row`, the one row outside this file
 /// that also uses it.
-pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> AnyView<SettingsState> {
+pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
-    let content: AnyView<SettingsState> = match mark {
-        RowMark::Vector(source) => any(icon(source).size(MARK_ICON).color(colors.fg_muted)),
+    let content = match mark {
+        RowMark::Vector(source) => {
+            Either::Left(icon(source).size(MARK_ICON).color(colors.fg_muted))
+        }
         RowMark::Text(glyph) => {
-            any(text(glyph).style(inked(&theme.type_scale.label_small, colors.fg_muted)))
+            Either::Right(text(glyph).style(inked(&theme.type_scale.label_small, colors.fg_muted)))
         }
     };
-    any(container(content)
+    container(content)
         .fill(colors.raised)
         .radius(theme.shape.extra_small)
-        .size_centered(MARK_BOX, MARK_BOX))
+        .size_centered(MARK_BOX, MARK_BOX)
 }
 
 /// A row's trailing slot: the faintest chevron for anything that leads
 /// somewhere, nothing for a static fact.
-fn trailing_slot(action: RowAction, colors: &Palette) -> Option<AnyView<SettingsState>> {
+fn trailing_slot(action: RowAction, colors: &Palette) -> Option<impl View<SettingsState>> {
     match action {
         RowAction::Static => None,
-        RowAction::Picker(_) | RowAction::UpgradeSheet => Some(any(icon(CHEVRON_RIGHT)
-            .size(CHEVRON)
-            .color(colors.fg_faintest))),
+        RowAction::Picker(_) | RowAction::UpgradeSheet => {
+            Some(icon(CHEVRON_RIGHT).size(CHEVRON).color(colors.fg_faintest))
+        }
     }
 }
 

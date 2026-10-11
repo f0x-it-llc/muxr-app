@@ -15,9 +15,9 @@
 
 use frust::authoring::DashPattern;
 use frust::{
-    Align, Alignment, AnyView, Axis, BorderStyle, ButtonStyle, CrossAxisAlignment, EdgeInsets,
-    FlexView, GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult,
-    RwSignal, Set, SizedBox, any, button, container, divider, flexible, inflexible, text,
+    Align, Alignment, AnyView, BorderStyle, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
+    GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult, RwSignal, Set,
+    SizedBox, View, any, button, column, container, divider, flexible, inflexible, text,
     text_input,
 };
 use frust_glyph::{glyph_dialog, show_glyph_dialog, toggle};
@@ -84,12 +84,12 @@ pub(super) fn token_item(
     token: &AuthToken,
     colors: &Palette,
     revoke_enabled: bool,
-) -> AnyView<SettingsState> {
+) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     let theme = active_theme();
     let name = token.name.clone();
-    let name_line =
-        any(text(token.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg)));
-    let revoke = any(button(REVOKE_LABEL, move |state: &mut SettingsState| {
+    let name_line = text(token.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg));
+    let revoke = button(REVOKE_LABEL, move |state: &mut SettingsState| {
         pages::open_revoke_dialog(state, &name)
     })
     .style(if revoke_enabled {
@@ -97,8 +97,8 @@ pub(super) fn token_item(
     } else {
         ButtonStyle::Ghost
     })
-    .small());
-    token_row(name_line, token, revoke, None, colors)
+    .small();
+    any(token_row(name_line, token, revoke, None, colors))
 }
 
 /// A `.token-item` mid-revoke: the same row, with the name line replaced by
@@ -114,34 +114,35 @@ pub(super) fn scrambling_token_item(
     token: &AuthToken,
     pose: &ScramblePose,
     colors: &Palette,
-) -> AnyView<SettingsState> {
+) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     let theme = active_theme();
     let ink = if pose.glitching {
         colors.error
     } else {
         colors.fg
     };
-    let name_line = any(text(pose.display.clone()).style(inked(&theme.type_scale.body_small, ink)));
-    let revoke = any(button(REVOKE_LABEL, |_state: &mut SettingsState| {})
+    let name_line = text(pose.display.clone()).style(inked(&theme.type_scale.body_small, ink));
+    let revoke = button(REVOKE_LABEL, |_state: &mut SettingsState| {})
         .style(ButtonStyle::Danger)
-        .small());
+        .small();
     // The ticker rides inside the row it drives, so the scroller's paint
     // culling can never leave one running without the other.
     let ticker = pose.running.then(scramble::frame_ticker);
     let row = token_row(name_line, token, revoke, ticker, colors);
-    scramble::collapsing(pose.ratio, row)
+    any(scramble::collapsing(pose.ratio, row))
 }
 
 /// The `.token-item` box both callers above share: `name_line` and `revoke`
 /// over the snapshot's scope chip and created line, plus an optional
 /// zero-height `tail`.
 fn token_row(
-    name_line: AnyView<SettingsState>,
+    name_line: impl View<SettingsState>,
     token: &AuthToken,
-    revoke: AnyView<SettingsState>,
+    revoke: impl View<SettingsState>,
     tail: Option<AnyView<SettingsState>>,
     colors: &Palette,
-) -> AnyView<SettingsState> {
+) -> impl View<SettingsState> {
     let theme = active_theme();
     let top = centered_row(vec![
         flexible(1, name_line),
@@ -155,28 +156,25 @@ fn token_row(
         spacer(),
         inflexible(revoke),
     ]);
-    let mut lines = vec![
-        any(top),
-        any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
-        any(meta),
-    ];
+    let gap = SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP));
+    let mut lines = vec![any(top), any(gap), any(meta)]; // erasure: keep accumulator into Vec<AnyView>
     lines.extend(tail);
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — see `widgets::rows`' own doc.
-    any(stretch_column(vec![
-        any(Padding(
+    stretch_column((
+        Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
             stretch_column(lines),
-        )),
-        any(divider(colors.rule)),
-    ]))
+        ),
+        divider(colors.rule),
+    ))
 }
 
 /// `.token-scope` — the 9px pill naming what a token may do. Hand-composed
 /// for both scopes rather than half-reached through `glyph::badge`, which
 /// has no cyan/info variant for the read-only one (recorded as a framework
 /// gap, not a preference).
-fn scope_chip(scope: TokenScope, colors: &Palette) -> AnyView<SettingsState> {
+fn scope_chip(scope: TokenScope, colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
     let (fill, ink, border) = match scope {
         TokenScope::ReadWrite => (colors.raised, colors.fg_muted, Some(colors.outline)),
@@ -191,7 +189,7 @@ fn scope_chip(scope: TokenScope, colors: &Palette) -> AnyView<SettingsState> {
     if let Some(border) = border {
         chip = chip.border(border, HAIRLINE);
     }
-    any(chip)
+    chip
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +203,7 @@ fn scope_chip(scope: TokenScope, colors: &Palette) -> AnyView<SettingsState> {
 pub(in super::super) fn create_token_row(
     colors: &Palette,
     enabled: bool,
-) -> AnyView<SettingsState> {
+) -> impl View<SettingsState> {
     let theme = active_theme();
     let (plus_ink, label_ink) = if enabled {
         (colors.amber, colors.fg_dim)
@@ -217,7 +215,7 @@ pub(in super::super) fn create_token_row(
         h_gap(ADD_GAP),
         inflexible(text(CREATE_TOKEN_LABEL).style(inked(&theme.type_scale.body_small, label_ink))),
     ]);
-    any(Padding(
+    Padding(
         EdgeInsets {
             left: ROW_PAD_X,
             top: ADD_MARGIN_TOP,
@@ -234,7 +232,7 @@ pub(in super::super) fn create_token_row(
             .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF))),
         )
         .on_tap(|state: &mut SettingsState| pages::open_create_token_dialog(state)),
-    ))
+    )
 }
 
 /// Open the mint-a-token dialog: a name field and the read-only toggle,
@@ -276,24 +274,22 @@ pub(in super::super) fn open_create_token_dialog(
             });
             glyph_dialog()
                 .title(CREATE_TOKEN_TITLE)
-                .content(any(FlexView::new(
-                    Axis::Vertical,
-                    vec![
-                        inflexible(field),
-                        inflexible(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
-                        inflexible(toggle),
-                    ],
+                .content(
+                    column()
+                        .child(field)
+                        .child(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP)))
+                        .child(toggle)
+                        .cross_axis(CrossAxisAlignment::Stretch),
                 )
-                .cross_axis(CrossAxisAlignment::Stretch)))
-                .action(any(button(
-                    DIALOG_CANCEL_LABEL,
-                    move |_state: &mut AppState| cancel_nav.pop(),
+                .action(
+                    button(DIALOG_CANCEL_LABEL, move |_state: &mut AppState| {
+                        cancel_nav.pop()
+                    })
+                    .style(ButtonStyle::Ghost)
+                    .small(),
                 )
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button(
-                    DIALOG_SUBMIT_LABEL,
-                    move |_state: &mut AppState| {
+                .action(
+                    button(DIALOG_SUBMIT_LABEL, move |_state: &mut AppState| {
                         // "Disabled": the style below is the visual half,
                         // this guard the behavioral one.
                         if can_submit {
@@ -303,14 +299,14 @@ pub(in super::super) fn open_create_token_dialog(
                                 read_only.get_untracked(),
                             );
                         }
-                    },
+                    })
+                    .style(if can_submit {
+                        ButtonStyle::Primary
+                    } else {
+                        ButtonStyle::Ghost
+                    })
+                    .small(),
                 )
-                .style(if can_submit {
-                    ButtonStyle::Primary
-                } else {
-                    ButtonStyle::Ghost
-                })
-                .small()))
         },
         move |state: &mut AppState, result: PopResult| {
             if let Some((typed, read_only)) = result.take::<(String, bool)>() {
@@ -352,20 +348,19 @@ fn dialog_read_only_row(
     on: bool,
     colors: &Palette,
     on_toggle: impl Fn(&mut AppState) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
-    let toggle_view = any(toggle::<AppState, _>(
-        on,
-        move |state: &mut AppState, _requested: bool| on_toggle(state),
-    )
-    .label(READ_ONLY_TOGGLE_LABEL));
-    any(centered_row(vec![
+    let toggle_view = toggle::<AppState, _>(on, move |state: &mut AppState, _requested: bool| {
+        on_toggle(state)
+    })
+    .label(READ_ONLY_TOGGLE_LABEL);
+    centered_row(vec![
         flexible(
             1,
-            any(text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg))),
+            text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg)),
         ),
         inflexible(toggle_view),
-    ]))
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -381,11 +376,13 @@ pub(in super::super) fn secret_reveal_sheet(
     minted: Option<&MintedToken>,
     colors: &Palette,
     on_done: impl Fn(&mut AppState) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
     let Some(minted) = minted else {
-        return any(text(SECRET_ALREADY_DISMISSED)
-            .style(inked(&theme.type_scale.body_small, colors.fg_dim)));
+        return Either::Left(
+            text(SECRET_ALREADY_DISMISSED)
+                .style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+        );
     };
     // One residue `Zeroizing` cannot cover: rendering the secret needs a
     // plain `String` this render pass owns (the shaped glyph run and the
@@ -393,20 +390,19 @@ pub(in super::super) fn secret_reveal_sheet(
     // scrub-on-drop for the rest of this build call.
     let secret = minted.token.to_string();
     let copy_secret = secret.clone();
-    let children: Vec<AnyView<AppState>> = vec![
-        any(text(SECRET_REVEAL_TITLE)
-            .style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
-        any(SizedBox::<AppState>(None, Some(PICK_TITLE_GAP))),
-        any(text(minted.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
-        any(SizedBox::<AppState>(None, Some(ROW_LINE_GAP))),
-        any(container(Padding(
+    Either::Right(stretch_column((
+        text(SECRET_REVEAL_TITLE).style(inked(&theme.type_scale.title_small_emphasized, colors.fg)),
+        SizedBox::<AppState>(None, Some(PICK_TITLE_GAP)),
+        text(minted.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+        SizedBox::<AppState>(None, Some(ROW_LINE_GAP)),
+        container(Padding(
             EdgeInsets::all(ROW_PAD_X),
             text(secret).style(inked(&theme.type_scale.title_small, colors.fg)),
         ))
         .fill(colors.raised)
-        .radius(theme.shape.small)),
-        any(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
-        any(button(COPY_SECRET_LABEL, move |_state: &mut AppState| {
+        .radius(theme.shape.small),
+        SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP)),
+        button(COPY_SECRET_LABEL, move |_state: &mut AppState| {
             let copied = frust_clipboard::Clipboard::set_text_sensitive(&copy_secret).is_ok();
             app_toasts().show(if copied {
                 COPIED_SECRET_TOAST
@@ -415,15 +411,14 @@ pub(in super::super) fn secret_reveal_sheet(
             });
         })
         .style(ButtonStyle::Primary)
-        .small()),
-        any(SizedBox::<AppState>(None, Some(TOKEN_LINE_GAP))),
-        any(text(SECRET_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
-        any(SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP))),
-        any(button(SECRET_DONE_LABEL, move |state: &mut AppState| {
+        .small(),
+        SizedBox::<AppState>(None, Some(TOKEN_LINE_GAP)),
+        text(SECRET_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        SizedBox::<AppState>(None, Some(DIALOG_FIELD_GAP)),
+        button(SECRET_DONE_LABEL, move |state: &mut AppState| {
             on_done(state)
         })
         .style(ButtonStyle::Ghost)
-        .small()),
-    ];
-    any(stretch_column(children))
+        .small(),
+    )))
 }

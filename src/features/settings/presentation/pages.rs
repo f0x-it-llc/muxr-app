@@ -31,9 +31,9 @@ use std::sync::Arc;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    GetUntracked, NavigatorController, Padding, Set, SizedBox, View, WindowMetrics, any, component,
-    inflexible, safe_area, scroll_view, spawn_local, use_context,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView,
+    Get, GetUntracked, NavigatorController, Padding, Set, SizedBox, View, WindowMetrics, any,
+    component, inflexible, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -105,7 +105,8 @@ fn sheet_band_height(metrics: &WindowMetrics, rows_height: f64) -> f64 {
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
 /// The Settings screen's route entry point.
-pub fn settings_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
+pub fn settings_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> // erasure: keep accumulator into Vec<AnyView>
+{
     any(component(SettingsScreen { overlays }))
 }
 
@@ -231,15 +232,15 @@ impl Component for SettingsScreen {
         }
 
         let mut token_group = widgets::token_rows(&tokens, &showing, read_only, &colors);
-        token_group.push(widgets::create_token_row(&colors, !read_only));
+        token_group.push(any(widgets::create_token_row(&colors, !read_only))); // erasure: keep accumulator into Vec<AnyView>
         groups.push(("auth tokens", token_group));
 
         let saved_group = if saved.is_empty() {
-            vec![widgets::no_saved_servers_row(&colors)]
+            vec![any(widgets::no_saved_servers_row(&colors))] // erasure: keep accumulator into Vec<AnyView>
         } else {
             saved
                 .iter()
-                .map(|server| widgets::saved_server_item(server, &colors))
+                .map(|server| any(widgets::saved_server_item(server, &colors))) // erasure: keep accumulator into Vec<AnyView>
                 .collect()
         };
         groups.push(("saved servers", saved_group));
@@ -256,22 +257,26 @@ impl Component for SettingsScreen {
 
         if responsive.is_tablet() {
             return widgets::page_tone(
-                widgets::tablet_scroller(groups, responsive.is_full(), &colors),
+                Either::Left(widgets::tablet_scroller(
+                    groups,
+                    responsive.is_full(),
+                    &colors,
+                )),
                 &colors,
             );
         }
 
         let mut body = Vec::new();
         for (label, rows) in groups {
-            body.push(widgets::group_label(label, &colors));
+            body.push(any(widgets::group_label(label, &colors))); // erasure: keep accumulator into Vec<AnyView>
             body.extend(rows);
         }
-        body.push(widgets::disconnect_button());
+        body.push(any(widgets::disconnect_button())); // erasure: keep accumulator into Vec<AnyView>
 
         // The *shell's* bar consumes the top window inset on this screen's
         // behalf, so the body's safe area disables its top edge to avoid
         // double-padding it.
-        let scroller: AnyView<SettingsState> = any(safe_area(scroll_view(Padding(
+        let scroller = safe_area(scroll_view(Padding(
             EdgeInsets {
                 left: 0.0,
                 top: widgets::SCROLL_PAD_TOP,
@@ -281,20 +286,20 @@ impl Component for SettingsScreen {
             FlexView::new(Axis::Vertical, body.into_iter().map(inflexible).collect())
                 .cross_axis(CrossAxisAlignment::Stretch),
         )))
-        .top(false));
+        .top(false);
         let scroller = if responsive.wide_clamp {
-            any(Align(
+            Either::Left(Align(
                 Alignment::CENTER,
                 SizedBox::<SettingsState>(Some(SETTINGS_CLAMP_WIDTH), None).child(scroller),
             ))
         } else {
-            scroller
+            Either::Right(scroller)
         };
         // The shell scaffold's app-bar slot already reserves the bar's own
         // band above this screen's body — no clearance to add here (a
         // one-time double-inset bug: the scaffold owns the band, this page
         // used to as well).
-        widgets::page_tone(scroller, &colors)
+        widgets::page_tone(Either::Right(scroller), &colors)
     }
 }
 
@@ -322,14 +327,16 @@ impl Actions {
             let picker = actions.picker(kind);
             let picking = actions.clone();
             let sheet = sheet.clone();
-            widgets::picker_sheet(&picker, &colors, move |_app: &mut AppState, index| {
-                // Close first, then persist — a sheet pop only *lands* at
-                // the next rebuild, so a second row tap inside that one
-                // frame would otherwise pop `/settings` out from under the
-                // picker (`crate::ui::sheet`'s "One sheet, one dismissal").
-                sheet.close();
-                picking.pick(kind, index);
-            })
+            let body =
+                widgets::picker_sheet(&picker, &colors, move |_app: &mut AppState, index| {
+                    // Close first, then persist — a sheet pop only *lands* at
+                    // the next rebuild, so a second row tap inside that one
+                    // frame would otherwise pop `/settings` out from under the
+                    // picker (`crate::ui::sheet`'s "One sheet, one dismissal").
+                    sheet.close();
+                    picking.pick(kind, index);
+                });
+            any(body) // erasure: keep stored view table/registry
         });
     }
 
@@ -438,7 +445,7 @@ impl Actions {
             let sheet = sheet.clone();
             let selecting = actions.clone();
             let downloading = actions.clone();
-            widgets::font_picker_sheet(
+            let body = widgets::font_picker_sheet(
                 &picker,
                 &colors,
                 move |_app: &mut AppState, family: String| {
@@ -448,7 +455,8 @@ impl Actions {
                 // A download leaves the sheet up: it makes the row
                 // selectable, it does not select it.
                 move |_app: &mut AppState, family: String| downloading.download_font(&family),
-            )
+            );
+            any(body) // erasure: keep stored view table/registry
         });
     }
 
@@ -806,10 +814,12 @@ fn open_secret_reveal(
         let minted = controller.pending_token_secret.get();
         let sheet = sheet.clone();
         let controller = Arc::clone(&controller);
-        widgets::secret_reveal_sheet(minted.as_ref(), &colors, move |_app: &mut AppState| {
-            sheet.close();
-            controller.clear_pending_secret();
-        })
+        let body =
+            widgets::secret_reveal_sheet(minted.as_ref(), &colors, move |_app: &mut AppState| {
+                sheet.close();
+                controller.clear_pending_secret();
+            });
+        any(body) // erasure: keep stored view table/registry
     });
 }
 
