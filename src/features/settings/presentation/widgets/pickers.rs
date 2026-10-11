@@ -121,12 +121,11 @@ pub(in super::super) fn picker_sheet(
 /// back in by the same amount: rows lay out exactly as before, but the
 /// selected row's painted bleed now lies inside the viewport's clip.
 pub(super) fn bleeding_scroll<M>(children: impl ViewSeq<AppState, M>) -> impl View<AppState> {
-    let scroller = scroll_view(Padding(
-        EdgeInsets::symmetric(PICK_BLEED, 0.0),
-        stretch_column(children),
-    ));
     WidenedView {
-        child: any(scroller), // erasure: keep ChildPod-fed
+        child: any(scroll_view(Padding(
+            EdgeInsets::symmetric(PICK_BLEED, 0.0),
+            stretch_column(children),
+        ))),
         by: PICK_BLEED,
     }
 }

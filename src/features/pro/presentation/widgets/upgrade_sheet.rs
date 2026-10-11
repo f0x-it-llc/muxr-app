@@ -150,27 +150,24 @@ fn upgrade_sheet_body(
     let colors = Palette::from_theme(&theme);
     let entitled = pro.entitlement.get().is_pro();
 
-    let title = text(UPGRADE_SHEET_TITLE).style(inked(&theme.type_scale.title_medium, colors.fg));
-    let subtitle = text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim));
-    let benefit = benefit_row(
-        MULTIPLE_SERVERS_COPY,
-        LINK,
-        &theme.type_scale.body_medium,
-        &colors,
-    );
     let mut children = vec![
-        any(title),            // erasure: keep accumulator into Vec<AnyView>
-        any(gap(TITLE_GAP)),   // erasure: keep accumulator into Vec<AnyView>
-        any(subtitle),         // erasure: keep accumulator into Vec<AnyView>
+        any(text(UPGRADE_SHEET_TITLE).style(inked(&theme.type_scale.title_medium, colors.fg))), // erasure: keep accumulator into Vec<AnyView>
+        any(gap(TITLE_GAP)), // erasure: keep accumulator into Vec<AnyView>
+        any(text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim))), // erasure: keep accumulator into Vec<AnyView>
         any(gap(SECTION_GAP)), // erasure: keep accumulator into Vec<AnyView>
-        any(benefit),          // erasure: keep accumulator into Vec<AnyView>
+        any(benefit_row(
+            MULTIPLE_SERVERS_COPY,
+            LINK,
+            &theme.type_scale.body_medium,
+            &colors,
+        )),
         any(gap(SECTION_GAP)), // erasure: keep accumulator into Vec<AnyView>
     ];
 
     if entitled {
-        let already =
-            text(ALREADY_PRO_COPY).style(inked(&theme.type_scale.body_medium, colors.success));
-        children.push(any(already)); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(
+            text(ALREADY_PRO_COPY).style(inked(&theme.type_scale.body_medium, colors.success))
+        ));
         children.push(any(gap(SECTION_GAP))); // erasure: keep accumulator into Vec<AnyView>
     } else {
         children.push(offer_action(
@@ -350,7 +347,7 @@ mod tests {
     use super::*;
     use crate::features::connect::domain::entities::TrustMode;
 
-    fn saved_row(label: &str) -> SavedServer {
+    fn row(label: &str) -> SavedServer {
         SavedServer {
             host: "a.example".to_string(),
             port: 50051,
@@ -378,11 +375,11 @@ mod tests {
     #[test]
     fn one_row_to_forget_is_named_and_several_are_counted() {
         assert_eq!(
-            forget_and_connect_label(&[saved_row("Home rig")]),
+            forget_and_connect_label(&[row("Home rig")]),
             "Forget Home rig and connect"
         );
         assert_eq!(
-            forget_and_connect_label(&[saved_row("Home rig"), saved_row("Office")]),
+            forget_and_connect_label(&[row("Home rig"), row("Office")]),
             "Forget 2 saved servers and connect"
         );
     }

@@ -106,36 +106,33 @@ pub(in super::super) fn font_picker_sheet(
         let selected = row.family == picker.selected;
         let on_select = Rc::clone(&on_select);
         let family = row.family.clone();
-        let item = font_pick_row(
+        body.push(any(font_pick_row(
             row,
             selected,
             index < last_installed,
             colors,
             move |state: &mut AppState| on_select(state, family.clone()),
-        );
-        body.push(any(item)); // erasure: keep accumulator into Vec<AnyView>
+        )));
     }
 
     body.push(any(font_section_label(FONT_SECTION_AVAILABLE, colors))); // erasure: keep accumulator into Vec<AnyView>
     if let Some(note) = catalog_note(picker) {
-        let line = Padding(
+        body.push(any(Padding(
             EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
             text(note).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
-        );
-        body.push(any(line)); // erasure: keep accumulator into Vec<AnyView>
+        )));
     }
     let last_available = picker.available.len().saturating_sub(1);
     for (index, row) in picker.available.iter().enumerate() {
         let on_download = Rc::clone(&on_download);
         let family = row.family.clone();
-        let item = font_pick_row(
+        body.push(any(font_pick_row(
             row,
             false,
             index < last_available,
             colors,
             move |state: &mut AppState| on_download(state, family.clone()),
-        );
-        body.push(any(item)); // erasure: keep accumulator into Vec<AnyView>
+        )));
     }
 
     let scroller = bleeding_scroll(body);

@@ -156,8 +156,11 @@ fn token_row(
         spacer(),
         inflexible(revoke),
     ]);
-    let gap = SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP));
-    let mut lines = vec![any(top), any(gap), any(meta)]; // erasure: keep accumulator into Vec<AnyView>
+    let mut lines = vec![
+        any(top),
+        any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
+        any(meta),
+    ];
     lines.extend(tail);
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — see `widgets::rows`' own doc.
