@@ -629,7 +629,12 @@ impl Component for TerminalScreen {
                     // Persistent behind the menu toggle; read-only never shows it.
                     let shown = controller.key_bar_visible.get() && !read_only;
                     let fn_row = controller.fn_row_visible;
-                    keybar::tablet_key_bar(shown, responsive.band, fn_row, &session.input)
+                    Either::Left(keybar::tablet_key_bar(
+                        shown,
+                        responsive.band,
+                        fn_row,
+                        &session.input,
+                    ))
                 } else {
                     // The keyboard's reported height is the app's one proxy for "the
                     // IME is up" — this screen has no other text input, so it mirrors
@@ -637,7 +642,7 @@ impl Component for TerminalScreen {
                     let keyboard_up = use_context::<WindowInsets>()
                         .map(|insets| insets.view_insets.bottom > 0.0)
                         .unwrap_or(false);
-                    keybar::key_bar(keyboard_up, &session.input)
+                    Either::Right(keybar::key_bar(keyboard_up, &session.input))
                 };
                 Either::Left(
                     column()
@@ -1231,7 +1236,7 @@ pub(super) fn tree_view<S: 'static>(
     actions: &Actions,
     mode: TreeMode,
     after: AfterCommit,
-) -> impl View<S> {
+) -> impl View<S> + use<S> {
     let controller = &actions.controller;
     let spaces = controller.spaces.get();
     let tabs = controller.tabs.get();
