@@ -12,7 +12,7 @@ use frust_glyph::{BadgeVariant, avatar, badge};
 
 use super::pairing::READ_ONLY_CHIP;
 use super::pro_gate::row_is_locked;
-use super::{Live, backed, column, h_gap, row, v_gap};
+use super::{Live, backed, block_column, centered_row, h_gap, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
@@ -58,12 +58,12 @@ pub fn saved_address<S: 'static>(
     for (index, server) in servers.iter().enumerate() {
         children.push(saved_row(theme, colors, server, servers, index, now, live));
     }
-    backed(column::<S>(children), colors)
+    backed(block_column::<S>(children), colors)
 }
 
 /// An uppercase micro label followed by a hairline rule filling the rest of the row.
 fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
-    any(row::<S>(vec![
+    any(centered_row::<S>(vec![
         inflexible(any(
             text("SAVED SERVERS").style(inked(&theme.type_scale.label_small, colors.fg_dim))
         )),
@@ -119,7 +119,7 @@ fn saved_row<S: 'static>(
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,
-            any(column::<S>(vec![
+            any(block_column::<S>(vec![
                 any(text(server.endpoint()).style(inked(&theme.type_scale.body_small, colors.fg))),
                 v_gap::<S>(spacing::MICRO),
                 any(text(meta).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
@@ -127,7 +127,10 @@ fn saved_row<S: 'static>(
         ),
     ];
     items.extend(chips::<S>(colors, server, locked(server, servers, live)));
-    let body = Padding(EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y), row::<S>(items));
+    let body = Padding(
+        EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y),
+        centered_row::<S>(items),
+    );
     let tappable: AnyView<S> = match live {
         None => any(body),
         Some(live) => {
@@ -135,7 +138,7 @@ fn saved_row<S: 'static>(
             any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
         }
     };
-    any(row::<S>(vec![
+    any(centered_row::<S>(vec![
         flexible(1, tappable),
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),
@@ -196,7 +199,7 @@ pub fn tablet_saved_list<S: 'static>(
             theme, colors, server, servers, index, now, live,
         ));
     }
-    any(column::<S>(children))
+    any(block_column::<S>(children))
 }
 
 /// A bordered card row: the label's initial, the label over
@@ -229,7 +232,7 @@ fn tablet_saved_row<S: 'static>(
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,
-            any(column::<S>(vec![
+            any(block_column::<S>(vec![
                 any(text(server.label.clone())
                     .style(inked(&theme.type_scale.body_small, colors.fg))),
                 v_gap::<S>(spacing::MICRO),
@@ -238,7 +241,7 @@ fn tablet_saved_row<S: 'static>(
         ),
     ];
     items.extend(chips::<S>(colors, server, locked(server, servers, live)));
-    let body = row::<S>(items);
+    let body = centered_row::<S>(items);
     let tappable: AnyView<S> = match live {
         None => any(body),
         Some(live) => {
@@ -246,7 +249,7 @@ fn tablet_saved_row<S: 'static>(
             any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
         }
     };
-    let content = row::<S>(vec![
+    let content = centered_row::<S>(vec![
         flexible(1, tappable),
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),

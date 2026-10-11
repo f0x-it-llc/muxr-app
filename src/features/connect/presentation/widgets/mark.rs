@@ -4,7 +4,7 @@ use frust::{
     Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, colored_box, container, inflexible,
 };
 
-use super::{h_gap, hugging_column, row, v_gap};
+use super::{centered_row, h_gap, hugging_column, v_gap};
 use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::Palette;
 use crate::ui::spacing;
@@ -35,13 +35,13 @@ pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
             .radius(cell_radius))
     };
     let grid = hugging_column::<S>(vec![
-        any(row::<S>(vec![
+        any(centered_row::<S>(vec![
             inflexible(faint()),
             inflexible(h_gap::<S>(MARK_GAP)),
             inflexible(solid()),
         ])),
         v_gap::<S>(MARK_GAP),
-        any(row::<S>(vec![
+        any(centered_row::<S>(vec![
             inflexible(solid()),
             inflexible(h_gap::<S>(MARK_GAP)),
             inflexible(faint()),

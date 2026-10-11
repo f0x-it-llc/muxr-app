@@ -6,7 +6,7 @@ use std::rc::Rc;
 use frust::{Alignment, AnyView, SizedBox, Theme, any, button, flexible, inflexible};
 
 use super::pairing::{pairing_banner, pairing_chrome};
-use super::{Live, column, h_gap, row, v_gap};
+use super::{Live, block_column, centered_row, h_gap, v_gap};
 use crate::ui::palette::Palette;
 use crate::ui::spacing;
 
@@ -71,7 +71,7 @@ fn connect_block<S: 'static>(
     ));
     let cta = match secondary {
         None => cta,
-        Some(secondary) => any(row::<S>(vec![
+        Some(secondary) => any(centered_row::<S>(vec![
             flexible(1, cta),
             inflexible(h_gap::<S>(spacing::MD)),
             inflexible(any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(secondary))),
@@ -81,7 +81,7 @@ fn connect_block<S: 'static>(
         return cta;
     };
     let on_connect_pinned = live.map(|live| Rc::clone(&live.on_connect_pinned));
-    any(column::<S>(vec![
+    any(block_column::<S>(vec![
         pairing_banner(theme, colors, pairing),
         v_gap::<S>(spacing::MD),
         any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(

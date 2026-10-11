@@ -6,7 +6,7 @@ use frust::authoring::Color;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
 use frust::{AnyView, Get, Theme, any, text, text_input};
 
-use super::{Live, backed, column, v_gap};
+use super::{Live, backed, block_column, v_gap};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
@@ -30,7 +30,7 @@ pub fn server_url_field<S: 'static>(
         .unwrap_or_default();
     let error = live.and_then(|live| live.controller.url_error.get());
     let controller = live.map(|live| Arc::clone(&live.controller));
-    field(
+    labelled_input(
         theme,
         colors,
         "SERVER URL",
@@ -60,7 +60,7 @@ pub fn token_field<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Li
         .map(|live| live.controller.token.get().as_str().to_owned())
         .unwrap_or_default();
     let controller = live.map(|live| Arc::clone(&live.controller));
-    field(
+    labelled_input(
         theme,
         colors,
         "LOGIN TOKEN",
@@ -80,7 +80,7 @@ pub fn token_field<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Li
     )
 }
 
-/// Per-field flags [`field`] needs beyond its label/placeholder/value — one
+/// Per-field flags [`labelled_input`] needs beyond its label/placeholder/value — one
 /// struct so its parameter count stays under clippy's `too_many_arguments` threshold.
 struct FieldOptions {
     /// Inks the label `error` while the form is invalid — only
@@ -104,7 +104,7 @@ struct FieldOptions {
 /// width and focus treatment into private constants and exposes only
 /// `text_style` — the radius, fill and idle border are already right; only
 /// the framework can close the rest.
-fn field<S: 'static>(
+fn labelled_input<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     label: &str,
@@ -135,7 +135,7 @@ fn field<S: 'static>(
             text(message).style(inked(&theme.type_scale.body_small, colors.error))
         ));
     }
-    backed(column::<S>(children), colors)
+    backed(block_column::<S>(children), colors)
 }
 
 /// `body_medium` re-inked, with one deliberate change to its family, applied

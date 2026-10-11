@@ -3,7 +3,7 @@
 use frust::authoring::text::TextAlign;
 use frust::{Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, container, text};
 
-use super::{backed, column, hugging_column, v_gap};
+use super::{backed, block_column, hugging_column, v_gap};
 use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
@@ -40,7 +40,7 @@ pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
 /// that `text` carries a paragraph alignment.
 pub fn heading<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
     backed(
-        column::<S>(vec![
+        block_column::<S>(vec![
             any(Align(
                 Alignment::CENTER,
                 text("Connect to server").style(inked(&theme.type_scale.title_medium, colors.fg)),

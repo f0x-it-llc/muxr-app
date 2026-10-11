@@ -4,7 +4,7 @@
 use frust::{AnyView, Theme, With, any, flexible, inflexible, text};
 use frust_glyph::{BadgeVariant, badge};
 
-use super::{Live, h_gap, row};
+use super::{Live, centered_row, h_gap};
 use crate::features::connect::domain::entities::PairingTrust;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
@@ -70,5 +70,5 @@ pub(super) fn pairing_banner<S: 'static>(
             BadgeVariant::Neutral,
         ))));
     }
-    any(row::<S>(items))
+    any(centered_row::<S>(items))
 }

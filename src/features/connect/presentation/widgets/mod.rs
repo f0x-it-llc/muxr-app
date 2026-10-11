@@ -98,7 +98,7 @@ fn h_gap<S: 'static>(gap: f64) -> AnyView<S> {
 
 /// A vertical stack whose children each fill the available width — the CSS
 /// block-flow the mock's blocks assume.
-fn column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
+fn block_column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
     FlexView::new(
         Axis::Vertical,
         children.into_iter().map(inflexible).collect(),
@@ -118,7 +118,7 @@ fn hugging_column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
 }
 
 /// A horizontal row with its items vertically centered.
-fn row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
+fn centered_row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
@@ -158,7 +158,7 @@ pub fn tablet_panel_pieces<S: 'static>(
 ) -> Vec<AnyView<S>> {
     let colors = Palette::from_theme(theme);
     vec![
-        any(row::<S>(vec![
+        any(centered_row::<S>(vec![
             inflexible(mark::connect_mark(theme, &colors)),
             inflexible(h_gap::<S>(spacing::LG)),
             inflexible(badge::server_badge(theme, &colors)),
