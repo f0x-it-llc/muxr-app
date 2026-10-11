@@ -17,7 +17,7 @@
 //! [`crate::ui::palette::Palette`] instead (see the [directory docs](super)).
 
 use frust::authoring::Color;
-use frust::{AnyView, EdgeInsets, Padding, Theme, any, scroll_view};
+use frust::{EdgeInsets, Padding, Theme, View, scroll_view};
 use frust_glyph::GlyphInk;
 
 use crate::features::terminal::domain::entities::TermLine;
@@ -87,12 +87,12 @@ pub(crate) fn card_body<State: 'static>(
     lines: Vec<TermLine>,
     epoch: u64,
     ink: &CardInk,
-) -> AnyView<State> {
+) -> impl View<State> {
     let theme = active_theme();
-    any(scroll_view(Padding(
+    scroll_view(Padding(
         EdgeInsets::symmetric(BODY_PAD_X, BODY_PAD_Y),
         term_body(lines, epoch, line_styles(&theme, ink), ink.prompt),
-    )))
+    ))
 }
 
 #[cfg(test)]

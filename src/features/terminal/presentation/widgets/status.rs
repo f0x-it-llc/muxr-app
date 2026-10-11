@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use frust::authoring::text::{LineHeight, TextOverflow};
 use frust::{
-    Align, Alignment, AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, Stack, any,
-    container, flexible, icons, inflexible, text,
+    Align, Alignment, EdgeInsets, GestureDetector, Padding, SizedBox, View, container, flexible,
+    icons, inflexible, stack, text,
 };
 use frust_glyph::{MenuEntry, breadcrumb, crumb, menu_item, menu_item_danger, menu_separator};
 
@@ -136,7 +136,7 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     colors: &Palette,
     ink: &CardInk,
     on_toggle: F,
-) -> AnyView<State> {
+) -> impl View<State> {
     let theme = active_theme();
     let mut title_style = sized(&theme.type_scale.display_small, TITLE_SIZE, ink.prompt);
     title_style.line_height = LineHeight::Absolute(TITLE_LINE_HEIGHT);
@@ -194,10 +194,10 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
         children.push(inflexible(read_only_badge()));
     }
     children.push(h_gap(spacing::SM));
-    children.push(inflexible(Stack(vec![any(press_band), any(button)])));
+    children.push(inflexible(stack().child(press_band).child(button)));
     // Trailing padding as a spacer — the button column owns the vertical padding.
     children.push(h_gap(STATUS_PAD_RIGHT));
-    any(container(centered_row(children)).fill(ink.head))
+    container(centered_row(children)).fill(ink.head)
 }
 
 #[cfg(test)]

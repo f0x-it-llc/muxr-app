@@ -108,14 +108,14 @@ pub(super) fn status_strip<State: 'static>(
     message: impl Into<String>,
     style: TextStyle,
     fill: Color,
-    action: Option<AnyView<State>>,
-) -> AnyView<State> {
+    action: Option<impl View<State>>,
+) -> impl View<State> {
     let mut children = vec![flexible(1, text(message.into()).style(style))];
     if let Some(action) = action {
         children.push(inflexible(frust::SizedBox::<State>(Some(STRIP_GAP), None)));
         children.push(inflexible(action));
     }
-    any(container(Padding(
+    container(Padding(
         EdgeInsets {
             left: STRIP_PAD_LEFT,
             top: STRIP_PAD_Y,
@@ -124,7 +124,7 @@ pub(super) fn status_strip<State: 'static>(
         },
         FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center),
     ))
-    .fill(fill))
+    .fill(fill)
 }
 
 /// A minimal retained text run — `frust-widgets`' own per-module `GlyphLabel`
@@ -234,7 +234,8 @@ impl<State: 'static> ExpandButtonView<State> {
     }
 
     /// The mark, as the pod this button paints and lays out.
-    fn mark_view(&self) -> AnyView<State> {
+    fn mark_view(&self) -> AnyView<State> // erasure: keep ChildPod-fed
+    {
         any(icon(self.mark.clone())
             .size(EXPAND_ICON_SIZE)
             .color(self.ink))
@@ -562,7 +563,7 @@ pub(super) fn terminal_stage<State: 'static, V: View<State>>(
     border: Color,
 ) -> TerminalStageView<State> {
     TerminalStageView {
-        child: any(child),
+        child: any(child), // erasure: keep ChildPod-fed
         fullscreen,
         gutters,
         card,
