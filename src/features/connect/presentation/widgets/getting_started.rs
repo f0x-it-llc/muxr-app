@@ -16,7 +16,7 @@ use frust::{
 };
 use frust_glyph::{glyph_card, glyph_dialog, show_glyph_dialog};
 
-use super::{column, row};
+use super::{block_column, centered_row};
 use crate::AppState;
 use crate::links::open_external;
 use crate::ui::palette::{Palette, active_theme, inked};
@@ -100,9 +100,9 @@ pub(crate) fn tablet_headline<S: 'static>(theme: &Theme, colors: &Palette) -> An
             text(copy).style(inked(&theme.type_scale.headline_small, ink))
         ))
     };
-    any(column::<S>(vec![
+    any(block_column::<S>(vec![
         any(text("attach to a").style(inked(&theme.type_scale.headline_small, colors.fg))),
-        any(row::<S>(vec![
+        any(centered_row::<S>(vec![
             run("herdr", colors.amber),
             run(" or", colors.fg),
             run(" zellij", colors.amber),

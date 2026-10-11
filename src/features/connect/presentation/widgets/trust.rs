@@ -11,7 +11,7 @@ use frust::{
 use frust_glyph::{BadgeVariant, badge, radio, toggle};
 
 use super::pairing::pairing_chrome;
-use super::{Live, backed, column, h_gap, row, v_gap};
+use super::{Live, backed, block_column, centered_row, h_gap, v_gap};
 use crate::connection::TrustMode;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
@@ -78,8 +78,8 @@ pub fn remember_row<S: 'static>(
         .label(REMEMBER_LABEL),
     );
     backed(
-        column::<S>(vec![
-            any(row::<S>(vec![
+        block_column::<S>(vec![
+            any(centered_row::<S>(vec![
                 // The flexible label takes every pixel the toggle doesn't,
                 // pinning the toggle to the trailing edge.
                 flexible(
@@ -131,7 +131,7 @@ fn trust_selector<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Liv
             text(caption).style(inked(&theme.type_scale.label_small, colors.fg_dim))
         ));
     }
-    any(column::<S>(rows))
+    any(block_column::<S>(rows))
 }
 
 /// This mode's label. [`TrustMode::Pinned`] is never a row; its arm is kept
@@ -158,7 +158,7 @@ fn trust_row<S: 'static>(
     let label = trust_option_label(mode);
     let option: AnyView<S> = match live {
         // Splash: static art with no recognizer and no node — nothing to operate.
-        None => any(row::<S>(vec![
+        None => any(centered_row::<S>(vec![
             inflexible(radio_dot::<S>(colors, selected)),
             inflexible(h_gap::<S>(RADIO_GAP)),
             inflexible(any(text(label).style(radio_label_style(theme, colors.fg)))),
@@ -182,7 +182,7 @@ fn trust_row<S: 'static>(
     }
     let content = any(Padding(
         EdgeInsets::symmetric(0.0, RADIO_PAD_Y),
-        row::<S>(items),
+        centered_row::<S>(items),
     ));
     match live {
         // Splash: inert art — no press layer to add.
