@@ -17,8 +17,7 @@
 //! the worse failure if it ever were.
 
 use frust::{
-    AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, any, divider, flexible, inflexible,
-    text,
+    CrossAxisAlignment, EdgeInsets, Padding, View, column, divider, flexible, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, badge};
 
@@ -28,7 +27,7 @@ use crate::ui::spacing;
 
 use super::super::heartbeat::{self, HeartbeatVisual};
 use super::super::pages::SessionsState;
-use super::{active_theme, h_gap, row};
+use super::{active_theme, centered_row, h_gap};
 
 /// `.conn-row{padding:13px 16px}` — the Y value has no on-scale
 /// `ui::spacing` match and stays a local one-off.
@@ -55,10 +54,10 @@ pub(in crate::features::sessions::presentation) fn server_strip(
     beat: HeartbeatVisual,
     read_only: bool,
     colors: &Palette,
-) -> AnyView<SessionsState> {
+) -> impl View<SessionsState> {
     let theme = active_theme();
     let content = match info {
-        None => row(vec![inflexible(
+        None => centered_row(vec![inflexible(
             text("not connected").style(inked(&theme.type_scale.body_small, colors.fg_dim)),
         )]),
         Some(info) => {
@@ -91,7 +90,7 @@ pub(in crate::features::sessions::presentation) fn server_strip(
                 children.push(h_gap(STRIP_GAP));
                 children.push(inflexible(badge(READ_ONLY_CHIP, BadgeVariant::Info)));
             }
-            row(children)
+            centered_row(children)
         }
     };
     // `.conn-row`'s bottom hairline is a plain `divider` stacked under the
@@ -99,13 +98,12 @@ pub(in crate::features::sessions::presentation) fn server_strip(
     // bottom-rule option by design (see `frust-widgets::container`'s module
     // docs), so the rule composes as an ordinary second child instead of a
     // paint-time overlay.
-    any(Column(vec![
-        any(Padding(
+    column()
+        .child(Padding(
             EdgeInsets::symmetric(STRIP_PAD_X, STRIP_PAD_Y),
             content.cross_axis(CrossAxisAlignment::Center),
-        )),
-        any(divider(colors.rule)),
-    ]))
+        ))
+        .child(divider(colors.rule))
 }
 
 /// The strip's dim meta text: every backend the handshake detected, as
