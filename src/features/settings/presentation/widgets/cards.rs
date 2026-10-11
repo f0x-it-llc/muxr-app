@@ -103,12 +103,11 @@ pub(in super::super) fn tablet_scroller(
             FlexView::new(Axis::Vertical, interleave_gaps(cards, Axis::Vertical, None))
                 .cross_axis(CrossAxisAlignment::Stretch)
         };
-        let columns = FlexView::new(
+        vec![any(FlexView::new(
             Axis::Horizontal,
             interleave_gaps(vec![column(left), column(right)], Axis::Horizontal, Some(1)),
         )
-        .cross_axis(CrossAxisAlignment::Start);
-        vec![any(columns)] // erasure: keep accumulator into Vec<AnyView>
+        .cross_axis(CrossAxisAlignment::Start))]
     } else {
         cards
     };
