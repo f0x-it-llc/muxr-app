@@ -5,8 +5,8 @@ use std::sync::Arc;
 use frust::authoring::Color;
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Get, Padding, Stack, Theme, any, colored_box, flexible,
-    inflexible, text,
+    AnyView, EdgeInsets, Either, GestureDetector, Get, Padding, Theme, View, any, colored_box,
+    flexible, inflexible, stack, text,
 };
 use frust_glyph::{BadgeVariant, badge, radio, toggle};
 
@@ -64,34 +64,32 @@ pub fn remember_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let remembered = live.is_none_or(|live| live.controller.remember.get());
     let controller = live.map(|live| Arc::clone(&live.controller));
     // A controlled component: the toggle reports the requested value it never
     // self-applies; the controller's flip stays the single source of truth.
-    let toggle_view = any(
-        toggle::<S, _>(remembered, move |_state: &mut S, _requested: bool| {
-            if let Some(controller) = &controller {
-                controller.toggle_remember();
-            }
-        })
-        .label(REMEMBER_LABEL),
-    );
+    let toggle_view = toggle::<S, _>(remembered, move |_state: &mut S, _requested: bool| {
+        if let Some(controller) = &controller {
+            controller.toggle_remember();
+        }
+    })
+    .label(REMEMBER_LABEL);
     backed(
-        block_column::<S>(vec![
-            any(centered_row::<S>(vec![
+        block_column::<S, _>((
+            centered_row::<S>(vec![
                 // The flexible label takes every pixel the toggle doesn't,
                 // pinning the toggle to the trailing edge.
                 flexible(
                     1,
-                    any(text(REMEMBER_LABEL)
-                        .style(inked(&theme.type_scale.body_small, colors.fg_muted))),
+                    text(REMEMBER_LABEL)
+                        .style(inked(&theme.type_scale.body_small, colors.fg_muted)),
                 ),
                 inflexible(toggle_view),
-            ])),
+            ]),
             v_gap::<S>(spacing::SHEET),
-            trust_selector(theme, colors, live),
-        ]),
+            trust_selector::<S>(theme, colors, live),
+        )),
         colors,
     )
 }
@@ -115,11 +113,16 @@ pub fn remember_row<S: 'static>(
 /// ([`radio_label_style`]): `frust_glyph::radio` always wires a working
 /// press and a `Role::RadioButton` node, which the splash's static art must
 /// never carry.
-fn trust_selector<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Live>) -> AnyView<S> {
+fn trust_selector<S: 'static>(
+    theme: &Theme,
+    colors: &Palette,
+    live: Option<&Live>,
+) -> impl View<S> + use<S> // erasure: keep accumulator into Vec<AnyView>
+{
     let selected = live.map_or(TrustMode::System, |live| live.controller.trust_mode.get());
     let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS
         .iter()
-        .map(|&mode| trust_row(theme, colors, mode, selected == mode, live))
+        .map(|&mode| any(trust_row(theme, colors, mode, selected == mode, live)))
         .collect();
     if !TRUST_OPTIONS.contains(&selected) {
         let caption = if pairing_chrome(live).is_some() {
@@ -131,7 +134,7 @@ fn trust_selector<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Liv
             text(caption).style(inked(&theme.type_scale.label_small, colors.fg_dim))
         ));
     }
-    any(block_column::<S>(rows))
+    block_column::<S, _>(rows)
 }
 
 /// This mode's label. [`TrustMode::Pinned`] is never a row; its arm is kept
@@ -154,21 +157,23 @@ fn trust_row<S: 'static>(
     mode: TrustMode,
     selected: bool,
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let label = trust_option_label(mode);
-    let option: AnyView<S> = match live {
+    let option = match live {
         // Splash: static art with no recognizer and no node — nothing to operate.
-        None => any(centered_row::<S>(vec![
+        None => Either::Left(centered_row::<S>(vec![
             inflexible(radio_dot::<S>(colors, selected)),
             inflexible(h_gap::<S>(RADIO_GAP)),
-            inflexible(any(text(label).style(radio_label_style(theme, colors.fg)))),
+            inflexible(text(label).style(radio_label_style(theme, colors.fg))),
         ])),
         Some(live) => {
             let controller = Arc::clone(&live.controller);
-            any(radio::<S, _>(selected, move |_state: &mut S| {
-                controller.select_trust_mode(mode)
-            })
-            .label(label))
+            Either::Right(
+                radio::<S, _>(selected, move |_state: &mut S| {
+                    controller.select_trust_mode(mode)
+                })
+                .label(label),
+            )
         }
     };
     // The flexible option pushes the chip to the trailing edge.
@@ -178,20 +183,20 @@ fn trust_row<S: 'static>(
     // for one, and the app cannot supply it.
     if mode == TrustMode::NoVerification {
         items.push(inflexible(h_gap::<S>(spacing::MD)));
-        items.push(inflexible(any(badge("insecure", BadgeVariant::Warning))));
+        items.push(inflexible(badge("insecure", BadgeVariant::Warning)));
     }
-    let content = any(Padding(
+    let content = Padding(
         EdgeInsets::symmetric(0.0, RADIO_PAD_Y),
         centered_row::<S>(items),
-    ));
+    );
     match live {
         // Splash: inert art — no press layer to add.
-        None => content,
+        None => Either::Left(content),
         Some(live) => {
             let controller = Arc::clone(&live.controller);
-            full_row_press(content, move |_state: &mut S| {
+            Either::Right(full_row_press(content, move |_state: &mut S| {
                 controller.select_trust_mode(mode)
-            })
+            }))
         }
     }
 }
@@ -211,12 +216,12 @@ fn trust_row<S: 'static>(
 /// by construction — see `full_row_press_mechanism` below.
 /// [`ROW_PRESS_FLOOR`] sizes the background's own height.
 fn full_row_press<S: 'static>(
-    content: AnyView<S>,
+    content: impl View<S>,
     on_tap: impl Fn(&mut S) + 'static,
-) -> AnyView<S> {
+) -> impl View<S> {
     let background =
         GestureDetector(colored_box::<S>().size(f64::INFINITY, ROW_PRESS_FLOOR)).on_tap(on_tap);
-    any(Stack(vec![any(background), content]))
+    stack().child(background).child(content)
 }
 
 /// The static row's label at [`frust_glyph::radio`]'s own style — the
@@ -233,7 +238,7 @@ fn radio_label_style(theme: &Theme, ink: Color) -> TextStyle {
 /// A 16px ring whose selected state re-inks it amber and drops an inset amber
 /// dot into it — the splash's inert copy of [`frust_glyph::radio`]'s own
 /// art (see [`trust_selector`]'s docs); never used for the live row.
-fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
+fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> impl View<S> + use<S> {
     let ring_ink = if selected {
         colors.amber
     } else {
@@ -244,19 +249,18 @@ fn radio_dot<S: 'static>(colors: &Palette, selected: bool) -> AnyView<S> {
         .radius(RADIO_RING / 2.0)
         .border(ring_ink, RADIO_RING_BORDER);
     if !selected {
-        return any(ring);
+        return Either::Left(ring);
     }
     let dot = RADIO_RING - 2.0 * RADIO_DOT_INSET;
-    any(Stack(vec![
-        any(ring),
-        any(Padding(
+    Either::Right(
+        stack().child(ring).child(Padding(
             EdgeInsets::all(RADIO_DOT_INSET),
             colored_box::<S>()
                 .size(dot, dot)
                 .radius(dot / 2.0)
                 .fill(colors.amber),
         )),
-    ]))
+    )
 }
 
 #[cfg(test)]
@@ -315,13 +319,14 @@ mod tests {
 
         // A labelless `radio` (hit box = [`RADIO_RING`]) wrapped by
         // `full_row_press` — reproduces a naive nested detector's double-fire.
-        fn logic(_state: &mut Counts) -> AnyView<Counts> {
-            let radio_view = any(radio::<Counts, _>(false, |state: &mut Counts| {
+        fn logic(_state: &mut Counts) -> AnyView<Counts> // erasure: keep stored view table/registry
+        {
+            let radio_view = radio::<Counts, _>(false, |state: &mut Counts| {
                 state.radio += 1;
-            }));
-            full_row_press(radio_view, |state: &mut Counts| {
+            });
+            any(full_row_press(radio_view, |state: &mut Counts| {
                 state.background += 1;
-            })
+            }))
         }
 
         fn dispatch(

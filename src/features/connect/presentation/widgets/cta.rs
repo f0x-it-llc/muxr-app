@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use frust::{Alignment, AnyView, SizedBox, Theme, any, button, flexible, inflexible};
+use frust::{Alignment, Either, SizedBox, SizedBoxView, Theme, View, button, flexible, inflexible};
 
 use super::pairing::{pairing_banner, pairing_chrome};
 use super::{Live, block_column, centered_row, h_gap, v_gap};
@@ -34,8 +34,8 @@ pub fn connect_button<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     live: Option<&Live>,
-) -> AnyView<S> {
-    connect_block(theme, colors, live, None)
+) -> impl View<S> {
+    connect_block::<S, SizedBoxView<S>>(theme, colors, live, None)
 }
 
 /// The Tablet form's action block: the same pairing rows over a button row,
@@ -44,21 +44,21 @@ pub fn connect_actions<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     live: Option<&Live>,
-    secondary: AnyView<S>,
-) -> AnyView<S> {
+    secondary: impl View<S>,
+) -> impl View<S> {
     connect_block(theme, colors, live, Some(secondary))
 }
 
-fn connect_block<S: 'static>(
+fn connect_block<S: 'static, V: View<S>>(
     theme: &Theme,
     colors: &Palette,
     live: Option<&Live>,
-    secondary: Option<AnyView<S>>,
-) -> AnyView<S> {
+    secondary: Option<V>,
+) -> impl View<S> {
     // Shared by every CTA this piece renders; the splash reads `false`.
     let busy = live.is_some_and(|live| live.controller.busy());
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
-    let cta = any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
+    let cta = SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
         button(CONNECT_LABEL, move |_state: &mut S| {
             if let Some(on_connect) = &on_connect {
                 on_connect();
@@ -68,23 +68,23 @@ fn connect_block<S: 'static>(
         // `busy` spans the offer's held redirect too, since the save chain runs
         // with the form still looking live and this CTA the only guard against a re-tap.
         .loading(busy),
-    ));
+    );
     let cta = match secondary {
-        None => cta,
-        Some(secondary) => any(centered_row::<S>(vec![
+        None => Either::Left(cta),
+        Some(secondary) => Either::Right(centered_row::<S>(vec![
             flexible(1, cta),
             inflexible(h_gap::<S>(spacing::MD)),
-            inflexible(any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(secondary))),
+            inflexible(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(secondary)),
         ])),
     };
     let Some(pairing) = pairing_chrome(live) else {
-        return cta;
+        return Either::Left(cta);
     };
     let on_connect_pinned = live.map(|live| Rc::clone(&live.on_connect_pinned));
-    any(block_column::<S>(vec![
+    Either::Right(block_column::<S, _>((
         pairing_banner(theme, colors, pairing),
         v_gap::<S>(spacing::MD),
-        any(SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
+        SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
             button(pairing.connect_label(), move |_state: &mut S| {
                 if let Some(on_connect_pinned) = &on_connect_pinned {
                     on_connect_pinned();
@@ -93,10 +93,10 @@ fn connect_block<S: 'static>(
             .label_alignment(Alignment::CENTER)
             // Same connection-controller signal the manual CTA reads.
             .loading(busy),
-        )),
+        ),
         v_gap::<S>(spacing::MD),
         cta,
-    ]))
+    )))
 }
 
 #[cfg(test)]

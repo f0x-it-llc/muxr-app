@@ -1,7 +1,7 @@
 //! Piece 0 — `.connect-mark`.
 
 use frust::{
-    Align, Alignment, AnyView, EdgeInsets, Padding, Theme, any, colored_box, container, inflexible,
+    Align, Alignment, EdgeInsets, Padding, Theme, View, colored_box, container, inflexible,
 };
 
 use super::{centered_row, h_gap, hugging_column, v_gap};
@@ -18,40 +18,40 @@ const MARK_CELL: f64 = (MARK_SIZE - 2.0 * spacing::BASE - MARK_GAP) / 2.0;
 /// Piece 0 — a bordered 60×60 tile holding a 2×2 grid whose diagonal is solid
 /// amber and whose off-diagonal is the faint amber wash, centered in the layer
 /// (`margin:0 auto`). Pure decoration — no [`Live`](super::Live).
-pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
+pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> {
     let cell_radius = theme.shape.extra_small;
     // Diagonal is a hairline-bordered faint wash; off-diagonal is solid accent fill.
     let faint = || {
-        any(colored_box::<S>()
+        colored_box::<S>()
             .size(MARK_CELL, MARK_CELL)
             .fill(colors.amber_faint)
             .radius(cell_radius)
-            .border(colors.amber_border, HAIRLINE))
+            .border(colors.amber_border, HAIRLINE)
     };
     let solid = || {
-        any(colored_box::<S>()
+        colored_box::<S>()
             .size(MARK_CELL, MARK_CELL)
             .fill(colors.amber)
-            .radius(cell_radius))
+            .radius(cell_radius)
     };
-    let grid = hugging_column::<S>(vec![
-        any(centered_row::<S>(vec![
+    let grid = hugging_column::<S, _>((
+        centered_row::<S>(vec![
             inflexible(faint()),
             inflexible(h_gap::<S>(MARK_GAP)),
             inflexible(solid()),
-        ])),
+        ]),
         v_gap::<S>(MARK_GAP),
-        any(centered_row::<S>(vec![
+        centered_row::<S>(vec![
             inflexible(solid()),
             inflexible(h_gap::<S>(MARK_GAP)),
             inflexible(faint()),
-        ])),
-    ]);
+        ]),
+    ));
     let tile = container(Padding(EdgeInsets::all(spacing::BASE), grid))
         .fill(colors.page)
         .radius(theme.shape.medium)
         .border(colors.outline, HAIRLINE);
-    any(Align(Alignment::CENTER, tile))
+    Align(Alignment::CENTER, tile)
 }
 
 #[cfg(test)]
