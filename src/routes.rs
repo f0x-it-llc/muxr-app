@@ -48,9 +48,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    AnyView, BackPolicy, Get, GetUntracked, Location, NavigatorController, PushOptions, Resolution,
-    ResolvedPage, Route, RouteObserver, RouteParams, Router, RwSignal, Set, SizedBox,
-    TransitionSpec, any, shell_route,
+    AnyView, BackPolicy, Either, Get, GetUntracked, Location, NavigatorController, PushOptions,
+    Resolution, ResolvedPage, Route, RouteObserver, RouteParams, Router, RwSignal, Set, SizedBox,
+    TransitionSpec, View, shell_route,
 };
 
 use crate::AppState;
@@ -404,10 +404,10 @@ impl Nav {
     /// every rebuild like any other page builder. A shell placed with no leaf
     /// (nothing in this table resolves that way) opens on an empty box rather
     /// than panicking.
-    pub(crate) fn landing_page(&self) -> AnyView<AppState> {
+    pub(crate) fn landing_page(&self) -> impl View<AppState> + use<> {
         match self.landing.borrow().as_ref() {
-            Some(page) => page.build(),
-            None => any(SizedBox::<AppState>(Some(0.0), Some(0.0))),
+            Some(page) => Either::Left(page.build()),
+            None => Either::Right(SizedBox::<AppState>(Some(0.0), Some(0.0))),
         }
     }
 

@@ -63,7 +63,9 @@ use frust::authoring::{
     PaintScene, Point, SemanticsCtx, Size, View, Widget, any, build_child, rebuild_child,
     teardown_child,
 };
-use frust::{Align, Alignment, FrameTime, Image, ImageFit, RwSignal, Set, SizedBox, Stack, Theme};
+use frust::{
+    Align, Alignment, FrameTime, Image, ImageFit, RwSignal, Set, SizedBox, Stack, Theme, stack,
+};
 
 use super::icon_phase::{IconArt, icon_phase};
 use super::{accent_ink, delta_ms, reduce_motion, spec, with_alpha};
@@ -196,15 +198,15 @@ pub fn splash_sequence<State: 'static>(
     let staggered = pieces
         .into_iter()
         .enumerate()
-        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece)))
+        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece))) // erasure: keep accumulator into Vec<AnyView>
         .collect();
     let assembly = assemble(staggered);
 
     // Bottom-to-top, matching the source's z-index ladder: the ui-layer (5)
     // under the burst particles (8), under the icon (10). The backdrop is
     // below all of it.
-    any(Stack(vec![
-        any(page_backdrop::<State>().block_input(true)),
+    any(stack()
+        .child(page_backdrop::<State>().block_input(true))
         // The end cue rides the assembly's gate, clocking from the pieces' own
         // first frame: a gap straddling the gate delays both together, so the
         // overlay never unmounts over a piece still dropping. Legitimate only
@@ -212,19 +214,17 @@ pub fn splash_sequence<State: 'static>(
         // the end's later arm — if those ever diverge, the cue moves to
         // whichever gate opens last. Zero-size, so the nested `Stack` still
         // sizes to the assembly alone.
-        any(delayed(
+        .child(delayed(
             assembly_start_ms(),
-            Stack(vec![
-                assembly,
-                any(cue::<State>(sequence_end_ms() - assembly_start_ms(), done)),
-            ]),
-        )),
-        any(delayed(
+            stack()
+                .child(assembly)
+                .child(cue::<State>(sequence_end_ms() - assembly_start_ms(), done)),
+        ))
+        .child(delayed(
             dissolve_cue_ms(),
             super::burst::burst::<State>(seed),
-        )),
-        any(icon_phase::<State>(art)),
-    ]))
+        ))
+        .child(icon_phase::<State>(art)))
 }
 
 /// The reduced-motion fallback: the static app icon over the page backdrop
@@ -243,7 +243,7 @@ pub fn splash_sequence<State: 'static>(
 /// on the first painted frame and unmount the hold ~16ms after it
 /// appeared — a flicker where the design reference has a 200ms beat.
 pub fn reduced_splash<State: 'static>(art: IconArt, done: RwSignal<bool>) -> AnyView<State> {
-    let mut layers: Vec<AnyView<State>> = vec![any(page_backdrop::<State>().block_input(true))];
+    let mut layers: Vec<AnyView<State>> = vec![any(page_backdrop::<State>().block_input(true))]; // erasure: keep accumulator into Vec<AnyView>
     if let IconArt::Image(source) = art {
         layers.push(any(Align(
             Alignment::CENTER,
@@ -279,7 +279,7 @@ pub fn delayed_showing(elapsed_ms: f64, delay_ms: f64, reduce_motion: bool) -> b
 pub fn delayed<State: 'static, V: View<State>>(delay_ms: f64, child: V) -> DelayedView<State> {
     DelayedView {
         delay_ms,
-        child: any(child),
+        child: any(child), // erasure: keep ChildPod-fed
     }
 }
 
@@ -590,7 +590,7 @@ pub fn piece_entry<State: 'static, V: View<State>>(
 ) -> PieceEntryView<State> {
     PieceEntryView {
         delay_ms,
-        child: any(child),
+        child: any(child), // erasure: keep ChildPod-fed
     }
 }
 

@@ -165,7 +165,7 @@ pub fn icon_phase<State: 'static>(art: IconArt) -> IconPhaseView<State> {
         // `Contain` on a square source in a square box is an exact fit; it
         // also degrades gracefully if the asset is ever replaced with a
         // non-square one.
-        IconArt::Image(source) => Some(any(Image(source.clone()).fit(ImageFit::Contain))),
+        IconArt::Image(source) => Some(any(Image(source.clone()).fit(ImageFit::Contain))), // erasure: keep ChildPod-fed
         IconArt::Vector => None,
     };
     IconPhaseView {
