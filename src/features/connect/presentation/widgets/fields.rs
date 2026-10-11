@@ -30,7 +30,7 @@ pub fn server_url_field<S: 'static>(
         .unwrap_or_default();
     let error = live.and_then(|live| live.controller.url_error.get());
     let controller = live.map(|live| Arc::clone(&live.controller));
-    labelled_input(
+    field(
         theme,
         colors,
         "SERVER URL",
@@ -64,7 +64,7 @@ pub fn token_field<S: 'static>(
         .map(|live| live.controller.token.get().as_str().to_owned())
         .unwrap_or_default();
     let controller = live.map(|live| Arc::clone(&live.controller));
-    labelled_input(
+    field(
         theme,
         colors,
         "LOGIN TOKEN",
@@ -84,7 +84,7 @@ pub fn token_field<S: 'static>(
     )
 }
 
-/// Per-field flags [`labelled_input`] needs beyond its label/placeholder/value — one
+/// Per-field flags [`field`] needs beyond its label/placeholder/value — one
 /// struct so its parameter count stays under clippy's `too_many_arguments` threshold.
 struct FieldOptions {
     /// Inks the label `error` while the form is invalid — only
@@ -108,7 +108,7 @@ struct FieldOptions {
 /// width and focus treatment into private constants and exposes only
 /// `text_style` — the radius, fill and idle border are already right; only
 /// the framework can close the rest.
-fn labelled_input<S: 'static>(
+fn field<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     label: &str,
