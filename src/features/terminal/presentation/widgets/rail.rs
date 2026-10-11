@@ -20,8 +20,8 @@ use frust::authoring::{
 };
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexView,
-    GestureDetector, IconData, Padding, SizedBox, any, button, container, flexible, icons,
-    inflexible, scroll_view, text,
+    GestureDetector, IconData, Padding, SizedBox, any, button, column, container, flexible, icons,
+    inflexible, row, scroll_view, text,
 };
 use frust_glyph::{BadgeVariant, badge, tooltip};
 
@@ -33,7 +33,7 @@ use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
 use super::side_sheet_tree::SPACE_DIAMOND;
-use super::util::{h_gap, read_only_badge, row, sized, v_gap};
+use super::util::{centered_row, h_gap, read_only_badge, sized, v_gap};
 
 /// `.rail{width:264px}`.
 pub(crate) const RAIL_WIDTH: f64 = 264.0;
@@ -117,7 +117,7 @@ fn status_chip(link: Option<LinkStatus>) -> (&'static str, BadgeVariant) {
 /// `detach` button. `top` clears a status-bar inset the app bar no longer does.
 pub(crate) fn docked_rail<State: 'static>(
     head: &RailHead<'_>,
-    tree: AnyView<State>,
+    tree: impl View<State>,
     top: f64,
     on_detach: impl Fn(&mut State) + 'static,
 ) -> AnyView<State> {
@@ -128,23 +128,19 @@ pub(crate) fn docked_rail<State: 'static>(
     let mut chips = vec![
         flexible(
             1,
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(
-                        text(head.name.to_string())
-                            .style(sized(&theme.type_scale.label_large, NAME_SIZE, colors.fg))
-                            .max_lines(1)
-                            .overflow(TextOverflow::Ellipsis),
-                    ),
-                    inflexible(text(head.summary.clone()).style(sized(
-                        &theme.type_scale.label_small,
-                        SUMMARY_SIZE,
-                        colors.fg_dim,
-                    ))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Start),
+            column()
+                .child(
+                    text(head.name.to_string())
+                        .style(sized(&theme.type_scale.label_large, NAME_SIZE, colors.fg))
+                        .max_lines(1)
+                        .overflow(TextOverflow::Ellipsis),
+                )
+                .child(text(head.summary.clone()).style(sized(
+                    &theme.type_scale.label_small,
+                    SUMMARY_SIZE,
+                    colors.fg_dim,
+                )))
+                .cross_axis(CrossAxisAlignment::Start),
         ),
         h_gap(spacing::SM),
         inflexible(badge(status, variant)),
@@ -157,29 +153,21 @@ pub(crate) fn docked_rail<State: 'static>(
     let mut tip_style = sized(&theme.type_scale.body_small, TIP_SIZE, colors.fg_dim);
     tip_style.style = FontStyle::Italic;
     let tip = if head.read_only { TIP_READ_ONLY } else { TIP };
-    let footer = FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(text(tip).style(tip_style)),
-            inflexible(v_gap(spacing::XS)),
-            inflexible(button(DETACH_LABEL, on_detach).style(ButtonStyle::Secondary)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch);
+    let footer = column()
+        .child(text(tip).style(tip_style))
+        .child(v_gap(spacing::XS))
+        .child(button(DETACH_LABEL, on_detach).style(ButtonStyle::Secondary))
+        .cross_axis(CrossAxisAlignment::Stretch);
 
-    let body = FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(SizedBox::<State>(None, Some(top))),
-            inflexible(Padding(HEAD_PAD, row(chips))),
-            inflexible(rule(None, Some(HAIRLINE), &colors)),
-            flexible(1, scroll_view(Padding(TREE_PAD, tree))),
-            inflexible(rule(None, Some(HAIRLINE), &colors)),
-            inflexible(Padding(FOOT_PAD, footer)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch);
-    panel(RAIL_WIDTH, any(body), &colors)
+    let body = column()
+        .child(SizedBox::<State>(None, Some(top)))
+        .child(Padding(HEAD_PAD, centered_row(chips)))
+        .child(rule(None, Some(HAIRLINE), &colors))
+        .flex(1, scroll_view(Padding(TREE_PAD, tree)))
+        .child(rule(None, Some(HAIRLINE), &colors))
+        .child(Padding(FOOT_PAD, footer))
+        .cross_axis(CrossAxisAlignment::Stretch);
+    any(panel(RAIL_WIDTH, body, &colors))
 }
 
 /// What the mini rail draws: every space, the selected space's tabs, and the
@@ -244,7 +232,7 @@ pub(crate) fn mini_rail<State: 'static>(
         ));
     }
     if !data.spaces.is_empty() {
-        items.push(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors));
+        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors)));
     }
     for tab in data.tabs {
         let active = tab.key == data.active_tab;
@@ -266,7 +254,7 @@ pub(crate) fn mini_rail<State: 'static>(
         items.push(any(tooltip(cell, tab.label.clone())));
     }
     if let Some(tab) = data.tabs.iter().find(|tab| tab.key == data.active_tab) {
-        items.push(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors));
+        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors)));
         for pane in &tab.panes {
             let open = Rc::clone(&actions.on_pane);
             let (key, target) = (tab.key.clone(), pane.clone());
@@ -296,27 +284,20 @@ pub(crate) fn mini_rail<State: 'static>(
         column.push(inflexible(item));
     }
     let body = FlexView::new(Axis::Vertical, column).cross_axis(CrossAxisAlignment::Center);
-    panel(
+    any(panel(
         MINI_RAIL_WIDTH,
-        any(scroll_view(Padding(
-            EdgeInsets::symmetric(0.0, spacing::MD),
-            body,
-        ))),
+        scroll_view(Padding(EdgeInsets::symmetric(0.0, spacing::MD), body)),
         &colors,
-    )
+    ))
 }
 
 /// The rail's column at `width` on the surface tone, with its hairline right edge.
-fn panel<State: 'static>(width: f64, body: AnyView<State>, colors: &Palette) -> AnyView<State> {
+fn panel<State: 'static>(width: f64, body: impl View<State>, colors: &Palette) -> impl View<State> {
     let column = container(SizedBox::<State>(Some(width), None).child(body)).fill(colors.surface);
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(column),
-            inflexible(rule(Some(HAIRLINE), None, colors)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    row()
+        .child(column)
+        .child(rule(Some(HAIRLINE), None, colors))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// A hairline rule: `width`×`height`, the unset one stretched by its parent.
@@ -324,8 +305,8 @@ fn rule<State: 'static>(
     width: Option<f64>,
     height: Option<f64>,
     colors: &Palette,
-) -> AnyView<State> {
-    any(container(SizedBox::<State>(width, height)).fill(colors.outline))
+) -> impl View<State> {
+    container(SizedBox::<State>(width, height)).fill(colors.outline)
 }
 
 /// `child` (a tap target) published to accessibility as a button named `label`
@@ -337,7 +318,7 @@ fn labelled_button<State: 'static, V: View<State>>(
 ) -> LabelledButtonView<State> {
     LabelledButtonView {
         label,
-        child: any(child),
+        child: any(child), // erasure: keep ChildPod-fed
     }
 }
 
