@@ -19,7 +19,7 @@ use crate::ui::spacing;
 
 use super::super::pages::{self, SessionsState};
 use super::session_card::{CardMode, IDLE_OPACITY, session_card};
-use super::{LoadPhase, active_theme, column, h_gap, row};
+use super::{LoadPhase, active_theme, centered_row, gapped_column, h_gap};
 
 /// `.new-sess-btn{padding:13px}` — no on-scale `ui::spacing` match.
 const NEW_ROW_PAD: f64 = 13.0;
@@ -53,7 +53,7 @@ pub(in crate::features::sessions::presentation) fn new_session_row(
     read_only: bool,
 ) -> AnyView<SessionsState> {
     let theme = active_theme();
-    let label = row(vec![
+    let label = centered_row(vec![
         inflexible(text(NEW_SESSION_PLUS).style(inked(&theme.type_scale.body_small, colors.amber))),
         h_gap(NEW_ROW_GAP),
         inflexible(
@@ -132,7 +132,7 @@ pub(in crate::features::sessions::presentation) fn tablet_list(
 ) -> AnyView<SessionsState> {
     any(Padding(
         EdgeInsets::all(COLUMN_PAD),
-        column(pieces, COLUMN_GAP),
+        gapped_column(pieces, COLUMN_GAP),
     ))
 }
 

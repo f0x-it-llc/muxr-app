@@ -29,7 +29,7 @@ use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
 use super::super::pages::{self, SessionsState};
-use super::{active_theme, h_gap, row};
+use super::{active_theme, centered_row, h_gap};
 
 /// `.sess-avatar{width:26px;height:26px}` — a widget dimension, not a
 /// spacing gap, so it stays off the shared scale.
@@ -160,7 +160,7 @@ pub(in crate::features::sessions::presentation) fn session_card(
         h_gap(PILL_GAP),
         inflexible(badge(session.backend.label(), BadgeVariant::Neutral)),
     ]);
-    let top = row(top);
+    let top = centered_row(top);
 
     let meta_style = inked(&theme.type_scale.label_small, colors.fg_dim);
     let mut meta = vec![
@@ -177,7 +177,7 @@ pub(in crate::features::sessions::presentation) fn session_card(
         ));
     }
     meta.push(spacer());
-    let meta = row(meta);
+    let meta = centered_row(meta);
 
     let (selected, previews) = match mode {
         CardMode::Compact => (false, true),
@@ -266,7 +266,7 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
             .radius(theme.shape.extra_small),
         ));
     }
-    row(children)
+    centered_row(children)
 }
 
 /// A flexible spacer that pushes what follows it to the trailing edge — Flex
