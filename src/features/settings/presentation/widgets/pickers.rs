@@ -17,15 +17,15 @@ use frust::authoring::{
 };
 use frust::icons::CHECK;
 use frust::{
-    AnyView, EdgeInsets, GestureDetector, Padding, SizedBox, any, flexible, icon, inflexible,
-    scroll_view, text,
+    AnyView, EdgeInsets, Either, GestureDetector, Padding, SizedBox, ViewSeq, any, flexible, icon,
+    inflexible, scroll_view, text,
 };
 
 use crate::AppState;
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
-use super::rows::{ROW_GAP, column, h_gap, rounded_fill, row};
+use super::rows::{ROW_GAP, centered_row, h_gap, rounded_fill, stretch_column};
 
 /// `.pick-row{padding:13px 4px}`.
 pub(super) const PICK_PAD_X: f64 = spacing::TIGHT;
@@ -85,14 +85,10 @@ pub(in super::super) fn picker_sheet(
     picker: &Picker,
     colors: &Palette,
     on_pick: impl Fn(&mut AppState, usize) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
     let on_pick: OnPick = Rc::new(on_pick);
     let last = picker.options.len().saturating_sub(1);
-    let head = vec![
-        any(text(picker.title).style(inked(&theme.type_scale.title_small_emphasized, colors.fg))),
-        any(SizedBox::<AppState>(None, Some(PICK_TITLE_GAP))),
-    ];
     let mut children = Vec::new();
     for (index, option) in picker.options.iter().enumerate() {
         children.push(pick_row(
@@ -107,29 +103,31 @@ pub(in super::super) fn picker_sheet(
         ));
     }
     let scroller = bleeding_scroll(children);
-    let list: AnyView<AppState> = match picker.max_height {
+    let list = match picker.max_height {
         // A fixed height, not a flex share: the sheet body is unbounded in
         // height, so a `flexible` child would divide zero free space.
-        Some(height) => any(SizedBox::<AppState>(None, Some(height)).child(scroller)),
-        None => any(scroller),
+        Some(height) => Either::Left(SizedBox::<AppState>(None, Some(height)).child(scroller)),
+        None => Either::Right(scroller),
     };
-    let mut body = head;
-    body.push(list);
-    any(column(body))
+    stretch_column((
+        text(picker.title).style(inked(&theme.type_scale.title_small_emphasized, colors.fg)),
+        SizedBox::<AppState>(None, Some(PICK_TITLE_GAP)),
+        list,
+    ))
 }
 
 /// `children` in a vertical scroll region whose *viewport* is [`PICK_BLEED`]
 /// wider than the sheet's content gutter on each side, with the content padded
 /// back in by the same amount: rows lay out exactly as before, but the
 /// selected row's painted bleed now lies inside the viewport's clip.
-pub(super) fn bleeding_scroll(children: Vec<AnyView<AppState>>) -> AnyView<AppState> {
-    any(WidenedView {
+pub(super) fn bleeding_scroll<M>(children: impl ViewSeq<AppState, M>) -> impl View<AppState> {
+    WidenedView {
         child: any(scroll_view(Padding(
             EdgeInsets::symmetric(PICK_BLEED, 0.0),
-            column(children),
+            stretch_column(children),
         ))),
         by: PICK_BLEED,
-    })
+    }
 }
 
 /// Lays its child out `by` wider than itself on each side — frust's `Padding`
@@ -208,7 +206,7 @@ fn pick_row(
     ruled: bool,
     colors: &Palette,
     on_tap: impl Fn(&mut AppState) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let theme = active_theme();
     let ink = if selected { colors.amber } else { colors.fg };
     let mut children = vec![flexible(
@@ -225,7 +223,10 @@ fn pick_row(
         Color::TRANSPARENT
     };
     let mut box_ = rounded_fill(
-        Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
+        Padding(
+            EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
+            centered_row(children),
+        ),
         fill,
         theme.shape.small,
     );
@@ -235,7 +236,7 @@ fn pick_row(
     if ruled {
         box_ = box_.bottom_rule(colors.rule);
     }
-    any(GestureDetector(box_).on_tap(on_tap))
+    GestureDetector(box_).on_tap(on_tap)
 }
 
 #[cfg(test)]

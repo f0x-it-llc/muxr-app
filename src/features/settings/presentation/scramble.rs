@@ -344,15 +344,15 @@ impl RevokeAnimations {
 /// Wrap a revoking row in its collapse: opacity and height driven together off
 /// the same `ratio`, as in the catalog. See the [module docs](self) for why the
 /// height is measured rather than transcribed.
-pub(super) fn collapsing(ratio: f64, row: AnyView<SettingsState>) -> AnyView<SettingsState> {
-    any(AnimatedOpacity(
+pub(super) fn collapsing(ratio: f64, row: impl View<SettingsState>) -> impl View<SettingsState> {
+    AnimatedOpacity(
         ratio,
         CollapseView {
-            child: row,
+            child: any(row), // erasure: keep ChildPod-fed
             ratio: ratio.clamp(0.0, 1.0),
         },
     )
-    .timing(ZERO))
+    .timing(ZERO)
 }
 
 /// The declarative half of the collapse: `child` at its natural height, this
@@ -479,7 +479,8 @@ impl Widget for FrameTickerWidget {
 
 /// Mount a [`FrameTicker`] — call only while the caller's own row still needs
 /// another frame ([`ScramblePose::running`]); the widget itself just asks.
-pub(super) fn frame_ticker() -> AnyView<SettingsState> {
+pub(super) fn frame_ticker() -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     any(FrameTicker)
 }
 
