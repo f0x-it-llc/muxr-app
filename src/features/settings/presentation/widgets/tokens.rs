@@ -33,7 +33,8 @@ use crate::ui::toasts::app_toasts;
 
 use super::pickers::PICK_TITLE_GAP;
 use super::rows::{
-    HAIRLINE, RADIUS_FULL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, column, h_gap, row, spacer,
+    HAIRLINE, RADIUS_FULL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, centered_row, h_gap,
+    spacer, stretch_column,
 };
 
 /// `.token-top{margin-bottom:4px}`.
@@ -142,12 +143,12 @@ fn token_row(
     colors: &Palette,
 ) -> AnyView<SettingsState> {
     let theme = active_theme();
-    let top = row(vec![
+    let top = centered_row(vec![
         flexible(1, name_line),
         h_gap(ROW_GAP),
         inflexible(scope_chip(token.scope, colors)),
     ]);
-    let meta = row(vec![
+    let meta = centered_row(vec![
         inflexible(
             text(token.created_label()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
         ),
@@ -162,10 +163,10 @@ fn token_row(
     lines.extend(tail);
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — see `widgets::rows`' own doc.
-    any(column(vec![
+    any(stretch_column(vec![
         any(Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            column(lines),
+            stretch_column(lines),
         )),
         any(divider(colors.rule)),
     ]))
@@ -211,7 +212,7 @@ pub(in super::super) fn create_token_row(
     } else {
         (colors.fg_faintest, colors.fg_faintest)
     };
-    let label = row(vec![
+    let label = centered_row(vec![
         inflexible(text(CREATE_TOKEN_PLUS).style(inked(&theme.type_scale.body_small, plus_ink))),
         h_gap(ADD_GAP),
         inflexible(text(CREATE_TOKEN_LABEL).style(inked(&theme.type_scale.body_small, label_ink))),
@@ -358,7 +359,7 @@ fn dialog_read_only_row(
         move |state: &mut AppState, _requested: bool| on_toggle(state),
     )
     .label(READ_ONLY_TOGGLE_LABEL));
-    any(row(vec![
+    any(centered_row(vec![
         flexible(
             1,
             any(text(READ_ONLY_TOGGLE_LABEL).style(inked(&theme.type_scale.label_large, colors.fg))),
@@ -424,5 +425,5 @@ pub(in super::super) fn secret_reveal_sheet(
         .style(ButtonStyle::Ghost)
         .small()),
     ];
-    any(column(children))
+    any(stretch_column(children))
 }

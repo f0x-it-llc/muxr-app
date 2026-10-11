@@ -25,7 +25,7 @@ use crate::AppState;
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
-use super::rows::{ROW_GAP, column, h_gap, rounded_fill, row};
+use super::rows::{ROW_GAP, centered_row, h_gap, rounded_fill, stretch_column};
 
 /// `.pick-row{padding:13px 4px}`.
 pub(super) const PICK_PAD_X: f64 = spacing::TIGHT;
@@ -115,7 +115,7 @@ pub(in super::super) fn picker_sheet(
     };
     let mut body = head;
     body.push(list);
-    any(column(body))
+    any(stretch_column(body))
 }
 
 /// `children` in a vertical scroll region whose *viewport* is [`PICK_BLEED`]
@@ -126,7 +126,7 @@ pub(super) fn bleeding_scroll(children: Vec<AnyView<AppState>>) -> AnyView<AppSt
     any(WidenedView {
         child: any(scroll_view(Padding(
             EdgeInsets::symmetric(PICK_BLEED, 0.0),
-            column(children),
+            stretch_column(children),
         ))),
         by: PICK_BLEED,
     })
@@ -225,7 +225,10 @@ fn pick_row(
         Color::TRANSPARENT
     };
     let mut box_ = rounded_fill(
-        Padding(EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y), row(children)),
+        Padding(
+            EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),
+            centered_row(children),
+        ),
         fill,
         theme.shape.small,
     );
