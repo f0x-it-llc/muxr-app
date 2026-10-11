@@ -24,9 +24,9 @@ use frust::authoring::text::FontStyle;
 use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    IconData, NavigatorController, PopResult, RwSignal, Set, SystemUiMode, WindowMetrics, any,
-    component, container, flexible, icons, inflexible, on_cleanup, scroll_view, set_system_ui_mode,
-    spawn_local, text, use_context,
+    IconData, NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics,
+    any, component, container, flexible, icons, inflexible, on_cleanup, scroll_view,
+    set_system_ui_mode, spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
 
@@ -387,7 +387,7 @@ impl Component for TerminalScreen {
     /// press handler: `build` runs under this screen's `Owner`, which is
     /// what binds `spawn_feed_pump`'s/`use_interval`'s `on_cleanup` — a
     /// press handler has no owner at all on desktop.
-    fn build(&self, state: &mut TerminalState) -> AnyView<TerminalState> {
+    fn build(&self, state: &mut TerminalState) -> impl View<TerminalState> {
         // Owned, not borrowed: the live-pane entry below needs `&mut state`.
         let controller = Arc::clone(&state.actions.controller);
 

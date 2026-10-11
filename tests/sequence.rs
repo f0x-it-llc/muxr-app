@@ -774,7 +774,7 @@ fn the_cold_start_overlay_unmounts_onto_an_identical_connect_screen() {
     let _ambient = setup();
 
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let frames = drive(
         &mut logic,
         &mut state,
@@ -821,7 +821,7 @@ fn a_second_launch_decision_in_the_same_process_never_replays_the_splash() {
     // Whichever of these claimed the process's splash, the *second* must not play — the
     // once-per-process rule, observed end to end. Both are actually *built*: the claim is spent on
     // a launch's first build, not `init` (`AppState::splash_plan`), so an unbuilt app spends none.
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut first = MuxrApp.init();
     drive(&mut logic, &mut first, theme(false), 2);
 

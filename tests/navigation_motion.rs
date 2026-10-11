@@ -148,7 +148,7 @@ impl Harness {
         root.set_theme(Box::new(theme));
         let mut harness = Harness {
             root,
-            logic: Box::new(|state: &mut AppState| MuxrApp.build(state)),
+            logic: Box::new(|state: &mut AppState| AnyView::new(MuxrApp.build(state))),
             state: MuxrApp.init(),
             tcx: TextContext::new(),
             clock: support::SETTLE_MS,

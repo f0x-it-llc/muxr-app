@@ -758,7 +758,7 @@ impl Component for GridScreen {
         );
     }
 
-    fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
         // A tracked read: the pump's write is what wakes this rebuild.
         let generation = self.generation.get();
         any(terminal_grid(

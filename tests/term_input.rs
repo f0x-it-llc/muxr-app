@@ -28,7 +28,8 @@ use frust::authoring::{
     EditingState, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
 };
 use frust::{
-    AnyView, Axis, Component, FlexView, Get, RwSignal, Set, any, component, flexible, inflexible,
+    AnyView, Axis, Component, FlexView, Get, RwSignal, Set, View, any, component, flexible,
+    inflexible,
 };
 use frust_core::RenderRoot;
 use frust_core::accesskit::Toggled;
@@ -104,7 +105,7 @@ impl Component for TermScreen {
 
     fn init(&self) -> Self::State {}
 
-    fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
         let generation = self.generation.get();
         // A read-only terminal has no keyboard, and therefore no bar — the
         // wiring a real screen owns, modelled here.

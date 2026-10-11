@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use clean_signals_frust::use_controller;
 use frust::{
-    AnyView, Component, Get, GetUntracked, Stack, WindowMetrics, any, component, scroll_view,
+    AnyView, Component, Get, GetUntracked, Stack, View, WindowMetrics, any, component, scroll_view,
     use_context,
 };
 
@@ -146,7 +146,7 @@ impl Component for ConnectScreen {
         }
     }
 
-    fn build(&self, state: &mut ConnectState) -> AnyView<ConnectState> {
+    fn build(&self, state: &mut ConnectState) -> impl View<ConnectState> {
         let rule = Responsive::of(use_context::<WindowMetrics>());
         let theme = active_theme();
 

@@ -30,7 +30,7 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox, Stack,
+    FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox, Stack, View,
     WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area, scroll_view,
     spawn_local, use_context,
 };
@@ -369,7 +369,7 @@ impl Component for SessionsScreen {
         }
     }
 
-    fn build(&self, state: &mut SessionsState) -> AnyView<SessionsState> {
+    fn build(&self, state: &mut SessionsState) -> impl View<SessionsState> {
         // Plain atomic, not a signal — see `BackConfirm`'s doc for why.
         let depth = state.actions.stack_depth();
         state.actions.controller.observe_depth(depth);
