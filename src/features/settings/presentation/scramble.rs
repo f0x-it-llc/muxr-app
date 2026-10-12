@@ -348,7 +348,7 @@ pub(super) fn collapsing(ratio: f64, row: impl View<SettingsState>) -> impl View
     AnimatedOpacity(
         ratio,
         CollapseView {
-            child: any(row), // erasure: keep ChildPod-fed
+            child: row,
             ratio: ratio.clamp(0.0, 1.0),
         },
     )
@@ -357,8 +357,8 @@ pub(super) fn collapsing(ratio: f64, row: impl View<SettingsState>) -> impl View
 
 /// The declarative half of the collapse: `child` at its natural height, this
 /// box at `ratio` of it.
-struct CollapseView<State: 'static> {
-    child: AnyView<State>,
+struct CollapseView<V> {
+    child: V,
     ratio: f64,
 }
 
@@ -368,7 +368,7 @@ struct CollapseWidget {
     ratio: f64,
 }
 
-impl<State: 'static> View<State> for CollapseView<State> {
+impl<State: 'static, V: View<State>> View<State> for CollapseView<V> {
     type Element = CollapseWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CollapseWidget {

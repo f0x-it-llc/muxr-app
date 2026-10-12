@@ -896,15 +896,15 @@ fn overflow<State: 'static>(
     .box_size(Size::new(OVERFLOW_BOX, OVERFLOW_BOX))
     .radius(tones.theme.shape.small);
     Some(AnchorProbe {
-        child: any(button), // erasure: keep ChildPod-fed
+        child: button,
         anchor,
     })
 }
 
 /// Records its child's painted **window** rect into `anchor` — a Glyph menu is
 /// anchored in window space, and only paint learns where a widget landed.
-struct AnchorProbe<State: 'static> {
-    child: AnyView<State>,
+struct AnchorProbe<V> {
+    child: V,
     anchor: Rc<Cell<Rect>>,
 }
 
@@ -914,7 +914,7 @@ struct AnchorProbeWidget {
     anchor: Rc<Cell<Rect>>,
 }
 
-impl<State: 'static> View<State> for AnchorProbe<State> {
+impl<State: 'static, V: View<State>> View<State> for AnchorProbe<V> {
     type Element = AnchorProbeWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {

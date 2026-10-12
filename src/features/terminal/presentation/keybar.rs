@@ -44,10 +44,10 @@ use std::rc::Rc;
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
-    Action, Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Role, SemanticsCtx, Size, Toggled, Vec2, View, Widget, WindowInsets, any,
-    build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
+    Action, Affine, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
+    SemanticsCtx, Size, Toggled, Vec2, View, Widget, WindowInsets, build_child, erase_callback,
+    rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
     Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView, Get,
@@ -338,7 +338,7 @@ fn separator<State: 'static>(colors: &Palette, height: f64, margin: f64) -> impl
         BarBackdropView {
             fill: colors.outline,
             hairline: Color::TRANSPARENT,
-            child: any(SizedBox::<State>(Some(SEPARATOR_W), Some(height))), // erasure: keep ChildPod-fed
+            child: SizedBox::<State>(Some(SEPARATOR_W), Some(height)),
         },
     )
 }
@@ -379,7 +379,7 @@ impl<'a> Kit<'a> {
         BarBackdropView {
             fill: self.ink.head,
             hairline: self.ink.card_border,
-            child: any(Padding(
+            child: Padding(
                 EdgeInsets {
                     left: pad_x,
                     top: pad_y,
@@ -387,7 +387,7 @@ impl<'a> Kit<'a> {
                     bottom: pad_y + keyboard_inset(),
                 },
                 content,
-            )),
+            ),
         }
     }
 
@@ -456,10 +456,10 @@ impl<'a> Kit<'a> {
 /// bar's band and (fill only) the group separators. Hand-rolled rather than
 /// `frust::container`, which strokes a full rounded border rather than one
 /// square top edge.
-struct BarBackdropView<State: 'static> {
+struct BarBackdropView<V> {
     fill: Color,
     hairline: Color,
-    child: AnyView<State>,
+    child: V,
 }
 
 /// The retained half of a [`BarBackdropView`].
@@ -469,7 +469,7 @@ struct BarBackdropWidget {
     child: ChildPod,
 }
 
-impl<State: 'static> View<State> for BarBackdropView<State> {
+impl<State: 'static, V: View<State>> View<State> for BarBackdropView<V> {
     type Element = BarBackdropWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> BarBackdropWidget {
@@ -550,16 +550,15 @@ impl<State: 'static> KeyCapView<State> {
     /// The cap's content: a vector arrow, or its printed label — centred
     /// inside its shape's inset ([`CAP_PAD_X`] on Compact) that stays inside
     /// the press target and fill, so a wide label can never paint over the border.
-    fn content(&self) -> AnyView<State> // erasure: keep ChildPod-fed
-    {
+    fn content(&self) -> impl View<State> + use<State> {
         let inner = match arrow_mark(self.key) {
             Some(mark) => Either::Left(icon(mark).size(self.shape.icon).color(self.ink)),
             None => Either::Right(text(self.key.label()).style(self.label.clone())),
         };
-        any(Padding(
+        Padding(
             EdgeInsets::symmetric(self.shape.pad_x, 0.0),
             Align(Alignment::CENTER, inner),
-        ))
+        )
     }
 }
 

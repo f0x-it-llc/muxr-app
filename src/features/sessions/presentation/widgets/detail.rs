@@ -15,8 +15,8 @@ use frust::authoring::text::TextOverflow;
 use frust::icons::PANE_MARK;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
-    FlexChild, FlexView, GestureDetector, Padding, SizedBox, View, any, button, column, container,
-    divider, flexible, icon, inflexible, row, scroll_view, text,
+    EitherOf3, FlexChild, FlexView, GestureDetector, Padding, SizedBox, View, any, button, column,
+    container, divider, flexible, icon, inflexible, row, scroll_view, text,
 };
 use frust_glyph::{BadgeVariant, badge, empty_state, glyph_card, skeleton, stat_card, tag};
 
@@ -83,17 +83,16 @@ pub(in crate::features::sessions::presentation) fn detail_pane(
     read_only: bool,
     full: bool,
     colors: &Palette,
-) -> AnyView<SessionsState> // erasure: keep 3+-arm body
-{
+) -> impl View<SessionsState> {
     let body = match pane_state(phase, sessions.len(), selected_index(sessions, selected)) {
-        PaneState::Loading => any(loading_body(full)),
-        PaneState::Empty => any(hint(EMPTY_TITLE, EMPTY_DESC)),
+        PaneState::Loading => Either::Left(loading_body(full)),
+        PaneState::Empty => Either::Right(hint(EMPTY_TITLE, EMPTY_DESC)),
         PaneState::Selected(index) => {
-            return any(selected_detail(&sessions[index], read_only, full, colors));
+            return Either::Left(selected_detail(&sessions[index], read_only, full, colors));
         }
-        PaneState::NoSelection => any(hint(SELECT_TITLE, SELECT_DESC)),
+        PaneState::NoSelection => Either::Right(hint(SELECT_TITLE, SELECT_DESC)),
     };
-    any(container(body).fill(colors.base))
+    Either::Right(container(body).fill(colors.base))
 }
 
 /// What the pane shows, before any widget is built.
@@ -422,10 +421,10 @@ fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsSta
         None => format!("active tab{SEP}{tab_name}"),
     };
     let panes = tab.map_or(&[][..], |tab| tab.panes.as_slice());
-    let tiles: AnyView<SessionsState> = match (tile_layout(panes.len()), panes) {
-        (TileLayout::None, _) => any(card_title("no panes reported", colors)), // erasure: keep 3+-arm body
-        (TileLayout::One, [only]) => any(tile(only, colors)), // erasure: keep 3+-arm body
-        (TileLayout::Two, [a, b]) => any(tile_row(vec![
+    let tiles = match (tile_layout(panes.len()), panes) {
+        (TileLayout::None, _) => EitherOf3::A(card_title("no panes reported", colors)),
+        (TileLayout::One, [only]) => EitherOf3::B(tile(only, colors)),
+        (TileLayout::Two, [a, b]) => EitherOf3::C(tile_row(vec![
             flexible(1, tile(a, colors)),
             flexible(1, tile(b, colors)),
         ])),
@@ -433,12 +432,12 @@ fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsSta
             let stacked = rest.iter().map(|pane| flexible(1, tile(pane, colors)));
             let stack = FlexView::new(Axis::Vertical, spaced(stacked.collect(), false))
                 .cross_axis(CrossAxisAlignment::Stretch);
-            any(tile_row(vec![
+            EitherOf3::C(tile_row(vec![
                 flexible(2, tile(first, colors)),
                 flexible(1, stack),
             ]))
         }
-        (_, []) => any(card_title("no panes reported", colors)), // erasure: keep 3+-arm body
+        (_, []) => EitherOf3::A(card_title("no panes reported", colors)),
     };
     glyph_card()
         .title(card_title(title, colors))

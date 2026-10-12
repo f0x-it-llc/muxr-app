@@ -12,10 +12,10 @@ use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point,
-    PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
-    rebuild_child, teardown_child,
+    Action, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point, PointerPhase,
+    Role, SemanticsCtx, Size, View, Widget, build_child, erase_callback, rebuild_child,
+    teardown_child,
 };
 use frust::{CrossAxisAlignment, IconData, SizedBox, icon, row, text};
 
@@ -208,13 +208,12 @@ impl<State: 'static> IconButtonView<State> {
     }
 
     /// The mark, as the pod this button paints and lays out.
-    fn mark_view(&self) -> AnyView<State> // erasure: keep ChildPod-fed
-    {
+    fn mark_view(&self) -> impl View<State> + use<State> {
         let mut view = icon(self.mark.clone()).size(self.icon_size);
         if let Some(ink) = self.ink {
             view = view.color(ink);
         }
-        any(view)
+        view
     }
 }
 

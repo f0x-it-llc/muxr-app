@@ -123,8 +123,8 @@ pub(in super::super) fn page_tone<B: View<SettingsState>>(
 /// unopened row by that uniform pitch. Everywhere else a bottom hairline
 /// composes as a trailing `frust::divider` instead (see this module's own
 /// doc).
-pub(super) struct RoundedFillView<State: 'static> {
-    child: AnyView<State>,
+pub(super) struct RoundedFillView<V> {
+    child: V,
     fill: Color,
     radius: f64,
     bleed: f64,
@@ -133,13 +133,9 @@ pub(super) struct RoundedFillView<State: 'static> {
 
 /// Wrap `child` in a `fill`-filled box with corner `radius`, no bleed and no
 /// bottom rule. See [`RoundedFillView`].
-pub(super) fn rounded_fill<State: 'static, V: View<State>>(
-    child: V,
-    fill: Color,
-    radius: f64,
-) -> RoundedFillView<State> {
+pub(super) fn rounded_fill<V>(child: V, fill: Color, radius: f64) -> RoundedFillView<V> {
     RoundedFillView {
-        child: any(child), // erasure: keep ChildPod-fed
+        child,
         fill,
         radius,
         bleed: 0.0,
@@ -147,7 +143,7 @@ pub(super) fn rounded_fill<State: 'static, V: View<State>>(
     }
 }
 
-impl<State: 'static> RoundedFillView<State> {
+impl<V> RoundedFillView<V> {
     /// See [`RoundedFillView`].
     pub(super) fn bleed(mut self, bleed: f64) -> Self {
         self.bleed = bleed;
@@ -170,7 +166,7 @@ pub(super) struct RoundedFillWidget {
     bottom_rule: Option<Color>,
 }
 
-impl<State: 'static> View<State> for RoundedFillView<State> {
+impl<State: 'static, V: View<State>> View<State> for RoundedFillView<V> {
     type Element = RoundedFillWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> RoundedFillWidget {

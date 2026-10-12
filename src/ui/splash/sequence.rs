@@ -272,21 +272,17 @@ pub fn delayed_showing(elapsed_ms: f64, delay_ms: f64, reduce_motion: bool) -> b
 /// Lay `child` out from the first frame but don't **paint** it until
 /// `delay_ms` has elapsed on this widget's own clock.
 ///
-/// Laying out throughout is what keeps the assembly's geometry stable (and
-/// identical to the route's) across the whole sequence; withholding paint is
-/// what starts the child's own clock at the cue, since every splash widget
-/// self-clocks from its first paint.
-pub fn delayed<State: 'static, V: View<State>>(delay_ms: f64, child: V) -> DelayedView<State> {
-    DelayedView {
-        delay_ms,
-        child: any(child), // erasure: keep ChildPod-fed
-    }
+/// Laying out throughout keeps the assembly's geometry stable (and identical to
+/// the route's) across the whole sequence; withholding paint starts the child's
+/// own clock at the cue, since every splash widget self-clocks from its first paint.
+pub fn delayed<V>(delay_ms: f64, child: V) -> DelayedView<V> {
+    DelayedView { delay_ms, child }
 }
 
 /// The declarative half of a paint gate. See [`delayed`].
-pub struct DelayedView<State: 'static> {
+pub struct DelayedView<V> {
     delay_ms: f64,
-    child: AnyView<State>,
+    child: V,
 }
 
 /// The retained half of a paint gate. See [`delayed`].
@@ -299,7 +295,7 @@ pub struct DelayedWidget {
     last_frame: Option<FrameTime>,
 }
 
-impl<State: 'static> View<State> for DelayedView<State> {
+impl<State: 'static, V: View<State>> View<State> for DelayedView<V> {
     type Element = DelayedWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> DelayedWidget {
@@ -317,8 +313,7 @@ impl<State: 'static> View<State> for DelayedView<State> {
         element: &mut DelayedWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // The delay is a constant of the timeline, re-passed identically every
-        // rebuild; the clock is retained state and is never reset here.
+        // A timeline constant, re-passed every rebuild; the retained clock is never reset.
         element.delay_ms = self.delay_ms;
         rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
@@ -584,20 +579,14 @@ pub fn piece_finished(elapsed_ms: f64, delay_ms: f64) -> bool {
 ///
 /// Paint-time only — layout is a straight pass-through, so a wrapped piece
 /// occupies exactly the box its unwrapped twin does.
-pub fn piece_entry<State: 'static, V: View<State>>(
-    delay_ms: f64,
-    child: V,
-) -> PieceEntryView<State> {
-    PieceEntryView {
-        delay_ms,
-        child: any(child), // erasure: keep ChildPod-fed
-    }
+pub fn piece_entry<V>(delay_ms: f64, child: V) -> PieceEntryView<V> {
+    PieceEntryView { delay_ms, child }
 }
 
 /// The declarative half of a piece's entrance. See [`piece_entry`].
-pub struct PieceEntryView<State: 'static> {
+pub struct PieceEntryView<V> {
     delay_ms: f64,
-    child: AnyView<State>,
+    child: V,
 }
 
 /// The retained half of a piece's entrance. See [`piece_entry`].
@@ -636,7 +625,7 @@ impl PieceEntryWidget {
     }
 }
 
-impl<State: 'static> View<State> for PieceEntryView<State> {
+impl<State: 'static, V: View<State>> View<State> for PieceEntryView<V> {
     type Element = PieceEntryWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> PieceEntryWidget {

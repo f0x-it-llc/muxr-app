@@ -17,8 +17,8 @@ use frust::authoring::{
 };
 use frust::icons::CHECK;
 use frust::{
-    AnyView, EdgeInsets, Either, GestureDetector, Padding, SizedBox, ViewSeq, any, flexible, icon,
-    inflexible, scroll_view, text,
+    EdgeInsets, Either, GestureDetector, Padding, SizedBox, ViewSeq, flexible, icon, inflexible,
+    scroll_view, text,
 };
 
 use crate::AppState;
@@ -122,10 +122,10 @@ pub(in super::super) fn picker_sheet(
 /// selected row's painted bleed now lies inside the viewport's clip.
 pub(super) fn bleeding_scroll<M>(children: impl ViewSeq<AppState, M>) -> impl View<AppState> {
     WidenedView {
-        child: any(scroll_view(Padding(
+        child: scroll_view(Padding(
             EdgeInsets::symmetric(PICK_BLEED, 0.0),
             stretch_column(children),
-        ))),
+        )),
         by: PICK_BLEED,
     }
 }
@@ -133,8 +133,8 @@ pub(super) fn bleeding_scroll<M>(children: impl ViewSeq<AppState, M>) -> impl Vi
 /// Lays its child out `by` wider than itself on each side — frust's `Padding`
 /// clamps a negative inset, so this is the one way to give a clipping child
 /// the sheet gutter back. Reports its own (unwidened) width to the parent.
-struct WidenedView<State: 'static> {
-    child: AnyView<State>,
+struct WidenedView<V> {
+    child: V,
     by: f64,
 }
 
@@ -143,7 +143,7 @@ struct WidenedWidget {
     by: f64,
 }
 
-impl<State: 'static> View<State> for WidenedView<State> {
+impl<State: 'static, V: View<State>> View<State> for WidenedView<V> {
     type Element = WidenedWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> WidenedWidget {

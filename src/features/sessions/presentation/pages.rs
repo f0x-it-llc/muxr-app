@@ -29,10 +29,10 @@ use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexChild,
-    FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox, Stack, View,
-    WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area, scroll_view,
-    spawn_local, use_context,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4,
+    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox,
+    Stack, View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area,
+    scroll_view, spawn_local, use_context,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
@@ -427,7 +427,7 @@ impl Component for SessionsScreen {
         );
         // Always a `Stack`, overlay or not: an erased child type that flips
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
-        let mut children = vec![live_scroller];
+        let mut children = vec![any(live_scroller)]; // erasure: keep accumulator into Vec<AnyView>
         if !loading_done {
             let (overlay_pieces, stale) = if settled {
                 let frozen = state
@@ -556,16 +556,18 @@ fn list_view(
     pieces: Vec<AnyView<SessionsState>>,
     layout: &ListLayout,
     scroll: bool,
-) -> AnyView<SessionsState> // erasure: keep 3+-arm body
-{
-    let list = match layout {
-        ListLayout::Compact { .. } => any(padded_list(pieces)),
-        ListLayout::Tablet { .. } => any(widgets::tablet_list(pieces)),
-    };
-    let list = if scroll { any(scroll_view(list)) } else { list };
-    match layout {
-        ListLayout::Compact { wide } => any(list_band(list, *wide)),
-        ListLayout::Tablet { .. } => list,
+) -> impl View<SessionsState> + use<> {
+    match (layout, scroll) {
+        (ListLayout::Compact { wide }, true) => {
+            EitherOf4::A(list_band(scroll_view(padded_list(pieces)), *wide))
+        }
+        (ListLayout::Compact { wide }, false) => {
+            EitherOf4::B(list_band(padded_list(pieces), *wide))
+        }
+        (ListLayout::Tablet { .. }, true) => {
+            EitherOf4::C(scroll_view(widgets::tablet_list(pieces)))
+        }
+        (ListLayout::Tablet { .. }, false) => EitherOf4::D(widgets::tablet_list(pieces)),
     }
 }
 
