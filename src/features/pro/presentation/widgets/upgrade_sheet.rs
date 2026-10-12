@@ -30,9 +30,9 @@ use std::sync::Arc;
 use frust::authoring::text::TextStyle;
 use frust::icons::LINK;
 use frust::{
-    AnyView, Axis, ButtonStyle, CrossAxisAlignment, FlexChild, FlexView, Get, GetUntracked,
-    IconSource, NavigatorController, SizedBox, View, any, button, icon, inflexible, row,
-    spawn_local, text,
+    AnyView, Axis, ButtonStyle, CrossAxisAlignment, EitherOf3, FlexChild, FlexView, Get,
+    GetUntracked, IconSource, NavigatorController, SizedBox, View, any, button, icon, inflexible,
+    row, spawn_local, text,
 };
 use frust_glyph::{dots_loader, skeleton};
 
@@ -170,12 +170,13 @@ fn upgrade_sheet_body(
         ));
         children.push(any(gap(SECTION_GAP))); // erasure: keep accumulator into Vec<AnyView>
     } else {
-        children.push(offer_action(
+        // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(offer_action(
             pro,
             sheet,
             context,
             inked(&theme.type_scale.body_small, colors.fg_dim),
-        ));
+        )));
         children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
         children.push(any(restore_action(pro, sheet, context))); // erasure: keep accumulator into Vec<AnyView>
         children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
@@ -196,17 +197,18 @@ fn offer_action(
     sheet: &SheetHandle,
     context: &UpgradeContext,
     unavailable_style: TextStyle,
-) -> AnyView<AppState> // erasure: keep 3+-arm body
-{
+) -> impl View<AppState> {
     let busy = pro.busy.get();
     match (pro.offer.get(), pro.offer_settled.get()) {
-        (Some(offer), _) => any(upgrade_action(pro, sheet, context, &offer, busy)),
-        (None, false) => any(row()
-            .child(skeleton(OFFER_SKELETON_WIDTH, OFFER_SKELETON_HEIGHT))
-            .child(SizedBox::<AppState>(Some(ROW_GAP), None))
-            .child(dots_loader())
-            .cross_axis(CrossAxisAlignment::Center)),
-        (None, true) => any(text(UNAVAILABLE_COPY).style(unavailable_style)),
+        (Some(offer), _) => EitherOf3::A(upgrade_action(pro, sheet, context, &offer, busy)),
+        (None, false) => EitherOf3::B(
+            row()
+                .child(skeleton(OFFER_SKELETON_WIDTH, OFFER_SKELETON_HEIGHT))
+                .child(SizedBox::<AppState>(Some(ROW_GAP), None))
+                .child(dots_loader())
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
+        (None, true) => EitherOf3::C(text(UNAVAILABLE_COPY).style(unavailable_style)),
     }
 }
 
@@ -219,7 +221,7 @@ fn upgrade_action(
     context: &UpgradeContext,
     offer: &ProOffer,
     busy: bool,
-) -> impl View<AppState> {
+) -> impl View<AppState> + use<> {
     let pro = Arc::clone(pro);
     let sheet = sheet.clone();
     let on_unlocked = Rc::clone(&context.on_unlocked);

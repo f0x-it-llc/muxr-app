@@ -33,10 +33,10 @@ use std::time::Duration;
 use frust::authoring::TickClass;
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
-    Action, Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod,
-    Color, ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene,
-    Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget,
-    any, build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
+    Action, Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget,
+    build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
     AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
@@ -234,11 +234,10 @@ impl<State: 'static> ExpandButtonView<State> {
     }
 
     /// The mark, as the pod this button paints and lays out.
-    fn mark_view(&self) -> AnyView<State> // erasure: keep ChildPod-fed
-    {
-        any(icon(self.mark.clone())
+    fn mark_view(&self) -> impl View<State> + use<State> {
+        icon(self.mark.clone())
             .size(EXPAND_ICON_SIZE)
-            .color(self.ink))
+            .color(self.ink)
     }
 }
 
@@ -546,8 +545,8 @@ impl FullscreenStage {
 /// [`WRAP_PAD`] — is an input rather than an outer `Padding` for that same
 /// reason: a wrapper could only *flip* between its windowed and fullscreen
 /// values, and a flip mid-transition is a jump.
-pub(super) struct TerminalStageView<State: 'static> {
-    child: AnyView<State>,
+pub(super) struct TerminalStageView<V> {
+    child: V,
     fullscreen: bool,
     gutters: EdgeInsets,
     card: Color,
@@ -555,15 +554,15 @@ pub(super) struct TerminalStageView<State: 'static> {
 }
 
 /// The `.term-wrap`/`.term-card` stage around `child`.
-pub(super) fn terminal_stage<State: 'static, V: View<State>>(
+pub(super) fn terminal_stage<V>(
     child: V,
     fullscreen: bool,
     gutters: EdgeInsets,
     card: Color,
     border: Color,
-) -> TerminalStageView<State> {
+) -> TerminalStageView<V> {
     TerminalStageView {
-        child: any(child), // erasure: keep ChildPod-fed
+        child,
         fullscreen,
         gutters,
         card,
@@ -594,7 +593,7 @@ pub(super) struct TerminalStageWidget {
     card_radius: f64,
 }
 
-impl<State: 'static> View<State> for TerminalStageView<State> {
+impl<State: 'static, V: View<State>> View<State> for TerminalStageView<V> {
     type Element = TerminalStageWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> TerminalStageWidget {

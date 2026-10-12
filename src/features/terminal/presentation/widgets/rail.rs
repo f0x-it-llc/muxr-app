@@ -316,20 +316,14 @@ fn rule<State: 'static>(
 /// `child` (a tap target) published to accessibility as a button named `label`
 /// — a bare [`GestureDetector`] draws and taps but is invisible to a screen
 /// reader, and the badge inside carries only the tab's index.
-fn labelled_button<State: 'static, V: View<State>>(
-    label: String,
-    child: V,
-) -> LabelledButtonView<State> {
-    LabelledButtonView {
-        label,
-        child: any(child), // erasure: keep ChildPod-fed
-    }
+fn labelled_button<V>(label: String, child: V) -> LabelledButtonView<V> {
+    LabelledButtonView { label, child }
 }
 
 /// The declarative half of [`labelled_button`].
-struct LabelledButtonView<State: 'static> {
+struct LabelledButtonView<V> {
     label: String,
-    child: AnyView<State>,
+    child: V,
 }
 
 /// The retained half of a [`labelled_button`].
@@ -338,7 +332,7 @@ struct LabelledButtonWidget {
     child: ChildPod,
 }
 
-impl<State: 'static> View<State> for LabelledButtonView<State> {
+impl<State: 'static, V: View<State>> View<State> for LabelledButtonView<V> {
     type Element = LabelledButtonWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> LabelledButtonWidget {
