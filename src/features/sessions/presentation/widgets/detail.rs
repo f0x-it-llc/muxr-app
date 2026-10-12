@@ -14,9 +14,9 @@
 use frust::authoring::text::TextOverflow;
 use frust::icons::PANE_MARK;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
-    EitherOf3, FlexChild, FlexView, GestureDetector, Padding, SizedBox, View, any, button, column,
-    container, divider, flexible, icon, inflexible, row, scroll_view, text,
+    Align, Alignment, AnyView, Axis, ButtonStyle, ContainerView, CrossAxisAlignment, EdgeInsets,
+    Either, EitherOf3, FlexChild, FlexView, GestureDetector, Padding, SizedBox, View, any, button,
+    column, container, divider, flexible, icon, inflexible, row, scroll_view, text,
 };
 use frust_glyph::{BadgeVariant, badge, empty_state, glyph_card, skeleton, stat_card, tag};
 
@@ -83,16 +83,16 @@ pub(in crate::features::sessions::presentation) fn detail_pane(
     read_only: bool,
     full: bool,
     colors: &Palette,
-) -> impl View<SessionsState> {
+) -> ContainerView<SessionsState> {
     let body = match pane_state(phase, sessions.len(), selected_index(sessions, selected)) {
         PaneState::Loading => Either::Left(loading_body(full)),
         PaneState::Empty => Either::Right(hint(EMPTY_TITLE, EMPTY_DESC)),
         PaneState::Selected(index) => {
-            return Either::Left(selected_detail(&sessions[index], read_only, full, colors));
+            return selected_detail(&sessions[index], read_only, full, colors);
         }
         PaneState::NoSelection => Either::Right(hint(SELECT_TITLE, SELECT_DESC)),
     };
-    Either::Right(container(body).fill(colors.base))
+    container(body).fill(colors.base)
 }
 
 /// What the pane shows, before any widget is built.
@@ -201,7 +201,7 @@ fn selected_detail(
     read_only: bool,
     full: bool,
     colors: &Palette,
-) -> impl View<SessionsState> {
+) -> ContainerView<SessionsState> {
     let overview = overview_card(session, colors);
     let kind = body_kind(
         session.status.is_live(),
