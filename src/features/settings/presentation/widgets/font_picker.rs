@@ -90,12 +90,16 @@ pub(in super::super) struct FontPicker {
 /// The tap handler shared by every row of one font sheet.
 type OnFont = Rc<dyn Fn(&mut AppState, String)>;
 
-pub(in super::super) fn font_picker_sheet(
+pub(in super::super) fn font_picker_sheet<S, D>(
     picker: &FontPicker,
     colors: &Palette,
-    on_select: impl Fn(&mut AppState, String) + 'static,
-    on_download: impl Fn(&mut AppState, String) + 'static,
-) -> impl View<AppState> {
+    on_select: S,
+    on_download: D,
+) -> impl View<AppState> + use<S, D>
+where
+    S: Fn(&mut AppState, String) + 'static,
+    D: Fn(&mut AppState, String) + 'static,
+{
     let theme = active_theme();
     let on_select: OnFont = Rc::new(on_select);
     let on_download: OnFont = Rc::new(on_download);

@@ -24,7 +24,7 @@ use frust::authoring::text::FontStyle;
 use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
     Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView, Get, GetUntracked, IconData,
-    NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics, any, column,
+    NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics, column,
     component, container, flexible, icons, inflexible, on_cleanup, row, scroll_view,
     set_system_ui_mode, spawn_local, text, use_context,
 };
@@ -827,8 +827,8 @@ impl Actions {
         show_side_sheet(
             &self.overlays,
             SHEET_TITLE,
-            move |sheet| any(sheet_tree_body(&body_actions, sheet)), // erasure: keep stored view table/registry
-            move |sheet| any(sheet_footer(&footer_actions, sheet)), // erasure: keep stored view table/registry
+            move |sheet| sheet_tree_body(&body_actions, sheet),
+            move |sheet| sheet_footer(&footer_actions, sheet),
             move || reset_controller.reset_browse(),
         );
         let controller = Arc::clone(&self.controller);
@@ -1212,7 +1212,7 @@ impl Actions {
 
 /// The side sheet's body: [`tree_view`] in its sheet mode, scrolling, and a
 /// pane commit closing the sheet behind it.
-fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> {
+fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> + use<> {
     // This body is a page of the **root** overlay host, so it can outlive the
     // screen that pushed it (a guard bounce off `/terminal` leaves the sheet
     // up). One untracked liveness check ahead of the tracked reads below, which
@@ -1335,7 +1335,7 @@ fn tree_actions<S: 'static>(actions: &Actions, after: AfterCommit, docked: bool)
 /// orphaned footer's rename would seed itself off a disposed signal and its
 /// detach would pop a stack no longer carrying `/terminal`. Quiet no-ops
 /// instead — the tree above them has already emptied itself.
-fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> {
+fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> + use<> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
 

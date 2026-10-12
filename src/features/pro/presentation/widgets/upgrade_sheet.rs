@@ -135,7 +135,7 @@ pub fn show_upgrade_sheet(
         spawn_local(async move { loading.load_offer().await });
     }
     show_sheet(overlays, move |sheet| {
-        any(upgrade_sheet_body(&pro, sheet, &context)) // erasure: keep stored view table/registry
+        upgrade_sheet_body(&pro, sheet, &context)
     });
 }
 
@@ -145,7 +145,7 @@ fn upgrade_sheet_body(
     pro: &Arc<ProController>,
     sheet: &SheetHandle,
     context: &UpgradeContext,
-) -> impl View<AppState> {
+) -> impl View<AppState> + use<> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
     let entitled = pro.entitlement.get().is_pro();

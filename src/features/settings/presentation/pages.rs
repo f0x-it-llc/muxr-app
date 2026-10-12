@@ -326,18 +326,14 @@ impl Actions {
             let picker = actions.picker(kind);
             let picking = actions.clone();
             let sheet = sheet.clone();
-            any(widgets::picker_sheet(
-                &picker,
-                &colors,
-                move |_app: &mut AppState, index| {
-                    // Close first, then persist — a sheet pop only *lands* at
-                    // the next rebuild, so a second row tap inside that one
-                    // frame would otherwise pop `/settings` out from under the
-                    // picker (`crate::ui::sheet`'s "One sheet, one dismissal").
-                    sheet.close();
-                    picking.pick(kind, index);
-                },
-            ))
+            widgets::picker_sheet(&picker, &colors, move |_app: &mut AppState, index| {
+                // Close first, then persist — a sheet pop only *lands* at
+                // the next rebuild, so a second row tap inside that one
+                // frame would otherwise pop `/settings` out from under the
+                // picker (`crate::ui::sheet`'s "One sheet, one dismissal").
+                sheet.close();
+                picking.pick(kind, index);
+            })
         });
     }
 
@@ -446,7 +442,7 @@ impl Actions {
             let sheet = sheet.clone();
             let selecting = actions.clone();
             let downloading = actions.clone();
-            any(widgets::font_picker_sheet(
+            widgets::font_picker_sheet(
                 &picker,
                 &colors,
                 move |_app: &mut AppState, family: String| {
@@ -456,7 +452,7 @@ impl Actions {
                 // A download leaves the sheet up: it makes the row
                 // selectable, it does not select it.
                 move |_app: &mut AppState, family: String| downloading.download_font(&family),
-            ))
+            )
         });
     }
 
@@ -814,14 +810,10 @@ fn open_secret_reveal(
         let minted = controller.pending_token_secret.get();
         let sheet = sheet.clone();
         let controller = Arc::clone(&controller);
-        any(widgets::secret_reveal_sheet(
-            minted.as_ref(),
-            &colors,
-            move |_app: &mut AppState| {
-                sheet.close();
-                controller.clear_pending_secret();
-            },
-        ))
+        widgets::secret_reveal_sheet(minted.as_ref(), &colors, move |_app: &mut AppState| {
+            sheet.close();
+            controller.clear_pending_secret();
+        })
     });
 }
 
