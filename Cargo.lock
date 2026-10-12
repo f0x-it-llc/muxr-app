@@ -878,9 +878,9 @@ dependencies = [
 
 [[package]]
 name = "clean-signals-frust"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b00483278579e244070e695c03b1ef9225be20cb3103ea7a47cb2d0d450cbb0d"
+checksum = "3c0fac7f511ea0655a20ebd4eee8581fc055568c945901a5432560f1ea9567a3"
 dependencies = [
  "clean-signals",
  "frust-ui",
@@ -1402,9 +1402,9 @@ dependencies = [
 
 [[package]]
 name = "frust-camera"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f78c70ad2f1abc5d5acf735946fdea39d348090d0a1047df396272691ca7699d"
+checksum = "1b43a751a1134a46965f198b1784208dccf1d20ace931e0e33d77688d0f60b3f"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -1423,9 +1423,9 @@ dependencies = [
 
 [[package]]
 name = "frust-clipboard"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b8d028178a374ae4e8317506162a82c766d2ee42b67480c69acecc1896a755"
+checksum = "7d76ae13f7a64b1a9b0333f0e35810e17e8ef3e3c9646a2bd998163562203c81"
 dependencies = [
  "arboard",
  "frust-plugin",
@@ -1438,9 +1438,9 @@ dependencies = [
 
 [[package]]
 name = "frust-core"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6419b861db6c57f76ce67c59c1d5d6e70804b45add2731fbdacb36b57db78378"
+checksum = "16e65c09e03cb9eb36a40515469ca5a479707ee28e94e2fbb6a4172725688298"
 dependencies = [
  "accesskit",
  "frust-scene",
@@ -1452,9 +1452,9 @@ dependencies = [
 
 [[package]]
 name = "frust-engine"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8d9cd4d91adfa93f84760e12267a5cfa0fb6db2c0f428bd8b1a6f1ea6a500ab"
+checksum = "74b84548440ee430d27e844df9b1093965b3812233329bdd89c12b1956442fab"
 dependencies = [
  "bytemuck",
  "frust-gpu",
@@ -1470,9 +1470,9 @@ dependencies = [
 
 [[package]]
 name = "frust-glyph"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f04637a82addc8219a7578d46ac98b5ec06806217b188e67bfd774c49b20413a"
+checksum = "9418d362dd3f4b2d078436cc80a882d22f669708841a1661595255609139fe61"
 dependencies = [
  "frust-ui",
  "kurbo",
@@ -1481,9 +1481,9 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec18a3927b169067a3d2bc4f2317d76f73f369bf5468aac3d6201300eeae49cc"
+checksum = "5f123156740f80645ba14011f5cf766427e33b3fbf7fd068ec7143b1e22d9f59"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1496,9 +1496,9 @@ dependencies = [
 
 [[package]]
 name = "frust-haptics"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2923b94a6fcac0040f42c53cbf2bb74278bfae84905e0581d24a8333b5833826"
+checksum = "c95b8784dc68aed4ee89e1e7f66bc4e87b4bd613dcb213f12e8460480694908d"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -1510,9 +1510,9 @@ dependencies = [
 
 [[package]]
 name = "frust-iap"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f749a42d42f08bcf52274dc62d76caa19c5e0773f7d7e8e7aaf77ea4a608b5a6"
+checksum = "82a6aedcdd6ac8b32e938e2f6b93c23114368c74231fc012f24d027a17fc8954"
 dependencies = [
  "block2 0.6.2",
  "frust-plugin",
@@ -1527,18 +1527,18 @@ dependencies = [
 
 [[package]]
 name = "frust-paths"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16deef7d0839450d851346d4a29d68a4f5cac67665031229853316988a442f19"
+checksum = "0126c6538b8fbb53cc06783bc0dc9584f5fd8f09fc2661f0f56af78d773c0bd6"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "frust-plugin"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e2f9e70754dd9a6cb5b0edbdf8419a51933bc83ccbcbac970527d3b8d328272"
+checksum = "6fa409a986b17ddb431e224b5c1e0fc019ed6be7a36011d7406e6471ab00b347"
 dependencies = [
  "jni 0.22.4",
  "ndk-context",
@@ -1547,9 +1547,9 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89e0f7e44f3eb15acb997aa425e70a0f548cfa7b15fbe6f77222927e99f43feb"
+checksum = "737fe2c4d8cd4d17ffee9f50e4346b02e45b60fda6ade8e2a559e86a64b4e632"
 dependencies = [
  "any_spawner",
  "futures",
@@ -1560,9 +1560,9 @@ dependencies = [
 
 [[package]]
 name = "frust-render"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b695205fafb711f7f10725ec662c2d08c325c14a2ab4b4101d658e86c44f120e"
+checksum = "15f98905dc2214d3913db89f2328da29067c588792c8746bc6afb3d9a6709532"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1577,9 +1577,9 @@ dependencies = [
 
 [[package]]
 name = "frust-scene"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61eb3233319a7f3d00bfe0cd849f5129865471c3f9aa813830527c4effe115d6"
+checksum = "3434fc6f9e6444a21d0def67863c3b91c98642bce33c435ba8bedd23f752be02"
 dependencies = [
  "kurbo",
  "peniko",
@@ -1587,9 +1587,9 @@ dependencies = [
 
 [[package]]
 name = "frust-secure-storage"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04a2cd3f66d6e88af2658eecf9c3005017455b31b8611e0edb2dd370facc4d88"
+checksum = "72d19ea43aec446cfd791caa9cd89129ce94ef0e9d598f4663fe41fd5d04ad44"
 dependencies = [
  "frust-plugin",
  "jni 0.22.4",
@@ -1607,9 +1607,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shared-preferences"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "420f6fd9f8d645346fb70e5c2f2bc3ad51ac65df40ac57c5fa33518805810675"
+checksum = "bcf2de21660e3f42c37fe7ef9a3d9f1b53b14067cfcc49d71ad68eec23c8008f"
 dependencies = [
  "frust-paths",
  "frust-plugin",
@@ -1622,9 +1622,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-android"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "beeab561707a9ff13aea5da390093d9a5a28eb5135b64c0d7cfcb3e3ea6fde2b"
+checksum = "b3ac550d4293ba0738d2fdd8bfa85602a70de5619a037569f9be02000463d9f4"
 dependencies = [
  "accesskit_android",
  "android_logger",
@@ -1650,9 +1650,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-common"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c214206c3e3d80b25d16c9687d77043b97c54d405ee9b06819e8951823f6157"
+checksum = "3d8a9645516872032c903b4eec26d4664e652d635dbc729591b60df6a5e5ded2"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -1664,9 +1664,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-desktop"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68d02b3f8e44926693e91334884a6f776718510f3f06aee991e4b31d69749c6"
+checksum = "6f46b1ac029c32572de056215c1df354c3f78c8097582b5c9f84fe3fb1443c4c"
 dependencies = [
  "accesskit_winit",
  "anyhow",
@@ -1688,9 +1688,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-ios"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a173ce5b735a0fead1217dcad764aa5ba9e14620080208e71a792c05b109fb0"
+checksum = "e2ea4565275b16b7076ed72c34b7f41b21fa21d7cdec3b4fb6634ac4aedc1590"
 dependencies = [
  "accesskit",
  "accesskit_ios",
@@ -1712,9 +1712,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-linux"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2ba51d7148d1672138b1a7d6cfcdf00892ca3117f9926549066a4f0337bb1b4"
+checksum = "774fb2f634dddf594128d3058f6fce28b08e1fcdf784cf239b3bebda2fb45f5d"
 dependencies = [
  "frust-shell-desktop",
  "log",
@@ -1723,9 +1723,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-macos"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd6a7503fb06fc9a4faae73fa5d4fd5b327efdd5339c06d90f3e2f6398ae4346"
+checksum = "238d4d37e5d9f73839446f44f1a1f6750e6467b38bf6bc2fd6f6857afa8237c9"
 dependencies = [
  "frust-plugin",
  "frust-reactive",
@@ -1742,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-web"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c7ffbbe40354bac71311793d1a87ebcdaa04da8650799a75bce53ea63bc6a8"
+checksum = "bd62c6bcd81d18e3ab3f1fc5e1b4859c4752090bf06023d8cf8fdfcfc7c3bab9"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -1768,9 +1768,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-windows"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c296289da01a288330c41d56c68ed121bd56bd2d55c8ef1a280f3d9e48f4286"
+checksum = "26eaf667c2d8c6822b6fefa8fe5ec3e503d6e0cff8d1990ce6cf0d3cdcba65fb"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
@@ -1783,9 +1783,9 @@ dependencies = [
 
 [[package]]
 name = "frust-text"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4822793290e5cafe7e6cb1d37a1df7c0c16ed77e689d3d446f526bf4324e310"
+checksum = "5cdf91d6ea85256984e2b370b542853f8f801126d4b86b0594ea505801da980f"
 dependencies = [
  "frust-scene",
  "kurbo",
@@ -1796,9 +1796,9 @@ dependencies = [
 
 [[package]]
 name = "frust-theme"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1918cb9c1a4cdeb976ee91e54e58e0d5934ed0f2767d5d2f034021276ffb30df"
+checksum = "77ff7b102e3bca69f6a93dcc9478170f6f1a84af231ea25aabc2f95168c9aaaf"
 dependencies = [
  "frust-core",
  "frust-text",
@@ -1807,9 +1807,9 @@ dependencies = [
 
 [[package]]
 name = "frust-ui"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "316c8d225a0527b63e1be3cb554246af23e4685fcf416e558e601a9b59f9bbea"
+checksum = "d42f070948747233db2e860162ff2283073ba52e77e023ff65ffd54562130ea3"
 dependencies = [
  "any_spawner",
  "anyhow",
@@ -1839,9 +1839,9 @@ dependencies = [
 
 [[package]]
 name = "frust-url-launcher"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10b281df2905d30b8324227129d33c0f75059ec8723ff25b5c600ce08c02fc48"
+checksum = "8ce4da823ff4a23e90aab5752eceeac53331ca04397eef0b0a9fe0db91c0a8ab"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -1855,9 +1855,9 @@ dependencies = [
 
 [[package]]
 name = "frust-widgets"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c383f81530c848e3aed6a05ce446cd002c8f945c1c3c593c9a4619c8eaea1f2f"
+checksum = "27db7416c793d1dc99c4ccfb2aa50e339c099943d7a0789a29f9399e554457d1"
 dependencies = [
  "frust-core",
  "frust-scene",

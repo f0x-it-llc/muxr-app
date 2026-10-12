@@ -12,11 +12,11 @@ publish = false
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-frust = { package = "frust-ui", version = "0.6.0", default-features = false }
-frust-glyph = "0.6.0"
-clean-signals-frust = "0.6.0"
-frust-clipboard = "0.6.0"
-frust-haptics = "0.6.0"
+frust = { package = "frust-ui", version = "0.6.1", default-features = false }
+frust-glyph = "0.6.1"
+clean-signals-frust = "0.6.1"
+frust-clipboard = "0.6.1"
+frust-haptics = "0.6.1"
 clean-signals = "0.1.0"
 
 log = "0.4"
@@ -38,19 +38,19 @@ sha2 = "0.10"
 base64 = "0.22"
 percent-encoding = "2"
 arc-swap = "1"
-frust-plugin = "0.6.0"
-frust-shared-preferences = "0.6.0"
-frust-secure-storage = "0.6.0"
-frust-camera = "0.6.0"
-frust-iap = "0.6.0"
-frust-url-launcher = "0.6.0"
+frust-plugin = "0.6.1"
+frust-shared-preferences = "0.6.1"
+frust-secure-storage = "0.6.1"
+frust-camera = "0.6.1"
+frust-iap = "0.6.1"
+frust-url-launcher = "0.6.1"
 # `frust-iap` models the per-platform `requestPurchase` payloads as raw
 # `serde_json::Value` by design, so a caller has to build them itself.
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-webpki-roots-no-provider",
 ] }
-frust-paths = "0.6.0"
+frust-paths = "0.6.1"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
 
@@ -60,11 +60,11 @@ protox = "0.9"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-frust-core = { version = "0.6.0", features = ["test-support"] }
-frust-reactive = "0.6.0"
-frust-scene = "0.6.0"
-frust-shell-common = "0.6.0"
-frust-text = "0.6.0"
+frust-core = { version = "0.6.1", features = ["test-support"] }
+frust-reactive = "0.6.1"
+frust-scene = "0.6.1"
+frust-shell-common = "0.6.1"
+frust-text = "0.6.1"
 kurbo = "0.13.1"
 peniko = "0.6.1"
 reactive_graph = "0.2"
