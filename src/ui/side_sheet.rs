@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use frust::{AnyView, NavigatorController, PopResult};
+use frust::{NavigatorController, PopResult, View};
 use frust_glyph::{GlyphSideSheetHandle, glyph_side_sheet, show_glyph_side_sheet};
 
 use super::SheetHandle;
@@ -27,11 +27,11 @@ use super::SheetHandle;
 /// [`crate::ui::sheet::show_sheet`]'s own callers use. `on_dismiss` runs once,
 /// after the exit animation completes, on *every* dismissal — whichever of
 /// the sheet's own gestures or a programmatic [`SheetHandle::close`] drove it.
-pub fn show_side_sheet<State: 'static>(
+pub fn show_side_sheet<State: 'static, V: View<State>, F: View<State>>(
     nav: &NavigatorController<State>,
     title: impl Into<String>,
-    build_body: impl Fn(&SheetHandle) -> AnyView<State> + 'static,
-    build_footer: impl Fn(&SheetHandle) -> AnyView<State> + 'static,
+    build_body: impl Fn(&SheetHandle) -> V + 'static,
+    build_footer: impl Fn(&SheetHandle) -> F + 'static,
     on_dismiss: impl Fn() + 'static,
 ) {
     let title = title.into();

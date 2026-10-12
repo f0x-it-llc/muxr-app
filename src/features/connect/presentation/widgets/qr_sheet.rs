@@ -34,9 +34,9 @@ use std::time::Duration;
 
 use clean_signals_frust::use_interval;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, Either, FlexView,
-    Get, RwSignal, Set, SizedBox, Theme, View, any, button, component, container, icon, icons,
-    inflexible, on_cleanup, platform_view, spawn_blocking, spawn_local, text,
+    Align, Alignment, Axis, ButtonStyle, Component, CrossAxisAlignment, Either, FlexView, Get,
+    RwSignal, Set, SizedBox, Theme, View, button, component, container, icon, icons, inflexible,
+    on_cleanup, platform_view, spawn_blocking, spawn_local, text,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat};
 use frust_camera::{BarcodeStreamOptions, CameraError, CameraSession, DetectionPolicy};
@@ -81,9 +81,11 @@ const STREAM_ERROR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// when a payload has been applied; every other way out tears this
 /// component down, which is what closes the camera. `pub` so
 /// `tests/connect.rs` can mount it directly.
-pub fn qr_sheet_body(close: Rc<dyn Fn()>, controller: Arc<ConnectController>) -> AnyView<AppState> // erasure: keep stored view table/registry
-{
-    any(component(QrScanSheet { close, controller }))
+pub fn qr_sheet_body(
+    close: Rc<dyn Fn()>,
+    controller: Arc<ConnectController>,
+) -> impl View<AppState> {
+    component(QrScanSheet { close, controller })
 }
 
 /// Stateless; everything retained lives in [`QrSheetState`].

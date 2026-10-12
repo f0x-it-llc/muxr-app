@@ -375,11 +375,14 @@ fn dialog_read_only_row(
 /// only in the vanishingly unlikely race where the pending secret was
 /// already cleared by the time this body re-ran; it renders a bare caption
 /// rather than panicking.
-pub(in super::super) fn secret_reveal_sheet(
+pub(in super::super) fn secret_reveal_sheet<D>(
     minted: Option<&MintedToken>,
     colors: &Palette,
-    on_done: impl Fn(&mut AppState) + 'static,
-) -> impl View<AppState> {
+    on_done: D,
+) -> impl View<AppState> + use<D>
+where
+    D: Fn(&mut AppState) + 'static,
+{
     let theme = active_theme();
     let Some(minted) = minted else {
         return Either::Left(

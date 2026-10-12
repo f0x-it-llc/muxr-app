@@ -745,13 +745,7 @@ impl Actions {
         let name = session.name;
         let id = id.to_string();
         show_sheet(&self.overlays, move |sheet| {
-            any(widgets::sheet_body(
-                &actions,
-                sheet,
-                &id,
-                name.clone(),
-                read_only,
-            ))
+            widgets::sheet_body(&actions, sheet, &id, name.clone(), read_only)
         });
     }
 }

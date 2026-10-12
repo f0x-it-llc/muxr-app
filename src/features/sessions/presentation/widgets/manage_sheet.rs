@@ -41,7 +41,7 @@ pub(in crate::features::sessions::presentation) fn sheet_body(
     id: &str,
     name: String,
     read_only: bool,
-) -> impl View<AppState> {
+) -> impl View<AppState> + use<> {
     let heading = sheet_heading(name);
     let rows = [
         sheet_action(actions, sheet, id, ManageAction::Attach, false),

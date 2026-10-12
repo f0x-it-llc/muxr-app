@@ -81,11 +81,14 @@ pub(in super::super) struct Picker {
 /// The pick handler, shared by every row of one sheet.
 type OnPick = Rc<dyn Fn(&mut AppState, usize)>;
 
-pub(in super::super) fn picker_sheet(
+pub(in super::super) fn picker_sheet<P>(
     picker: &Picker,
     colors: &Palette,
-    on_pick: impl Fn(&mut AppState, usize) + 'static,
-) -> impl View<AppState> {
+    on_pick: P,
+) -> impl View<AppState> + use<P>
+where
+    P: Fn(&mut AppState, usize) + 'static,
+{
     let theme = active_theme();
     let on_pick: OnPick = Rc::new(on_pick);
     let last = picker.options.len().saturating_sub(1);
