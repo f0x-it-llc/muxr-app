@@ -12,12 +12,12 @@ use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point,
-    PointerPhase, Role, SemanticsCtx, Size, View, Widget, any, build_child, erase_callback,
-    rebuild_child, teardown_child,
+    Action, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PRESSED_OPACITY, PaintCtx, PaintScene, Point, PointerPhase,
+    Role, SemanticsCtx, Size, View, Widget, build_child, erase_callback, rebuild_child,
+    teardown_child,
 };
-use frust::{Axis, CrossAxisAlignment, FlexView, IconData, SizedBox, icon, inflexible, text};
+use frust::{CrossAxisAlignment, IconData, SizedBox, icon, row, text};
 
 use crate::ui::palette::active_theme;
 
@@ -50,24 +50,20 @@ pub const BACK_LABEL: &str = "Back";
 /// The bar's leading brand row: the four-cell mark beside the wordmark
 /// (`docs/redesign.html`'s `.topbar` brand), laid out at its natural width in
 /// the app bar's loose leading slot.
-pub fn brand_leading<State: 'static>() -> AnyView<State> {
+pub fn brand_leading<State: 'static>() -> impl View<State> {
     let theme = active_theme();
     let scheme = theme.scheme();
     let mut brand_style = theme.type_scale.display_small.clone();
     brand_style.size = BRAND_SIZE;
     brand_style.line_height = LineHeight::Absolute(BRAND_LINE_HEIGHT);
     brand_style.color = scheme.primary;
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(BrandMark {
-                color: scheme.primary_container,
-            }),
-            inflexible(SizedBox::<State>(Some(BRAND_GAP), None)),
-            inflexible(text(BRAND).style(brand_style)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    row()
+        .child(BrandMark {
+            color: scheme.primary_container,
+        })
+        .child(SizedBox::<State>(Some(BRAND_GAP), None))
+        .child(text(BRAND).style(brand_style))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A vector affordance sized for the app bar's icon slot: `mark` at
@@ -212,12 +208,12 @@ impl<State: 'static> IconButtonView<State> {
     }
 
     /// The mark, as the pod this button paints and lays out.
-    fn mark_view(&self) -> AnyView<State> {
+    fn mark_view(&self) -> impl View<State> + use<State> {
         let mut view = icon(self.mark.clone()).size(self.icon_size);
         if let Some(ink) = self.ink {
             view = view.color(ink);
         }
-        any(view)
+        view
     }
 }
 

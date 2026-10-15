@@ -33,7 +33,7 @@ fn render(route: &str, connected: bool) -> support::RecScene {
 
     let mut root: Root = RenderRoot::new();
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut tcx = TextContext::new();
 
     if connected {
@@ -90,7 +90,7 @@ fn shell_builds_at_the_connect_route_by_default() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut tcx = TextContext::new();
 
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -268,7 +268,7 @@ fn a_push_through_the_app_nav_handle_lands_on_the_apps_own_navigator() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut tcx = TextContext::new();
     frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(state.nav.controller().depth(), 1, "only the start location");

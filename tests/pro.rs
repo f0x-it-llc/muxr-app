@@ -556,7 +556,7 @@ fn app_init_publishes_the_pro_seam_and_fires_one_launch_refresh() {
     let _ambient = setup();
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     root.set_theme(Box::new(frust_glyph::baseline()));
-    let mut logic: Logic = Box::new(|state: &mut AppState| MuxrApp.build(state));
+    let mut logic: Logic = Box::new(|state: &mut AppState| AnyView::new(MuxrApp.build(state)));
     let mut state = MuxrApp.init();
     let mut tcx = TextContext::new();
 

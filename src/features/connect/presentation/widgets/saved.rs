@@ -5,14 +5,14 @@ use std::rc::Rc;
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, AnyView, EdgeInsets, FlexChild, GestureDetector, Padding, SizedBox, Theme,
-    any, colored_box, container, flexible, icon, icons, inflexible, text,
+    Align, Alignment, EdgeInsets, Either, FlexChild, GestureDetector, Padding, SizedBox, Theme,
+    View, any, colored_box, container, flexible, icon, icons, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, avatar, badge};
 
 use super::pairing::READ_ONLY_CHIP;
 use super::pro_gate::row_is_locked;
-use super::{Live, backed, column, h_gap, row, v_gap};
+use super::{Live, backed, block_column, centered_row, h_gap, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
@@ -51,29 +51,34 @@ pub fn saved_address<S: 'static>(
     colors: &Palette,
     servers: &[SavedServer],
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     // One clock read for the whole list — every row's recency measured against it.
     let now = epoch_millis();
-    let mut children = vec![saved_header(theme, colors), v_gap(spacing::MICRO)];
+    let mut children = vec![
+        any(saved_header::<S>(theme, colors)), // erasure: keep accumulator into Vec<AnyView>
+        any(v_gap::<S>(spacing::MICRO)),       // erasure: keep accumulator into Vec<AnyView>
+    ];
     for (index, server) in servers.iter().enumerate() {
-        children.push(saved_row(theme, colors, server, servers, index, now, live));
+        children.push(any(saved_row(
+            theme, colors, server, servers, index, now, live,
+        )));
     }
-    backed(column::<S>(children), colors)
+    backed(block_column::<S, _>(children), colors)
 }
 
 /// An uppercase micro label followed by a hairline rule filling the rest of the row.
-fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> AnyView<S> {
-    any(row::<S>(vec![
-        inflexible(any(
-            text("SAVED SERVERS").style(inked(&theme.type_scale.label_small, colors.fg_dim))
-        )),
+fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> + use<S> {
+    centered_row::<S>(vec![
+        inflexible(
+            text("SAVED SERVERS").style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        ),
         inflexible(h_gap::<S>(spacing::SM)),
         // A zero-width box under a flexible slot gets the remaining width.
         flexible(
             1,
-            any(colored_box::<S>().size(0.0, RULE_HEIGHT).fill(colors.rule)),
+            colored_box::<S>().size(0.0, RULE_HEIGHT).fill(colors.rule),
         ),
-    ]))
+    ])
 }
 
 /// This mode's short form, for a saved row's meta line.
@@ -102,7 +107,7 @@ fn saved_row<S: 'static>(
     index: usize,
     now_ms: i64,
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let meta = format!(
         "{} · {} · port {}",
         trust_meta_label(server.trust_mode),
@@ -111,35 +116,40 @@ fn saved_row<S: 'static>(
     );
     let mut items = vec![
         // The glow is part of the dot, not decoration — it's what reads as "live" at 7px.
-        inflexible(any(colored_box::<S>()
-            .size(DOT, DOT)
-            .radius(DOT / 2.0)
-            .fill(colors.success)
-            .glow(colors.success, GLOW_STD_DEV, GLOW_SPREAD))),
+        inflexible(
+            colored_box::<S>()
+                .size(DOT, DOT)
+                .radius(DOT / 2.0)
+                .fill(colors.success)
+                .glow(colors.success, GLOW_STD_DEV, GLOW_SPREAD),
+        ),
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,
-            any(column::<S>(vec![
-                any(text(server.endpoint()).style(inked(&theme.type_scale.body_small, colors.fg))),
+            block_column::<S, _>((
+                text(server.endpoint()).style(inked(&theme.type_scale.body_small, colors.fg)),
                 v_gap::<S>(spacing::MICRO),
-                any(text(meta).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
-            ])),
+                text(meta).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+            )),
         ),
     ];
     items.extend(chips::<S>(colors, server, locked(server, servers, live)));
-    let body = Padding(EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y), row::<S>(items));
-    let tappable: AnyView<S> = match live {
-        None => any(body),
+    let body = Padding(
+        EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y),
+        centered_row::<S>(items),
+    );
+    let tappable = match live {
+        None => Either::Left(body),
         Some(live) => {
             let on_tap = Rc::clone(&live.on_saved_tap);
-            any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
+            Either::Right(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
         }
     };
-    any(row::<S>(vec![
+    centered_row::<S>(vec![
         flexible(1, tappable),
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),
-    ]))
+    ])
 }
 
 /// Whether the row wears the pro tag. The splash has no controller, so no
@@ -158,16 +168,16 @@ fn chips<S: 'static>(colors: &Palette, server: &SavedServer, locked: bool) -> Ve
     ] {
         if shown {
             items.push(inflexible(h_gap::<S>(spacing::MD)));
-            items.push(inflexible(any(badge(chip, BadgeVariant::Neutral))));
+            items.push(inflexible(badge(chip, BadgeVariant::Neutral)));
         }
     }
     if locked {
         items.push(inflexible(h_gap::<S>(spacing::MD)));
-        items.push(inflexible(any(icon(icons::LOCK)
-            .size(LOCK_MARK)
-            .color(colors.amber))));
+        items.push(inflexible(
+            icon(icons::LOCK).size(LOCK_MARK).color(colors.amber),
+        ));
         items.push(inflexible(h_gap::<S>(spacing::MICRO)));
-        items.push(inflexible(any(badge(PRO_TAG, BadgeVariant::Accent))));
+        items.push(inflexible(badge(PRO_TAG, BadgeVariant::Accent)));
     }
     items
 }
@@ -180,9 +190,12 @@ pub fn tablet_saved_list<S: 'static>(
     colors: &Palette,
     servers: &[SavedServer],
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let now = epoch_millis();
-    let mut children = vec![saved_header(theme, colors), v_gap(spacing::MD)];
+    let mut children = vec![
+        any(saved_header::<S>(theme, colors)), // erasure: keep accumulator into Vec<AnyView>
+        any(v_gap::<S>(spacing::MD)),          // erasure: keep accumulator into Vec<AnyView>
+    ];
     if servers.is_empty() {
         children.push(any(
             text(NO_SAVED_SERVERS).style(inked(&theme.type_scale.body_small, colors.fg_muted))
@@ -190,13 +203,13 @@ pub fn tablet_saved_list<S: 'static>(
     }
     for (index, server) in servers.iter().enumerate() {
         if index > 0 {
-            children.push(v_gap(spacing::SM));
+            children.push(any(v_gap::<S>(spacing::SM))); // erasure: keep accumulator into Vec<AnyView>
         }
-        children.push(tablet_saved_row(
+        children.push(any(tablet_saved_row(
             theme, colors, server, servers, index, now, live,
-        ));
+        )));
     }
-    any(column::<S>(children))
+    block_column::<S, _>(children)
 }
 
 /// A bordered card row: the label's initial, the label over
@@ -209,7 +222,7 @@ fn tablet_saved_row<S: 'static>(
     index: usize,
     now_ms: i64,
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let meta = format!(
         "{} · {} · {}",
         server.endpoint(),
@@ -225,28 +238,27 @@ fn tablet_saved_row<S: 'static>(
         .unwrap_or_default();
     let mut items = vec![
         // The label beside it already names the row.
-        inflexible(any(avatar(initial).size(AVATAR).decorative())),
+        inflexible(avatar(initial).size(AVATAR).decorative()),
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,
-            any(column::<S>(vec![
-                any(text(server.label.clone())
-                    .style(inked(&theme.type_scale.body_small, colors.fg))),
+            block_column::<S, _>((
+                text(server.label.clone()).style(inked(&theme.type_scale.body_small, colors.fg)),
                 v_gap::<S>(spacing::MICRO),
-                any(text(meta).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
-            ])),
+                text(meta).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+            )),
         ),
     ];
     items.extend(chips::<S>(colors, server, locked(server, servers, live)));
-    let body = row::<S>(items);
-    let tappable: AnyView<S> = match live {
-        None => any(body),
+    let body = centered_row::<S>(items);
+    let tappable = match live {
+        None => Either::Left(body),
         Some(live) => {
             let on_tap = Rc::clone(&live.on_saved_tap);
-            any(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
+            Either::Right(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
         }
     };
-    let content = row::<S>(vec![
+    let content = centered_row::<S>(vec![
         flexible(1, tappable),
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),
@@ -257,10 +269,10 @@ fn tablet_saved_row<S: 'static>(
         right: spacing::TIGHT,
         bottom: spacing::XS,
     };
-    any(container(Padding(inset, content))
+    container(Padding(inset, content))
         .fill(colors.surface)
         .radius(theme.shape.medium)
-        .border(colors.outline, HAIRLINE))
+        .border(colors.outline, HAIRLINE)
 }
 
 /// A dim [`icons::DELETE`] mark in a [`DELETE_TARGET`]-square press target,
@@ -272,9 +284,9 @@ fn delete_affordance<S: 'static>(
     server: &SavedServer,
     index: usize,
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let Some(live) = live else {
-        return any(
+        return Either::Left(
             SizedBox::<S>(Some(DELETE_TARGET), Some(DELETE_TARGET)).child(Align(
                 Alignment::CENTER,
                 icon(icons::DELETE).size(DELETE_MARK).color(colors.fg_dim),
@@ -283,15 +295,17 @@ fn delete_affordance<S: 'static>(
     };
     let on_delete = Rc::clone(&live.on_saved_delete);
     // A labelled `Role::Button`, which a bare `GestureDetector` could not give a screen reader.
-    any(icon_button(
-        icons::DELETE,
-        delete_label(&server.label),
-        move |_state: &mut S| on_delete(index),
+    Either::Right(
+        icon_button(
+            icons::DELETE,
+            delete_label(&server.label),
+            move |_state: &mut S| on_delete(index),
+        )
+        .ink(colors.fg_dim)
+        .icon_size(DELETE_MARK)
+        .box_size(Size::new(DELETE_TARGET, DELETE_TARGET))
+        .radius(DELETE_TARGET / 2.0),
     )
-    .ink(colors.fg_dim)
-    .icon_size(DELETE_MARK)
-    .box_size(Size::new(DELETE_TARGET, DELETE_TARGET))
-    .radius(DELETE_TARGET / 2.0))
 }
 
 /// The delete affordance's accessible name — a bare "Delete" would announce

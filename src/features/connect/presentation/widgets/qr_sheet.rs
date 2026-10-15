@@ -34,8 +34,8 @@ use std::time::Duration;
 
 use clean_signals_frust::use_interval;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, FlexView, Get,
-    RwSignal, Set, SizedBox, Theme, any, button, component, container, icon, icons, inflexible,
+    Align, Alignment, Axis, ButtonStyle, Component, CrossAxisAlignment, Either, FlexView, Get,
+    RwSignal, Set, SizedBox, Theme, View, button, component, container, icon, icons, inflexible,
     on_cleanup, platform_view, spawn_blocking, spawn_local, text,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat};
@@ -81,8 +81,11 @@ const STREAM_ERROR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// when a payload has been applied; every other way out tears this
 /// component down, which is what closes the camera. `pub` so
 /// `tests/connect.rs` can mount it directly.
-pub fn qr_sheet_body(close: Rc<dyn Fn()>, controller: Arc<ConnectController>) -> AnyView<AppState> {
-    any(component(QrScanSheet { close, controller }))
+pub fn qr_sheet_body(
+    close: Rc<dyn Fn()>,
+    controller: Arc<ConnectController>,
+) -> impl View<AppState> {
+    component(QrScanSheet { close, controller })
 }
 
 /// Stateless; everything retained lives in [`QrSheetState`].
@@ -170,13 +173,13 @@ impl Component for QrScanSheet {
         }
     }
 
-    fn build(&self, state: &mut QrSheetState) -> AnyView<QrSheetState> {
+    fn build(&self, state: &mut QrSheetState) -> impl View<QrSheetState> {
         let theme = active_theme();
         open_camera_once(state);
         match sheet_stage(state) {
-            Stage::Live => live_body(state, &theme),
+            Stage::Live => Either::Left(live_body(state, &theme)),
             Stage::Unavailable(message, tone, retryable) => {
-                message_body(&theme, message, tone, retryable)
+                Either::Right(message_body(&theme, message, tone, retryable))
             }
         }
     }
@@ -336,14 +339,19 @@ fn spawn_detection_pump(
 
 /// The platform preview inside the same framed viewfinder the placeholder
 /// draws, and the scan hint.
-fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
+fn live_body(state: &QrSheetState, theme: &Theme) -> impl View<QrSheetState> + use<> {
     let scheme = theme.scheme();
     let guard = state.session.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(session) = guard.as_ref() else {
         // Unreachable: `Stage::Live` is what a held session means. Rendering
         // the instruction beats an `expect` on a lock a rebuild could race.
         drop(guard);
-        return message_body(theme, CAMERA_UNAVAILABLE, MessageTone::Failed, true);
+        return Either::Left(message_body(
+            theme,
+            CAMERA_UNAVAILABLE,
+            MessageTone::Failed,
+            true,
+        ));
     };
     // Target-gated by the session itself — never a shared literal.
     let view_type = session.preview_view_type().to_string();
@@ -363,19 +371,19 @@ fn live_body(state: &QrSheetState, theme: &Theme) -> AnyView<QrSheetState> {
     .border(scheme.outline, HAIRLINE);
 
     let children = vec![
-        inflexible(any(Align(Alignment::CENTER, viewfinder))),
-        inflexible(any(SizedBox::<QrSheetState>(None, Some(spacing::XL)))),
-        inflexible(any(
-            text(SHEET_TITLE).style(inked(&theme.type_scale.title_medium, scheme.on_surface))
-        )),
-        inflexible(any(SizedBox::<QrSheetState>(None, Some(spacing::XL / 2.0)))),
-        inflexible(any(text(SCAN_HINT).style(inked(
+        inflexible(Align(Alignment::CENTER, viewfinder)),
+        inflexible(SizedBox::<QrSheetState>(None, Some(spacing::XL))),
+        inflexible(
+            text(SHEET_TITLE).style(inked(&theme.type_scale.title_medium, scheme.on_surface)),
+        ),
+        inflexible(SizedBox::<QrSheetState>(None, Some(spacing::XL / 2.0))),
+        inflexible(text(SCAN_HINT).style(inked(
             &theme.type_scale.body_small,
             scheme.on_surface_variant,
-        )))),
+        ))),
     ];
 
-    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+    Either::Right(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// The placeholder viewfinder over `message`, and a retry where one could help.
@@ -384,7 +392,7 @@ fn message_body(
     message: &str,
     tone: MessageTone,
     retryable: bool,
-) -> AnyView<QrSheetState> {
+) -> impl View<QrSheetState> + use<> {
     let scheme = theme.scheme();
     let viewfinder = container(
         SizedBox::<QrSheetState>(Some(VIEWFINDER), Some(VIEWFINDER)).child(Align(
@@ -403,28 +411,26 @@ fn message_body(
     };
 
     let mut children = vec![
-        inflexible(any(Align(Alignment::CENTER, viewfinder))),
-        inflexible(any(SizedBox::<QrSheetState>(None, Some(spacing::XL)))),
-        inflexible(any(
-            text(SHEET_TITLE).style(inked(&theme.type_scale.title_medium, scheme.on_surface))
-        )),
-        inflexible(any(SizedBox::<QrSheetState>(None, Some(spacing::XL / 2.0)))),
-        inflexible(any(
-            text(message).style(inked(&theme.type_scale.body_small, message_ink))
-        )),
+        inflexible(Align(Alignment::CENTER, viewfinder)),
+        inflexible(SizedBox::<QrSheetState>(None, Some(spacing::XL))),
+        inflexible(
+            text(SHEET_TITLE).style(inked(&theme.type_scale.title_medium, scheme.on_surface)),
+        ),
+        inflexible(SizedBox::<QrSheetState>(None, Some(spacing::XL / 2.0))),
+        inflexible(text(message).style(inked(&theme.type_scale.body_small, message_ink))),
     ];
     if retryable {
-        children.push(inflexible(any(SizedBox::<QrSheetState>(
+        children.push(inflexible(SizedBox::<QrSheetState>(
             None,
             Some(spacing::XL),
-        ))));
-        children.push(inflexible(any(Align(
+        )));
+        children.push(inflexible(Align(
             Alignment::CENTER,
             button(RETRY_LABEL, retry_camera).style(ButtonStyle::Secondary),
-        ))));
+        )));
     }
 
-    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// Clears the failure and lets `build`'s own open branch reopen on the next

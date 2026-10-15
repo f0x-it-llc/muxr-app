@@ -55,7 +55,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, FlexView, SizedBox, Theme, any, container, inflexible,
+    AnyView, Axis, CrossAxisAlignment, FlexView, SizedBox, Theme, View, ViewSeq, any, column,
+    container, inflexible,
 };
 
 use super::controller::ConnectController;
@@ -87,45 +88,41 @@ pub struct Live {
 }
 
 /// A `gap`-tall spacer between stacked pieces/rows.
-fn v_gap<S: 'static>(gap: f64) -> AnyView<S> {
-    any(SizedBox::<S>(None, Some(gap)))
+fn v_gap<S: 'static>(gap: f64) -> impl View<S> {
+    SizedBox::<S>(None, Some(gap))
 }
 
 /// A `gap`-wide spacer between row items.
-fn h_gap<S: 'static>(gap: f64) -> AnyView<S> {
-    any(SizedBox::<S>(Some(gap), None))
+fn h_gap<S: 'static>(gap: f64) -> impl View<S> {
+    SizedBox::<S>(Some(gap), None)
 }
 
 /// A vertical stack whose children each fill the available width — the CSS
 /// block-flow the mock's blocks assume.
-fn column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
-    FlexView::new(
-        Axis::Vertical,
-        children.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Stretch)
+fn block_column<S: 'static, M>(children: impl ViewSeq<S, M>) -> FlexView<S> {
+    column()
+        .children(children)
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// A vertical stack that shrink-wraps to its widest child and centers each
 /// one, rather than spanning the layer (stretching would turn the mark's
 /// tile into a full-width bar).
-fn hugging_column<S: 'static>(children: Vec<AnyView<S>>) -> FlexView<S> {
-    FlexView::new(
-        Axis::Vertical,
-        children.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Center)
+fn hugging_column<S: 'static, M>(children: impl ViewSeq<S, M>) -> FlexView<S> {
+    column()
+        .children(children)
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A horizontal row with its items vertically centered.
-fn row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
+fn centered_row<S: 'static>(children: Vec<frust::FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A full-width piece backing in the page tone — invisible over the route's
 /// backdrop, while giving the splash something opaque behind its assembling text.
-fn backed<S: 'static>(child: impl frust::View<S>, colors: &Palette) -> AnyView<S> {
-    any(container(child).fill(colors.page))
+fn backed<S: 'static, V: View<S>>(child: V, colors: &Palette) -> impl View<S> + use<S, V> {
+    container(child).fill(colors.page)
 }
 
 /// `live` is `Some(..)` for the screen and `None` for the splash (the parity
@@ -134,17 +131,18 @@ pub fn connect_pieces_with<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,
     saved: &[SavedServer],
-) -> Vec<AnyView<S>> {
+) -> Vec<AnyView<S>> // erasure: keep accumulator into Vec<AnyView>
+{
     let colors = Palette::from_theme(theme);
     vec![
-        mark::connect_mark(theme, &colors),
-        badge::server_badge(theme, &colors),
+        any(mark::connect_mark(theme, &colors)),
+        any(badge::server_badge(theme, &colors)),
         badge::heading(theme, &colors),
-        fields::server_url_field(theme, &colors, live),
-        fields::token_field(theme, &colors, live),
-        trust::remember_row(theme, &colors, live),
-        cta::connect_button(theme, &colors, live),
-        saved::saved_address(theme, &colors, saved, live),
+        any(fields::server_url_field(theme, &colors, live)),
+        any(fields::token_field(theme, &colors, live)),
+        any(trust::remember_row(theme, &colors, live)),
+        any(cta::connect_button(theme, &colors, live)),
+        any(saved::saved_address(theme, &colors, saved, live)),
     ]
 }
 
@@ -155,17 +153,18 @@ pub fn tablet_panel_pieces<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,
     saved: &[SavedServer],
-) -> Vec<AnyView<S>> {
+) -> Vec<AnyView<S>> // erasure: keep accumulator into Vec<AnyView>
+{
     let colors = Palette::from_theme(theme);
     vec![
-        any(row::<S>(vec![
+        any(centered_row::<S>(vec![
             inflexible(mark::connect_mark(theme, &colors)),
             inflexible(h_gap::<S>(spacing::LG)),
             inflexible(badge::server_badge(theme, &colors)),
         ])),
-        getting_started::tablet_headline(theme, &colors),
-        getting_started::getting_started_card(theme, &colors),
-        saved::tablet_saved_list(theme, &colors, saved, live),
+        any(getting_started::tablet_headline(theme, &colors)),
+        any(getting_started::getting_started_card(theme, &colors)),
+        any(saved::tablet_saved_list(theme, &colors, saved, live)),
     ]
 }
 
@@ -177,18 +176,19 @@ pub fn tablet_form_pieces<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,
     folded: Option<&[SavedServer]>,
-    secondary: AnyView<S>,
-) -> Vec<AnyView<S>> {
+    secondary: impl View<S>,
+) -> Vec<AnyView<S>> // erasure: keep accumulator into Vec<AnyView>
+{
     let colors = Palette::from_theme(theme);
     let mut pieces = vec![
         badge::heading(theme, &colors),
-        fields::server_url_field(theme, &colors, live),
-        fields::token_field(theme, &colors, live),
-        trust::remember_row(theme, &colors, live),
-        cta::connect_actions(theme, &colors, live, secondary),
+        any(fields::server_url_field(theme, &colors, live)),
+        any(fields::token_field(theme, &colors, live)),
+        any(trust::remember_row(theme, &colors, live)),
+        any(cta::connect_actions(theme, &colors, live, secondary)),
     ];
     if let Some(saved) = folded {
-        pieces.push(saved::tablet_saved_list(theme, &colors, saved, live));
+        pieces.push(any(saved::tablet_saved_list(theme, &colors, saved, live)));
     }
     pieces
 }

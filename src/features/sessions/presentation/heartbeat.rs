@@ -32,8 +32,8 @@ use frust::authoring::{
 };
 use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
-    Align, Alignment, AnyView, Curve, FlexChild, Get, RwSignal, Set, SizedBox, Stack, Timing, any,
-    colored_box, container, inflexible,
+    Align, Alignment, Curve, Either, FlexChild, Get, RwSignal, Set, SizedBox, Timing, colored_box,
+    container, inflexible, stack,
 };
 
 use super::pages::SessionsState;
@@ -218,38 +218,39 @@ fn glow_dot<State: 'static>(ink: Color) -> impl View<State> {
 /// [`RING_SLOT`]-square cell, ring layer under the dot, both centered.
 ///
 /// Constant size whether or not a ping is in flight (the row must not
-/// twitch), and both stack children always present — [`Stack`] reconciles
+/// twitch), and both stack children always present — [`stack`] reconciles
 /// positionally, so a vanishing child would rebuild its sibling.
-pub(super) fn pinging_dot(ring: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
-    any(
-        SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)).child(Stack(vec![
-            ring_layer(ring, ink),
-            any(Align(Alignment::CENTER, glow_dot::<SessionsState>(ink))),
-        ])),
+pub(super) fn pinging_dot(ring: Option<RingPose>, ink: Color) -> impl View<SessionsState> {
+    SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)).child(
+        stack()
+            .child(ring_layer(ring, ink))
+            .child(Align(Alignment::CENTER, glow_dot::<SessionsState>(ink))),
     )
 }
 
 /// The ring at `pose`, or an empty [`RING_SLOT`] slot. Opacity layer
 /// outermost (lays out at `RING_SLOT`), scale inside it around a dot-sized
 /// ring — see the [module docs](self) clip note.
-fn ring_layer(pose: Option<RingPose>, ink: Color) -> AnyView<SessionsState> {
+fn ring_layer(pose: Option<RingPose>, ink: Color) -> impl View<SessionsState> {
     let Some(pose) = pose else {
-        return any(SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)));
+        return Either::Left(SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)));
     };
-    any(AnimatedOpacity(
-        pose.opacity,
-        SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)).child(Align(
-            Alignment::CENTER,
-            AnimatedScale(
-                pose.scale,
-                container(SizedBox::<SessionsState>(Some(DOT), Some(DOT)))
-                    .border(ink, HAIRLINE)
-                    .radius(RADIUS_FULL),
-            )
-            .timing(ZERO),
-        )),
+    Either::Right(
+        AnimatedOpacity(
+            pose.opacity,
+            SizedBox::<SessionsState>(Some(RING_SLOT), Some(RING_SLOT)).child(Align(
+                Alignment::CENTER,
+                AnimatedScale(
+                    pose.scale,
+                    container(SizedBox::<SessionsState>(Some(DOT), Some(DOT)))
+                        .border(ink, HAIRLINE)
+                        .radius(RADIUS_FULL),
+                )
+                .timing(ZERO),
+            )),
+        )
+        .timing(ZERO),
     )
-    .timing(ZERO))
 }
 
 /// A zero-size sentinel [`View`]/[`Widget`] whose only job is an
@@ -395,9 +396,9 @@ mod tests {
         #[test]
         fn the_dots_glow_radius_clamps_to_the_dot_not_the_radius_full_sentinel() {
             let ink = Color::from_rgb8(0x30, 0xd1, 0x5c);
-            let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+            let mut root = RenderRoot::new();
             let mut state = ();
-            root.rebuild(&mut |_state: &mut ()| any(glow_dot::<()>(ink)), &mut state);
+            root.rebuild(&mut |_state: &mut ()| glow_dot::<()>(ink), &mut state);
             root.layout(Size::new(DOT, DOT));
             let mut scene = ShadowRecorder::default();
             root.paint(&mut scene, FrameTime::ZERO);

@@ -259,7 +259,7 @@ impl Harness {
         let nav_for_screen = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             any(Stack(vec![
-                connect_page(nav_for_screen.clone()),
+                any(connect_page(nav_for_screen.clone())),
                 any(navigator(&nav_for_navigator, empty_base_page)),
             ]))
         });
@@ -1803,7 +1803,7 @@ fn the_qr_sheet_shows_the_no_camera_state_off_device() {
     let mut state = MuxrApp.init();
     let controller = pairing_controller();
     let mut logic: Logic =
-        Box::new(move |_state| qr_sheet_body(Rc::new(|| {}), Arc::clone(&controller)));
+        Box::new(move |_state| any(qr_sheet_body(Rc::new(|| {}), Arc::clone(&controller))));
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     let mut tcx = TextContext::new();
     let scene = frame_sized(&mut root, &mut logic, &mut state, &mut tcx, SURFACE);

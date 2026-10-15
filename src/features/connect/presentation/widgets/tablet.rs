@@ -14,9 +14,8 @@
 //! (`connect_pieces`/`connect_layout` is the Compact half).
 
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox, Stack, Theme,
-    WindowMetrics, any, colored_box, container, flexible, inflexible, safe_area, scroll_view,
-    use_context,
+    AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, Stack, Theme, View, WindowMetrics,
+    any, colored_box, container, row, safe_area, scroll_view, use_context,
 };
 
 use super::getting_started::info_affordance;
@@ -63,22 +62,25 @@ const FULL_STAGGER: [Column; 9] = [
 
 /// The Tablet screen over the page backdrop. `qr` is the action beside the
 /// CTA; `overlays` raises the info dialog on the collapsed band.
-pub fn tablet_screen<S: 'static>(
+pub fn tablet_screen<S: 'static, Q: View<S>>(
     theme: &Theme,
     live: &Live,
     saved: &[SavedServer],
     full: bool,
-    qr: AnyView<S>,
+    qr: Q,
     overlays: &frust::NavigatorController<AppState>,
-) -> AnyView<S> {
+) -> impl View<S> + use<S, Q> {
     let folded = (!full).then_some(saved);
     let form = tablet_form_pieces(theme, Some(live), folded, qr);
     let panel = full.then(|| tablet_panel_pieces(theme, Some(live), saved));
-    let mut layers = vec![any(page_backdrop::<S>()), tablet_layout(theme, panel, form)];
+    let mut layers = vec![
+        any(page_backdrop::<S>()), // erasure: keep accumulator into Vec<AnyView>
+        any(tablet_layout(theme, panel, form)), // erasure: keep accumulator into Vec<AnyView>
+    ];
     if !full {
-        layers.push(info_affordance(overlays));
+        layers.push(any(info_affordance(overlays))); // erasure: keep accumulator into Vec<AnyView>
     }
-    any(Stack(layers))
+    Stack(layers)
 }
 
 /// The Tablet pieces with no live wiring, in stagger order — the splash's
@@ -118,9 +120,10 @@ pub fn tablet_splash_layout<S: 'static>(
     theme: &Theme,
     full: bool,
     pieces: Vec<AnyView<S>>,
-) -> AnyView<S> {
+) -> AnyView<S> // erasure: keep stored view table/registry
+{
     if !full {
-        return tablet_layout(theme, None, pieces);
+        return any(tablet_layout(theme, None, pieces));
     }
     let mut panel = Vec::new();
     let mut form = Vec::new();
@@ -130,7 +133,7 @@ pub fn tablet_splash_layout<S: 'static>(
             Column::Form => form.push(piece),
         }
     }
-    tablet_layout(theme, Some(panel), form)
+    any(tablet_layout(theme, Some(panel), form))
 }
 
 /// The safe-area-inset body: on the full band (`panel` is `Some`) a
@@ -142,13 +145,13 @@ fn tablet_layout<S: 'static>(
     theme: &Theme,
     panel: Option<Vec<AnyView<S>>>,
     form: Vec<AnyView<S>>,
-) -> AnyView<S> {
-    let form_column = any(scroll_view(Padding(
+) -> impl View<S> {
+    let form_column = scroll_view(Padding(
         EdgeInsets::symmetric(spacing::SHEET, spacing::HERO),
-        clamp(any(gapped(form, spacing::XL))),
-    )));
+        clamp(gapped(form, spacing::XL)),
+    ));
     let Some(panel) = panel else {
-        return any(safe_area(form_column));
+        return safe_area(form_column);
     };
     let colors = Palette::from_theme(theme);
     // The iPadOS top-left window control sits over the brand tile; clear it.
@@ -166,17 +169,13 @@ fn tablet_layout<S: 'static>(
     let panel =
         container(scroll_view(Padding(inset, gapped(panel, spacing::XL)))).fill(colors.base);
     let edge = colored_box::<S>().size(HAIRLINE, 0.0).fill(colors.rule);
-    any(safe_area(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(SizedBox::<S>(Some(LEFT_PANEL_WIDTH), None).child(panel))),
-                inflexible(any(edge)),
-                flexible(1, form_column),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    safe_area(
+        row()
+            .child(SizedBox::<S>(Some(LEFT_PANEL_WIDTH), None).child(panel))
+            .child(edge)
+            .flex(1, form_column)
+            .cross_axis(CrossAxisAlignment::Stretch),
+    )
 }
 
 #[cfg(test)]

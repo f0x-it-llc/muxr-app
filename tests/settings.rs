@@ -216,7 +216,7 @@ impl Harness {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             any(Stack(vec![
-                settings_page(screen_nav),
+                any(settings_page(screen_nav)),
                 any(navigator(&overlay_nav, || {
                     // Full-bleed and childless — see the module docs.
                     any(SizedBox::<AppState>(

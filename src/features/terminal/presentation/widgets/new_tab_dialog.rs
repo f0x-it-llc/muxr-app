@@ -2,8 +2,8 @@
 //! **blank** field is a valid submit.
 
 use frust::{
-    Axis, ButtonStyle, CrossAxisAlignment, FlexView, Get, NavigatorController, PopResult, RwSignal,
-    Set, SizedBox, any, button, flexible, inflexible, text_input,
+    ButtonStyle, CrossAxisAlignment, Get, NavigatorController, PopResult, RwSignal, Set, SizedBox,
+    button, column, row, text_input,
 };
 use frust_glyph::{GlyphDialogView, glyph_dialog};
 
@@ -50,36 +50,28 @@ pub(crate) fn new_tab_dialog(
     .on_submit(move |_app: &mut AppState, typed: String| {
         enter_nav.pop_with_result(PopResult::of(typed.trim().to_string()));
     });
-    let buttons = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, SizedBox::<AppState>(None, None)),
-            inflexible(
-                button(NEW_TAB_CANCEL_LABEL, move |_app: &mut AppState| {
-                    cancel_nav.pop()
-                })
-                .style(ButtonStyle::Ghost)
-                .small(),
-            ),
-            inflexible(SizedBox::<AppState>(Some(NEW_TAB_ACTION_GAP), None)),
-            inflexible(
-                button(NEW_TAB_SUBMIT_LABEL, move |_app: &mut AppState| {
-                    submit_nav.pop_with_result(PopResult::of(current.trim().to_string()));
-                })
-                .style(ButtonStyle::Primary)
-                .small(),
-            ),
-        ],
-    );
-    glyph_dialog()
-        .title(NEW_TAB_TITLE)
-        .action(any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(field),
-                inflexible(SizedBox::<AppState>(None, Some(NEW_TAB_FIELD_GAP))),
-                inflexible(buttons),
-            ],
+    let buttons = row()
+        .flex(1, SizedBox::<AppState>(None, None))
+        .child(
+            button(NEW_TAB_CANCEL_LABEL, move |_app: &mut AppState| {
+                cancel_nav.pop()
+            })
+            .style(ButtonStyle::Ghost)
+            .small(),
         )
-        .cross_axis(CrossAxisAlignment::Stretch)))
+        .child(SizedBox::<AppState>(Some(NEW_TAB_ACTION_GAP), None))
+        .child(
+            button(NEW_TAB_SUBMIT_LABEL, move |_app: &mut AppState| {
+                submit_nav.pop_with_result(PopResult::of(current.trim().to_string()));
+            })
+            .style(ButtonStyle::Primary)
+            .small(),
+        );
+    glyph_dialog().title(NEW_TAB_TITLE).action(
+        column()
+            .child(field)
+            .child(SizedBox::<AppState>(None, Some(NEW_TAB_FIELD_GAP)))
+            .child(buttons)
+            .cross_axis(CrossAxisAlignment::Stretch),
+    )
 }

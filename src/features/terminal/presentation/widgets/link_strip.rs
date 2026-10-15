@@ -1,7 +1,7 @@
 //! The card's link strip — the one band between the status row and the body
 //! that says a live `muxrd` session is not currently healthy.
 
-use frust::{AnyView, any, button};
+use frust::{View, button};
 
 use crate::features::terminal::domain::feed::LinkStatus;
 use crate::ui::palette::{Palette, active_theme, inked};
@@ -32,23 +32,23 @@ pub(crate) fn link_strip(
     link: Option<LinkStatus>,
     colors: &Palette,
     ink: &CardInk,
-) -> Option<AnyView<TerminalState>> {
-    let (message, action): (&str, Option<AnyView<TerminalState>>) = match link? {
+) -> Option<impl View<TerminalState>> {
+    let (message, action) = match link? {
         LinkStatus::Idle | LinkStatus::Connected => return None,
         LinkStatus::Reconnecting => (LINK_RECONNECTING, None),
         LinkStatus::Disconnected => (
             LINK_DISCONNECTED,
-            Some(any(button(LINK_RETRY, |state: &mut TerminalState| {
+            Some(button(LINK_RETRY, |state: &mut TerminalState| {
                 if let Some(session) = state.live.as_ref() {
                     session.retry();
                 }
-            }))),
+            })),
         ),
         LinkStatus::Closed => (
             LINK_CLOSED,
-            Some(any(button(LINK_LEAVE, |state: &mut TerminalState| {
+            Some(button(LINK_LEAVE, |state: &mut TerminalState| {
                 state.actions.app_nav.pop();
-            }))),
+            })),
         ),
     };
     // Resolved only once there is a strip to build — a silent `build` stays cheap.
