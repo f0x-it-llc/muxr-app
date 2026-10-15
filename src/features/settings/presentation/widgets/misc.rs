@@ -3,7 +3,7 @@
 //! closing `Disconnect` action.
 
 use frust::{
-    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, any, button, divider, flexible,
+    AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, View, any, button, divider, flexible,
     inflexible, text,
 };
 use frust_glyph::toggle;
@@ -13,7 +13,8 @@ use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
 use super::rows::{
-    MARK_BELL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, column, h_gap, mark_tile, row,
+    MARK_BELL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, centered_row, h_gap, mark_tile,
+    stretch_column,
 };
 
 /// `.disconnect-btn{margin:20px 16px 4px}`.
@@ -39,35 +40,36 @@ pub(super) fn bell_notifications_row(
     on: bool,
     colors: &Palette,
     on_toggle: impl Fn(&mut SettingsState) + 'static,
-) -> AnyView<SettingsState> {
+) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     let theme = active_theme();
-    let toggle_view = any(toggle::<SettingsState, _>(
-        on,
-        move |state: &mut SettingsState, _requested: bool| on_toggle(state),
-    )
-    .label("bell notifications"));
-    let label_column = column(vec![
-        any(text("bell notifications").style(inked(&theme.type_scale.label_large, colors.fg))),
-        any(SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP))),
-        any(text(BELL_VALUE).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
-    ]);
+    let toggle_view =
+        toggle::<SettingsState, _>(on, move |state: &mut SettingsState, _requested: bool| {
+            on_toggle(state)
+        })
+        .label("bell notifications");
+    let label_column = stretch_column((
+        text("bell notifications").style(inked(&theme.type_scale.label_large, colors.fg)),
+        SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP)),
+        text(BELL_VALUE).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+    ));
     let children = vec![
         inflexible(mark_tile(MARK_BELL, colors)),
         h_gap(ROW_GAP),
-        flexible(1, any(label_column)),
+        flexible(1, label_column),
         h_gap(ROW_GAP),
         inflexible(toggle_view),
     ];
 
     // No fill, so this composes as plain content over a trailing
     // `frust::divider` — see `widgets::rows`' own doc.
-    let box_ = column(vec![
-        any(Padding(
+    let box_ = stretch_column((
+        Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            row(children),
-        )),
-        any(divider(colors.rule)),
-    ]);
+            centered_row(children),
+        ),
+        divider(colors.rule),
+    ));
 
     any(box_)
 }
@@ -75,8 +77,8 @@ pub(super) fn bell_notifications_row(
 /// The screen's last element: a full-width outlined error-hued action.
 /// `ButtonStyle::Danger` *is* the mock's `.disconnect-btn` (transparent
 /// fill, error hairline, error ink).
-pub(in super::super) fn disconnect_button() -> AnyView<SettingsState> {
-    any(Padding(
+pub(in super::super) fn disconnect_button() -> impl View<SettingsState> {
+    Padding(
         EdgeInsets {
             left: ROW_PAD_X,
             top: DISCONNECT_MARGIN_TOP,
@@ -87,5 +89,5 @@ pub(in super::super) fn disconnect_button() -> AnyView<SettingsState> {
             pages::open_disconnect_dialog(state)
         })
         .style(ButtonStyle::Danger),
-    ))
+    )
 }

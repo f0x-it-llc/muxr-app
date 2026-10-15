@@ -108,24 +108,25 @@ pub fn auto_release_ms() -> f64 {
 ///   the band beneath it; keeps input here past the landing, until the
 ///   unmount.
 /// - `done` — set `true` exactly once, when the sequence is over.
-pub fn loading_sequence<State: 'static>(
+pub fn loading_sequence<State: 'static, A: View<State>>(
     seed: u64,
     tone: Color,
     pieces: Vec<AnyView<State>>,
-    assemble: impl FnOnce(Vec<AnyView<State>>) -> AnyView<State>,
+    assemble: impl FnOnce(Vec<AnyView<State>>) -> A,
     released: bool,
     stale: bool,
     done: RwSignal<bool>,
-) -> AnyView<State> {
+) -> AnyView<State> // erasure: keep accumulator into Vec<AnyView>
+{
     let cell = Rc::new(Cell::new(0.0));
     let piece_count = pieces.len();
     let staggered = pieces
         .into_iter()
         .enumerate()
-        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece)))
+        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece))) // erasure: keep accumulator into Vec<AnyView>
         .collect();
     any(LoadingView {
-        rain: any(super::rain::rain::<State>(seed).clock_cell(Rc::clone(&cell))),
+        rain: super::rain::rain::<State>(seed).clock_cell(Rc::clone(&cell)),
         assembly: assemble(staggered),
         cell,
         piece_count,
@@ -137,9 +138,9 @@ pub fn loading_sequence<State: 'static>(
 }
 
 /// The declarative half of the loading rain. See [`loading_sequence`].
-pub struct LoadingView<State: 'static> {
-    rain: AnyView<State>,
-    assembly: AnyView<State>,
+pub struct LoadingView<R, A> {
+    rain: R,
+    assembly: A,
     /// The rain-local clock this widget writes and the rain pod reads.
     cell: Rc<Cell<f64>>,
     piece_count: usize,
@@ -173,7 +174,7 @@ pub struct LoadingWidget {
     done: RwSignal<bool>,
 }
 
-impl<State: 'static> View<State> for LoadingView<State> {
+impl<State: 'static, R: View<State>, A: View<State>> View<State> for LoadingView<R, A> {
     type Element = LoadingWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> LoadingWidget {
@@ -343,8 +344,8 @@ impl Widget for LoadingWidget {
 
 #[cfg(test)]
 mod tests {
-    use frust::SizedBox;
     use frust::authoring::{PointerButton, PointerEvent, PointerPhase, ScrollDelta};
+    use frust::{SizedBox, SizedBoxView};
 
     use super::*;
 
@@ -353,10 +354,14 @@ mod tests {
 
     /// A view whose children answer nothing, so a rebuild's flags are the
     /// overlay's own and not a child's.
-    fn inert_view(released: bool, tone: Color, stale: bool) -> LoadingView<()> {
+    fn inert_view(
+        released: bool,
+        tone: Color,
+        stale: bool,
+    ) -> LoadingView<SizedBoxView<()>, SizedBoxView<()>> {
         LoadingView {
-            rain: any(SizedBox::<()>(None, None)),
-            assembly: any(SizedBox::<()>(None, None)),
+            rain: SizedBox::<()>(None, None),
+            assembly: SizedBox::<()>(None, None),
             cell: Rc::new(Cell::new(0.0)),
             piece_count: 1,
             tone,

@@ -344,21 +344,21 @@ impl RevokeAnimations {
 /// Wrap a revoking row in its collapse: opacity and height driven together off
 /// the same `ratio`, as in the catalog. See the [module docs](self) for why the
 /// height is measured rather than transcribed.
-pub(super) fn collapsing(ratio: f64, row: AnyView<SettingsState>) -> AnyView<SettingsState> {
-    any(AnimatedOpacity(
+pub(super) fn collapsing(ratio: f64, row: impl View<SettingsState>) -> impl View<SettingsState> {
+    AnimatedOpacity(
         ratio,
         CollapseView {
             child: row,
             ratio: ratio.clamp(0.0, 1.0),
         },
     )
-    .timing(ZERO))
+    .timing(ZERO)
 }
 
 /// The declarative half of the collapse: `child` at its natural height, this
 /// box at `ratio` of it.
-struct CollapseView<State: 'static> {
-    child: AnyView<State>,
+struct CollapseView<V> {
+    child: V,
     ratio: f64,
 }
 
@@ -368,7 +368,7 @@ struct CollapseWidget {
     ratio: f64,
 }
 
-impl<State: 'static> View<State> for CollapseView<State> {
+impl<State: 'static, V: View<State>> View<State> for CollapseView<V> {
     type Element = CollapseWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CollapseWidget {
@@ -479,7 +479,8 @@ impl Widget for FrameTickerWidget {
 
 /// Mount a [`FrameTicker`] — call only while the caller's own row still needs
 /// another frame ([`ScramblePose::running`]); the widget itself just asks.
-pub(super) fn frame_ticker() -> AnyView<SettingsState> {
+pub(super) fn frame_ticker() -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
     any(FrameTicker)
 }
 

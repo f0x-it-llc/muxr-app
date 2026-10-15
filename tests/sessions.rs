@@ -165,7 +165,7 @@ impl Harness {
                 // (route stack + overlay host, two in production —
                 // `AppState::nav`/`overlays`), keeping every overlay a page of
                 // the one mounted navigator, drivable and locatable here.
-                sessions_page(screen_nav, logic_nav.clone()),
+                any(sessions_page(screen_nav, logic_nav.clone())),
                 any(navigator(&overlay_nav, || {
                     // Full-bleed and childless — see the module docs.
                     any(SizedBox::<AppState>(

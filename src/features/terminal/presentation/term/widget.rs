@@ -623,6 +623,8 @@ impl Widget for TerminalGridWidget {
             // The root unwraps a contact into `Pointer` before any widget sees
             // it, and the grid has no pinch gesture: a scale bubbles past it.
             InputEvent::PointerContact { .. } | InputEvent::Scale(_) => EventResult::Ignored,
+            // Only desktop shells emit file drops; the grid accepts none.
+            InputEvent::FileDrop(_) => EventResult::Ignored,
         }
     }
 

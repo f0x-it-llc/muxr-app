@@ -1,10 +1,10 @@
 //! The stashed-pairing chrome piece 6's CTA and the trust selector share: what
 //! a scanned QR contributes to the form while it waits for an explicit connect.
 
-use frust::{AnyView, Theme, With, any, flexible, inflexible, text};
+use frust::{Theme, View, With, flexible, inflexible, text};
 use frust_glyph::{BadgeVariant, badge};
 
-use super::{Live, h_gap, row};
+use super::{Live, centered_row, h_gap};
 use crate::features::connect::domain::entities::PairingTrust;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
@@ -58,17 +58,14 @@ pub(super) fn pairing_banner<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     pairing: PairingChrome,
-) -> AnyView<S> {
+) -> impl View<S> {
     let mut items = vec![flexible(
         1,
-        any(text(PAIRING_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim))),
+        text(PAIRING_CAPTION).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
     )];
     if pairing.read_only {
         items.push(inflexible(h_gap::<S>(spacing::MD)));
-        items.push(inflexible(any(badge(
-            READ_ONLY_CHIP,
-            BadgeVariant::Neutral,
-        ))));
+        items.push(inflexible(badge(READ_ONLY_CHIP, BadgeVariant::Neutral)));
     }
-    any(row::<S>(items))
+    centered_row::<S>(items)
 }

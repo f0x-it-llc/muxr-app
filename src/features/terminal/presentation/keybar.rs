@@ -44,14 +44,15 @@ use std::rc::Rc;
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
-    Action, Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Role, SemanticsCtx, Size, Toggled, Vec2, View, Widget, WindowInsets, any,
-    build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
+    Action, Affine, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
+    SemanticsCtx, Size, Toggled, Vec2, View, Widget, WindowInsets, build_child, erase_callback,
+    rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
-    Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    IconSource, Padding, RwSignal, Set, SizedBox, Theme, flexible, icon, icons, inflexible, text,
+    Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView, Get,
+    GetUntracked, IconSource, Padding, RwSignal, Set, SizedBox, Theme, column, flexible, icon,
+    icons, inflexible, row, text,
 };
 
 use crate::responsive::WidthBand;
@@ -195,12 +196,12 @@ fn cap_weight(key: BarKey) -> u32 {
 ///
 /// **Reads `seam.revision` tracked**, so a latch change wakes the rebuild
 /// that repaints the armed pips. Mount from a `Component::build`.
-pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State> {
+pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> impl View<State> + use<State> {
     // Read unconditionally, before the inactive early-out, so the
     // subscription exists on the frame the bar is still hidden.
     let _revision = seam.revision.get();
     if !active {
-        return any(SizedBox::<State>(None, Some(0.0)));
+        return Either::Left(SizedBox::<State>(None, Some(0.0)));
     }
 
     let kit = Kit::new(seam);
@@ -221,7 +222,7 @@ pub fn key_bar<State: 'static>(active: bool, seam: &InputSeam) -> AnyView<State>
     }
 
     let row = FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center);
-    kit.band(BAR_PAD_X, BAR_PAD_Y, any(row))
+    Either::Right(kit.band(BAR_PAD_X, BAR_PAD_Y, row))
 }
 
 /// The keyboard's own inset a bar docks on; zero in a headless test/desktop.
@@ -245,11 +246,11 @@ pub fn tablet_key_bar<State: 'static>(
     band: WidthBand,
     fn_row: RwSignal<bool>,
     seam: &InputSeam,
-) -> AnyView<State> {
+) -> impl View<State> + use<State> {
     let _revision = seam.revision.get();
     let fn_open = fn_row.get();
     if !shown || seam.read_only() {
-        return any(SizedBox::<State>(None, Some(keyboard_inset())));
+        return Either::Left(SizedBox::<State>(None, Some(keyboard_inset())));
     }
 
     let kit = Kit::new(seam);
@@ -295,7 +296,7 @@ pub fn tablet_key_bar<State: 'static>(
         rows.push(inflexible(FlexView::new(Axis::Horizontal, keys)));
     }
     let column = FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch);
-    kit.band(spacing::BASE, spacing::SM, any(column))
+    Either::Right(kit.band(spacing::BASE, spacing::SM, column))
 }
 
 /// A Tablet cap's width: its label plus [`TABLET_CAP_PAD_X`] a side, never
@@ -307,7 +308,7 @@ fn tablet_cap_width(key: BarKey) -> f64 {
 
 /// The inverted-T: `↑` alone over `← ↓ →`, three [`TABLET_CAP_MIN_W`]
 /// columns whose two rows together span one Tablet cap.
-fn arrow_cluster<State: 'static>(kit: &Kit<'_>) -> AnyView<State> {
+fn arrow_cluster<State: 'static>(kit: &Kit<'_>) -> impl View<State> {
     let cell = |key: Option<BarKey>| {
         let slot = SizedBox::<State>(Some(TABLET_CAP_MIN_W), Some(ARROW_CAP_HEIGHT));
         inflexible(match key {
@@ -318,28 +319,28 @@ fn arrow_cluster<State: 'static>(kit: &Kit<'_>) -> AnyView<State> {
     let gap = || inflexible(SizedBox::<State>(Some(ARROW_GAP), Some(ARROW_GAP)));
     let line = |keys: [Option<BarKey>; 3]| {
         let [a, b, c] = keys.map(cell);
-        inflexible(FlexView::new(Axis::Horizontal, vec![a, gap(), b, gap(), c]))
+        inflexible(row().push(a).push(gap()).push(b).push(gap()).push(c))
     };
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            line([None, Some(BarKey::Up), None]),
-            gap(),
-            line([Some(BarKey::Left), Some(BarKey::Down), Some(BarKey::Right)]),
-        ],
-    ))
+    column()
+        .push(line([None, Some(BarKey::Up), None]))
+        .push(gap())
+        .push(line([
+            Some(BarKey::Left),
+            Some(BarKey::Down),
+            Some(BarKey::Right),
+        ]))
 }
 
 /// One group rule — a `height`-tall hairline with `margin` either side.
-fn separator<State: 'static>(colors: &Palette, height: f64, margin: f64) -> AnyView<State> {
-    any(Padding(
+fn separator<State: 'static>(colors: &Palette, height: f64, margin: f64) -> impl View<State> {
+    Padding(
         EdgeInsets::symmetric(margin, 0.0),
         BarBackdropView {
             fill: colors.outline,
             hairline: Color::TRANSPARENT,
-            child: any(SizedBox::<State>(Some(SEPARATOR_W), Some(height))),
+            child: SizedBox::<State>(Some(SEPARATOR_W), Some(height)),
         },
-    ))
+    )
 }
 
 /// What every cap of one bar build shares: the theme's tones, the latch the
@@ -369,16 +370,16 @@ impl<'a> Kit<'a> {
     /// The bar's band around `content`: fill and top hairline outside, padding
     /// inside, so full-bleed chrome reaches both screen edges, keyboard inset
     /// included.
-    fn band<State: 'static>(
+    fn band<State: 'static, Content: View<State>>(
         &self,
         pad_x: f64,
         pad_y: f64,
-        content: AnyView<State>,
-    ) -> AnyView<State> {
-        any(BarBackdropView {
+        content: Content,
+    ) -> impl View<State> + use<State, Content> {
+        BarBackdropView {
             fill: self.ink.head,
             hairline: self.ink.card_border,
-            child: any(Padding(
+            child: Padding(
                 EdgeInsets {
                     left: pad_x,
                     top: pad_y,
@@ -386,8 +387,8 @@ impl<'a> Kit<'a> {
                     bottom: pad_y + keyboard_inset(),
                 },
                 content,
-            )),
-        })
+            ),
+        }
     }
 
     /// One cap, wired to the seam: a latch key toggles, every other key sends its
@@ -455,10 +456,10 @@ impl<'a> Kit<'a> {
 /// bar's band and (fill only) the group separators. Hand-rolled rather than
 /// `frust::container`, which strokes a full rounded border rather than one
 /// square top edge.
-struct BarBackdropView<State: 'static> {
+struct BarBackdropView<V> {
     fill: Color,
     hairline: Color,
-    child: AnyView<State>,
+    child: V,
 }
 
 /// The retained half of a [`BarBackdropView`].
@@ -468,7 +469,7 @@ struct BarBackdropWidget {
     child: ChildPod,
 }
 
-impl<State: 'static> View<State> for BarBackdropView<State> {
+impl<State: 'static, V: View<State>> View<State> for BarBackdropView<V> {
     type Element = BarBackdropWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> BarBackdropWidget {
@@ -549,15 +550,15 @@ impl<State: 'static> KeyCapView<State> {
     /// The cap's content: a vector arrow, or its printed label — centred
     /// inside its shape's inset ([`CAP_PAD_X`] on Compact) that stays inside
     /// the press target and fill, so a wide label can never paint over the border.
-    fn content(&self) -> AnyView<State> {
-        let inner: AnyView<State> = match arrow_mark(self.key) {
-            Some(mark) => any(icon(mark).size(self.shape.icon).color(self.ink)),
-            None => any(text(self.key.label()).style(self.label.clone())),
+    fn content(&self) -> impl View<State> + use<State> {
+        let inner = match arrow_mark(self.key) {
+            Some(mark) => Either::Left(icon(mark).size(self.shape.icon).color(self.ink)),
+            None => Either::Right(text(self.key.label()).style(self.label.clone())),
         };
-        any(Padding(
+        Padding(
             EdgeInsets::symmetric(self.shape.pad_x, 0.0),
             Align(Alignment::CENTER, inner),
-        ))
+        )
     }
 }
 

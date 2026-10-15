@@ -41,8 +41,9 @@ use frust::authoring::{
     build_child, rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
-    Align, Alignment, AnyView, BorderStyle, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    IconSource, Padding, SizedBox, Theme, any, container, flexible, icon, icons, inflexible, text,
+    Align, Alignment, AnyView, BorderStyle, CrossAxisAlignment, EdgeInsets, Either, FlexChild,
+    FlexView, GestureDetector, IconSource, Padding, SizedBox, Theme, any, column, container,
+    flexible, icon, icons, inflexible, text,
 };
 use frust_glyph::motion::GlyphStagger;
 use frust_glyph::{
@@ -55,7 +56,7 @@ use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
-use super::util::{column, h_gap, row, sized, v_gap};
+use super::util::{centered_row, h_gap, sized, stretch_column, v_gap};
 
 /// `.space-row{border-radius:13px}` — the card level, worn by a space and by a
 /// promoted zellij tab.
@@ -368,7 +369,7 @@ pub(crate) fn tree_body<State: 'static>(
     data: &TreeData<'_>,
     actions: &TreeActions<State>,
     mode: TreeMode,
-) -> AnyView<State> {
+) -> impl View<State> + use<State> {
     let theme = active_theme();
     let tones = Tones {
         colors: Palette::from_theme(&theme),
@@ -379,24 +380,24 @@ pub(crate) fn tree_body<State: 'static>(
 
     if data.nested() {
         for space in data.spaces {
-            children.push(space_group(space, data, &tones, actions));
-            children.push(v_gap(GROUP_GAP));
+            children.push(any(space_group(space, data, &tones, actions))); // erasure: keep accumulator into Vec<AnyView>
+            children.push(any(v_gap(GROUP_GAP))); // erasure: keep accumulator into Vec<AnyView>
         }
     } else {
         for tab in data.tabs {
             let expanded = data.expanded_tab == Some(tab.key.as_str());
-            children.push(tab_group(tab, None, true, expanded, &tones, actions));
-            children.push(v_gap(GROUP_GAP));
+            children.push(any(tab_group(tab, None, true, expanded, &tones, actions))); // erasure: keep accumulator into Vec<AnyView>
+            children.push(any(v_gap(GROUP_GAP))); // erasure: keep accumulator into Vec<AnyView>
         }
         if let Some(mutations) = &actions.mutations {
             let create = Rc::clone(&mutations.on_new_tab);
-            children.push(add_row(
+            children.push(any(add_row(
                 ADD_TAB_LABEL,
                 CARD_RADIUS,
                 CARD_PAD,
                 &tones,
                 move |state: &mut State| create(state, None),
-            ));
+            )));
         }
     }
     // The space level's own create row closes the tree on either shape: nested,
@@ -404,16 +405,16 @@ pub(crate) fn tree_body<State: 'static>(
     // first space back.
     if let Some(mutations) = actions.mutations.as_ref().filter(|_| data.has_spaces) {
         let create = Rc::clone(&mutations.on_new_space);
-        children.push(add_row(
+        children.push(any(add_row(
             ADD_SPACE_LABEL,
             CARD_RADIUS,
             CARD_PAD,
             &tones,
             move |state: &mut State| create(state),
-        ));
+        )));
     }
 
-    any(column(children))
+    stretch_column(children)
 }
 
 /// The auto-expansion a landed space cascade schedules: which tab opens, and how
@@ -461,7 +462,7 @@ fn space_group<State: 'static>(
     data: &TreeData<'_>,
     tones: &Tones<'_>,
     actions: &TreeActions<State>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let expanded = data.expanded_space == Some(space.id.as_str());
     let tabs = data.tabs_of(space);
     let head = space_row(space, tabs.map(<[TabEntry]>::len), expanded, tones, actions);
@@ -470,18 +471,18 @@ fn space_group<State: 'static>(
     match tabs {
         // Read, and empty: the hint. Unread (a fetch still in flight) shows
         // nothing rather than claiming emptiness.
-        Some([]) => kids.push(empty_hint(tones)),
+        Some([]) => kids.push(any(empty_hint(tones))), // erasure: keep accumulator into Vec<AnyView>
         Some(tabs) => {
             for tab in tabs {
                 let tab_expanded = expanded && data.expanded_tab == Some(tab.key.as_str());
-                kids.push(tab_group(
+                kids.push(any(tab_group(
                     tab,
                     Some(space.id.as_str()),
                     false,
                     tab_expanded,
                     tones,
                     actions,
-                ));
+                )));
             }
         }
         None => {}
@@ -489,22 +490,24 @@ fn space_group<State: 'static>(
     if let Some(mutations) = &actions.mutations {
         let create = Rc::clone(&mutations.on_new_tab);
         let id = space.id.clone();
-        kids.push(add_row(
+        kids.push(any(add_row(
             ADD_TAB_LABEL,
             ADD_RADIUS,
             ADD_PAD,
             tones,
             move |state: &mut State| create(state, Some(&id)),
-        ));
+        )));
     }
 
-    any(column(vec![
-        head,
-        any(glyph_reveal(kids)
-            .expanded(expanded)
-            .gap(spacing::XS)
-            .guide(TABS_GUIDE)),
-    ]))
+    column()
+        .child(head)
+        .child(
+            glyph_reveal(kids)
+                .expanded(expanded)
+                .gap(spacing::XS)
+                .guide(TABS_GUIDE),
+        )
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// One tab: its row, and the reveal holding its panes. `promoted` gives a
@@ -516,7 +519,7 @@ fn tab_group<State: 'static>(
     expanded: bool,
     tones: &Tones<'_>,
     actions: &TreeActions<State>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let path = TabPath {
         space_id: space_id.map(str::to_string),
         tab_key: tab.key.clone(),
@@ -526,27 +529,29 @@ fn tab_group<State: 'static>(
     let mut kids: Vec<AnyView<State>> = tab
         .panes
         .iter()
-        .map(|pane| pane_row(pane, &path, tones, actions))
+        .map(|pane| any(pane_row(pane, &path, tones, actions))) // erasure: keep accumulator into Vec<AnyView>
         .collect();
     if let Some(mutations) = &actions.mutations {
         let create = Rc::clone(&mutations.on_new_pane);
         let path = path.clone();
-        kids.push(add_row(
+        kids.push(any(add_row(
             ADD_PANE_LABEL,
             RADIUS_FULL,
             ADD_PAD,
             tones,
             move |state: &mut State| create(state, &path),
-        ));
+        )));
     }
 
-    any(column(vec![
-        head,
-        any(glyph_reveal(kids)
-            .expanded(expanded)
-            .gap(spacing::XS)
-            .guide(PANES_GUIDE)),
-    ]))
+    column()
+        .child(head)
+        .child(
+            glyph_reveal(kids)
+                .expanded(expanded)
+                .gap(spacing::XS)
+                .guide(PANES_GUIDE),
+        )
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// `.space-row` — the accent mark, the name, the tab count when it is known, and
@@ -557,15 +562,13 @@ fn space_row<State: 'static>(
     expanded: bool,
     tones: &Tones<'_>,
     actions: &TreeActions<State>,
-) -> AnyView<State> {
-    let mark = any(
-        SizedBox::<State>(Some(SPACE_MARK_BOX), Some(SPACE_MARK_BOX)).child(Align(
-            Alignment::CENTER,
-            icon(SPACE_DIAMOND)
-                .size(SPACE_MARK_SIZE)
-                .color(tones.colors.amber),
-        )),
-    );
+) -> impl View<State> {
+    let mark = SizedBox::<State>(Some(SPACE_MARK_BOX), Some(SPACE_MARK_BOX)).child(Align(
+        Alignment::CENTER,
+        icon(SPACE_DIAMOND)
+            .size(SPACE_MARK_SIZE)
+            .color(tones.colors.amber),
+    ));
     let content = disclosure_row(
         mark,
         RowLabel {
@@ -574,7 +577,7 @@ fn space_row<State: 'static>(
             ink: tones.colors.fg,
             meta: tab_count.map(|count| count_label(count, "tab")),
         },
-        None,
+        None::<AnyView<State>>,
         expanded,
         tones,
     );
@@ -608,7 +611,7 @@ fn tab_row<State: 'static>(
     expanded: bool,
     tones: &Tones<'_>,
     actions: &TreeActions<State>,
-) -> AnyView<State> {
+) -> impl View<State> {
     // The badge's ink is the one role read straight off the scheme: `Palette`
     // carries no on-accent colour, and an amber fill's ink is that role's own
     // pair (`#241a04` under Glyph dark, the mock's own value).
@@ -617,7 +620,7 @@ fn tab_row<State: 'static>(
     } else {
         (tones.colors.raised, tones.colors.fg_dim)
     };
-    let index_badge = any(container(
+    let index_badge = container(
         SizedBox::<State>(Some(TAB_BADGE_BOX), Some(TAB_BADGE_BOX)).child(Align(
             Alignment::CENTER,
             text(tab.index.to_string()).style(sized(
@@ -628,7 +631,7 @@ fn tab_row<State: 'static>(
         )),
     )
     .fill(badge_fill)
-    .radius(TAB_BADGE_RADIUS));
+    .radius(TAB_BADGE_RADIUS);
 
     let boxed = if promoted {
         card_box(expanded, tab.active, tones)
@@ -649,10 +652,10 @@ fn tab_row<State: 'static>(
         }
     };
     let bell = (tones.mode == TreeMode::Docked && tab.has_bell).then(|| {
-        any(icon(icons::NOTIFICATIONS)
+        icon(icons::NOTIFICATIONS)
             .size(BELL_MARK)
             .color(tones.colors.warning)
-            .label(BELL_LABEL))
+            .label(BELL_LABEL)
     });
     let content = disclosure_row(
         index_badge,
@@ -705,7 +708,7 @@ fn pane_row<State: 'static>(
     path: &TabPath,
     tones: &Tones<'_>,
     actions: &TreeActions<State>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let colors = &tones.colors;
     let (fill, border, mark) = if pane.focused {
         (colors.amber_faint, colors.amber_border, colors.amber)
@@ -792,7 +795,7 @@ fn pane_row<State: 'static>(
         title: pane.title.clone(),
     };
     boxed_row(
-        row(children),
+        centered_row(children),
         boxed,
         move |state: &mut State| commit(state, &target, id, is_plugin),
         hold,
@@ -803,9 +806,9 @@ fn pane_row<State: 'static>(
 /// The row content every disclosure level shares: leading mark, ellipsized name,
 /// an optional mark after it, the optional trailing count, chevron.
 fn disclosure_row<State: 'static>(
-    leading: AnyView<State>,
+    leading: impl View<State>,
     label: RowLabel<'_>,
-    mark: Option<AnyView<State>>,
+    mark: Option<impl View<State>>,
     expanded: bool,
     tones: &Tones<'_>,
 ) -> FlexView<State> {
@@ -838,7 +841,7 @@ fn disclosure_row<State: 'static>(
     }
     children.push(h_gap(ROW_GAP));
     children.push(inflexible(glyph_chevron(expanded)));
-    row(children)
+    centered_row(children)
 }
 
 /// A row's `content` in its level's box, with its gestures: the whole box presses
@@ -849,21 +852,21 @@ fn boxed_row<State: 'static>(
     boxed: RowBox,
     on_tap: impl Fn(&mut State) + 'static,
     on_hold: Option<Press<State>>,
-    overflow: Option<AnyView<State>>,
-) -> AnyView<State> {
+    overflow: Option<impl View<State>>,
+) -> impl View<State> {
     let frame = |child: FlexView<State>| {
-        any(container(Padding(boxed.pad, child))
+        container(Padding(boxed.pad, child))
             .fill(boxed.fill)
             .radius(boxed.radius)
-            .border(boxed.border, HAIRLINE))
+            .border(boxed.border, HAIRLINE)
     };
     match overflow {
-        None => pressable(frame(content), on_tap, on_hold),
-        Some(button) => frame(row(vec![
+        None => Either::Left(pressable(frame(content), on_tap, on_hold)),
+        Some(button) => Either::Right(frame(centered_row(vec![
             flexible(1, pressable(content, on_tap, on_hold)),
             h_gap(spacing::TIGHT),
             inflexible(button),
-        ])),
+        ]))),
     }
 }
 
@@ -873,7 +876,7 @@ fn overflow<State: 'static>(
     target: RowTarget,
     actions: &TreeActions<State>,
     tones: &Tones<'_>,
-) -> Option<AnyView<State>> {
+) -> Option<impl View<State>> {
     if tones.mode != TreeMode::Docked {
         return None;
     }
@@ -892,16 +895,16 @@ fn overflow<State: 'static>(
     .icon_size(OVERFLOW_MARK)
     .box_size(Size::new(OVERFLOW_BOX, OVERFLOW_BOX))
     .radius(tones.theme.shape.small);
-    Some(any(AnchorProbe {
-        child: any(button),
+    Some(AnchorProbe {
+        child: button,
         anchor,
-    }))
+    })
 }
 
 /// Records its child's painted **window** rect into `anchor` — a Glyph menu is
 /// anchored in window space, and only paint learns where a widget landed.
-struct AnchorProbe<State: 'static> {
-    child: AnyView<State>,
+struct AnchorProbe<V> {
+    child: V,
     anchor: Rc<Cell<Rect>>,
 }
 
@@ -911,7 +914,7 @@ struct AnchorProbeWidget {
     anchor: Rc<Cell<Rect>>,
 }
 
-impl<State: 'static> View<State> for AnchorProbe<State> {
+impl<State: 'static, V: View<State>> View<State> for AnchorProbe<V> {
     type Element = AnchorProbeWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {
@@ -991,7 +994,7 @@ fn add_row<State: 'static, F: Fn(&mut State) + 'static>(
     pad: EdgeInsets,
     tones: &Tones<'_>,
     on_tap: F,
-) -> AnyView<State> {
+) -> impl View<State> {
     let plus = sized(
         &tones.theme.type_scale.body_small,
         ADD_SIZE,
@@ -1002,31 +1005,31 @@ fn add_row<State: 'static, F: Fn(&mut State) + 'static>(
         ADD_SIZE,
         tones.colors.fg_dim,
     );
-    let content = row(vec![
+    let content = centered_row(vec![
         inflexible(text(ADD_PLUS).style(plus)),
         h_gap(spacing::TIGHT),
         inflexible(text(label).style(body)),
     ]);
-    any(GestureDetector(
+    GestureDetector(
         container(Padding(pad, Align(Alignment::CENTER, content)))
             .fill(Color::TRANSPARENT)
             .radius(radius)
             .border(tones.colors.outline, HAIRLINE)
             .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF))),
     )
-    .on_tap(on_tap))
+    .on_tap(on_tap)
 }
 
 /// `.empty-hint` — italic, dim, and not a row: a space that has been read and
 /// holds nothing.
-fn empty_hint<State: 'static>(tones: &Tones<'_>) -> AnyView<State> {
+fn empty_hint<State: 'static>(tones: &Tones<'_>) -> impl View<State> {
     let mut style = sized(
         &tones.theme.type_scale.body_small,
         HINT_SIZE,
         tones.colors.fg_dim,
     );
     style.style = FontStyle::Italic;
-    any(Padding(HINT_PAD, text(EMPTY_HINT).style(style)))
+    Padding(HINT_PAD, text(EMPTY_HINT).style(style))
 }
 
 /// The row gesture pair: a tap, plus a press-and-hold when the caller supplied
@@ -1036,11 +1039,11 @@ fn pressable<State: 'static, V: View<State> + 'static>(
     child: V,
     on_tap: impl Fn(&mut State) + 'static,
     on_hold: Option<Press<State>>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let detector = GestureDetector(child).on_tap(on_tap);
     match on_hold {
-        Some(hold) => any(detector.on_long_press(move |state: &mut State| hold(state))),
-        None => any(detector),
+        Some(hold) => detector.on_long_press(move |state: &mut State| hold(state)),
+        None => detector,
     }
 }
 
@@ -1204,13 +1207,13 @@ mod tests {
 
     /// A mounted tree: the render root, its recorded callbacks, and the text
     /// context its rows need to measure.
-    struct Rig {
-        root: RenderRoot<Log, AnyView<Log>>,
+    struct Rig<V: View<Log>> {
+        root: RenderRoot<Log, V>,
         state: Log,
         tcx: TextContext,
     }
 
-    impl Rig {
+    impl<V: View<Log>> Rig<V> {
         fn new() -> Self {
             Self {
                 root: RenderRoot::new(),
@@ -1220,7 +1223,7 @@ mod tests {
         }
 
         /// One rebuild + layout + paint at `ms`, returning what was painted.
-        fn frame(&mut self, logic: &mut impl FnMut(&mut Log) -> AnyView<Log>, ms: f64) -> Rec {
+        fn frame(&mut self, logic: &mut impl FnMut(&mut Log) -> V, ms: f64) -> Rec {
             self.root.rebuild(logic, &mut self.state);
             let tcx: &mut dyn std::any::Any = &mut self.tcx;
             self.root.layout_with_text(SURFACE, tcx);
@@ -1248,7 +1251,7 @@ mod tests {
 
         /// A press held past the recognizer's threshold: two paints span it, and
         /// the release resolves as a long press rather than a tap.
-        fn hold(&mut self, logic: &mut impl FnMut(&mut Log) -> AnyView<Log>, at: Point) {
+        fn hold(&mut self, logic: &mut impl FnMut(&mut Log) -> V, at: Point) {
             self.dispatch(PointerPhase::Down, at);
             self.frame(logic, 0.0);
             self.frame(logic, HELD_MS);

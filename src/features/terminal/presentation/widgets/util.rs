@@ -5,7 +5,7 @@
 use frust::authoring::Color;
 use frust::authoring::text::{FontStyle, LineHeight, TextStyle};
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, Theme, any, inflexible,
+    AnyView, Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, Theme, View, inflexible,
 };
 
 use frust_glyph::{BadgeVariant, badge};
@@ -27,8 +27,8 @@ pub(crate) fn sized(style: &TextStyle, size: f32, color: Color) -> TextStyle {
 
 /// The read-only chip — the one place its word and variant live, so the status
 /// row and the rail cannot drift apart.
-pub(crate) fn read_only_badge<State: 'static>() -> AnyView<State> {
-    any(badge(READ_ONLY_CHIP, BadgeVariant::Info))
+pub(crate) fn read_only_badge<State: 'static>() -> impl View<State> {
+    badge(READ_ONLY_CHIP, BadgeVariant::Info)
 }
 
 /// The read-only chip's word.
@@ -40,17 +40,17 @@ pub(crate) fn h_gap<State: 'static>(gap: f64) -> FlexChild<State> {
 }
 
 /// A `gap`-tall vertical spacer, as a view.
-pub(crate) fn v_gap<State: 'static>(gap: f64) -> AnyView<State> {
-    any(SizedBox::<State>(None, Some(gap)))
+pub(crate) fn v_gap<State: 'static>(gap: f64) -> impl View<State> {
+    SizedBox::<State>(None, Some(gap))
 }
 
 /// A vertically-centred row.
-pub(crate) fn row<State: 'static>(children: Vec<FlexChild<State>>) -> FlexView<State> {
+pub(crate) fn centered_row<State: 'static>(children: Vec<FlexChild<State>>) -> FlexView<State> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A column whose children each fill the available width.
-pub(crate) fn column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+pub(crate) fn stretch_column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
     FlexView::new(
         Axis::Vertical,
         children.into_iter().map(inflexible).collect(),

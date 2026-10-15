@@ -948,7 +948,7 @@ impl ToastHarness {
     fn mount() -> Self {
         let mut harness = ToastHarness {
             root: RenderRoot::new(),
-            logic: Box::new(|_state: &mut State| toast_layer::<State>()),
+            logic: Box::new(|_state: &mut State| AnyView::new(toast_layer::<State>())),
             state: State::default(),
             tcx: TextContext::new(),
         };
@@ -1001,7 +1001,7 @@ fn the_app_root_mounts_the_toast_layer_over_the_overlay_host() {
     // through the layer `MuxrApp::build` stacks over the overlay host, with no per-screen wiring.
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut tcx = TextContext::new();
     frame(&mut root, &mut logic, &mut state, &mut tcx);
 
@@ -1028,7 +1028,7 @@ fn a_toast_surfaces_over_an_open_sheet_and_leaves_it_tappable() {
 
     let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut tcx = TextContext::new();
     frame(&mut root, &mut logic, &mut state, &mut tcx);
 

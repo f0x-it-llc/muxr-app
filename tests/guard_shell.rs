@@ -75,7 +75,7 @@ impl Harness {
         root.set_theme(Box::new(frust_glyph::baseline()));
         let mut harness = Harness {
             root,
-            logic: Box::new(|state: &mut AppState| MuxrApp.build(state)),
+            logic: Box::new(|state: &mut AppState| AnyView::new(MuxrApp.build(state))),
             state: MuxrApp.init(),
             tcx: TextContext::new(),
         };

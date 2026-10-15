@@ -1,7 +1,7 @@
 //! The overlay host's root page, and the shell page the route table hangs the
 //! three bar-bearing routes off.
 
-use frust::{AnyView, Location, NavigatorController, Stack, any, icons, navigator};
+use frust::{AnyView, Location, NavigatorController, Stack, View, any, icons, navigator};
 use frust_glyph::{TitleDirection, TitlePosition, app_bar};
 
 use crate::AppState;
@@ -27,7 +27,8 @@ pub fn root_view(
     controller: &NavigatorController<AppState>,
     initial: impl Fn() -> AnyView<AppState> + 'static,
     overlay: Option<AnyView<AppState>>,
-) -> AnyView<AppState> {
+) -> AnyView<AppState> // erasure: keep accumulator into Vec<AnyView>
+{
     let mut children = vec![any(
         navigator(controller, initial).root_route(Location::parse(CONNECT_LOCATION))
     )];
@@ -47,7 +48,7 @@ pub fn root_view(
 pub(crate) fn shell_page(
     inner: &NavigatorController<AppState>,
     connection: &ConnectionController,
-) -> AnyView<AppState> {
+) -> impl View<AppState> + use<> {
     let nav = app_nav();
     let bar = shell_bar(&nav, connection);
     let landing = nav.clone();
@@ -55,7 +56,7 @@ pub(crate) fn shell_page(
     if let Some(route) = nav.landing_route() {
         pages = pages.root_route(route);
     }
-    any(frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar))
+    frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar)
 }
 
 /// The Glyph app bar for whatever route the inner navigator has on top.
@@ -66,7 +67,7 @@ pub(crate) fn shell_page(
 /// request. Suppressing rather than hiding is the scaffold's own idiom —
 /// `app_bar_opt(None)` hands the body the bar's band, which is exactly what a
 /// fullscreen terminal is asking for.
-fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<AnyView<AppState>> {
+fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<AppState>> {
     let state = nav.bar();
     let meta = state.meta?;
     if state.fullscreen {
@@ -84,30 +85,30 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<AnyView<App
         BarLeading::Brand => bar.leading(brand_leading()),
         BarLeading::Back => {
             let nav = nav.clone();
-            bar.leading(any(bar_icon(
+            bar.leading(bar_icon(
                 icons::CHEVRON_LEFT,
                 BACK_LABEL,
                 move |_state: &mut AppState| nav.pop(),
-            )))
+            ))
         }
     };
     let actions = match meta.action {
         Some(BarAction::Settings) => {
             let nav = nav.clone();
-            vec![any(bar_icon(
+            vec![bar_icon(
                 icons::SETTINGS,
                 SETTINGS_LABEL,
                 move |_state: &mut AppState| nav.push(SETTINGS_ROUTE),
-            ))]
+            )]
         }
         // Forward only: the terminal feature owns its own menu — its entries,
         // its anchor rect and every action they run.
-        Some(BarAction::TerminalMenu) => vec![any(bar_icon(
+        Some(BarAction::TerminalMenu) => vec![bar_icon(
             icons::MORE_VERT,
             TERMINAL_MENU_LABEL,
             open_terminal_menu,
-        ))],
+        )],
         None => Vec::new(),
     };
-    Some(any(bar.actions(actions)))
+    Some(bar.actions(actions))
 }

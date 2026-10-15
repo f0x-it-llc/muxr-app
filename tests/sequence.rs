@@ -310,13 +310,13 @@ fn mount_sequence_on(
     let art = decoded_icon();
     let done = RwSignal::new(false);
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
-        splash_sequence(
+        AnyView::new(splash_sequence(
             art.clone(),
             7,
             connect_pieces(&frust_glyph::baseline(), &saved),
             connect_layout,
             done,
-        )
+        ))
     };
     let frames = drive_clock(clock, &mut logic, &mut state, theme(reduce_motion));
     (frames, done)
@@ -434,13 +434,13 @@ fn a_tablet_window_assembles_the_tablet_screen_rather_than_the_phone_column() {
     let baseline = frust_glyph::baseline();
     let mut logic = move |_: &mut AppState| -> AnyView<AppState> {
         let assemble_theme = baseline.clone();
-        splash_sequence(
+        AnyView::new(splash_sequence(
             art.clone(),
             7,
             tablet_splash_pieces(&baseline, &saved, true),
             move |pieces| tablet_splash_layout(&assemble_theme, true, pieces),
             done,
-        )
+        ))
     };
     let metrics = support::metrics_at(FULL_TABLET.width, FULL_TABLET.height);
     let frames = support::mount_with_metrics(Some(metrics), || {
@@ -726,7 +726,7 @@ fn the_reduced_fallback_holds_the_static_icon_then_cues() {
         if done.get() {
             any(page_backdrop::<AppState>())
         } else {
-            reduced_splash(art.clone(), done)
+            any(reduced_splash(art.clone(), done))
         }
     };
     let frames = drive(
@@ -774,7 +774,7 @@ fn the_cold_start_overlay_unmounts_onto_an_identical_connect_screen() {
     let _ambient = setup();
 
     let mut state = MuxrApp.init();
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let frames = drive(
         &mut logic,
         &mut state,
@@ -821,7 +821,7 @@ fn a_second_launch_decision_in_the_same_process_never_replays_the_splash() {
     // Whichever of these claimed the process's splash, the *second* must not play — the
     // once-per-process rule, observed end to end. Both are actually *built*: the claim is spent on
     // a launch's first build, not `init` (`AppState::splash_plan`), so an unbuilt app spends none.
-    let mut logic = |s: &mut AppState| MuxrApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
     let mut first = MuxrApp.init();
     drive(&mut logic, &mut first, theme(false), 2);
 

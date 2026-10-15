@@ -23,10 +23,10 @@ use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::text::FontStyle;
 use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, GetUntracked,
-    IconData, NavigatorController, PopResult, RwSignal, Set, SystemUiMode, WindowMetrics, any,
-    component, container, flexible, icons, inflexible, on_cleanup, scroll_view, set_system_ui_mode,
-    spawn_local, text, use_context,
+    Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView, Get, GetUntracked, IconData,
+    NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics, column,
+    component, container, flexible, icons, inflexible, on_cleanup, row, scroll_view,
+    set_system_ui_mode, spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
 
@@ -63,7 +63,7 @@ use super::widgets::side_sheet_tree::{
     auto_expand_after_cascade, tree_body,
 };
 use super::widgets::status::{TerminalMenuChoice, status_row, terminal_menu, terminal_menu_choice};
-use super::widgets::util::{column, h_gap, row, sized, v_gap};
+use super::widgets::util::{centered_row, h_gap, sized, stretch_column, v_gap};
 
 /// How long the sheet stays up after a **pane row** is tapped, so the selection
 /// visibly moves before it closes — `setTimeout(closeSheet, 260)` in the mock. A
@@ -114,8 +114,8 @@ const _: () = {
 
 /// The Terminal screen's route entry point: a `Component` under the outer
 /// [`AppState`], so its `init` runs under a real reactive `Owner`.
-pub fn terminal_page(overlays: NavigatorController<AppState>) -> AnyView<AppState> {
-    any(component(TerminalScreen { overlays }))
+pub fn terminal_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
+    component(TerminalScreen { overlays })
 }
 
 /// The Terminal screen `Component`. Stateless configuration — everything
@@ -387,7 +387,7 @@ impl Component for TerminalScreen {
     /// press handler: `build` runs under this screen's `Owner`, which is
     /// what binds `spawn_feed_pump`'s/`use_interval`'s `on_cleanup` — a
     /// press handler has no owner at all on desktop.
-    fn build(&self, state: &mut TerminalState) -> AnyView<TerminalState> {
+    fn build(&self, state: &mut TerminalState) -> impl View<TerminalState> {
         // Owned, not borrowed: the live-pane entry below needs `&mut state`.
         let controller = Arc::clone(&state.actions.controller);
 
@@ -535,7 +535,7 @@ impl Component for TerminalScreen {
         };
 
         // The card's body: the mock transcript, or the live grid once entered.
-        let body: AnyView<TerminalState> = match state.live.as_ref() {
+        let body = match state.live.as_ref() {
             Some(session) => {
                 // Tracked: the pump's one write per wake is what repaints the
                 // live pane (`term`'s ~30 Hz coalescing contract).
@@ -566,13 +566,13 @@ impl Component for TerminalScreen {
                 if let Some(sink) = demo_copy_sink() {
                     chip = chip.copy_sink(sink);
                 }
-                any(term::terminal_surface(
+                Either::Left(term::terminal_surface(
                     session.selection.clone(),
                     grid,
                     chip,
                 ))
             }
-            None => card_body(lines, epoch, &ink),
+            None => Either::Right(card_body(lines, epoch, &ink)),
         };
 
         // The link strip sits between the status row and the body, and only when
@@ -600,27 +600,24 @@ impl Component for TerminalScreen {
         let card =
             FlexView::new(Axis::Vertical, card_children).cross_axis(CrossAxisAlignment::Stretch);
 
-        let stage: AnyView<TerminalState> = any(super::chrome::terminal_stage(
-            card,
-            fullscreen,
-            gutters,
-            ink.card,
-            ink.card_border,
-        ));
+        let stage =
+            super::chrome::terminal_stage(card, fullscreen, gutters, ink.card, ink.card_border);
 
         // The page tone stays **outside** the stage so it fills the whole surface,
         // bar band included: the bar slides in over it, and a page that stopped at
         // the clearance would flash the shell's clear colour through the gap.
-        let page: AnyView<TerminalState> = any(container(stage).fill(colors.void));
+        let page = container(stage).fill(colors.void);
         let page = if tablet {
             let mini = fullscreen || !responsive.is_full();
             let rail = rail_view(&state.actions, mini, fullscreen, read_only, link);
-            any(
-                FlexView::new(Axis::Horizontal, vec![inflexible(rail), flexible(1, page)])
+            Either::Left(
+                row()
+                    .child(rail)
+                    .flex(1, page)
                     .cross_axis(CrossAxisAlignment::Stretch),
             )
         } else {
-            page
+            Either::Right(page)
         };
 
         // Key bar mount: a fixed slot beneath the card, live-mode only. The `None`
@@ -631,7 +628,12 @@ impl Component for TerminalScreen {
                     // Persistent behind the menu toggle; read-only never shows it.
                     let shown = controller.key_bar_visible.get() && !read_only;
                     let fn_row = controller.fn_row_visible;
-                    keybar::tablet_key_bar(shown, responsive.band, fn_row, &session.input)
+                    Either::Left(keybar::tablet_key_bar(
+                        shown,
+                        responsive.band,
+                        fn_row,
+                        &session.input,
+                    ))
                 } else {
                     // The keyboard's reported height is the app's one proxy for "the
                     // IME is up" — this screen has no other text input, so it mirrors
@@ -639,14 +641,16 @@ impl Component for TerminalScreen {
                     let keyboard_up = use_context::<WindowInsets>()
                         .map(|insets| insets.view_insets.bottom > 0.0)
                         .unwrap_or(false);
-                    keybar::key_bar(keyboard_up, &session.input)
+                    Either::Right(keybar::key_bar(keyboard_up, &session.input))
                 };
-                any(
-                    FlexView::new(Axis::Vertical, vec![flexible(1, page), inflexible(bar)])
+                Either::Left(
+                    column()
+                        .flex(1, page)
+                        .child(bar)
                         .cross_axis(CrossAxisAlignment::Stretch),
                 )
             }
-            None => page,
+            None => Either::Right(page),
         }
     }
 }
@@ -1208,20 +1212,20 @@ impl Actions {
 
 /// The side sheet's body: [`tree_view`] in its sheet mode, scrolling, and a
 /// pane commit closing the sheet behind it.
-fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
+fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> + use<> {
     // This body is a page of the **root** overlay host, so it can outlive the
     // screen that pushed it (a guard bounce off `/terminal` leaves the sheet
     // up). One untracked liveness check ahead of the tracked reads below, which
     // panic on a disposed owner; nothing follows it that could dispose one.
     if !actions.controller.signals_alive() {
-        return any(column(Vec::new()));
+        return Either::Left(stretch_column(Vec::new()));
     }
     // The side sheet hands its body slot a tight extent and clips whatever
     // overflows it — the tree itself scrolls no more than `tree_body` on its
     // own does, so a session with many spaces/tabs/panes stays fully
     // reachable rather than running off the bottom of the panel.
     let after = AfterCommit::Close(sheet.clone());
-    any(scroll_view(tree_view(actions, TreeMode::Sheet, after)))
+    Either::Right(scroll_view(tree_view(actions, TreeMode::Sheet, after)))
 }
 
 /// The tree over the controller's tracked signals — the [`TreeData`] borrow
@@ -1231,7 +1235,7 @@ pub(super) fn tree_view<S: 'static>(
     actions: &Actions,
     mode: TreeMode,
     after: AfterCommit,
-) -> AnyView<S> {
+) -> impl View<S> + use<S> {
     let controller = &actions.controller;
     let spaces = controller.spaces.get();
     let tabs = controller.tabs.get();
@@ -1331,7 +1335,7 @@ fn tree_actions<S: 'static>(actions: &Actions, after: AfterCommit, docked: bool)
 /// orphaned footer's rename would seed itself off a disposed signal and its
 /// detach would pop a stack no longer carrying `/terminal`. Quiet no-ops
 /// instead — the tree above them has already emptied itself.
-fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
+fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState> + use<> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
 
@@ -1378,15 +1382,15 @@ fn sheet_footer(actions: &Actions, sheet: &SheetHandle) -> AnyView<AppState> {
         )
     };
 
-    any(column(vec![
-        any(text(FOOTER_TIP).style(tip_style)),
-        v_gap(spacing::SM),
-        any(row(vec![
+    column()
+        .child(text(FOOTER_TIP).style(tip_style))
+        .child(v_gap(spacing::SM))
+        .child(centered_row(vec![
             inflexible(rename),
             h_gap(spacing::MD),
             inflexible(detach),
-        ])),
-    ]))
+        ]))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The footer icon buttons' mark size, in logical px — `connect`'s saved-server
@@ -1407,12 +1411,12 @@ fn footer_action(
     label: &'static str,
     colors: &Palette,
     on_press: impl Fn(&mut AppState) + 'static,
-) -> AnyView<AppState> {
-    any(icon_button(mark, label, on_press)
+) -> impl View<AppState> {
+    icon_button(mark, label, on_press)
         .ink(colors.fg_dim)
         .icon_size(FOOTER_ICON_SIZE)
         .box_size(Size::new(FOOTER_TARGET, FOOTER_TARGET))
-        .radius(FOOTER_TARGET / 2.0))
+        .radius(FOOTER_TARGET / 2.0)
 }
 
 #[cfg(test)]

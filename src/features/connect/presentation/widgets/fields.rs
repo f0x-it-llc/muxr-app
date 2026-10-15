@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use frust::authoring::Color;
 use frust::authoring::text::{FamilyName, FontFamily, GenericSlot, TextStyle};
-use frust::{AnyView, Get, Theme, any, text, text_input};
+use frust::{Get, Theme, View, any, text, text_input};
 
-use super::{Live, backed, column, v_gap};
+use super::{Live, backed, block_column, v_gap};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
@@ -23,7 +23,7 @@ pub fn server_url_field<S: 'static>(
     theme: &Theme,
     colors: &Palette,
     live: Option<&Live>,
-) -> AnyView<S> {
+) -> impl View<S> {
     let invalid = live.is_some_and(|live| live.controller.invalid.get());
     let value = live
         .map(|live| live.controller.url.get())
@@ -53,7 +53,11 @@ pub fn server_url_field<S: 'static>(
 /// Piece 4 — the login token, masked. Obscuring hides the rendered glyphs,
 /// not the platform IME's own suggestion strip, which still surfaces the
 /// text as it is typed (`docs/ARCHITECTURE.md`'s Planned section).
-pub fn token_field<S: 'static>(theme: &Theme, colors: &Palette, live: Option<&Live>) -> AnyView<S> {
+pub fn token_field<S: 'static>(
+    theme: &Theme,
+    colors: &Palette,
+    live: Option<&Live>,
+) -> impl View<S> {
     // `TextInputView` takes a plain `String` by value; the same display
     // surface the masking note above covers, not a new leak.
     let value = live
@@ -112,15 +116,15 @@ fn field<S: 'static>(
     value: String,
     options: FieldOptions,
     on_change: impl Fn(String) + 'static,
-) -> AnyView<S> {
+) -> impl View<S> {
     let label_ink = if options.invalid {
         colors.error
     } else {
         colors.fg_dim
     };
     let mut children = vec![
-        any(text(label).style(inked(&theme.type_scale.label_small, label_ink))),
-        v_gap::<S>(spacing::XS),
+        any(text(label).style(inked(&theme.type_scale.label_small, label_ink))), // erasure: keep accumulator into Vec<AnyView>
+        any(v_gap::<S>(spacing::XS)), // erasure: keep accumulator into Vec<AnyView>
         any(
             text_input::<S, _>(value, move |_state: &mut S, next: String| on_change(next))
                 .placeholder(placeholder)
@@ -130,12 +134,12 @@ fn field<S: 'static>(
         ),
     ];
     if let Some(message) = options.error {
-        children.push(v_gap::<S>(spacing::XS));
+        children.push(any(v_gap::<S>(spacing::XS))); // erasure: keep accumulator into Vec<AnyView>
         children.push(any(
             text(message).style(inked(&theme.type_scale.body_small, colors.error))
         ));
     }
-    backed(column::<S>(children), colors)
+    backed(block_column::<S, _>(children), colors)
 }
 
 /// `body_medium` re-inked, with one deliberate change to its family, applied

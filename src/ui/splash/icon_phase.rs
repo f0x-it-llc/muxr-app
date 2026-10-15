@@ -32,9 +32,9 @@
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
     Affine, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, LayoutCtx, PaintCtx, PaintScene,
-    Point, SemanticsCtx, Size, View, Widget, any, build_child, rebuild_child, teardown_child,
+    Point, SemanticsCtx, Size, View, Widget, build_child, rebuild_child, teardown_child,
 };
-use frust::{AnyView, FrameTime, Image, ImageFit, ImageSource, RwSignal, Set, Theme};
+use frust::{FrameTime, Image, ImageFit, ImageSource, ImageView, RwSignal, Set, Theme};
 
 use super::spec;
 use super::{ShapedGlyph, delta_ms, fill_size, mono_style, reduce_motion};
@@ -165,12 +165,13 @@ pub fn icon_phase<State: 'static>(art: IconArt) -> IconPhaseView<State> {
         // `Contain` on a square source in a square box is an exact fit; it
         // also degrades gracefully if the asset is ever replaced with a
         // non-square one.
-        IconArt::Image(source) => Some(any(Image(source.clone()).fit(ImageFit::Contain))),
+        IconArt::Image(source) => Some(Image(source.clone()).fit(ImageFit::Contain)),
         IconArt::Vector => None,
     };
     IconPhaseView {
         child,
         on_phase: None,
+        state: std::marker::PhantomData,
     }
 }
 
@@ -178,9 +179,11 @@ pub fn icon_phase<State: 'static>(art: IconArt) -> IconPhaseView<State> {
 pub struct IconPhaseView<State: 'static> {
     /// The `Image` child for [`IconArt::Image`]; `None` selects the vector
     /// fallback, which the widget paints itself.
-    child: Option<AnyView<State>>,
+    child: Option<ImageView>,
     /// Where to publish phase changes, if anyone is listening.
     on_phase: Option<RwSignal<IconPhase>>,
+    /// `View<State>` is generic over the app state; this view never touches it.
+    state: std::marker::PhantomData<fn() -> State>,
 }
 
 impl<State: 'static> IconPhaseView<State> {
@@ -258,7 +261,10 @@ impl<State: 'static> View<State> for IconPhaseView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> IconPhaseWidget {
         IconPhaseWidget {
-            child: self.child.as_ref().map(|child| build_child(child, ctx)),
+            child: self
+                .child
+                .as_ref()
+                .map(|child| build_child::<State, _>(child, ctx)),
             fallback_glyph: None,
             fallback_style: None,
             icon_origin: Point::ZERO,
@@ -281,17 +287,17 @@ impl<State: 'static> View<State> for IconPhaseView<State> {
             // `Image` view's own rebuild is an `Arc`-pointer check, never a
             // re-decode.
             (Some(prev_child), Some(next_child), Some(pod)) => {
-                rebuild_child(prev_child, next_child, pod, ctx)
+                rebuild_child::<State, _>(prev_child, next_child, pod, ctx)
             }
             // Art swapped between bitmap and vector mid-flight (not something
             // the orchestrator does, but the lifecycle has to be closed).
             (Some(prev_child), None, Some(pod)) => {
-                teardown_child(prev_child, pod, ctx);
+                teardown_child::<State, _>(prev_child, pod, ctx);
                 element.child = None;
                 ChangeFlags::LAYOUT | ChangeFlags::PAINT
             }
             (None, Some(next_child), _) => {
-                element.child = Some(build_child(next_child, ctx));
+                element.child = Some(build_child::<State, _>(next_child, ctx));
                 ChangeFlags::LAYOUT | ChangeFlags::PAINT
             }
             _ => ChangeFlags::NONE,
@@ -300,7 +306,7 @@ impl<State: 'static> View<State> for IconPhaseView<State> {
 
     fn teardown(&self, element: &mut IconPhaseWidget, ctx: &mut BuildCtx<'_>) {
         if let (Some(child), Some(pod)) = (&self.child, &mut element.child) {
-            teardown_child(child, pod, ctx);
+            teardown_child::<State, _>(child, pod, ctx);
         }
     }
 }

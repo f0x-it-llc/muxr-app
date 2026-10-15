@@ -10,7 +10,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use frust::{AnyView, Component, ComponentView, any, component, text, use_context};
+use frust::{Component, ComponentView, View, any, component, text, use_context};
 use frust_core::{RenderRoot, WindowMetrics};
 use frust_text::TextContext;
 use muxr::responsive::Responsive;
@@ -33,7 +33,7 @@ impl Component for Probe {
 
     fn init(&self) {}
 
-    fn build(&self, _state: &mut ()) -> AnyView<()> {
+    fn build(&self, _state: &mut ()) -> impl View<()> {
         self.builds.set(self.builds.get() + 1);
         let rule = Responsive::of(use_context::<WindowMetrics>());
         any(text(if rule.is_tablet() {

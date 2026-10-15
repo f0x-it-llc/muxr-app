@@ -26,7 +26,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::{ButtonStyle, PopResult, any, button};
+use frust::{ButtonStyle, PopResult, button};
 use frust_glyph::{glyph_dialog, show_glyph_dialog};
 
 use super::super::controller::{ConnectController, CredentialOffer, OfferPrompt};
@@ -152,22 +152,20 @@ fn offer_credential_save(
             glyph_dialog()
                 .title(title)
                 .body(body.clone())
-                .action(any(button(
-                    OFFER_DECLINE_LABEL,
-                    move |_state: &mut AppState| {
+                .action(
+                    button(OFFER_DECLINE_LABEL, move |_state: &mut AppState| {
                         decline_nav.pop_with_result(PopResult::of(false));
-                    },
+                    })
+                    .style(ButtonStyle::Ghost)
+                    .small(),
                 )
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button(
-                    OFFER_ACCEPT_LABEL,
-                    move |_state: &mut AppState| {
+                .action(
+                    button(OFFER_ACCEPT_LABEL, move |_state: &mut AppState| {
                         accept_nav.pop_with_result(PopResult::of(true));
-                    },
+                    })
+                    .style(ButtonStyle::Primary)
+                    .small(),
                 )
-                .style(ButtonStyle::Primary)
-                .small()))
         },
         // Only the accept action pops `true`; decline and every dismissal
         // route pop `false`/empty, the same answer. Both branches navigate —

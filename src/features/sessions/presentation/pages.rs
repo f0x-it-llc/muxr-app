@@ -29,10 +29,10 @@ use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
-    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox, Stack,
-    WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area, scroll_view,
-    spawn_local, use_context,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4,
+    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox,
+    Stack, View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area,
+    scroll_view, spawn_local, use_context,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
@@ -108,11 +108,11 @@ pub fn set_loading_rain_for_tests(enabled: bool) {
 pub fn sessions_page(
     controller: NavigatorController<AppState>,
     overlays: NavigatorController<AppState>,
-) -> AnyView<AppState> {
-    any(component(SessionsScreen {
+) -> impl View<AppState> {
+    component(SessionsScreen {
         nav: controller,
         overlays,
-    }))
+    })
 }
 
 /// The Sessions screen `Component`. Stateless configuration — everything
@@ -369,7 +369,7 @@ impl Component for SessionsScreen {
         }
     }
 
-    fn build(&self, state: &mut SessionsState) -> AnyView<SessionsState> {
+    fn build(&self, state: &mut SessionsState) -> impl View<SessionsState> {
         // Plain atomic, not a signal — see `BackConfirm`'s doc for why.
         let depth = state.actions.stack_depth();
         state.actions.controller.observe_depth(depth);
@@ -427,7 +427,7 @@ impl Component for SessionsScreen {
         );
         // Always a `Stack`, overlay or not: an erased child type that flips
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
-        let mut children = vec![live_scroller];
+        let mut children = vec![any(live_scroller)]; // erasure: keep accumulator into Vec<AnyView>
         if !loading_done {
             let (overlay_pieces, stale) = if settled {
                 let frozen = state
@@ -461,7 +461,7 @@ impl Component for SessionsScreen {
             ));
         }
         let strip = widgets::server_strip(info.as_ref(), beat, read_only, &colors);
-        let list = any(Stack(children));
+        let list = Stack(children);
         let mut bands = match layout {
             ListLayout::Compact { .. } => vec![inflexible(strip), flexible(1, list)],
             ListLayout::Tablet { full, .. } => {
@@ -487,10 +487,10 @@ impl Component for SessionsScreen {
         // band above this screen's body — no clearance to add here (a
         // one-time double-inset bug: the scaffold owns the band, this page
         // used to as well).
-        any(widgets::page_tone(
+        widgets::page_tone(
             FlexView::new(Axis::Vertical, bands).cross_axis(CrossAxisAlignment::Stretch),
             &colors,
-        ))
+        )
     }
 }
 
@@ -528,23 +528,24 @@ fn list_pieces(
     read_only: bool,
     colors: &Palette,
     layout: &ListLayout,
-) -> Vec<AnyView<SessionsState>> {
+) -> Vec<AnyView<SessionsState>> // erasure: keep accumulator into Vec<AnyView>
+{
     if let ListLayout::Tablet { full, selected } = layout {
         let phase = LoadPhase::of(loaded, settled);
         let selected = selected.as_deref();
         return widgets::tablet_list_pieces(sessions, phase, read_only, selected, *full, colors);
     }
     if loaded && sessions.is_empty() {
-        return vec![widgets::empty_view(read_only)];
+        return vec![any(widgets::empty_view(read_only))];
     }
     let mut pieces: Vec<AnyView<SessionsState>> = sessions
         .iter()
-        .map(|session| widgets::session_card(session, colors, CardMode::Compact))
+        .map(|session| any(widgets::session_card(session, colors, CardMode::Compact)))
         .collect();
     pieces.push(if settled {
-        widgets::new_session_row(colors, read_only)
+        any(widgets::new_session_row(colors, read_only))
     } else {
-        widgets::loading_view(colors)
+        any(widgets::loading_view(colors))
     });
     pieces
 }
@@ -555,38 +556,42 @@ fn list_view(
     pieces: Vec<AnyView<SessionsState>>,
     layout: &ListLayout,
     scroll: bool,
-) -> AnyView<SessionsState> {
-    let list = match layout {
-        ListLayout::Compact { .. } => padded_list(pieces),
-        ListLayout::Tablet { .. } => widgets::tablet_list(pieces),
-    };
-    let list = if scroll { any(scroll_view(list)) } else { list };
-    match layout {
-        ListLayout::Compact { wide } => list_band(list, *wide),
-        ListLayout::Tablet { .. } => list,
+) -> impl View<SessionsState> + use<> {
+    match (layout, scroll) {
+        (ListLayout::Compact { wide }, true) => {
+            EitherOf4::A(list_band(scroll_view(padded_list(pieces)), *wide))
+        }
+        (ListLayout::Compact { wide }, false) => {
+            EitherOf4::B(list_band(padded_list(pieces), *wide))
+        }
+        (ListLayout::Tablet { .. }, true) => {
+            EitherOf4::C(scroll_view(widgets::tablet_list(pieces)))
+        }
+        (ListLayout::Tablet { .. }, false) => EitherOf4::D(widgets::tablet_list(pieces)),
     }
 }
 
 /// `pieces` as the screen's padded, [`LIST_GAP`]-spaced, stretched column.
-fn padded_list(pieces: Vec<AnyView<SessionsState>>) -> AnyView<SessionsState> {
-    any(Padding(
+fn padded_list(pieces: Vec<AnyView<SessionsState>>) -> impl View<SessionsState> {
+    Padding(
         EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
         FlexView::new(Axis::Vertical, gapped(pieces)).cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    )
 }
 
 /// The band `content` occupies: safe-area inset with its top edge off (the
 /// shell's bar already consumed that window inset), clamped and centered past
 /// [`SESSIONS_CLAMP_WIDTH`] while the strip beside it stays full-bleed.
-fn list_band(content: AnyView<SessionsState>, is_wide: bool) -> AnyView<SessionsState> {
-    let band = any(safe_area(content).top(false));
-    if !is_wide {
-        return band;
+fn list_band(content: impl View<SessionsState>, is_wide: bool) -> impl View<SessionsState> {
+    let band = safe_area(content).top(false);
+    if is_wide {
+        Either::Left(Align(
+            Alignment::CENTER,
+            SizedBox::<SessionsState>(Some(SESSIONS_CLAMP_WIDTH), None).child(band),
+        ))
+    } else {
+        Either::Right(band)
     }
-    any(Align(
-        Alignment::CENTER,
-        SizedBox::<SessionsState>(Some(SESSIONS_CLAMP_WIDTH), None).child(band),
-    ))
 }
 
 /// The list's children with a [`LIST_GAP`] spacer between consecutive ones.

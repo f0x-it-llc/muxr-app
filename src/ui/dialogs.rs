@@ -1,6 +1,4 @@
-use frust::{
-    ButtonStyle, Get, NavigatorController, PopResult, RwSignal, Set, any, button, text_input,
-};
+use frust::{ButtonStyle, Get, NavigatorController, PopResult, RwSignal, Set, button, text_input};
 use frust_glyph::{glyph_dialog, show_glyph_dialog};
 
 const CANCEL_LABEL: &str = "Cancel";
@@ -27,19 +25,20 @@ pub fn confirm_dialog<State: 'static>(
             glyph_dialog()
                 .title(title.clone())
                 .body(message.clone())
-                .action(any(button(CANCEL_LABEL, move |_state: &mut State| {
-                    cancel_nav.pop();
-                })
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button(
-                    confirm_label.clone(),
-                    move |_state: &mut State| {
-                        confirm_nav.pop_with_result(PopResult::of(true));
-                    },
+                .action(
+                    button(CANCEL_LABEL, move |_state: &mut State| {
+                        cancel_nav.pop();
+                    })
+                    .style(ButtonStyle::Ghost)
+                    .small(),
                 )
-                .style(ButtonStyle::Danger)
-                .small()))
+                .action(
+                    button(confirm_label.clone(), move |_state: &mut State| {
+                        confirm_nav.pop_with_result(PopResult::of(true));
+                    })
+                    .style(ButtonStyle::Danger)
+                    .small(),
+                )
         },
         move |state: &mut State, result: PopResult| {
             // Only the confirm action pops with a payload; every dismissal
@@ -82,25 +81,27 @@ pub fn name_input_dialog<State: 'static>(
                 // The content slot's loose-width constraints fill the panel
                 // width intrinsically (`TextInput::layout` reaches for
                 // `bc.max().width` when finite) — no stretch wrapper needed.
-                .content(any(field))
-                .action(any(button(CANCEL_LABEL, move |_state: &mut State| {
-                    cancel_nav.pop()
-                })
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button(SUBMIT_LABEL, move |_state: &mut State| {
-                    // "Disabled" here is two halves: the style below is the
-                    // visual one, this guard is the behavioral one.
-                    if can_submit {
-                        submit(&submit_nav, &current);
-                    }
-                })
-                .style(if can_submit {
-                    SUBMIT_ENABLED_STYLE
-                } else {
-                    SUBMIT_DISABLED_STYLE
-                })
-                .small()))
+                .content(field)
+                .action(
+                    button(CANCEL_LABEL, move |_state: &mut State| cancel_nav.pop())
+                        .style(ButtonStyle::Ghost)
+                        .small(),
+                )
+                .action(
+                    button(SUBMIT_LABEL, move |_state: &mut State| {
+                        // "Disabled" here is two halves: the style below is the
+                        // visual one, this guard is the behavioral one.
+                        if can_submit {
+                            submit(&submit_nav, &current);
+                        }
+                    })
+                    .style(if can_submit {
+                        SUBMIT_ENABLED_STYLE
+                    } else {
+                        SUBMIT_DISABLED_STYLE
+                    })
+                    .small(),
+                )
         },
         move |state: &mut State, result: PopResult| {
             if let Some(name) = result.take::<String>() {

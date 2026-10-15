@@ -16,8 +16,7 @@
 //! [`super::super::pages::Actions::open_manage_sheet`]).
 
 use frust::{
-    AnyView, Axis, ButtonStyle, CrossAxisAlignment, FlexView, SizedBox, any, button, inflexible,
-    text,
+    Axis, ButtonStyle, CrossAxisAlignment, FlexView, SizedBox, View, button, inflexible, text,
 };
 
 use crate::AppState;
@@ -42,7 +41,7 @@ pub(in crate::features::sessions::presentation) fn sheet_body(
     id: &str,
     name: String,
     read_only: bool,
-) -> AnyView<AppState> {
+) -> impl View<AppState> + use<> {
     let heading = sheet_heading(name);
     let rows = [
         sheet_action(actions, sheet, id, ManageAction::Attach, false),
@@ -59,15 +58,15 @@ pub(in crate::features::sessions::presentation) fn sheet_body(
         }
         children.push(inflexible(row));
     }
-    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The sheet's header: the session's own name, so a sheet opened from a
 /// long-press says *which* session it is about.
-fn sheet_heading(title: impl Into<String>) -> AnyView<AppState> {
+fn sheet_heading(title: impl Into<String>) -> impl View<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
-    any(text(title.into()).style(inked(&theme.type_scale.label_large, colors.fg)))
+    text(title.into()).style(inked(&theme.type_scale.label_large, colors.fg))
 }
 
 /// One row: a full-width, labelled action. Ordinary rows are `Secondary`;
@@ -78,7 +77,7 @@ fn sheet_row(
     destructive: bool,
     disabled: bool,
     on_press: impl Fn(&mut AppState) + 'static,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let style = if disabled {
         ButtonStyle::Ghost
     } else if destructive {
@@ -86,12 +85,12 @@ fn sheet_row(
     } else {
         ButtonStyle::Secondary
     };
-    any(button(label.into(), move |state: &mut AppState| {
+    button(label.into(), move |state: &mut AppState| {
         if !disabled {
             on_press(state);
         }
     })
-    .style(style))
+    .style(style)
 }
 
 /// The three things the management sheet can do to a session.
@@ -127,7 +126,7 @@ fn sheet_action(
     id: &str,
     action: ManageAction,
     disabled: bool,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let actions = actions.clone();
     let sheet = sheet.clone();
     let id = id.to_string();
