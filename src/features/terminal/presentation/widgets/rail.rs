@@ -219,7 +219,7 @@ pub(crate) fn mini_rail<State: 'static>(
         any(tooltip(target, label.to_string())) // erasure: keep accumulator into Vec<AnyView>
     };
 
-    let mut items: Vec<AnyView<State>> = Vec::new();
+    let mut items: Vec<AnyView<State>> = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
     for space in data.spaces {
         let open = Rc::clone(&actions.on_space);
         let id = space.id.clone();
@@ -232,7 +232,7 @@ pub(crate) fn mini_rail<State: 'static>(
         ));
     }
     if !data.spaces.is_empty() {
-        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors))); // erasure: keep accumulator into Vec<AnyView>
+        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors)));
     }
     for tab in data.tabs {
         let active = tab.key == data.active_tab;
@@ -251,10 +251,10 @@ pub(crate) fn mini_rail<State: 'static>(
         )
         .on_tap(move |state: &mut State| open(state, &target));
         let cell = labelled_button(tab.label.clone(), cell);
-        items.push(any(tooltip(cell, tab.label.clone()))); // erasure: keep accumulator into Vec<AnyView>
+        items.push(any(tooltip(cell, tab.label.clone())));
     }
     if let Some(tab) = data.tabs.iter().find(|tab| tab.key == data.active_tab) {
-        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors))); // erasure: keep accumulator into Vec<AnyView>
+        items.push(any(rule(Some(MINI_SEP_WIDTH), Some(HAIRLINE), &colors)));
         for pane in &tab.panes {
             let open = Rc::clone(&actions.on_pane);
             let (key, target) = (tab.key.clone(), pane.clone());

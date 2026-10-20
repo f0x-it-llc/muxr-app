@@ -119,9 +119,9 @@ fn trust_selector<S: 'static>(
     live: Option<&Live>,
 ) -> impl View<S> + use<S> {
     let selected = live.map_or(TrustMode::System, |live| live.controller.trust_mode.get());
-    let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS
+    let mut rows: Vec<AnyView<S>> = TRUST_OPTIONS // erasure: keep accumulator into Vec<AnyView>
         .iter()
-        .map(|&mode| any(trust_row(theme, colors, mode, selected == mode, live))) // erasure: keep accumulator into Vec<AnyView>
+        .map(|&mode| any(trust_row(theme, colors, mode, selected == mode, live)))
         .collect();
     if !TRUST_OPTIONS.contains(&selected) {
         let caption = if pairing_chrome(live).is_some() {

@@ -512,6 +512,17 @@ fn both_platforms_return_paths_send_carriage_return() {
 }
 
 #[test]
+fn a_hardware_f2_sends_the_ss3_sequence() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+
+    mounted.key(Key::Named(NamedKey::F2));
+    assert_eq!(mounted.drain_hex(), "1b4f51");
+}
+
+#[test]
 fn a_return_leaves_no_newline_behind_and_the_next_key_starts_clean() {
     let _serial = serial();
     let _owner = setup();

@@ -372,10 +372,11 @@ impl BarKey {
 }
 
 /// The bytes a focus-routed [`NamedKey`] sends — the desktop preview's real
-/// keyboard, and Android's `IME_ACTION_DONE`-as-`Enter`. An exhaustive match,
-/// so a new [`NamedKey`] variant is a compile error, not a silently dropped
-/// key. Shares its sequences with [`BarKey`]: the bar's `↑` and a physical
-/// `↑` send the same three bytes, and the same six shifted ones.
+/// keyboard, and Android's `IME_ACTION_DONE`-as-`Enter`. [`NamedKey`] is
+/// `non_exhaustive` since frust 0.6.3, so an unmapped key (F13–F24, and any
+/// future one) sends nothing. Shares its sequences with [`BarKey`]: the bar's
+/// `↑` and a physical `↑` send the same three bytes, and the same six shifted
+/// ones; F1–F12 share [`F_KEYS`] with the bar's `F(n)`.
 /// `Copy`/`Cut`/`Paste` deliberately send **nothing** — not a silent drop:
 /// the shell already decodes that hardware key onto `InputEvent::EditCommand`
 /// before a widget sees `InputEvent::Key`, so a byte here would double-handle
@@ -395,6 +396,19 @@ pub fn named_key_bytes(key: NamedKey) -> &'static [u8] {
         NamedKey::Tab => TAB,
         NamedKey::Insert => INSERT,
         NamedKey::Copy | NamedKey::Cut | NamedKey::Paste => &[],
+        NamedKey::F1 => F_KEYS[0][PLAIN],
+        NamedKey::F2 => F_KEYS[1][PLAIN],
+        NamedKey::F3 => F_KEYS[2][PLAIN],
+        NamedKey::F4 => F_KEYS[3][PLAIN],
+        NamedKey::F5 => F_KEYS[4][PLAIN],
+        NamedKey::F6 => F_KEYS[5][PLAIN],
+        NamedKey::F7 => F_KEYS[6][PLAIN],
+        NamedKey::F8 => F_KEYS[7][PLAIN],
+        NamedKey::F9 => F_KEYS[8][PLAIN],
+        NamedKey::F10 => F_KEYS[9][PLAIN],
+        NamedKey::F11 => F_KEYS[10][PLAIN],
+        NamedKey::F12 => F_KEYS[11][PLAIN],
+        _ => &[],
     }
 }
 
@@ -454,6 +468,29 @@ mod tests {
         assert!(shifted_sequence(ESC).is_none());
         assert!(shifted_sequence(HOME).is_none(), "nor Home/End");
         assert!(shifted_sequence(END).is_none());
+    }
+
+    #[test]
+    fn hardware_f_keys_send_the_bars_plain_forms() {
+        let keys = [
+            NamedKey::F1,
+            NamedKey::F2,
+            NamedKey::F3,
+            NamedKey::F4,
+            NamedKey::F5,
+            NamedKey::F6,
+            NamedKey::F7,
+            NamedKey::F8,
+            NamedKey::F9,
+            NamedKey::F10,
+            NamedKey::F11,
+            NamedKey::F12,
+        ];
+        for (row, key) in F_KEYS.iter().zip(keys) {
+            assert_eq!(named_key_bytes(key), row[PLAIN], "{key:?}");
+        }
+        assert!(named_key_bytes(NamedKey::F13).is_empty());
+        assert!(named_key_bytes(NamedKey::F24).is_empty());
     }
 
     /// One F-key's expected forms: `(key, plain, Shift, Alt, Ctrl)`.
