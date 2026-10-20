@@ -376,18 +376,18 @@ pub(crate) fn tree_body<State: 'static>(
         theme: &theme,
         mode,
     };
-    let mut children: Vec<AnyView<State>> = Vec::new();
+    let mut children: Vec<AnyView<State>> = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
 
     if data.nested() {
         for space in data.spaces {
-            children.push(any(space_group(space, data, &tones, actions))); // erasure: keep accumulator into Vec<AnyView>
-            children.push(any(v_gap(GROUP_GAP))); // erasure: keep accumulator into Vec<AnyView>
+            children.push(any(space_group(space, data, &tones, actions)));
+            children.push(any(v_gap(GROUP_GAP)));
         }
     } else {
         for tab in data.tabs {
             let expanded = data.expanded_tab == Some(tab.key.as_str());
-            children.push(any(tab_group(tab, None, true, expanded, &tones, actions))); // erasure: keep accumulator into Vec<AnyView>
-            children.push(any(v_gap(GROUP_GAP))); // erasure: keep accumulator into Vec<AnyView>
+            children.push(any(tab_group(tab, None, true, expanded, &tones, actions)));
+            children.push(any(v_gap(GROUP_GAP)));
         }
         if let Some(mutations) = &actions.mutations {
             let create = Rc::clone(&mutations.on_new_tab);
@@ -467,11 +467,11 @@ fn space_group<State: 'static>(
     let tabs = data.tabs_of(space);
     let head = space_row(space, tabs.map(<[TabEntry]>::len), expanded, tones, actions);
 
-    let mut kids: Vec<AnyView<State>> = Vec::new();
+    let mut kids: Vec<AnyView<State>> = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
     match tabs {
         // Read, and empty: the hint. Unread (a fetch still in flight) shows
         // nothing rather than claiming emptiness.
-        Some([]) => kids.push(any(empty_hint(tones))), // erasure: keep accumulator into Vec<AnyView>
+        Some([]) => kids.push(any(empty_hint(tones))),
         Some(tabs) => {
             for tab in tabs {
                 let tab_expanded = expanded && data.expanded_tab == Some(tab.key.as_str());
@@ -526,10 +526,10 @@ fn tab_group<State: 'static>(
     };
     let head = tab_row(tab, &path, promoted, expanded, tones, actions);
 
-    let mut kids: Vec<AnyView<State>> = tab
+    let mut kids: Vec<AnyView<State>> = tab // erasure: keep accumulator into Vec<AnyView>
         .panes
         .iter()
-        .map(|pane| any(pane_row(pane, &path, tones, actions))) // erasure: keep accumulator into Vec<AnyView>
+        .map(|pane| any(pane_row(pane, &path, tones, actions)))
         .collect();
     if let Some(mutations) = &actions.mutations {
         let create = Rc::clone(&mutations.on_new_pane);

@@ -625,6 +625,8 @@ impl Widget for TerminalGridWidget {
             InputEvent::PointerContact { .. } | InputEvent::Scale(_) => EventResult::Ignored,
             // Only desktop shells emit file drops; the grid accepts none.
             InputEvent::FileDrop(_) => EventResult::Ignored,
+            // The grid registers no shortcut, so none is ever addressed to it.
+            InputEvent::Shortcut(_) => EventResult::Ignored,
         }
     }
 

@@ -123,7 +123,7 @@ pub fn loading_sequence<State: 'static, A: View<State>>(
     let staggered = pieces
         .into_iter()
         .enumerate()
-        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece))) // erasure: keep accumulator into Vec<AnyView>
+        .map(|(index, piece)| any(piece_entry(spec::piece_delay_ms(index), piece)))
         .collect();
     any(LoadingView {
         rain: super::rain::rain::<State>(seed).clock_cell(Rc::clone(&cell)),
