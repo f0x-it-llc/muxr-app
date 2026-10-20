@@ -2504,10 +2504,10 @@ fn cancelling_the_add_tab_dialog_reaches_the_repository_not_at_all() {
 
     // Escape is this app's own "cancelled" dismissal route, the same reading a
     // scrim tap or a back press gets — but only once the *dialog itself* holds
-    // focus. A tap on its own field would claim focus there instead, and
-    // `TextInput` handles `Escape` itself (a self-blur), consuming it before the
-    // dialog sees it — so this taps the panel's own title corner, clear of the
-    // field and both buttons.
+    // focus. A tap on its own field would claim focus there instead, and a
+    // focused `TextInput`'s bare `Escape` blurs it (declined since frust 0.6.3,
+    // so the dialog would see it too) — tapping the panel's own title corner,
+    // clear of the field and both buttons, keeps the assertion exact.
     let dialog = added(&after.rounded, &dialog_frame.rounded);
     let (origin, _) = panel(&dialog);
     h.tap(Point::new(origin.x + 10.0, origin.y + 10.0));
