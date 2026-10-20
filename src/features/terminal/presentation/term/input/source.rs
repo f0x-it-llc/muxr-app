@@ -1915,4 +1915,33 @@ mod tests {
         assert_eq!(emission.class, InputClass::Sequence);
         assert_eq!(source.mirror(), "ab");
     }
+
+    #[test]
+    fn a_hardware_f_key_takes_its_modified_form_from_its_plain_bytes() {
+        let mods = |shift, alt, ctrl| Modifiers {
+            shift,
+            alt,
+            ctrl,
+            ..Modifiers::default()
+        };
+        let mut source = KeystrokeSource::new();
+        let f5 = Key::Named(NamedKey::F5);
+        let cases: [(Modifiers, &[u8]); 3] = [
+            (mods(true, false, false), b"\x1b[15;2~"),
+            (mods(false, true, false), b"\x1b[15;3~"),
+            (mods(false, false, true), b"\x1b[15;5~"),
+        ];
+        for (m, expected) in cases {
+            assert_eq!(source.on_key(&f5, m).bytes, expected);
+        }
+        let f1 = Key::Named(NamedKey::F1);
+        assert_eq!(
+            source.on_key(&f1, Modifiers::default()).bytes,
+            b"\x1bOP".to_vec()
+        );
+        assert_eq!(
+            source.on_key(&f1, mods(false, false, true)).bytes,
+            b"\x1b[1;5P".to_vec()
+        );
+    }
 }
