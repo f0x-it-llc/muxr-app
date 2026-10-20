@@ -119,7 +119,7 @@ where
         )));
     }
 
-    body.push(any(font_section_label(FONT_SECTION_AVAILABLE, colors))); // erasure: keep accumulator into Vec<AnyView>
+    body.push(any(font_section_label(FONT_SECTION_AVAILABLE, colors)));
     if let Some(note) = catalog_note(picker) {
         body.push(any(Padding(
             EdgeInsets::symmetric(PICK_PAD_X, PICK_PAD_Y),

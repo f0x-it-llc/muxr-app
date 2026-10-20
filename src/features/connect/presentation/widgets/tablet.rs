@@ -73,12 +73,13 @@ pub fn tablet_screen<S: 'static, Q: View<S>>(
     let folded = (!full).then_some(saved);
     let form = tablet_form_pieces(theme, Some(live), folded, qr);
     let panel = full.then(|| tablet_panel_pieces(theme, Some(live), saved));
+    // erasure: keep accumulator into Vec<AnyView>
     let mut layers = vec![
-        any(page_backdrop::<S>()), // erasure: keep accumulator into Vec<AnyView>
-        any(tablet_layout(theme, panel, form)), // erasure: keep accumulator into Vec<AnyView>
+        any(page_backdrop::<S>()),
+        any(tablet_layout(theme, panel, form)),
     ];
     if !full {
-        layers.push(any(info_affordance(overlays))); // erasure: keep accumulator into Vec<AnyView>
+        layers.push(any(info_affordance(overlays)));
     }
     Stack(layers)
 }

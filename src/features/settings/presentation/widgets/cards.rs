@@ -89,10 +89,11 @@ pub(in super::super) fn tablet_scroller(
     full: bool,
     colors: &Palette,
 ) -> impl View<SettingsState> + use<> {
-    let cards: Vec<AnyView<SettingsState>> = groups
+    let cards: Vec<AnyView<SettingsState>> = groups // erasure: keep accumulator into Vec<AnyView>
         .into_iter()
-        .map(|(label, rows)| any(group_card(label, rows, colors))) // erasure: keep accumulator into Vec<AnyView>
+        .map(|(label, rows)| any(group_card(label, rows, colors)))
         .collect();
+    // erasure: keep accumulator into Vec<AnyView>
     let mut lines: Vec<AnyView<SettingsState>> = if full {
         let (left, right): (Vec<_>, Vec<_>) = cards
             .into_iter()
@@ -111,7 +112,7 @@ pub(in super::super) fn tablet_scroller(
     } else {
         cards
     };
-    lines.push(any(disconnect_card(colors))); // erasure: keep accumulator into Vec<AnyView>
+    lines.push(any(disconnect_card(colors)));
 
     let grid = Padding(
         EdgeInsets {

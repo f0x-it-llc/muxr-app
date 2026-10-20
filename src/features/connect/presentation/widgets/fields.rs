@@ -122,9 +122,10 @@ fn field<S: 'static>(
     } else {
         colors.fg_dim
     };
+    // erasure: keep accumulator into Vec<AnyView>
     let mut children = vec![
-        any(text(label).style(inked(&theme.type_scale.label_small, label_ink))), // erasure: keep accumulator into Vec<AnyView>
-        any(v_gap::<S>(spacing::XS)), // erasure: keep accumulator into Vec<AnyView>
+        any(text(label).style(inked(&theme.type_scale.label_small, label_ink))),
+        any(v_gap::<S>(spacing::XS)),
         any(
             text_input::<S, _>(value, move |_state: &mut S, next: String| on_change(next))
                 .placeholder(placeholder)
@@ -134,7 +135,7 @@ fn field<S: 'static>(
         ),
     ];
     if let Some(message) = options.error {
-        children.push(any(v_gap::<S>(spacing::XS))); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(v_gap::<S>(spacing::XS)));
         children.push(any(
             text(message).style(inked(&theme.type_scale.body_small, colors.error))
         ));
