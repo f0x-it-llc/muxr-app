@@ -265,12 +265,12 @@ impl Component for SettingsScreen {
             );
         }
 
-        let mut body = Vec::new();
+        let mut body = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
         for (label, rows) in groups {
-            body.push(any(widgets::group_label(label, &colors))); // erasure: keep accumulator into Vec<AnyView>
+            body.push(any(widgets::group_label(label, &colors)));
             body.extend(rows);
         }
-        body.push(any(widgets::disconnect_button())); // erasure: keep accumulator into Vec<AnyView>
+        body.push(any(widgets::disconnect_button()));
 
         // The *shell's* bar consumes the top window inset on this screen's
         // behalf, so the body's safe area disables its top edge to avoid

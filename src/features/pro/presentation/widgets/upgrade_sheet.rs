@@ -150,42 +150,42 @@ fn upgrade_sheet_body(
     let colors = Palette::from_theme(&theme);
     let entitled = pro.entitlement.get().is_pro();
 
+    // erasure: keep accumulator into Vec<AnyView>
     let mut children = vec![
-        any(text(UPGRADE_SHEET_TITLE).style(inked(&theme.type_scale.title_medium, colors.fg))), // erasure: keep accumulator into Vec<AnyView>
-        any(gap(TITLE_GAP)), // erasure: keep accumulator into Vec<AnyView>
-        any(text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim))), // erasure: keep accumulator into Vec<AnyView>
-        any(gap(SECTION_GAP)), // erasure: keep accumulator into Vec<AnyView>
+        any(text(UPGRADE_SHEET_TITLE).style(inked(&theme.type_scale.title_medium, colors.fg))),
+        any(gap(TITLE_GAP)),
+        any(text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
+        any(gap(SECTION_GAP)),
         any(benefit_row(
             MULTIPLE_SERVERS_COPY,
             LINK,
             &theme.type_scale.body_medium,
             &colors,
         )),
-        any(gap(SECTION_GAP)), // erasure: keep accumulator into Vec<AnyView>
+        any(gap(SECTION_GAP)),
     ];
 
     if entitled {
         children.push(any(
             text(ALREADY_PRO_COPY).style(inked(&theme.type_scale.body_medium, colors.success))
         ));
-        children.push(any(gap(SECTION_GAP))); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(gap(SECTION_GAP)));
     } else {
-        // erasure: keep accumulator into Vec<AnyView>
         children.push(any(offer_action(
             pro,
             sheet,
             context,
             inked(&theme.type_scale.body_small, colors.fg_dim),
         )));
-        children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
-        children.push(any(restore_action(pro, sheet, context))); // erasure: keep accumulator into Vec<AnyView>
-        children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
+        children.push(any(gap(ROW_GAP)));
+        children.push(any(restore_action(pro, sheet, context)));
+        children.push(any(gap(ROW_GAP)));
         if let Some(limit) = &context.server_limit {
-            children.push(any(forget_and_connect_action(sheet, limit))); // erasure: keep accumulator into Vec<AnyView>
-            children.push(any(gap(ROW_GAP))); // erasure: keep accumulator into Vec<AnyView>
+            children.push(any(forget_and_connect_action(sheet, limit)));
+            children.push(any(gap(ROW_GAP)));
         }
     }
-    children.push(any(not_now_action(sheet))); // erasure: keep accumulator into Vec<AnyView>
+    children.push(any(not_now_action(sheet)));
     stretch_column(children)
 }
 

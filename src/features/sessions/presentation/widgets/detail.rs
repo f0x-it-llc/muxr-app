@@ -207,14 +207,15 @@ fn selected_detail(
         session.status.is_live(),
         !session.layout.tabs_detail.is_empty(),
     );
+    // erasure: keep accumulator into Vec<AnyView>
     let cards = match kind {
         BodyKind::Resurrect => {
             vec![
-                any(resurrect_card(session, colors)), // erasure: keep accumulator into Vec<AnyView>
-                any(grid(vec![overview], full)),      // erasure: keep accumulator into Vec<AnyView>
+                any(resurrect_card(session, colors)),
+                any(grid(vec![overview], full)),
             ]
         }
-        BodyKind::OverviewOnly => vec![any(grid(vec![overview], full))], // erasure: keep accumulator into Vec<AnyView>
+        BodyKind::OverviewOnly => vec![any(grid(vec![overview], full))],
         BodyKind::Full => vec![
             any(grid(
                 vec![
@@ -223,7 +224,7 @@ fn selected_detail(
                 ],
                 full,
             )),
-            any(tree_card(session, full, colors)), // erasure: keep accumulator into Vec<AnyView>
+            any(tree_card(session, full, colors)),
         ],
     };
     container(
@@ -527,12 +528,13 @@ fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> impl Vi
         head.push(h_gap(CHIP_GAP));
     }
     head.push(inflexible(tab_chip(tab)));
+    // erasure: keep accumulator into Vec<AnyView>
     let mut parts = vec![any(Padding(
         EdgeInsets::symmetric(TAB_PAD_X, TAB_PAD_Y),
         centered_row(head),
     ))];
     if tab.focused && !tab.panes.is_empty() {
-        parts.push(any(divider(colors.rule))); // erasure: keep accumulator into Vec<AnyView>
+        parts.push(any(divider(colors.rule)));
         parts.push(any(container(Padding(
             EdgeInsets::symmetric(TAB_PAD_X, TAB_PAD_Y),
             pane_pills(id, tab, full, colors),

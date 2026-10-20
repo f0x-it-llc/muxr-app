@@ -156,6 +156,7 @@ fn token_row(
         spacer(),
         inflexible(revoke),
     ]);
+    // erasure: keep accumulator into Vec<AnyView>
     let mut lines = vec![
         any(top),
         any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
