@@ -35,6 +35,7 @@ use frust::{
     scroll_view, spawn_local, use_context,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use tokio::sync::broadcast;
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
@@ -42,6 +43,7 @@ use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
+use crate::net::wake::WakeReason;
 use crate::responsive::Responsive;
 use crate::routes::{
     Nav, TERMINAL_PANE_QUERY_KEY, TERMINAL_SESSION_QUERY_KEY, TERMINAL_TAB_QUERY_KEY, app_nav,
@@ -54,7 +56,7 @@ use crate::ui::spacing;
 use crate::ui::splash::loading::loading_sequence;
 use crate::ui::toasts::app_toasts;
 
-use super::controllers::{POLL_PERIOD_SECS, SessionsController};
+use super::controllers::{POLL_PERIOD_SECS, SessionsController, each_wake};
 use super::heartbeat::{self, HeartbeatState};
 use super::widgets::{self, CardMode, LoadPhase};
 
@@ -283,6 +285,65 @@ fn spawn_cadence_loop(
     });
 }
 
+/// One heartbeat round trip, shared by the cadence tick and a wake. A no-op
+/// while the poll is covered, or with nothing connected to time; the
+/// connection's own single-flight `ping` keeps overlapping beats from stacking.
+fn beat(
+    polling: &SessionsController,
+    connection: &Arc<ConnectionController>,
+    heartbeat: HeartbeatState,
+) {
+    if !polling.is_polling() {
+        return;
+    }
+    // Untracked: a callback isn't a render. `None` means nothing connected to
+    // time.
+    let Some(from) = connection
+        .server_info
+        .get_untracked()
+        .map(|info| info.latency_ms)
+    else {
+        return;
+    };
+    heartbeat.start_ping();
+    let connection = Arc::clone(connection);
+    spawn_local(async move {
+        // A ping that measured nothing rolls nothing — the list poll owns
+        // failure surfacing.
+        if let Some(measured) = connection.ping().await {
+            heartbeat.settle(from, measured);
+        }
+    });
+}
+
+/// Runs a wake-driven refresh and heartbeat ping for every wake on `wakes`
+/// while the screen is mounted. `wakes` is injected: production passes
+/// [`crate::net::wake::subscribe`], tests a receiver from a local bus. The
+/// refresh and the ping go through the same single-flight paths the poll
+/// uses, so a wake never starts a second one in flight.
+fn spawn_wake_loop(
+    wakes: broadcast::Receiver<WakeReason>,
+    controller: Arc<SessionsController>,
+    connection: Arc<ConnectionController>,
+    heartbeat: HeartbeatState,
+) {
+    let alive = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&alive);
+    on_cleanup(move || flag.store(false, Ordering::SeqCst));
+
+    spawn_local(each_wake(
+        wakes,
+        move || alive.load(Ordering::SeqCst),
+        move || {
+            let refresh = Arc::clone(&controller);
+            spawn_local(async move {
+                refresh.refresh_on_wake().await;
+            });
+            beat(&controller, &connection, heartbeat);
+        },
+    ));
+}
+
 impl Component for SessionsScreen {
     type State = SessionsState;
 
@@ -327,28 +388,17 @@ impl Component for SessionsScreen {
         let beating = Arc::clone(&controller);
         let pinged = Arc::clone(&connection);
         spawn_cadence_loop(preferences, move || {
-            if !beating.is_polling() {
-                return;
-            }
-            // Untracked: a callback isn't a render. `None` means nothing
-            // connected to time.
-            let Some(from) = pinged
-                .server_info
-                .get_untracked()
-                .map(|info| info.latency_ms)
-            else {
-                return;
-            };
-            heartbeat.start_ping();
-            let connection = Arc::clone(&pinged);
-            spawn_local(async move {
-                // A ping that measured nothing rolls nothing — the list
-                // poll owns failure surfacing.
-                if let Some(measured) = connection.ping().await {
-                    heartbeat.settle(from, measured);
-                }
-            });
+            beat(&beating, &pinged, heartbeat);
         });
+
+        // A network change or a return to the foreground refreshes the list
+        // and re-times the connection now, not at the next tick.
+        spawn_wake_loop(
+            crate::net::wake::subscribe(),
+            Arc::clone(&controller),
+            Arc::clone(&connection),
+            heartbeat,
+        );
 
         // Read once per mount — a process-wide test opt-out, not observed
         // state, so never from `build` or a spawned block.
