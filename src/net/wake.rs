@@ -99,6 +99,48 @@ pub fn install_wake_source(source: Arc<dyn WakeSource>) -> bool {
     true
 }
 
+/// The wake for the lifecycle `restart` transition: `Hidden` reached from
+/// `Paused`, i.e. a return from a real background. The notification shade,
+/// Control Center and the app switcher only pass `Inactive` and never fire it.
+pub fn wake_for_restart() -> WakeReason {
+    WakeReason::Foregrounded
+}
+
+/// What a default-network report says, stripped of the path details the wake
+/// decision ignores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkSignal {
+    /// A usable default network; `initial` marks the monitor's first report.
+    Available { initial: bool },
+    /// The usable default network went away.
+    Lost,
+    /// Any event this app does not act on.
+    Other,
+}
+
+/// The wake, if any, for a network signal. Only a later `Available` (the
+/// default network changed) wakes; the monitor's first report and `Lost` do
+/// not.
+pub fn wake_for_network(signal: NetworkSignal) -> Option<WakeReason> {
+    match signal {
+        NetworkSignal::Available { initial: false } => Some(WakeReason::NetworkChanged),
+        _ => None,
+    }
+}
+
+/// The wake, if any, for a connectivity event. The event enum is
+/// non-exhaustive, so unknown events map to [`NetworkSignal::Other`].
+pub fn wake_for_connectivity(event: &frust_connectivity::ConnectivityEvent) -> Option<WakeReason> {
+    use frust_connectivity::ConnectivityEvent;
+    wake_for_network(match event {
+        ConnectivityEvent::Available { initial, .. } => {
+            NetworkSignal::Available { initial: *initial }
+        }
+        ConnectivityEvent::Lost => NetworkSignal::Lost,
+        _ => NetworkSignal::Other,
+    })
+}
+
 /// Publish a wake on the app bus as if a source had. Tests only.
 #[cfg(test)]
 pub fn publish_for_tests(reason: WakeReason) {
@@ -167,5 +209,39 @@ mod tests {
         assert!(!install_wake_source(Arc::new(Fire)));
         publish_for_tests(WakeReason::Foregrounded);
         assert_eq!(rx.try_recv(), Ok(WakeReason::Foregrounded));
+    }
+
+    // `NetworkPath` is non-exhaustive with crate-private constructors, so an
+    // `Available` event cannot be built outside frust-connectivity: its
+    // mapping is tested through `NetworkSignal`, `Lost` through the event.
+    #[test]
+    fn the_first_connectivity_report_does_not_wake() {
+        assert_eq!(
+            wake_for_network(NetworkSignal::Available { initial: true }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_later_available_wakes_as_a_network_change() {
+        assert_eq!(
+            wake_for_network(NetworkSignal::Available { initial: false }),
+            Some(WakeReason::NetworkChanged)
+        );
+    }
+
+    #[test]
+    fn a_lost_network_does_not_wake() {
+        assert_eq!(wake_for_network(NetworkSignal::Lost), None);
+        assert_eq!(wake_for_network(NetworkSignal::Other), None);
+        assert_eq!(
+            wake_for_connectivity(&frust_connectivity::ConnectivityEvent::Lost),
+            None
+        );
+    }
+
+    #[test]
+    fn a_lifecycle_restart_wakes_as_foregrounded() {
+        assert_eq!(wake_for_restart(), WakeReason::Foregrounded);
     }
 }
