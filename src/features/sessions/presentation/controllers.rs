@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use clean_signals::{ControllerCore, NoParams, RunOptions};
 use frust::{GetUntracked, RwSignal, Set};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
@@ -12,6 +14,7 @@ use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::sessions::domain::use_cases::{
     CreateSession, KillSession, ListSessions, RenameSession,
 };
+use crate::net::wake::WakeReason;
 
 /// The sentinel [`SessionsController::resume_at`] holds while polling is
 /// running — no real navigator depth ever reaches it.
@@ -88,6 +91,18 @@ impl SessionsController {
         }
         let _release = ReleasePollClaim(&self.poll_in_flight);
         self.refresh().await;
+    }
+
+    /// The wake reaction: one refresh through the poll's own single-flight
+    /// gate ([`take_poll_tick`](Self::take_poll_tick)), so a wake that lands
+    /// while a poll (or an earlier wake) is in flight starts nothing. Returns
+    /// whether it started a refresh.
+    pub async fn refresh_on_wake(&self) -> bool {
+        if !self.take_poll_tick() {
+            return false;
+        }
+        self.refresh_from_poll().await;
+        true
     }
 
     /// Re-runs a failed first load; its success sets `loaded`, the gate
@@ -219,6 +234,28 @@ impl SessionsController {
 impl AsRef<ControllerCore<AppFailure>> for SessionsController {
     fn as_ref(&self) -> &ControllerCore<AppFailure> {
         &self.core
+    }
+}
+
+/// Calls `on_wake` once per burst of wakes on `wakes`, until `alive` turns
+/// false or the bus closes. A lagged receiver means wakes were dropped, which
+/// still means "a wake happened": it is treated as a wake, never an error, and
+/// the already-queued wakes are coalesced into the same single call.
+pub async fn each_wake(
+    mut wakes: broadcast::Receiver<WakeReason>,
+    alive: impl Fn() -> bool,
+    mut on_wake: impl FnMut(),
+) {
+    loop {
+        match wakes.recv().await {
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+        if !alive() {
+            break;
+        }
+        while matches!(wakes.try_recv(), Ok(_) | Err(TryRecvError::Lagged(_))) {}
+        on_wake();
     }
 }
 
@@ -549,6 +586,178 @@ mod tests {
             c.first_load_settled.get_untracked(),
             "still true after second refresh"
         );
+    }
+
+    /// [`block_on`] under a `LocalSet`, so a test can `spawn_local` the
+    /// refreshes a wake starts and await them.
+    fn local_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a current-thread runtime");
+        tokio::task::LocalSet::new().block_on(&rt, fut)
+    }
+
+    #[test]
+    fn a_wake_refreshes_the_list_before_the_next_poll_tick() {
+        use crate::net::wake::WakeBus;
+
+        let repo = Arc::new(GatedSessionsRepository::new(0));
+        let c = Arc::new(SessionsController::new(
+            Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>
+        ));
+
+        local_block_on(async {
+            c.refresh().await;
+            assert_eq!(repo.calls.load(Ordering::SeqCst), 1);
+
+            let bus = WakeBus::new();
+            let wakes = bus.subscribe();
+            bus.publish(WakeReason::NetworkChanged);
+            drop(bus);
+
+            let started = std::cell::RefCell::new(Vec::new());
+            each_wake(
+                wakes,
+                || true,
+                || {
+                    let c = Arc::clone(&c);
+                    started
+                        .borrow_mut()
+                        .push(tokio::task::spawn_local(async move {
+                            c.refresh_on_wake().await
+                        }));
+                },
+            )
+            .await;
+            for handle in started.into_inner() {
+                assert!(handle.await.expect("the refresh task finishes"));
+            }
+
+            assert_eq!(
+                repo.calls.load(Ordering::SeqCst),
+                2,
+                "one wake, one refresh"
+            );
+            assert_eq!(c.sessions.get_untracked(), vec![gated_session(1)]);
+            assert!(c.take_poll_tick(), "the wake left the poll gate free");
+        });
+    }
+
+    #[test]
+    fn a_wake_during_an_in_flight_refresh_starts_no_second_one() {
+        use crate::net::wake::WakeBus;
+
+        let repo = Arc::new(GatedSessionsRepository::new(2));
+        // The first load goes straight through; the poll's refresh parks on
+        // call 1.
+        repo.release_call(0);
+        let c = Arc::new(SessionsController::new(
+            Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>
+        ));
+
+        local_block_on(async {
+            c.refresh().await;
+
+            assert!(c.take_poll_tick(), "a poll tick claims the gate");
+            let poll = tokio::task::spawn_local({
+                let c = Arc::clone(&c);
+                async move { c.refresh_from_poll().await }
+            });
+            repo.wait_for_call(1).await;
+
+            let bus = WakeBus::new();
+            let wakes = bus.subscribe();
+            bus.publish(WakeReason::Foregrounded);
+            drop(bus);
+
+            let started = std::cell::RefCell::new(Vec::new());
+            each_wake(
+                wakes,
+                || true,
+                || {
+                    let c = Arc::clone(&c);
+                    started
+                        .borrow_mut()
+                        .push(tokio::task::spawn_local(async move {
+                            c.refresh_on_wake().await
+                        }));
+                },
+            )
+            .await;
+            for handle in started.into_inner() {
+                assert!(
+                    !handle.await.expect("the wake task finishes"),
+                    "the in-flight poll holds the gate, so the wake starts nothing"
+                );
+            }
+            assert_eq!(repo.calls.load(Ordering::SeqCst), 2);
+
+            repo.release_call(1);
+            poll.await.expect("the poll finishes");
+            assert_eq!(repo.calls.load(Ordering::SeqCst), 2, "no second refresh");
+        });
+    }
+
+    #[test]
+    fn a_lagged_wake_stream_is_one_wake() {
+        use crate::net::wake::WakeBus;
+
+        let bus = WakeBus::new();
+        let wakes = bus.subscribe();
+        // Far past the buffer: the receiver lags before it ever polls.
+        for _ in 0..64 {
+            bus.publish(WakeReason::NetworkChanged);
+        }
+        drop(bus);
+
+        let mut calls = 0;
+        block_on(each_wake(wakes, || true, || calls += 1));
+
+        assert_eq!(calls, 1, "a lag is one wake, never an error");
+    }
+
+    #[test]
+    fn no_wake_means_no_refresh() {
+        use crate::net::wake::WakeBus;
+
+        let repo = Arc::new(GatedSessionsRepository::new(0));
+        let c =
+            SessionsController::new(Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>);
+        block_on(c.refresh());
+
+        let bus = WakeBus::new();
+        let wakes = bus.subscribe();
+        drop(bus);
+        let mut calls = 0;
+        block_on(each_wake(wakes, || true, || calls += 1));
+
+        assert_eq!(calls, 0);
+        assert_eq!(repo.calls.load(Ordering::SeqCst), 1, "only the first load");
+    }
+
+    #[test]
+    fn a_wake_before_the_first_load_settles_starts_nothing() {
+        let c = controller();
+
+        assert!(!block_on(c.refresh_on_wake()));
+        assert!(!c.loaded.get_untracked());
+    }
+
+    #[test]
+    fn a_stopped_screen_ends_its_wake_loop_on_the_next_wake() {
+        use crate::net::wake::WakeBus;
+
+        let bus = WakeBus::new();
+        let wakes = bus.subscribe();
+        bus.publish(WakeReason::NetworkChanged);
+        bus.publish(WakeReason::NetworkChanged);
+        drop(bus);
+
+        let mut calls = 0;
+        block_on(each_wake(wakes, || false, || calls += 1));
+
+        assert_eq!(calls, 0, "an unmounted screen reacts to nothing");
     }
 
     struct GatedSessionsRepository {
