@@ -262,6 +262,8 @@
 				OTHER_LDFLAGS = (
 					"-lmuxr",
 					"-framework",
+					Network,
+					"-framework",
 					Metal,
 					"-framework",
 					QuartzCore,
@@ -300,6 +302,8 @@
 				LIBRARY_SEARCH_PATHS = "$(inherited) $(BUILT_PRODUCTS_DIR)";
 				OTHER_LDFLAGS = (
 					"-lmuxr",
+					"-framework",
+					Network,
 					"-framework",
 					Metal,
 					"-framework",
@@ -340,6 +344,8 @@
 				LIBRARY_SEARCH_PATHS = "$(inherited) $(BUILT_PRODUCTS_DIR)";
 				OTHER_LDFLAGS = (
 					"-lmuxr",
+					"-framework",
+					Network,
 					"-framework",
 					Metal,
 					"-framework",
@@ -514,6 +520,8 @@
 				OTHER_LDFLAGS = (
 					"-lmuxr",
 					"-framework",
+					Network,
+					"-framework",
 					Metal,
 					"-framework",
 					QuartzCore,
@@ -554,6 +562,8 @@
 				OTHER_LDFLAGS = (
 					"-lmuxr",
 					"-framework",
+					Network,
+					"-framework",
 					Metal,
 					"-framework",
 					QuartzCore,
@@ -593,6 +603,8 @@
 				OTHER_LDFLAGS = (
 					"-lmuxr",
 					"-framework",
+					Network,
+					"-framework",
 					Metal,
 					"-framework",
 					QuartzCore,
@@ -631,6 +643,8 @@
 				LIBRARY_SEARCH_PATHS = "$(inherited) $(BUILT_PRODUCTS_DIR)";
 				OTHER_LDFLAGS = (
 					"-lmuxr",
+					"-framework",
+					Network,
 					"-framework",
 					Metal,
 					"-framework",
@@ -672,6 +686,8 @@
 				OTHER_LDFLAGS = (
 					"-lmuxr",
 					"-framework",
+					Network,
+					"-framework",
 					Metal,
 					"-framework",
 					QuartzCore,
@@ -710,6 +726,8 @@
 				LIBRARY_SEARCH_PATHS = "$(inherited) $(BUILT_PRODUCTS_DIR)";
 				OTHER_LDFLAGS = (
 					"-lmuxr",
+					"-framework",
+					Network,
 					"-framework",
 					Metal,
 					"-framework",

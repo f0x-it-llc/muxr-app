@@ -117,3 +117,15 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-iap"))
     }
 }
+
+// Added by `frust` Add Plugin: a plugin's Android library module,
+// included from the plugin package cargo resolves for this app (its
+// directory is machine-local: `frust.plugin.frust-connectivity.dir` in local.properties).
+include(":frust-connectivity")
+project(":frust-connectivity").projectDir = frustLocalDir("frust.plugin.frust-connectivity.dir")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-connectivity") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-connectivity"))
+    }
+}
