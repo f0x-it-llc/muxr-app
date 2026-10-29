@@ -5,8 +5,9 @@
 //! [`DemoFeed`](super::demo_feed::DemoFeed) is the fixture replayed for anything else.
 //!
 //! **Wire contract** (`proto/muxr.proto`): `attach: AttachReq{session, rows, cols}` — plus the
-//! [`ResumeTarget`] hints, when set — is the mandatory first frame of every stream, reconnects
-//! included, then `input`/`resize`/`mouse` out and `render`/`control` back. Input goes on the
+//! [`ResumeTarget`] hints, when set, and the feed's `client_instance_id` (minted once per feed,
+//! so every re-attach names the same client view) — is the mandatory first frame of every
+//! stream, reconnects included, then `input`/`resize`/`mouse` out and `render`/`control` back. Input goes on the
 //! stream, never through `WriteToPane`, so a keystroke keeps its order relative to the resizes
 //! around it; the attach frame replays the current grid, since [`TerminalFeed::resize`] caches
 //! `cols`/`rows`. Two control kinds are understood ([`CONTROL_CONNECTION_ID`],
@@ -263,6 +264,13 @@ impl GrpcTerminalFeed {
         self.shared.resume.target()
     }
 
+    /// The `client_instance_id` this feed attaches with, on every attempt. Test-only: the
+    /// value is never logged, and production never reads it back.
+    #[cfg(test)]
+    fn client_instance_id(&self) -> String {
+        self.shared.client_instance_id.clone()
+    }
+
     /// The feed and its pump future, unspawned. The one construction path.
     fn build(pump: Pump) -> (Self, impl Future<Output = ()> + Send + use<>) {
         let feed = Self {
@@ -422,6 +430,10 @@ struct Shared {
     /// since the screen writes it from the UI thread while the pump holds `state`
     /// across a whole attempt's bookkeeping.
     resume: Arc<ResumeSlot>,
+    /// The `client_instance_id` every attach this feed makes carries. Minted once in
+    /// [`Shared::new`], so a backoff re-attach and a manual retry reuse it while a new mount
+    /// (a new feed) gets a new one. Never logged in full.
+    client_instance_id: String,
 }
 
 struct State {
@@ -514,6 +526,7 @@ impl Shared {
             shutdown: AtomicBool::new(false),
             retry: AtomicBool::new(false),
             resume,
+            client_instance_id: mint_client_instance_id(),
         }
     }
 
@@ -665,6 +678,35 @@ async fn run_pump(pump: Pump) {
     shared.retire();
 }
 
+/// The mandatory first frame's payload: the session, the grid, the resume hints and the feed's
+/// client instance id. Pure, so the frame's shape is checkable without a stream.
+fn attach_request(
+    session: &str,
+    cols: u16,
+    rows: u16,
+    resume: ResumeTarget,
+    client_instance_id: &str,
+) -> AttachReq {
+    AttachReq {
+        session: session.to_string(),
+        rows: u32::from(rows),
+        cols: u32::from(cols),
+        // Unset spells itself as the wire's proto3 default, which is the
+        // hint-less shape the server reads as "today's behavior".
+        resume_space_id: resume.space_id.unwrap_or_default(),
+        resume_tab_id: resume.tab_id.unwrap_or_default(),
+        resume_pane_id: resume.pane_id.unwrap_or_default(),
+        client_instance_id: client_instance_id.to_string(),
+    }
+}
+
+/// A fresh `client_instance_id`: a random 128-bit value as 32 lowercase hex characters (a
+/// UUID v4, simple form). The server only compares it for equality, so it needs to be unique
+/// per client view, not secret; it is never logged.
+fn mint_client_instance_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 /// One attach attempt: open the stream with its mandatory first frame, then pump it until it
 /// ends.
 ///
@@ -676,19 +718,16 @@ async fn run_pump(pump: Pump) {
 async fn attach(client: &MuxrClient, session: &str, shared: &Shared) -> Attempt {
     let (outbound, requests) = mpsc::channel(OUTBOUND_CAPACITY);
     let (cols, rows) = shared.dims();
-    let resume = shared.resume.target();
+    let request = attach_request(
+        session,
+        cols,
+        rows,
+        shared.resume.target(),
+        &shared.client_instance_id,
+    );
     if outbound
         .try_send(ClientFrame {
-            kind: Some(client_frame::Kind::Attach(AttachReq {
-                session: session.to_string(),
-                rows: u32::from(rows),
-                cols: u32::from(cols),
-                // Unset spells itself as the wire's proto3 default, which is the
-                // hint-less shape the server reads as "today's behavior".
-                resume_space_id: resume.space_id.unwrap_or_default(),
-                resume_tab_id: resume.tab_id.unwrap_or_default(),
-                resume_pane_id: resume.pane_id.unwrap_or_default(),
-            })),
+            kind: Some(client_frame::Kind::Attach(request)),
         })
         .is_err()
     {
@@ -1074,6 +1113,86 @@ mod tests {
             },
             "the feed reads the screen's live slot, not a copy taken at attach"
         );
+    }
+
+    /// One feed keeps one `client_instance_id` across a drop: the kill-driven re-attach runs
+    /// under the id the mount was built with, and a second mount mints a different one.
+    #[tokio::test]
+    async fn a_feed_reuses_its_client_instance_id_across_a_reattach() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == LinkStatus::Connected
+        })
+        .await;
+
+        let id = feed.client_instance_id();
+        assert_eq!(id.len(), 32, "a 128-bit id, as 32 hex characters");
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "the id is lowercase hex"
+        );
+
+        script.kill();
+        wait_until("the feed re-attaches", || script.attach_count() == 2).await;
+        wait_until("the re-attached stream is up", || {
+            feed.status() == LinkStatus::Connected
+        })
+        .await;
+        assert_eq!(
+            feed.client_instance_id(),
+            id,
+            "a re-attach reuses the id the mount minted"
+        );
+
+        let (other, _) = rig.feed(80, 24);
+        assert_ne!(
+            other.client_instance_id(),
+            id,
+            "a new mount (a new feed) mints a new id"
+        );
+    }
+
+    /// The attach frame carries the instance id beside the session, the grid and the resume
+    /// hints, and passes it through unchanged.
+    #[test]
+    fn attach_request_carries_the_instance_id_beside_the_resume_hints() {
+        let resume = ResumeTarget {
+            space_id: Some("ws-1".to_string()),
+            tab_id: Some(3),
+            pane_id: Some(31),
+        };
+        let req = attach_request(SESSION, 80, 24, resume, "0123456789abcdef0123456789abcdef");
+        assert_eq!(req.client_instance_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            (req.session.as_str(), req.cols, req.rows),
+            (SESSION, 80, 24)
+        );
+        assert_eq!(
+            (
+                req.resume_space_id.as_str(),
+                req.resume_tab_id,
+                req.resume_pane_id
+            ),
+            ("ws-1", 3, 31)
+        );
+    }
+
+    /// Minted ids are 32 lowercase hex characters, and two mints never collide.
+    #[test]
+    fn minted_instance_ids_are_32_lowercase_hex_and_distinct() {
+        let (a, b) = (mint_client_instance_id(), mint_client_instance_id());
+        for id in [&a, &b] {
+            assert_eq!(id.len(), 32);
+            assert!(
+                id.bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+                "the id is lowercase hex"
+            );
+        }
+        assert_ne!(a, b);
     }
 
     /// The slot's own rules, the ones the controller's two user-driven paths lean
