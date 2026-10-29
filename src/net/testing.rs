@@ -12,16 +12,18 @@
 //! return `UNIMPLEMENTED`, never a plausible canned value.
 //!
 //! `AttachTerminal` is scripted via [`TerminalScript`] (render frame, clean
-//! [`exit`](crate::net::control::CONTROL_EXIT), or mid-flight drop); the
-//! one-shot workspace-verb RPCs are just recorded via [`ActionLog`].
+//! [`exit`](crate::net::control::CONTROL_EXIT), mid-flight drop, or a silent
+//! stall); the one-shot workspace-verb RPCs are just recorded via [`ActionLog`].
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
@@ -96,6 +98,7 @@ pub struct MuxrdFixture {
     fingerprint_hex: String,
     terminal: Arc<TerminalScript>,
     actions: Arc<ActionLog>,
+    connections: Arc<AtomicUsize>,
     server: JoinHandle<()>,
 }
 
@@ -120,6 +123,14 @@ impl MuxrdFixture {
         let addr = incoming
             .local_addr()
             .expect("a bound listener has an address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::clone(&connections);
+        let incoming = incoming.map(move |connection| {
+            if connection.is_ok() {
+                accepted.fetch_add(1, Ordering::SeqCst);
+            }
+            connection
+        });
 
         let terminal = Arc::new(TerminalScript::default());
         let actions = Arc::new(ActionLog::default());
@@ -142,8 +153,15 @@ impl MuxrdFixture {
             fingerprint_hex,
             terminal,
             actions,
+            connections,
             server,
         }
+    }
+
+    /// TCP connections the fixture has accepted. One per dial: a client's
+    /// channel rebuild shows up here as one more.
+    pub fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
     }
 
     /// The server side of this fixture's `AttachTerminal` streams: what the
@@ -348,6 +366,8 @@ pub struct AttachObservation {
     pub resume_space_id: String,
     pub resume_tab_id: u64,
     pub resume_pane_id: u32,
+    /// The client view the attach names, verbatim.
+    pub client_instance_id: String,
 }
 
 /// One observed `mouse` frame on an `AttachTerminal` stream.
@@ -369,6 +389,9 @@ enum ServerCommand {
     Exit,
     /// End the stream where it stands, saying nothing.
     Kill,
+    /// Go silent with the stream and its connection left open: no frame, no
+    /// end, no read — a half-open connection, short of the keepalive.
+    Stall,
 }
 
 /// The record-and-drive half of the fixture's `AttachTerminal` support (see
@@ -388,6 +411,7 @@ struct ScriptState {
     inputs: Vec<Vec<u8>>,
     resizes: Vec<(u16, u16)>,
     mice: Vec<MouseObservation>,
+    stalls: usize,
     /// The current stream's command channel, replaced on every attach. `None`
     /// before the first one.
     commands: Option<mpsc::Sender<ServerCommand>>,
@@ -426,6 +450,11 @@ impl TerminalScript {
         self.state().mice.clone()
     }
 
+    /// How many streams have gone silent on [`stall`](Self::stall).
+    pub fn stalls(&self) -> usize {
+        self.state().stalls
+    }
+
     /// Send `bytes` to the client as a `render` frame.
     pub fn push_render(&self, bytes: Vec<u8>) {
         self.command(ServerCommand::Render(bytes));
@@ -441,6 +470,13 @@ impl TerminalScript {
     /// its `AttachTerminal` end and takes its backoff path.
     pub fn kill(&self) {
         self.command(ServerCommand::Kill);
+    }
+
+    /// Stall the current stream: it stays open on a live connection and the
+    /// server stops sending and reading, so the client sees nothing at all
+    /// until a keepalive would notice. [`stalls`](Self::stalls) counts it.
+    pub fn stall(&self) {
+        self.command(ServerCommand::Stall);
     }
 
     /// Record a handshake and take over the command channel, returning this
@@ -461,6 +497,10 @@ impl TerminalScript {
         if let Some(commands) = self.state().commands.as_ref() {
             let _ = commands.try_send(command);
         }
+    }
+
+    fn record_stall(&self) {
+        self.state().stalls += 1;
     }
 
     fn record_input(&self, bytes: Vec<u8>) {
@@ -536,6 +576,17 @@ async fn serve_attach(
                     let _ = frames
                         .send(Ok(control_frame(CONTROL_EXIT, String::new())))
                         .await;
+                    return;
+                }
+                // Both stream halves stay held, untouched, until a kill or a
+                // newer stream ends this one.
+                Some(ServerCommand::Stall) => {
+                    script.record_stall();
+                    while let Some(command) = commands.recv().await {
+                        if matches!(command, ServerCommand::Kill) {
+                            break;
+                        }
+                    }
                     return;
                 }
                 // A dropped command channel means a newer stream took over;
@@ -627,6 +678,7 @@ impl Muxr for FixtureService {
                 resume_space_id: attach.resume_space_id,
                 resume_tab_id: attach.resume_tab_id,
                 resume_pane_id: attach.resume_pane_id,
+                client_instance_id: attach.client_instance_id,
             },
             commands_tx,
         );
