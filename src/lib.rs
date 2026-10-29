@@ -91,6 +91,45 @@ fn full_splash(cue: &SplashCue) -> impl View<AppState> {
     splash_sequence(cue.art.clone(), SPLASH_SEED, pieces, assemble, cue.done)
 }
 
+/// The production wake source: the app lifecycle's return-from-background and
+/// the platform's default-network changes, both mapped in `net::wake`.
+///
+/// The listener and the connectivity handle unregister on drop, so this value
+/// owns them for the process lifetime (the installed source is never dropped).
+/// Both callbacks only do one non-blocking publish: the lifecycle one runs
+/// synchronously on the UI thread, the connectivity one on the plugin's
+/// `frust-connectivity-events` thread.
+#[derive(Default)]
+struct FrustWakeSource {
+    registrations: std::sync::Mutex<Option<WakeRegistrations>>,
+}
+
+struct WakeRegistrations {
+    // Held only so they stay registered.
+    _lifecycle: frust::AppLifecycleListener,
+    _connectivity: frust_connectivity::ListenerHandle,
+}
+
+impl net::wake::WakeSource for FrustWakeSource {
+    fn start(&self, publisher: net::wake::WakePublisher) {
+        let on_restart = publisher.clone();
+        let lifecycle = frust::AppLifecycleListener::new()
+            .on_restart(move || on_restart.publish(net::wake::wake_for_restart()));
+        let connectivity = frust_connectivity::Connectivity::set_listener(Box::new(move |event| {
+            if let Some(reason) = net::wake::wake_for_connectivity(&event) {
+                publisher.publish(reason);
+            }
+        }));
+        *self
+            .registrations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WakeRegistrations {
+            _lifecycle: lifecycle,
+            _connectivity: connectivity,
+        });
+    }
+}
+
 #[derive(Default)]
 pub struct MuxrApp;
 
@@ -99,6 +138,10 @@ impl Component for MuxrApp {
 
     fn init(&self) -> AppState {
         let connection = connection::provide_connection_controller();
+
+        // Once for the process: a second `init` finds the source installed and
+        // leaves it running.
+        net::wake::install_wake_source(std::sync::Arc::new(FrustWakeSource::default()));
 
         connection
             .core()
