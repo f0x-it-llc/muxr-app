@@ -329,7 +329,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "synstructure",
+ "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -878,9 +878,9 @@ dependencies = [
 
 [[package]]
 name = "clean-signals-frust"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a593516f3aaf4b8359b3a50a5d5274e7cafdeb3e517c2ab4b0e144d702c2dd19"
+checksum = "3b9aed0d7320e12afbd75a1497c4614e963510cacda148dcdaa6781d5cbed5dc"
 dependencies = [
  "clean-signals",
  "frust-ui",
@@ -1344,24 +1344,16 @@ dependencies = [
 
 [[package]]
 name = "fontique"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6688bc1294fe7117d788937b6c53480169b29c566954af490830d4c09da9516a"
+checksum = "bbf1df16263783918b7da396077521f92b729ef7c429444dfcf03581f1448b77"
 dependencies = [
  "hashbrown 0.17.1",
  "linebender_resource_handle",
  "memmap2",
- "objc2 0.6.4",
- "objc2-core-foundation",
- "objc2-core-text",
- "objc2-foundation 0.3.2",
  "parlance",
  "read-fonts",
- "roxmltree",
  "smallvec",
- "windows",
- "windows-core",
- "yeslogic-fontconfig-sys",
 ]
 
 [[package]]
@@ -1402,9 +1394,9 @@ dependencies = [
 
 [[package]]
 name = "frust-camera"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85d099f66d10eb54244532b110a2fe7ad8fc0be744b8a38de7785dc1376eb859"
+checksum = "8b8bd0bd051e1fc3a5554650695a3769c66b18697cdb95725d5f9cbc0dd7dea5"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -1424,9 +1416,9 @@ dependencies = [
 
 [[package]]
 name = "frust-clipboard"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5425c4c22261b86b039164eedd8f81efcfd1cc2746f35aefc7cf1918257370b2"
+checksum = "a99ee9b5d93f8e9e8da7cfc01cdead093eedcbea65311c3949c0d1ac728f6c62"
 dependencies = [
  "arboard",
  "frust-plugin",
@@ -1438,10 +1430,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "frust-core"
-version = "0.6.3"
+name = "frust-connectivity"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64802cf1fcbee47c496f225ae1f6f556596fe827614daa5e047b82bbfcf397b4"
+checksum = "75287ac05e6392b601d9ffc647792802712124e063faaa4a3040fec287699297"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "log",
+]
+
+[[package]]
+name = "frust-core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c8842cd72f2552fbd868826103b2417ab87e6f03ea328b8fc41a7207a26d3b9"
 dependencies = [
  "accesskit",
  "frust-scene",
@@ -1454,9 +1459,9 @@ dependencies = [
 
 [[package]]
 name = "frust-engine"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92a3d8b21bb9f92c9dddc7e6f502808e6c7e471a3889f398a1f70654b62dc79e"
+checksum = "5f23513515f8e472439beae19730ab5f265c3cce03a3dafa6c8a94ec8362597e"
 dependencies = [
  "bytemuck",
  "frust-gpu",
@@ -1464,17 +1469,21 @@ dependencies = [
  "glifo",
  "kurbo",
  "log",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
  "peniko",
  "thiserror 2.0.19",
  "vello_common",
+ "web-time",
  "wgpu",
 ]
 
 [[package]]
 name = "frust-glyph"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f6e37440f58d5397b54a8f21f6c2b03cbf336b3832c75336ac91275c6047918"
+checksum = "549229d2eaf7c53633b1b7b971b55d5ef43932bb652ed57f8e2e7f0efa3eebe7"
 dependencies = [
  "frust-ui",
  "kurbo",
@@ -1483,9 +1492,9 @@ dependencies = [
 
 [[package]]
 name = "frust-gpu"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dfa328742291ed7efcbeb24159deb008642cd24b5cee975e1f6d20a75fa8060"
+checksum = "aa982015e6fba59bd0fc74f7fe9e0f46ce575b6502d8b6757acb87bedebf0bc0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1499,14 +1508,15 @@ dependencies = [
  "objc2-core-video",
  "objc2-metal 0.3.2",
  "peniko",
+ "web-time",
  "wgpu",
 ]
 
 [[package]]
 name = "frust-haptics"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c2d98e82e372a22299a69f8fe63816a02c4089358c2a182baf5741107f858f9"
+checksum = "eaade6a8752bce3256cdeeb874667a3dd09b0c1092b5cea9afb4af5b82d5c3cc"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -1518,9 +1528,9 @@ dependencies = [
 
 [[package]]
 name = "frust-iap"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26bc293d8fdf47477bb97e96dfcd3667ff5f6534229b48c3c650b940f32f8a76"
+checksum = "bfa1260a10ff1911429483ffcc175d7219418f6e457925ea7259817f114f8969"
 dependencies = [
  "block2 0.6.2",
  "frust-plugin",
@@ -1535,18 +1545,18 @@ dependencies = [
 
 [[package]]
 name = "frust-paths"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8a0c5e1a58eccee7b5a4a3f64796163cb1b053121572786cd35380a259037c0"
+checksum = "0b1449552bb9c27176aebdda6a04a5671ab44e6df960592305fe5498a0d334d0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "frust-plugin"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f760e8509046c812f2302e7af0ce316f620bbd1cbd9a6719661cec19989ad719"
+checksum = "e4158e87ad6a0298750f16bb8e3ea636fe4afea3bb77de702b522793d7d79463"
 dependencies = [
  "jni 0.22.4",
  "ndk-context",
@@ -1555,13 +1565,14 @@ dependencies = [
 
 [[package]]
 name = "frust-reactive"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "796832bd8dd50c72604267fdf8c8fba68ff4eaacb07ac0de256798866d7b8418"
+checksum = "5402b891de97103c6354e4a247c09741872c09edd28d7a2f3fe64ff047079bb2"
 dependencies = [
  "any_spawner",
  "futures",
  "libc",
+ "log",
  "reactive_graph",
  "tokio",
  "wasm-bindgen-futures",
@@ -1569,9 +1580,9 @@ dependencies = [
 
 [[package]]
 name = "frust-render"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f9bb2424bc6382c429ba71acb59699a3dd42ae4a20d0be3351c3e0a32d3ba75"
+checksum = "ba2959cf2d5e47867cdb4ed8ef0d3933cf9b7ccee3426d8b995a494077974ec0"
 dependencies = [
  "android_system_properties",
  "anyhow",
@@ -1581,14 +1592,15 @@ dependencies = [
  "kurbo",
  "log",
  "peniko",
+ "web-time",
  "wgpu",
 ]
 
 [[package]]
 name = "frust-scene"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8baa6f7f0f75a4c12172ea0dff396d02bb5e732a0152dbac90de4c9882e62a7"
+checksum = "90f83adfad62d952ff09d4b3239129da56a0838a92938f8a20c5d533c2252a87"
 dependencies = [
  "kurbo",
  "peniko",
@@ -1596,9 +1608,9 @@ dependencies = [
 
 [[package]]
 name = "frust-secure-storage"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "410e3f8c93b2b55b4f519a771f2772f681aa6da02893ffdd7e972fde2ec7fd6c"
+checksum = "4f28134b00aa05313dd9db96bae89b52faad869c48ed4bbff26de050492da279"
 dependencies = [
  "frust-paths",
  "frust-plugin",
@@ -1618,9 +1630,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shared-preferences"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d2ee2dda06ac6bbbc003172fd5baa65c2f31a77c292cf6de093c3800e0fb73"
+checksum = "8f03095ccdb00ef59e69b6f8d636faee08b90585703471da9421f8299a4a34d2"
 dependencies = [
  "frust-paths",
  "frust-plugin",
@@ -1633,9 +1645,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-android"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54d9a0d22e8cc18e8ac91ce0e5c8ae2af1fce5d957a31a5579b395c48289afe1"
+checksum = "58e7fd321cc9184d467fe6e8bc5666faf27adae4cb4d55854b7f4b9480eed4a8"
 dependencies = [
  "accesskit_android",
  "android_logger",
@@ -1661,9 +1673,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-common"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786b7da3c824c30d565652853e17382ed883b682da8a818a8f71921f22839f5c"
+checksum = "ce3f19ee2221bd2260448c5ba528c372835940074e3fcbc546f3f3439d33f295"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -1671,13 +1683,14 @@ dependencies = [
  "frust-theme",
  "kurbo",
  "log",
+ "web-time",
 ]
 
 [[package]]
 name = "frust-shell-desktop"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "280b3cde08adc9b7b6fae784b0b181d1469b2f470863dfbf511d758eda17778d"
+checksum = "4eab0a96c2a32af1fd3b11d9edf56cfd4148adc93437ea823c5dae3d9faa60ad"
 dependencies = [
  "accesskit_winit",
  "anyhow",
@@ -1699,9 +1712,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-ios"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460b67d86d5c936589487988e0c7d8155c9a1b011709b01acf16520a3e9aa436"
+checksum = "838d909a77ab83f67e9032904146946715ae1bb40c10dceb3a11fee06775eaa4"
 dependencies = [
  "accesskit",
  "accesskit_ios",
@@ -1723,9 +1736,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-linux"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93c20860a13f0b6d207a23e0e2596f25d8b6422157fd4f4c9bc796def0e52ff3"
+checksum = "2a9cf2084f3243e4247fed0360a29295602e9cc6602ac70b9d0a5e68d949c45e"
 dependencies = [
  "frust-shell-desktop",
  "log",
@@ -1734,9 +1747,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-macos"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bca0553be1d6cc550b766c9bc832e6b3e5a5a798c2c18e448a505451c9326ea"
+checksum = "59374f4ccc0d4356f8ad0b9fa895b2511cee96f0b072dfcb0c0d29bb82a748c9"
 dependencies = [
  "frust-plugin",
  "frust-reactive",
@@ -1753,9 +1766,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-web"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4246ca5dcf36d730cdd753c2b11fb11e7e2c6acfb974204b41cd1444851c8f2"
+checksum = "58c82ff6042c298fb10e52212172ddd9d35b7fbd02cd38730a7db7abd6ac88d2"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -1779,9 +1792,9 @@ dependencies = [
 
 [[package]]
 name = "frust-shell-windows"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cbef4f950e040f87d363a654b821a29360666450454937678acaf8aee6c1d65"
+checksum = "032f07e63bf3eedeb55655ca3e5f5b353c8cb4f65f9993d103368c2034eb2c74"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
@@ -1794,22 +1807,36 @@ dependencies = [
 
 [[package]]
 name = "frust-text"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d8b8534eb2abbcf4e3c9a130abde415b609bbeebcfa50b69e1e5a9caabb4267"
+checksum = "2d021c598cf7bbf1c21470c20fd8f9bce9e29f70920b43a28e09ccc38abc2495"
 dependencies = [
+ "fontique",
+ "frust-paths",
  "frust-scene",
  "kurbo",
- "parley",
+ "log",
+ "ndk",
+ "objc2-core-foundation",
+ "objc2-core-text",
+ "parlance",
+ "parley_engine",
  "peniko",
+ "read-fonts",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
+ "web-time",
+ "windows-link",
+ "windows-sys 0.61.2",
+ "yeslogic-fontconfig-sys",
 ]
 
 [[package]]
 name = "frust-theme"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1fb9bc214a5f567139ed1a7555fddbc6ece9aa3b865d9e10df6345153a00056"
+checksum = "1ffa793dd5c83f2bf38d41b712360681b1c10d2f1b8ba9258431bd4c74526b5d"
 dependencies = [
  "frust-core",
  "frust-text",
@@ -1818,9 +1845,9 @@ dependencies = [
 
 [[package]]
 name = "frust-ui"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04d8483c5afc1138a6bef38bcb96e9d337fea22663ba98d5c943f3a8ed7208b5"
+checksum = "b18bdf409915a6a46f02dba20a122fbd0a3a25a9a1b6cdbe1688e8da208361c2"
 dependencies = [
  "any_spawner",
  "anyhow",
@@ -1850,9 +1877,9 @@ dependencies = [
 
 [[package]]
 name = "frust-url-launcher"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07d75b55e731721137b34d134f8c64fabe189cd582c54287c39d5ec044addad2"
+checksum = "0e46d2e5b37650ad3c1d2cae987c65f9e04188d4f76369b78ab22e7d2134e7dd"
 dependencies = [
  "dispatch2",
  "frust-plugin",
@@ -1866,9 +1893,9 @@ dependencies = [
 
 [[package]]
 name = "frust-widgets"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc82ec7ce14c9b7efa49e21e282a8b041c1b0714f2b41fafbfba6fd73dd7c3d5"
+checksum = "ef302f746e11b1539e9b28a01f64b4c0871117d6837363069be79382bf0585f6"
 dependencies = [
  "frust-core",
  "frust-scene",
@@ -2592,9 +2619,9 @@ dependencies = [
 
 [[package]]
 name = "icu_collections"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2984d1cd16c883d7935b9e07e44071dca8d917fd52ecc02c04d5fa0b5a3f191c"
+checksum = "fe090a42a0d3140fed8c63263ed1fecc02422cb2f4bfe55cd8de2de1b8e105dd"
 dependencies = [
  "displaydoc",
  "potential_utf",
@@ -2605,25 +2632,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "icu_locale"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5a396343c7208121dc86e35623d3dfe19814a7613cfd14964994cdc9c9a2e26"
-dependencies = [
- "icu_collections",
- "icu_locale_core",
- "icu_locale_data",
- "icu_provider",
- "potential_utf",
- "tinystr",
- "zerovec",
-]
-
-[[package]]
 name = "icu_locale_core"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92219b62b3e2b4d88ac5119f8904c10f8f61bf7e95b640d25ba3075e6cac2c29"
+checksum = "25d29b57c17c6528d0dc4c2141cfa2d08200465acb537a3909c8b9b8a4a984c0"
 dependencies = [
  "displaydoc",
  "litemap",
@@ -2634,16 +2646,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "icu_locale_data"
-version = "2.2.0"
+name = "icu_locale_fallback"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fdcc9ac77c6d74ff5cf6e65ef3181d6af32003b16fce3a77fb451d2f695993"
+checksum = "406e9ae5b95d8aa37db6293405931b766a6172d1848daee22d70eb44aa78a43c"
+dependencies = [
+ "icu_locale_core",
+ "icu_locale_fallback_data",
+ "icu_provider",
+ "potential_utf",
+ "tinystr",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_locale_fallback_data"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3632ebbd0c5c3637ba1a40bdf8288f2cb9d2268e73441a69d5fc73d7cfbaa87c"
 
 [[package]]
 name = "icu_normalizer"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c56e5ee99d6e3d33bd91c5d85458b6005a22140021cc324cea84dd0e72cff3b4"
+checksum = "404a3b8c486f205c87fe7f23ab6894d84a4ad76d6e4671ae1981ba7def87c599"
 dependencies = [
  "icu_collections",
  "icu_normalizer_data",
@@ -2655,16 +2681,17 @@ dependencies = [
 
 [[package]]
 name = "icu_normalizer_data"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da3be0ae77ea334f4da67c12f149704f19f81d1adf7c51cf482943e84a2bad38"
+checksum = "20f0088bfb7441f7a37fa0c9e20cb1e9cba1cac6b9ce8cd2a6dc44294f8e8cbc"
 
 [[package]]
 name = "icu_properties"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bee3b67d0ea5c2cca5003417989af8996f8604e34fb9ddf96208a033901e70de"
+checksum = "2ea83d991c56158f7cf898bf86436c1dfe7c07ee82fe88951f2695c9f37a379f"
 dependencies = [
+ "displaydoc",
  "icu_collections",
  "icu_locale_core",
  "icu_properties_data",
@@ -2675,15 +2702,15 @@ dependencies = [
 
 [[package]]
 name = "icu_properties_data"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e2bbb201e0c04f7b4b3e14382af113e17ba4f63e2c9d2ee626b720cbce54a14"
+checksum = "b98f29af82d02b163fe50161388350e743bb3107cc8e8c2f7314cb505faddfcf"
 
 [[package]]
 name = "icu_provider"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139c4cf31c8b5f33d7e199446eff9c1e02decfc2f0eec2c8d71f65befa45b421"
+checksum = "413099315636c588ee8f011190b329b971a09a8fae9d157e01dcae8379468514"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
@@ -2698,24 +2725,26 @@ dependencies = [
 
 [[package]]
 name = "icu_segmenter"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c0794db0b1a86193ac9c48768d0e6c52c54448e0870ad87907d456ee0dac964"
+checksum = "61b195dc605f81aa181bec9b3bd14e26cc71b903e4644f6af578ca9772c7a710"
 dependencies = [
  "icu_collections",
- "icu_locale",
+ "icu_locale_fallback",
  "icu_provider",
  "icu_segmenter_data",
  "potential_utf",
+ "smallvec",
  "utf8_iter",
+ "zerotrie",
  "zerovec",
 ]
 
 [[package]]
 name = "icu_segmenter_data"
-version = "2.2.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4a2c462a4d927d512f5f882a033ddd62f33a05bb9f230d98f736ac3dc85938f"
+checksum = "913a7d294ad056474749152107309fdee3ec17d2482d1ab70fdc61a81c64b9a3"
 
 [[package]]
 name = "idna"
@@ -3249,6 +3278,7 @@ dependencies = [
  "clean-signals-frust",
  "frust-camera",
  "frust-clipboard",
+ "frust-connectivity",
  "frust-core",
  "frust-glyph",
  "frust-haptics",
@@ -3669,6 +3699,7 @@ checksum = "0cde0dfb48d25d2b4862161a4d5fcc0e3c24367869ad306b0c9ec0073bfed92d"
 dependencies = [
  "bitflags 2.13.1",
  "objc2-core-foundation",
+ "objc2-core-graphics",
 ]
 
 [[package]]
@@ -3999,35 +4030,44 @@ dependencies = [
 
 [[package]]
 name = "parlance"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b6937eda350acc1a5d05872c3cbf99fe78619c269096e2be3d4a350058639d5"
+checksum = "73072a9470554c8e794778acece2312661218aaabb635600957d952cf01c716e"
 
 [[package]]
-name = "parley"
-version = "0.11.1"
+name = "parley_data"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22d2ff88bd3f7d68d1d9b09c7e6209f9a8e8c05088295140a2bcf2e9b17038c5"
+checksum = "c43b63f808f6cc8f4a3b07de0d62a977bddd2e0bb5c232bd9e93ba8ef92e5e4b"
+dependencies = [
+ "icu_collections",
+ "icu_properties",
+]
+
+[[package]]
+name = "parley_emoji"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c4482d912d7671a7cd2089794f90ef3bb5f5f8c738230fb0fcd50fa020f0ed3"
+
+[[package]]
+name = "parley_engine"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74c0d373e462e504ad4436710a39f099e18e848e1ee711f70cd2dcd5a69b290"
 dependencies = [
  "fontique",
  "harfrust",
  "hashbrown 0.17.1",
+ "icu_locale_core",
  "icu_normalizer",
  "icu_properties",
  "icu_segmenter",
  "linebender_resource_handle",
  "parlance",
  "parley_data",
+ "parley_emoji",
  "skrifa",
-]
-
-[[package]]
-name = "parley_data"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1567535334d6ba2d3cde19221ba9a7bd0fabb3cbd99046ddfb10ae061cfcc889"
-dependencies = [
- "icu_properties",
 ]
 
 [[package]]
@@ -4659,15 +4699,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roxmltree"
-version = "0.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "rqrr"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5077,9 +5108,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "smithay-client-toolkit"
@@ -5208,6 +5239,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "synstructure"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -5348,9 +5390,9 @@ dependencies = [
 
 [[package]]
 name = "tinystr"
-version = "0.8.3"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d"
+checksum = "abc840c238154d58f9e86b2792261edfde565a17696e1cda1a449de27979801a"
 dependencies = [
  "displaydoc",
  "serde_core",
@@ -6598,9 +6640,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "writeable"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "x11"
@@ -6716,9 +6758,9 @@ dependencies = [
 
 [[package]]
 name = "yoke"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5"
+checksum = "417ef3fcf6c300b7dbd25c85531a746931c02ad536f3cf4786ed1e88223340b3"
 dependencies = [
  "stable_deref_trait",
  "yoke-derive",
@@ -6727,14 +6769,14 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
- "synstructure",
+ "syn 3.0.3",
+ "synstructure 0.14.0",
 ]
 
 [[package]]
@@ -6883,7 +6925,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "synstructure",
+ "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -6894,9 +6936,9 @@ checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerotrie"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f9152d31db0792fa83f70fb2f83148effb5c1f5b8c7686c3459e361d9bc20bf"
+checksum = "4ea269c3bd32f0a32c321907a2ae912ba6f4649bb0fc764a15627e99a7095a3f"
 dependencies = [
  "displaydoc",
  "yoke",
@@ -6906,9 +6948,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec"
-version = "0.11.6"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90f911cbc359ab6af17377d242225f4d75119aec87ea711a880987b18cd7b239"
+checksum = "f58a2799cfe9a1670c7ea8edbd52ef8edb93cb37a7f83bf31ba9e35d9dae6a40"
 dependencies = [
  "serde",
  "yoke",
@@ -6918,13 +6960,13 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.3"
+version = "0.11.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555"
+checksum = "c3743ddbf47738d929cd1ae2e199d40d0162979dfe31aef8ae646d2bf00bf97a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
