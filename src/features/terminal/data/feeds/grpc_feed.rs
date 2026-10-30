@@ -449,9 +449,11 @@ struct Wakes {
     pending: bool,
     /// Starts the timer that reports a window closing.
     waiter: Waiter,
-    /// Raised by the one timer started per owed wake when the window closes. Held here so a
-    /// dropped [`next`](Self::next) neither loses the signal (a `Notify` stores a permit) nor
-    /// starts another timer.
+    /// The signal of the timer armed for the wake owed now. Replaced by a fresh `Notify` each
+    /// time a timer is armed, so a timer that fires late (after the clock already released its
+    /// wake, or while no wait is live) lands on a `Notify` nobody listens to any more instead of
+    /// leaving a stale permit that cuts the next owed wake's wait short and starts a second
+    /// timer. A `Notify` keeps a permit, so a dropped [`next`](Self::next) loses no signal.
     closed: Arc<Notify>,
     /// Whether a timer is already running for the wake owed now.
     armed: bool,
@@ -502,6 +504,7 @@ impl Wakes {
                 // rebuilt: each of those would otherwise cost a sleeping pool thread.
                 if !self.armed {
                     self.armed = true;
+                    self.closed = Arc::new(Notify::new());
                     #[cfg(test)]
                     {
                         self.timers += 1;
@@ -2540,6 +2543,43 @@ mod tests {
         let again = race(wakes.next(), tokio::time::sleep(2 * TEST_DEBOUNCE)).await;
         assert!(matches!(again, Winner::Second(())), "acted exactly once");
         assert_eq!(wakes.timers, 1);
+    }
+
+    /// A timer that fires after its wake already acted through the clock leaves no permit
+    /// behind for the next owed wake: each owed wake costs exactly one timer.
+    #[tokio::test]
+    async fn a_late_timer_signal_does_not_cost_the_next_owed_wake_a_second_timer() {
+        let bus = WakeBus::new();
+        let mut wakes = Wakes::new(bus.subscribe(), TEST_DEBOUNCE, Waiter::Tokio);
+        bus.publish(WakeReason::Foregrounded);
+        wakes.next().await;
+
+        // First owed wake: arm its timer, drop the wait, let the window run out with nobody
+        // listening, and act through the clock before ever awaiting the signal.
+        bus.publish(WakeReason::NetworkChanged);
+        let inside = race(wakes.next(), tokio::task::yield_now()).await;
+        assert!(matches!(inside, Winner::Second(())));
+        assert_eq!(wakes.timers, 1);
+        tokio::time::sleep(TEST_DEBOUNCE + Duration::from_millis(30)).await;
+        wakes.next().await;
+        assert!(!wakes.pending);
+        // The timer fired meanwhile; its signal must not outlive the wake it served.
+        tokio::task::yield_now().await;
+
+        // Second owed wake: one more timer, and its own window close wakes the wait.
+        bus.publish(WakeReason::NetworkChanged);
+        let inside = race(wakes.next(), tokio::task::yield_now()).await;
+        assert!(matches!(inside, Winner::Second(())));
+        let owed = Instant::now();
+        wakes.next().await;
+        assert!(
+            owed.elapsed() > Duration::from_millis(20),
+            "not on a stale permit"
+        );
+        assert_eq!(wakes.timers, 2, "one timer for each owed wake");
+        let again = race(wakes.next(), tokio::time::sleep(2 * TEST_DEBOUNCE)).await;
+        assert!(matches!(again, Winner::Second(())), "acted exactly once");
+        assert_eq!(wakes.timers, 2);
     }
 
     /// A wake after a successful wake-driven attach restarts the schedule as ever.
