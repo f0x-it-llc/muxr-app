@@ -5184,6 +5184,11 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
     };
     let em = f64::from(broken.size);
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &broken, |c| c.is_ascii_digit());
+    assert_eq!(
+        digits.len(),
+        5,
+        "the unresolvable stack must shape all five digits of 50051, not an empty measurement"
+    );
     assert!(
         digits.iter().all(|advance| *advance < em - ADVANCE_EPSILON),
         "expected the unresolvable stack to leave every digit below a full \
@@ -5201,6 +5206,11 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
         ..field_style()
     };
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &rescued, |c| c.is_ascii_digit());
+    assert_eq!(
+        digits.len(),
+        5,
+        "the rescued stack must shape all five digits of 50051, not an empty measurement"
+    );
     assert!(
         digits.iter().all(|advance| *advance < em - ADVANCE_EPSILON),
         "a resolvable terminal generic must collapse the fallback split, got \
