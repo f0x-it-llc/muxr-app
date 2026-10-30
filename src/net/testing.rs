@@ -412,6 +412,10 @@ struct ScriptState {
     resizes: Vec<(u16, u16)>,
     mice: Vec<MouseObservation>,
     stalls: usize,
+    /// Whether `AttachTerminal` answers `UNAVAILABLE` instead of opening a stream.
+    refusing: bool,
+    /// Attaches refused while refusal was set.
+    refused: usize,
     /// The current stream's command channel, replaced on every attach. `None`
     /// before the first one.
     commands: Option<mpsc::Sender<ServerCommand>>,
@@ -453,6 +457,17 @@ impl TerminalScript {
     /// How many streams have gone silent on [`stall`](Self::stall).
     pub fn stalls(&self) -> usize {
         self.state().stalls
+    }
+
+    /// Make every new `AttachTerminal` answer `UNAVAILABLE` (a non-auth failure, so the client
+    /// takes its backoff path) until switched off again. Streams already open are untouched.
+    pub fn refuse_attaches(&self, refuse: bool) {
+        self.state().refusing = refuse;
+    }
+
+    /// How many attaches [`refuse_attaches`](Self::refuse_attaches) turned away.
+    pub fn refused(&self) -> usize {
+        self.state().refused
     }
 
     /// Send `bytes` to the client as a `render` frame.
@@ -497,6 +512,15 @@ impl TerminalScript {
         if let Some(commands) = self.state().commands.as_ref() {
             let _ = commands.try_send(command);
         }
+    }
+
+    /// Count and report whether this attach is to be turned away.
+    fn refuse(&self) -> bool {
+        let mut state = self.state();
+        if state.refusing {
+            state.refused += 1;
+        }
+        state.refusing
     }
 
     fn record_stall(&self) {
@@ -657,6 +681,9 @@ impl Muxr for FixtureService {
         request: Request<tonic::Streaming<ClientFrame>>,
     ) -> Result<Response<Self::AttachTerminalStream>, Status> {
         require_bearer(&request)?;
+        if self.terminal.refuse() {
+            return Err(Status::unavailable("attaches are refused"));
+        }
         let mut inbound = request.into_inner();
         let first = inbound
             .message()
