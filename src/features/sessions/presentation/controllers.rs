@@ -1,10 +1,12 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::task::Poll;
 
 use clean_signals::{ControllerCore, NoParams, RunOptions};
 use frust::{GetUntracked, RwSignal, Set};
-use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
+use tokio::sync::{Notify, broadcast};
 
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
@@ -97,12 +99,26 @@ impl SessionsController {
     /// gate ([`take_poll_tick`](Self::take_poll_tick)), so a wake that lands
     /// while a poll (or an earlier wake) is in flight starts nothing. Returns
     /// whether it started a refresh.
+    ///
+    /// A wake on a first load that settled *failed* (the Retry state, where
+    /// no poll runs) re-runs that load instead, through the same claim; a
+    /// wake before the first load settles still starts nothing.
     pub async fn refresh_on_wake(&self) -> bool {
-        if !self.take_poll_tick() {
+        if !self.take_poll_tick() && !self.take_retry() {
             return false;
         }
         self.refresh_from_poll().await;
         true
+    }
+
+    /// Claims the poll gate for a re-run of a settled-but-failed first load.
+    /// Honours the same covered-screen pause as
+    /// [`take_poll_tick`](Self::take_poll_tick).
+    fn take_retry(&self) -> bool {
+        self.is_polling()
+            && self.first_load_settled.get_untracked()
+            && !self.loaded.get_untracked()
+            && !self.poll_in_flight.swap(true, Ordering::SeqCst)
     }
 
     /// Re-runs a failed first load; its success sets `loaded`, the gate
@@ -237,26 +253,56 @@ impl AsRef<ControllerCore<AppFailure>> for SessionsController {
     }
 }
 
-/// Calls `on_wake` once per burst of wakes on `wakes`, until `alive` turns
-/// false or the bus closes. A lagged receiver means wakes were dropped, which
-/// still means "a wake happened": it is treated as a wake, never an error, and
-/// the already-queued wakes are coalesced into the same single call.
+/// Calls `on_wake` once per burst of wakes on `wakes`, until `cancel` is
+/// notified or the bus closes. The burst reports its strongest reason:
+/// [`WakeReason::NetworkChanged`] if any wake in it was one. A lagged receiver
+/// means wakes were dropped, which still means "a wake happened": it is
+/// treated as a wake, never an error, and (its reasons being lost) as a
+/// network change, the side that errs towards a redial. The already-queued
+/// wakes are coalesced into the same single call.
+///
+/// `cancel` is raced against the wait itself, so a stopped screen's loop ends
+/// at once rather than at its next wake. `Notify` keeps a permit when nobody
+/// is waiting, so a cancel that lands between waits is not lost.
 pub async fn each_wake(
     mut wakes: broadcast::Receiver<WakeReason>,
-    alive: impl Fn() -> bool,
-    mut on_wake: impl FnMut(),
+    cancel: &Notify,
+    mut on_wake: impl FnMut(WakeReason),
 ) {
     loop {
-        match wakes.recv().await {
-            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-            Err(broadcast::error::RecvError::Closed) => break,
+        let mut reason = match recv_or_cancel(&mut wakes, cancel).await {
+            None | Some(Err(broadcast::error::RecvError::Closed)) => break,
+            Some(Ok(reason)) => reason,
+            Some(Err(broadcast::error::RecvError::Lagged(_))) => WakeReason::NetworkChanged,
+        };
+        loop {
+            match wakes.try_recv() {
+                Ok(WakeReason::NetworkChanged) | Err(TryRecvError::Lagged(_)) => {
+                    reason = WakeReason::NetworkChanged;
+                }
+                Ok(WakeReason::Foregrounded) => {}
+                Err(_) => break,
+            }
         }
-        if !alive() {
-            break;
-        }
-        while matches!(wakes.try_recv(), Ok(_) | Err(TryRecvError::Lagged(_))) {}
-        on_wake();
+        on_wake(reason);
     }
+}
+
+/// One wait on `wakes`, or `None` the moment `cancel` fires. `cancel` is
+/// polled first, so a pending cancel beats a ready wake.
+async fn recv_or_cancel(
+    wakes: &mut broadcast::Receiver<WakeReason>,
+    cancel: &Notify,
+) -> Option<Result<WakeReason, broadcast::error::RecvError>> {
+    let mut cancelled = std::pin::pin!(cancel.notified());
+    let mut recv = std::pin::pin!(wakes.recv());
+    std::future::poll_fn(|cx| {
+        if cancelled.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        recv.as_mut().poll(cx).map(Some)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -617,18 +663,14 @@ mod tests {
             drop(bus);
 
             let started = std::cell::RefCell::new(Vec::new());
-            each_wake(
-                wakes,
-                || true,
-                || {
-                    let c = Arc::clone(&c);
-                    started
-                        .borrow_mut()
-                        .push(tokio::task::spawn_local(async move {
-                            c.refresh_on_wake().await
-                        }));
-                },
-            )
+            each_wake(wakes, &Notify::new(), |_| {
+                let c = Arc::clone(&c);
+                started
+                    .borrow_mut()
+                    .push(tokio::task::spawn_local(async move {
+                        c.refresh_on_wake().await
+                    }));
+            })
             .await;
             for handle in started.into_inner() {
                 assert!(handle.await.expect("the refresh task finishes"));
@@ -672,18 +714,14 @@ mod tests {
             drop(bus);
 
             let started = std::cell::RefCell::new(Vec::new());
-            each_wake(
-                wakes,
-                || true,
-                || {
-                    let c = Arc::clone(&c);
-                    started
-                        .borrow_mut()
-                        .push(tokio::task::spawn_local(async move {
-                            c.refresh_on_wake().await
-                        }));
-                },
-            )
+            each_wake(wakes, &Notify::new(), |_| {
+                let c = Arc::clone(&c);
+                started
+                    .borrow_mut()
+                    .push(tokio::task::spawn_local(async move {
+                        c.refresh_on_wake().await
+                    }));
+            })
             .await;
             for handle in started.into_inner() {
                 assert!(
@@ -712,7 +750,7 @@ mod tests {
         drop(bus);
 
         let mut calls = 0;
-        block_on(each_wake(wakes, || true, || calls += 1));
+        block_on(each_wake(wakes, &Notify::new(), |_| calls += 1));
 
         assert_eq!(calls, 1, "a lag is one wake, never an error");
     }
@@ -730,7 +768,7 @@ mod tests {
         let wakes = bus.subscribe();
         drop(bus);
         let mut calls = 0;
-        block_on(each_wake(wakes, || true, || calls += 1));
+        block_on(each_wake(wakes, &Notify::new(), |_| calls += 1));
 
         assert_eq!(calls, 0);
         assert_eq!(repo.calls.load(Ordering::SeqCst), 1, "only the first load");
@@ -745,19 +783,97 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_screen_ends_its_wake_loop_on_the_next_wake() {
+    fn a_stopped_screen_ends_its_wake_loop_without_waiting_for_a_wake() {
+        use crate::net::wake::WakeBus;
+
+        // The bus stays open and nothing is published: only the cancel can
+        // end the loop. (Retargeted from "on the next wake": the loop used to
+        // outlive its screen until one arrived.)
+        let bus = WakeBus::new();
+        let wakes = bus.subscribe();
+        let cancel = Notify::new();
+        cancel.notify_one();
+
+        let mut calls = 0;
+        block_on(each_wake(wakes, &cancel, |_| calls += 1));
+
+        assert_eq!(calls, 0, "an unmounted screen reacts to nothing");
+        drop(bus);
+    }
+
+    #[test]
+    fn a_cancel_ends_a_loop_that_is_parked_waiting() {
         use crate::net::wake::WakeBus;
 
         let bus = WakeBus::new();
         let wakes = bus.subscribe();
+        let cancel = Notify::new();
+
+        local_block_on(async {
+            let mut calls = 0;
+            let waiting = each_wake(wakes, &cancel, |_| calls += 1);
+            let stop = async {
+                tokio::task::yield_now().await;
+                cancel.notify_one();
+            };
+            tokio::join!(waiting, stop);
+            assert_eq!(calls, 0);
+        });
+        drop(bus);
+    }
+
+    #[test]
+    fn a_burst_reports_the_strongest_reason() {
+        use crate::net::wake::WakeBus;
+
+        let bus = WakeBus::new();
+        let wakes = bus.subscribe();
+        bus.publish(WakeReason::Foregrounded);
         bus.publish(WakeReason::NetworkChanged);
-        bus.publish(WakeReason::NetworkChanged);
+        bus.publish(WakeReason::Foregrounded);
+        let calm = bus.subscribe();
+        bus.publish(WakeReason::Foregrounded);
+        bus.publish(WakeReason::Foregrounded);
         drop(bus);
 
-        let mut calls = 0;
-        block_on(each_wake(wakes, || false, || calls += 1));
+        let mut reasons = Vec::new();
+        block_on(each_wake(wakes, &Notify::new(), |r| reasons.push(r)));
+        assert_eq!(reasons, vec![WakeReason::NetworkChanged]);
 
-        assert_eq!(calls, 0, "an unmounted screen reacts to nothing");
+        let mut reasons = Vec::new();
+        block_on(each_wake(calm, &Notify::new(), |r| reasons.push(r)));
+        assert_eq!(reasons, vec![WakeReason::Foregrounded]);
+    }
+
+    #[test]
+    fn a_wake_on_a_failed_first_load_retries_it() {
+        let repo = Arc::new(FailOnceSessionsRepository::default());
+        let c =
+            SessionsController::new(Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>);
+        block_on(c.refresh());
+        assert!(c.first_load_settled.get_untracked());
+        assert!(!c.loaded.get_untracked(), "the first load failed");
+        assert_eq!(repo.calls.load(Ordering::SeqCst), 1);
+
+        assert!(block_on(c.refresh_on_wake()), "the wake re-ran the load");
+
+        assert_eq!(
+            repo.calls.load(Ordering::SeqCst),
+            2,
+            "a second ListSessions"
+        );
+        assert!(c.loaded.get_untracked());
+        assert!(c.take_poll_tick(), "the poll is re-armed");
+    }
+
+    #[test]
+    fn a_wake_over_a_covered_screen_does_not_retry_a_failed_first_load() {
+        let c = SessionsController::new(Arc::new(FailOnceSessionsRepository::default()));
+        block_on(c.refresh());
+        c.pause_until_depth(0);
+
+        assert!(!block_on(c.refresh_on_wake()));
+        assert!(!c.loaded.get_untracked());
     }
 
     struct GatedSessionsRepository {
