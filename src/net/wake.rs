@@ -2,10 +2,11 @@
 //! connection worth retrying now". Consumers (the terminal feed, the Sessions
 //! heartbeat) subscribe and react; they never learn where a wake came from.
 //!
-//! The production source is installed by `MuxrApp::init` from frust's
-//! connectivity and lifecycle events. Until one is installed nothing is ever
-//! published, so behaviour is unchanged. Free of feature types: features
-//! depend on `net`, never the reverse.
+//! The production source is installed by `MuxrApp::init` (see `src/lib.rs`):
+//! its `FrustWakeSource` publishes from frust's connectivity events (a changed
+//! network path) and lifecycle events (a return to the foreground), so a
+//! subscriber sees wakes whenever the platform reports either. Free of feature
+//! types: features depend on `net`, never the reverse.
 
 use std::sync::{Arc, OnceLock};
 
