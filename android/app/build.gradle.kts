@@ -104,10 +104,11 @@ android {
 
     defaultConfig {
         applicationId = "com.it.f0x.muxr"
-        // Frust's :frust-embedding library floor is 26 (Platform-Support
-        // Policy, frust docs/DEVELOPMENT.md) - AGP's manifest merger hard-fails
-        // on an app min below it.
-        minSdk = 26
+        // Frust 0.6.4's Android modules (:frust-embedding and every plugin)
+        // declare a floor of 29 (Android 10; the text stack needs the API 29
+        // NDK font matcher) - AGP's manifest merger hard-fails on an app min
+        // below it.
+        minSdk = 29
         targetSdk = 36
         versionCode = versionCodeValue
         versionName = versionNameValue
@@ -258,6 +259,7 @@ dependencies {
     implementation(project(":frust-camera"))
     implementation(project(":frust-secure-storage"))
     implementation(project(":frust-iap"))
+    implementation(project(":frust-connectivity"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

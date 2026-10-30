@@ -4,6 +4,7 @@
 //! token + bearer interceptor) → [`client`] ([`MuxrClient`]) → [`error`]
 //! (`tonic::Status` → [`AppFailure`](crate::failure::AppFailure)) →
 //! [`control`] (the `ControlEvent.kind` strings the proto can't type).
+//! [`wake`] is the app-scoped "retry now" signal beside that chain.
 //!
 //! App-level infrastructure beside `connection.rs`/`failure.rs`, not a
 //! feature's `data` layer — shared across `sessions`, `settings`, `terminal`
@@ -24,6 +25,7 @@ pub mod control;
 pub mod error;
 pub mod proto;
 pub mod tls;
+pub mod wake;
 
 /// The in-process `muxrd` fixture the crate's own tests connect to. See its
 /// module docs for why it is `#[cfg(test)]` rather than feature-gated.

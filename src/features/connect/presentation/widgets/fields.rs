@@ -163,7 +163,9 @@ pub fn field_text_style(theme: &Theme, ink: Color) -> TextStyle {
 /// falls back per cluster, advancing every digit a full em. A generic that
 /// resolves everywhere collapses it back to one run. Scoped to the fields on
 /// purpose — every other run on this screen shapes against the shell's
-/// font-registered context and resolves mono correctly.
+/// font-registered context and resolves mono correctly. On frust 0.6.4 (parley
+/// 0.12) the host counter-example stopped reproducing; the workaround stays
+/// until it is re-measured on the device that showed the defect.
 fn field_font_family(family: &FontFamily) -> FontFamily {
     let mut names: Vec<FamilyName> = match family {
         FontFamily::SystemUi => vec![FamilyName::Generic(GenericSlot::SystemUi)],
