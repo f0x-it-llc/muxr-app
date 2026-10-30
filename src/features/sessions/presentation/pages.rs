@@ -35,7 +35,7 @@ use frust::{
     scroll_view, spawn_local, use_context,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
@@ -317,31 +317,53 @@ fn beat(
 }
 
 /// Runs a wake-driven refresh and heartbeat ping for every wake on `wakes`
-/// while the screen is mounted. `wakes` is injected: production passes
-/// [`crate::net::wake::subscribe`], tests a receiver from a local bus. The
-/// refresh and the ping go through the same single-flight paths the poll
-/// uses, so a wake never starts a second one in flight.
+/// while the screen is mounted, and ends the loop at unmount. `wakes` is
+/// injected: production passes [`crate::net::wake::subscribe`], tests a
+/// receiver from a local bus. The refresh and the ping go through the same
+/// single-flight paths the poll uses, so a wake never starts a second one in
+/// flight.
+///
+/// A [`WakeReason::NetworkChanged`] wake first rebuilds the shared client's
+/// channel (single-flight with the terminal feed's own), so the refresh and
+/// the ping do not ride a half-open one until keepalive notices; a failed
+/// rebuild is logged and the refresh still runs, whose own error surfacing
+/// then applies. A [`WakeReason::Foregrounded`] wake skips the redial. A wake
+/// while the poll is covered does nothing at all.
+///
+/// Must run where a reactive `Owner` is ambient, as `on_cleanup` no-ops
+/// otherwise.
 fn spawn_wake_loop(
     wakes: broadcast::Receiver<WakeReason>,
     controller: Arc<SessionsController>,
     connection: Arc<ConnectionController>,
     heartbeat: HeartbeatState,
 ) {
-    let alive = Arc::new(AtomicBool::new(true));
-    let flag = Arc::clone(&alive);
-    on_cleanup(move || flag.store(false, Ordering::SeqCst));
+    let cancel = Arc::new(Notify::new());
+    let stop = Arc::clone(&cancel);
+    on_cleanup(move || stop.notify_one());
 
-    spawn_local(each_wake(
-        wakes,
-        move || alive.load(Ordering::SeqCst),
-        move || {
-            let refresh = Arc::clone(&controller);
+    spawn_local(async move {
+        each_wake(wakes, &cancel, move |reason| {
+            if !controller.is_polling() {
+                return;
+            }
+            let controller = Arc::clone(&controller);
+            let connection = Arc::clone(&connection);
             spawn_local(async move {
-                refresh.refresh_on_wake().await;
+                if reason == WakeReason::NetworkChanged
+                    && let Err(failure) = connection.reconnect().await
+                {
+                    log::debug!("sessions: reconnect on a network change failed: {failure:?}");
+                }
+                let refresh = Arc::clone(&controller);
+                spawn_local(async move {
+                    refresh.refresh_on_wake().await;
+                });
+                beat(&controller, &connection, heartbeat);
             });
-            beat(&controller, &connection, heartbeat);
-        },
-    ));
+        })
+        .await;
+    });
 }
 
 impl Component for SessionsScreen {
@@ -871,6 +893,7 @@ fn terminal_location(id: &str, pane: Option<(u32, u32)>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::Set;
 
     #[test]
     fn the_attach_location_carries_the_session_id_as_a_query_param() {
@@ -984,6 +1007,219 @@ mod tests {
         assert!(
             disconnect_message(DISCONNECT_UNKNOWN_HOST).contains(DISCONNECT_UNKNOWN_HOST),
             "…and still reads as a sentence with no endpoint published"
+        );
+    }
+
+    /// What the wake loop asked of its collaborators, in order.
+    type Events = Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+    fn note(events: &Events, what: &'static str) {
+        events.lock().expect("events").push(what);
+    }
+
+    fn noted(events: &Events) -> Vec<&'static str> {
+        events.lock().expect("events").clone()
+    }
+
+    /// A connection backend that records the reconnects asked of it and every
+    /// `client()` lookup (the first thing `ping` does, and `None` ends it).
+    struct RecordingBackend(Events);
+
+    impl crate::connection::ConnectionBackend for RecordingBackend {
+        fn begin_connect(
+            &self,
+            _: crate::connection::ConnectTarget,
+        ) -> crate::connection::ConnectRun {
+            unreachable!("the wake loop never connects")
+        }
+
+        fn disconnect(&self) {}
+
+        fn client(&self) -> Option<crate::net::MuxrClient> {
+            note(&self.0, "ping");
+            None
+        }
+
+        fn reconnect(&self) -> crate::connection::ReconnectFuture {
+            note(&self.0, "reconnect");
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// The seeded mock repository, recording each `ListSessions`.
+    struct RecordingRepository {
+        events: Events,
+        inner: crate::features::sessions::data::repositories::MockSessionsRepository,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+    impl crate::features::sessions::domain::repositories::SessionsRepository for RecordingRepository {
+        async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+            note(&self.events, "refresh");
+            self.inner.list_sessions().await
+        }
+
+        async fn create_session(
+            &self,
+            params: crate::features::sessions::domain::entities::CreateSessionParams,
+        ) -> Result<Session, AppFailure> {
+            self.inner.create_session(params).await
+        }
+
+        async fn rename_session(
+            &self,
+            request: crate::features::sessions::domain::entities::RenameRequest,
+        ) -> Result<Session, AppFailure> {
+            self.inner.rename_session(request).await
+        }
+
+        async fn kill_session(&self, id: String) -> Result<(), AppFailure> {
+            self.inner.kill_session(id).await
+        }
+    }
+
+    struct WakeRig {
+        runtime: &'static frust_reactive::ReactiveRuntime,
+        owner: Option<frust_reactive::Owner>,
+        bus: crate::net::wake::WakeBus,
+        events: Events,
+        controller: Arc<SessionsController>,
+    }
+
+    impl WakeRig {
+        /// A loaded sessions controller and a connected-looking connection,
+        /// with `spawn_wake_loop` running under its own owner. The recorded
+        /// events are cleared once the first load has settled.
+        fn mount() -> Self {
+            let runtime = frust_reactive::ReactiveRuntime::init(Arc::new(|| {}));
+            let events: Events = Events::default();
+            let controller = Arc::new(SessionsController::new(Arc::new(RecordingRepository {
+                events: Arc::clone(&events),
+                inner:
+                    crate::features::sessions::data::repositories::MockSessionsRepository::seeded(),
+            })));
+            let connection = Arc::new(ConnectionController::with_backend(Arc::new(
+                RecordingBackend(Arc::clone(&events)),
+            )));
+            connection
+                .server_info
+                .set(Some(crate::connection::ServerInfo {
+                    endpoint: "host:1".to_string(),
+                    trust_mode: crate::connection::TrustMode::System,
+                    tls_label: String::new(),
+                    version: String::new(),
+                    latency_ms: 10,
+                    backend_versions: Vec::new(),
+                    available_backends: Vec::new(),
+                    capabilities: Default::default(),
+                    is_read_only: false,
+                }));
+            let bus = crate::net::wake::WakeBus::new();
+            let owner = frust_reactive::Owner::new();
+            owner.with(|| {
+                spawn_wake_loop(
+                    bus.subscribe(),
+                    Arc::clone(&controller),
+                    connection,
+                    HeartbeatState::new(),
+                )
+            });
+            let first = Arc::clone(&controller);
+            spawn_local(async move { first.refresh().await });
+            let rig = Self {
+                runtime,
+                owner: Some(owner),
+                bus,
+                events,
+                controller,
+            };
+            rig.pump();
+            assert!(rig.controller.loaded.get_untracked());
+            rig.events.lock().expect("events").clear();
+            rig
+        }
+
+        /// Drains the local queue for a short window: controller calls hop to
+        /// the background runtime and back, so one drain is not enough.
+        fn pump(&self) {
+            for _ in 0..60 {
+                self.runtime.pump_local();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
+    #[test]
+    fn a_network_change_wake_reconnects_then_refreshes_once_and_pings_once() {
+        let rig = WakeRig::mount();
+
+        rig.bus.publish(WakeReason::NetworkChanged);
+        rig.pump();
+
+        let events = noted(&rig.events);
+        assert_eq!(events.first(), Some(&"reconnect"), "{events:?}");
+        assert_eq!(
+            events.iter().filter(|e| **e == "refresh").count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "ping").count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(events.len(), 3, "{events:?}");
+    }
+
+    #[test]
+    fn a_foregrounded_wake_refreshes_and_pings_without_a_redial() {
+        let rig = WakeRig::mount();
+
+        rig.bus.publish(WakeReason::Foregrounded);
+        rig.pump();
+
+        let events = noted(&rig.events);
+        assert!(!events.contains(&"reconnect"), "{events:?}");
+        assert!(
+            events.contains(&"refresh") && events.contains(&"ping"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_wake_while_the_poll_is_covered_does_nothing() {
+        let rig = WakeRig::mount();
+        rig.controller.pause_until_depth(0);
+
+        rig.bus.publish(WakeReason::NetworkChanged);
+        rig.pump();
+
+        assert_eq!(noted(&rig.events), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn unmounting_ends_the_wake_loop_and_releases_what_it_held() {
+        let mut rig = WakeRig::mount();
+        assert!(
+            Arc::strong_count(&rig.controller) > 1,
+            "the running loop holds the controller"
+        );
+
+        drop(rig.owner.take());
+        rig.pump();
+
+        assert_eq!(
+            Arc::strong_count(&rig.controller),
+            1,
+            "cleanup ended the loop with no wake published"
+        );
+        rig.bus.publish(WakeReason::NetworkChanged);
+        rig.pump();
+        assert_eq!(
+            noted(&rig.events),
+            Vec::<&str>::new(),
+            "a late wake reaches nobody"
         );
     }
 }

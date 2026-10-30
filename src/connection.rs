@@ -176,7 +176,17 @@ pub trait ConnectionBackend: Send + Sync + 'static {
     fn client(&self) -> Option<MuxrClient> {
         None
     }
+
+    /// Rebuild the live client's channel (single-flight, see
+    /// [`MuxrClient::reconnect`]). Nothing open — or no wire behind the
+    /// backend — is nothing to rebuild, and succeeds.
+    fn reconnect(&self) -> ReconnectFuture {
+        Box::pin(async { Ok(()) })
+    }
 }
+
+/// The work behind [`ConnectionController::reconnect`].
+pub type ReconnectFuture = Pin<Box<dyn Future<Output = Result<(), AppFailure>> + Send>>;
 
 /// The work behind an accepted credential offer — installed by the `connect`
 /// feature, called by [`ConnectionController::accept_credential_offer`].
@@ -266,6 +276,13 @@ impl ConnectionBackend for NetConnectionBackend {
 
     fn client(&self) -> Option<MuxrClient> {
         self.slot().clone()
+    }
+
+    fn reconnect(&self) -> ReconnectFuture {
+        match self.client() {
+            Some(client) => Box::pin(async move { client.reconnect().await }),
+            None => Box::pin(async { Ok(()) }),
+        }
     }
 }
 
@@ -438,6 +455,13 @@ impl ConnectionController {
         Self::new(Arc::new(MockConnectionBackend))
     }
 
+    /// A fresh, unpublished controller over a test's own backend — the seam
+    /// for observing what a screen asks of the connection.
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: Arc<dyn ConnectionBackend>) -> Self {
+        Self::new(backend)
+    }
+
     /// This controller's [`ControllerCore`] — the failure sink `MuxrApp::init`
     /// bridges to the app's toasts. A named accessor rather than the [`AsRef`]
     /// impl below because `Arc<ConnectionController>` has its own inherent
@@ -450,6 +474,15 @@ impl ConnectionController {
     /// under the mock backend).
     pub fn client(&self) -> Option<MuxrClient> {
         self.backend.client()
+    }
+
+    /// Rebuild the shared client's channel now — the shared client's
+    /// single-flight [`MuxrClient::reconnect`], so a concurrent caller (the
+    /// terminal feed) collapses into the same dial. A no-op `Ok` while nothing
+    /// is connected. For a screen that must not trust a half-open channel
+    /// after a network change before it sends its next RPC.
+    pub async fn reconnect(&self) -> Result<(), AppFailure> {
+        self.backend.reconnect().await
     }
 
     /// Connect to `target`, ignoring the outcome — the fire-and-forget form for
