@@ -11,8 +11,9 @@
 //!
 //! The screen is ~830px tall, so every frame here lays out at [`SURFACE`], not
 //! `support`'s default. The placeholder-shaping tests at the bottom shape the
-//! fields' real placeholder strings through a bare [`TextContext`], reproducing
-//! a still-live device defect (digits shaping a full em apart).
+//! fields' real placeholder strings through a bare [`TextContext`], guarding
+//! against the device defect they were fixed for (digits shaping a full em
+//! apart), which frust 0.6.4's host shaping no longer reproduces.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -5169,23 +5170,31 @@ fn the_token_placeholder_stays_the_control_it_was_on_device() {
 }
 
 #[test]
-fn a_stack_that_resolves_to_nothing_is_what_blows_the_digits_up() {
-    // The counter-example that gives the three tests above their teeth: the
-    // *same* string, shaped with a stack that cannot resolve, splits into more
-    // than one run and advances its digits a full em.
+fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
+    // The retired counter-example. It was the negative control for
+    // `field_font_family`: on parley 0.11 a stack that resolves to nothing fell
+    // back per cluster and advanced every digit a full em. On frust 0.6.4
+    // (parley 0.12) it no longer does, so the host no longer reproduces that
+    // device defect. The workaround is kept until it is re-measured on the
+    // device that showed the defect. If this fails again, parley's fallback has
+    // regressed and the workaround is load-bearing once more.
     let broken = TextStyle {
         family: FontFamily::Named(vec!["No Such Family 1234".to_string()]),
         ..field_style()
     };
     let em = f64::from(broken.size);
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &broken, |c| c.is_ascii_digit());
+    assert_eq!(
+        digits.len(),
+        5,
+        "the unresolvable stack must shape all five digits of 50051, not an empty measurement"
+    );
     assert!(
-        digits
-            .iter()
-            .all(|advance| *advance >= em - ADVANCE_EPSILON),
-        "expected the unresolvable stack to advance digits a full {em}px em, \
-         got {digits:?} — if this stops holding, parley's per-cluster fallback \
-         changed and `field_font_family`'s workaround should be re-measured"
+        digits.iter().all(|advance| *advance < em - ADVANCE_EPSILON),
+        "expected the unresolvable stack to leave every digit below a full \
+         {em}px em, got {digits:?} — if this fails, parley's per-cluster \
+         fallback has regressed and `field_font_family`'s workaround is \
+         load-bearing again; re-measure it on the device"
     );
 
     // …and the fix is one appended, resolvable generic, nothing more.
@@ -5197,6 +5206,11 @@ fn a_stack_that_resolves_to_nothing_is_what_blows_the_digits_up() {
         ..field_style()
     };
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &rescued, |c| c.is_ascii_digit());
+    assert_eq!(
+        digits.len(),
+        5,
+        "the rescued stack must shape all five digits of 50051, not an empty measurement"
+    );
     assert!(
         digits.iter().all(|advance| *advance < em - ADVANCE_EPSILON),
         "a resolvable terminal generic must collapse the fallback split, got \
