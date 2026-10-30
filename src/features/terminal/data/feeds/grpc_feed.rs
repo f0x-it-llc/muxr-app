@@ -440,14 +440,24 @@ struct Pump {
 struct Wakes {
     rx: broadcast::Receiver<WakeReason>,
     debounce: Duration,
-    /// When the last wake acted on arrived.
+    /// When the last wake was acted on: the moment [`next`](Self::next) resolved, so for a
+    /// trailing act the close of the window, not the arrival of the wake.
     last: Option<Instant>,
     /// A wake arrived inside the window and is owed one more act when the window closes. Lives
     /// here, not in a local of [`next`](Self::next), so a wait dropped mid-way by the race it
     /// sits in loses nothing.
     pending: bool,
-    /// Times the trailing wait for a window to close.
+    /// Starts the timer that reports a window closing.
     waiter: Waiter,
+    /// Raised by the one timer started per owed wake when the window closes. Held here so a
+    /// dropped [`next`](Self::next) neither loses the signal (a `Notify` stores a permit) nor
+    /// starts another timer.
+    closed: Arc<Notify>,
+    /// Whether a timer is already running for the wake owed now.
+    armed: bool,
+    /// Timers started so far — what the one-timer bound is checked against.
+    #[cfg(test)]
+    timers: usize,
 }
 
 impl Wakes {
@@ -458,6 +468,10 @@ impl Wakes {
             last: None,
             pending: false,
             waiter,
+            closed: Arc::new(Notify::new()),
+            armed: false,
+            #[cfg(test)]
+            timers: 0,
         }
     }
 
@@ -480,15 +494,27 @@ impl Wakes {
                 let remaining = self.remaining();
                 if remaining.is_zero() {
                     self.pending = false;
+                    self.armed = false;
                     self.last = Some(Instant::now());
                     return;
                 }
-                match race(self.rx.recv(), self.waiter.sleep(remaining)).await {
-                    Winner::First(Err(RecvError::Closed)) => self.waiter.sleep(remaining).await,
+                // One timer per owed wake, however many times this wait is dropped and
+                // rebuilt: each of those would otherwise cost a sleeping pool thread.
+                if !self.armed {
+                    self.armed = true;
+                    #[cfg(test)]
+                    {
+                        self.timers += 1;
+                    }
+                    self.waiter.start_timer(remaining, Arc::clone(&self.closed));
+                }
+                match race(self.rx.recv(), self.closed.notified()).await {
+                    Winner::First(Err(RecvError::Closed)) => self.closed.notified().await,
                     Winner::First(_) => {
                         while matches!(self.rx.try_recv(), Ok(_) | Err(TryRecvError::Lagged(_))) {}
                     }
-                    Winner::Second(()) => {}
+                    // The timer fired; if the clock says a sliver is left, it is re-armed.
+                    Winner::Second(()) => self.armed = false,
                 }
                 continue;
             }
@@ -595,6 +621,26 @@ enum Waiter {
 }
 
 impl Waiter {
+    /// Raise `closed` once `delay` has run out, without anything having to wait on the timer.
+    fn start_timer(&self, delay: Duration, closed: Arc<Notify>) {
+        match self {
+            // Detached on purpose: a dropped join handle leaves the nap running.
+            Waiter::Frust => {
+                drop(frust::spawn_blocking(move || {
+                    std::thread::sleep(delay);
+                    closed.notify_one();
+                }));
+            }
+            #[cfg(test)]
+            Waiter::Tokio => {
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    closed.notify_one();
+                });
+            }
+        }
+    }
+
     async fn sleep(&self, delay: Duration) {
         match self {
             // A raced-away nap leaves its pool thread sleeping out the remainder;
@@ -2407,7 +2453,9 @@ mod tests {
             tokio::time::sleep(TEST_DEBOUNCE + Duration::from_millis(10)).await;
             rig.wake(WakeReason::Foregrounded);
             wait_until("the wake costs one attempt", || {
-                script.refused() == 5 + wake && rig.connections() == 2 + wake
+                script.refused() == 5 + wake
+                    && rig.connections() == 2 + wake
+                    && feed.status() == LinkStatus::Disconnected
             })
             .await;
             assert_eq!(feed.backoff_step(), 2, "the schedule was not restarted");
@@ -2418,6 +2466,80 @@ mod tests {
             5,
             "one dial per wake, never a fresh climb"
         );
+    }
+
+    /// A failed wake-driven dial, then a successful one: the success clears the failure, so a
+    /// wake still inside the failure's two windows restarts the schedule.
+    #[tokio::test]
+    async fn a_success_clears_a_failed_wake_driven_dial_before_the_next_wake() {
+        const NAP: [Duration; 2] = [Duration::from_millis(40), Duration::from_millis(40)];
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (feed, _) = rig.feed_with(80, 24, &NAP);
+        wait_until("the stream is up", || {
+            feed.status() == LinkStatus::Connected
+        })
+        .await;
+        script.refuse_attaches(true);
+        script.kill();
+        wait_until("the schedule runs out", || {
+            feed.status() == LinkStatus::Disconnected && script.refused() == 2
+        })
+        .await;
+
+        // The failed wake-driven dial.
+        rig.wake(WakeReason::NetworkChanged);
+        wait_until("the wake-driven attempts fail", || {
+            feed.status() == LinkStatus::Disconnected && script.refused() == 5
+        })
+        .await;
+        script.refuse_attaches(false);
+
+        // Held to the window's close, so it lands within two windows of the failure and
+        // finds the step unreset: the one attempt succeeds.
+        rig.wake(WakeReason::Foregrounded);
+        wait_until("the second wake attaches", || {
+            script.attach_count() == 2 && feed.status() == LinkStatus::Connected
+        })
+        .await;
+        script.kill();
+        wait_until("the schedule is spent again", || {
+            feed.status() == LinkStatus::Disconnected
+        })
+        .await;
+        assert_eq!(feed.backoff_step(), 2);
+
+        // Again held to the window's close, still within two windows of the old failure.
+        rig.wake(WakeReason::NetworkChanged);
+        wait_until("the third wake attaches", || {
+            script.attach_count() == 3 && feed.status() == LinkStatus::Connected
+        })
+        .await;
+        assert_eq!(feed.backoff_step(), 0, "the success cleared the failure");
+    }
+
+    /// However often the wait for an owed wake is dropped and rebuilt inside one window, one
+    /// timer serves it, and the wake still acts exactly once when the window closes.
+    #[tokio::test]
+    async fn an_owed_wake_costs_one_timer_however_often_its_wait_is_rebuilt() {
+        let bus = WakeBus::new();
+        let mut wakes = Wakes::new(bus.subscribe(), TEST_DEBOUNCE, Waiter::Tokio);
+        bus.publish(WakeReason::Foregrounded);
+        wakes.next().await;
+        bus.publish(WakeReason::NetworkChanged);
+
+        for _ in 0..50 {
+            let inside = race(wakes.next(), tokio::task::yield_now()).await;
+            assert!(matches!(inside, Winner::Second(())));
+        }
+        assert!(wakes.pending);
+        assert_eq!(wakes.timers, 1, "one timer for the owed wake");
+
+        wakes.next().await;
+        assert_eq!(wakes.timers, 1, "the close needed no second timer");
+        let again = race(wakes.next(), tokio::time::sleep(2 * TEST_DEBOUNCE)).await;
+        assert!(matches!(again, Winner::Second(())), "acted exactly once");
+        assert_eq!(wakes.timers, 1);
     }
 
     /// A wake after a successful wake-driven attach restarts the schedule as ever.
