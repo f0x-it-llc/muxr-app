@@ -488,6 +488,7 @@ mod tests {
             backend,
             id: id.to_string(),
             space_count: 0,
+            agents: None,
         }
     }
 
@@ -501,6 +502,7 @@ mod tests {
     fn pane(title: &str) -> PaneMsg {
         PaneMsg {
             id: 0,
+            agent: None,
             title: title.to_string(),
             is_focused: false,
             is_floating: false,
