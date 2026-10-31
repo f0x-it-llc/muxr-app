@@ -400,6 +400,7 @@ mod tests {
             pane_path: String::new(),
             panes: (0..panes)
                 .map(|id| PaneEntry {
+                    agent: None,
                     id: id as u32,
                     title: String::new(),
                     cwd: String::new(),
