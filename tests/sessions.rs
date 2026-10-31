@@ -1238,6 +1238,7 @@ fn stub_session(name: &str) -> Session {
             tabs_detail: Vec::new(),
             space: None,
         },
+        agents: None,
     }
 }
 
