@@ -71,6 +71,7 @@ use std::sync::Arc;
 
 use tonic::Status;
 
+use crate::agents::AgentSummary;
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
@@ -306,6 +307,7 @@ fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
         has_bell: info.has_bell,
         is_current: info.is_current,
         layout,
+        agents: info.agents.as_ref().map(AgentSummary::from_wire),
     }
 }
 
@@ -450,6 +452,7 @@ fn optimistic_session(id: String, name: String, backend: SessionBackend) -> Sess
             tabs_detail: Vec::new(),
             space: None,
         },
+        agents: None,
     }
 }
 
@@ -490,6 +493,30 @@ mod tests {
             space_count: 0,
             agents: None,
         }
+    }
+
+    #[test]
+    fn map_session_carries_the_agent_summary_when_the_wire_has_one() {
+        let mut wire = info("herdr:a", "a", Backend::Herdr as i32, false);
+        wire.agents = Some(crate::net::proto::AgentSummary {
+            total: 4,
+            blocked: 1,
+            done: 1,
+            working: 1,
+            idle: 1,
+            unknown: 0,
+            kinds: vec!["claude".to_string(), "codex".to_string()],
+        });
+        let agents = map_session(wire, None).agents.expect("agents mapped");
+        assert_eq!((agents.total, agents.blocked, agents.done), (4, 1, 1));
+        assert_eq!((agents.working, agents.idle, agents.unknown), (1, 1, 0));
+        assert_eq!(agents.kinds, ["claude", "codex"]);
+    }
+
+    #[test]
+    fn map_session_without_wire_agents_has_none() {
+        let wire = info("zellij:a", "a", Backend::Zellij as i32, false);
+        assert_eq!(map_session(wire, None).agents, None);
     }
 
     fn params(name: &str) -> CreateSessionParams {

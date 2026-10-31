@@ -30,6 +30,9 @@ pub struct Session {
     /// The tab/pane/client counts and pane previews the card's lower half
     /// renders.
     pub layout: LayoutSummary,
+    /// Agent roll-up for the session; `None` when the server reports nothing
+    /// (no capability, zellij), `Some` otherwise.
+    pub agents: Option<crate::agents::AgentSummary>,
 }
 
 impl Session {
@@ -219,6 +222,7 @@ mod tests {
                 tabs_detail: Vec::new(),
                 space: None,
             },
+            agents: None,
         }
     }
 

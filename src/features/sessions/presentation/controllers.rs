@@ -917,6 +917,7 @@ mod tests {
                 tabs_detail: Vec::new(),
                 space: None,
             },
+            agents: None,
         }
     }
 
