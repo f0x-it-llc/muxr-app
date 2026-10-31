@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod connection;
 pub mod failure;
 pub mod features;
