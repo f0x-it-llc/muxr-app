@@ -25,8 +25,8 @@ use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
     Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView, Get, GetUntracked, IconData,
     NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics, column,
-    component, container, flexible, icons, inflexible, on_cleanup, row, scroll_view,
-    set_system_ui_mode, spawn_local, text, use_context,
+    component, container, flexible, icons, inflexible, on_cleanup, row, set_system_ui_mode,
+    spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
 
@@ -37,7 +37,7 @@ use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::di::expect_terminal_repository;
-use crate::features::terminal::domain::entities::{PaneEntry, ScrollStep, TabEntry};
+use crate::features::terminal::domain::entities::{AgentEntry, PaneEntry, ScrollStep, TabEntry};
 use crate::features::terminal::domain::feed::WheelKind;
 use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
@@ -54,6 +54,9 @@ use super::chrome::WRAP_PAD;
 use super::controller::{LiveSession, TerminalController};
 use super::keybar;
 use super::term;
+use super::widgets::agents_section::{
+    AgentsData, FocusedPane, PressAgent, agents_section, tree_split,
+};
 use super::widgets::card::{CardInk, card_body};
 use super::widgets::link_strip::link_strip;
 use super::widgets::new_tab_dialog::new_tab_dialog;
@@ -588,8 +591,10 @@ impl Component for TerminalScreen {
         };
         // The panes control is a Compact affordance: the Tablet's rail already
         // carries the tree, so its status row keeps the one exit button.
-        let panes = (fullscreen && !tablet)
-            .then(|| PanesControl::new(|state: &mut TerminalState| state.actions.open_sheet()));
+        let panes = (fullscreen && !tablet).then(|| {
+            PanesControl::new(|state: &mut TerminalState| state.actions.open_sheet())
+                .with_attention(controller.has_blocked_agent())
+        });
         let mut card_children = vec![inflexible(status_row(
             &title,
             &crumbs,
@@ -956,6 +961,20 @@ impl Actions {
         );
     }
 
+    /// An agent row's tap: jump to its pane through
+    /// [`TerminalController::commit_agent`] — the pane row's own commit — then
+    /// `after` (the sheet closes, the rail re-rests on the new tab).
+    fn commit_agent(&self, after: &AfterCommit, agent: &AgentEntry) {
+        let controller = Arc::clone(&self.controller);
+        let after = after.clone();
+        let agent = agent.clone();
+        spawn_local(async move {
+            if controller.commit_agent(&agent).await {
+                after.land(&controller).await;
+            }
+        });
+    }
+
     /// [`commit_pane`](Self::commit_pane) with the follow-up `after` picks.
     fn commit_pane_then(&self, after: &AfterCommit, tab_key: &str, pane_id: u32, is_plugin: bool) {
         let controller = Arc::clone(&self.controller);
@@ -1233,9 +1252,56 @@ fn sheet_tree_body(actions: &Actions, sheet: &SheetHandle) -> impl View<AppState
     // The side sheet hands its body slot a tight extent and clips whatever
     // overflows it — the tree itself scrolls no more than `tree_body` on its
     // own does, so a session with many spaces/tabs/panes stays fully
-    // reachable rather than running off the bottom of the panel.
+    // reachable rather than running off the bottom of the panel. That tight
+    // extent is also what bounds the two halves of the agents split.
     let after = AfterCommit::Close(sheet.clone());
-    Either::Right(scroll_view(tree_view(actions, TreeMode::Sheet, after)))
+    let agents = agents_view(actions, after.clone());
+    Either::Right(tree_split(
+        tree_view(actions, TreeMode::Sheet, after),
+        agents,
+    ))
+}
+
+/// The tree's agents half over the controller's tracked agent list, or `None`
+/// while the session runs no agent (the host then mounts the tree alone). A tap
+/// commits like a pane row, then `after`.
+pub(super) fn agents_view<S: 'static>(
+    actions: &Actions,
+    after: AfterCommit,
+) -> Option<impl View<S> + use<S>> {
+    let controller = &actions.controller;
+    let agents = controller.agents.get();
+    if agents.is_empty() {
+        return None;
+    }
+    let active = controller.active_tab.get();
+    let focused = controller
+        .tabs
+        .get()
+        .into_iter()
+        .find(|tab| tab.key == active)
+        .and_then(|tab| {
+            let pane = tab.panes.iter().find(|pane| pane.focused)?.id;
+            Some(FocusedPane {
+                space_id: controller
+                    .spaces
+                    .get()
+                    .into_iter()
+                    .find(|space| space.selected)
+                    .map(|space| space.id),
+                tab_key: tab.key.clone(),
+                pane_id: pane,
+            })
+        });
+    let jump = actions.clone();
+    let on_agent: PressAgent<S> = Rc::new(move |_state: &mut S, agent: &AgentEntry| {
+        jump.commit_agent(&after, agent);
+    });
+    let data = AgentsData {
+        agents: &agents,
+        focused,
+    };
+    Some(agents_section(&data, &on_agent))
 }
 
 /// The tree over the controller's tracked signals — the [`TreeData`] borrow
