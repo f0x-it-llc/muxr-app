@@ -5,7 +5,7 @@
 //! [`Actions`] bundle; nothing holds state of its own.
 
 use frust::authoring::{Rect, WindowInsets};
-use frust::{Either, Get, PopResult, View, use_context};
+use frust::{Either, Get, PopResult, View, With, use_context};
 use frust_glyph::show_glyph_menu;
 
 use crate::AppState;
@@ -13,7 +13,7 @@ use crate::features::terminal::domain::feed::LinkStatus;
 use crate::ui::sheet::SheetHandle;
 
 use super::controller::TerminalController;
-use super::pages::{Actions, SHEET_CLOSE_DELAY, TerminalState, tree_view};
+use super::pages::{Actions, SHEET_CLOSE_DELAY, TerminalState, agents_view, tree_view};
 use super::widgets::rail::{MiniData, RailHead, docked_rail, mini_rail, rail_summary};
 use super::widgets::side_sheet_tree::{
     RowMenuChoice, RowTarget, TreeMode, row_menu, row_menu_choice,
@@ -97,16 +97,19 @@ pub(super) fn rail_view(
         .get()
         .or_else(|| controller.session_id())
         .unwrap_or_default();
+    let agents = controller.agents.with(Vec::len);
     let head = RailHead {
         name: &name,
-        summary: rail_summary(spaces, &tabs),
+        summary: rail_summary(spaces, &tabs, agents),
         link,
         read_only,
+        needs_you: controller.has_blocked_agent(),
     };
     let detach = actions.clone();
     Either::Right(docked_rail(
         &head,
         tree_view(actions, TreeMode::Docked, AfterCommit::Rest),
+        agents_view(actions, AfterCommit::Rest),
         top,
         move |_state: &mut TerminalState| detach.detach(),
     ))
