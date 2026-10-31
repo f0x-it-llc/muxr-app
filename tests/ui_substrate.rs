@@ -19,7 +19,7 @@
 //! the app state, each taking nothing but the navigator to push its page onto.
 
 use frust::{
-    AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator,
+    AnyView, Component, NavigatorController, NavigatorView, Theme, any, button, navigator, row,
     spawn_local, text,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
@@ -27,7 +27,9 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
 
+use muxr::agents::AgentSummary;
 use muxr::failure::AppFailure;
+use muxr::ui::agent_marks::{count_pills, kind_tile, kind_tiles};
 use muxr::ui::dialogs::{confirm_dialog, name_input_dialog};
 use muxr::ui::sheet::{SCRIM_ALPHA, SheetHandle, show_sheet};
 use muxr::ui::side_sheet::show_side_sheet;
@@ -1086,4 +1088,69 @@ fn the_toast_layer_is_input_transparent() {
         "the toast host must let every pointer event through to the screen \
          underneath it"
     );
+}
+
+// ---- ui::agent_marks ----
+
+/// Mounts one agent-marks view, then reads back its accessible labels.
+fn agent_mark_labels(build: impl Fn() -> AnyView<State> + 'static) -> Vec<String> {
+    let mut root: RenderRoot<State, AnyView<State>> = RenderRoot::new();
+    let mut state = State::default();
+    let mut logic = move |_: &mut State| build();
+    let mut tcx = TextContext::new();
+    frame(&mut root, &mut logic, &mut state, &mut tcx);
+    node_labels(&root)
+}
+
+#[test]
+fn count_pills_label_each_nonzero_status_in_priority_order() {
+    let _g = serial();
+    let _ambient = setup();
+    let summary = AgentSummary {
+        total: 5,
+        blocked: 1,
+        done: 0,
+        working: 3,
+        idle: 1,
+        ..AgentSummary::default()
+    };
+    let labels = agent_mark_labels(move || {
+        let mut strip = row::<State>();
+        for pill in count_pills(&summary) {
+            strip = strip.child(pill);
+        }
+        any(strip)
+    });
+    let pills: Vec<&String> = labels
+        .iter()
+        .filter(|l| l.contains(['◉', '✓', '●', '○']))
+        .collect();
+    assert_eq!(pills, ["◉ 1", "● 3", "○ 1"], "all labels: {labels:?}");
+}
+
+#[test]
+fn kind_tiles_show_monograms_then_a_plus_n_tile() {
+    let _g = serial();
+    let _ambient = setup();
+    let kinds: Vec<String> = ["claude", "codex", "gemini", "pi", "mystery"]
+        .map(String::from)
+        .to_vec();
+    let labels = agent_mark_labels(move || any(kind_tiles::<State>(&kinds, 3)));
+    for expected in ["C", "X", "G", "+2"] {
+        assert!(
+            labels.iter().any(|l| l == expected),
+            "{expected} in {labels:?}"
+        );
+    }
+    assert!(!labels.iter().any(|l| l == "π"), "past the cap: {labels:?}");
+}
+
+#[test]
+fn kind_tile_falls_back_to_a_question_mark_for_an_unknown_kind() {
+    let _g = serial();
+    let _ambient = setup();
+    let labels = agent_mark_labels(|| any(kind_tile::<State>("mystery", 22.0)));
+    assert!(labels.iter().any(|l| l == "?"), "{labels:?}");
+    let labels = agent_mark_labels(|| any(kind_tile::<State>("pi", 22.0)));
+    assert!(labels.iter().any(|l| l == "π"), "{labels:?}");
 }

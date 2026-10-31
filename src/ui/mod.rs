@@ -4,6 +4,7 @@
 //!
 //! | Module | What it owns |
 //! |---|---|
+//! | [`agent_marks`] | The agent vocabulary's presentation: status tone/glyph/dot, kind monogram tiles, count pills and the accessibility summary line (over `crate::agents`) |
 //! | [`backdrop`] | Full-bleed page background the Connect screen and splash overlay paint |
 //! | [`dialogs`] | Confirm / name-input modal helpers over `frust_glyph`'s dialog |
 //! | [`paint`] | Cross-feature paint-primitive tokens (hairline, full-pill radius, status-dot glow, dashed-border step) shared by every feature's hand-rolled chrome |
@@ -20,6 +21,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+pub mod agent_marks;
 pub mod backdrop;
 pub mod dialogs;
 pub mod paint;
