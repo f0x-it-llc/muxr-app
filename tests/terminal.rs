@@ -81,6 +81,10 @@ const LINES_PER_TAB: usize = 4;
 /// imported them could not catch one of them changing).
 const EXPAND: &str = "Fullscreen";
 const COLLAPSE: &str = "Exit fullscreen";
+/// `status.rs`'s `PANES_LABEL` (private there), transcribed: the Compact
+/// fullscreen panes control, and the side sheet it opens.
+const PANES: &str = "Panes & tabs";
+const SHEET_TITLE: &str = "panes & tabs";
 /// …and the sheet's close button's.
 const CLOSE: &str = "Close";
 
@@ -882,6 +886,76 @@ fn the_padding_band_above_the_expand_button_toggles_fullscreen_too() {
         app_nav().bar().fullscreen,
         "the row's full height is the button's press target"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 1b — the panes control, Compact fullscreen only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compact_fullscreen_adds_a_panes_button_left_of_the_exit_button() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    assert!(
+        !node_labels(&h.root).iter().any(|l| l == PANES),
+        "no panes control outside fullscreen"
+    );
+    h.tap_label(EXPAND);
+    h.settle_motion(1_000.0);
+
+    let panes = h.label_point(PANES);
+    let exit = h.label_point(COLLAPSE);
+    assert!(panes.x < exit.x, "{panes:?} sits left of {exit:?}");
+    assert!((panes.y - exit.y).abs() < EPSILON, "…in the same row");
+}
+
+#[test]
+fn the_panes_button_opens_the_side_sheet_and_closing_it_keeps_fullscreen() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+
+    h.tap_label(EXPAND);
+    h.settle_motion(2_000.0);
+    assert_eq!(h.depth(), REST_DEPTH, "no sheet before the tap");
+
+    h.tap_label(PANES);
+    h.settle_motion(4_000.0);
+    assert_eq!(
+        h.depth(),
+        REST_DEPTH + 1,
+        "the panes button mounts the sheet"
+    );
+    assert!(h.shows(SHEET_TITLE), "{:?}", h.values());
+    assert!(
+        app_nav().bar().fullscreen,
+        "the app bar stays hidden under the sheet"
+    );
+
+    let close = h.close_disc();
+    h.tap(close);
+    h.flush();
+    assert_eq!(h.depth(), REST_DEPTH, "the sheet closed");
+    assert!(
+        app_nav().bar().fullscreen,
+        "closing the sheet leaves fullscreen on"
+    );
+}
+
+#[test]
+fn a_tablet_in_fullscreen_has_no_panes_button_and_keeps_its_rail_exit() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.tap_label(EXPAND);
+    h.settle_motion(1_000.0);
+
+    let labels = node_labels(&h.root);
+    assert!(!labels.iter().any(|l| l == PANES), "{labels:?}");
+    assert!(labels.iter().any(|l| l == EXIT_IMMERSIVE), "{labels:?}");
 }
 
 // ---------------------------------------------------------------------------
