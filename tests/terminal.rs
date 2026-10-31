@@ -29,7 +29,10 @@ use frust::{
     AnyView, Component, GetUntracked, NavigatorController, PopResult, Set, SizedBox, Stack, Theme,
     WindowMetrics, any, navigator, provide_context,
 };
-use frust_core::{FrameTime, NamedKey, PointerPhase, RenderRoot, TOUCH_SLOP};
+use frust_core::accesskit::{Node, Role};
+use frust_core::{
+    FrameTime, InputEvent, NamedKey, PointerPhase, RenderRoot, ScrollDelta, TOUCH_SLOP,
+};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -38,8 +41,9 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    clear_verb_log_for_tests, verb_log_for_tests,
+    clear_test_agents, clear_verb_log_for_tests, seed_agents, verb_log_for_tests,
 };
+use muxr::features::terminal::domain::entities::{AgentEntry, AgentStatus};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, open_terminal_menu, terminal_page,
 };
@@ -3424,4 +3428,405 @@ fn the_read_only_chip_shows_on_a_tablet_through_the_shared_helper() {
     assert!(!node_labels(&h.root).iter().any(|l| l == "read-only"));
     make_read_only(&mut h);
     assert!(node_labels(&h.root).iter().any(|l| l == "read-only"));
+}
+
+// ---------------------------------------------------------------------------
+// The agents split: panes & tabs over AI agents
+// ---------------------------------------------------------------------------
+
+/// Seeded agents for one test, dropped (and the store cleared) when it ends,
+/// pass or panic — the mock's agent store outlives every mount.
+struct SeededAgents;
+
+impl Drop for SeededAgents {
+    fn drop(&mut self) {
+        clear_test_agents();
+    }
+}
+
+/// Seed `agents` before the mount whose first load reads them.
+fn seed(agents: Vec<AgentEntry>) -> SeededAgents {
+    clear_test_agents();
+    seed_agents(agents);
+    SeededAgents
+}
+
+/// A `claude` agent named `name` in pane `pane_id` of the seeded tab
+/// `tab_key` (id `tab_id`), under `space` when the backend has spaces.
+fn agent(
+    name: &str,
+    (space, tab_key, tab_id, pane_id): (Option<&str>, &str, u64, u32),
+    status: AgentStatus,
+    change_seq: u64,
+) -> AgentEntry {
+    AgentEntry {
+        pane_id,
+        tab_id,
+        tab_key: tab_key.to_string(),
+        space_id: space.map(str::to_string),
+        space_name: space.map(str::to_string),
+        tab_name: tab_key.to_string(),
+        kind: "claude".to_string(),
+        name: Some(name.to_string()),
+        display_kind: None,
+        status,
+        title: None,
+        summary: Some(format!("{name} is busy")),
+        cwd: None,
+        focused: false,
+        change_seq,
+    }
+}
+
+/// Eight agents across the zellij mock's tabs — enough rows to overflow either
+/// host's lower half.
+fn many_agents() -> Vec<AgentEntry> {
+    (0..8)
+        .map(|i| {
+            agent(
+                &format!("agent{i}"),
+                (None, "devbox", 4, 40 + (i % 2)),
+                AgentStatus::Working,
+                u64::from(i),
+            )
+        })
+        .collect()
+}
+
+/// Every scroll viewport on screen: its bounds and announced offset.
+fn scroll_views(h: &Harness) -> Vec<(kurbo::Rect, f64)> {
+    h.root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node): &&(_, Node)| node.role() == Role::ScrollView)
+        .filter_map(|(_, node)| Some((node.bounds()?, node.scroll_y().unwrap_or(0.0))))
+        .map(|(b, y)| (kurbo::Rect::new(b.x0, b.y0, b.x1, b.y1), y))
+        .collect()
+}
+
+/// The scroll viewports fully inside `x0..x1`, top to bottom.
+fn scroll_views_between(h: &Harness, x0: f64, x1: f64) -> Vec<(kurbo::Rect, f64)> {
+    let mut views: Vec<_> = scroll_views(h)
+        .into_iter()
+        .filter(|(rect, _)| rect.x0 >= x0 - EPSILON && rect.x1 <= x1 + EPSILON)
+        .collect();
+    views.sort_by(|a, b| a.0.y0.total_cmp(&b.0.y0));
+    views
+}
+
+/// Wheel `rect`'s viewport down by a few lines and let the frame land.
+fn wheel(h: &mut Harness, rect: kurbo::Rect) {
+    for _ in 0..4 {
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: rect.center(),
+                delta: ScrollDelta::Lines(0.0, 3.0),
+            },
+        );
+        h.settle();
+    }
+}
+
+/// Wheel the lower half, then the upper, asserting each moves alone.
+fn halves_scroll_independently(h: &mut Harness, x0: f64, x1: f64) {
+    let views = scroll_views_between(h, x0, x1);
+    assert_eq!(views.len(), 2, "tree over agents: {views:?}");
+    let (upper, lower) = (views[0], views[1]);
+    assert!(upper.0.y1 <= lower.0.y0 + EPSILON, "stacked: {views:?}");
+
+    wheel(h, lower.0);
+    let moved = scroll_views_between(h, x0, x1);
+    assert!(moved[1].1 > lower.1, "the agents half scrolled: {moved:?}");
+    assert_eq!(moved[0].1, upper.1, "the tree half stayed put: {moved:?}");
+
+    wheel(h, upper.0);
+    let both = scroll_views_between(h, x0, x1);
+    assert!(both[0].1 > upper.1, "the tree half scrolled: {both:?}");
+    assert_eq!(
+        both[1].1, moved[1].1,
+        "the agents half stayed put: {both:?}"
+    );
+}
+
+/// The agent rows on screen, by their announced sentence, top to bottom.
+fn agent_row_labels(h: &Harness) -> Vec<String> {
+    node_labels(&h.root)
+        .into_iter()
+        .filter(|label| label.contains(" (claude): "))
+        .collect()
+}
+
+/// Pump until the controller holds `count` agents — the load reads them last.
+fn await_agents(h: &mut Harness, count: usize) {
+    h.pump_until("the agents to load", |_| {
+        debug_controller()
+            .expect("mounted")
+            .agents
+            .get_untracked()
+            .len()
+            == count
+    });
+}
+
+/// The rail's right edge: `RAIL_WIDTH` (264) plus its hairline.
+const RAIL_EDGE: f64 = 265.0;
+
+#[test]
+fn with_no_agents_the_sheet_mounts_one_scroll_view() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_test_agents();
+    let mut h = Harness::mount();
+    let before = scroll_views(&h).len();
+    h.open_sheet();
+    assert_eq!(scroll_views(&h).len(), before + 1, "the tree alone");
+    assert!(agent_row_labels(&h).is_empty() && !h.shows("AI AGENTS \u{b7} 0"));
+}
+
+#[test]
+fn with_no_agents_the_rail_mounts_one_scroll_view() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_test_agents();
+    let h = mount_tablet(SESSION_ID, TABLET_FULL);
+    assert_eq!(scroll_views_between(&h, 0.0, RAIL_EDGE).len(), 1);
+    assert!(h.shows(RAIL_SUMMARY), "no agent count: {:?}", h.values());
+}
+
+#[test]
+fn with_agents_the_sheet_splits_into_two_independently_scrolling_halves() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(many_agents());
+    let mut h = Harness::mount();
+    await_agents(&mut h, 8);
+    let before = scroll_views(&h).len();
+    h.open_sheet();
+    assert_eq!(scroll_views(&h).len(), before + 2, "tree over agents");
+    assert!(h.shows("AI AGENTS \u{b7} 8"), "{:?}", h.values());
+    // The sheet slides in from the right half; the card's own views span both.
+    halves_scroll_independently(&mut h, SURFACE.width / 2.0, SURFACE.width);
+}
+
+#[test]
+fn with_agents_the_rail_splits_into_two_independently_scrolling_halves() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(many_agents());
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.pump_until("the agents to load", |h| agent_row_labels(h).len() == 8);
+    assert!(
+        h.shows("4 tabs \u{b7} 8 panes \u{b7} 8 agents"),
+        "{:?}",
+        h.values()
+    );
+    halves_scroll_independently(&mut h, 0.0, RAIL_EDGE);
+}
+
+#[test]
+fn agent_rows_read_blocked_then_done_then_working_then_idle_newest_first() {
+    let _g = serial();
+    let _ambient = setup();
+    let at = |pane| (None, "devbox", 4, pane);
+    let _agents = seed(vec![
+        agent("idler", at(40), AgentStatus::Idle, 9),
+        agent("older", at(41), AgentStatus::Working, 2),
+        agent("asker", at(40), AgentStatus::Blocked, 1),
+        agent("newer", at(41), AgentStatus::Working, 7),
+        agent("closer", at(40), AgentStatus::Done, 3),
+    ]);
+    let mut h = Harness::mount();
+    await_agents(&mut h, 5);
+    h.open_sheet();
+    let names: Vec<String> = agent_row_labels(&h)
+        .iter()
+        .map(|label| label.split(' ').next().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(names, ["asker", "closer", "newer", "older", "idler"]);
+    assert_eq!(
+        agent_row_labels(&h)[0],
+        "asker (claude): needs you, in devbox \u{203a} p40"
+    );
+}
+
+/// The agent the cross-space jump aims at: `btop`'s second pane under
+/// `forgekit`, reached from a connection parked on `zelli_mobile`.
+fn btop_agent() -> AgentEntry {
+    agent(
+        "reviewer",
+        (Some("forgekit"), "btop", 1, 11),
+        AgentStatus::Blocked,
+        1,
+    )
+}
+
+/// Park the herdr connection on `zelli_mobile`, so `forgekit` is another space.
+fn park_on_zelli(h: &mut Harness) {
+    await_agents(h, 1);
+    let c = debug_controller().expect("mounted");
+    assert!(current_thread().block_on(c.select_space("zelli_mobile".to_string())));
+    h.frame();
+    app_toasts().clear();
+    clear_verb_log_for_tests();
+}
+
+#[test]
+fn an_agent_row_in_another_space_jumps_like_a_pane_row_and_closes_the_sheet_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![btop_agent()]);
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    park_on_zelli(&mut h);
+    let floor = h.push_route_floor();
+
+    open_terminal_menu(&mut h.state);
+    h.settle();
+    assert_eq!(h.depth(), floor + 1, "the sheet is up");
+    h.tap_label(&agent_row_labels(&h)[0]);
+    h.pump_until("the jump", |_| verb_log_for_tests().len() >= 3);
+    h.pump_until_closed("the sheet to close", |h| h.depth() == floor);
+
+    assert_eq!(
+        verb_log_for_tests(),
+        ["switch_space:forgekit", "go_to_tab:1", "focus_pane:11"],
+        "exactly a pane row's cross-space commit"
+    );
+    assert_eq!(h.depth(), floor, "one close, the route under it untouched");
+}
+
+#[test]
+fn an_agent_row_on_the_rail_jumps_and_the_rail_rests_on_the_new_tab() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![btop_agent()]);
+    let mut h = mount_tablet(HERDR_SESSION_ID, TABLET_FULL);
+    park_on_zelli(&mut h);
+    h.pump_until("the agent row", |h| agent_row_labels(h).len() == 1);
+
+    h.tap_label(&agent_row_labels(&h)[0]);
+    h.pump_until("the jump", |_| verb_log_for_tests().len() >= 3);
+    h.pump_for(2 * CLOSE_DELAY);
+
+    assert_eq!(
+        verb_log_for_tests(),
+        ["switch_space:forgekit", "go_to_tab:1", "focus_pane:11"]
+    );
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        expanded(&controller),
+        (Some("forgekit".to_string()), Some("btop".to_string())),
+        "resting on where the session now is"
+    );
+    assert_eq!(h.depth(), REST_DEPTH, "nothing closed, nothing opened");
+}
+
+#[test]
+fn an_agents_pane_shows_its_tile_and_dot_and_its_tab_the_rollup() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "reviewer",
+        (None, "devbox", 4, 40),
+        AgentStatus::Blocked,
+        1,
+    )]);
+    let mut h = Harness::mount();
+    await_agents(&mut h, 1);
+    let (_, scene) = h.open_sheet();
+
+    assert!(
+        node_labels(&h.root).iter().any(|l| l == "C"),
+        "the pane row's kind tile: {:?}",
+        node_labels(&h.root)
+    );
+    let header = node_centers_by_value(&h.root, "AI AGENTS \u{b7} 1")
+        .first()
+        .copied()
+        .expect("the agents header");
+    let warning = muxr::ui::palette::Palette::from_theme(&frust_glyph::baseline()).warning;
+    let tree_dots = scene
+        .rounded_fills
+        .iter()
+        .filter(|(origin, size, _, color)| {
+            *color == warning && (size.width - 8.0).abs() < EPSILON && origin.y < header.y
+        })
+        .count();
+    assert_eq!(tree_dots, 2, "the pane's status dot and its tab's rollup");
+}
+
+#[test]
+fn the_rail_header_reads_needs_you_while_an_agent_is_blocked() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "reviewer",
+        (None, "devbox", 4, 40),
+        AgentStatus::Blocked,
+        1,
+    )]);
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.pump_until("the agents to load", |h| agent_row_labels(h).len() == 1);
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == "needs you"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "running"), "{labels:?}");
+}
+
+/// The immersive panes button's round warning dot(s) in `scene`.
+fn attention_dots(scene: &RecScene) -> usize {
+    let warning = muxr::ui::palette::Palette::from_theme(&frust_glyph::baseline()).warning;
+    scene
+        .rounded_fills
+        .iter()
+        .filter(|(_, size, _, color)| *color == warning && (size.width - 8.0).abs() < EPSILON)
+        .count()
+}
+
+#[test]
+fn the_immersive_panes_button_carries_the_attention_dot_while_an_agent_is_blocked() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "reviewer",
+        (None, "devbox", 4, 40),
+        AgentStatus::Blocked,
+        1,
+    )]);
+    let mut h = Harness::mount();
+    h.pump_until("the agents to load", |_| {
+        !debug_controller()
+            .expect("mounted")
+            .agents
+            .get_untracked()
+            .is_empty()
+    });
+    h.tap_label(EXPAND);
+    let scene = h.settle_motion(0.0);
+    assert!(node_labels(&h.root).iter().any(|l| l == PANES));
+    assert_eq!(attention_dots(&scene), 1, "the dot rides the panes button");
+}
+
+#[test]
+fn the_immersive_panes_button_has_no_dot_while_nothing_is_blocked() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "reviewer",
+        (None, "devbox", 4, 40),
+        AgentStatus::Working,
+        1,
+    )]);
+    let mut h = Harness::mount();
+    h.pump_until("the agents to load", |_| {
+        !debug_controller()
+            .expect("mounted")
+            .agents
+            .get_untracked()
+            .is_empty()
+    });
+    h.tap_label(EXPAND);
+    let scene = h.settle_motion(0.0);
+    assert!(node_labels(&h.root).iter().any(|l| l == PANES));
+    assert_eq!(attention_dots(&scene), 0, "nothing blocked, no dot");
 }

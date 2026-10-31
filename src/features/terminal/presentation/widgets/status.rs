@@ -10,6 +10,7 @@ use frust::{
 };
 use frust_glyph::{MenuEntry, breadcrumb, crumb, menu_item, menu_item_danger, menu_separator};
 
+use crate::ui::paint::RADIUS_FULL;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 
@@ -116,9 +117,10 @@ pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
 }
 
 /// The Compact-fullscreen panes control: the tap that opens the side sheet,
-/// and whether an agent needs attention. `attention` draws the warning dot at
-/// the control's top-right; nothing sets it yet (the tree-split card wires it
-/// to "any agent blocked"), so [`PanesControl::new`] leaves it off.
+/// and whether an agent needs attention. `attention` draws the round warning
+/// dot at the control's top-right; [`PanesControl::new`] leaves it off and
+/// [`PanesControl::with_attention`] sets it (the page wires it to "any agent
+/// blocked").
 pub(crate) struct PanesControl<State> {
     on_tap: Rc<dyn Fn(&mut State)>,
     attention: bool,
@@ -131,6 +133,12 @@ impl<State> PanesControl<State> {
             on_tap: Rc::new(on_tap),
             attention: false,
         }
+    }
+
+    /// The same control, with the attention dot on or off.
+    pub(crate) fn with_attention(mut self, attention: bool) -> Self {
+        self.attention = attention;
+        self
     }
 }
 
@@ -269,7 +277,8 @@ fn panes_column<State: 'static>(
             SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)).child(Align(
                 Alignment::TOP_RIGHT,
                 container(SizedBox::<State>(Some(ATTENTION_DOT), Some(ATTENTION_DOT)))
-                    .fill(colors.warning),
+                    .fill(colors.warning)
+                    .radius(RADIUS_FULL),
             )),
         )
     } else {
@@ -357,5 +366,66 @@ mod tests {
     fn the_panes_control_starts_without_an_attention_dot() {
         let control = PanesControl::<()>::new(|_| {});
         assert!(!control.attention);
+        assert!(control.with_attention(true).attention);
+    }
+
+    /// The round warning dots one status row paints, as `(width, radius)`.
+    fn attention_dots(attention: bool) -> Vec<(f64, f64)> {
+        use frust::authoring::{Color, Point, Size};
+        use frust_core::{FrameTime, PaintScene, RenderRoot};
+        use frust_text::TextContext;
+
+        #[derive(Default)]
+        struct Rec {
+            rounded: Vec<(Size, f64, Color)>,
+        }
+        impl PaintScene for Rec {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn fill_rounded_rect(&mut self, _origin: Point, size: Size, radius: f64, color: Color) {
+                self.rounded.push((size, radius, color));
+            }
+        }
+
+        let theme = frust_glyph::baseline();
+        let colors = Palette::from_theme(&theme);
+        let ink = CardInk::from_theme(&theme);
+        let mut logic = |_state: &mut ()| {
+            status_row(
+                "zsh",
+                &[],
+                StatusOptions {
+                    fullscreen: true,
+                    read_only: false,
+                    panes: Some(PanesControl::new(|_: &mut ()| {}).with_attention(attention)),
+                },
+                &colors,
+                &ink,
+                |_: &mut ()| {},
+            )
+        };
+        let mut root = RenderRoot::new();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut logic, &mut ());
+        let tcx_any: &mut dyn std::any::Any = &mut tcx;
+        root.layout_with_text(Size::new(360.0, 80.0), tcx_any);
+        let mut rec = Rec::default();
+        root.paint(&mut rec, FrameTime::from_nanos(0));
+        rec.rounded
+            .into_iter()
+            .filter(|(size, _, color)| *color == colors.warning && size.width == ATTENTION_DOT)
+            .map(|(size, radius, _)| (size.width, radius))
+            .collect()
+    }
+
+    #[test]
+    fn the_attention_dot_is_painted_round_only_while_attention_is_on() {
+        let on = attention_dots(true);
+        assert_eq!(on.len(), 1, "one dot: {on:?}");
+        assert!(
+            on[0].1 >= ATTENTION_DOT / 2.0,
+            "a circle, not a square: {on:?}"
+        );
+        assert!(attention_dots(false).is_empty());
     }
 }
