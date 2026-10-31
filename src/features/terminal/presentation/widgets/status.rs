@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use frust::authoring::text::{LineHeight, TextOverflow};
 use frust::{
-    Align, Alignment, EdgeInsets, GestureDetector, Padding, SizedBox, View, container, flexible,
-    icons, inflexible, stack, text,
+    Align, Alignment, EdgeInsets, Either, GestureDetector, Padding, SizedBox, View, container,
+    flexible, icons, inflexible, stack, text,
 };
 use frust_glyph::{MenuEntry, breadcrumb, crumb, menu_item, menu_item_danger, menu_separator};
 
@@ -39,6 +39,10 @@ const TITLE_LINE_HEIGHT: f32 = 18.0;
 /// `⛶`/`⤡` it draws (`crate::ui::topbar`'s `BACK_LABEL` rule).
 const EXPAND_LABEL: &str = "Fullscreen";
 const COLLAPSE_LABEL: &str = "Exit fullscreen";
+/// The panes control's accessible name — what the tap opens, not its mark.
+const PANES_LABEL: &str = "Panes & tabs";
+/// The attention dot's diameter, drawn at the panes control's top-right.
+const ATTENTION_DOT: f64 = 8.0;
 
 /// What the Tablet's terminal menu asks for — [`terminal_menu_choice`] maps a
 /// picked entry index here.
@@ -111,9 +115,40 @@ pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
         .and_then(|(choice, _)| *choice)
 }
 
+/// The Compact-fullscreen panes control: the tap that opens the side sheet,
+/// and whether an agent needs attention. `attention` draws the warning dot at
+/// the control's top-right; nothing sets it yet (the tree-split card wires it
+/// to "any agent blocked"), so [`PanesControl::new`] leaves it off.
+pub(crate) struct PanesControl<State> {
+    on_tap: Rc<dyn Fn(&mut State)>,
+    attention: bool,
+}
+
+impl<State> PanesControl<State> {
+    /// The control, with no attention dot.
+    pub(crate) fn new(on_tap: impl Fn(&mut State) + 'static) -> Self {
+        Self {
+            on_tap: Rc::new(on_tap),
+            attention: false,
+        }
+    }
+}
+
+/// What [`status_row`] draws beyond its title, crumbs and palette. One struct
+/// so its parameter count stays under clippy's `too_many_arguments` threshold.
+pub(crate) struct StatusOptions<State> {
+    /// The card is fullscreen: the exit button is lit.
+    pub(crate) fullscreen: bool,
+    /// A read-only credential: the cyan chip before the buttons.
+    pub(crate) read_only: bool,
+    /// The panes control; `None` everywhere but Compact fullscreen.
+    pub(crate) panes: Option<PanesControl<State>>,
+}
+
 /// `.term-statusrow` — the pane title (ellipsized, single line) and, at the
-/// trailing edge, the **one** fullscreen affordance: no menu row, no
-/// gesture ("one button, always in the same place").
+/// trailing edge, the fullscreen affordance: no menu row, no gesture ("one
+/// button, always in the same place"). Compact fullscreen adds the panes
+/// control left of it (see [`panes_column`]).
 ///
 /// The padding is applied to the **title**, not the whole row — that lets
 /// the button's column run the row's full [`STATUS_ROW_H`]: a 28px circle
@@ -127,16 +162,20 @@ pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
 /// is the button's and a press above/below it is the detector's.
 ///
 /// `crumbs` (empty hides it) is Glyph's breadcrumb after the title, and
-/// `read_only` adds the cyan chip before the button.
+/// `options.read_only` adds the cyan chip before the buttons.
 pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     title: &str,
     crumbs: &[String],
-    fullscreen: bool,
-    read_only: bool,
+    options: StatusOptions<State>,
     colors: &Palette,
     ink: &CardInk,
     on_toggle: F,
 ) -> impl View<State> {
+    let StatusOptions {
+        fullscreen,
+        read_only,
+        panes,
+    } = options;
     let theme = active_theme();
     let mut title_style = sized(&theme.type_scale.display_small, TITLE_SIZE, ink.prompt);
     title_style.line_height = LineHeight::Absolute(TITLE_LINE_HEIGHT);
@@ -193,11 +232,50 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
         children.push(h_gap(spacing::SM));
         children.push(inflexible(read_only_badge()));
     }
+    if let Some(panes) = panes {
+        children.push(h_gap(spacing::SM));
+        children.push(inflexible(panes_column(panes, colors, ink)));
+    }
     children.push(h_gap(spacing::SM));
     children.push(inflexible(stack().child(press_band).child(button)));
     // Trailing padding as a spacer — the button column owns the vertical padding.
     children.push(h_gap(STATUS_PAD_RIGHT));
     container(centered_row(children)).fill(ink.head)
+}
+
+/// The panes control's column: the same 28px circle in the row's full height
+/// as the exit button, in the neutral tint (it toggles nothing, so it never
+/// takes the amber `.on` trio), with its own press band over the full height.
+/// The attention dot sits at the column's top-right and is stacked **under**
+/// the band, so it never takes a press.
+fn panes_column<State: 'static>(
+    panes: PanesControl<State>,
+    colors: &Palette,
+    ink: &CardInk,
+) -> impl View<State> {
+    let PanesControl { on_tap, attention } = panes;
+    let on_button = Rc::clone(&on_tap);
+    let button = SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)).child(Align(
+        Alignment::CENTER,
+        expand_button(icons::MORE_VERT, PANES_LABEL, move |state: &mut State| {
+            on_button(state)
+        })
+        .tones(ink.expand_fill, colors.fg_muted, ink.card_border),
+    ));
+    let press_band = GestureDetector(SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)))
+        .on_tap(move |state: &mut State| on_tap(state));
+    let dot = if attention {
+        Either::Left(
+            SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)).child(Align(
+                Alignment::TOP_RIGHT,
+                container(SizedBox::<State>(Some(ATTENTION_DOT), Some(ATTENTION_DOT)))
+                    .fill(colors.warning),
+            )),
+        )
+    } else {
+        Either::Right(SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)))
+    };
+    stack().child(dot).child(press_band).child(button)
 }
 
 #[cfg(test)]
@@ -261,5 +339,23 @@ mod tests {
             f64::from(TITLE_LINE_HEIGHT) + 2.0 * STATUS_PAD_TOP < STATUS_ROW_H,
             "the title's line box never decides the row's height"
         );
+    }
+
+    #[test]
+    fn the_panes_control_names_what_it_opens() {
+        // A name, not a mark: the one non-letter it needs is the `&`.
+        assert_eq!(PANES_LABEL, "Panes & tabs");
+        assert!(
+            PANES_LABEL
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == ' ' || c == '&'),
+            "{PANES_LABEL:?} is a name, not a mark"
+        );
+    }
+
+    #[test]
+    fn the_panes_control_starts_without_an_attention_dot() {
+        let control = PanesControl::<()>::new(|_| {});
+        assert!(!control.attention);
     }
 }

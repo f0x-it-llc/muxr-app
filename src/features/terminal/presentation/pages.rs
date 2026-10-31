@@ -62,7 +62,10 @@ use super::widgets::side_sheet_tree::{
     PressMenu, RowTarget, TabPath, TreeActions, TreeData, TreeMode, TreeMutations,
     auto_expand_after_cascade, tree_body,
 };
-use super::widgets::status::{TerminalMenuChoice, status_row, terminal_menu, terminal_menu_choice};
+use super::widgets::status::{
+    PanesControl, StatusOptions, TerminalMenuChoice, status_row, terminal_menu,
+    terminal_menu_choice,
+};
 use super::widgets::util::{centered_row, h_gap, sized, stretch_column, v_gap};
 
 /// How long the sheet stays up after a **pane row** is tapped, so the selection
@@ -583,11 +586,18 @@ impl Component for TerminalScreen {
         } else {
             Vec::new()
         };
+        // The panes control is a Compact affordance: the Tablet's rail already
+        // carries the tree, so its status row keeps the one exit button.
+        let panes = (fullscreen && !tablet)
+            .then(|| PanesControl::new(|state: &mut TerminalState| state.actions.open_sheet()));
         let mut card_children = vec![inflexible(status_row(
             &title,
             &crumbs,
-            fullscreen,
-            read_only,
+            StatusOptions {
+                fullscreen,
+                read_only,
+                panes,
+            },
             &colors,
             &ink,
             toggle_fullscreen,
