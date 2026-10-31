@@ -604,6 +604,7 @@ mod tests {
     fn pane(title: &str, cwd: &str, is_focused: bool) -> PaneMsg {
         PaneMsg {
             id: 0,
+            agent: None,
             title: title.to_string(),
             is_focused,
             is_floating: false,

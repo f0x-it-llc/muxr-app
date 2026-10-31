@@ -35,7 +35,7 @@ use crate::net::client::MuxrClient;
 use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::muxr_server::{Muxr, MuxrServer};
 use crate::net::proto::{
-    ActionAck, AttachReq, ClientFrame, CloseSpaceReq, ControlEvent, CreateSessionReq,
+    ActionAck, AgentList, AttachReq, ClientFrame, CloseSpaceReq, ControlEvent, CreateSessionReq,
     CreateSpaceReq, CreateTokenReq, Empty, Layout, ListPushTargetsReq, ListPushTargetsResp,
     LoginRequest, LoginResponse, MouseInput, MouseKind, NewPaneReq, NewTabReq, PaneTarget,
     RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq, RenameSessionReq, RenameSpaceReq,
@@ -734,6 +734,16 @@ impl Muxr for FixtureService {
                 })
                 .collect(),
         }))
+    }
+
+    /// The agent inventory is outside the fixture's answered subset: no test
+    /// here seeds agents, and a real `muxrd` without the `agents` capability
+    /// answers the same way.
+    async fn list_agents(
+        &self,
+        _request: Request<SessionRef>,
+    ) -> Result<Response<AgentList>, Status> {
+        Err(unsupported("ListAgents"))
     }
 
     async fn get_layout(&self, _request: Request<SessionRef>) -> Result<Response<Layout>, Status> {
