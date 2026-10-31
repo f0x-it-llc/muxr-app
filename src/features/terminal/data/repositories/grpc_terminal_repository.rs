@@ -21,20 +21,22 @@
 //! [`ConnectionController::on_session_expired`]; every `ActionAck`-returning call maps through
 //! [`crate::net::error::ack_result`] rather than trusting the outer `Status`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tonic::Status;
 
+use crate::agents::{AgentStatus, agent_sort_key};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
-    PaneEntry, ScrollStep, Space, TabEntry, TermLine,
+    AgentEntry, AgentMark, PaneEntry, ScrollStep, Space, TabEntry, TermLine,
 };
 use crate::features::terminal::domain::repositories::TerminalRepository;
 use crate::net::proto::{
-    CreateSpaceReq, Layout, NewPaneReq, NewTabReq, PaneMsg, PaneTarget, RenamePaneReq,
-    RenameSpaceReq, RenameTabReq, ScrollDirection, ScrollReq, SessionRef, SpaceList,
-    SwitchSpaceReq, TabTarget,
+    AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout, NewPaneReq, NewTabReq,
+    PaneMsg, PaneTarget, RenamePaneReq, RenameSpaceReq, RenameTabReq, ScrollDirection, ScrollReq,
+    SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
 };
 use crate::net::{MuxrClient, error};
 
@@ -186,6 +188,34 @@ impl TerminalRepository for GrpcTerminalRepository {
             .map_err(|status| self.map_status(status))?
             .into_inner();
         Ok(map_tabs(response))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
+        let Some(request) = self.session_ref() else {
+            return Ok(Vec::new());
+        };
+        let client = self.client()?;
+        let list = client
+            .authed()
+            .list_agents(request.clone())
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        // `AgentMsg` carries a tab id and a tab *name*, but `TabEntry::key` is derived from the
+        // tab's name and position within its space's layout (`unique_key`), so the key needs
+        // that layout: fetch one `GetLayout` per distinct space the agents live in (the empty
+        // space id, a backend without spaces, reads the focused space). A failed layout read
+        // leaves those rows with an empty `tab_key` rather than failing the inventory.
+        let space_ids: HashSet<String> = list.agents.iter().map(|a| a.space_id.clone()).collect();
+        let mut layouts: HashMap<String, Vec<TabEntry>> = HashMap::new();
+        for space_id in space_ids {
+            let mut layout_request = request.clone();
+            layout_request.space_id = space_id.clone();
+            if let Ok(response) = client.authed().get_layout(layout_request).await {
+                layouts.insert(space_id, map_tabs(response.into_inner()));
+            }
+        }
+        Ok(map_agents(list, &layouts))
     }
 
     async fn tab_lines(&self, _key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -421,6 +451,60 @@ fn map_pane(pane: &PaneMsg) -> PaneEntry {
         y: pane.y,
         rows: pane.rows,
         cols: pane.cols,
+        agent: pane.agent.as_ref().map(map_agent_mark),
+    }
+}
+
+/// The wire's `AgentMark` as [`AgentMark`]; an empty name is "no name".
+fn map_agent_mark(mark: &WireAgentMark) -> AgentMark {
+    AgentMark {
+        kind: mark.kind.clone(),
+        name: non_empty(&mark.name),
+        status: AgentStatus::from_wire(mark.status),
+    }
+}
+
+/// The wire spells an absent optional string as empty.
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// A `ListAgents` answer as [`AgentEntry`] rows, sorted by [`agent_sort_key`]. `layouts` holds
+/// the `GetLayout` answer per space id (the `""` entry is the focused space), already mapped by
+/// [`map_tabs`]; an agent's `tab_key` is the key of the tab with its `tab_id` in its own
+/// space's layout, so it equals the [`TabEntry::key`] a tab list yields for the same tab.
+fn map_agents(list: AgentList, layouts: &HashMap<String, Vec<TabEntry>>) -> Vec<AgentEntry> {
+    let mut rows: Vec<AgentEntry> = list
+        .agents
+        .into_iter()
+        .map(|agent| map_agent(agent, layouts))
+        .collect();
+    rows.sort_by_key(|row| agent_sort_key(row.status, row.change_seq));
+    rows
+}
+
+fn map_agent(agent: AgentMsg, layouts: &HashMap<String, Vec<TabEntry>>) -> AgentEntry {
+    let tab_key = layouts
+        .get(&agent.space_id)
+        .and_then(|tabs| tabs.iter().find(|tab| tab.tab_id == agent.tab_id))
+        .map(|tab| tab.key.clone())
+        .unwrap_or_default();
+    AgentEntry {
+        pane_id: agent.pane_id,
+        tab_id: agent.tab_id,
+        tab_key,
+        space_id: non_empty(&agent.space_id),
+        space_name: non_empty(&agent.space_name),
+        tab_name: agent.tab_name,
+        kind: agent.kind,
+        name: non_empty(&agent.name),
+        display_kind: non_empty(&agent.display_kind),
+        status: AgentStatus::from_wire(agent.status),
+        title: non_empty(&agent.title),
+        summary: non_empty(&agent.summary),
+        cwd: non_empty(&agent.cwd),
+        focused: agent.focused,
+        change_seq: agent.change_seq,
     }
 }
 
@@ -652,6 +736,91 @@ mod tests {
     }
 
     // -- proto → entity mapping ----------------------------------------------
+
+    #[test]
+    fn a_panes_agent_mark_maps_and_an_unknown_status_reads_unknown() {
+        use crate::net::proto::{AgentMark as WireMark, AgentStatus as WireStatus};
+        let mut wire = pane("claude", "/srv", true);
+        wire.agent = Some(WireMark {
+            kind: "claude".to_string(),
+            name: String::new(),
+            status: WireStatus::Blocked as i32,
+        });
+        let mark = map_pane(&wire).agent.expect("mark");
+        assert_eq!(mark.kind, "claude");
+        assert_eq!(mark.name, None);
+        assert_eq!(mark.status, AgentStatus::Blocked);
+
+        wire.agent = Some(WireMark {
+            kind: "x".to_string(),
+            name: "bob".to_string(),
+            status: 99,
+        });
+        let mark = map_pane(&wire).agent.expect("mark");
+        assert_eq!(mark.name.as_deref(), Some("bob"));
+        assert_eq!(mark.status, AgentStatus::Unknown);
+        assert_eq!(map_pane(&pane("zsh", "/", false)).agent, None);
+    }
+
+    fn agent_msg(pane_id: u32, tab_id: u64, status: i32, change_seq: u64) -> AgentMsg {
+        AgentMsg {
+            pane_id,
+            tab_id,
+            space_id: String::new(),
+            space_name: String::new(),
+            tab_name: "zsh".to_string(),
+            kind: "claude".to_string(),
+            name: String::new(),
+            display_kind: String::new(),
+            status,
+            title: "t".to_string(),
+            summary: String::new(),
+            cwd: "/srv".to_string(),
+            focused: false,
+            change_seq,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_agents_tab_key_equals_the_tab_entry_key_for_the_same_tab() {
+        use crate::net::proto::AgentStatus as WireStatus;
+        // Two tabs named `zsh`: the second's key is disambiguated by position.
+        let tabs = map_tabs(Layout {
+            tabs: vec![
+                tab(0, 7, "zsh", true, vec![pane("a", "/", true)]),
+                tab(1, 8, "zsh", false, vec![pane("b", "/", true)]),
+            ],
+        });
+        let layouts = HashMap::from([(String::new(), tabs.clone())]);
+        let list = AgentList {
+            agents: vec![
+                agent_msg(1, 7, WireStatus::Idle as i32, 1),
+                agent_msg(2, 8, WireStatus::Blocked as i32, 2),
+                agent_msg(3, 8, 99, 3),
+            ],
+            summary: None,
+        };
+        let rows = map_agents(list, &layouts);
+        assert_eq!(rows[0].status, AgentStatus::Blocked, "most urgent first");
+        assert_eq!(rows[0].tab_key, tabs[1].key);
+        assert_eq!(rows[1].status, AgentStatus::Idle);
+        assert_eq!(rows[1].tab_key, tabs[0].key);
+        assert_eq!(rows[2].status, AgentStatus::Unknown);
+        assert_eq!(rows[0].space_id, None);
+        assert_eq!(rows[0].title.as_deref(), Some("t"));
+        assert_eq!(rows[0].subtitle(), Some("t"));
+        assert_eq!(rows[0].display_name(), "claude");
+    }
+
+    #[test]
+    fn an_empty_agent_list_maps_to_no_rows() {
+        let list = AgentList {
+            agents: Vec::new(),
+            summary: None,
+        };
+        assert!(map_agents(list, &HashMap::new()).is_empty());
+    }
 
     #[test]
     fn a_space_list_maps_its_id_name_and_per_connection_active_flag() {

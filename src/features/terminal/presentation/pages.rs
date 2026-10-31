@@ -1457,6 +1457,7 @@ mod tests {
     /// A pane at `(x, y)`-`(x+w, y+h)` cells, `id` unique within its namespace.
     fn pane_at(id: u32, x: u32, y: u32, w: u32, h: u32) -> PaneEntry {
         PaneEntry {
+            agent: None,
             id,
             title: String::new(),
             cwd: String::new(),
