@@ -34,9 +34,12 @@ use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
+use muxr::agents::AgentSummary;
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
-use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
+use muxr::features::sessions::data::repositories::mock_sessions_repository::{
+    MockSessionsRepository, SEEDED_DEV_ID, SEEDED_HERDR_ID,
+};
 use muxr::features::sessions::di::SharedSessionsRepository;
 use muxr::features::sessions::domain::entities::{
     CreateSessionParams, LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus,
@@ -622,6 +625,148 @@ fn an_idle_card_carries_no_accent_and_no_pane_pills() {
         2,
         "herdr's two placeholder pills, and no others: {values:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 2b — the agent strip
+// ---------------------------------------------------------------------------
+
+/// Mount over the seeded mock after `seed` adjusted it, connected and loaded.
+fn connected_with(seed: impl FnOnce(&MockSessionsRepository)) -> Harness {
+    let mock = Arc::new(MockSessionsRepository::seeded());
+    seed(&mock);
+    let mut h = Harness::mount_over(Some(mock), support::surface());
+    expect_connection_controller().connect(mock_target(false));
+    h.await_sessions();
+    h
+}
+
+fn summary(blocked: u32, done: u32, working: u32, idle: u32, kinds: &[&str]) -> AgentSummary {
+    AgentSummary {
+        total: blocked + done + working + idle,
+        blocked,
+        done,
+        working,
+        idle,
+        unknown: 0,
+        kinds: kinds.iter().map(|k| k.to_string()).collect(),
+    }
+}
+
+fn position(labels: &[String], wanted: &str) -> usize {
+    labels
+        .iter()
+        .position(|l| l == wanted)
+        .unwrap_or_else(|| panic!("{wanted:?} missing: {labels:?}"))
+}
+
+#[test]
+fn a_herdr_card_with_agents_renders_the_strip_and_the_needs_you_rollup() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = connected_with(|_| {});
+    h.frame();
+
+    let labels = node_labels(&h.root);
+    let values = node_values(&h.root);
+    // One tile per seeded kind, the count, and the group's spoken summary.
+    for tile in ["C", "X", "G"] {
+        assert!(
+            labels.iter().any(|l| l == tile),
+            "tile {tile:?}: {labels:?}"
+        );
+    }
+    assert!(values.iter().any(|v| v == "4 agents"), "count: {values:?}");
+    assert!(
+        labels
+            .iter()
+            .any(|l| l == "4 agents: 1 needs you, 1 done, 1 working, 1 idle"),
+        "summary line: {labels:?}"
+    );
+    // Pills in order blocked, done, working, idle.
+    let order: Vec<usize> = ["\u{25c9} 1", "\u{2713} 1", "\u{25cf} 1", "\u{25cb} 1"]
+        .iter()
+        .map(|p| position(&labels, p))
+        .collect();
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "pill order: {order:?}"
+    );
+    // A blocked agent: the herdr card's badge reads `needs you`, so only the
+    // zellij card still says `running`.
+    assert_eq!(labels.iter().filter(|l| *l == "needs you").count(), 1);
+    assert_eq!(labels.iter().filter(|l| *l == "running").count(), 1);
+}
+
+#[test]
+fn zero_count_pills_are_absent_and_an_unblocked_card_stays_running() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = connected_with(|repo| {
+        repo.seed_agents_for_tests(SEEDED_HERDR_ID, Some(summary(0, 0, 2, 0, &["claude"])));
+    });
+    h.frame();
+
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == "\u{25cf} 2"), "{labels:?}");
+    for gone in ["\u{25c9}", "\u{2713}", "\u{25cb}"] {
+        assert!(
+            !labels.iter().any(|l| l.starts_with(gone)),
+            "no {gone} pill: {labels:?}"
+        );
+    }
+    assert!(!labels.iter().any(|l| l == "needs you"), "{labels:?}");
+    assert_eq!(labels.iter().filter(|l| *l == "running").count(), 2);
+}
+
+#[test]
+fn a_zellij_card_and_an_idle_card_render_no_strip() {
+    let _g = serial();
+    let _ambient = setup();
+    // Even a summary seeded onto the idle card draws nothing: the strip is
+    // gated on liveness, like the pane pills.
+    let mut h = connected_with(|repo| {
+        let some = Some(summary(1, 0, 1, 0, &["claude", "codex"]));
+        repo.seed_agents_for_tests("zellij:jumping-peach", some);
+    });
+    h.frame();
+
+    // The seed's running zellij card carries no agents, so the one strip on
+    // screen is the herdr card's.
+    let values = node_values(&h.root);
+    assert_eq!(values.iter().filter(|v| v.ends_with(" agents")).count(), 1);
+    assert!(values.iter().any(|v| v == "4 agents"), "{values:?}");
+    assert!(!values.iter().any(|v| v == "2 agents"), "{values:?}");
+}
+
+#[test]
+fn a_session_without_agents_renders_as_it_always_did() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut with = connected_with(|_| {});
+    let scene_with = with.frame();
+    let mut without = connected_with(|repo| repo.seed_agents_for_tests(SEEDED_HERDR_ID, None));
+    let scene_without = without.frame();
+
+    let labels = node_labels(&without.root);
+    assert!(!labels.iter().any(|l| l == "needs you"), "{labels:?}");
+    assert!(
+        !node_values(&without.root)
+            .iter()
+            .any(|v| v.contains("agents")),
+        "no count text"
+    );
+    // Same cards, same accents, but the strip's line is gone from the herdr
+    // card, so it is shorter.
+    assert_eq!(card_backs(&scene_without).len(), SEEDED.len());
+    assert_eq!(accent_bars(&scene_without).len(), RUNNING);
+    let tallest = |scene: &RecScene| {
+        card_backs(scene)
+            .iter()
+            .map(|(_, size)| size.height)
+            .fold(0.0, f64::max)
+    };
+    assert!(tallest(&scene_with) > tallest(&scene_without));
 }
 
 // ---------------------------------------------------------------------------
