@@ -14,16 +14,22 @@
 //! name and an accent `● this device` span closes the meta row on every
 //! class; a Tablet selection repaints the card in the amber selection wash.
 
-use frust::authoring::Color;
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, Size, Widget, build_child, rebuild_child,
+    route_event_single, teardown_child,
+};
 use frust::icons::NOTIFICATIONS;
 use frust::motion::AnimatedOpacity;
 use frust::{
-    Axis, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView, GestureDetector, Padding,
-    SizedBox, View, container, flexible, icon, inflexible, text,
+    AnyView, Axis, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView, GestureDetector,
+    Padding, SizedBox, View, any, container, flexible, icon, inflexible, text,
 };
 use frust_glyph::{BadgeVariant, avatar, badge};
 
+use crate::agents::AgentSummary;
 use crate::features::sessions::domain::entities::{Session, SessionStatus};
+use crate::ui::agent_marks::{count_pills, kind_tiles, summary_line};
 use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
@@ -58,6 +64,10 @@ pub(super) const IDLE_OPACITY: f64 = 0.55;
 const MAX_PREVIEW_PILLS: usize = 2;
 /// The bell mark after a ringing session's name.
 pub(super) const BELL_ICON: f64 = 14.0;
+/// How many distinct agent kinds the strip draws as tiles before a `+N` tile.
+const MAX_KIND_TILES: usize = 4;
+/// The status badge's text when an agent is blocked on the user.
+const NEEDS_YOU: &str = "needs you";
 /// The meta span a session attached from this device carries.
 const THIS_DEVICE: &str = "\u{25cf} this device";
 
@@ -151,12 +161,20 @@ pub(in crate::features::sessions::presentation) fn session_card(
         top.push(h_gap(PILL_GAP));
         top.push(inflexible(bell_mark(colors)));
     }
+    // The agent roll-up shows only on a live card with at least one agent.
+    let agents = session
+        .agents
+        .as_ref()
+        .filter(|summary| live && summary.total > 0);
+    let needs_you = agents.is_some_and(|summary| summary.blocked > 0);
+    let (status_label, status_tone) = if needs_you {
+        (NEEDS_YOU, BadgeVariant::Warning)
+    } else {
+        (session.status.label(), status_variant(session.status))
+    };
     top.extend([
         h_gap(PILL_GAP),
-        inflexible(badge(
-            session.status.label(),
-            status_variant(session.status),
-        )),
+        inflexible(badge(status_label, status_tone)),
         h_gap(PILL_GAP),
         inflexible(badge(session.backend.label(), BadgeVariant::Neutral)),
     ]);
@@ -183,11 +201,14 @@ pub(in crate::features::sessions::presentation) fn session_card(
         CardMode::Compact => (false, true),
         CardMode::Tablet { selected, previews } => (selected, previews),
     };
-    let mut lines = vec![top, meta];
+    let mut lines = vec![any(top), any(meta)];
+    if let Some(summary) = agents {
+        lines.push(any(agent_strip(summary, colors)));
+    }
     // An idle card draws no pills at all, so liveness gates the row as well
     // as the preview being non-empty.
     if live && previews && !session.layout.preview.is_empty() {
-        lines.push(pane_pills(&session.layout.preview, colors));
+        lines.push(any(pane_pills(&session.layout.preview, colors)));
     }
     let body = FlexView::new(Axis::Vertical, interleave(lines, CARD_LINE_GAP))
         .cross_axis(CrossAxisAlignment::Stretch);
@@ -198,7 +219,11 @@ pub(in crate::features::sessions::presentation) fn session_card(
         (
             colors.surface,
             colors.outline,
-            live.then_some(colors.success),
+            live.then_some(if needs_you {
+                colors.warning
+            } else {
+                colors.success
+            }),
         )
     };
     let card = accented_card(
@@ -269,6 +294,105 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
     centered_row(children)
 }
 
+/// `.sess-agents` — kind tiles and the `N agents` count at the left, the
+/// per-status count pills at the right; announced as one
+/// [`summary_line`].
+fn agent_strip(summary: &AgentSummary, colors: &Palette) -> impl View<SessionsState> {
+    let theme = active_theme();
+    let noun = if summary.total == 1 {
+        "agent"
+    } else {
+        "agents"
+    };
+    let mut children = vec![
+        inflexible(kind_tiles::<SessionsState>(&summary.kinds, MAX_KIND_TILES)),
+        h_gap(PILL_GAP),
+        inflexible(
+            text(format!("{} {noun}", summary.total))
+                .style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        ),
+        spacer(),
+    ];
+    for (index, pill) in count_pills::<SessionsState>(summary)
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            children.push(h_gap(PILL_GAP));
+        }
+        children.push(inflexible(pill));
+    }
+    Labeled {
+        child: centered_row(children),
+        label: summary_line(summary),
+    }
+}
+
+/// Wraps `child` in a `Role::Group` semantics node carrying `label`; layout,
+/// paint and events pass straight through.
+struct Labeled<V> {
+    child: V,
+    label: String,
+}
+
+struct LabeledWidget {
+    child: ChildPod,
+    label: String,
+}
+
+impl<V: View<SessionsState>> View<SessionsState> for Labeled<V> {
+    type Element = LabeledWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> LabeledWidget {
+        LabeledWidget {
+            child: build_child(&self.child, ctx),
+            label: self.label.clone(),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut LabeledWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if element.label != self.label {
+            element.label.clone_from(&self.label);
+            // Semantics-only, but PAINT is what dirties the semantics gate.
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    fn teardown(&self, element: &mut LabeledWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for LabeledWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        self.child.layout_child(ctx, bc)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        let label = self.label.clone();
+        ctx.push_container(
+            Role::Group,
+            |node| node.set_label(label),
+            |ctx| self.child.semantics_child(ctx),
+        );
+    }
+}
+
 /// A flexible spacer that pushes what follows it to the trailing edge — Flex
 /// v1 has no `space-between`.
 fn spacer() -> FlexChild<SessionsState> {
@@ -277,7 +401,7 @@ fn spacer() -> FlexChild<SessionsState> {
 
 /// `[a, b, c]` with a `gap`-tall spacer between consecutive items, as flex
 /// children.
-fn interleave<V: View<SessionsState>>(views: Vec<V>, gap: f64) -> Vec<FlexChild<SessionsState>> {
+fn interleave(views: Vec<AnyView<SessionsState>>, gap: f64) -> Vec<FlexChild<SessionsState>> {
     let mut children = Vec::with_capacity(views.len() * 2);
     for (index, view) in views.into_iter().enumerate() {
         if index > 0 {
