@@ -32,7 +32,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::failure::AppFailure;
-use crate::features::terminal::domain::entities::{PaneEntry, Space, TabEntry, TermLine};
+use crate::features::terminal::domain::entities::{
+    AgentEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
+};
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
@@ -82,6 +84,48 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
         active: false,
         has_bell: false,
     }
+}
+
+/// The agents [`seed_agents`] publishes — process-global like [`TEST_TABS`].
+static TEST_AGENTS: Mutex<Vec<AgentEntry>> = Mutex::new(Vec::new());
+
+/// Replace the agent inventory every later `list_agents` answers, and mark the pane each one
+/// targets (matched by pane id and tab id) in every later tab/pane read. Never called by
+/// production code.
+pub fn seed_agents(agents: Vec<AgentEntry>) {
+    *lock_test_agents() = agents;
+}
+
+/// Drop every seeded agent — a suite's own teardown and setup.
+pub fn clear_test_agents() {
+    lock_test_agents().clear();
+}
+
+fn lock_test_agents() -> std::sync::MutexGuard<'static, Vec<AgentEntry>> {
+    TEST_AGENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Stamp `PaneEntry.agent` on each pane a seeded agent targets.
+fn mark_agents(mut tabs: Vec<TabEntry>) -> Vec<TabEntry> {
+    let agents = lock_test_agents();
+    if agents.is_empty() {
+        return tabs;
+    }
+    for tab in &mut tabs {
+        for pane in &mut tab.panes {
+            pane.agent = agents
+                .iter()
+                .find(|a| a.pane_id == pane.id && a.tab_id == tab.tab_id)
+                .map(|a| AgentMark {
+                    kind: a.kind.clone(),
+                    name: a.name.clone(),
+                    status: a.status,
+                });
+        }
+    }
+    tabs
 }
 
 /// The most verbs [`VERB_LOG`] keeps.
@@ -170,7 +214,7 @@ impl MockTerminalRepository {
             .and_then(|id| self.lock_tabs().get(&id).cloned())
             .unwrap_or_default();
         tabs.extend(lock_test_tabs().iter().cloned());
-        tabs
+        mark_agents(tabs)
     }
 
     /// The store, with a poisoned lock recovered rather than propagated: a
@@ -318,6 +362,7 @@ fn seed_tabs_by_space() -> HashMap<String, Vec<TabEntry>> {
 /// what a tap's focus-or-keyboard verdict turns on.
 fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
     let pane = |id: u32, title: String, focused: bool, x: u32| PaneEntry {
+        agent: None,
         id,
         title,
         cwd: path.to_string(),
@@ -394,7 +439,14 @@ impl TerminalRepository for MockTerminalRepository {
                 "list_tabs_in_space: no space {space_id}"
             )));
         }
-        Ok(self.lock_tabs().get(space_id).cloned().unwrap_or_default())
+        Ok(mark_agents(
+            self.lock_tabs().get(space_id).cloned().unwrap_or_default(),
+        ))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        Ok(lock_test_agents().clone())
     }
 
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -484,6 +536,45 @@ mod tests {
             .build()
             .expect("a current-thread runtime")
             .block_on(fut)
+    }
+
+    #[test]
+    fn seeded_agents_round_trip_and_mark_their_pane() {
+        use crate::agents::AgentStatus;
+        let repo = MockTerminalRepository::seeded();
+        clear_test_agents();
+        assert!(block_on(repo.list_agents()).expect("ok").is_empty());
+
+        let tab = block_on(repo.list_tabs()).expect("tabs").remove(0);
+        let agent = AgentEntry {
+            pane_id: tab.panes[0].id,
+            tab_id: tab.tab_id,
+            tab_key: tab.key.clone(),
+            space_id: None,
+            space_name: None,
+            tab_name: tab.label.clone(),
+            kind: "claude".to_string(),
+            name: None,
+            display_kind: None,
+            status: AgentStatus::Working,
+            title: None,
+            summary: None,
+            cwd: None,
+            focused: true,
+            change_seq: 1,
+        };
+        seed_agents(vec![agent.clone()]);
+        assert_eq!(block_on(repo.list_agents()).expect("ok"), vec![agent]);
+        let marked = block_on(repo.list_tabs()).expect("tabs").remove(0);
+        let mark = marked.panes[0].agent.as_ref().expect("marked");
+        assert_eq!(
+            (mark.kind.as_str(), mark.status),
+            ("claude", AgentStatus::Working)
+        );
+        assert!(marked.panes[1].agent.is_none());
+
+        clear_test_agents();
+        assert!(block_on(repo.list_agents()).expect("ok").is_empty());
     }
 
     #[test]

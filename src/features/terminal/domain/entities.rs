@@ -10,6 +10,7 @@
 //! `SettingsCursorStyle` carries the qualified name to stay unambiguous beside
 //! `presentation::term::CursorStyle`, the grid's own type the two map between.
 
+pub use crate::agents::AgentStatus;
 pub use crate::features::sessions::domain::entities::RenameRequest;
 pub use crate::features::settings::domain::entities::CursorStyle as SettingsCursorStyle;
 
@@ -51,6 +52,61 @@ pub struct PaneEntry {
     pub y: u32,
     pub rows: u32,
     pub cols: u32,
+    /// The AI agent running in this pane, when the backend reports one (the wire's
+    /// `PaneMsg.agent`). `None` on a backend without an agent concept.
+    pub agent: Option<AgentMark>,
+}
+
+/// The agent riding on a [`PaneEntry`] — the wire's `AgentMark`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentMark {
+    /// The agent's CLI label as the backend reports it.
+    pub kind: String,
+    /// The user-facing agent name, when the backend has one.
+    pub name: Option<String>,
+    pub status: AgentStatus,
+}
+
+/// One agent in the session-wide inventory (the wire's `AgentMsg`), flattened so a row can
+/// jump to its pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentEntry {
+    pub pane_id: u32,
+    pub tab_id: u64,
+    /// The same key [`TabEntry::key`] carries for this tab, so a row can address
+    /// `commit_pane_in_space`. Empty when the tab is not in its space's layout.
+    pub tab_key: String,
+    pub space_id: Option<String>,
+    pub space_name: Option<String>,
+    pub tab_name: String,
+    pub kind: String,
+    pub name: Option<String>,
+    pub display_kind: Option<String>,
+    pub status: AgentStatus,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub cwd: Option<String>,
+    pub focused: bool,
+    /// Advances whenever the agent's state changes; larger is more recent.
+    pub change_seq: u64,
+}
+
+impl AgentEntry {
+    /// The row's headline: the agent's name, else its human kind, else the raw kind.
+    pub fn display_name(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.display_kind.as_deref())
+            .unwrap_or(&self.kind)
+    }
+
+    /// The row's second line: the activity summary, else the title, else the cwd.
+    pub fn subtitle(&self) -> Option<&str> {
+        self.summary
+            .as_deref()
+            .or(self.title.as_deref())
+            .or(self.cwd.as_deref())
+    }
 }
 
 /// One tab in the attached session — a `TABS` entry, whole. Three identifiers ride on it and
@@ -259,6 +315,7 @@ mod tests {
     #[test]
     fn a_tabs_pane_list_carries_every_pane_it_was_built_with() {
         let pane = PaneEntry {
+            agent: None,
             id: 3,
             title: "zsh".to_string(),
             cwd: "/srv".to_string(),

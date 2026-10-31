@@ -2400,6 +2400,7 @@ mod tests {
     fn recorded_tab(index: u32, key: &str, active: bool) -> TabEntry {
         let base = index * 10;
         let pane = |id: u32, focused: bool| PaneEntry {
+            agent: None,
             id,
             title: format!("{key}-{id}"),
             cwd: format!("/srv/{key}"),

@@ -1118,6 +1118,7 @@ mod tests {
 
     fn pane(id: u32, title: &str, focused: bool) -> PaneEntry {
         PaneEntry {
+            agent: None,
             id,
             title: title.to_string(),
             cwd: "/home/ed".to_string(),
