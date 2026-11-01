@@ -17,7 +17,12 @@
 //! — the sheet's commit and the space switches share one claim, since either
 //! can move the tab world out from under the other. The agents read keeps its own
 //! generation, and a failed newest read flips [`agents_stale`](TerminalController::agents_stale),
-//! muting [`has_blocked_agent`](TerminalController::has_blocked_agent).
+//! muting [`has_blocked_agent`](TerminalController::has_blocked_agent). Agents alone may also
+//! arrive pushed: see [`open_agent_watch`](TerminalController::open_agent_watch) for the
+//! subscription's lifecycle (stale only when a live stream goes down, an ended one dropped and
+//! reopened at most every [`AGENT_WATCH_RETRY`]) and
+//! [`apply_agent_event`](TerminalController::apply_agent_event) for how pushed rows and a
+//! relist merge by `change_seq`.
 //!
 //! **The tree sheet's own browse state** is id-keyed
 //! ([`expanded_space`](TerminalController::expanded_space)/
@@ -34,11 +39,12 @@
 //! resume hint ([`ResumeSlot`]); the grid's content-tap hook is never wired there.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
@@ -46,17 +52,17 @@ use frust::authoring::text::FontFamily;
 use frust::{Get, GetUntracked, RwSignal, Set, With, WithUntracked, spawn_local};
 
 use crate::agents::{AgentStatus, agent_sort_key};
-use crate::connection::ConnectionController;
+use crate::connection::{CAP_AGENTS_STREAM, ConnectionController};
 use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::data::feeds::grpc_feed::{GrpcTerminalFeed, ResumeSlot};
 use crate::features::terminal::domain::entities::{
-    AgentEntry, PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry,
-    TermLine, Workspace,
+    AgentEntry, AgentEventEntry, PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space,
+    TabEntry, TermLine, Workspace,
 };
 use crate::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use crate::features::terminal::domain::repositories::{
-    PreferencesRepository, SessionsRepository, TerminalRepository,
+    AgentSink, PreferencesRepository, SessionsRepository, TerminalRepository, WatchEnd, WatchHandle,
 };
 use crate::features::terminal::domain::use_cases::{
     DetachSession, ListSpaceTabs, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
@@ -108,6 +114,26 @@ pub struct TerminalController {
     /// [`agent_sort_key`] — the tree's agents half. Re-read with every tab
     /// refresh ([`refresh_agents`](Self::refresh_agents)).
     pub agents: RwSignal<Vec<AgentEntry>>,
+    /// The rows [`agents`](Self::agents) publishes, sorted: the last full read with every
+    /// streamed event applied — ahead of the signal while a move claim holds the rows still.
+    agent_rows: Mutex<Vec<AgentEntry>>,
+    /// The open agents subscription, if the server offered one — dropped on dispose, and on
+    /// the poll tick that finds it ended.
+    agent_watch: Mutex<Option<WatchHandle>>,
+    /// Whether the open subscription has been seen live — so only a live-to-down transition
+    /// flags [`agents_stale`](Self::agents_stale), never a stream still opening.
+    agent_watch_was_live: AtomicBool,
+    /// How to reopen an ended subscription, and from when; `None` once it may never reopen.
+    agent_watch_reopen: Mutex<Option<WatchReopen>>,
+    /// Whether the dispose hook dropping the subscription is registered.
+    agent_watch_hooked: AtomicBool,
+    /// When the last relist **landed**, for the streaming mount's [`AGENTS_SAFETY_RELIST`].
+    agents_listed_at: Mutex<Option<Instant>>,
+    /// The panes stream events touched while a relist is in flight, so its answer merges with
+    /// them instead of overwriting them. `None` while no relist is in flight.
+    agents_touched: Mutex<Option<HashMap<u32, Touch>>>,
+    /// How many times [`agents_stale`](Self::agents_stale) was raised — diagnostics only.
+    agents_stale_raises: AtomicU64,
     /// Whether the last newest-generation `list_agents` failed, so
     /// [`agents`](Self::agents) is a list the daemon could not confirm. The rows stay
     /// published; [`has_blocked_agent`](Self::has_blocked_agent) mutes meanwhile.
@@ -219,9 +245,15 @@ pub struct TerminalController {
 /// space create keep it. So the link never yanks the user back from, or resolves
 /// inside, a place they moved to themselves. It also waits out any such verb
 /// still in flight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachTarget {
-    /// `TabMsg.position` — never the tab id, never a title.
+    /// The space the tab lives in, as `GetSpaces` names it. `None`, or the
+    /// space already selected, leaves the link in the current space; any other
+    /// (also while no space is selected) is peeked first, then switched to ahead
+    /// of the tab and pane — and on a backend without spaces moves nothing.
+    pub space_id: Option<String>,
+    /// `TabMsg.position` — never the tab id, never a title. Counted in the
+    /// target space's own layout.
     pub tab_position: Option<u32>,
     /// `PaneMsg.id` of a terminal pane.
     pub pane_id: Option<u32>,
@@ -240,6 +272,119 @@ const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// has no layout-changed signal. **3s**, the original client's cadence: not
 /// tighter, since RPCs share the attach stream's HTTP/2 connection and flow control.
 const LAYOUT_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// How often a mount whose agents stream is live still re-lists them in full — a safety net
+/// under the stream, which otherwise replaces the layout poll's agents read.
+const AGENTS_SAFETY_RELIST: Duration = Duration::from_secs(30);
+
+/// The least time between two opens of a mount's agents subscription, so a server that ends
+/// every stream at once (zellij: an empty snapshot, then a clean end) costs one open per window.
+const AGENT_WATCH_RETRY: Duration = Duration::from_secs(30);
+
+/// How many streamed agent events may wait for the UI thread; coalescing keeps it far below.
+const AGENT_INBOX_CAPACITY: usize = 64;
+
+/// How far a test has run the agents clock ahead, in milliseconds.
+static AGENTS_CLOCK_AHEAD_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Run the clock the relist and reopen windows are judged on ahead by `by` — so a suite can
+/// cross [`AGENTS_SAFETY_RELIST`] or [`AGENT_WATCH_RETRY`] without waiting them out. `pub`
+/// rather than `#[cfg(test)]`: `tests/*.rs` link the normal build.
+pub fn advance_agents_clock_for_tests(by: Duration) {
+    AGENTS_CLOCK_AHEAD_MS.fetch_add(by.as_millis() as u64, Ordering::SeqCst);
+}
+
+/// Now, on the agents clock.
+fn agents_now() -> Instant {
+    Instant::now() + Duration::from_millis(AGENTS_CLOCK_AHEAD_MS.load(Ordering::SeqCst))
+}
+
+/// What a stream event did to a pane while a relist was in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Touch {
+    Changed,
+    /// Removed by the stream, carrying the `change_seq` the held row had then (`u64::MAX` when
+    /// none was held, so a relist can never resurrect it).
+    Removed(u64),
+}
+
+/// What reopening an ended agents subscription needs, and when it may.
+struct WatchReopen {
+    controller: Weak<TerminalController>,
+    connection: Weak<ConnectionController>,
+    /// When the subscription last opened (or tried to).
+    opened_at: Instant,
+    /// `Some` once it ended and may reopen from then; `None` while it is open.
+    not_before: Option<Instant>,
+}
+
+/// The bounded queue streamed agent events cross to the UI thread on. A snapshot supersedes
+/// everything queued before it, and a later change or removal for a pane supersedes an
+/// earlier queued one; past [`AGENT_INBOX_CAPACITY`] the oldest is dropped and the next tick
+/// relists.
+#[derive(Default)]
+struct AgentInbox {
+    queue: Mutex<VecDeque<AgentEventEntry>>,
+    wake: tokio::sync::Notify,
+    closed: AtomicBool,
+    overflowed: AtomicBool,
+}
+
+impl AgentInbox {
+    fn push(&self, event: AgentEventEntry) {
+        {
+            let mut queue = lock(&self.queue);
+            match event_pane(&event) {
+                None => queue.clear(),
+                Some(pane) => queue.retain(|queued| event_pane(queued) != Some(pane)),
+            }
+            if queue.len() >= AGENT_INBOX_CAPACITY {
+                queue.pop_front();
+                self.overflowed.store(true, Ordering::SeqCst);
+            }
+            queue.push_back(event);
+        }
+        self.wake.notify_one();
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    /// Everything queued, waiting for at least one event; `None` once closed and drained.
+    async fn next_batch(&self) -> Option<Vec<AgentEventEntry>> {
+        loop {
+            let closed = self.closed.load(Ordering::SeqCst);
+            let batch: Vec<AgentEventEntry> = lock(&self.queue).drain(..).collect();
+            if !batch.is_empty() {
+                return Some(batch);
+            }
+            if closed {
+                return None;
+            }
+            self.wake.notified().await;
+        }
+    }
+}
+
+/// The pane an event is about; `None` for a snapshot, which is about all of them.
+fn event_pane(event: &AgentEventEntry) -> Option<u32> {
+    match event {
+        AgentEventEntry::Snapshot(_) => None,
+        AgentEventEntry::Changed(agent) => Some(agent.pane_id),
+        AgentEventEntry::Removed(pane_id) => Some(*pane_id),
+    }
+}
+
+/// The sink's end of an [`AgentInbox`]: dropping it — the stream is over — closes the inbox.
+struct InboxSender(Arc<AgentInbox>);
+
+impl Drop for InboxSender {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
 
 /// How long a landed create waits before re-reading: the relay acks on
 /// **enqueue**, not apply, so an immediate reload misses what was just made.
@@ -329,6 +474,14 @@ impl TerminalController {
             lines: RwSignal::new(Vec::new()),
             agents: RwSignal::new(Vec::new()),
             agents_stale: RwSignal::new(false),
+            agent_rows: Mutex::new(Vec::new()),
+            agent_watch: Mutex::new(None),
+            agent_watch_was_live: AtomicBool::new(false),
+            agent_watch_reopen: Mutex::new(None),
+            agent_watch_hooked: AtomicBool::new(false),
+            agents_listed_at: Mutex::new(None),
+            agents_touched: Mutex::new(None),
+            agents_stale_raises: AtomicU64::new(0),
             session_name: RwSignal::new(None),
             key_bar_visible: RwSignal::new(true),
             fn_row_visible: RwSignal::new(false),
@@ -427,7 +580,20 @@ impl TerminalController {
     /// a tab nor a pane records nothing. Applied once by
     /// [`apply_attach_target`](Self::apply_attach_target).
     pub fn set_attach_target(&self, tab_position: Option<u32>, pane_id: Option<u32>) {
+        self.set_attach_target_in_space(None, tab_position, pane_id);
+    }
+
+    /// [`set_attach_target`](Self::set_attach_target) for a link that also names a
+    /// space (`/terminal?space=…`). A link naming a space alone records nothing: with no
+    /// tab or pane there is nowhere in it to land.
+    pub fn set_attach_target_in_space(
+        &self,
+        space_id: Option<String>,
+        tab_position: Option<u32>,
+        pane_id: Option<u32>,
+    ) {
         let target = (tab_position.is_some() || pane_id.is_some()).then_some(AttachTarget {
+            space_id,
             tab_position,
             pane_id,
         });
@@ -442,10 +608,10 @@ impl TerminalController {
     /// seam here, since `tests/*.rs` link the normal build.
     #[doc(hidden)]
     pub fn pending_attach_target_for_tests(&self) -> Option<AttachTarget> {
-        *self
-            .attach_target
+        self.attach_target
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Drop the [`AttachTarget`] — [`tell_move`](Self::tell_move)'s landed half.
@@ -477,42 +643,72 @@ impl TerminalController {
         else {
             return;
         };
+        // A link naming a space resolves against the current tab world only when that space
+        // is the selected one. Any other — no selected space included — is peeked first, and a
+        // backend without spaces has nowhere to put it: the link moves nothing.
+        if let Some(space_id) = target.space_id.clone()
+            && self.selected_space_id().as_deref() != Some(space_id.as_str())
+        {
+            if self.has_spaces() {
+                self.apply_attach_target_in_space(space_id, &target).await;
+            } else {
+                log::debug!("attach target: space {space_id} on a backend without spaces, dropped");
+            }
+            return;
+        }
         let (Some(tabs), Some(active)) = (
             self.tabs.try_get_untracked(),
             self.active_tab.try_get_untracked(),
         ) else {
             return;
         };
-        // `TabEntry::index` is the 1-based position the pill prints.
-        let tab = match target.tab_position {
-            Some(position) => tabs
-                .iter()
-                .find(|tab| tab.index == position.saturating_add(1)),
-            None => tabs.iter().find(|tab| tab.key == active),
-        };
-        let Some(tab) = tab else {
-            log::debug!(
-                "attach target: no tab at {:?}, dropped",
-                target.tab_position
-            );
+        let Some((tab, pane_id)) = resolve_attach_target(&tabs, &active, &target) else {
             return;
         };
-        let landed = match target.pane_id {
+        let landed = match pane_id {
             Some(pane_id) => {
-                if !tab
-                    .panes
-                    .iter()
-                    .any(|pane| pane.id == pane_id && !pane.is_plugin)
-                {
-                    log::debug!("attach target: no pane {pane_id} in tab, dropped");
-                    return;
-                }
                 self.commit_pane_unclaimed(tab.key.clone(), pane_id, false)
                     .await
             }
             None if tab.key != active => self.switch_tab(tab.key.clone()).await,
             None => true,
         };
+        if landed && self.is_docked() {
+            self.settle_rest();
+        }
+    }
+
+    /// [`apply_attach_target`](Self::apply_attach_target)'s foreign-space branch, under
+    /// the move claim it already holds. The space's tabs are peeked read-only first
+    /// ([`ListSpaceTabs`], published nowhere) and the target resolved against them; only
+    /// then does the connection move — space, then tab, then pane. **Fail-closed**: a
+    /// failed peek, or a tab or pane the peeked layout does not carry, sends nothing.
+    async fn apply_attach_target_in_space(&self, space_id: String, target: &AttachTarget) {
+        let Ok(tabs) = self
+            .core
+            .run(
+                &self.list_space_tabs,
+                space_id.clone(),
+                RunOptions::default(),
+            )
+            .await
+        else {
+            return;
+        };
+        if !self.signals_alive() {
+            return;
+        }
+        let active = tabs
+            .iter()
+            .find(|tab| tab.active)
+            .or_else(|| tabs.first())
+            .map(|tab| tab.key.clone())
+            .unwrap_or_default();
+        let Some((tab, pane_id)) = resolve_attach_target(&tabs, &active, target) else {
+            return;
+        };
+        let (tab_key, pane) = (tab.key.clone(), pane_id.map(|id| (id, false)));
+        let landed = self.land_in_space(space_id, tabs, tab_key, pane).await;
         if landed && self.is_docked() {
             self.settle_rest();
         }
@@ -808,6 +1004,21 @@ impl TerminalController {
         let Some(_claim) = self.claim_user_move() else {
             return false;
         };
+        self.land_in_space(space_id, cached_tabs, tab_key, Some((pane_id, is_plugin)))
+            .await
+    }
+
+    /// The move itself, under a claim the caller holds: `switch_space` to `space_id`
+    /// (recording the resume hint), adopt `tabs` as the new tab world, then land on
+    /// `tab_key` — and on its `pane` (id, is-plugin) when given. Shared by the sheet's
+    /// cross-space commit and the deep link's foreign-space attach.
+    async fn land_in_space(
+        &self,
+        space_id: String,
+        tabs: Vec<TabEntry>,
+        tab_key: String,
+        pane: Option<(u32, bool)>,
+    ) -> bool {
         if !self
             .tell_move(self.terminal.switch_space(space_id.clone()))
             .await
@@ -818,10 +1029,19 @@ impl TerminalController {
             self.resume.remember_space(space_id.clone());
         }
         self.select_space_locally(&space_id);
-        self.promote_browsed_tabs(cached_tabs);
-        let landed = self
-            .commit_pane_unclaimed(tab_key, pane_id, is_plugin)
-            .await;
+        self.promote_browsed_tabs(tabs);
+        let landed = match pane {
+            Some((pane_id, is_plugin)) => {
+                self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
+                    .await
+            }
+            None => {
+                let Some(active) = self.active_tab.try_get_untracked() else {
+                    return false;
+                };
+                tab_key == active || self.switch_tab(tab_key).await
+            }
+        };
         // Behind the pane steps, not ahead of them: the switch landed either
         // way, so the space list converges either way — and a user waiting on a
         // pane focus never waits on this read.
@@ -1183,23 +1403,232 @@ impl TerminalController {
                 }
             }
         }
-        self.refresh_agents().await;
+        if self.agents_relist_due() {
+            self.refresh_agents().await;
+        } else {
+            self.publish_agent_rows();
+        }
+    }
+
+    /// Whether this refresh re-reads the agents, tending the subscription on the way: always
+    /// without one (retrying an ended one when [`AGENT_WATCH_RETRY`] allows); while one is down,
+    /// flagging [`agents_stale`](Self::agents_stale) only on the tick a live stream went down;
+    /// and every [`AGENTS_SAFETY_RELIST`] while it is live. An ended subscription is dropped
+    /// here, without touching the stale flag — the poll simply takes over.
+    fn agents_relist_due(&self) -> bool {
+        let state = lock(&self.agent_watch)
+            .as_ref()
+            .map(|watch| (watch.end(), watch.is_live()));
+        match state {
+            None => {
+                self.retry_agent_watch();
+                true
+            }
+            Some((end, _)) if end.is_ended() => {
+                self.retire_agent_watch(end);
+                self.retry_agent_watch();
+                true
+            }
+            Some((_, true)) => {
+                self.agent_watch_was_live.store(true, Ordering::SeqCst);
+                lock(&self.agents_listed_at).is_none_or(|at| {
+                    agents_now().saturating_duration_since(at) >= AGENTS_SAFETY_RELIST
+                })
+            }
+            Some((_, false)) => {
+                // A live stream going down raises nothing up front: the relist this returns
+                // `true` for flags stale itself if it fails, so a drop with working unary RPCs
+                // never flickers the flag.
+                self.agent_watch_was_live.store(false, Ordering::SeqCst);
+                true
+            }
+        }
+    }
+
+    /// Drop an ended subscription and decide whether it may reopen: never after
+    /// `UNAUTHENTICATED`, otherwise [`AGENT_WATCH_RETRY`] after it last opened.
+    fn retire_agent_watch(&self, end: WatchEnd) {
+        let ended = lock(&self.agent_watch).take();
+        drop(ended);
+        self.agent_watch_was_live.store(false, Ordering::SeqCst);
+        let mut reopen = lock(&self.agent_watch_reopen);
+        if end == WatchEnd::EndedUnauthenticated {
+            *reopen = None;
+        } else if let Some(reopen) = reopen.as_mut() {
+            reopen.not_before = Some(reopen.opened_at + AGENT_WATCH_RETRY);
+        }
+    }
+
+    /// Reopen an ended subscription once its window has passed, if the mount is alive and the
+    /// server still advertises [`CAP_AGENTS_STREAM`].
+    fn retry_agent_watch(&self) {
+        let due = lock(&self.agent_watch_reopen).as_ref().and_then(|reopen| {
+            reopen
+                .not_before
+                .is_some_and(|at| agents_now() >= at)
+                .then(|| (reopen.controller.upgrade(), reopen.connection.upgrade()))
+        });
+        if let Some((Some(controller), Some(connection))) = due
+            && self.signals_alive()
+        {
+            controller.open_agent_watch(&connection);
+        }
+    }
+
+    /// Open the session's agents subscription when the server advertises
+    /// [`CAP_AGENTS_STREAM`]; otherwise, or if the open fails, the layout poll keeps reading
+    /// them. Events cross to the UI thread through a bounded, coalescing [`AgentInbox`] a local
+    /// task drains into [`apply_agent_event`](Self::apply_agent_event), so one lands within a
+    /// frame. The poll tick watches the handle ([`agents_relist_due`](Self::agents_relist_due)):
+    /// a live stream going down flags [`agents_stale`](Self::agents_stale) once, an ended one is
+    /// dropped and — unless it ended `UNAUTHENTICATED` — reopened at most once per
+    /// [`AGENT_WATCH_RETRY`] while the server still advertises the stream. Stopped on dispose.
+    pub fn open_agent_watch(self: &Arc<Self>, connection: &Arc<ConnectionController>) {
+        if self.session_id.is_none() || !connection.supports(CAP_AGENTS_STREAM) {
+            return;
+        }
+        let opened_at = agents_now();
+        let reopen = |not_before| WatchReopen {
+            controller: Arc::downgrade(self),
+            connection: Arc::downgrade(connection),
+            opened_at,
+            not_before,
+        };
+        let inbox = Arc::new(AgentInbox::default());
+        let sender = InboxSender(Arc::clone(&inbox));
+        let sink: AgentSink = Box::new(move |event| sender.0.push(event));
+        let handle = match self.terminal.watch_agents(sink) {
+            Ok(handle) => handle,
+            Err(failure) => {
+                log::debug!("watch_agents: {failure}");
+                *lock(&self.agent_watch_reopen) = Some(reopen(Some(opened_at + AGENT_WATCH_RETRY)));
+                return;
+            }
+        };
+        self.agent_watch_was_live.store(false, Ordering::SeqCst);
+        *lock(&self.agent_watch_reopen) = Some(reopen(None));
+        let previous = lock(&self.agent_watch).replace(handle);
+        drop(previous);
+        if !self.agent_watch_hooked.swap(true, Ordering::SeqCst) {
+            let owner = Arc::downgrade(self);
+            self.core.on_dispose(move || {
+                if let Some(controller) = owner.upgrade() {
+                    lock(&controller.agent_watch_reopen).take();
+                    let watch = lock(&controller.agent_watch).take();
+                    drop(watch);
+                }
+            });
+        }
+        let drain = Arc::downgrade(self);
+        spawn_local(async move {
+            while let Some(batch) = inbox.next_batch().await {
+                let Some(controller) = drain.upgrade() else {
+                    return;
+                };
+                controller
+                    .agent_watch_was_live
+                    .store(true, Ordering::SeqCst);
+                for event in batch {
+                    controller.absorb_agent_event(event);
+                }
+                if inbox.overflowed.swap(false, Ordering::SeqCst) {
+                    lock(&controller.agents_listed_at).take();
+                }
+                controller.agents_confirmed();
+            }
+        });
+    }
+
+    /// Apply one streamed event to [`agent_rows`](Self::agent_rows) and publish — see
+    /// [`absorb_agent_event`](Self::absorb_agent_event). Every event clears
+    /// [`agents_stale`](Self::agents_stale): the daemon just spoke. A held move claim defers
+    /// only the publish.
+    pub fn apply_agent_event(&self, event: AgentEventEntry) {
+        self.absorb_agent_event(event);
+        self.agents_confirmed();
+    }
+
+    /// Fold one event into [`agent_rows`](Self::agent_rows): a snapshot replaces; a change
+    /// upserts by pane id unless the held row's `change_seq` is higher (equal or higher
+    /// replaces); a removal drops. Re-sorted stably. A relist in flight is not cancelled: the
+    /// panes touched are recorded for it to merge with ([`merge_relist`]).
+    fn absorb_agent_event(&self, event: AgentEventEntry) {
+        let mut rows = lock(&self.agent_rows);
+        let mut touched = lock(&self.agents_touched);
+        match event {
+            AgentEventEntry::Snapshot(agents) => {
+                if let Some(touched) = touched.as_mut() {
+                    touched.extend(
+                        rows.iter()
+                            .map(|row| (row.pane_id, Touch::Removed(row.change_seq))),
+                    );
+                    touched.extend(agents.iter().map(|row| (row.pane_id, Touch::Changed)));
+                }
+                *rows = agents;
+            }
+            AgentEventEntry::Changed(agent) => {
+                if let Some(touched) = touched.as_mut() {
+                    touched.insert(agent.pane_id, Touch::Changed);
+                }
+                match rows.iter_mut().find(|row| row.pane_id == agent.pane_id) {
+                    Some(row) if row.change_seq > agent.change_seq => {}
+                    Some(row) => *row = *agent,
+                    None => rows.push(*agent),
+                }
+            }
+            AgentEventEntry::Removed(pane_id) => {
+                if let Some(touched) = touched.as_mut() {
+                    let seq = rows
+                        .iter()
+                        .find(|row| row.pane_id == pane_id)
+                        .map_or(u64::MAX, |row| row.change_seq);
+                    touched.insert(pane_id, Touch::Removed(seq));
+                }
+                rows.retain(|row| row.pane_id != pane_id);
+            }
+        }
+        rows.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
+    }
+
+    /// The daemon confirmed the rows: clear the stale flag and publish.
+    fn agents_confirmed(&self) {
+        if !self.signals_alive() {
+            return;
+        }
+        self.set_agents_stale(false);
+        self.publish_agent_rows();
+    }
+
+    /// Publish [`agent_rows`](Self::agent_rows) unless a move claim holds the rows still,
+    /// read-compare-then-write.
+    fn publish_agent_rows(&self) {
+        if self.move_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        let rows = lock(&self.agent_rows).clone();
+        if self.agents.try_with_untracked(|current| *current != rows) == Some(true) {
+            self.agents.set(rows);
+        }
     }
 
     /// Re-read the session's agents and publish them sorted, read-compare-then-write.
     /// Silent on failure beyond setting [`agents_stale`](Self::agents_stale) — a
     /// backend without agents answers empty, and the layout's own failure already
-    /// spoke. Generation-guarded: only the newest read publishes or flags.
-    /// **Never while a move is in flight**: a row reordering under the finger that
-    /// just tapped it would aim the next tap at a different agent, so a held move
-    /// claim skips this read's publish (the next refresh catches up).
+    /// spoke. Generation-guarded among relists: only the newest lands. Stream events arriving
+    /// meanwhile do not cancel it — the answer merges with them ([`merge_relist`]) — and
+    /// [`agents_listed_at`](Self::agents_listed_at) is stamped when it lands.
+    /// **Never published while a move is in flight**: a row reordering under the finger that
+    /// just tapped it would aim the next tap at a different agent, so a held move claim
+    /// defers the publish (the stale flag still clears).
     async fn refresh_agents(&self) {
         let generation = self.agents_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *lock(&self.agents_touched) = Some(HashMap::new());
         let answer = self.terminal.list_agents().await;
         if self.agents_generation.load(Ordering::SeqCst) != generation {
             return;
         }
-        let mut agents = match answer {
+        let touched = lock(&self.agents_touched).take().unwrap_or_default();
+        let listed = match answer {
             Ok(agents) => agents,
             Err(failure) => {
                 log::debug!("list_agents: {failure}");
@@ -1207,21 +1636,28 @@ impl TerminalController {
                 return;
             }
         };
-        agents.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
-        if self.move_in_flight.load(Ordering::SeqCst) {
-            return;
+        *lock(&self.agents_listed_at) = Some(agents_now());
+        {
+            let mut rows = lock(&self.agent_rows);
+            *rows = merge_relist(listed, &rows, &touched);
         }
-        self.set_agents_stale(false);
-        if self.agents.try_with_untracked(|current| *current != agents) == Some(true) {
-            self.agents.set(agents);
-        }
+        self.agents_confirmed();
     }
 
     /// Read-compare-then-write on [`agents_stale`](Self::agents_stale).
     fn set_agents_stale(&self, stale: bool) {
         if self.agents_stale.try_get_untracked() == Some(!stale) {
+            if stale {
+                self.agents_stale_raises.fetch_add(1, Ordering::SeqCst);
+            }
             self.agents_stale.set(stale);
         }
+    }
+
+    /// How many times [`agents_stale`](Self::agents_stale) has been raised on this mount —
+    /// how a suite proves a tick never flipped it, even for an instant.
+    pub fn agents_stale_raises(&self) -> u64 {
+        self.agents_stale_raises.load(Ordering::SeqCst)
     }
 
     /// Whether any agent is waiting on the user — the rail's `needs you` badge and
@@ -1727,12 +2163,89 @@ const HERDR_BACKEND: &str = "herdr:";
 /// global focus. A closure (not a method) since it owns the [`AttachSpec`].
 pub type Reattach = Rc<dyn Fn()>;
 
+/// Lock `mutex`, recovering a poisoned one: a panic elsewhere must not wedge the agents state.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A landing relist's rows merged with `held`, the rows stream events kept meanwhile. The relist
+/// is authoritative for every pane the stream did not touch while it was in flight (so a
+/// poll-only relist, with `touched` empty, replaces the rows wholesale). Only a pane the stream
+/// *changed* in that window is compared by `change_seq` — both rows then describe the same
+/// stream interval, and the higher wins (the relist's on a tie), a changed pane the relist
+/// omits staying present. A pane the stream *removed* stays gone unless the relist lists it with
+/// a `change_seq` higher than the removed row's.
+fn merge_relist(
+    listed: Vec<AgentEntry>,
+    held: &[AgentEntry],
+    touched: &HashMap<u32, Touch>,
+) -> Vec<AgentEntry> {
+    let held_row = |pane_id: u32| held.iter().find(|row| row.pane_id == pane_id);
+    let mut rows: Vec<AgentEntry> = listed
+        .into_iter()
+        .filter(|row| match touched.get(&row.pane_id) {
+            Some(Touch::Removed(seq)) => row.change_seq > *seq,
+            _ => true,
+        })
+        .map(
+            |row| match (touched.get(&row.pane_id), held_row(row.pane_id)) {
+                (Some(Touch::Changed), Some(kept)) if kept.change_seq > row.change_seq => {
+                    kept.clone()
+                }
+                _ => row,
+            },
+        )
+        .collect();
+    for kept in held {
+        let changed = touched.get(&kept.pane_id) == Some(&Touch::Changed);
+        if changed && !rows.iter().any(|row| row.pane_id == kept.pane_id) {
+            rows.push(kept.clone());
+        }
+    }
+    rows.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
+    rows
+}
+
 /// The key of the tab `tabs` flags active — where the server says focus is, and so
 /// where the docked rail rests.
 fn rest_tab_key(tabs: &[TabEntry]) -> Option<String> {
     tabs.iter()
         .find(|tab| tab.active)
         .map(|tab| tab.key.clone())
+}
+
+/// The tab (and pane id to focus) `target` names in `tabs`, with `active` the key of the
+/// tab a target naming none lands on. `None` — logged, nothing sent — when the layout does
+/// not carry the tab position, or the pane is missing from that tab or a plugin pane.
+fn resolve_attach_target<'a>(
+    tabs: &'a [TabEntry],
+    active: &str,
+    target: &AttachTarget,
+) -> Option<(&'a TabEntry, Option<u32>)> {
+    // `TabEntry::index` is the 1-based position the pill prints.
+    let tab = match target.tab_position {
+        Some(position) => tabs
+            .iter()
+            .find(|tab| tab.index == position.saturating_add(1)),
+        None => tabs.iter().find(|tab| tab.key == active),
+    };
+    let Some(tab) = tab else {
+        log::debug!(
+            "attach target: no tab at {:?}, dropped",
+            target.tab_position
+        );
+        return None;
+    };
+    if let Some(pane_id) = target.pane_id
+        && !tab
+            .panes
+            .iter()
+            .any(|pane| pane.id == pane_id && !pane.is_plugin)
+    {
+        log::debug!("attach target: no pane {pane_id} in tab, dropped");
+        return None;
+    }
+    Some((tab, target.pane_id))
 }
 
 /// Whether the session with id `session` runs on the **herdr** backend — this screen's
@@ -1955,6 +2468,9 @@ impl LiveSession {
                 spawn_local(async move { layout.refresh_layout_from_poll().await });
             });
         }
+        // The agents come through the repository, not the feed, so any mount on a session
+        // may watch them.
+        controller.open_agent_watch(connection);
 
         Self {
             emulator,
@@ -2432,6 +2948,8 @@ mod tests {
         active: Mutex<Option<String>>,
         /// What `list_agents` answers, unrecorded so no existing call log moves.
         agents: Mutex<Vec<AgentEntry>>,
+        /// How long every `list_agents` waits before answering.
+        agents_delay: Mutex<Option<Duration>>,
     }
 
     /// The space [`RecordingRepository`] starts out selected on.
@@ -2644,6 +3162,13 @@ mod tests {
         }
 
         async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
+            let delay = *self
+                .agents_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(delay) = delay {
+                clean_signals::time::sleep(delay).await;
+            }
             Ok(self
                 .agents
                 .lock()
@@ -4484,6 +5009,258 @@ mod tests {
         drop(claim);
         block_on(c.reload_tabs());
         assert_eq!(c.agents.get_untracked().len(), 1, "…until the move lands");
+    }
+
+    #[test]
+    fn a_late_change_with_a_lower_change_seq_never_overwrites_the_relisted_row() {
+        let (c, repository) = recorded("herdr:work");
+        stage_agents(
+            &repository,
+            vec![agent(10, "alpha", "ws-1", AgentStatus::Blocked, 5)],
+        );
+        block_on(c.refresh_agents());
+
+        let late = agent(10, "alpha", "ws-1", AgentStatus::Working, 3);
+        c.apply_agent_event(AgentEventEntry::Changed(Box::new(late)));
+        assert_eq!(c.agents.get_untracked()[0].status, AgentStatus::Blocked);
+
+        let reconciled = agent(10, "alpha", "ws-1", AgentStatus::Idle, 5);
+        c.apply_agent_event(AgentEventEntry::Changed(Box::new(reconciled)));
+        assert_eq!(
+            c.agents.get_untracked()[0].status,
+            AgentStatus::Idle,
+            "an equal change_seq replaces: the server's later row is the authoritative one"
+        );
+    }
+
+    #[test]
+    fn a_busy_stream_lets_the_safety_relist_land_and_merges_it_by_change_seq() {
+        let (c, repository) = recorded("herdr:work");
+        stage_agents(
+            &repository,
+            vec![
+                agent(10, "alpha", "ws-1", AgentStatus::Working, 1),
+                agent(11, "alpha", "ws-1", AgentStatus::Idle, 1),
+                agent(12, "alpha", "ws-1", AgentStatus::Idle, 1),
+            ],
+        );
+        *repository
+            .agents_delay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Duration::from_millis(450));
+        lock(&c.agents_listed_at).take();
+
+        block_on(async {
+            let stream = async {
+                for seq in 2..=4 {
+                    clean_signals::time::sleep(Duration::from_millis(100)).await;
+                    let busy = agent(10, "alpha", "ws-1", AgentStatus::Blocked, seq);
+                    c.apply_agent_event(AgentEventEntry::Changed(Box::new(busy)));
+                }
+                c.apply_agent_event(AgentEventEntry::Removed(11));
+                let born = agent(13, "alpha", "ws-1", AgentStatus::Done, 5);
+                c.apply_agent_event(AgentEventEntry::Changed(Box::new(born)));
+            };
+            tokio::join!(c.refresh_agents(), stream);
+        });
+
+        let rows: Vec<(u32, AgentStatus)> = c
+            .agents
+            .get_untracked()
+            .iter()
+            .map(|row| (row.pane_id, row.status))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (10, AgentStatus::Blocked),
+                (13, AgentStatus::Done),
+                (12, AgentStatus::Idle)
+            ],
+            "the streamed rows outrank the relist's older ones; the relist adds pane 12"
+        );
+        assert!(
+            lock(&c.agents_listed_at).is_some(),
+            "stamped when the relist landed, despite the events"
+        );
+    }
+
+    #[test]
+    fn a_poll_only_relist_replaces_the_rows_wholesale_even_when_pane_ids_were_reassigned() {
+        let (c, repository) = recorded("herdr:work");
+        stage_agents(
+            &repository,
+            vec![
+                agent(1, "A", "ws-1", AgentStatus::Working, 40),
+                agent(2, "B", "ws-1", AgentStatus::Working, 5),
+            ],
+        );
+        block_on(c.refresh_agents());
+
+        // A muxrd restart: the same agents under swapped pane ids, nothing streamed meanwhile.
+        let restarted = vec![
+            agent(1, "B", "ws-1", AgentStatus::Working, 5),
+            agent(2, "A", "ws-1", AgentStatus::Working, 40),
+        ];
+        stage_agents(&repository, restarted);
+        block_on(c.refresh_agents());
+
+        let mut rows: Vec<(u32, String, u64)> = c
+            .agents
+            .get_untracked()
+            .iter()
+            .map(|row| (row.pane_id, row.tab_name.clone(), row.change_seq))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            [(1, "B".to_string(), 5), (2, "A".to_string(), 40)],
+            "the relist's rows, A once and B present"
+        );
+    }
+
+    #[test]
+    fn merge_relist_compares_change_seq_only_for_panes_the_stream_changed() {
+        let held = vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Blocked, 9),
+            agent(11, "alpha", "ws-1", AgentStatus::Blocked, 9),
+        ];
+        let listed = vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Idle, 2),
+            agent(11, "alpha", "ws-1", AgentStatus::Idle, 2),
+        ];
+        let touched = HashMap::from([(10, Touch::Changed)]);
+        let merged = merge_relist(listed, &held, &touched);
+        let status = |pane: u32| {
+            merged
+                .iter()
+                .find(|row| row.pane_id == pane)
+                .map(|row| row.status)
+        };
+        assert_eq!(
+            status(10),
+            Some(AgentStatus::Blocked),
+            "touched: stream wins"
+        );
+        assert_eq!(
+            status(11),
+            Some(AgentStatus::Idle),
+            "untouched: relist wins"
+        );
+    }
+
+    #[test]
+    fn a_stream_removal_holds_unless_the_relist_row_is_newer() {
+        let held = vec![agent(10, "alpha", "ws-1", AgentStatus::Idle, 4)];
+        let touched = HashMap::from([(10, Touch::Removed(4)), (11, Touch::Removed(4))]);
+        let listed = vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Idle, 4),
+            agent(11, "alpha", "ws-1", AgentStatus::Idle, 7),
+        ];
+        let merged = merge_relist(listed, &held, &touched);
+        let panes: Vec<u32> = merged.iter().map(|row| row.pane_id).collect();
+        assert_eq!(
+            panes,
+            [11],
+            "pane 10 stays removed; pane 11 came back newer"
+        );
+    }
+
+    #[test]
+    fn a_relist_landing_under_a_held_move_claim_still_clears_the_stale_flag() {
+        let (c, repository) = recorded("herdr:work");
+        c.set_agents_stale(true);
+        stage_agents(
+            &repository,
+            vec![agent(10, "alpha", "ws-1", AgentStatus::Blocked, 1)],
+        );
+        let claim = c.claim_move().expect("free");
+        block_on(c.refresh_agents());
+        assert!(!c.agents_stale.get_untracked());
+        assert!(
+            c.agents.get_untracked().is_empty(),
+            "the publish waits for the move"
+        );
+        drop(claim);
+    }
+
+    #[test]
+    fn the_agent_inbox_keeps_the_last_event_per_pane_and_a_snapshot_supersedes_the_queue() {
+        let inbox = AgentInbox::default();
+        let changed = |pane: u32, seq: u64| {
+            AgentEventEntry::Changed(Box::new(agent(
+                pane,
+                "alpha",
+                "ws-1",
+                AgentStatus::Idle,
+                seq,
+            )))
+        };
+        inbox.push(changed(10, 1));
+        inbox.push(changed(11, 1));
+        inbox.push(changed(10, 2));
+        inbox.push(AgentEventEntry::Removed(11));
+        assert_eq!(
+            block_on(inbox.next_batch()),
+            Some(vec![changed(10, 2), AgentEventEntry::Removed(11)])
+        );
+
+        inbox.push(changed(10, 3));
+        inbox.push(AgentEventEntry::Snapshot(Vec::new()));
+        inbox.push(AgentEventEntry::Removed(10));
+        assert_eq!(
+            block_on(inbox.next_batch()),
+            Some(vec![
+                AgentEventEntry::Snapshot(Vec::new()),
+                AgentEventEntry::Removed(10)
+            ])
+        );
+
+        for pane in 0..100 {
+            inbox.push(AgentEventEntry::Removed(pane));
+        }
+        let batch = block_on(inbox.next_batch()).expect("queued");
+        assert_eq!(batch.len(), AGENT_INBOX_CAPACITY, "bounded");
+        assert_eq!(
+            batch[0],
+            AgentEventEntry::Removed(36),
+            "the oldest went first"
+        );
+        assert!(
+            inbox.overflowed.load(Ordering::SeqCst),
+            "and the next tick relists"
+        );
+
+        inbox.push(changed(1, 1));
+        inbox.close();
+        assert_eq!(block_on(inbox.next_batch()), Some(vec![changed(1, 1)]));
+        assert_eq!(block_on(inbox.next_batch()), None, "closed and drained");
+    }
+
+    #[test]
+    fn a_streamed_event_under_a_held_move_claim_lands_in_the_rows_but_publishes_later() {
+        let (c, _repository) = recorded("herdr:work");
+        c.apply_agent_event(AgentEventEntry::Snapshot(vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Working, 1),
+            agent(11, "alpha", "ws-1", AgentStatus::Idle, 2),
+        ]));
+        assert_eq!(c.agents.get_untracked().len(), 2);
+
+        let claim = c.claim_move().expect("free");
+        let blocked = agent(11, "alpha", "ws-1", AgentStatus::Blocked, 3);
+        c.apply_agent_event(AgentEventEntry::Changed(Box::new(blocked)));
+        assert_eq!(
+            c.agents.get_untracked()[0].pane_id,
+            10,
+            "the rows hold still"
+        );
+        drop(claim);
+        c.publish_agent_rows();
+        assert_eq!(
+            c.agents.get_untracked()[0].pane_id,
+            11,
+            "the change was kept"
+        );
     }
 
     #[test]

@@ -14,6 +14,9 @@
 //! `GlyphRun` carries shaped glyph ids rather than the source string:
 //! [`debug_live_probe`](muxr::features::terminal::presentation::pages::debug_live_probe) reaches
 //! the actual `vt100::Screen` the mounted screen renders.
+//!
+//! The agents stream closes the file: scripted through the mock repository's watch seam, with the
+//! server's `agents-stream` capability switched on per test.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -38,7 +41,7 @@ use frust_shell_common::{SystemUiMode, current_system_ui_mode};
 use frust_text::TextContext;
 use kurbo::{Point, Size, Vec2};
 
-use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::connection::{CAP_AGENTS_STREAM, ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::settings::di::expect_preferences_repository;
@@ -47,13 +50,21 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, clear_test_tabs, clear_verb_log_for_tests, verb_log_for_tests,
+    add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
+    agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
+    delay_next_list_agents_for_tests, drop_agent_stream_for_tests, end_agent_stream_for_tests,
+    fail_next_list_agents_for_tests, open_next_agent_watch_down_for_tests,
+    push_agent_event_for_tests, seed_agents, verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
-use muxr::features::terminal::domain::entities::{Space, TabEntry, TermLine};
+use muxr::features::terminal::domain::entities::{
+    AgentEntry, AgentEventEntry, AgentStatus, Space, TabEntry, TermLine,
+};
 use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
-use muxr::features::terminal::domain::repositories::TerminalRepository;
-use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
+use muxr::features::terminal::domain::repositories::{TerminalRepository, WatchEnd};
+use muxr::features::terminal::presentation::controller::{
+    AttachTarget, TerminalController, advance_agents_clock_for_tests,
+};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
     terminal_page,
@@ -286,6 +297,17 @@ impl Harness {
         // `node_values` dependency, since the live suite never reads the mock
         // transcript's own content).
         self.pump_for(Duration::from_millis(50));
+    }
+
+    /// Exactly one frame: the UI-thread task queue once, then a rebuild.
+    fn one_frame(&mut self) {
+        pump_frames(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            1,
+        );
     }
 
     fn unmount_screen(&mut self) {
@@ -1790,6 +1812,235 @@ fn a_deep_link_naming_no_such_tab_or_pane_sends_nothing() {
     }
 }
 
+// A link naming a space other than the selected one: the space switches first, then the
+// tab, then the pane — on a herdr session, whose spaces the mock seeds (`forgekit`
+// selected, `zelli_mobile` foreign: tabs `logs` (id 101) and `worker` (id 102)).
+/// The mock seeds transcripts for the selected space's tabs only, so a switch onto a
+/// `zelli_mobile` tab other than its active one would fail at the transcript read. This
+/// answers every transcript empty and delegates the rest.
+struct QuietLines(SharedTerminalRepository);
+
+#[clean_signals::async_trait]
+impl TerminalRepository for QuietLines {
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        self.0.list_spaces().await
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs().await
+    }
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs_in_space(space_id).await
+    }
+    async fn tab_lines(&self, _key: String) -> Result<Vec<TermLine>, AppFailure> {
+        Ok(Vec::new())
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.0.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.0.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.0.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.0.focus_pane(pane_id, is_plugin).await
+    }
+}
+
+/// A live herdr controller over [`QuietLines`] aimed at `zelli_mobile`'s `worker` tab, pane 21,
+/// loaded and handshaken but not yet applied.
+fn live_foreign_link(rt: &tokio::runtime::Runtime) -> Arc<TerminalController> {
+    let _state = MuxrApp.init();
+    let c = Arc::new(TerminalController::new(
+        Arc::new(QuietLines(expect_terminal_repository())),
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some("herdr:work".to_string()),
+    ));
+    c.set_attach_target_in_space(Some("zelli_mobile".to_string()), Some(1), Some(21));
+    c.attach_live();
+    rt.block_on(c.load());
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    c
+}
+
+#[test]
+fn a_deep_link_into_a_foreign_space_switches_space_then_tab_then_pane() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let rt = runtime();
+    let c = live_foreign_link(&rt);
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+
+    assert_eq!(
+        verb_log_for_tests(),
+        [
+            "switch_space:zelli_mobile",
+            "go_to_tab:102",
+            "focus_pane:21"
+        ]
+    );
+    assert_eq!(c.active_tab.get_untracked(), "worker");
+    assert_eq!(c.pending_attach_target_for_tests(), None, "applied once");
+    assert_eq!(
+        c.resume_slot().target().space_id.as_deref(),
+        Some("zelli_mobile"),
+        "a reconnect resumes in the linked space"
+    );
+}
+
+#[test]
+fn a_foreign_space_link_naming_a_missing_tab_or_pane_moves_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    for location in [
+        "/terminal?session=herdr:work&space=zelli_mobile&tab=9&pane=21",
+        "/terminal?session=herdr:work&space=zelli_mobile&tab=1&pane=99",
+        "/terminal?session=herdr:work&space=nowhere&tab=1&pane=21",
+    ] {
+        clear_verb_log_for_tests();
+        let mut h = Harness::mount_at(location);
+        h.pump_for(Duration::from_millis(150));
+        assert!(
+            verb_log_for_tests().is_empty(),
+            "{location}: {:?}",
+            verb_log_for_tests()
+        );
+        drop(h);
+    }
+}
+
+#[test]
+fn a_link_naming_the_selected_space_behaves_as_one_without() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    // `forgekit` is the selected space; position 2 is gohora (tab id 3).
+    let mut h = Harness::mount_at("/terminal?session=herdr:work&space=forgekit&tab=2&pane=31");
+    h.pump_until("the target", |_| verb_log_for_tests().len() >= 2);
+    h.pump_for(Duration::from_millis(100));
+
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
+}
+
+#[test]
+fn a_user_move_supersedes_a_foreign_space_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let rt = runtime();
+    let c = live_foreign_link(&rt);
+    assert!(c.pending_attach_target_for_tests().is_some());
+
+    rt.block_on(async {
+        assert!(c.commit_pane("btop".to_string(), 11, false).await);
+    });
+    assert_eq!(c.pending_attach_target_for_tests(), None);
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
+}
+
+/// [`QuietLines`] over a space list in which no space is selected — a herdr layout whose
+/// selection has not been read (or was lost).
+struct NoSelectedSpace(QuietLines);
+
+#[clean_signals::async_trait]
+impl TerminalRepository for NoSelectedSpace {
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        let spaces = self.0.list_spaces().await?;
+        Ok(spaces
+            .into_iter()
+            .map(|space| Space {
+                selected: false,
+                ..space
+            })
+            .collect())
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs().await
+    }
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs_in_space(space_id).await
+    }
+    async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
+        self.0.tab_lines(key).await
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.0.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.0.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.0.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.0.focus_pane(pane_id, is_plugin).await
+    }
+}
+
+#[test]
+fn a_space_link_with_no_selected_space_peeks_the_space_and_switches_into_it() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let rt = runtime();
+    let _state = MuxrApp.init();
+    let c = Arc::new(TerminalController::new(
+        Arc::new(NoSelectedSpace(QuietLines(expect_terminal_repository()))),
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some("herdr:work".to_string()),
+    ));
+    c.set_attach_target_in_space(Some("zelli_mobile".to_string()), Some(1), Some(21));
+    c.attach_live();
+    rt.block_on(c.load());
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    assert!(c.spaces.get_untracked().iter().all(|space| !space.selected));
+
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+
+    assert_eq!(
+        verb_log_for_tests(),
+        [
+            "switch_space:zelli_mobile",
+            "go_to_tab:102",
+            "focus_pane:21"
+        ],
+        "resolved against the peeked space, never the current tab world"
+    );
+    assert_eq!(c.pending_attach_target_for_tests(), None);
+}
+
+#[test]
+fn a_space_link_on_a_backend_without_spaces_moves_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    // Position 2 and pane 31 resolve in the mock's tab world: without the space the link lands.
+    let location = format!("/terminal?session={SESSION_ID}&space=forgekit&tab=2&pane=31");
+    let mut h = Harness::mount_at(&location);
+    await_workspace(&mut h);
+    h.pump_for(Duration::from_millis(150));
+
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "{:?}",
+        verb_log_for_tests()
+    );
+}
+
 /// One controller call, boxed so a test can open it, leave it parked on its round
 /// trip, and land it later — the ordering a race needs, with no clock in it.
 type Step<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
@@ -1881,6 +2132,7 @@ fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
     assert_eq!(
         c.pending_attach_target_for_tests(),
         Some(AttachTarget {
+            space_id: None,
             tab_position: Some(2),
             pane_id: Some(31),
         }),
@@ -2026,5 +2278,454 @@ fn a_new_tab_in_flight_at_the_settle_defers_the_deep_link() {
         c.pending_attach_target_for_tests(),
         None,
         "the landed create"
+    );
+}
+
+// The agents stream. The mock repository opens a watch with a snapshot of its seeded inventory and
+// then delivers only what a test pushes; the mock connection advertises no `agents-stream`, so
+// each test that streams switches it on before the live pane mounts.
+
+/// Clears the seeded agents when a test ends, however it ends.
+struct AgentsReset;
+
+impl Drop for AgentsReset {
+    fn drop(&mut self) {
+        clear_test_agents();
+    }
+}
+
+/// A `claude` agent in pane `pane_id` of the zellij mock's `devbox` tab.
+fn streamed_agent(pane_id: u32, status: AgentStatus, change_seq: u64) -> AgentEntry {
+    AgentEntry {
+        pane_id,
+        tab_id: 4,
+        tab_key: "devbox".to_string(),
+        space_id: None,
+        space_name: None,
+        tab_name: "devbox".to_string(),
+        kind: "claude".to_string(),
+        name: Some(format!("agent{pane_id}")),
+        display_kind: None,
+        status,
+        title: None,
+        summary: None,
+        cwd: None,
+        focused: false,
+        change_seq,
+    }
+}
+
+/// The mounted screen's agent rows, by pane id, in published order.
+fn agent_panes() -> Vec<u32> {
+    debug_controller()
+        .expect("a terminal screen is mounted")
+        .agents
+        .get_untracked()
+        .iter()
+        .map(|agent| agent.pane_id)
+        .collect()
+}
+
+/// Mount with `agents` seeded, advertise the stream when `streaming`, enter the live pane, and
+/// wait for the rows.
+fn mount_watching(agents: Vec<AgentEntry>, streaming: bool) -> (Harness, AgentsReset) {
+    clear_test_agents();
+    seed_agents(agents.clone());
+    let reset = AgentsReset;
+    let mut h = Harness::mount();
+    await_workspace(&mut h);
+    if streaming {
+        let cc = expect_connection_controller();
+        let mut info = cc.server_info.get_untracked().expect("connected");
+        info.capabilities.insert(CAP_AGENTS_STREAM.to_string());
+        cc.server_info.set(Some(info));
+    }
+    h.enter_demo();
+    h.pump_until("the agents to load", |_| {
+        agent_panes().len() == agents.len()
+    });
+    // The rows may be the stream's snapshot: let the mount's own relist land too, so the
+    // safety relist's window starts from it.
+    h.pump_for(Duration::from_millis(100));
+    (h, reset)
+}
+
+/// Run one layout poll tick to completion.
+fn poll_tick(controller: &Arc<TerminalController>) {
+    assert!(controller.take_layout_poll_tick(), "the poll is armed");
+    let tick = Arc::clone(controller);
+    drive(Box::pin(
+        async move { tick.refresh_layout_from_poll().await },
+    ));
+}
+
+/// The two rows most stream tests start from: a working agent above an idle one.
+fn working_and_idle() -> Vec<AgentEntry> {
+    vec![
+        streamed_agent(40, AgentStatus::Working, 3),
+        streamed_agent(41, AgentStatus::Idle, 2),
+    ]
+}
+
+#[test]
+fn a_pushed_blocked_change_re_sorts_its_row_to_the_top_within_one_frame_without_a_poll() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    assert_eq!(
+        agent_watch_opens_for_tests(),
+        opens + 1,
+        "the stream opened"
+    );
+    assert_eq!(agent_panes(), [40, 41]);
+
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.one_frame();
+
+    assert_eq!(agent_panes(), [41, 40], "the blocked row leads");
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        controller.agents.get_untracked()[0].status,
+        AgentStatus::Blocked
+    );
+    assert!(controller.has_blocked_agent());
+}
+
+#[test]
+fn a_pushed_removal_drops_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+
+    assert!(push_agent_event_for_tests(AgentEventEntry::Removed(40)));
+    h.one_frame();
+
+    assert_eq!(agent_panes(), [41]);
+}
+
+#[test]
+fn a_pushed_snapshot_replaces_the_whole_list() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+
+    let fresh = vec![streamed_agent(50, AgentStatus::Done, 1)];
+    assert!(push_agent_event_for_tests(AgentEventEntry::Snapshot(fresh)));
+    h.one_frame();
+
+    assert_eq!(agent_panes(), [50]);
+}
+
+#[test]
+fn without_the_capability_no_stream_opens_and_the_poll_still_refreshes() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (_h, _reset) = mount_watching(working_and_idle(), false);
+    assert_eq!(agent_watch_opens_for_tests(), opens, "nothing to watch");
+
+    let mut agents = working_and_idle();
+    agents.push(streamed_agent(42, AgentStatus::Blocked, 5));
+    seed_agents(agents);
+    poll_tick(&debug_controller().expect("mounted"));
+
+    assert_eq!(agent_panes(), [42, 40, 41], "the poll re-read them");
+}
+
+#[test]
+fn unmounting_the_screen_stops_the_agents_stream() {
+    let _g = serial();
+    let _ambient = setup();
+    let stops = agent_watch_stops_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    assert!(agent_watch_open_for_tests());
+
+    h.unmount_screen();
+
+    assert_eq!(
+        agent_watch_stops_for_tests(),
+        stops + 1,
+        "the handle dropped"
+    );
+    assert!(!agent_watch_open_for_tests());
+    assert!(!push_agent_event_for_tests(AgentEventEntry::Removed(40)));
+}
+
+#[test]
+fn a_lost_stream_falls_back_to_the_poll_until_the_stream_delivers_again() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+
+    // Down, and the fallback read fails: the list is unconfirmed.
+    drop_agent_stream_for_tests();
+    fail_next_list_agents_for_tests();
+    poll_tick(&controller);
+    assert!(controller.agents_stale.get_untracked());
+
+    // The stream delivers again: confirmed, and live.
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.one_frame();
+    assert!(!controller.agents_stale.get_untracked());
+    assert!(controller.has_blocked_agent());
+
+    // Live and freshly listed, a tick leaves the agents to the stream.
+    seed_agents(vec![streamed_agent(60, AgentStatus::Idle, 1)]);
+    poll_tick(&controller);
+    assert_eq!(agent_panes(), [41, 40], "no re-list under a live stream");
+
+    // Down again, a tick re-reads them.
+    drop_agent_stream_for_tests();
+    poll_tick(&controller);
+    assert_eq!(agent_panes(), [60]);
+    assert!(!controller.agents_stale.get_untracked());
+}
+
+// The subscription's lifecycle: stale only on a live-to-down transition, an ended watch dropped on
+// the next tick, and reopened at most once per retry window unless the credential was refused.
+
+/// The window the controller waits between two opens of a subscription (`AGENT_WATCH_RETRY`).
+const WATCH_RETRY: Duration = Duration::from_secs(30);
+
+/// A blocked agent above an idle one, so the attention badge has something to say.
+fn blocked_and_idle() -> Vec<AgentEntry> {
+    vec![
+        streamed_agent(40, AgentStatus::Blocked, 3),
+        streamed_agent(41, AgentStatus::Idle, 2),
+    ]
+}
+
+#[test]
+fn an_ended_watch_is_dropped_on_the_next_tick_without_ever_raising_the_stale_flag() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_h, _reset) = mount_watching(blocked_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    let (raises, stops) = (
+        controller.agents_stale_raises(),
+        agent_watch_stops_for_tests(),
+    );
+    assert!(controller.has_blocked_agent());
+
+    end_agent_stream_for_tests(WatchEnd::EndedClean);
+    for _ in 0..3 {
+        poll_tick(&controller);
+        assert!(controller.has_blocked_agent(), "the badge holds");
+    }
+
+    assert_eq!(
+        controller.agents_stale_raises(),
+        raises,
+        "never stale, not even mid-tick"
+    );
+    assert_eq!(
+        agent_watch_stops_for_tests(),
+        stops + 1,
+        "the ended handle dropped"
+    );
+}
+
+#[test]
+fn a_zellij_shaped_watch_leaves_the_badge_stable_and_the_poll_running() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_h, _reset) = mount_watching(Vec::new(), true);
+    let controller = debug_controller().expect("mounted");
+    let raises = controller.agents_stale_raises();
+
+    // An empty snapshot (the mount's), then a clean end: the server has no agents to stream.
+    end_agent_stream_for_tests(WatchEnd::EndedClean);
+    poll_tick(&controller);
+    poll_tick(&controller);
+    assert!(!controller.has_blocked_agent());
+    assert_eq!(controller.agents_stale_raises(), raises);
+
+    seed_agents(vec![streamed_agent(42, AgentStatus::Blocked, 1)]);
+    poll_tick(&controller);
+    assert_eq!(agent_panes(), [42], "the poll keeps reading them");
+    assert_eq!(controller.agents_stale_raises(), raises);
+}
+
+#[test]
+fn a_cleanly_ended_watch_reopens_once_the_retry_window_passes_while_the_stream_is_advertised() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+
+    end_agent_stream_for_tests(WatchEnd::EndedClean);
+    poll_tick(&controller);
+    assert_eq!(
+        agent_watch_opens_for_tests(),
+        opens + 1,
+        "not inside the window"
+    );
+    assert!(!agent_watch_open_for_tests());
+
+    advance_agents_clock_for_tests(WATCH_RETRY);
+    poll_tick(&controller);
+    assert_eq!(agent_watch_opens_for_tests(), opens + 2, "reopened");
+    assert!(agent_watch_open_for_tests());
+    poll_tick(&controller);
+    assert_eq!(agent_watch_opens_for_tests(), opens + 2, "once");
+
+    // The reopened stream delivers like the first.
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.pump_for(Duration::from_millis(50));
+    assert_eq!(agent_panes(), [41, 40]);
+}
+
+#[test]
+fn an_unauthenticated_watch_never_reopens_for_the_mount() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (_h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+
+    end_agent_stream_for_tests(WatchEnd::EndedUnauthenticated);
+    poll_tick(&controller);
+    advance_agents_clock_for_tests(WATCH_RETRY * 2);
+    poll_tick(&controller);
+    poll_tick(&controller);
+
+    assert_eq!(agent_watch_opens_for_tests(), opens + 1);
+    assert!(!agent_watch_open_for_tests());
+}
+
+#[test]
+fn a_watch_not_yet_live_is_not_stale_but_a_live_one_going_down_is_once() {
+    let _g = serial();
+    let _ambient = setup();
+    open_next_agent_watch_down_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    let raises = controller.agents_stale_raises();
+
+    poll_tick(&controller);
+    poll_tick(&controller);
+    assert_eq!(
+        controller.agents_stale_raises(),
+        raises,
+        "still opening, not down"
+    );
+
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.one_frame();
+    poll_tick(&controller);
+    drop_agent_stream_for_tests();
+    poll_tick(&controller);
+    poll_tick(&controller);
+    assert_eq!(
+        controller.agents_stale_raises(),
+        raises,
+        "the drop's relist succeeded: not even an instant of stale"
+    );
+    assert!(
+        !controller.agents_stale.get_untracked(),
+        "the poll's read confirmed them"
+    );
+}
+
+#[test]
+fn a_live_stream_dropping_with_a_working_relist_never_reads_stale_but_a_failed_relist_does() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(blocked_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    assert!(controller.has_blocked_agent());
+    poll_tick(&controller);
+    let raises = controller.agents_stale_raises();
+
+    // Sampled on every frame the tick takes: the drop and its successful relist.
+    drop_agent_stream_for_tests();
+    assert!(controller.take_layout_poll_tick(), "the poll is armed");
+    delay_next_list_agents_for_tests(Duration::from_millis(40));
+    let tick = Arc::clone(&controller);
+    let mut tick = Box::pin(async move { tick.refresh_layout_from_poll().await });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime");
+    let mut sampled = 0;
+    runtime.block_on(async {
+        loop {
+            let finished =
+                std::future::poll_fn(|cx| Poll::Ready(tick.as_mut().poll(cx).is_ready())).await;
+            assert!(!controller.agents_stale.get_untracked(), "never stale");
+            if finished {
+                break;
+            }
+            sampled += 1;
+            h.one_frame();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    assert!(sampled > 1, "the relist was in flight across frames");
+    assert_eq!(controller.agents_stale_raises(), raises, "no flicker");
+    assert!(controller.has_blocked_agent());
+
+    // A drop whose relist fails is stale, as before.
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    let raises = controller.agents_stale_raises();
+    drop_agent_stream_for_tests();
+    fail_next_list_agents_for_tests();
+    poll_tick(&controller);
+    assert_eq!(controller.agents_stale_raises(), raises + 1);
+    assert!(controller.agents_stale.get_untracked());
+    h.one_frame();
+}
+
+/// A name per row, so a test can tell reassigned panes apart.
+fn named_agent(pane_id: u32, name: &str, change_seq: u64) -> AgentEntry {
+    AgentEntry {
+        name: Some(name.to_string()),
+        ..streamed_agent(pane_id, AgentStatus::Working, change_seq)
+    }
+}
+
+fn agent_names() -> Vec<(u32, String)> {
+    let mut rows: Vec<(u32, String)> = debug_controller()
+        .expect("mounted")
+        .agents
+        .get_untracked()
+        .iter()
+        .map(|row| (row.pane_id, row.name.clone().unwrap_or_default()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn a_poll_only_relist_replaces_rows_after_a_restart_reassigned_the_pane_ids() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_h, _reset) = mount_watching(vec![named_agent(1, "A", 40), named_agent(2, "B", 5)], false);
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(agent_names(), [(1, "A".to_string()), (2, "B".to_string())]);
+
+    seed_agents(vec![named_agent(1, "B", 5), named_agent(2, "A", 40)]);
+    poll_tick(&controller);
+
+    assert_eq!(
+        agent_names(),
+        [(1, "B".to_string()), (2, "A".to_string())],
+        "the relist's rows outright: no duplicate A, B present"
     );
 }
