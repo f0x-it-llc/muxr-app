@@ -109,6 +109,18 @@ impl AgentEntry {
     }
 }
 
+/// One message of a live agents subscription (the wire's `AgentEvent`), mapped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentEventEntry {
+    /// The whole inventory, replacing everything the client holds.
+    Snapshot(Vec<AgentEntry>),
+    /// One agent's complete current state: insert it, or replace the row with its pane id.
+    /// Boxed, so the enum stays the size of its small variants.
+    Changed(Box<AgentEntry>),
+    /// The agent in this pane is gone.
+    Removed(u32),
+}
+
 /// One tab in the attached session — a `TABS` entry, whole. Three identifiers ride on it and
 /// none derives from another: [`index`](Self::index) is a display position that shifts when an
 /// earlier tab closes, [`key`](Self::key) is this screen's own lookup handle, and

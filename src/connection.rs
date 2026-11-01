@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use clean_signals::ControllerCore;
 use clean_signals_frust::{expect_controller, provide_controller};
-use frust::{GetUntracked, RwSignal, Set, spawn, spawn_local};
+use frust::{GetUntracked, RwSignal, Set, WithUntracked, spawn, spawn_local};
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -40,6 +40,10 @@ use crate::net::{MuxrClient, TrustConfig, error};
 /// Capability flag: server supports mouse frames in `AttachTerminal`. Unknown
 /// flags carry through unchanged, as the wire requires.
 pub const CAP_MOUSE_INPUT: &str = "mouse-input";
+
+/// Capability flag: `WatchAgents` delivers live agent changes. Absent, a client polls
+/// `ListAgents` instead.
+pub const CAP_AGENTS_STREAM: &str = "agents-stream";
 
 const UNKNOWN_VERSION: &str = "unknown";
 
@@ -476,6 +480,14 @@ impl ConnectionController {
         self.backend.client()
     }
 
+    /// Whether the connected server advertised `capability` — `false` while disconnected. An
+    /// untracked read, for a caller deciding once rather than a build.
+    pub fn supports(&self, capability: &str) -> bool {
+        self.server_info
+            .try_with_untracked(|info| info.as_ref().is_some_and(|info| info.supports(capability)))
+            .unwrap_or(false)
+    }
+
     /// Rebuild the shared client's channel now — the shared client's
     /// single-flight [`MuxrClient::reconnect`], so a concurrent caller (the
     /// terminal feed) collapses into the same dial. A no-op `Ok` while nothing
@@ -842,6 +854,11 @@ mod tests {
             }]
         );
         assert!(info.supports(CAP_MOUSE_INPUT));
+        assert!(controller.supports(CAP_MOUSE_INPUT));
+        assert!(
+            !controller.supports(CAP_AGENTS_STREAM),
+            "the mock advertises no agents stream, so screens poll"
+        );
         assert!(!info.is_read_only);
         assert!(!controller.is_read_only.get_untracked());
     }

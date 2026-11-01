@@ -14,6 +14,9 @@
 //! `GlyphRun` carries shaped glyph ids rather than the source string:
 //! [`debug_live_probe`](muxr::features::terminal::presentation::pages::debug_live_probe) reaches
 //! the actual `vt100::Screen` the mounted screen renders.
+//!
+//! The agents stream closes the file: scripted through the mock repository's watch seam, with the
+//! server's `agents-stream` capability switched on per test.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -38,7 +41,7 @@ use frust_shell_common::{SystemUiMode, current_system_ui_mode};
 use frust_text::TextContext;
 use kurbo::{Point, Size, Vec2};
 
-use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
+use muxr::connection::{CAP_AGENTS_STREAM, ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::settings::di::expect_preferences_repository;
@@ -47,10 +50,15 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, clear_test_tabs, clear_verb_log_for_tests, verb_log_for_tests,
+    add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
+    agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
+    drop_agent_stream_for_tests, fail_next_list_agents_for_tests, push_agent_event_for_tests,
+    seed_agents, verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
-use muxr::features::terminal::domain::entities::{Space, TabEntry, TermLine};
+use muxr::features::terminal::domain::entities::{
+    AgentEntry, AgentEventEntry, AgentStatus, Space, TabEntry, TermLine,
+};
 use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use muxr::features::terminal::domain::repositories::TerminalRepository;
 use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
@@ -286,6 +294,17 @@ impl Harness {
         // `node_values` dependency, since the live suite never reads the mock
         // transcript's own content).
         self.pump_for(Duration::from_millis(50));
+    }
+
+    /// Exactly one frame: the UI-thread task queue once, then a rebuild.
+    fn one_frame(&mut self) {
+        pump_frames(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            1,
+        );
     }
 
     fn unmount_screen(&mut self) {
@@ -2027,4 +2046,209 @@ fn a_new_tab_in_flight_at_the_settle_defers_the_deep_link() {
         None,
         "the landed create"
     );
+}
+
+// The agents stream. The mock repository opens a watch with a snapshot of its seeded inventory and
+// then delivers only what a test pushes; the mock connection advertises no `agents-stream`, so
+// each test that streams switches it on before the live pane mounts.
+
+/// Clears the seeded agents when a test ends, however it ends.
+struct AgentsReset;
+
+impl Drop for AgentsReset {
+    fn drop(&mut self) {
+        clear_test_agents();
+    }
+}
+
+/// A `claude` agent in pane `pane_id` of the zellij mock's `devbox` tab.
+fn streamed_agent(pane_id: u32, status: AgentStatus, change_seq: u64) -> AgentEntry {
+    AgentEntry {
+        pane_id,
+        tab_id: 4,
+        tab_key: "devbox".to_string(),
+        space_id: None,
+        space_name: None,
+        tab_name: "devbox".to_string(),
+        kind: "claude".to_string(),
+        name: Some(format!("agent{pane_id}")),
+        display_kind: None,
+        status,
+        title: None,
+        summary: None,
+        cwd: None,
+        focused: false,
+        change_seq,
+    }
+}
+
+/// The mounted screen's agent rows, by pane id, in published order.
+fn agent_panes() -> Vec<u32> {
+    debug_controller()
+        .expect("a terminal screen is mounted")
+        .agents
+        .get_untracked()
+        .iter()
+        .map(|agent| agent.pane_id)
+        .collect()
+}
+
+/// Mount with `agents` seeded, advertise the stream when `streaming`, enter the live pane, and
+/// wait for the rows.
+fn mount_watching(agents: Vec<AgentEntry>, streaming: bool) -> (Harness, AgentsReset) {
+    clear_test_agents();
+    seed_agents(agents.clone());
+    let reset = AgentsReset;
+    let mut h = Harness::mount();
+    await_workspace(&mut h);
+    if streaming {
+        let cc = expect_connection_controller();
+        let mut info = cc.server_info.get_untracked().expect("connected");
+        info.capabilities.insert(CAP_AGENTS_STREAM.to_string());
+        cc.server_info.set(Some(info));
+    }
+    h.enter_demo();
+    h.pump_until("the agents to load", |_| {
+        agent_panes().len() == agents.len()
+    });
+    (h, reset)
+}
+
+/// Run one layout poll tick to completion.
+fn poll_tick(controller: &Arc<TerminalController>) {
+    assert!(controller.take_layout_poll_tick(), "the poll is armed");
+    let tick = Arc::clone(controller);
+    drive(Box::pin(
+        async move { tick.refresh_layout_from_poll().await },
+    ));
+}
+
+/// The two rows most stream tests start from: a working agent above an idle one.
+fn working_and_idle() -> Vec<AgentEntry> {
+    vec![
+        streamed_agent(40, AgentStatus::Working, 3),
+        streamed_agent(41, AgentStatus::Idle, 2),
+    ]
+}
+
+#[test]
+fn a_pushed_blocked_change_re_sorts_its_row_to_the_top_within_one_frame_without_a_poll() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    assert_eq!(
+        agent_watch_opens_for_tests(),
+        opens + 1,
+        "the stream opened"
+    );
+    assert_eq!(agent_panes(), [40, 41]);
+
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.one_frame();
+
+    assert_eq!(agent_panes(), [41, 40], "the blocked row leads");
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(
+        controller.agents.get_untracked()[0].status,
+        AgentStatus::Blocked
+    );
+    assert!(controller.has_blocked_agent());
+}
+
+#[test]
+fn a_pushed_removal_drops_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+
+    assert!(push_agent_event_for_tests(AgentEventEntry::Removed(40)));
+    h.one_frame();
+
+    assert_eq!(agent_panes(), [41]);
+}
+
+#[test]
+fn a_pushed_snapshot_replaces_the_whole_list() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+
+    let fresh = vec![streamed_agent(50, AgentStatus::Done, 1)];
+    assert!(push_agent_event_for_tests(AgentEventEntry::Snapshot(fresh)));
+    h.one_frame();
+
+    assert_eq!(agent_panes(), [50]);
+}
+
+#[test]
+fn without_the_capability_no_stream_opens_and_the_poll_still_refreshes() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (_h, _reset) = mount_watching(working_and_idle(), false);
+    assert_eq!(agent_watch_opens_for_tests(), opens, "nothing to watch");
+
+    let mut agents = working_and_idle();
+    agents.push(streamed_agent(42, AgentStatus::Blocked, 5));
+    seed_agents(agents);
+    poll_tick(&debug_controller().expect("mounted"));
+
+    assert_eq!(agent_panes(), [42, 40, 41], "the poll re-read them");
+}
+
+#[test]
+fn unmounting_the_screen_stops_the_agents_stream() {
+    let _g = serial();
+    let _ambient = setup();
+    let stops = agent_watch_stops_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    assert!(agent_watch_open_for_tests());
+
+    h.unmount_screen();
+
+    assert_eq!(
+        agent_watch_stops_for_tests(),
+        stops + 1,
+        "the handle dropped"
+    );
+    assert!(!agent_watch_open_for_tests());
+    assert!(!push_agent_event_for_tests(AgentEventEntry::Removed(40)));
+}
+
+#[test]
+fn a_lost_stream_falls_back_to_the_poll_until_the_stream_delivers_again() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+
+    // Down, and the fallback read fails: the list is unconfirmed.
+    drop_agent_stream_for_tests();
+    fail_next_list_agents_for_tests();
+    poll_tick(&controller);
+    assert!(controller.agents_stale.get_untracked());
+
+    // The stream delivers again: confirmed, and live.
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.one_frame();
+    assert!(!controller.agents_stale.get_untracked());
+    assert!(controller.has_blocked_agent());
+
+    // Live and freshly listed, a tick leaves the agents to the stream.
+    seed_agents(vec![streamed_agent(60, AgentStatus::Idle, 1)]);
+    poll_tick(&controller);
+    assert_eq!(agent_panes(), [41, 40], "no re-list under a live stream");
+
+    // Down again, a tick re-reads them.
+    drop_agent_stream_for_tests();
+    poll_tick(&controller);
+    assert_eq!(agent_panes(), [60]);
+    assert!(!controller.agents_stale.get_untracked());
 }

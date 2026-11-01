@@ -20,23 +20,37 @@
 //! [`crate::net::error::from_status`], with `UNAUTHENTICATED` additionally invoking
 //! [`ConnectionController::on_session_expired`]; every `ActionAck`-returning call maps through
 //! [`crate::net::error::ack_result`] rather than trusting the outer `Status`.
+//!
+//! **The agents stream.** `watch_agents` runs `WatchAgents` on a background [`frust::spawn`]
+//! task that writes no signal: events reach the caller's sink, a transport failure reconnects on
+//! the terminal feed's [`RECONNECT_BACKOFF`] (reset by a stream that delivered), and a clean end,
+//! an `UNAUTHENTICATED` answer or a spent schedule ends the subscription for good. That answer
+//! does not fire the session-expired hook from here — it writes signals, and the attached feed
+//! reports the same expiry itself. Tab keys come from a per-space layout cache, refreshed on
+//! every snapshot and on a changed agent whose tab it lacks.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
+use std::time::Duration;
 
-use tonic::Status;
+use tokio::sync::Notify;
+use tonic::{Code, Status};
 
 use crate::agents::{AgentStatus, agent_sort_key};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
+use crate::features::terminal::data::feeds::grpc_feed::RECONNECT_BACKOFF;
 use crate::features::terminal::domain::entities::{
-    AgentEntry, AgentMark, PaneEntry, ScrollStep, Space, TabEntry, TermLine,
+    AgentEntry, AgentEventEntry, AgentMark, PaneEntry, ScrollStep, Space, TabEntry, TermLine,
 };
-use crate::features::terminal::domain::repositories::TerminalRepository;
+use crate::features::terminal::domain::repositories::{AgentSink, TerminalRepository, WatchHandle};
 use crate::net::proto::{
-    AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout, NewPaneReq, NewTabReq,
-    PaneMsg, PaneTarget, RenamePaneReq, RenameSpaceReq, RenameTabReq, ScrollDirection, ScrollReq,
-    SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
+    AgentEvent, AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout,
+    NewPaneReq, NewTabReq, PaneMsg, PaneTarget, RenamePaneReq, RenameSpaceReq, RenameTabReq,
+    ScrollDirection, ScrollReq, SessionRef, SpaceList, SwitchSpaceReq, TabTarget, agent_event,
 };
 use crate::net::{MuxrClient, error};
 
@@ -134,6 +148,239 @@ impl GrpcTerminalRepository {
         }
         failure
     }
+
+    /// The handle and the unspawned pump of one agents subscription, napping through `nap` on
+    /// `schedule` — `watch_agents` spawns it; a test drives it on its own runtime.
+    fn agent_watch(
+        &self,
+        sink: AgentSink,
+        nap: Nap,
+        schedule: Vec<Duration>,
+    ) -> Result<(WatchHandle, impl Future<Output = ()> + Send + 'static), AppFailure> {
+        let request = self
+            .session_ref()
+            .ok_or_else(|| AppFailure::Internal(NO_SESSION.to_string()))?;
+        self.client()?;
+        let watch = Arc::new(AgentWatch::default());
+        let stop = Arc::clone(&watch);
+        let handle = WatchHandle::new(Arc::clone(&watch.live), move || stop.stop());
+        let pump = run_agent_watch(
+            Arc::clone(&self.connection),
+            request,
+            Mutex::new(sink),
+            watch,
+            nap,
+            schedule,
+        );
+        Ok((handle, pump))
+    }
+}
+
+/// Each space's mapped `GetLayout` answer, keyed by space id (`""` is the focused space).
+type Layouts = HashMap<String, Vec<TabEntry>>;
+
+/// One `GetLayout` per distinct space `list`'s agents live in, since an agent's `tab_key`
+/// derives from its tab's name and position there. A failed read leaves that space out, so its
+/// rows carry an empty `tab_key` rather than failing the inventory.
+async fn fetch_layouts(client: &MuxrClient, request: &SessionRef, list: &AgentList) -> Layouts {
+    let space_ids: HashSet<&str> = list.agents.iter().map(|a| a.space_id.as_str()).collect();
+    let mut layouts = Layouts::new();
+    for space_id in space_ids {
+        if let Some(tabs) = fetch_layout(client, request, space_id).await {
+            layouts.insert(space_id.to_string(), tabs);
+        }
+    }
+    layouts
+}
+
+/// `space_id`'s mapped layout, or `None` when the read fails.
+async fn fetch_layout(
+    client: &MuxrClient,
+    request: &SessionRef,
+    space_id: &str,
+) -> Option<Vec<TabEntry>> {
+    let mut layout_request = request.clone();
+    layout_request.space_id = space_id.to_string();
+    let response = client.authed().get_layout(layout_request).await.ok()?;
+    Some(map_tabs(response.into_inner()))
+}
+
+/// The state an agents subscription's pump shares with its [`WatchHandle`].
+#[derive(Default)]
+struct AgentWatch {
+    stop: AtomicBool,
+    wake: Notify,
+    live: Arc<AtomicBool>,
+}
+
+impl AgentWatch {
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    /// Resolves once [`stop`](Self::stop) has run; the stored permit makes a stop raised
+    /// between the check and the wait unmissable.
+    async fn stopped(&self) {
+        while !self.stop.load(Ordering::Acquire) {
+            self.wake.notified().await;
+        }
+    }
+}
+
+/// How one `WatchAgents` stream ended.
+enum WatchEnd {
+    /// A transport failure: reconnect, from the first step if this stream delivered.
+    Dropped { delivered: bool },
+    /// The server ended the stream, or refused the credential: the subscription is over.
+    Over,
+}
+
+/// How the pump naps between reconnects: production `tokio` has no timer, so the app naps on
+/// frust's blocking pool, as the terminal feed does.
+enum Nap {
+    Frust,
+    #[cfg(test)]
+    Tokio,
+}
+
+impl Nap {
+    async fn sleep(&self, delay: Duration) {
+        match self {
+            Nap::Frust => {
+                let _ = frust::spawn_blocking(move || std::thread::sleep(delay)).await;
+            }
+            #[cfg(test)]
+            Nap::Tokio => tokio::time::sleep(delay).await,
+        }
+    }
+}
+
+/// The subscription's whole life: stream, reconnect on `schedule`, until stopped or over.
+/// The sink sits behind a `Mutex` only so a borrow of it may cross an `await`.
+async fn run_agent_watch(
+    connection: Arc<ConnectionController>,
+    request: SessionRef,
+    sink: Mutex<AgentSink>,
+    watch: Arc<AgentWatch>,
+    nap: Nap,
+    schedule: Vec<Duration>,
+) {
+    let mut layouts = Layouts::new();
+    let mut step = 0;
+    loop {
+        let attempt = watch_once(&connection, &request, &sink, &watch.live, &mut layouts);
+        let end = match race(watch.stopped(), attempt).await {
+            Winner::First(()) => break,
+            Winner::Second(end) => end,
+        };
+        watch.live.store(false, Ordering::Release);
+        match end {
+            WatchEnd::Over => break,
+            WatchEnd::Dropped { delivered: true } => step = 0,
+            WatchEnd::Dropped { delivered: false } => {}
+        }
+        let Some(&delay) = schedule.get(step) else {
+            break;
+        };
+        step += 1;
+        if let Winner::First(()) = race(watch.stopped(), nap.sleep(delay)).await {
+            break;
+        }
+    }
+    watch.live.store(false, Ordering::Release);
+}
+
+/// One `WatchAgents` stream, from open to end, each event mapped into `sink`.
+async fn watch_once(
+    connection: &ConnectionController,
+    request: &SessionRef,
+    sink: &Mutex<AgentSink>,
+    live: &AtomicBool,
+    layouts: &mut Layouts,
+) -> WatchEnd {
+    let Some(client) = connection.client() else {
+        return WatchEnd::Dropped { delivered: false };
+    };
+    let mut stream = match client.authed().watch_agents(request.clone()).await {
+        Ok(response) => response.into_inner(),
+        Err(status) => return watch_end(&status, false),
+    };
+    live.store(true, Ordering::Release);
+    let mut delivered = false;
+    loop {
+        match stream.message().await {
+            Ok(Some(event)) => {
+                delivered = true;
+                if let Some(entry) = map_agent_event(&client, request, event, layouts).await {
+                    (sink.lock().unwrap_or_else(PoisonError::into_inner))(entry);
+                }
+            }
+            Ok(None) => return WatchEnd::Over,
+            Err(status) => return watch_end(&status, delivered),
+        }
+    }
+}
+
+/// An error `status` as the end of a stream: an expired credential is over, anything else one
+/// more drop.
+fn watch_end(status: &Status, delivered: bool) -> WatchEnd {
+    if status.code() == Code::Unauthenticated {
+        WatchEnd::Over
+    } else {
+        WatchEnd::Dropped { delivered }
+    }
+}
+
+/// One wire event as an [`AgentEventEntry`], filling tab keys from `layouts` (see the [module
+/// docs](self)). `None` for an event kind this client does not know.
+async fn map_agent_event(
+    client: &MuxrClient,
+    request: &SessionRef,
+    event: AgentEvent,
+    layouts: &mut Layouts,
+) -> Option<AgentEventEntry> {
+    match event.kind? {
+        agent_event::Kind::Snapshot(list) => {
+            *layouts = fetch_layouts(client, request, &list).await;
+            Some(AgentEventEntry::Snapshot(map_agents(list, layouts)))
+        }
+        agent_event::Kind::Changed(agent) => {
+            let known = layouts
+                .get(&agent.space_id)
+                .is_some_and(|tabs| tabs.iter().any(|tab| tab.tab_id == agent.tab_id));
+            if !known && let Some(tabs) = fetch_layout(client, request, &agent.space_id).await {
+                layouts.insert(agent.space_id.clone(), tabs);
+            }
+            Some(AgentEventEntry::Changed(Box::new(map_agent(
+                agent, layouts,
+            ))))
+        }
+        agent_event::Kind::RemovedPaneId(pane_id) => Some(AgentEventEntry::Removed(pane_id)),
+    }
+}
+
+/// Which of [`race`]'s two futures finished first.
+enum Winner<A, B> {
+    First(A),
+    Second(B),
+}
+
+/// Poll `first`, then `second`, finishing with whichever completes first — production `tokio`
+/// carries no `select!`. `first` wins a tie.
+async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B::Output> {
+    let mut first = std::pin::pin!(first);
+    let mut second = std::pin::pin!(second);
+    std::future::poll_fn(move |cx| {
+        if let Poll::Ready(value) = first.as_mut().poll(cx) {
+            return Poll::Ready(Winner::First(value));
+        }
+        if let Poll::Ready(value) = second.as_mut().poll(cx) {
+            return Poll::Ready(Winner::Second(value));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -206,16 +453,14 @@ impl TerminalRepository for GrpcTerminalRepository {
         // that layout: fetch one `GetLayout` per distinct space the agents live in (the empty
         // space id, a backend without spaces, reads the focused space). A failed layout read
         // leaves those rows with an empty `tab_key` rather than failing the inventory.
-        let space_ids: HashSet<String> = list.agents.iter().map(|a| a.space_id.clone()).collect();
-        let mut layouts: HashMap<String, Vec<TabEntry>> = HashMap::new();
-        for space_id in space_ids {
-            let mut layout_request = request.clone();
-            layout_request.space_id = space_id.clone();
-            if let Ok(response) = client.authed().get_layout(layout_request).await {
-                layouts.insert(space_id, map_tabs(response.into_inner()));
-            }
-        }
+        let layouts = fetch_layouts(&client, &request, &list).await;
         Ok(map_agents(list, &layouts))
+    }
+
+    fn watch_agents(&self, sink: AgentSink) -> Result<WatchHandle, AppFailure> {
+        let (handle, pump) = self.agent_watch(sink, Nap::Frust, RECONNECT_BACKOFF.to_vec())?;
+        frust::spawn(pump);
+        Ok(handle)
     }
 
     async fn tab_lines(&self, _key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -654,8 +899,11 @@ mod tests {
     use frust::GetUntracked;
     use zeroize::Zeroizing;
 
-    use crate::connection::{ConnectTarget, TrustMode};
+    use crate::connection::{
+        ConnectRun, ConnectTarget, ConnectionBackend, NetConnectionBackend, TrustMode,
+    };
     use crate::net::proto::{ActionAck, PaneMsg, Space as WireSpace, TabMsg};
+    use crate::net::testing::{self, MuxrdFixture, wait_until};
 
     use super::*;
 
@@ -811,6 +1059,138 @@ mod tests {
         assert_eq!(rows[0].title.as_deref(), Some("t"));
         assert_eq!(rows[0].subtitle(), Some("t"));
         assert_eq!(rows[0].display_name(), "claude");
+    }
+
+    // -- the agents stream, against the in-process fixture ----------------------
+
+    /// Two short steps, so a reconnect costs milliseconds.
+    const TEST_BACKOFF: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
+
+    /// A repository bound to the fixture's `alpha` session over a real pinned, logged-in dial —
+    /// driven here rather than through `connect`, whose `frust::spawn` has no runtime under a
+    /// plain `#[tokio::test]`.
+    async fn fixture_repo(fixture: &MuxrdFixture) -> GrpcTerminalRepository {
+        let backend = Arc::new(NetConnectionBackend::new());
+        let target = ConnectTarget {
+            host: "127.0.0.1".to_string(),
+            port: fixture.port(),
+            trust_mode: TrustMode::Pinned,
+            label: "Fixture".to_string(),
+            offer_credential: false,
+            token: Zeroizing::new(testing::AUTH_TOKEN.to_string()),
+            remember: false,
+            fingerprint: Some(fixture.fingerprint_hex().to_string()),
+        };
+        let ConnectRun::Pending(work) = backend.begin_connect(target) else {
+            panic!("a real dial is never decided before it runs");
+        };
+        work.await.expect("the fixture accepts its own pin + token");
+        let repo =
+            GrpcTerminalRepository::new(Arc::new(ConnectionController::with_backend(backend)));
+        repo.bind(Some(testing::SESSION_NAMES[0].to_string()), None);
+        repo
+    }
+
+    type Seen = Arc<Mutex<Vec<AgentEventEntry>>>;
+
+    /// A sink that records every event it is handed.
+    fn recorder() -> (AgentSink, Seen) {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let sink: AgentSink = Box::new(move |event| sink_seen.lock().expect("ok").push(event));
+        (sink, seen)
+    }
+
+    fn event(kind: agent_event::Kind) -> AgentEvent {
+        AgentEvent { kind: Some(kind) }
+    }
+
+    #[test]
+    fn a_watch_needs_a_bound_session_and_a_live_client() {
+        let unbound = repo(None).agent_watch(recorder().0, Nap::Tokio, Vec::new());
+        assert!(matches!(unbound.err(), Some(AppFailure::Internal(_))));
+        let offline = repo(Some("alpha")).agent_watch(recorder().0, Nap::Tokio, Vec::new());
+        assert!(matches!(offline.err(), Some(AppFailure::Network(_))));
+    }
+
+    #[tokio::test]
+    async fn a_watch_maps_snapshot_change_and_removal_and_its_drop_ends_the_stream() {
+        use crate::net::proto::AgentStatus as WireStatus;
+        let fixture = MuxrdFixture::start().await;
+        let script = fixture.agents();
+        let repo = fixture_repo(&fixture).await;
+        let (sink, seen) = recorder();
+        let (handle, pump) = repo
+            .agent_watch(sink, Nap::Tokio, TEST_BACKOFF.to_vec())
+            .expect("bound and connected");
+        let pump = tokio::spawn(pump);
+        wait_until("the stream opens", || {
+            script.opened() == 1 && handle.is_live()
+        })
+        .await;
+
+        let list = AgentList {
+            agents: vec![agent_msg(1, 7, WireStatus::Working as i32, 1)],
+            summary: None,
+        };
+        script.push(event(agent_event::Kind::Snapshot(list)));
+        script.push(event(agent_event::Kind::Changed(agent_msg(
+            2,
+            7,
+            WireStatus::Blocked as i32,
+            2,
+        ))));
+        script.push(event(agent_event::Kind::RemovedPaneId(1)));
+        wait_until("three events land", || seen.lock().expect("ok").len() == 3).await;
+        let seen = seen.lock().expect("ok").clone();
+        let AgentEventEntry::Snapshot(rows) = &seen[0] else {
+            panic!("a snapshot first: {seen:?}");
+        };
+        assert_eq!((rows.len(), rows[0].pane_id), (1, 1));
+        assert!(
+            matches!(&seen[1], AgentEventEntry::Changed(agent)
+                if agent.pane_id == 2 && agent.status == AgentStatus::Blocked),
+            "{seen:?}"
+        );
+        assert_eq!(seen[2], AgentEventEntry::Removed(1));
+
+        drop(handle);
+        wait_until("the pump ends", || pump.is_finished()).await;
+        wait_until("the server sees the client go", || script.client_gone()).await;
+        assert_eq!(script.opened(), 1, "a stop never reconnects");
+    }
+
+    #[tokio::test]
+    async fn a_failed_stream_reconnects_and_a_clean_end_stays_ended() {
+        let fixture = MuxrdFixture::start().await;
+        let script = fixture.agents();
+        let repo = fixture_repo(&fixture).await;
+        let (handle, pump) = repo
+            .agent_watch(recorder().0, Nap::Tokio, TEST_BACKOFF.to_vec())
+            .expect("bound and connected");
+        let pump = tokio::spawn(pump);
+        wait_until("the stream opens", || script.opened() == 1).await;
+
+        script.fail();
+        wait_until("it reconnects", || script.opened() == 2 && handle.is_live()).await;
+        script.end();
+        wait_until("a clean end is the last word", || pump.is_finished()).await;
+        assert!(!handle.is_live());
+        assert_eq!(script.opened(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_watch_stops_without_reconnecting() {
+        let fixture = MuxrdFixture::start().await;
+        let script = fixture.agents();
+        script.refuse_unauthenticated(true);
+        let repo = fixture_repo(&fixture).await;
+        let (handle, pump) = repo
+            .agent_watch(recorder().0, Nap::Tokio, TEST_BACKOFF.to_vec())
+            .expect("bound and connected");
+        tokio::spawn(pump).await.expect("the pump ends on its own");
+        assert_eq!((script.refused(), script.opened()), (1, 0));
+        assert!(!handle.is_live());
     }
 
     #[test]
