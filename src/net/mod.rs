@@ -4,7 +4,8 @@
 //! token + bearer interceptor) → [`client`] ([`MuxrClient`]) → [`error`]
 //! (`tonic::Status` → [`AppFailure`](crate::failure::AppFailure)) →
 //! [`control`] (the `ControlEvent.kind` strings the proto can't type).
-//! [`wake`] is the app-scoped "retry now" signal beside that chain.
+//! [`wake`] is the app-scoped "retry now" signal beside that chain, and [`agent_layouts`] the
+//! `ListAgents` + per-space `GetLayout` join both features' repositories share.
 //!
 //! App-level infrastructure beside `connection.rs`/`failure.rs`, not a
 //! feature's `data` layer — shared across `sessions`, `settings`, `terminal`
@@ -18,6 +19,7 @@
 //! (in `connection.rs`) is deliberately not referenced here: mapping a
 //! user-facing posture onto a [`TrustConfig`] is the connect seam's job.
 
+pub mod agent_layouts;
 pub mod auth;
 pub mod channel;
 pub mod client;

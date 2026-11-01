@@ -40,11 +40,11 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::agents::{AgentSummary, PREVIEW_AGENT_MARKS};
+use crate::agents::{AgentSummary, PREVIEW_AGENT_MARKS, agent_sort_key};
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
-    CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionBackend,
-    SessionStatus, TabSummary, ThirdMetric,
+    CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionAgent,
+    SessionBackend, SessionStatus, TabSummary, ThirdMetric,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
@@ -285,6 +285,46 @@ fn seed() -> Vec<Session> {
     ]
 }
 
+/// The seeded herdr session's agents: [`PREVIEW_AGENT_MARKS`] given names, a
+/// pane and a line of activity each, so the detail list and the card's
+/// roll-up strip are the same four agents. Most urgent first.
+fn seed_herdr_agents() -> Vec<SessionAgent> {
+    let places = [
+        (
+            "reviewer",
+            0,
+            0,
+            "Waiting for approval to run the migration",
+            4,
+        ),
+        ("planner", 0, 1, "Finished the refactor plan", 3),
+        ("scout", 1, 0, "Reading the build logs", 2),
+        ("notes", 1, 1, "Idle since the last summary", 1),
+    ];
+    let mut rows: Vec<SessionAgent> = PREVIEW_AGENT_MARKS
+        .iter()
+        .zip(places)
+        .map(
+            |(&(status, kind), (name, tab_position, pane_id, summary, change_seq))| SessionAgent {
+                pane_id,
+                tab_position: Some(tab_position),
+                space_id: Some("home".to_string()),
+                space_name: Some("home".to_string()),
+                tab_name: if tab_position == 0 { "work" } else { "notes" }.to_string(),
+                kind: kind.to_string(),
+                name: Some(name.to_string()),
+                display_kind: None,
+                status,
+                title: None,
+                summary: Some(summary.to_string()),
+                change_seq,
+            },
+        )
+        .collect();
+    rows.sort_by_key(|row| agent_sort_key(row.status, row.change_seq));
+    rows
+}
+
 /// A session created at runtime: one empty tab, running, no clients yet.
 fn new_session(name: String, backend: SessionBackend) -> Session {
     let third = match backend {
@@ -322,6 +362,21 @@ impl SessionsRepository for MockSessionsRepository {
     async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
         Ok(self.snapshot())
+    }
+
+    async fn list_agents(&self, session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        let agents = self
+            .snapshot()
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.agents.as_ref())
+            .is_some_and(|summary| !summary.is_empty());
+        Ok(if agents && session_id == SEEDED_HERDR_ID {
+            seed_herdr_agents()
+        } else {
+            Vec::new()
+        })
     }
 
     async fn create_session(&self, params: CreateSessionParams) -> Result<Session, AppFailure> {

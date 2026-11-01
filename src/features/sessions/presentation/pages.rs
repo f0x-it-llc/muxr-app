@@ -41,13 +41,13 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::sessions::di::expect_sessions_repository;
-use crate::features::sessions::domain::entities::{Session, SessionBackend};
+use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
 use crate::net::wake::WakeReason;
 use crate::responsive::Responsive;
 use crate::routes::{
-    Nav, TERMINAL_PANE_QUERY_KEY, TERMINAL_SESSION_QUERY_KEY, TERMINAL_TAB_QUERY_KEY, app_nav,
-    sessions_back_signal,
+    Nav, TERMINAL_PANE_QUERY_KEY, TERMINAL_SESSION_QUERY_KEY, TERMINAL_SPACE_QUERY_KEY,
+    TERMINAL_TAB_QUERY_KEY, app_nav, sessions_back_signal,
 };
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::palette::Palette;
@@ -484,6 +484,13 @@ impl Component for SessionsScreen {
                 wide: rule.wide_clamp,
             }
         };
+        // Only the Tablet shows the detail, so only it pays for the agent reads
+        // the controller makes on the poll.
+        state
+            .actions
+            .controller
+            .set_detail_visible(rule.is_tablet());
+        let agents = state.actions.controller.agents.get();
         let tone = if rule.is_tablet() {
             colors.surface
         } else {
@@ -540,6 +547,7 @@ impl Component for SessionsScreen {
                 let footer = settled.then(|| widgets::new_session_row(&colors, read_only));
                 let detail = widgets::detail_pane(
                     &sessions,
+                    &agents,
                     selected.as_deref(),
                     LoadPhase::of(loaded, settled),
                     read_only,
@@ -710,6 +718,17 @@ impl Actions {
         self.app_nav.push(&terminal_location(id, Some((tab, pane))));
     }
 
+    /// Attach to `id` aimed at an agent row's pane: the same `(tab, pane)`
+    /// target as a pill, plus the agent's space when it has one. An agent the
+    /// layout could not place has no target, so nothing happens.
+    pub fn attach_agent(&self, id: &str, agent: &SessionAgent) {
+        let Some(location) = terminal_location_for_agent(id, agent) else {
+            return;
+        };
+        self.pause_for_push();
+        self.app_nav.push(&location);
+    }
+
     /// Open the create-session dialog (the dashed row and the empty state's
     /// action both land here).
     pub fn open_create_dialog(&self, connection: &Arc<ConnectionController>) {
@@ -828,11 +847,16 @@ pub(super) fn attach(state: &mut SessionsState, id: &str) {
 
 /// A Tablet card tap: select `id` for the detail pane.
 pub(super) fn select(state: &mut SessionsState, id: &str) {
-    state.actions.controller.select(id);
+    state.actions.controller.select_and_refresh_agents(id);
 }
 
 pub(super) fn attach_pane(state: &mut SessionsState, id: &str, tab: u32, pane: u32) {
     state.actions.attach_pane(id, tab, pane);
+}
+
+/// An agent row's tap: attach into its space, tab and pane.
+pub(super) fn attach_agent(state: &mut SessionsState, id: &str, agent: &SessionAgent) {
+    state.actions.attach_agent(id, agent);
 }
 
 /// The detail header's rename, refused with [`READ_ONLY_TOAST`] when read-only.
@@ -890,6 +914,19 @@ fn terminal_location(id: &str, pane: Option<(u32, u32)>) -> String {
     location
 }
 
+/// [`terminal_location`] for an agent row: its tab position and pane id, and
+/// `space` (percent-encoded) when the agent reports a space. `None` for an
+/// agent with no tab position.
+fn terminal_location_for_agent(id: &str, agent: &SessionAgent) -> Option<String> {
+    let tab = agent.tab_position?;
+    let mut location = terminal_location(id, Some((tab, agent.pane_id)));
+    if let Some(space) = &agent.space_id {
+        let space = utf8_percent_encode(space, NON_ALPHANUMERIC);
+        location.push_str(&format!("&{TERMINAL_SPACE_QUERY_KEY}={space}"));
+    }
+    Some(location)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +960,36 @@ mod tests {
         assert_eq!(query(TERMINAL_TAB_QUERY_KEY), Some("2"));
         assert_eq!(query(TERMINAL_PANE_QUERY_KEY), Some("7"));
         assert_eq!(terminal_location("s-1", None), "/terminal?session=s%2D1");
+    }
+
+    #[test]
+    fn an_agent_location_adds_the_encoded_space_only_when_the_agent_has_one() {
+        let mut agent = SessionAgent {
+            pane_id: 7,
+            tab_position: Some(2),
+            space_id: Some("sp a&b".to_string()),
+            space_name: None,
+            tab_name: "t".to_string(),
+            kind: "claude".to_string(),
+            name: None,
+            display_kind: None,
+            status: crate::agents::AgentStatus::Idle,
+            title: None,
+            summary: None,
+            change_seq: 1,
+        };
+        let loc = frust::Location::parse(&terminal_location_for_agent("herdr:h", &agent).unwrap());
+        let query = |key: &str| loc.query.get(key).map(String::as_str);
+        assert_eq!(query(TERMINAL_SPACE_QUERY_KEY), Some("sp a&b"));
+        assert_eq!(query(TERMINAL_TAB_QUERY_KEY), Some("2"));
+        assert_eq!(query(TERMINAL_PANE_QUERY_KEY), Some("7"));
+
+        agent.space_id = None;
+        let raw = terminal_location_for_agent("herdr:h", &agent).unwrap();
+        assert!(!raw.contains(TERMINAL_SPACE_QUERY_KEY), "{raw}");
+
+        agent.tab_position = None;
+        assert_eq!(terminal_location_for_agent("herdr:h", &agent), None);
     }
 
     /// An observer over `signal`, mounted (as `init` mounts one) at whatever
