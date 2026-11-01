@@ -201,6 +201,46 @@ pub struct RenameRequest {
     pub name: String,
 }
 
+/// One AI agent in a session, as the Tablet detail's agent list shows it —
+/// this slice's own flattening of the wire's `AgentMsg`, so a row can aim a
+/// deep link at its pane without importing the terminal slice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionAgent {
+    /// `PaneMsg.id` of the pane the agent runs in.
+    pub pane_id: u32,
+    /// `TabMsg.position` (0-based) of the containing tab in its space's
+    /// layout — what the terminal's attach target addresses.
+    pub tab_position: u32,
+    /// Opaque space id; `None` on a backend without spaces.
+    pub space_id: Option<String>,
+    pub space_name: Option<String>,
+    pub tab_name: String,
+    /// The CLI's canonical label as the backend reports it.
+    pub kind: String,
+    pub name: Option<String>,
+    pub display_kind: Option<String>,
+    pub status: crate::agents::AgentStatus,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    /// Advances whenever the agent's state changes; larger is more recent.
+    pub change_seq: u64,
+}
+
+impl SessionAgent {
+    /// The row's headline: the agent's name, else its human kind, else the raw kind.
+    pub fn display_name(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.display_kind.as_deref())
+            .unwrap_or(&self.kind)
+    }
+
+    /// The row's second line: the activity summary, else the title.
+    pub fn subtitle(&self) -> Option<&str> {
+        self.summary.as_deref().or(self.title.as_deref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
