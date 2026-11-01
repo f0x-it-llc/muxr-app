@@ -228,9 +228,14 @@ pub struct TerminalController {
 /// space create keep it. So the link never yanks the user back from, or resolves
 /// inside, a place they moved to themselves. It also waits out any such verb
 /// still in flight.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachTarget {
-    /// `TabMsg.position` — never the tab id, never a title.
+    /// The space the tab lives in, as `GetSpaces` names it. `None`, or the
+    /// space already selected, leaves the link in the current space; another
+    /// space is peeked first, then switched to ahead of the tab and pane.
+    pub space_id: Option<String>,
+    /// `TabMsg.position` — never the tab id, never a title. Counted in the
+    /// target space's own layout.
     pub tab_position: Option<u32>,
     /// `PaneMsg.id` of a terminal pane.
     pub pane_id: Option<u32>,
@@ -443,7 +448,20 @@ impl TerminalController {
     /// a tab nor a pane records nothing. Applied once by
     /// [`apply_attach_target`](Self::apply_attach_target).
     pub fn set_attach_target(&self, tab_position: Option<u32>, pane_id: Option<u32>) {
+        self.set_attach_target_in_space(None, tab_position, pane_id);
+    }
+
+    /// [`set_attach_target`](Self::set_attach_target) for a link that also names a
+    /// space (`/terminal?space=…`). A link naming a space alone records nothing: with no
+    /// tab or pane there is nowhere in it to land.
+    pub fn set_attach_target_in_space(
+        &self,
+        space_id: Option<String>,
+        tab_position: Option<u32>,
+        pane_id: Option<u32>,
+    ) {
         let target = (tab_position.is_some() || pane_id.is_some()).then_some(AttachTarget {
+            space_id,
             tab_position,
             pane_id,
         });
@@ -458,10 +476,10 @@ impl TerminalController {
     /// seam here, since `tests/*.rs` link the normal build.
     #[doc(hidden)]
     pub fn pending_attach_target_for_tests(&self) -> Option<AttachTarget> {
-        *self
-            .attach_target
+        self.attach_target
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Drop the [`AttachTarget`] — [`tell_move`](Self::tell_move)'s landed half.
@@ -493,42 +511,67 @@ impl TerminalController {
         else {
             return;
         };
+        if let Some(space_id) = target.space_id.clone()
+            && self
+                .selected_space_id()
+                .is_some_and(|selected| selected != space_id)
+        {
+            self.apply_attach_target_in_space(space_id, &target).await;
+            return;
+        }
         let (Some(tabs), Some(active)) = (
             self.tabs.try_get_untracked(),
             self.active_tab.try_get_untracked(),
         ) else {
             return;
         };
-        // `TabEntry::index` is the 1-based position the pill prints.
-        let tab = match target.tab_position {
-            Some(position) => tabs
-                .iter()
-                .find(|tab| tab.index == position.saturating_add(1)),
-            None => tabs.iter().find(|tab| tab.key == active),
-        };
-        let Some(tab) = tab else {
-            log::debug!(
-                "attach target: no tab at {:?}, dropped",
-                target.tab_position
-            );
+        let Some((tab, pane_id)) = resolve_attach_target(&tabs, &active, &target) else {
             return;
         };
-        let landed = match target.pane_id {
+        let landed = match pane_id {
             Some(pane_id) => {
-                if !tab
-                    .panes
-                    .iter()
-                    .any(|pane| pane.id == pane_id && !pane.is_plugin)
-                {
-                    log::debug!("attach target: no pane {pane_id} in tab, dropped");
-                    return;
-                }
                 self.commit_pane_unclaimed(tab.key.clone(), pane_id, false)
                     .await
             }
             None if tab.key != active => self.switch_tab(tab.key.clone()).await,
             None => true,
         };
+        if landed && self.is_docked() {
+            self.settle_rest();
+        }
+    }
+
+    /// [`apply_attach_target`](Self::apply_attach_target)'s foreign-space branch, under
+    /// the move claim it already holds. The space's tabs are peeked read-only first
+    /// ([`ListSpaceTabs`], published nowhere) and the target resolved against them; only
+    /// then does the connection move — space, then tab, then pane. **Fail-closed**: a
+    /// failed peek, or a tab or pane the peeked layout does not carry, sends nothing.
+    async fn apply_attach_target_in_space(&self, space_id: String, target: &AttachTarget) {
+        let Ok(tabs) = self
+            .core
+            .run(
+                &self.list_space_tabs,
+                space_id.clone(),
+                RunOptions::default(),
+            )
+            .await
+        else {
+            return;
+        };
+        if !self.signals_alive() {
+            return;
+        }
+        let active = tabs
+            .iter()
+            .find(|tab| tab.active)
+            .or_else(|| tabs.first())
+            .map(|tab| tab.key.clone())
+            .unwrap_or_default();
+        let Some((tab, pane_id)) = resolve_attach_target(&tabs, &active, target) else {
+            return;
+        };
+        let (tab_key, pane) = (tab.key.clone(), pane_id.map(|id| (id, false)));
+        let landed = self.land_in_space(space_id, tabs, tab_key, pane).await;
         if landed && self.is_docked() {
             self.settle_rest();
         }
@@ -824,6 +867,21 @@ impl TerminalController {
         let Some(_claim) = self.claim_user_move() else {
             return false;
         };
+        self.land_in_space(space_id, cached_tabs, tab_key, Some((pane_id, is_plugin)))
+            .await
+    }
+
+    /// The move itself, under a claim the caller holds: `switch_space` to `space_id`
+    /// (recording the resume hint), adopt `tabs` as the new tab world, then land on
+    /// `tab_key` — and on its `pane` (id, is-plugin) when given. Shared by the sheet's
+    /// cross-space commit and the deep link's foreign-space attach.
+    async fn land_in_space(
+        &self,
+        space_id: String,
+        tabs: Vec<TabEntry>,
+        tab_key: String,
+        pane: Option<(u32, bool)>,
+    ) -> bool {
         if !self
             .tell_move(self.terminal.switch_space(space_id.clone()))
             .await
@@ -834,10 +892,19 @@ impl TerminalController {
             self.resume.remember_space(space_id.clone());
         }
         self.select_space_locally(&space_id);
-        self.promote_browsed_tabs(cached_tabs);
-        let landed = self
-            .commit_pane_unclaimed(tab_key, pane_id, is_plugin)
-            .await;
+        self.promote_browsed_tabs(tabs);
+        let landed = match pane {
+            Some((pane_id, is_plugin)) => {
+                self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
+                    .await
+            }
+            None => {
+                let Some(active) = self.active_tab.try_get_untracked() else {
+                    return false;
+                };
+                tab_key == active || self.switch_tab(tab_key).await
+            }
+        };
         // Behind the pane steps, not ahead of them: the switch landed either
         // way, so the space list converges either way — and a user waiting on a
         // pane focus never waits on this read.
@@ -1858,6 +1925,40 @@ fn rest_tab_key(tabs: &[TabEntry]) -> Option<String> {
     tabs.iter()
         .find(|tab| tab.active)
         .map(|tab| tab.key.clone())
+}
+
+/// The tab (and pane id to focus) `target` names in `tabs`, with `active` the key of the
+/// tab a target naming none lands on. `None` — logged, nothing sent — when the layout does
+/// not carry the tab position, or the pane is missing from that tab or a plugin pane.
+fn resolve_attach_target<'a>(
+    tabs: &'a [TabEntry],
+    active: &str,
+    target: &AttachTarget,
+) -> Option<(&'a TabEntry, Option<u32>)> {
+    // `TabEntry::index` is the 1-based position the pill prints.
+    let tab = match target.tab_position {
+        Some(position) => tabs
+            .iter()
+            .find(|tab| tab.index == position.saturating_add(1)),
+        None => tabs.iter().find(|tab| tab.key == active),
+    };
+    let Some(tab) = tab else {
+        log::debug!(
+            "attach target: no tab at {:?}, dropped",
+            target.tab_position
+        );
+        return None;
+    };
+    if let Some(pane_id) = target.pane_id
+        && !tab
+            .panes
+            .iter()
+            .any(|pane| pane.id == pane_id && !pane.is_plugin)
+    {
+        log::debug!("attach target: no pane {pane_id} in tab, dropped");
+        return None;
+    }
+    Some((tab, target.pane_id))
 }
 
 /// Whether the session with id `session` runs on the **herdr** backend — this screen's

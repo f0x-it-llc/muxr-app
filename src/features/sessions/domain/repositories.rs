@@ -6,7 +6,9 @@
 //! fails with [`AppFailure`], mapped once in `data`.
 
 use crate::failure::AppFailure;
-use crate::features::sessions::domain::entities::{CreateSessionParams, RenameRequest, Session};
+use crate::features::sessions::domain::entities::{
+    CreateSessionParams, RenameRequest, Session, SessionAgent,
+};
 
 /// Read/write access to the connected server's session list.
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -24,4 +26,10 @@ pub trait SessionsRepository {
 
     /// Kills the session with `id`, disconnecting any attached client.
     async fn kill_session(&self, id: String) -> Result<(), AppFailure>;
+
+    /// The AI agents running in session `session_id`, most urgent first.
+    /// Defaults to none, for a backend (or double) that reports no agents.
+    async fn list_agents(&self, _session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
+        Ok(Vec::new())
+    }
 }

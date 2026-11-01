@@ -71,16 +71,19 @@ use std::sync::Arc;
 
 use tonic::Status;
 
-use crate::agents::AgentSummary;
+use std::collections::HashMap;
+
+use crate::agents::{AgentStatus, AgentSummary, agent_sort_key};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
-    CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionBackend,
-    SessionStatus, TabSummary, ThirdMetric,
+    CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionAgent,
+    SessionBackend, SessionStatus, TabSummary, ThirdMetric,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::net::proto::{
-    Backend, CreateSessionReq, Empty, Layout, RenameSessionReq, SessionInfo, SessionRef,
+    AgentList, AgentMsg, Backend, CreateSessionReq, Empty, Layout, RenameSessionReq, SessionInfo,
+    SessionRef,
 };
 use crate::net::{MuxrClient, error};
 
@@ -259,6 +262,46 @@ impl SessionsRepository for GrpcSessionsRepository {
             .into_inner();
         error::ack_result(&ack)
     }
+
+    /// `ListAgents`, then one `GetLayout` per distinct space the agents live
+    /// in: the wire names an agent's tab by id, and the terminal's attach
+    /// target wants its position. An agent whose tab the layout does not
+    /// carry (or whose space's layout failed to read) is left out rather than
+    /// aimed at a guessed tab.
+    async fn list_agents(&self, session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
+        let client = self.client()?;
+        let request = SessionRef {
+            session: session_id,
+            connection_id: String::new(),
+            space_id: String::new(),
+        };
+        let list = client
+            .authed()
+            .list_agents(request.clone())
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        let mut positions: HashMap<(String, u64), u32> = HashMap::new();
+        let mut spaces: Vec<&str> = list.agents.iter().map(|a| a.space_id.as_str()).collect();
+        spaces.sort_unstable();
+        spaces.dedup();
+        for space_id in spaces {
+            let mut layout_request = request.clone();
+            layout_request.space_id = space_id.to_string();
+            match client.authed().get_layout(layout_request).await {
+                Ok(response) => {
+                    for tab in response.into_inner().tabs {
+                        positions
+                            .insert((space_id.to_string(), u64::from(tab.tab_id)), tab.position);
+                    }
+                }
+                Err(status) => {
+                    self.map_status(status);
+                }
+            }
+        }
+        Ok(map_agents(list, &positions))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +351,44 @@ fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
         is_current: info.is_current,
         layout,
         agents: info.agents.as_ref().map(AgentSummary::from_wire),
+    }
+}
+
+/// A `ListAgents` answer as [`SessionAgent`] rows, most urgent first.
+/// `positions` maps `(space id, tab id)` to the tab's layout position; an
+/// agent whose tab is absent from it is dropped.
+fn map_agents(list: AgentList, positions: &HashMap<(String, u64), u32>) -> Vec<SessionAgent> {
+    let mut rows: Vec<SessionAgent> = list
+        .agents
+        .into_iter()
+        .filter_map(|agent| {
+            let position = *positions.get(&(agent.space_id.clone(), agent.tab_id))?;
+            Some(map_agent(agent, position))
+        })
+        .collect();
+    rows.sort_by_key(|row| agent_sort_key(row.status, row.change_seq));
+    rows
+}
+
+/// The wire spells an absent optional string as empty.
+fn non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
+fn map_agent(agent: AgentMsg, tab_position: u32) -> SessionAgent {
+    SessionAgent {
+        pane_id: agent.pane_id,
+        tab_position,
+        space_id: non_empty(agent.space_id),
+        space_name: non_empty(agent.space_name),
+        tab_name: agent.tab_name,
+        kind: agent.kind,
+        name: non_empty(agent.name),
+        display_kind: non_empty(agent.display_kind),
+        status: AgentStatus::from_wire(agent.status),
+        title: non_empty(agent.title),
+        summary: non_empty(agent.summary),
+        change_seq: agent.change_seq,
     }
 }
 
@@ -511,6 +592,53 @@ mod tests {
         assert_eq!((agents.total, agents.blocked, agents.done), (4, 1, 1));
         assert_eq!((agents.working, agents.idle, agents.unknown), (1, 1, 0));
         assert_eq!(agents.kinds, ["claude", "codex"]);
+    }
+
+    #[test]
+    fn map_agents_resolves_tab_positions_and_orders_by_urgency() {
+        let msg = |pane_id, tab_id, space: &str, status: i32, change_seq| AgentMsg {
+            pane_id,
+            tab_id,
+            space_id: space.to_string(),
+            kind: "claude".to_string(),
+            status,
+            change_seq,
+            ..AgentMsg::default()
+        };
+        let list = AgentList {
+            agents: vec![
+                msg(1, 10, "a", crate::net::proto::AgentStatus::Idle as i32, 5),
+                msg(
+                    2,
+                    11,
+                    "a",
+                    crate::net::proto::AgentStatus::Blocked as i32,
+                    1,
+                ),
+                msg(
+                    3,
+                    99,
+                    "a",
+                    crate::net::proto::AgentStatus::Blocked as i32,
+                    9,
+                ),
+                msg(4, 10, "", crate::net::proto::AgentStatus::Working as i32, 2),
+            ],
+            ..AgentList::default()
+        };
+        let positions = HashMap::from([
+            (("a".to_string(), 10), 0),
+            (("a".to_string(), 11), 3),
+            ((String::new(), 10), 1),
+        ]);
+
+        let rows = map_agents(list, &positions);
+
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| (r.pane_id, r.tab_position, r.space_id.as_deref()))
+            .collect();
+        assert_eq!(seen, [(2, 3, Some("a")), (4, 1, None), (1, 0, Some("a"))]);
     }
 
     #[test]

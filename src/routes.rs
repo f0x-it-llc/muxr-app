@@ -74,6 +74,7 @@ pub const TERMINAL_SESSION_QUERY_KEY: &str = "session";
 pub const TERMINAL_TAB_QUERY_KEY: &str = "tab";
 /// The wire pane id (unique within the tab's terminal panes) a pill targets.
 pub const TERMINAL_PANE_QUERY_KEY: &str = "pane";
+pub const TERMINAL_SPACE_QUERY_KEY: &str = "space";
 
 /// The `/` route (and the outer navigator's initial page): Connect.
 pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
