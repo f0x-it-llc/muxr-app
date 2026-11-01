@@ -25,6 +25,15 @@ const NOT_PAUSED: usize = usize::MAX;
 
 pub const POLL_PERIOD_SECS: u32 = 3;
 
+/// Releases a single-flight claim when dropped, however the claimed work ends.
+struct ReleaseClaim<'a>(&'a AtomicBool);
+
+impl Drop for ReleaseClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct SessionsController {
     core: ControllerCore<AppFailure>,
     list: ListSessions,
@@ -52,6 +61,9 @@ pub struct SessionsController {
     /// Bumped by every agents fetch and every retarget: only the newest fetch
     /// for the current target publishes.
     agents_generation: AtomicU64,
+    /// The poll tick's own single-flight claim on the agents fetch, apart from
+    /// [`poll_in_flight`](Self::poll_in_flight): a hung agents read never stalls the list.
+    agents_in_flight: AtomicBool,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
@@ -75,6 +87,7 @@ impl SessionsController {
             detail_visible: AtomicBool::new(false),
             agents_for: Mutex::new(None),
             agents_generation: AtomicU64::new(0),
+            agents_in_flight: AtomicBool::new(false),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
@@ -105,21 +118,38 @@ impl SessionsController {
     }
 
     pub async fn refresh_from_poll(&self) {
-        struct ReleasePollClaim<'a>(&'a AtomicBool);
-        impl Drop for ReleasePollClaim<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::SeqCst);
-            }
+        {
+            let _release = ReleaseClaim(&self.poll_in_flight);
+            self.refresh().await;
         }
-        let _release = ReleasePollClaim(&self.poll_in_flight);
-        self.refresh().await;
+        // Past the list poll's claim: the next tick's list refresh does not wait on this read.
+        self.refresh_agents_from_poll().await;
+    }
+
+    /// The poll tick's agent fetch under its own single-flight claim: a tick finding the
+    /// previous tick's read still outstanding skips it.
+    async fn refresh_agents_from_poll(&self) {
+        if self.agents_in_flight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _release = ReleaseClaim(&self.agents_in_flight);
         self.refresh_agents().await;
     }
 
     /// Record whether the detail pane is on screen — the page's size class,
-    /// set once per build. A plain store: no read, no I/O.
-    pub fn set_detail_visible(&self, visible: bool) {
-        self.detail_visible.store(visible, Ordering::Relaxed);
+    /// forwarded each build. On a hidden-to-visible edge with a selected live session
+    /// the controller fetches its agents at once (its own task, so the page does no I/O);
+    /// on a visible-to-hidden edge the list is cleared. A repeat of the same value is a
+    /// plain no-op.
+    pub fn set_detail_visible(self: &Arc<Self>, visible: bool) {
+        let was = self.detail_visible.swap(visible, Ordering::Relaxed);
+        if was == visible {
+            return;
+        }
+        if self.retarget_agents().is_some() {
+            let controller = Arc::clone(self);
+            frust::spawn_local(async move { controller.refresh_agents().await });
+        }
     }
 
     /// The session whose agents the detail shows now: the selected one, while
