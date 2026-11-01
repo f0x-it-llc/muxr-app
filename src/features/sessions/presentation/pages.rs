@@ -816,8 +816,6 @@ impl Actions {
         self.app_nav.push(&terminal_location(id, Some((tab, pane))));
     }
 
-    /// Open the create-session dialog (the dashed row and the empty state's
-    /// action both land here).
     /// Attach to `id` aimed at an agent row's pane: the same `(tab, pane)`
     /// target as a pill, plus the agent's space when it has one.
     pub fn attach_agent(&self, id: &str, agent: &SessionAgent) {
@@ -825,6 +823,8 @@ impl Actions {
         self.app_nav.push(&terminal_location_for_agent(id, agent));
     }
 
+    /// Open the create-session dialog (the dashed row and the empty state's
+    /// action both land here).
     pub fn open_create_dialog(&self, connection: &Arc<ConnectionController>) {
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
