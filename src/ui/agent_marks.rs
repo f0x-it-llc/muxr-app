@@ -19,7 +19,7 @@ use frust_glyph::{BadgeVariant, avatar, badge};
 
 use crate::agents::{AgentStatus, AgentSummary};
 use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV, HAIRLINE, RADIUS_FULL};
-use crate::ui::palette::{Palette, active_theme};
+use crate::ui::palette::{Palette, active_theme, washed};
 
 /// The status dot's diameter, per the design.
 pub const DOT: f64 = 8.0;
@@ -45,6 +45,9 @@ const PI: Color = Color::from_rgb8(0x5E, 0xC8, 0xD8);
 pub const TILE_SIZE: f64 = 22.0;
 /// Fraction of a tile's edge the next tile overlaps in [`kind_tiles`].
 const TILE_OVERLAP: f64 = 0.3;
+/// The avatar's accent-wash alpha (Glyph's `AVATAR_WASH_ALPHA`), folded over
+/// the surface so a stacked tile is opaque and hides the one beneath it.
+const TILE_WASH_ALPHA: f32 = 0.12;
 /// The monogram for a kind no mark is drawn for.
 const UNKNOWN_MONOGRAM: &str = "?";
 
@@ -132,18 +135,30 @@ pub fn kind_tiles<S: 'static>(kinds: &[String], max: usize) -> impl View<S> {
     let colors = Palette::from_theme(&active_theme());
     let mut layers = stack::<S>();
     for (i, kind) in kinds[..shown].iter().enumerate() {
-        layers = layers.child(offset(i, step, any(kind_tile::<S>(kind, size))));
+        let mark = kind_mark(kind, &colors);
+        let tile = opaque_tile::<S>(mark.monogram, mark.accent, size, &colors);
+        layers = layers.child(offset(i, step, any(tile)));
     }
     if hidden > 0 {
-        layers = layers.child(offset(
-            shown,
-            step,
-            any(avatar(format!("+{hidden}"))
-                .size(size)
-                .accent(colors.fg_muted)),
-        ));
+        let tail = opaque_tile::<S>(format!("+{hidden}"), colors.fg_muted, size, &colors);
+        layers = layers.child(offset(shown, step, any(tail)));
     }
     layers
+}
+
+/// A tile whose wash is pre-composited over the surface: the stack overlaps
+/// tiles, and a translucent wash would let the tile beneath show through.
+fn opaque_tile<S: 'static>(
+    label: impl Into<String>,
+    accent: Color,
+    size: f64,
+    colors: &Palette,
+) -> impl View<S> {
+    avatar(label).size(size).accent(accent).background(washed(
+        colors.surface,
+        accent,
+        TILE_WASH_ALPHA,
+    ))
 }
 
 fn offset<S: 'static>(index: usize, step: f64, tile: AnyView<S>) -> impl View<S> {
