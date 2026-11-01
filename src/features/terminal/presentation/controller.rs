@@ -303,7 +303,9 @@ fn agents_now() -> Instant {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Touch {
     Changed,
-    Removed,
+    /// Removed by the stream, carrying the `change_seq` the held row had then (`u64::MAX` when
+    /// none was held, so a relist can never resurrect it).
+    Removed(u64),
 }
 
 /// What reopening an ended agents subscription needs, and when it may.
@@ -1434,9 +1436,10 @@ impl TerminalController {
                 })
             }
             Some((_, false)) => {
-                if self.agent_watch_was_live.swap(false, Ordering::SeqCst) {
-                    self.set_agents_stale(true);
-                }
+                // A live stream going down raises nothing up front: the relist this returns
+                // `true` for flags stale itself if it fails, so a drop with working unary RPCs
+                // never flickers the flag.
+                self.agent_watch_was_live.store(false, Ordering::SeqCst);
                 true
             }
         }
@@ -1555,7 +1558,10 @@ impl TerminalController {
         match event {
             AgentEventEntry::Snapshot(agents) => {
                 if let Some(touched) = touched.as_mut() {
-                    touched.extend(rows.iter().map(|row| (row.pane_id, Touch::Removed)));
+                    touched.extend(
+                        rows.iter()
+                            .map(|row| (row.pane_id, Touch::Removed(row.change_seq))),
+                    );
                     touched.extend(agents.iter().map(|row| (row.pane_id, Touch::Changed)));
                 }
                 *rows = agents;
@@ -1572,7 +1578,11 @@ impl TerminalController {
             }
             AgentEventEntry::Removed(pane_id) => {
                 if let Some(touched) = touched.as_mut() {
-                    touched.insert(pane_id, Touch::Removed);
+                    let seq = rows
+                        .iter()
+                        .find(|row| row.pane_id == pane_id)
+                        .map_or(u64::MAX, |row| row.change_seq);
+                    touched.insert(pane_id, Touch::Removed(seq));
                 }
                 rows.retain(|row| row.pane_id != pane_id);
             }
@@ -2158,10 +2168,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A landing relist's rows merged with `held`, the rows stream events kept meanwhile: the
-/// relist decides membership, except that a pane the stream removed stays gone and one it
-/// changed stays present; a pane in both keeps whichever row has the higher `change_seq`
-/// (the relist's on a tie).
+/// A landing relist's rows merged with `held`, the rows stream events kept meanwhile. The relist
+/// is authoritative for every pane the stream did not touch while it was in flight (so a
+/// poll-only relist, with `touched` empty, replaces the rows wholesale). Only a pane the stream
+/// *changed* in that window is compared by `change_seq` — both rows then describe the same
+/// stream interval, and the higher wins (the relist's on a tie), a changed pane the relist
+/// omits staying present. A pane the stream *removed* stays gone unless the relist lists it with
+/// a `change_seq` higher than the removed row's.
 fn merge_relist(
     listed: Vec<AgentEntry>,
     held: &[AgentEntry],
@@ -2170,11 +2183,18 @@ fn merge_relist(
     let held_row = |pane_id: u32| held.iter().find(|row| row.pane_id == pane_id);
     let mut rows: Vec<AgentEntry> = listed
         .into_iter()
-        .filter(|row| touched.get(&row.pane_id) != Some(&Touch::Removed))
-        .map(|row| match held_row(row.pane_id) {
-            Some(kept) if kept.change_seq > row.change_seq => kept.clone(),
-            _ => row,
+        .filter(|row| match touched.get(&row.pane_id) {
+            Some(Touch::Removed(seq)) => row.change_seq > *seq,
+            _ => true,
         })
+        .map(
+            |row| match (touched.get(&row.pane_id), held_row(row.pane_id)) {
+                (Some(Touch::Changed), Some(kept)) if kept.change_seq > row.change_seq => {
+                    kept.clone()
+                }
+                _ => row,
+            },
+        )
         .collect();
     for kept in held {
         let changed = touched.get(&kept.pane_id) == Some(&Touch::Changed);
@@ -5062,6 +5082,87 @@ mod tests {
         assert!(
             lock(&c.agents_listed_at).is_some(),
             "stamped when the relist landed, despite the events"
+        );
+    }
+
+    #[test]
+    fn a_poll_only_relist_replaces_the_rows_wholesale_even_when_pane_ids_were_reassigned() {
+        let (c, repository) = recorded("herdr:work");
+        stage_agents(
+            &repository,
+            vec![
+                agent(1, "A", "ws-1", AgentStatus::Working, 40),
+                agent(2, "B", "ws-1", AgentStatus::Working, 5),
+            ],
+        );
+        block_on(c.refresh_agents());
+
+        // A muxrd restart: the same agents under swapped pane ids, nothing streamed meanwhile.
+        let restarted = vec![
+            agent(1, "B", "ws-1", AgentStatus::Working, 5),
+            agent(2, "A", "ws-1", AgentStatus::Working, 40),
+        ];
+        stage_agents(&repository, restarted);
+        block_on(c.refresh_agents());
+
+        let mut rows: Vec<(u32, String, u64)> = c
+            .agents
+            .get_untracked()
+            .iter()
+            .map(|row| (row.pane_id, row.tab_name.clone(), row.change_seq))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            [(1, "B".to_string(), 5), (2, "A".to_string(), 40)],
+            "the relist's rows, A once and B present"
+        );
+    }
+
+    #[test]
+    fn merge_relist_compares_change_seq_only_for_panes_the_stream_changed() {
+        let held = vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Blocked, 9),
+            agent(11, "alpha", "ws-1", AgentStatus::Blocked, 9),
+        ];
+        let listed = vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Idle, 2),
+            agent(11, "alpha", "ws-1", AgentStatus::Idle, 2),
+        ];
+        let touched = HashMap::from([(10, Touch::Changed)]);
+        let merged = merge_relist(listed, &held, &touched);
+        let status = |pane: u32| {
+            merged
+                .iter()
+                .find(|row| row.pane_id == pane)
+                .map(|row| row.status)
+        };
+        assert_eq!(
+            status(10),
+            Some(AgentStatus::Blocked),
+            "touched: stream wins"
+        );
+        assert_eq!(
+            status(11),
+            Some(AgentStatus::Idle),
+            "untouched: relist wins"
+        );
+    }
+
+    #[test]
+    fn a_stream_removal_holds_unless_the_relist_row_is_newer() {
+        let held = vec![agent(10, "alpha", "ws-1", AgentStatus::Idle, 4)];
+        let touched = HashMap::from([(10, Touch::Removed(4)), (11, Touch::Removed(4))]);
+        let listed = vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Idle, 4),
+            agent(11, "alpha", "ws-1", AgentStatus::Idle, 7),
+        ];
+        let merged = merge_relist(listed, &held, &touched);
+        let panes: Vec<u32> = merged.iter().map(|row| row.pane_id).collect();
+        assert_eq!(
+            panes,
+            [11],
+            "pane 10 stays removed; pane 11 came back newer"
         );
     }
 

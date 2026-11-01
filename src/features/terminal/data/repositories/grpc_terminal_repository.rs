@@ -267,12 +267,14 @@ impl StreamKeys {
             if layouts.space_failed(&space_id) {
                 continue;
             }
-            let slots = layouts
+            let slots: HashMap<u64, TabSlot> = layouts
                 .tabs
                 .iter()
                 .filter(|((space, _), _)| *space == space_id)
                 .map(|((_, tab_id), slot)| (*tab_id, slot.clone()))
                 .collect();
+            lock_keys(&self.known)
+                .retain(|(space, tab_id), _| *space != space_id || slots.contains_key(tab_id));
             self.spaces.insert(space_id, CachedSpace { slots, read_at });
         }
     }
@@ -521,6 +523,10 @@ async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B:
 impl TerminalRepository for GrpcTerminalRepository {
     fn bind(&self, session: Option<String>, connection_id: Option<String>) {
         let mut binding = self.binding();
+        if binding.session != session {
+            // Another session's tabs are another world: its keys must not resurrect here.
+            lock_keys(&self.known_keys).clear();
+        }
         binding.session = session;
         binding.connection_id = connection_id.unwrap_or_default();
     }
@@ -861,9 +867,18 @@ fn non_empty(value: &str) -> Option<String> {
 
 /// A `ListAgents` answer as [`AgentEntry`] rows, sorted by [`agent_sort_key`]. An agent's
 /// `tab_key` is its tab's slot in `layouts` (so it equals the [`TabEntry::key`] a tab list
-/// yields for the same tab), recorded in `known`; a row whose space failed to read keeps the
+/// yields for the same tab), recorded in `known` (which a successful read of a space prunes of
+/// tabs the read no longer lists); a row whose space failed to read keeps the
 /// key `known` last held, and one whose space read fine but lacks its tab carries none.
 fn map_agents(list: AgentList, layouts: &AgentLayouts, known: &mut KnownKeys) -> Vec<AgentEntry> {
+    // A space whose layout read fine is authoritative: known keys of tabs it no longer lists go.
+    let read_spaces: Vec<String> = agent_spaces(&list.agents)
+        .into_iter()
+        .filter(|space| !layouts.space_failed(space))
+        .collect();
+    known.retain(|(space, tab_id), _| {
+        !read_spaces.contains(space) || layouts.tabs.contains_key(&(space.clone(), *tab_id))
+    });
     let mut rows: Vec<AgentEntry> = list
         .agents
         .into_iter()
@@ -1595,6 +1610,157 @@ mod tests {
         };
         let rows = map_agents(list(), &failed, &mut known);
         assert_eq!(keys(&rows), [(1, "zsh".to_string()), (2, String::new())]);
+    }
+
+    #[tokio::test]
+    async fn a_rebind_clears_the_known_keys_so_a_failed_read_cannot_resurrect_the_old_sessions_key()
+    {
+        let fixture = MuxrdFixture::start().await;
+        let script = fixture.agents();
+        let repo = fixture_repo(&fixture).await;
+        let layouts = Arc::new(ScriptedLayouts::default());
+        let (sink, seen) = recorder();
+        let (handle, pump) = repo
+            .agent_watch(
+                sink,
+                Nap::Tokio,
+                TEST_BACKOFF.to_vec(),
+                LayoutSource::Scripted(Arc::clone(&layouts)),
+            )
+            .expect("bound and connected");
+        let pump = tokio::spawn(pump);
+        wait_until("the stream opens", || {
+            script.opened() == 1 && handle.is_live()
+        })
+        .await;
+        layouts.set("ws", Some(vec![tab(0, 7, "zsh", true, Vec::new())]));
+        script.push(snapshot_of(vec![agent_in(1, 7, "zsh", 1)]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 1).await;
+        assert_eq!(
+            lock_keys(&repo.known_keys).get(&("ws".to_string(), 7)),
+            Some(&"zsh".to_string())
+        );
+
+        drop(handle);
+        wait_until("the pump ends", || pump.is_finished()).await;
+        repo.bind(
+            Some(testing::SESSION_NAMES[0].to_string()),
+            Some("again".to_string()),
+        );
+        assert!(
+            !lock_keys(&repo.known_keys).is_empty(),
+            "the same session keeps its keys across a new connection id"
+        );
+        repo.bind(Some(testing::SESSION_NAMES[1].to_string()), None);
+        assert!(lock_keys(&repo.known_keys).is_empty(), "another session");
+
+        layouts.set("ws", None);
+        let (sink, seen) = recorder();
+        let (_handle, pump) = repo
+            .agent_watch(
+                sink,
+                Nap::Tokio,
+                TEST_BACKOFF.to_vec(),
+                LayoutSource::Scripted(Arc::clone(&layouts)),
+            )
+            .expect("bound and connected");
+        let _pump = tokio::spawn(pump);
+        wait_until("the second stream opens", || script.opened() == 2).await;
+        script.push(snapshot_of(vec![agent_in(1, 7, "zsh", 2)]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 1).await;
+        let AgentEventEntry::Snapshot(rows) = seen.lock().expect("ok")[0].clone() else {
+            panic!("a snapshot");
+        };
+        assert_eq!(rows[0].tab_key, "", "the old session's key is gone");
+    }
+
+    #[tokio::test]
+    async fn a_successful_layout_read_evicts_the_known_keys_of_tabs_it_no_longer_lists() {
+        let fixture = MuxrdFixture::start().await;
+        let script = fixture.agents();
+        let repo = fixture_repo(&fixture).await;
+        let layouts = Arc::new(ScriptedLayouts::default());
+        let (sink, seen) = recorder();
+        let (handle, pump) = repo
+            .agent_watch(
+                sink,
+                Nap::Tokio,
+                TEST_BACKOFF.to_vec(),
+                LayoutSource::Scripted(Arc::clone(&layouts)),
+            )
+            .expect("bound and connected");
+        let _pump = tokio::spawn(pump);
+        wait_until("the stream opens", || {
+            script.opened() == 1 && handle.is_live()
+        })
+        .await;
+        layouts.set(
+            "ws",
+            Some(vec![
+                tab(0, 7, "zsh", true, Vec::new()),
+                tab(1, 8, "vim", false, Vec::new()),
+            ]),
+        );
+        script.push(snapshot_of(vec![
+            agent_in(1, 7, "zsh", 1),
+            agent_in(2, 8, "vim", 1),
+        ]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 1).await;
+        assert_eq!(lock_keys(&repo.known_keys).len(), 2);
+
+        layouts.set("ws", Some(vec![tab(0, 7, "zsh", true, Vec::new())]));
+        script.push(snapshot_of(vec![agent_in(1, 7, "zsh", 2)]));
+        wait_until("the second snapshot", || {
+            seen.lock().expect("ok").len() == 2
+        })
+        .await;
+        let known: Vec<(String, u64)> = lock_keys(&repo.known_keys).keys().cloned().collect();
+        assert_eq!(known, [("ws".to_string(), 7)], "the closed tab's key went");
+    }
+
+    #[test]
+    fn a_list_prunes_known_keys_of_read_spaces_only() {
+        use crate::net::agent_layouts::{SpaceFailure, TabSlot};
+        let slot = TabSlot {
+            tab_key: "zsh".to_string(),
+            position: 0,
+            name: "zsh".to_string(),
+        };
+        let list = || AgentList {
+            agents: vec![agent_in(1, 7, "zsh", 1)],
+            summary: None,
+        };
+        let seeded = || {
+            KnownKeys::from([
+                (("ws".to_string(), 7), "zsh".to_string()),
+                (("ws".to_string(), 8), "vim".to_string()),
+                (("elsewhere".to_string(), 1), "sh".to_string()),
+            ])
+        };
+        let read = AgentLayouts {
+            tabs: HashMap::from([(("ws".to_string(), 7), slot)]),
+            failed: Vec::new(),
+        };
+        let mut known = seeded();
+        map_agents(list(), &read, &mut known);
+        let mut kept: Vec<_> = known.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            [("elsewhere".to_string(), 1), ("ws".to_string(), 7)],
+            "tab 8 of the read space went; an unread space is untouched"
+        );
+
+        let failed = AgentLayouts {
+            tabs: HashMap::new(),
+            failed: vec![SpaceFailure {
+                space_id: "ws".to_string(),
+                status: Status::unavailable("down"),
+            }],
+        };
+        let mut known = seeded();
+        map_agents(list(), &failed, &mut known);
+        assert_eq!(known.len(), 3, "a failed read prunes nothing");
     }
 
     #[test]
