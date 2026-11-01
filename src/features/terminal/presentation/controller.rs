@@ -17,7 +17,8 @@
 //! — the sheet's commit and the space switches share one claim, since either
 //! can move the tab world out from under the other. The agents read keeps its own
 //! generation, and a failed newest read flips [`agents_stale`](TerminalController::agents_stale),
-//! muting [`has_blocked_agent`](TerminalController::has_blocked_agent).
+//! muting [`has_blocked_agent`](TerminalController::has_blocked_agent). Agents alone may also
+//! arrive pushed: see [`open_agent_watch`](TerminalController::open_agent_watch).
 //!
 //! **The tree sheet's own browse state** is id-keyed
 //! ([`expanded_space`](TerminalController::expanded_space)/
@@ -37,8 +38,8 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
@@ -46,17 +47,17 @@ use frust::authoring::text::FontFamily;
 use frust::{Get, GetUntracked, RwSignal, Set, With, WithUntracked, spawn_local};
 
 use crate::agents::{AgentStatus, agent_sort_key};
-use crate::connection::ConnectionController;
+use crate::connection::{CAP_AGENTS_STREAM, ConnectionController};
 use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::data::feeds::grpc_feed::{GrpcTerminalFeed, ResumeSlot};
 use crate::features::terminal::domain::entities::{
-    AgentEntry, PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry,
-    TermLine, Workspace,
+    AgentEntry, AgentEventEntry, PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space,
+    TabEntry, TermLine, Workspace,
 };
 use crate::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use crate::features::terminal::domain::repositories::{
-    PreferencesRepository, SessionsRepository, TerminalRepository,
+    PreferencesRepository, SessionsRepository, TerminalRepository, WatchHandle,
 };
 use crate::features::terminal::domain::use_cases::{
     DetachSession, ListSpaceTabs, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
@@ -108,6 +109,14 @@ pub struct TerminalController {
     /// [`agent_sort_key`] — the tree's agents half. Re-read with every tab
     /// refresh ([`refresh_agents`](Self::refresh_agents)).
     pub agents: RwSignal<Vec<AgentEntry>>,
+    /// The rows [`agents`](Self::agents) publishes, sorted: the last full read with every
+    /// streamed event applied — ahead of the signal while a move claim holds the rows still.
+    agent_rows: Mutex<Vec<AgentEntry>>,
+    /// The open agents subscription, if the server offered one — dropped on dispose.
+    agent_watch: Mutex<Option<WatchHandle>>,
+    /// When [`refresh_agents`](Self::refresh_agents) last started, for the streaming
+    /// mount's [`AGENTS_SAFETY_RELIST`].
+    agents_listed_at: Mutex<Option<Instant>>,
     /// Whether the last newest-generation `list_agents` failed, so
     /// [`agents`](Self::agents) is a list the daemon could not confirm. The rows stay
     /// published; [`has_blocked_agent`](Self::has_blocked_agent) mutes meanwhile.
@@ -241,6 +250,10 @@ const APPEARANCE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// tighter, since RPCs share the attach stream's HTTP/2 connection and flow control.
 const LAYOUT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
+/// How often a mount whose agents stream is live still re-lists them in full — a safety net
+/// under the stream, which otherwise replaces the layout poll's agents read.
+const AGENTS_SAFETY_RELIST: Duration = Duration::from_secs(30);
+
 /// How long a landed create waits before re-reading: the relay acks on
 /// **enqueue**, not apply, so an immediate reload misses what was just made.
 /// 350ms is the original client's own settle.
@@ -329,6 +342,9 @@ impl TerminalController {
             lines: RwSignal::new(Vec::new()),
             agents: RwSignal::new(Vec::new()),
             agents_stale: RwSignal::new(false),
+            agent_rows: Mutex::new(Vec::new()),
+            agent_watch: Mutex::new(None),
+            agents_listed_at: Mutex::new(None),
             session_name: RwSignal::new(None),
             key_bar_visible: RwSignal::new(true),
             fn_row_visible: RwSignal::new(false),
@@ -1183,7 +1199,113 @@ impl TerminalController {
                 }
             }
         }
-        self.refresh_agents().await;
+        if self.agents_relist_due() {
+            self.refresh_agents().await;
+        } else {
+            self.publish_agent_rows();
+        }
+    }
+
+    /// Whether this refresh re-reads the agents: always without a subscription; while one is
+    /// down, which also flags [`agents_stale`](Self::agents_stale) until a read or a streamed
+    /// event confirms the list again; and every [`AGENTS_SAFETY_RELIST`] while it is live.
+    fn agents_relist_due(&self) -> bool {
+        let live = match lock(&self.agent_watch).as_ref() {
+            None => return true,
+            Some(watch) => watch.is_live(),
+        };
+        if !live {
+            if self.signals_alive() {
+                self.set_agents_stale(true);
+            }
+            return true;
+        }
+        lock(&self.agents_listed_at).is_none_or(|at| at.elapsed() >= AGENTS_SAFETY_RELIST)
+    }
+
+    /// Open the session's agents subscription when the server advertises
+    /// [`CAP_AGENTS_STREAM`]; otherwise, or if the open fails, the layout poll keeps reading
+    /// them. Events cross to the UI thread over a channel a local task drains into
+    /// [`apply_agent_event`](Self::apply_agent_event), so one lands within a frame; the stream
+    /// ending for good flags [`agents_stale`](Self::agents_stale). Stopped on dispose.
+    pub fn open_agent_watch(self: &Arc<Self>, connection: &ConnectionController) {
+        if self.session_id.is_none() || !connection.supports(CAP_AGENTS_STREAM) {
+            return;
+        }
+        let (events, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Box::new(move |event| {
+            let _ = events.send(event);
+        });
+        let handle = match self.terminal.watch_agents(sink) {
+            Ok(handle) => handle,
+            Err(failure) => {
+                log::debug!("watch_agents: {failure}");
+                return;
+            }
+        };
+        *lock(&self.agent_watch) = Some(handle);
+        let owner = Arc::downgrade(self);
+        self.core.on_dispose(move || {
+            if let Some(controller) = owner.upgrade() {
+                lock(&controller.agent_watch).take();
+            }
+        });
+        let drain = Arc::downgrade(self);
+        spawn_local(async move {
+            while let Some(event) = inbox.recv().await {
+                let Some(controller) = drain.upgrade() else {
+                    return;
+                };
+                controller.apply_agent_event(event);
+            }
+            if let Some(controller) = drain.upgrade()
+                && controller.signals_alive()
+            {
+                controller.set_agents_stale(true);
+            }
+        });
+    }
+
+    /// Apply one streamed event to [`agent_rows`](Self::agent_rows) — a snapshot replaces,
+    /// a change upserts by pane id, a removal drops — re-sort stably and publish. Supersedes
+    /// any `list_agents` still in flight; a snapshot or change clears
+    /// [`agents_stale`](Self::agents_stale). A held move claim defers only the publish.
+    pub fn apply_agent_event(&self, event: AgentEventEntry) {
+        self.agents_generation.fetch_add(1, Ordering::SeqCst);
+        let confirms = !matches!(event, AgentEventEntry::Removed(_));
+        {
+            let mut rows = lock(&self.agent_rows);
+            match event {
+                AgentEventEntry::Snapshot(agents) => *rows = agents,
+                AgentEventEntry::Changed(agent) => {
+                    match rows.iter_mut().find(|row| row.pane_id == agent.pane_id) {
+                        Some(row) => *row = *agent,
+                        None => rows.push(*agent),
+                    }
+                }
+                AgentEventEntry::Removed(pane_id) => rows.retain(|row| row.pane_id != pane_id),
+            }
+            rows.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
+        }
+        if !self.signals_alive() {
+            return;
+        }
+        if confirms {
+            self.set_agents_stale(false);
+        }
+        self.publish_agent_rows();
+    }
+
+    /// Publish [`agent_rows`](Self::agent_rows) unless a move claim holds the rows still,
+    /// read-compare-then-write.
+    fn publish_agent_rows(&self) {
+        if self.move_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        let rows = lock(&self.agent_rows).clone();
+        if self.agents.try_with_untracked(|current| *current != rows) == Some(true) {
+            self.agents.set(rows);
+        }
     }
 
     /// Re-read the session's agents and publish them sorted, read-compare-then-write.
@@ -1195,6 +1317,7 @@ impl TerminalController {
     /// claim skips this read's publish (the next refresh catches up).
     async fn refresh_agents(&self) {
         let generation = self.agents_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *lock(&self.agents_listed_at) = Some(Instant::now());
         let answer = self.terminal.list_agents().await;
         if self.agents_generation.load(Ordering::SeqCst) != generation {
             return;
@@ -1208,13 +1331,12 @@ impl TerminalController {
             }
         };
         agents.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
+        *lock(&self.agent_rows) = agents;
         if self.move_in_flight.load(Ordering::SeqCst) {
             return;
         }
         self.set_agents_stale(false);
-        if self.agents.try_with_untracked(|current| *current != agents) == Some(true) {
-            self.agents.set(agents);
-        }
+        self.publish_agent_rows();
     }
 
     /// Read-compare-then-write on [`agents_stale`](Self::agents_stale).
@@ -1727,6 +1849,11 @@ const HERDR_BACKEND: &str = "herdr:";
 /// global focus. A closure (not a method) since it owns the [`AttachSpec`].
 pub type Reattach = Rc<dyn Fn()>;
 
+/// Lock `mutex`, recovering a poisoned one: a panic elsewhere must not wedge the agents state.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The key of the tab `tabs` flags active — where the server says focus is, and so
 /// where the docked rail rests.
 fn rest_tab_key(tabs: &[TabEntry]) -> Option<String> {
@@ -1955,6 +2082,9 @@ impl LiveSession {
                 spawn_local(async move { layout.refresh_layout_from_poll().await });
             });
         }
+        // The agents come through the repository, not the feed, so any mount on a session
+        // may watch them.
+        controller.open_agent_watch(connection);
 
         Self {
             emulator,
@@ -4484,6 +4614,32 @@ mod tests {
         drop(claim);
         block_on(c.reload_tabs());
         assert_eq!(c.agents.get_untracked().len(), 1, "…until the move lands");
+    }
+
+    #[test]
+    fn a_streamed_event_under_a_held_move_claim_lands_in_the_rows_but_publishes_later() {
+        let (c, _repository) = recorded("herdr:work");
+        c.apply_agent_event(AgentEventEntry::Snapshot(vec![
+            agent(10, "alpha", "ws-1", AgentStatus::Working, 1),
+            agent(11, "alpha", "ws-1", AgentStatus::Idle, 2),
+        ]));
+        assert_eq!(c.agents.get_untracked().len(), 2);
+
+        let claim = c.claim_move().expect("free");
+        let blocked = agent(11, "alpha", "ws-1", AgentStatus::Blocked, 3);
+        c.apply_agent_event(AgentEventEntry::Changed(Box::new(blocked)));
+        assert_eq!(
+            c.agents.get_untracked()[0].pane_id,
+            10,
+            "the rows hold still"
+        );
+        drop(claim);
+        c.publish_agent_rows();
+        assert_eq!(
+            c.agents.get_untracked()[0].pane_id,
+            11,
+            "the change was kept"
+        );
     }
 
     #[test]

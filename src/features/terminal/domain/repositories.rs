@@ -22,15 +22,52 @@
 pub use crate::features::sessions::domain::repositories::SessionsRepository;
 pub use crate::features::settings::domain::repositories::PreferencesRepository;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
-    AgentEntry, ScrollStep, Space, TabEntry, TermLine,
+    AgentEntry, AgentEventEntry, ScrollStep, Space, TabEntry, TermLine,
 };
 
 /// The failure every default verb below answers with — see the [module
 /// docs](self)' "Workspace verbs" section for why it is always this shape.
 fn unsupported(verb: &str) -> AppFailure {
     AppFailure::Internal(format!("{verb} is not supported by this repository"))
+}
+
+/// Where [`TerminalRepository::watch_agents`] delivers events. Called off the UI thread by a
+/// real stream, so it must not touch a signal itself.
+pub type AgentSink = Box<dyn Fn(AgentEventEntry) + Send>;
+
+/// An open [`TerminalRepository::watch_agents`] subscription. **Dropping it stops the stream.**
+pub struct WatchHandle {
+    live: Arc<AtomicBool>,
+    stop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl WatchHandle {
+    /// A handle whose stream is open while `live` holds, and which runs `stop` once on drop.
+    pub fn new(live: Arc<AtomicBool>, stop: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            live,
+            stop: Some(Box::new(stop)),
+        }
+    }
+
+    /// Whether a stream is delivering right now: `false` while a reconnect waits out its
+    /// backoff, and for good once the subscription has given up.
+    pub fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop();
+        }
+    }
 }
 
 /// Read access to the attached session's tab/pane world, the two switches the
@@ -64,6 +101,13 @@ pub trait TerminalRepository {
     /// an unbound repository, answers empty rather than failing. Default: empty.
     async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
         Ok(Vec::new())
+    }
+
+    /// Subscribe to the bound session's agents: an opening [`AgentEventEntry::Snapshot`], then
+    /// deltas, into `sink` until the returned handle drops. Default: unsupported, which leaves
+    /// the caller polling [`list_agents`](Self::list_agents).
+    fn watch_agents(&self, _sink: AgentSink) -> Result<WatchHandle, AppFailure> {
+        Err(unsupported("watch_agents"))
     }
 
     /// The scrollback the tab keyed `key` currently shows.
@@ -228,6 +272,27 @@ mod tests {
             block_on(repo.scroll_pane(1, false, ScrollStep::Up)),
             Err(AppFailure::Internal(_))
         ));
+    }
+
+    #[test]
+    fn watch_agents_defaults_to_unsupported() {
+        let answer = BareRepository.watch_agents(Box::new(|_| {}));
+        assert!(matches!(answer, Err(AppFailure::Internal(_))));
+    }
+
+    #[test]
+    fn a_watch_handle_reports_its_liveness_and_stops_once_on_drop() {
+        let live = Arc::new(AtomicBool::new(true));
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&stops);
+        let handle = WatchHandle::new(Arc::clone(&live), move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(handle.is_live());
+        live.store(false, Ordering::Release);
+        assert!(!handle.is_live());
+        drop(handle);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
 
     #[test]
