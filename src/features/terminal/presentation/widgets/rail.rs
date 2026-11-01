@@ -32,6 +32,7 @@ use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
+use super::agents_section::tree_split;
 use super::side_sheet_tree::SPACE_DIAMOND;
 use super::util::{centered_row, h_gap, read_only_badge, sized, v_gap};
 
@@ -84,17 +85,24 @@ pub(crate) struct RailHead<'a> {
     pub summary: String,
     pub link: Option<LinkStatus>,
     pub read_only: bool,
+    /// An agent is waiting on the user: `needs you` stands where `running` would.
+    pub needs_you: bool,
 }
 
 /// The header's small line: `N spaces · M panes` on herdr, `N tabs · M panes`
-/// on zellij, counting the panes of the tabs this client has read.
-pub(crate) fn rail_summary(spaces: Option<usize>, tabs: &[TabEntry]) -> String {
+/// on zellij, counting the panes of the tabs this client has read, then
+/// `· K agents` when the session runs any.
+pub(crate) fn rail_summary(spaces: Option<usize>, tabs: &[TabEntry], agents: usize) -> String {
     let panes: usize = tabs.iter().map(|tab| tab.panes.len()).sum();
     let (count, unit) = match spaces {
         Some(spaces) => (spaces, "space"),
         None => (tabs.len(), "tab"),
     };
-    format!("{} \u{b7} {}", plural(count, unit), plural(panes, "pane"))
+    let summary = format!("{} \u{b7} {}", plural(count, unit), plural(panes, "pane"));
+    if agents == 0 {
+        return summary;
+    }
+    format!("{summary} \u{b7} {}", plural(agents, "agent"))
 }
 
 fn plural(count: usize, unit: &str) -> String {
@@ -103,9 +111,11 @@ fn plural(count: usize, unit: &str) -> String {
 }
 
 /// The status chip: the attached stream's link, or `running` for a session
-/// with no stream to report (the mock transcript).
-fn status_chip(link: Option<LinkStatus>) -> (&'static str, BadgeVariant) {
+/// with no stream to report (the mock transcript) — `needs you` instead of
+/// `running` while an agent waits on the user. A link problem still wins.
+fn status_chip(link: Option<LinkStatus>, needs_you: bool) -> (&'static str, BadgeVariant) {
     match link {
+        None | Some(LinkStatus::Connected) if needs_you => ("needs you", BadgeVariant::Warning),
         None | Some(LinkStatus::Connected) => ("running", BadgeVariant::Success),
         Some(LinkStatus::Idle | LinkStatus::Reconnecting) => ("connecting", BadgeVariant::Warning),
         Some(LinkStatus::Disconnected) => ("offline", BadgeVariant::Error),
@@ -113,18 +123,25 @@ fn status_chip(link: Option<LinkStatus>) -> (&'static str, BadgeVariant) {
     }
 }
 
-/// The full rail: header, the scrolling `tree`, and the footer's tip and one
+/// The full rail: header, the scrolling `tree` (over the scrolling `agents`
+/// half when there is one — [`tree_split`]), and the footer's tip and one
 /// `detach` button. `top` clears a status-bar inset the app bar no longer does.
-pub(crate) fn docked_rail<State: 'static, Tree: View<State>, Detach: Fn(&mut State) + 'static>(
+pub(crate) fn docked_rail<
+    State: 'static,
+    Tree: View<State>,
+    Agents: View<State>,
+    Detach: Fn(&mut State) + 'static,
+>(
     head: &RailHead<'_>,
     tree: Tree,
+    agents: Option<Agents>,
     top: f64,
     on_detach: Detach,
-) -> impl View<State> + use<State, Tree, Detach> {
+) -> impl View<State> + use<State, Tree, Agents, Detach> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
 
-    let (status, variant) = status_chip(head.link);
+    let (status, variant) = status_chip(head.link, head.needs_you);
     let mut chips = vec![
         flexible(
             1,
@@ -163,7 +180,7 @@ pub(crate) fn docked_rail<State: 'static, Tree: View<State>, Detach: Fn(&mut Sta
         .child(SizedBox::<State>(None, Some(top)))
         .child(Padding(HEAD_PAD, centered_row(chips)))
         .child(rule(None, Some(HAIRLINE), &colors))
-        .flex(1, scroll_view(Padding(TREE_PAD, tree)))
+        .flex(1, tree_split(Padding(TREE_PAD, tree), agents))
         .child(rule(None, Some(HAIRLINE), &colors))
         .child(Padding(FOOT_PAD, footer))
         .cross_axis(CrossAxisAlignment::Stretch);
@@ -316,18 +333,18 @@ fn rule<State: 'static>(
 /// `child` (a tap target) published to accessibility as a button named `label`
 /// — a bare [`GestureDetector`] draws and taps but is invisible to a screen
 /// reader, and the badge inside carries only the tab's index.
-fn labelled_button<V>(label: String, child: V) -> LabelledButtonView<V> {
+pub(crate) fn labelled_button<V>(label: String, child: V) -> LabelledButtonView<V> {
     LabelledButtonView { label, child }
 }
 
 /// The declarative half of [`labelled_button`].
-struct LabelledButtonView<V> {
+pub(crate) struct LabelledButtonView<V> {
     label: String,
     child: V,
 }
 
 /// The retained half of a [`labelled_button`].
-struct LabelledButtonWidget {
+pub(crate) struct LabelledButtonWidget {
     label: String,
     child: ChildPod,
 }
@@ -400,6 +417,7 @@ mod tests {
             pane_path: String::new(),
             panes: (0..panes)
                 .map(|id| PaneEntry {
+                    agent: None,
                     id: id as u32,
                     title: String::new(),
                     cwd: String::new(),
@@ -422,21 +440,53 @@ mod tests {
     #[test]
     fn the_summary_counts_spaces_on_herdr_and_tabs_on_zellij() {
         let tabs = vec![tab("a", 2), tab("b", 1)];
-        assert_eq!(rail_summary(Some(3), &tabs), "3 spaces \u{b7} 3 panes");
-        assert_eq!(rail_summary(None, &tabs), "2 tabs \u{b7} 3 panes");
-        assert_eq!(rail_summary(Some(1), &tabs[1..]), "1 space \u{b7} 1 pane");
+        assert_eq!(rail_summary(Some(3), &tabs, 0), "3 spaces \u{b7} 3 panes");
+        assert_eq!(rail_summary(None, &tabs, 0), "2 tabs \u{b7} 3 panes");
+        assert_eq!(
+            rail_summary(Some(1), &tabs[1..], 0),
+            "1 space \u{b7} 1 pane"
+        );
+    }
+
+    #[test]
+    fn the_summary_counts_agents_only_when_there_are_any() {
+        let tabs = vec![tab("a", 2), tab("b", 1)];
+        assert_eq!(
+            rail_summary(None, &tabs, 4),
+            "2 tabs \u{b7} 3 panes \u{b7} 4 agents"
+        );
+        assert_eq!(
+            rail_summary(Some(1), &tabs, 1),
+            "1 space \u{b7} 3 panes \u{b7} 1 agent"
+        );
+    }
+
+    #[test]
+    fn a_blocked_agent_turns_running_into_needs_you_but_never_hides_a_link_problem() {
+        assert_eq!(
+            status_chip(None, true),
+            ("needs you", BadgeVariant::Warning)
+        );
+        assert_eq!(
+            status_chip(Some(LinkStatus::Connected), true).0,
+            "needs you"
+        );
+        assert_eq!(
+            status_chip(Some(LinkStatus::Disconnected), true).0,
+            "offline"
+        );
     }
 
     #[test]
     fn the_status_chip_reads_the_link_and_a_streamless_session_as_running() {
-        assert_eq!(status_chip(None).0, "running");
-        assert_eq!(status_chip(Some(LinkStatus::Connected)).0, "running");
+        assert_eq!(status_chip(None, false).0, "running");
+        assert_eq!(status_chip(Some(LinkStatus::Connected), false).0, "running");
         assert_eq!(
-            status_chip(Some(LinkStatus::Reconnecting)).1,
+            status_chip(Some(LinkStatus::Reconnecting), false).1,
             BadgeVariant::Warning
         );
         assert_eq!(
-            status_chip(Some(LinkStatus::Disconnected)).1,
+            status_chip(Some(LinkStatus::Disconnected), false).1,
             BadgeVariant::Error
         );
     }

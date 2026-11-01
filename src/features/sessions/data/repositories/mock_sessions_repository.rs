@@ -40,6 +40,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::agents::{AgentSummary, PREVIEW_AGENT_MARKS};
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
     CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionBackend,
@@ -88,6 +89,18 @@ impl MockSessionsRepository {
             .find(|s| s.name == name)
             .unwrap_or_else(|| panic!("churn: no session named {name:?}"));
         session.layout.panes += 1;
+    }
+
+    /// Test seam: sets the agent roll-up of the session with id `id`, the way
+    /// the daemon's agent census changes between polls. Panics when there is
+    /// no such session.
+    pub fn seed_agents_for_tests(&self, id: &str, agents: Option<AgentSummary>) {
+        let mut sessions = self.lock();
+        let session = sessions
+            .iter_mut()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("seed_agents_for_tests: no session with id {id:?}"));
+        session.agents = agents;
     }
 
     /// The store, with a poisoned lock recovered rather than propagated: a
@@ -210,6 +223,7 @@ fn seed() -> Vec<Session> {
                 ],
                 space: None,
             },
+            agents: None,
         },
         Session {
             id: session_id(SessionBackend::Zellij, "jumping-peach"),
@@ -227,6 +241,7 @@ fn seed() -> Vec<Session> {
                 tabs_detail: Vec::new(),
                 space: None,
             },
+            agents: None,
         },
         Session {
             id: session_id(SessionBackend::Herdr, "herdr"),
@@ -263,6 +278,9 @@ fn seed() -> Vec<Session> {
                 ],
                 space: Some("home".to_string()),
             },
+            agents: Some(AgentSummary::from_statuses(
+                PREVIEW_AGENT_MARKS.iter().copied(),
+            )),
         },
     ]
 }
@@ -294,6 +312,7 @@ fn new_session(name: String, backend: SessionBackend) -> Session {
             )],
             space: None,
         },
+        agents: None,
     }
 }
 
@@ -431,6 +450,32 @@ mod tests {
         assert_eq!(sessions[2].layout.third, ThirdMetric::Spaces(5));
         assert_eq!(sessions[2].layout.panes, 3);
         assert_eq!(sessions[2].layout.tabs, 2);
+
+        // Agents — only the herdr session carries a roll-up.
+        assert_eq!(sessions[0].agents, None);
+        assert_eq!(sessions[1].agents, None);
+        let agents = sessions[2].agents.as_ref().expect("herdr agents");
+        assert_eq!((agents.total, agents.blocked, agents.done), (4, 1, 1));
+        assert_eq!((agents.working, agents.idle, agents.unknown), (1, 1, 0));
+        assert_eq!(agents.kinds, ["claude", "codex", "gemini"]);
+    }
+
+    #[test]
+    fn seed_agents_for_tests_overrides_one_sessions_summary() {
+        let repo = MockSessionsRepository::seeded();
+        repo.seed_agents_for_tests(SEEDED_HERDR_ID, None);
+        repo.seed_agents_for_tests(
+            SEEDED_DEV_ID,
+            Some(AgentSummary {
+                total: 1,
+                idle: 1,
+                kinds: vec!["claude".to_string()],
+                ..AgentSummary::default()
+            }),
+        );
+        let sessions = repo.snapshot();
+        assert_eq!(sessions[2].agents, None);
+        assert_eq!(sessions[0].agents.as_ref().map(|a| a.total), Some(1));
     }
 
     #[test]

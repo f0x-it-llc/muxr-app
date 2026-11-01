@@ -22,6 +22,10 @@
 //! untouched by it) — belongs to a serialized suite, since a suite reaches this store only as the
 //! `Arc<dyn TerminalRepository>` its `di` published, and is process-global.
 //!
+//! **Agents.** A store never seeded answers [`default_agents_for_preview`] (what the desktop
+//! preview shows, matching the sessions mock's herdr roll-up); the mock is session-agnostic, so a
+//! zellij session's terminal lists those agents too.
+//!
 //! Failure mapping: an unknown tab key, space id or blank session id maps to
 //! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just rendered.
 //! [`MOCK_LATENCY`] is a short sleep before every call, so the screen's async path is the one the
@@ -29,10 +33,14 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::agents::PREVIEW_AGENT_MARKS;
 use crate::failure::AppFailure;
-use crate::features::terminal::domain::entities::{PaneEntry, Space, TabEntry, TermLine};
+use crate::features::terminal::domain::entities::{
+    AgentEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
+};
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
@@ -82,6 +90,138 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
         active: false,
         has_bell: false,
     }
+}
+
+/// The agents [`seed_agents`] publishes — process-global like [`TEST_TABS`]. `None` (never
+/// seeded) answers [`default_agents_for_preview`]; [`clear_test_agents`] stores an empty `Some`.
+static TEST_AGENTS: Mutex<Option<Vec<AgentEntry>>> = Mutex::new(None);
+
+/// Whether the next `list_agents` answers an error — see [`fail_next_list_agents_for_tests`].
+static FAIL_NEXT_LIST_AGENTS: AtomicBool = AtomicBool::new(false);
+
+/// Extra milliseconds the next `list_agents` sleeps — see [`delay_next_list_agents_for_tests`].
+static DELAY_NEXT_LIST_AGENTS_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Make the next `list_agents` answer an error. Test-only seam; never called by production code.
+pub fn fail_next_list_agents_for_tests() {
+    FAIL_NEXT_LIST_AGENTS.store(true, Ordering::SeqCst);
+}
+
+/// Make the next `list_agents` land `by` later than usual, its answer snapshotted before the
+/// wait. Test-only seam; never called by production code.
+pub fn delay_next_list_agents_for_tests(by: Duration) {
+    let millis = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+    DELAY_NEXT_LIST_AGENTS_MS.store(millis, Ordering::SeqCst);
+}
+
+/// The four agents the desktop preview shows, [`PREVIEW_AGENT_MARKS`] given names, a pane
+/// each in the seeded tab world, and a line of context — the same inventory the sessions
+/// mock's herdr summary rolls up.
+pub fn default_agents_for_preview() -> Vec<AgentEntry> {
+    let details = [
+        (
+            "reviewer",
+            ("forgekit", "minefit", 2, 20),
+            "Waiting for approval to run the migration",
+            "~/api",
+            4,
+        ),
+        (
+            "planner",
+            ("forgekit", "gohora", 3, 30),
+            "Finished the refactor plan",
+            "~/src",
+            3,
+        ),
+        (
+            "scout",
+            ("forgekit", "devbox", 4, 40),
+            "Reading the build logs",
+            "/home/ed",
+            2,
+        ),
+        (
+            "notes",
+            ("zelli_mobile", "logs", 101, 10),
+            "Idle since the last summary",
+            "~/logs",
+            1,
+        ),
+    ];
+    PREVIEW_AGENT_MARKS
+        .iter()
+        .zip(details)
+        .map(
+            |(
+                &(status, kind),
+                (name, (space, tab_key, tab_id, pane_id), summary, cwd, change_seq),
+            )| {
+                AgentEntry {
+                    pane_id,
+                    tab_id,
+                    tab_key: tab_key.to_string(),
+                    space_id: Some(space.to_string()),
+                    space_name: Some(space.to_string()),
+                    tab_name: tab_key.to_string(),
+                    kind: kind.to_string(),
+                    name: Some(name.to_string()),
+                    display_kind: None,
+                    status,
+                    title: Some(format!("{kind} \u{b7} {name}")),
+                    summary: Some(summary.to_string()),
+                    cwd: Some(cwd.to_string()),
+                    focused: false,
+                    change_seq,
+                }
+            },
+        )
+        .collect()
+}
+
+/// Replace the agent inventory every later `list_agents` answers, and mark the pane each one
+/// targets (matched by pane id and tab id) in every later tab/pane read. Never called by
+/// production code.
+pub fn seed_agents(agents: Vec<AgentEntry>) {
+    *lock_test_agents() = Some(agents);
+}
+
+/// Drop every seeded agent — a suite's own teardown and setup.
+pub fn clear_test_agents() {
+    *lock_test_agents() = Some(Vec::new());
+}
+
+fn lock_test_agents() -> std::sync::MutexGuard<'static, Option<Vec<AgentEntry>>> {
+    TEST_AGENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The inventory `list_agents` and [`mark_agents`] both read: the seeded one, else the default.
+fn resolved_agents() -> Vec<AgentEntry> {
+    lock_test_agents()
+        .clone()
+        .unwrap_or_else(default_agents_for_preview)
+}
+
+/// Stamp `PaneEntry.agent` on each pane a seeded agent targets.
+fn mark_agents(mut tabs: Vec<TabEntry>) -> Vec<TabEntry> {
+    let agents = resolved_agents();
+    if agents.is_empty() {
+        return tabs;
+    }
+    for tab in &mut tabs {
+        for pane in &mut tab.panes {
+            pane.agent = agents
+                .iter()
+                .find(|a| a.pane_id == pane.id && a.tab_id == tab.tab_id)
+                .map(|a| AgentMark {
+                    kind: a.kind.clone(),
+                    name: a.name.clone(),
+                    status: a.status,
+                });
+        }
+    }
+    tabs
 }
 
 /// The most verbs [`VERB_LOG`] keeps.
@@ -170,7 +310,7 @@ impl MockTerminalRepository {
             .and_then(|id| self.lock_tabs().get(&id).cloned())
             .unwrap_or_default();
         tabs.extend(lock_test_tabs().iter().cloned());
-        tabs
+        mark_agents(tabs)
     }
 
     /// The store, with a poisoned lock recovered rather than propagated: a
@@ -318,6 +458,7 @@ fn seed_tabs_by_space() -> HashMap<String, Vec<TabEntry>> {
 /// what a tap's focus-or-keyboard verdict turns on.
 fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
     let pane = |id: u32, title: String, focused: bool, x: u32| PaneEntry {
+        agent: None,
         id,
         title,
         cwd: path.to_string(),
@@ -394,7 +535,19 @@ impl TerminalRepository for MockTerminalRepository {
                 "list_tabs_in_space: no space {space_id}"
             )));
         }
-        Ok(self.lock_tabs().get(space_id).cloned().unwrap_or_default())
+        Ok(mark_agents(
+            self.lock_tabs().get(space_id).cloned().unwrap_or_default(),
+        ))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
+        let answer = resolved_agents();
+        let delay = DELAY_NEXT_LIST_AGENTS_MS.swap(0, Ordering::SeqCst);
+        clean_signals::time::sleep(MOCK_LATENCY + Duration::from_millis(delay)).await;
+        if FAIL_NEXT_LIST_AGENTS.swap(false, Ordering::SeqCst) {
+            return Err(AppFailure::Internal("list_agents: seeded failure".into()));
+        }
+        Ok(answer)
     }
 
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -474,7 +627,7 @@ impl TerminalRepository for MockTerminalRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::terminal::domain::entities::TermLineKind;
+    use crate::features::terminal::domain::entities::{AgentStatus, TermLineKind};
 
     /// Drive one repository call to completion on a current-thread runtime —
     /// a pure data-layer test, with no frust runtime in play.
@@ -484,6 +637,71 @@ mod tests {
             .build()
             .expect("a current-thread runtime")
             .block_on(fut)
+    }
+
+    #[test]
+    fn seeded_agents_round_trip_and_mark_their_pane() {
+        let repo = MockTerminalRepository::seeded();
+        clear_test_agents();
+        assert!(block_on(repo.list_agents()).expect("ok").is_empty());
+
+        let tab = block_on(repo.list_tabs()).expect("tabs").remove(0);
+        let agent = AgentEntry {
+            pane_id: tab.panes[0].id,
+            tab_id: tab.tab_id,
+            tab_key: tab.key.clone(),
+            space_id: None,
+            space_name: None,
+            tab_name: tab.label.clone(),
+            kind: "claude".to_string(),
+            name: None,
+            display_kind: None,
+            status: AgentStatus::Working,
+            title: None,
+            summary: None,
+            cwd: None,
+            focused: true,
+            change_seq: 1,
+        };
+        seed_agents(vec![agent.clone()]);
+        assert_eq!(block_on(repo.list_agents()).expect("ok"), vec![agent]);
+        let marked = block_on(repo.list_tabs()).expect("tabs").remove(0);
+        let mark = marked.panes[0].agent.as_ref().expect("marked");
+        assert_eq!(
+            (mark.kind.as_str(), mark.status),
+            ("claude", AgentStatus::Working)
+        );
+        assert!(marked.panes[1].agent.is_none());
+
+        clear_test_agents();
+        assert!(block_on(repo.list_agents()).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn every_default_preview_agent_points_at_a_real_pane_and_its_tab_key() {
+        let repo = MockTerminalRepository::seeded();
+        let agents = default_agents_for_preview();
+        let mut panes = std::collections::HashSet::new();
+        for agent in &agents {
+            let space = agent.space_id.clone().expect("a space");
+            let tabs = block_on(repo.list_tabs_in_space(&space)).expect("tabs");
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.tab_id == agent.tab_id)
+                .unwrap_or_else(|| panic!("{}: no tab {}", agent.display_name(), agent.tab_id));
+            assert_eq!(tab.key, agent.tab_key, "{}", agent.display_name());
+            assert!(
+                tab.panes.iter().any(|pane| pane.id == agent.pane_id),
+                "{}: no pane {}",
+                agent.display_name(),
+                agent.pane_id
+            );
+            assert!(
+                panes.insert((space, agent.tab_id, agent.pane_id)),
+                "one agent per pane"
+            );
+        }
+        assert_eq!(agents.len(), 4);
     }
 
     #[test]

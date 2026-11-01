@@ -50,7 +50,9 @@ use frust_glyph::{
     BadgeVariant, MenuEntry, RevealGuide, badge, glyph_chevron, glyph_reveal, menu_item,
 };
 
+use crate::agents::AgentStatus;
 use crate::features::terminal::domain::entities::{PaneEntry, Space, TabEntry};
+use crate::ui::agent_marks::{kind_tile, status_dot};
 use crate::ui::paint::{DASH_OFF, DASH_ON, HAIRLINE, RADIUS_FULL};
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::spacing;
@@ -75,6 +77,8 @@ const TAB_BADGE_BOX: f64 = 15.0;
 const TAB_BADGE_RADIUS: f64 = 4.0;
 /// `.pane-icon{width:17px;height:17px}`.
 const PANE_MARK_BOX: f64 = 17.0;
+/// The kind tile standing in for a pane's mark while an agent runs there.
+const PANE_TILE: f64 = 20.0;
 /// `.pane-focused-chip` — the mock's 8px `●`, drawn rather than typeset.
 const FOCUS_DOT: f64 = 5.0;
 /// `.pane-row .row-path{max-width:64px}` — a fixed band rather than a maximum:
@@ -361,6 +365,16 @@ struct RowLabel<'a> {
     size: f32,
     ink: Color,
     meta: Option<String>,
+    /// The worst agent status under the row, drawn as a dot before the count.
+    rollup: Option<AgentStatus>,
+}
+
+/// The most urgent status among `panes`' agents — a tab's (and a space's)
+/// roll-up dot. `None` when no pane runs an agent.
+fn worst_status<'a>(panes: impl Iterator<Item = &'a PaneEntry>) -> Option<AgentStatus> {
+    panes
+        .filter_map(|pane| pane.agent.as_ref().map(|agent| agent.status))
+        .max_by_key(|status| status.priority())
 }
 
 /// The side sheet's tree body, top to bottom: a group per space (or, with no
@@ -465,7 +479,16 @@ fn space_group<State: 'static>(
 ) -> impl View<State> {
     let expanded = data.expanded_space == Some(space.id.as_str());
     let tabs = data.tabs_of(space);
-    let head = space_row(space, tabs.map(<[TabEntry]>::len), expanded, tones, actions);
+    // Only from tabs this client has read; an unread space draws no dot.
+    let rollup = tabs.and_then(|tabs| worst_status(tabs.iter().flat_map(|tab| &tab.panes)));
+    let head = space_row(
+        space,
+        tabs.map(<[TabEntry]>::len),
+        rollup,
+        expanded,
+        tones,
+        actions,
+    );
 
     let mut kids: Vec<AnyView<State>> = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
     match tabs {
@@ -559,6 +582,7 @@ fn tab_group<State: 'static>(
 fn space_row<State: 'static>(
     space: &Space,
     tab_count: Option<usize>,
+    rollup: Option<AgentStatus>,
     expanded: bool,
     tones: &Tones<'_>,
     actions: &TreeActions<State>,
@@ -576,6 +600,7 @@ fn space_row<State: 'static>(
             size: SPACE_NAME_SIZE,
             ink: tones.colors.fg,
             meta: tab_count.map(|count| count_label(count, "tab")),
+            rollup,
         },
         None::<AnyView<State>>,
         expanded,
@@ -670,6 +695,7 @@ fn tab_row<State: 'static>(
             // A promoted tab stands where a space's card does, so it carries the
             // same trailing count — of what it actually holds.
             meta: promoted.then(|| count_label(tab.panes.len(), "pane")),
+            rollup: worst_status(tab.panes.iter()),
         },
         bell,
         expanded,
@@ -721,12 +747,17 @@ fn pane_row<State: 'static>(
         colors.fg
     };
 
-    let mut children: Vec<FlexChild<State>> = vec![
-        inflexible(
+    // An agent's kind tile stands in for the plain mark.
+    let leading = match &pane.agent {
+        Some(agent) => Either::Left(kind_tile::<State>(&agent.kind, PANE_TILE)),
+        None => Either::Right(
             container(SizedBox::<State>(Some(PANE_MARK_BOX), Some(PANE_MARK_BOX)))
                 .fill(mark)
                 .radius(RADIUS_FULL),
         ),
+    };
+    let mut children: Vec<FlexChild<State>> = vec![
+        inflexible(leading),
         h_gap(ROW_GAP),
         flexible(
             1,
@@ -766,7 +797,12 @@ fn pane_row<State: 'static>(
             ),
         ));
     }
-    if pane.focused {
+    // The agent's status takes the trailing dot's place: the row's own wash
+    // already says it is focused.
+    if let Some(agent) = &pane.agent {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(status_dot::<State>(agent.status)));
+    } else if pane.focused {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(
             container(SizedBox::<State>(Some(FOCUS_DOT), Some(FOCUS_DOT)))
@@ -830,6 +866,10 @@ fn disclosure_row<State: 'static>(
     if let Some(mark) = mark {
         children.push(h_gap(ROW_GAP));
         children.push(inflexible(mark));
+    }
+    if let Some(status) = label.rollup {
+        children.push(h_gap(ROW_GAP));
+        children.push(inflexible(status_dot::<State>(status)));
     }
     if let Some(meta) = label.meta {
         children.push(h_gap(ROW_GAP));
@@ -1118,6 +1158,7 @@ mod tests {
 
     fn pane(id: u32, title: &str, focused: bool) -> PaneEntry {
         PaneEntry {
+            agent: None,
             id,
             title: title.to_string(),
             cwd: "/home/ed".to_string(),
@@ -1614,6 +1655,84 @@ mod tests {
             Duration::from_secs_f64(0.220)
         );
         assert!(cascade_settle(8, 220.0, false) > Duration::from_secs_f64(0.220));
+    }
+
+    #[test]
+    fn an_agents_pane_wears_its_kind_tile_and_status_dot_and_its_tab_and_space_the_rollup() {
+        use crate::features::terminal::domain::entities::AgentMark;
+        let spaces = vec![space("ws-1", true)];
+        let mut tabs = tabs();
+        tabs[1].panes[1].agent = Some(AgentMark {
+            kind: "claude".to_string(),
+            name: None,
+            status: AgentStatus::Blocked,
+        });
+        let acts = actions(false);
+        let mut logic = |_state: &mut Log| {
+            tree_body(
+                &TreeData {
+                    spaces: &spaces,
+                    tabs: &tabs,
+                    browsed: None,
+                    expanded_space: Some("ws-1"),
+                    expanded_tab: Some("devbox"),
+                    has_spaces: true,
+                },
+                &acts,
+                TreeMode::Sheet,
+            )
+        };
+        let mut rig = Rig::new();
+        let rec = rig.frame(&mut logic, 0.0);
+        let warning = Palette::from_theme(&active_theme()).warning;
+        let dots = rec
+            .rounded
+            .iter()
+            .filter(|(_, size, _, fill)| {
+                *fill == warning && size.width == crate::ui::agent_marks::DOT
+            })
+            .count();
+        assert_eq!(
+            dots, 3,
+            "the pane's own dot, its tab's and its space's rollup"
+        );
+        let tiles = rec
+            .rounded
+            .iter()
+            .filter(|(_, size, _, _)| size.width == PANE_TILE && size.height == PANE_TILE)
+            .count();
+        assert_eq!(tiles, 1, "the kind tile replaces the pane's plain mark");
+        let labels: Vec<String> = rig
+            .root
+            .semantics()
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().map(str::to_string))
+            .collect();
+        assert!(labels.iter().any(|l| l == "C"), "{labels:?}");
+    }
+
+    #[test]
+    fn the_worst_status_wins_the_rollup_and_no_agent_draws_none() {
+        use crate::features::terminal::domain::entities::AgentMark;
+        let mut panes = [
+            pane(1, "a", false),
+            pane(2, "b", false),
+            pane(3, "c", false),
+        ];
+        assert_eq!(worst_status(panes.iter()), None);
+        for (pane, status) in
+            panes
+                .iter_mut()
+                .zip([AgentStatus::Idle, AgentStatus::Done, AgentStatus::Working])
+        {
+            pane.agent = Some(AgentMark {
+                kind: "codex".to_string(),
+                name: None,
+                status,
+            });
+        }
+        assert_eq!(worst_status(panes.iter()), Some(AgentStatus::Done));
     }
 
     #[test]

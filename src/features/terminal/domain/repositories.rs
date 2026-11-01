@@ -23,7 +23,9 @@ pub use crate::features::sessions::domain::repositories::SessionsRepository;
 pub use crate::features::settings::domain::repositories::PreferencesRepository;
 
 use crate::failure::AppFailure;
-use crate::features::terminal::domain::entities::{ScrollStep, Space, TabEntry, TermLine};
+use crate::features::terminal::domain::entities::{
+    AgentEntry, ScrollStep, Space, TabEntry, TermLine,
+};
 
 /// The failure every default verb below answers with — see the [module
 /// docs](self)' "Workspace verbs" section for why it is always this shape.
@@ -55,6 +57,13 @@ pub trait TerminalRepository {
     /// Default: a bare [`list_tabs`](Self::list_tabs) call.
     async fn list_tabs_in_space(&self, _space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
         self.list_tabs().await
+    }
+
+    /// Every AI agent running in the bound session, **session-wide across all its spaces** (not
+    /// just the space this connection views), most urgent first. A backend without agents, or
+    /// an unbound repository, answers empty rather than failing. Default: empty.
+    async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
+        Ok(Vec::new())
     }
 
     /// The scrollback the tab keyed `key` currently shows.

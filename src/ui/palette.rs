@@ -86,7 +86,7 @@ pub fn inked(style: &TextStyle, color: Color) -> TextStyle {
 
 /// `tint` at `alpha` composited over the opaque `base` — the colour the GPU
 /// would show for the translucent wash, folded into one opaque fill.
-fn washed(base: Color, tint: Color, alpha: f32) -> Color {
+pub(crate) fn washed(base: Color, tint: Color, alpha: f32) -> Color {
     let (b, t) = (base.components, tint.components);
     let mix = |i: usize| b[i] * (1.0 - alpha) + t[i] * alpha;
     Color::new([mix(0), mix(1), mix(2), 1.0])
