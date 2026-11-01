@@ -241,7 +241,7 @@ fn selected_detail(
             any(tree_card(session, full, colors)),
         ],
     };
-    let mut cards = cards;
+    let mut cards = cards; // erasure: keep accumulator into Vec<AnyView>
     if kind != BodyKind::Resurrect && !agents.is_empty() {
         // Above the spaces/tabs/panes card, which is last in `Full`.
         let at = cards.len() - usize::from(kind == BodyKind::Full);
@@ -690,10 +690,8 @@ fn agents_section(id: &str, agents: &[SessionAgent], colors: &Palette) -> impl V
         .iter()
         .map(|agent| agent_row(id, agent, colors))
         .collect();
-    gapped_column(
-        vec![any(centered_row(head)), any(gapped_column(rows, AGENT_GAP))],
-        HEAD_GAP,
-    )
+    let parts = vec![any(centered_row(head)), any(gapped_column(rows, AGENT_GAP))]; // erasure: keep accumulator into Vec<AnyView>
+    gapped_column(parts, HEAD_GAP)
 }
 
 /// `space › tab › p<pane>`, the space left out when the agent reports none.
