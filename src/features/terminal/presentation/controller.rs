@@ -15,7 +15,9 @@
 //! [`publish_tabs`](TerminalController::publish_tabs), a self-healing active
 //! key, and single-flight claims on the poll, on creates, and on every **move**
 //! — the sheet's commit and the space switches share one claim, since either
-//! can move the tab world out from under the other.
+//! can move the tab world out from under the other. The agents read keeps its own
+//! generation, and a failed newest read flips [`agents_stale`](TerminalController::agents_stale),
+//! muting [`has_blocked_agent`](TerminalController::has_blocked_agent).
 //!
 //! **The tree sheet's own browse state** is id-keyed
 //! ([`expanded_space`](TerminalController::expanded_space)/
@@ -41,14 +43,16 @@ use std::time::Duration;
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
 use frust::authoring::text::FontFamily;
-use frust::{Get, GetUntracked, RwSignal, Set, WithUntracked, spawn_local};
+use frust::{Get, GetUntracked, RwSignal, Set, With, WithUntracked, spawn_local};
 
+use crate::agents::{AgentStatus, agent_sort_key};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::data::feeds::grpc_feed::{GrpcTerminalFeed, ResumeSlot};
 use crate::features::terminal::domain::entities::{
-    PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry, TermLine, Workspace,
+    AgentEntry, PaneEntry, RenameRequest, ScrollStep, SettingsCursorStyle, Space, TabEntry,
+    TermLine, Workspace,
 };
 use crate::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use crate::features::terminal::domain::repositories::{
@@ -100,6 +104,14 @@ pub struct TerminalController {
     pub browsed_space_tabs: RwSignal<Option<(String, Vec<TabEntry>)>>,
     /// The active tab's lines — what the card's body prints.
     pub lines: RwSignal<Vec<TermLine>>,
+    /// Every AI agent in the attached session, session-wide, ordered by
+    /// [`agent_sort_key`] — the tree's agents half. Re-read with every tab
+    /// refresh ([`refresh_agents`](Self::refresh_agents)).
+    pub agents: RwSignal<Vec<AgentEntry>>,
+    /// Whether the last newest-generation `list_agents` failed, so
+    /// [`agents`](Self::agents) is a list the daemon could not confirm. The rows stay
+    /// published; [`has_blocked_agent`](Self::has_blocked_agent) mutes meanwhile.
+    pub agents_stale: RwSignal<bool>,
     /// The attached session's current name, for the rename dialog's seed.
     pub session_name: RwSignal<Option<String>>,
     /// Whether the Tablet's key bar shows; the menu's "Show key bar" toggles it
@@ -147,6 +159,9 @@ pub struct TerminalController {
     /// [`begin_layout_fetch`](Self::begin_layout_fetch) before a round trip,
     /// re-checked before commit, so a slower fetch can't roll back a newer one.
     layout_generation: AtomicU64,
+    /// [`layout_generation`](Self::layout_generation)'s counterpart for
+    /// [`refresh_agents`](Self::refresh_agents): only the newest read publishes.
+    agents_generation: AtomicU64,
     /// Whether a poll-driven layout reload is outstanding — claimed by
     /// [`take_layout_poll_tick`](Self::take_layout_poll_tick), released by
     /// [`refresh_layout_from_poll`](Self::refresh_layout_from_poll), so a slow
@@ -312,6 +327,8 @@ impl TerminalController {
             expanded_tab: RwSignal::new(None),
             browsed_space_tabs: RwSignal::new(None),
             lines: RwSignal::new(Vec::new()),
+            agents: RwSignal::new(Vec::new()),
+            agents_stale: RwSignal::new(false),
             session_name: RwSignal::new(None),
             key_bar_visible: RwSignal::new(true),
             fn_row_visible: RwSignal::new(false),
@@ -329,6 +346,7 @@ impl TerminalController {
             preferences,
             appearance_writes: AtomicU64::new(0),
             layout_generation: AtomicU64::new(0),
+            agents_generation: AtomicU64::new(0),
             layout_poll_in_flight: AtomicBool::new(false),
             create_in_flight: AtomicBool::new(false),
             move_in_flight: AtomicBool::new(false),
@@ -402,6 +420,7 @@ impl TerminalController {
             self.settle_rest();
         }
         self.apply_attach_target().await;
+        self.refresh_agents().await;
     }
 
     /// Record where a deep link wants the terminal to land; a link naming neither
@@ -766,10 +785,27 @@ impl TerminalController {
         if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
             return self.commit_pane(tab_key, pane_id, is_plugin).await;
         }
-        let Some(_claim) = self.claim_user_move() else {
+        let Some(cached_tabs) = self.browsed_tabs_for(&space_id) else {
             return false;
         };
-        let Some(cached_tabs) = self.browsed_tabs_for(&space_id) else {
+        self.commit_pane_in_space_with(space_id, cached_tabs, tab_key, pane_id, is_plugin)
+            .await
+    }
+
+    /// [`commit_pane_in_space`](Self::commit_pane_in_space)'s body after the cache
+    /// read, for a caller already holding the target space's tabs — the claim, the
+    /// switch, the local selection, the promotion and the pane commit. Takes the
+    /// tabs by value so [`commit_agent`](Self::commit_agent)'s peek never has to be
+    /// published into [`browsed_space_tabs`](Self::browsed_space_tabs).
+    async fn commit_pane_in_space_with(
+        &self,
+        space_id: String,
+        cached_tabs: Vec<TabEntry>,
+        tab_key: String,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> bool {
+        let Some(_claim) = self.claim_user_move() else {
             return false;
         };
         if !self
@@ -1147,6 +1183,106 @@ impl TerminalController {
                 }
             }
         }
+        self.refresh_agents().await;
+    }
+
+    /// Re-read the session's agents and publish them sorted, read-compare-then-write.
+    /// Silent on failure beyond setting [`agents_stale`](Self::agents_stale) — a
+    /// backend without agents answers empty, and the layout's own failure already
+    /// spoke. Generation-guarded: only the newest read publishes or flags.
+    /// **Never while a move is in flight**: a row reordering under the finger that
+    /// just tapped it would aim the next tap at a different agent, so a held move
+    /// claim skips this read's publish (the next refresh catches up).
+    async fn refresh_agents(&self) {
+        let generation = self.agents_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let answer = self.terminal.list_agents().await;
+        if self.agents_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let mut agents = match answer {
+            Ok(agents) => agents,
+            Err(failure) => {
+                log::debug!("list_agents: {failure}");
+                self.set_agents_stale(true);
+                return;
+            }
+        };
+        agents.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
+        if self.move_in_flight.load(Ordering::SeqCst) {
+            return;
+        }
+        self.set_agents_stale(false);
+        if self.agents.try_with_untracked(|current| *current != agents) == Some(true) {
+            self.agents.set(agents);
+        }
+    }
+
+    /// Read-compare-then-write on [`agents_stale`](Self::agents_stale).
+    fn set_agents_stale(&self, stale: bool) {
+        if self.agents_stale.try_get_untracked() == Some(!stale) {
+            self.agents_stale.set(stale);
+        }
+    }
+
+    /// Whether any agent is waiting on the user — the rail's `needs you` badge and
+    /// the immersive panes button's dot. A tracked read. `false` while
+    /// [`agents_stale`](Self::agents_stale): both are claims about *now*, and a list
+    /// the daemon could not confirm must not keep asserting them (the rows themselves
+    /// keep drawing from [`agents`](Self::agents)).
+    pub fn has_blocked_agent(&self) -> bool {
+        if self.agents_stale.get() {
+            return false;
+        }
+        self.agents.with(|agents| {
+            agents
+                .iter()
+                .any(|agent| agent.status == AgentStatus::Blocked)
+        })
+    }
+
+    /// Jump to `agent`'s pane — the agent row's tap, over exactly the pane row's
+    /// commit ([`commit_pane_in_space`](Self::commit_pane_in_space), same claims).
+    /// An agent in a space nobody has browsed is peeked first (the read-only
+    /// [`ListSpaceTabs`] an expand would make), since the cross-space commit
+    /// trusts only a cached browse; a failed peek moves nothing. An agent whose
+    /// tab is missing from its space's layout (empty `tab_key`) answers `false`.
+    pub async fn commit_agent(&self, agent: &AgentEntry) -> bool {
+        if agent.tab_key.is_empty() {
+            return false;
+        }
+        let selected = self.selected_space_id();
+        let Some(space_id) = agent.space_id.clone().or_else(|| selected.clone()) else {
+            return self
+                .commit_pane(agent.tab_key.clone(), agent.pane_id, false)
+                .await;
+        };
+        if selected.as_deref() == Some(space_id.as_str()) {
+            return self
+                .commit_pane_in_space(space_id, agent.tab_key.clone(), agent.pane_id, false)
+                .await;
+        }
+        let cached = self.browsed_tabs_for(&space_id);
+        let tabs = if let Some(tabs) = cached {
+            tabs
+        } else {
+            let Ok(tabs) = self
+                .core
+                .run(
+                    &self.list_space_tabs,
+                    space_id.clone(),
+                    RunOptions::default(),
+                )
+                .await
+            else {
+                return false;
+            };
+            if !self.signals_alive() {
+                return false;
+            }
+            tabs
+        };
+        self.commit_pane_in_space_with(space_id, tabs, agent.tab_key.clone(), agent.pane_id, false)
+            .await
     }
 
     /// **Consume** one layout poll tick: skips if the first load hasn't
@@ -2294,6 +2430,8 @@ mod tests {
         selected: Mutex<Option<String>>,
         /// The tab every later `list_tabs` flags active; `None` keeps `alpha`.
         active: Mutex<Option<String>>,
+        /// What `list_agents` answers, unrecorded so no existing call log moves.
+        agents: Mutex<Vec<AgentEntry>>,
     }
 
     /// The space [`RecordingRepository`] starts out selected on.
@@ -2400,6 +2538,7 @@ mod tests {
     fn recorded_tab(index: u32, key: &str, active: bool) -> TabEntry {
         let base = index * 10;
         let pane = |id: u32, focused: bool| PaneEntry {
+            agent: None,
             id,
             title: format!("{key}-{id}"),
             cwd: format!("/srv/{key}"),
@@ -2502,6 +2641,14 @@ mod tests {
                 }
             }
             Ok(tabs)
+        }
+
+        async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
+            Ok(self
+                .agents
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone())
         }
 
         async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -4273,5 +4420,104 @@ mod tests {
             after_first,
             "an idle poll over an unchanged font_family pref must write nothing"
         );
+    }
+
+    fn agent(pane_id: u32, tab: &str, space: &str, status: AgentStatus, seq: u64) -> AgentEntry {
+        AgentEntry {
+            pane_id,
+            tab_id: u64::from(pane_id / 10),
+            tab_key: tab.to_string(),
+            space_id: Some(space.to_string()),
+            space_name: Some(space.to_string()),
+            tab_name: tab.to_string(),
+            kind: "claude".to_string(),
+            name: None,
+            display_kind: None,
+            status,
+            title: None,
+            summary: None,
+            cwd: None,
+            focused: false,
+            change_seq: seq,
+        }
+    }
+
+    fn stage_agents(repository: &RecordingRepository, agents: Vec<AgentEntry>) {
+        *repository
+            .agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = agents;
+    }
+
+    #[test]
+    fn a_reload_publishes_the_agents_most_urgent_first_and_flags_a_blocked_one() {
+        let (c, repository) = recorded("herdr:work");
+        assert!(c.agents.get_untracked().is_empty());
+        stage_agents(
+            &repository,
+            vec![
+                agent(10, "alpha", "ws-1", AgentStatus::Idle, 9),
+                agent(11, "alpha", "ws-1", AgentStatus::Working, 5),
+                agent(20, "beta", "ws-1", AgentStatus::Blocked, 1),
+                agent(21, "beta", "ws-1", AgentStatus::Working, 7),
+            ],
+        );
+        block_on(c.reload_tabs());
+        let order: Vec<u32> = c.agents.get_untracked().iter().map(|a| a.pane_id).collect();
+        assert_eq!(order, [20, 21, 11, 10]);
+        assert!(
+            c.agents
+                .with_untracked(|agents| agents[0].status == AgentStatus::Blocked)
+        );
+    }
+
+    #[test]
+    fn a_held_move_claim_keeps_the_agent_rows_still() {
+        let (c, repository) = recorded("herdr:work");
+        stage_agents(
+            &repository,
+            vec![agent(10, "alpha", "ws-1", AgentStatus::Working, 1)],
+        );
+        let claim = c.claim_move().expect("free");
+        block_on(c.reload_tabs());
+        assert!(c.agents.get_untracked().is_empty(), "nothing published");
+        drop(claim);
+        block_on(c.reload_tabs());
+        assert_eq!(c.agents.get_untracked().len(), 1, "…until the move lands");
+    }
+
+    #[test]
+    fn an_agent_in_an_unbrowsed_space_is_peeked_then_committed_like_a_pane_row() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        let before = repository.calls().len();
+        let target = agent(21, "beta", "ws-2", AgentStatus::Blocked, 1);
+
+        assert!(block_on(c.commit_agent(&target)));
+
+        let since: Vec<String> = repository.calls().into_iter().skip(before).collect();
+        assert_eq!(
+            since,
+            [
+                "list_tabs",
+                "switch_space(ws-2)",
+                "go_to_tab(2)",
+                "tab_lines(beta)",
+                "focus_pane(21,false)",
+                "list_spaces",
+            ],
+            "a read-only peek, then commit_pane_in_space's own steps"
+        );
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+    }
+
+    #[test]
+    fn an_agent_whose_tab_is_off_the_layout_moves_nothing() {
+        let (c, repository) = recorded("herdr:work");
+        let before = repository.actions().len();
+        let mut target = agent(21, "beta", "ws-1", AgentStatus::Done, 1);
+        target.tab_key.clear();
+        assert!(!block_on(c.commit_agent(&target)));
+        assert_eq!(repository.actions().len(), before);
     }
 }
