@@ -708,6 +708,8 @@ fn agent_location(agent: &SessionAgent) -> String {
 
 /// One agent row: status dot, kind tile, `name · kind` over the activity line,
 /// the status word and the location trailing. Blocked rows wear the amber wash.
+/// A tap attaches into the agent's pane; a row the layout could not place
+/// (no tab position) keeps the same anatomy but takes no tap.
 fn agent_row(id: &str, agent: &SessionAgent, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let (fill, border) = if agent.status == AgentStatus::Blocked {
@@ -772,9 +774,14 @@ fn agent_row(id: &str, agent: &SessionAgent, colors: &Palette) -> impl View<Sess
     .fill(fill)
     .radius(AGENT_ROW_RADIUS)
     .border(border, HAIRLINE);
+    if agent.tab_position.is_none() {
+        return Either::Right(boxed);
+    }
     let (id, agent) = (id.to_string(), agent.clone());
-    GestureDetector(boxed)
-        .on_tap(move |state: &mut SessionsState| pages::attach_agent(state, &id, &agent))
+    Either::Left(
+        GestureDetector(boxed)
+            .on_tap(move |state: &mut SessionsState| pages::attach_agent(state, &id, &agent)),
+    )
 }
 
 #[cfg(test)]
@@ -785,7 +792,7 @@ mod tests {
     fn an_agents_location_skips_a_missing_space() {
         let mut agent = SessionAgent {
             pane_id: 2,
-            tab_position: 0,
+            tab_position: Some(0),
             space_id: None,
             space_name: Some("api".to_string()),
             tab_name: "shell".to_string(),

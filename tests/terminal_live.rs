@@ -52,16 +52,19 @@ use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
     agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
-    drop_agent_stream_for_tests, fail_next_list_agents_for_tests, push_agent_event_for_tests,
-    seed_agents, verb_log_for_tests,
+    drop_agent_stream_for_tests, end_agent_stream_for_tests, fail_next_list_agents_for_tests,
+    open_next_agent_watch_down_for_tests, push_agent_event_for_tests, seed_agents,
+    verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
 use muxr::features::terminal::domain::entities::{
     AgentEntry, AgentEventEntry, AgentStatus, Space, TabEntry, TermLine,
 };
 use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
-use muxr::features::terminal::domain::repositories::TerminalRepository;
-use muxr::features::terminal::presentation::controller::{AttachTarget, TerminalController};
+use muxr::features::terminal::domain::repositories::{TerminalRepository, WatchEnd};
+use muxr::features::terminal::presentation::controller::{
+    AttachTarget, TerminalController, advance_agents_clock_for_tests,
+};
 use muxr::features::terminal::presentation::pages::{
     debug_controller, debug_grid_hooks, debug_live_probe, open_terminal_menu, set_demo_copy_sink,
     terminal_page,
@@ -1945,6 +1948,99 @@ fn a_user_move_supersedes_a_foreign_space_link() {
     assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
 }
 
+/// [`QuietLines`] over a space list in which no space is selected — a herdr layout whose
+/// selection has not been read (or was lost).
+struct NoSelectedSpace(QuietLines);
+
+#[clean_signals::async_trait]
+impl TerminalRepository for NoSelectedSpace {
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        let spaces = self.0.list_spaces().await?;
+        Ok(spaces
+            .into_iter()
+            .map(|space| Space {
+                selected: false,
+                ..space
+            })
+            .collect())
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs().await
+    }
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs_in_space(space_id).await
+    }
+    async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
+        self.0.tab_lines(key).await
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.0.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.0.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.0.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.0.focus_pane(pane_id, is_plugin).await
+    }
+}
+
+#[test]
+fn a_space_link_with_no_selected_space_peeks_the_space_and_switches_into_it() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let rt = runtime();
+    let _state = MuxrApp.init();
+    let c = Arc::new(TerminalController::new(
+        Arc::new(NoSelectedSpace(QuietLines(expect_terminal_repository()))),
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some("herdr:work".to_string()),
+    ));
+    c.set_attach_target_in_space(Some("zelli_mobile".to_string()), Some(1), Some(21));
+    c.attach_live();
+    rt.block_on(c.load());
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    assert!(c.spaces.get_untracked().iter().all(|space| !space.selected));
+
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+
+    assert_eq!(
+        verb_log_for_tests(),
+        [
+            "switch_space:zelli_mobile",
+            "go_to_tab:102",
+            "focus_pane:21"
+        ],
+        "resolved against the peeked space, never the current tab world"
+    );
+    assert_eq!(c.pending_attach_target_for_tests(), None);
+}
+
+#[test]
+fn a_space_link_on_a_backend_without_spaces_moves_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    // Position 2 and pane 31 resolve in the mock's tab world: without the space the link lands.
+    let location = format!("/terminal?session={SESSION_ID}&space=forgekit&tab=2&pane=31");
+    let mut h = Harness::mount_at(&location);
+    await_workspace(&mut h);
+    h.pump_for(Duration::from_millis(150));
+
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "{:?}",
+        verb_log_for_tests()
+    );
+}
+
 /// One controller call, boxed so a test can open it, leave it parked on its round
 /// trip, and land it later — the ordering a race needs, with no clock in it.
 type Step<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
@@ -2248,6 +2344,9 @@ fn mount_watching(agents: Vec<AgentEntry>, streaming: bool) -> (Harness, AgentsR
     h.pump_until("the agents to load", |_| {
         agent_panes().len() == agents.len()
     });
+    // The rows may be the stream's snapshot: let the mount's own relist land too, so the
+    // safety relist's window starts from it.
+    h.pump_for(Duration::from_millis(100));
     (h, reset)
 }
 
@@ -2388,4 +2487,157 @@ fn a_lost_stream_falls_back_to_the_poll_until_the_stream_delivers_again() {
     poll_tick(&controller);
     assert_eq!(agent_panes(), [60]);
     assert!(!controller.agents_stale.get_untracked());
+}
+
+// The subscription's lifecycle: stale only on a live-to-down transition, an ended watch dropped on
+// the next tick, and reopened at most once per retry window unless the credential was refused.
+
+/// The window the controller waits between two opens of a subscription (`AGENT_WATCH_RETRY`).
+const WATCH_RETRY: Duration = Duration::from_secs(30);
+
+/// A blocked agent above an idle one, so the attention badge has something to say.
+fn blocked_and_idle() -> Vec<AgentEntry> {
+    vec![
+        streamed_agent(40, AgentStatus::Blocked, 3),
+        streamed_agent(41, AgentStatus::Idle, 2),
+    ]
+}
+
+#[test]
+fn an_ended_watch_is_dropped_on_the_next_tick_without_ever_raising_the_stale_flag() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_h, _reset) = mount_watching(blocked_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    let (raises, stops) = (
+        controller.agents_stale_raises(),
+        agent_watch_stops_for_tests(),
+    );
+    assert!(controller.has_blocked_agent());
+
+    end_agent_stream_for_tests(WatchEnd::EndedClean);
+    for _ in 0..3 {
+        poll_tick(&controller);
+        assert!(controller.has_blocked_agent(), "the badge holds");
+    }
+
+    assert_eq!(
+        controller.agents_stale_raises(),
+        raises,
+        "never stale, not even mid-tick"
+    );
+    assert_eq!(
+        agent_watch_stops_for_tests(),
+        stops + 1,
+        "the ended handle dropped"
+    );
+}
+
+#[test]
+fn a_zellij_shaped_watch_leaves_the_badge_stable_and_the_poll_running() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_h, _reset) = mount_watching(Vec::new(), true);
+    let controller = debug_controller().expect("mounted");
+    let raises = controller.agents_stale_raises();
+
+    // An empty snapshot (the mount's), then a clean end: the server has no agents to stream.
+    end_agent_stream_for_tests(WatchEnd::EndedClean);
+    poll_tick(&controller);
+    poll_tick(&controller);
+    assert!(!controller.has_blocked_agent());
+    assert_eq!(controller.agents_stale_raises(), raises);
+
+    seed_agents(vec![streamed_agent(42, AgentStatus::Blocked, 1)]);
+    poll_tick(&controller);
+    assert_eq!(agent_panes(), [42], "the poll keeps reading them");
+    assert_eq!(controller.agents_stale_raises(), raises);
+}
+
+#[test]
+fn a_cleanly_ended_watch_reopens_once_the_retry_window_passes_while_the_stream_is_advertised() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+
+    end_agent_stream_for_tests(WatchEnd::EndedClean);
+    poll_tick(&controller);
+    assert_eq!(
+        agent_watch_opens_for_tests(),
+        opens + 1,
+        "not inside the window"
+    );
+    assert!(!agent_watch_open_for_tests());
+
+    advance_agents_clock_for_tests(WATCH_RETRY);
+    poll_tick(&controller);
+    assert_eq!(agent_watch_opens_for_tests(), opens + 2, "reopened");
+    assert!(agent_watch_open_for_tests());
+    poll_tick(&controller);
+    assert_eq!(agent_watch_opens_for_tests(), opens + 2, "once");
+
+    // The reopened stream delivers like the first.
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.pump_for(Duration::from_millis(50));
+    assert_eq!(agent_panes(), [41, 40]);
+}
+
+#[test]
+fn an_unauthenticated_watch_never_reopens_for_the_mount() {
+    let _g = serial();
+    let _ambient = setup();
+    let opens = agent_watch_opens_for_tests();
+    let (_h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+
+    end_agent_stream_for_tests(WatchEnd::EndedUnauthenticated);
+    poll_tick(&controller);
+    advance_agents_clock_for_tests(WATCH_RETRY * 2);
+    poll_tick(&controller);
+    poll_tick(&controller);
+
+    assert_eq!(agent_watch_opens_for_tests(), opens + 1);
+    assert!(!agent_watch_open_for_tests());
+}
+
+#[test]
+fn a_watch_not_yet_live_is_not_stale_but_a_live_one_going_down_is_once() {
+    let _g = serial();
+    let _ambient = setup();
+    open_next_agent_watch_down_for_tests();
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    let raises = controller.agents_stale_raises();
+
+    poll_tick(&controller);
+    poll_tick(&controller);
+    assert_eq!(
+        controller.agents_stale_raises(),
+        raises,
+        "still opening, not down"
+    );
+
+    let blocked = Box::new(streamed_agent(41, AgentStatus::Blocked, 9));
+    assert!(push_agent_event_for_tests(AgentEventEntry::Changed(
+        blocked
+    )));
+    h.one_frame();
+    poll_tick(&controller);
+    drop_agent_stream_for_tests();
+    poll_tick(&controller);
+    poll_tick(&controller);
+    assert_eq!(
+        controller.agents_stale_raises(),
+        raises + 1,
+        "one transition, one raise"
+    );
+    assert!(
+        !controller.agents_stale.get_untracked(),
+        "the poll's read confirmed them"
+    );
 }

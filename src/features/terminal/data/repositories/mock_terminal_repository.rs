@@ -27,7 +27,8 @@
 //! zellij session's terminal lists those agents too. `watch_agents` opens with a snapshot of
 //! that inventory and then delivers only what a test scripts through
 //! [`push_agent_event_for_tests`]; the open/stop counters let a suite pin the subscription's
-//! lifetime.
+//! lifetime, [`end_agent_stream_for_tests`] ends it with a chosen [`WatchEnd`], and
+//! [`open_next_agent_watch_down_for_tests`] opens the next one not yet live.
 //!
 //! Failure mapping: an unknown tab key, space id or blank session id maps to
 //! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just rendered.
@@ -35,7 +36,7 @@
 //! real client will take.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,7 +45,9 @@ use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
     AgentEntry, AgentEventEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
 };
-use crate::features::terminal::domain::repositories::{AgentSink, TerminalRepository, WatchHandle};
+use crate::features::terminal::domain::repositories::{
+    AgentSink, TerminalRepository, WatchEnd, WatchHandle,
+};
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
@@ -206,12 +209,17 @@ fn resolved_agents() -> Vec<AgentEntry> {
         .unwrap_or_else(default_agents_for_preview)
 }
 
-/// The one open agents subscription: its sink, its liveness, and the id its handle stops by.
+/// The one open agents subscription: its sink, its liveness and end, and the id its handle
+/// stops by.
 struct MockWatch {
     id: u64,
     sink: AgentSink,
     live: Arc<AtomicBool>,
+    ended: Arc<AtomicU8>,
 }
+
+/// Whether the next `watch_agents` opens not yet live and without its snapshot.
+static NEXT_WATCH_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// The newest `watch_agents` subscription — process-global like [`TEST_AGENTS`]; a newer
 /// one replaces it, dropping the older sink.
@@ -250,6 +258,22 @@ pub fn drop_agent_stream_for_tests() {
     if let Some(watch) = lock_agent_watch().as_ref() {
         watch.live.store(false, Ordering::Release);
     }
+}
+
+/// End the open subscription for good with `end`, as a server's clean end, a refused credential
+/// or a spent reconnect schedule does: not live, and its sink dropped. Never called by
+/// production code.
+pub fn end_agent_stream_for_tests(end: WatchEnd) {
+    if let Some(watch) = lock_agent_watch().take() {
+        watch.live.store(false, Ordering::Release);
+        end.store(&watch.ended);
+    }
+}
+
+/// Open the next subscription still connecting: not live, no snapshot yet. Never called by
+/// production code.
+pub fn open_next_agent_watch_down_for_tests() {
+    NEXT_WATCH_DOWN.store(true, Ordering::SeqCst);
 }
 
 /// Whether a subscription is open (opened, and its handle not yet dropped).
@@ -616,16 +640,21 @@ impl TerminalRepository for MockTerminalRepository {
 
     fn watch_agents(&self, sink: AgentSink) -> Result<WatchHandle, AppFailure> {
         let id = NEXT_WATCH_ID.fetch_add(1, Ordering::SeqCst);
-        let live = Arc::new(AtomicBool::new(true));
-        // The wire's first message is always the whole inventory.
-        sink(AgentEventEntry::Snapshot(resolved_agents()));
+        let down = NEXT_WATCH_DOWN.swap(false, Ordering::SeqCst);
+        let live = Arc::new(AtomicBool::new(!down));
+        let ended = Arc::new(AtomicU8::new(0));
+        if !down {
+            // The wire's first message is always the whole inventory.
+            sink(AgentEventEntry::Snapshot(resolved_agents()));
+        }
         *lock_agent_watch() = Some(MockWatch {
             id,
             sink,
             live: Arc::clone(&live),
+            ended: Arc::clone(&ended),
         });
         AGENT_WATCH_OPENS.fetch_add(1, Ordering::SeqCst);
-        Ok(WatchHandle::new(live, move || {
+        Ok(WatchHandle::new(live, ended, move || {
             AGENT_WATCH_STOPS.fetch_add(1, Ordering::SeqCst);
             let mut watch = lock_agent_watch();
             if watch.as_ref().is_some_and(|watch| watch.id == id) {
@@ -761,8 +790,15 @@ mod tests {
         assert!(block_on(repo.list_agents()).expect("ok").is_empty());
     }
 
+    /// The two watch tests share the process-global subscription slot.
+    fn watch_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn a_watch_opens_with_a_snapshot_delivers_pushes_and_stops_on_drop() {
+        let _g = watch_lock();
         let repo = MockTerminalRepository::seeded();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink_seen = Arc::clone(&seen);
@@ -784,6 +820,30 @@ mod tests {
         assert_eq!(agent_watch_stops_for_tests(), stops + 1);
         assert!(!agent_watch_open_for_tests());
         assert!(!push_agent_event_for_tests(AgentEventEntry::Removed(7)));
+    }
+
+    #[test]
+    fn an_ended_watch_reports_its_end_and_a_down_open_waits_for_its_first_event() {
+        let _g = watch_lock();
+        let repo = MockTerminalRepository::seeded();
+        let handle = repo
+            .watch_agents(Box::new(|_| {}))
+            .expect("the mock watches");
+        end_agent_stream_for_tests(WatchEnd::EndedClean);
+        assert!(!handle.is_live() && !agent_watch_open_for_tests());
+        assert_eq!(handle.end(), WatchEnd::EndedClean);
+        drop(handle);
+
+        open_next_agent_watch_down_for_tests();
+        let seen = Arc::new(Mutex::new(0));
+        let counted = Arc::clone(&seen);
+        let handle = repo
+            .watch_agents(Box::new(move |_| *counted.lock().expect("ok") += 1))
+            .expect("the mock watches");
+        assert!(!handle.is_live());
+        assert_eq!(*seen.lock().expect("ok"), 0, "no snapshot yet");
+        assert!(push_agent_event_for_tests(AgentEventEntry::Removed(1)));
+        assert!(handle.is_live());
     }
 
     #[test]

@@ -34,7 +34,7 @@ use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
-use muxr::agents::AgentSummary;
+use muxr::agents::{AgentStatus, AgentSummary};
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::sessions::data::repositories::mock_sessions_repository::{
@@ -42,8 +42,8 @@ use muxr::features::sessions::data::repositories::mock_sessions_repository::{
 };
 use muxr::features::sessions::di::SharedSessionsRepository;
 use muxr::features::sessions::domain::entities::{
-    CreateSessionParams, LayoutSummary, RenameRequest, Session, SessionBackend, SessionStatus,
-    ThirdMetric,
+    CreateSessionParams, LayoutSummary, RenameRequest, Session, SessionAgent, SessionBackend,
+    SessionStatus, ThirdMetric,
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
@@ -1533,6 +1533,177 @@ async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it()
         vec!["fresh".to_string()],
         "the newer, faster refresh's result wins, not the older, slower one: {names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The Tablet detail's agent list is controller state: fetched on a selection
+// change and on every poll tick while the detail shows it.
+// ---------------------------------------------------------------------------
+
+/// The one live herdr session [`AgentsRepo`] lists.
+const AGENTS_SESSION: &str = "herdr:agents";
+
+/// A repository with one live session whose roll-up names two agents, and a
+/// scriptable agent list behind it.
+struct AgentsRepo {
+    agents: Mutex<Vec<SessionAgent>>,
+    fail: std::sync::atomic::AtomicBool,
+    calls: AtomicU32,
+}
+
+impl AgentsRepo {
+    fn new(agents: Vec<SessionAgent>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+            fail: std::sync::atomic::AtomicBool::new(false),
+            calls: AtomicU32::new(0),
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for AgentsRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        let mut session = stub_session(AGENTS_SESSION);
+        session.backend = SessionBackend::Herdr;
+        session.agents = Some(summary(1, 0, 1, 0, &["claude"]));
+        Ok(vec![session, stub_session("other")])
+    }
+
+    async fn list_agents(&self, _session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AppFailure::Network("list_agents refused".to_string()));
+        }
+        Ok(self.agents.lock().expect("ok").clone())
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the agent-list tests")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the agent-list tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the agent-list tests")
+    }
+}
+
+fn session_agent(pane_id: u32, status: AgentStatus) -> SessionAgent {
+    SessionAgent {
+        pane_id,
+        tab_position: Some(0),
+        space_id: None,
+        space_name: None,
+        tab_name: "work".to_string(),
+        kind: "claude".to_string(),
+        name: Some(format!("agent{pane_id}")),
+        display_kind: None,
+        status,
+        title: None,
+        summary: None,
+        change_seq: 1,
+    }
+}
+
+fn agent_rows(controller: &SessionsController) -> Vec<(u32, AgentStatus)> {
+    controller
+        .agents
+        .get_untracked()
+        .iter()
+        .map(|agent| (agent.pane_id, agent.status))
+        .collect()
+}
+
+/// A loaded controller over `repo`, its detail visible, with the agents
+/// session selected and its first agent read landed.
+async fn selected_with_agents(repo: &Arc<AgentsRepo>) -> SessionsController {
+    let controller = SessionsController::new(Arc::clone(repo) as SharedSessionsRepository);
+    controller.set_detail_visible(true);
+    controller.refresh().await;
+    controller.select(AGENTS_SESSION);
+    controller.refresh_agents().await;
+    controller
+}
+
+/// One poll tick, run to completion.
+async fn tick(controller: &SessionsController) {
+    assert!(controller.take_poll_tick(), "the poll is armed");
+    controller.refresh_from_poll().await;
+}
+
+#[tokio::test]
+async fn swapping_two_agents_statuses_at_constant_counts_updates_the_rows_on_the_next_tick() {
+    let repo = Arc::new(AgentsRepo::new(vec![
+        session_agent(1, AgentStatus::Blocked),
+        session_agent(2, AgentStatus::Working),
+    ]));
+    let controller = selected_with_agents(&repo).await;
+    assert_eq!(
+        agent_rows(&controller),
+        [(1, AgentStatus::Blocked), (2, AgentStatus::Working)]
+    );
+
+    // The roll-up still reads one blocked, one working: only the rows moved.
+    *repo.agents.lock().expect("ok") = vec![
+        session_agent(1, AgentStatus::Working),
+        session_agent(2, AgentStatus::Blocked),
+    ];
+    tick(&controller).await;
+
+    assert_eq!(
+        agent_rows(&controller),
+        [(2, AgentStatus::Blocked), (1, AgentStatus::Working)]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_agent_read_keeps_the_previous_rows_and_the_next_tick_retries() {
+    let repo = Arc::new(AgentsRepo::new(vec![session_agent(
+        1,
+        AgentStatus::Blocked,
+    )]));
+    let controller = selected_with_agents(&repo).await;
+
+    repo.fail.store(true, Ordering::SeqCst);
+    *repo.agents.lock().expect("ok") = vec![session_agent(1, AgentStatus::Idle)];
+    tick(&controller).await;
+    assert_eq!(agent_rows(&controller), [(1, AgentStatus::Blocked)]);
+
+    repo.fail.store(false, Ordering::SeqCst);
+    tick(&controller).await;
+    assert_eq!(agent_rows(&controller), [(1, AgentStatus::Idle)]);
+}
+
+#[tokio::test]
+async fn a_hidden_detail_never_reads_agents_and_a_selection_change_empties_the_list_at_once() {
+    let repo = Arc::new(AgentsRepo::new(vec![session_agent(
+        1,
+        AgentStatus::Blocked,
+    )]));
+    let controller = selected_with_agents(&repo).await;
+    assert_eq!(repo.calls(), 1);
+
+    controller.select("other");
+    assert!(
+        controller.agents.get_untracked().is_empty(),
+        "cleared on the change"
+    );
+    tick(&controller).await;
+    assert_eq!(repo.calls(), 1, "a session without agents is never asked");
+
+    controller.select(AGENTS_SESSION);
+    controller.set_detail_visible(false);
+    tick(&controller).await;
+    assert_eq!(repo.calls(), 1, "a Compact window pays for nothing");
+    assert!(controller.agents.get_untracked().is_empty());
 }
 
 // ---------------------------------------------------------------------------

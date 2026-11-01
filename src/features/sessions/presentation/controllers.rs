@@ -1,16 +1,17 @@
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 
 use clean_signals::{ControllerCore, NoParams, RunOptions};
-use frust::{GetUntracked, RwSignal, Set};
+use frust::{GetUntracked, RwSignal, Set, WithUntracked};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{Notify, broadcast};
 
+use crate::agents::agent_sort_key;
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
-    CreateSessionParams, RenameRequest, Session, SessionBackend,
+    CreateSessionParams, RenameRequest, Session, SessionAgent, SessionBackend,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::sessions::domain::use_cases::{
@@ -38,6 +39,19 @@ pub struct SessionsController {
     /// The Tablet detail's selection, keyed by [`Session::id`] — cleared by a
     /// load whose set no longer carries that id.
     pub selected: RwSignal<Option<String>>,
+    /// The Tablet detail's agent list: the selected session's agents, most
+    /// urgent first. Fetched by [`refresh_agents`](Self::refresh_agents) on a
+    /// selection change and every poll tick while the detail shows them.
+    pub agents: RwSignal<Vec<SessionAgent>>,
+    repository: Arc<dyn SessionsRepository + Send + Sync>,
+    /// Whether the detail pane is on screen — the page sets it from its size
+    /// class each build, so a Compact window never pays for the agent reads.
+    detail_visible: AtomicBool,
+    /// The session [`agents`](Self::agents) belongs to, if any.
+    agents_for: Mutex<Option<String>>,
+    /// Bumped by every agents fetch and every retarget: only the newest fetch
+    /// for the current target publishes.
+    agents_generation: AtomicU64,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
@@ -51,11 +65,16 @@ impl SessionsController {
             list: ListSessions::new(Arc::clone(&repository)),
             create: CreateSession::new(Arc::clone(&repository)),
             rename: RenameSession::new(Arc::clone(&repository)),
-            kill: KillSession::new(repository),
+            kill: KillSession::new(Arc::clone(&repository)),
             sessions: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
             first_load_settled: RwSignal::new(false),
             selected: RwSignal::new(None),
+            agents: RwSignal::new(Vec::new()),
+            repository,
+            detail_visible: AtomicBool::new(false),
+            agents_for: Mutex::new(None),
+            agents_generation: AtomicU64::new(0),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
@@ -80,6 +99,7 @@ impl SessionsController {
             self.forget_vanished_selection(&sessions);
             self.sessions.set(sessions);
             self.loaded.set(true);
+            self.retarget_agents();
         }
         self.first_load_settled.set(true);
     }
@@ -93,6 +113,85 @@ impl SessionsController {
         }
         let _release = ReleasePollClaim(&self.poll_in_flight);
         self.refresh().await;
+        self.refresh_agents().await;
+    }
+
+    /// Record whether the detail pane is on screen — the page's size class,
+    /// set once per build. A plain store: no read, no I/O.
+    pub fn set_detail_visible(&self, visible: bool) {
+        self.detail_visible.store(visible, Ordering::Relaxed);
+    }
+
+    /// The session whose agents the detail shows now: the selected one, while
+    /// the detail is visible, the session is live and its roll-up names agents.
+    fn agents_target(&self) -> Option<String> {
+        if !self.detail_visible.load(Ordering::Relaxed) {
+            return None;
+        }
+        let selected = self.selected.try_get_untracked().flatten()?;
+        let wanted = self.sessions.try_with_untracked(|sessions| {
+            sessions.iter().any(|session| {
+                session.id == selected
+                    && session.status.is_live()
+                    && session.agents.as_ref().is_some_and(|a| !a.is_empty())
+            })
+        })?;
+        wanted.then_some(selected)
+    }
+
+    /// Point [`agents`](Self::agents) at [`agents_target`](Self::agents_target):
+    /// on a change the list empties at once and any fetch in flight for the old
+    /// target lands nowhere. Answers the current target.
+    fn retarget_agents(&self) -> Option<String> {
+        let target = self.agents_target();
+        let mut current = self
+            .agents_for
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *current != target {
+            *current = target.clone();
+            drop(current);
+            self.agents_generation.fetch_add(1, Ordering::SeqCst);
+            self.publish_agents(Vec::new());
+        }
+        target
+    }
+
+    /// Fetch the detail's agents for the current target — on a selection change
+    /// and on every poll tick, so a status swap that leaves the roll-up's counts
+    /// alone still reaches the rows. Generation-guarded (an older fetch never
+    /// overwrites a newer one), never written after dispose, and a failure keeps
+    /// the last list for the next tick to retry.
+    pub async fn refresh_agents(&self) {
+        let Some(target) = self.retarget_agents() else {
+            return;
+        };
+        let generation = self.agents_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let answer = self.repository.list_agents(target).await;
+        if self.agents_generation.load(Ordering::SeqCst) != generation || !self.alive() {
+            return;
+        }
+        match answer {
+            Ok(mut agents) => {
+                agents.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
+                self.publish_agents(agents);
+            }
+            Err(failure) => {
+                log::debug!("sessions: list_agents failed, keeping the rows: {failure}")
+            }
+        }
+    }
+
+    /// Whether the hosted state is still mounted — `false` once disposed.
+    fn alive(&self) -> bool {
+        !self.core.is_disposed() && self.agents.try_with_untracked(|_| ()).is_some()
+    }
+
+    /// Read-compare-then-write, so an unchanged list never rebuilds.
+    fn publish_agents(&self, agents: Vec<SessionAgent>) {
+        if self.agents.try_with_untracked(|current| *current != agents) == Some(true) {
+            self.agents.set(agents);
+        }
     }
 
     /// The wake reaction: one refresh through the poll's own single-flight
@@ -136,6 +235,7 @@ impl SessionsController {
         if self.selected.get_untracked().as_deref() != Some(id) {
             self.selected.set(Some(id.to_string()));
         }
+        self.retarget_agents();
     }
 
     fn forget_vanished_selection(&self, sessions: &[Session]) {
