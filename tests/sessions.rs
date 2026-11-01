@@ -1752,6 +1752,82 @@ fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
         param(muxr::routes::TERMINAL_PANE_QUERY_KEY).as_deref(),
         Some("2")
     );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_SPACE_QUERY_KEY),
+        None,
+        "a pane pill names no space"
+    );
+}
+
+#[test]
+fn the_tablet_detail_lists_the_seeded_agents_in_priority_order_and_a_row_tap_deep_links() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+
+    h.tap_value(SEEDED[2]);
+    h.settle();
+    h.pump_until("the agent list", |h| has_value(h, "AI AGENTS \u{b7} 4"));
+
+    let values = node_values(&h.root);
+    let at = |wanted: &str| values.iter().position(|v| v == wanted);
+    let order: Vec<_> = [
+        "reviewer \u{b7} claude",
+        "planner \u{b7} codex",
+        "scout \u{b7} gemini",
+        "notes \u{b7} claude",
+    ]
+    .map(|row| at(row).unwrap_or_else(|| panic!("no row {row:?} in {values:?}")))
+    .into();
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "blocked, done, working, idle: {values:?}"
+    );
+    assert!(
+        at("AI AGENTS \u{b7} 4") < at("tabs \u{2192} panes \u{b7} space home"),
+        "the agents sit above the tabs card"
+    );
+    assert!(has_value(&h, "home \u{203a} work \u{203a} p0"));
+
+    tap_last_value(&mut h, "reviewer \u{b7} claude");
+    h.settle();
+    assert_eq!(h.depth(), 2, "an agent row pushes the terminal route");
+    let nav = muxr::routes::app_nav();
+    let param = |key: &str| nav.param(key);
+    assert_eq!(
+        param(muxr::routes::TERMINAL_SESSION_QUERY_KEY).as_deref(),
+        Some(SEEDED_HERDR_ID)
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_SPACE_QUERY_KEY).as_deref(),
+        Some("home")
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_TAB_QUERY_KEY).as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        param(muxr::routes::TERMINAL_PANE_QUERY_KEY).as_deref(),
+        Some("0")
+    );
+}
+
+#[test]
+fn a_session_without_agents_draws_no_agent_section() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = sized(FULL_TABLET, None);
+    h.await_sessions();
+
+    h.tap_value(SEEDED[0]);
+    h.settle();
+
+    assert!(
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v.starts_with("AI AGENTS"))
+    );
 }
 
 #[test]

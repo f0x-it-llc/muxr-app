@@ -1809,6 +1809,142 @@ fn a_deep_link_naming_no_such_tab_or_pane_sends_nothing() {
     }
 }
 
+// A link naming a space other than the selected one: the space switches first, then the
+// tab, then the pane — on a herdr session, whose spaces the mock seeds (`forgekit`
+// selected, `zelli_mobile` foreign: tabs `logs` (id 101) and `worker` (id 102)).
+/// The mock seeds transcripts for the selected space's tabs only, so a switch onto a
+/// `zelli_mobile` tab other than its active one would fail at the transcript read. This
+/// answers every transcript empty and delegates the rest.
+struct QuietLines(SharedTerminalRepository);
+
+#[clean_signals::async_trait]
+impl TerminalRepository for QuietLines {
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        self.0.list_spaces().await
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs().await
+    }
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        self.0.list_tabs_in_space(space_id).await
+    }
+    async fn tab_lines(&self, _key: String) -> Result<Vec<TermLine>, AppFailure> {
+        Ok(Vec::new())
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.0.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.0.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.0.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.0.focus_pane(pane_id, is_plugin).await
+    }
+}
+
+/// A live herdr controller over [`QuietLines`] aimed at `zelli_mobile`'s `worker` tab, pane 21,
+/// loaded and handshaken but not yet applied.
+fn live_foreign_link(rt: &tokio::runtime::Runtime) -> Arc<TerminalController> {
+    let _state = MuxrApp.init();
+    let c = Arc::new(TerminalController::new(
+        Arc::new(QuietLines(expect_terminal_repository())),
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some("herdr:work".to_string()),
+    ));
+    c.set_attach_target_in_space(Some("zelli_mobile".to_string()), Some(1), Some(21));
+    c.attach_live();
+    rt.block_on(c.load());
+    assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+    c
+}
+
+#[test]
+fn a_deep_link_into_a_foreign_space_switches_space_then_tab_then_pane() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let rt = runtime();
+    let c = live_foreign_link(&rt);
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+
+    assert_eq!(
+        verb_log_for_tests(),
+        [
+            "switch_space:zelli_mobile",
+            "go_to_tab:102",
+            "focus_pane:21"
+        ]
+    );
+    assert_eq!(c.active_tab.get_untracked(), "worker");
+    assert_eq!(c.pending_attach_target_for_tests(), None, "applied once");
+    assert_eq!(
+        c.resume_slot().target().space_id.as_deref(),
+        Some("zelli_mobile"),
+        "a reconnect resumes in the linked space"
+    );
+}
+
+#[test]
+fn a_foreign_space_link_naming_a_missing_tab_or_pane_moves_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    for location in [
+        "/terminal?session=herdr:work&space=zelli_mobile&tab=9&pane=21",
+        "/terminal?session=herdr:work&space=zelli_mobile&tab=1&pane=99",
+        "/terminal?session=herdr:work&space=nowhere&tab=1&pane=21",
+    ] {
+        clear_verb_log_for_tests();
+        let mut h = Harness::mount_at(location);
+        h.pump_for(Duration::from_millis(150));
+        assert!(
+            verb_log_for_tests().is_empty(),
+            "{location}: {:?}",
+            verb_log_for_tests()
+        );
+        drop(h);
+    }
+}
+
+#[test]
+fn a_link_naming_the_selected_space_behaves_as_one_without() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    // `forgekit` is the selected space; position 2 is gohora (tab id 3).
+    let mut h = Harness::mount_at("/terminal?session=herdr:work&space=forgekit&tab=2&pane=31");
+    h.pump_until("the target", |_| verb_log_for_tests().len() >= 2);
+    h.pump_for(Duration::from_millis(100));
+
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
+}
+
+#[test]
+fn a_user_move_supersedes_a_foreign_space_link() {
+    let _g = serial();
+    let _ambient = setup();
+    clear_verb_log_for_tests();
+    let rt = runtime();
+    let c = live_foreign_link(&rt);
+    assert!(c.pending_attach_target_for_tests().is_some());
+
+    rt.block_on(async {
+        assert!(c.commit_pane("btop".to_string(), 11, false).await);
+    });
+    assert_eq!(c.pending_attach_target_for_tests(), None);
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.apply_attach_target().await;
+    });
+    assert_eq!(verb_log_for_tests(), ["go_to_tab:1", "focus_pane:11"]);
+}
+
 /// One controller call, boxed so a test can open it, leave it parked on its round
 /// trip, and land it later — the ordering a race needs, with no clock in it.
 type Step<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
@@ -1900,6 +2036,7 @@ fn a_handshake_that_never_settles_neither_applies_nor_drops_the_deep_link() {
     assert_eq!(
         c.pending_attach_target_for_tests(),
         Some(AttachTarget {
+            space_id: None,
             tab_position: Some(2),
             pane_id: Some(31),
         }),

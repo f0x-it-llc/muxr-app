@@ -4,7 +4,8 @@
 //! cards: overview stats, the active tab's pane tiles, and the full-width
 //! tabs → panes card whose pane pills carry a tab/pane target (honoured by
 //! the terminal once Phase 4's attach-into-pane card lands; until then it
-//! attaches at the session's server focus).
+//! attaches at the session's server focus). A running session with agents
+//! also gets an `AI AGENTS · N` section above that card.
 //!
 //! Every count reads the session's `LayoutSummary`. No selection, a list
 //! still loading, a failed first load, an empty list and a resurrectible
@@ -20,9 +21,11 @@ use frust::{
 };
 use frust_glyph::{BadgeVariant, badge, empty_state, glyph_card, skeleton, stat_card, tag};
 
+use crate::agents::{AgentStatus, AgentSummary};
 use crate::features::sessions::domain::entities::{
-    PaneSummary, Session, SessionBackend, TabSummary, ThirdMetric,
+    PaneSummary, Session, SessionAgent, SessionBackend, TabSummary, ThirdMetric,
 };
+use crate::ui::agent_marks::{TILE_SIZE, count_pills, kind_tile, status_dot, status_tone};
 use crate::ui::paint::{HAIRLINE, RADIUS_FULL};
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
@@ -65,6 +68,15 @@ const SKELETON_TITLE: f64 = 18.0;
 const SKELETON_STATS: f64 = 44.0;
 const SKELETON_ROW: f64 = 38.0;
 
+/// The agent row's height and corner radius — the terminal tree's row anatomy.
+const AGENT_ROW_HEIGHT: f64 = 52.0;
+const AGENT_ROW_RADIUS: f64 = 10.0;
+/// The trailing `space › tab › pane` band, fixed like the terminal row's.
+const AGENT_LOCATION_WIDTH: f64 = 160.0;
+const AGENT_GAP: f64 = spacing::XS;
+const AGENTS_LABEL: &str = "AI AGENTS";
+const LOCATION_SEP: &str = " \u{203a} ";
+
 const SELECT_TITLE: &str = "Select a session";
 const SELECT_DESC: &str = "Its layout and tabs show here. Attach from the header.";
 const EMPTY_TITLE: &str = "No sessions";
@@ -78,6 +90,7 @@ const RESURRECT_DESC: &str = "This session is kept by the server but has no live
 /// The pane beside the Tablet list column. See the [module docs](self).
 pub(in crate::features::sessions::presentation) fn detail_pane(
     sessions: &[Session],
+    agents: &[SessionAgent],
     selected: Option<&str>,
     phase: LoadPhase,
     read_only: bool,
@@ -88,7 +101,7 @@ pub(in crate::features::sessions::presentation) fn detail_pane(
         PaneState::Loading => Either::Left(loading_body(full)),
         PaneState::Empty => Either::Right(hint(EMPTY_TITLE, EMPTY_DESC)),
         PaneState::Selected(index) => {
-            return selected_detail(&sessions[index], read_only, full, colors);
+            return selected_detail(&sessions[index], agents, read_only, full, colors);
         }
         PaneState::NoSelection => Either::Right(hint(SELECT_TITLE, SELECT_DESC)),
     };
@@ -198,6 +211,7 @@ fn loading_body(full: bool) -> impl View<SessionsState> {
 /// Header over the scrolling body for `session`.
 fn selected_detail(
     session: &Session,
+    agents: &[SessionAgent],
     read_only: bool,
     full: bool,
     colors: &Palette,
@@ -227,6 +241,12 @@ fn selected_detail(
             any(tree_card(session, full, colors)),
         ],
     };
+    let mut cards = cards; // erasure: keep accumulator into Vec<AnyView>
+    if kind != BodyKind::Resurrect && !agents.is_empty() {
+        // Above the spaces/tabs/panes card, which is last in `Full`.
+        let at = cards.len() - usize::from(kind == BodyKind::Full);
+        cards.insert(at, any(agents_section(&session.id, agents, colors)));
+    }
     container(
         column()
             .child(header(session, read_only, colors))
@@ -641,9 +661,146 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl V
         .on_tap(move |state: &mut SessionsState| pages::attach_pane(state, &id, tab, pane_id))
 }
 
+/// `AI AGENTS · N` with the count pills, over one row per agent (most urgent
+/// first, as the repository orders them). A tap attaches into the agent's pane.
+fn agents_section(id: &str, agents: &[SessionAgent], colors: &Palette) -> impl View<SessionsState> {
+    let theme = active_theme();
+    let summary = AgentSummary::from_statuses(
+        agents
+            .iter()
+            .map(|agent| (agent.status, agent.kind.as_str())),
+    );
+    let mut head = vec![
+        inflexible(
+            text(format!("{AGENTS_LABEL}{SEP}{}", summary.total))
+                .style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        ),
+        flexible(1, SizedBox::<SessionsState>(None, None)),
+    ];
+    for (index, pill) in count_pills::<SessionsState>(&summary)
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            head.push(h_gap(CHIP_GAP));
+        }
+        head.push(inflexible(pill));
+    }
+    let rows = agents
+        .iter()
+        .map(|agent| agent_row(id, agent, colors))
+        .collect();
+    let parts = vec![any(centered_row(head)), any(gapped_column(rows, AGENT_GAP))]; // erasure: keep accumulator into Vec<AnyView>
+    gapped_column(parts, HEAD_GAP)
+}
+
+/// `space › tab › p<pane>`, the space left out when the agent reports none.
+fn agent_location(agent: &SessionAgent) -> String {
+    let pane = format!("p{}", agent.pane_id);
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    if let Some(space) = agent.space_name.as_deref() {
+        parts.push(space);
+    }
+    parts.push(&agent.tab_name);
+    parts.push(&pane);
+    parts.join(LOCATION_SEP)
+}
+
+/// One agent row: status dot, kind tile, `name · kind` over the activity line,
+/// the status word and the location trailing. Blocked rows wear the amber wash.
+fn agent_row(id: &str, agent: &SessionAgent, colors: &Palette) -> impl View<SessionsState> {
+    let theme = active_theme();
+    let (fill, border) = if agent.status == AgentStatus::Blocked {
+        (colors.amber_wash, colors.warning)
+    } else {
+        (colors.base, colors.outline)
+    };
+    let one_line = |value: String, ink| {
+        text(value)
+            .style(inked(&theme.type_scale.label_small, ink))
+            .max_lines(1)
+            .overflow(TextOverflow::Ellipsis)
+    };
+    let headline = centered_row(vec![
+        flexible(
+            1,
+            text(format!("{} \u{b7} {}", agent.display_name(), agent.kind))
+                .style(inked(&theme.type_scale.label_large, colors.fg))
+                .max_lines(1)
+                .overflow(TextOverflow::Ellipsis),
+        ),
+        h_gap(CHIP_GAP),
+        inflexible(text(agent.status.label()).style(inked(
+            &theme.type_scale.label_small,
+            status_tone(colors, agent.status),
+        ))),
+    ]);
+    let line = centered_row(vec![
+        flexible(
+            1,
+            one_line(
+                agent.subtitle().unwrap_or_default().to_string(),
+                colors.fg_muted,
+            ),
+        ),
+        h_gap(CHIP_GAP),
+        inflexible(
+            SizedBox::<SessionsState>(Some(AGENT_LOCATION_WIDTH), None)
+                .child(one_line(agent_location(agent), colors.fg_dim)),
+        ),
+    ]);
+    let content = centered_row(vec![
+        inflexible(status_dot::<SessionsState>(agent.status)),
+        h_gap(CHIP_GAP),
+        inflexible(kind_tile::<SessionsState>(&agent.kind, TILE_SIZE)),
+        h_gap(CHIP_GAP),
+        flexible(
+            1,
+            column()
+                .child(headline)
+                .push(v_gap(spacing::MICRO))
+                .child(line)
+                .cross_axis(CrossAxisAlignment::Stretch),
+        ),
+    ]);
+    let boxed = container(
+        SizedBox::<SessionsState>(None, Some(AGENT_ROW_HEIGHT)).child(Padding(
+            EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
+            content,
+        )),
+    )
+    .fill(fill)
+    .radius(AGENT_ROW_RADIUS)
+    .border(border, HAIRLINE);
+    let (id, agent) = (id.to_string(), agent.clone());
+    GestureDetector(boxed)
+        .on_tap(move |state: &mut SessionsState| pages::attach_agent(state, &id, &agent))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agents_location_skips_a_missing_space() {
+        let mut agent = SessionAgent {
+            pane_id: 2,
+            tab_position: 0,
+            space_id: None,
+            space_name: Some("api".to_string()),
+            tab_name: "shell".to_string(),
+            kind: "claude".to_string(),
+            name: None,
+            display_kind: None,
+            status: AgentStatus::Idle,
+            title: None,
+            summary: None,
+            change_seq: 0,
+        };
+        assert_eq!(agent_location(&agent), "api \u{203a} shell \u{203a} p2");
+        agent.space_name = None;
+        assert_eq!(agent_location(&agent), "shell \u{203a} p2");
+    }
 
     #[test]
     fn a_tabs_pane_count_reads_in_the_singular_for_one() {
