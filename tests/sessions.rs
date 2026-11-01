@@ -1549,6 +1549,10 @@ struct AgentsRepo {
     agents: Mutex<Vec<SessionAgent>>,
     fail: std::sync::atomic::AtomicBool,
     calls: AtomicU32,
+    lists: AtomicU32,
+    /// When set, the next agents read parks until [`release`](Self::release) is notified.
+    stall: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
 }
 
 impl AgentsRepo {
@@ -1557,11 +1561,18 @@ impl AgentsRepo {
             agents: Mutex::new(agents),
             fail: std::sync::atomic::AtomicBool::new(false),
             calls: AtomicU32::new(0),
+            lists: AtomicU32::new(0),
+            stall: std::sync::atomic::AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
         }
     }
 
     fn calls(&self) -> u32 {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn lists(&self) -> u32 {
+        self.lists.load(Ordering::SeqCst)
     }
 }
 
@@ -1569,6 +1580,7 @@ impl AgentsRepo {
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 impl SessionsRepository for AgentsRepo {
     async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        self.lists.fetch_add(1, Ordering::SeqCst);
         let mut session = stub_session(AGENTS_SESSION);
         session.backend = SessionBackend::Herdr;
         session.agents = Some(summary(1, 0, 1, 0, &["claude"]));
@@ -1577,6 +1589,9 @@ impl SessionsRepository for AgentsRepo {
 
     async fn list_agents(&self, _session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.stall.swap(false, Ordering::SeqCst) {
+            self.release.notified().await;
+        }
         if self.fail.load(Ordering::SeqCst) {
             return Err(AppFailure::Network("list_agents refused".to_string()));
         }
@@ -1624,8 +1639,10 @@ fn agent_rows(controller: &SessionsController) -> Vec<(u32, AgentStatus)> {
 
 /// A loaded controller over `repo`, its detail visible, with the agents
 /// session selected and its first agent read landed.
-async fn selected_with_agents(repo: &Arc<AgentsRepo>) -> SessionsController {
-    let controller = SessionsController::new(Arc::clone(repo) as SharedSessionsRepository);
+async fn selected_with_agents(repo: &Arc<AgentsRepo>) -> Arc<SessionsController> {
+    let controller = Arc::new(SessionsController::new(
+        Arc::clone(repo) as SharedSessionsRepository
+    ));
     controller.set_detail_visible(true);
     controller.refresh().await;
     controller.select(AGENTS_SESSION);
@@ -1704,6 +1721,92 @@ async fn a_hidden_detail_never_reads_agents_and_a_selection_change_empties_the_l
     tick(&controller).await;
     assert_eq!(repo.calls(), 1, "a Compact window pays for nothing");
     assert!(controller.agents.get_untracked().is_empty());
+}
+
+#[tokio::test]
+async fn a_stalled_agents_read_does_not_delay_the_next_list_poll() {
+    let repo = Arc::new(AgentsRepo::new(vec![session_agent(
+        1,
+        AgentStatus::Blocked,
+    )]));
+    let controller = selected_with_agents(&repo).await;
+    let (calls, lists) = (repo.calls(), repo.lists());
+
+    repo.stall.store(true, Ordering::SeqCst);
+    assert!(controller.take_poll_tick(), "the poll is armed");
+    let first = controller.refresh_from_poll();
+    let second = async {
+        while repo.calls() == calls {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            controller.take_poll_tick(),
+            "the list poll's claim is free while the agents read hangs"
+        );
+        controller.refresh_from_poll().await;
+        assert_eq!(repo.lists(), lists + 2, "the second list refresh ran");
+        assert_eq!(
+            repo.calls(),
+            calls + 1,
+            "the hung agents read is single-flight: no second one stacked"
+        );
+        repo.release.notify_one();
+    };
+    tokio::join!(first, second);
+
+    tick(&controller).await;
+    assert_eq!(
+        repo.calls(),
+        calls + 2,
+        "the claim released: agents read again"
+    );
+}
+
+#[test]
+fn a_visible_edge_with_a_selected_session_fetches_the_agents_without_a_tick() {
+    use frust_reactive::ReactiveRuntime;
+
+    let _g = serial();
+    let _ambient = setup();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let repo = Arc::new(AgentsRepo::new(vec![session_agent(
+        1,
+        AgentStatus::Blocked,
+    )]));
+    let controller = Arc::new(SessionsController::new(
+        Arc::clone(&repo) as SharedSessionsRepository
+    ));
+    runtime.block_on(async {
+        controller.refresh().await;
+        controller.select(AGENTS_SESSION);
+    });
+    assert_eq!(repo.calls(), 0, "hidden: nothing read yet");
+
+    controller.set_detail_visible(true);
+    let pump = ReactiveRuntime::get().expect("runtime installed by setup()");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while repo.calls() == 0 {
+        assert!(Instant::now() < deadline, "the edge never fetched");
+        pump.pump_local();
+        runtime.block_on(tokio::task::yield_now());
+    }
+    while agent_rows(&controller).is_empty() {
+        assert!(Instant::now() < deadline, "the rows never landed");
+        pump.pump_local();
+        runtime.block_on(tokio::task::yield_now());
+    }
+    assert_eq!(agent_rows(&controller), [(1, AgentStatus::Blocked)]);
+
+    controller.set_detail_visible(true);
+    assert_eq!(repo.calls(), 1, "a repeated value is not an edge");
+    controller.set_detail_visible(false);
+    assert!(
+        controller.agents.get_untracked().is_empty(),
+        "the hidden edge clears the list"
+    );
 }
 
 // ---------------------------------------------------------------------------
