@@ -36,9 +36,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::agents::PREVIEW_AGENT_MARKS;
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
-    AgentEntry, AgentMark, AgentStatus, PaneEntry, Space, TabEntry, TermLine,
+    AgentEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
 };
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
@@ -113,71 +114,68 @@ pub fn delay_next_list_agents_for_tests(by: Duration) {
     DELAY_NEXT_LIST_AGENTS_MS.store(millis, Ordering::SeqCst);
 }
 
-/// The four agents the desktop preview shows: one `claude` blocked, one `codex` done, one
-/// `gemini` working, one `claude` idle — rolling up to the sessions mock's herdr summary. Each
-/// points at a real pane of the seeded tab world.
+/// The four agents the desktop preview shows, [`PREVIEW_AGENT_MARKS`] given names, a pane
+/// each in the seeded tab world, and a line of context — the same inventory the sessions
+/// mock's herdr summary rolls up.
 pub fn default_agents_for_preview() -> Vec<AgentEntry> {
-    let agent = |name: &str,
-                 kind: &str,
-                 status: AgentStatus,
-                 (space, tab_key, tab_id, pane_id): (&str, &str, u64, u32),
-                 summary: &str,
-                 cwd: &str,
-                 change_seq: u64| AgentEntry {
-        pane_id,
-        tab_id,
-        tab_key: tab_key.to_string(),
-        space_id: Some(space.to_string()),
-        space_name: Some(space.to_string()),
-        tab_name: tab_key.to_string(),
-        kind: kind.to_string(),
-        name: Some(name.to_string()),
-        display_kind: None,
-        status,
-        title: Some(format!("{kind} \u{b7} {name}")),
-        summary: Some(summary.to_string()),
-        cwd: Some(cwd.to_string()),
-        focused: false,
-        change_seq,
-    };
-    vec![
-        agent(
+    let details = [
+        (
             "reviewer",
-            "claude",
-            AgentStatus::Blocked,
             ("forgekit", "minefit", 2, 20),
             "Waiting for approval to run the migration",
             "~/api",
             4,
         ),
-        agent(
+        (
             "planner",
-            "codex",
-            AgentStatus::Done,
             ("forgekit", "gohora", 3, 30),
             "Finished the refactor plan",
             "~/src",
             3,
         ),
-        agent(
+        (
             "scout",
-            "gemini",
-            AgentStatus::Working,
             ("forgekit", "devbox", 4, 40),
             "Reading the build logs",
             "/home/ed",
             2,
         ),
-        agent(
+        (
             "notes",
-            "claude",
-            AgentStatus::Idle,
             ("zelli_mobile", "logs", 101, 10),
             "Idle since the last summary",
             "~/logs",
             1,
         ),
-    ]
+    ];
+    PREVIEW_AGENT_MARKS
+        .iter()
+        .zip(details)
+        .map(
+            |(
+                &(status, kind),
+                (name, (space, tab_key, tab_id, pane_id), summary, cwd, change_seq),
+            )| {
+                AgentEntry {
+                    pane_id,
+                    tab_id,
+                    tab_key: tab_key.to_string(),
+                    space_id: Some(space.to_string()),
+                    space_name: Some(space.to_string()),
+                    tab_name: tab_key.to_string(),
+                    kind: kind.to_string(),
+                    name: Some(name.to_string()),
+                    display_kind: None,
+                    status,
+                    title: Some(format!("{kind} \u{b7} {name}")),
+                    summary: Some(summary.to_string()),
+                    cwd: Some(cwd.to_string()),
+                    focused: false,
+                    change_seq,
+                }
+            },
+        )
+        .collect()
 }
 
 /// Replace the agent inventory every later `list_agents` answers, and mark the pane each one
@@ -629,7 +627,7 @@ impl TerminalRepository for MockTerminalRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::terminal::domain::entities::TermLineKind;
+    use crate::features::terminal::domain::entities::{AgentStatus, TermLineKind};
 
     /// Drive one repository call to completion on a current-thread runtime —
     /// a pure data-layer test, with no frust runtime in play.

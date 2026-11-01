@@ -125,6 +125,17 @@ impl AgentSummary {
     }
 }
 
+/// The desktop preview's agent inventory as `(status, kind)` marks — the one
+/// list both mocks derive from: the terminal mock places these on panes and
+/// the sessions mock rolls them up with [`AgentSummary::from_statuses`].
+#[doc(hidden)]
+pub const PREVIEW_AGENT_MARKS: [(AgentStatus, &str); 4] = [
+    (AgentStatus::Blocked, "claude"),
+    (AgentStatus::Done, "codex"),
+    (AgentStatus::Working, "gemini"),
+    (AgentStatus::Idle, "claude"),
+];
+
 /// Ascending sort key for agent rows: most urgent status first, then the most
 /// recent change (highest `change_seq`) first.
 pub fn agent_sort_key(status: AgentStatus, change_seq: u64) -> (u8, u64) {

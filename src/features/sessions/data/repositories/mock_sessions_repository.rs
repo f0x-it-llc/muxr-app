@@ -40,7 +40,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::agents::AgentSummary;
+use crate::agents::{AgentSummary, PREVIEW_AGENT_MARKS};
 use crate::failure::AppFailure;
 use crate::features::sessions::domain::entities::{
     CreateSessionParams, LayoutSummary, PaneSummary, RenameRequest, Session, SessionBackend,
@@ -278,19 +278,9 @@ fn seed() -> Vec<Session> {
                 ],
                 space: Some("home".to_string()),
             },
-            agents: Some(AgentSummary {
-                total: 4,
-                blocked: 1,
-                done: 1,
-                working: 1,
-                idle: 1,
-                unknown: 0,
-                kinds: vec![
-                    "claude".to_string(),
-                    "codex".to_string(),
-                    "gemini".to_string(),
-                ],
-            }),
+            agents: Some(AgentSummary::from_statuses(
+                PREVIEW_AGENT_MARKS.iter().copied(),
+            )),
         },
     ]
 }
