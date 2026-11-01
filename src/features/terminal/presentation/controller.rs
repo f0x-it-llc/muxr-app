@@ -1268,11 +1268,11 @@ impl TerminalController {
 
     /// Apply one streamed event to [`agent_rows`](Self::agent_rows) — a snapshot replaces,
     /// a change upserts by pane id, a removal drops — re-sort stably and publish. Supersedes
-    /// any `list_agents` still in flight; a snapshot or change clears
-    /// [`agents_stale`](Self::agents_stale). A held move claim defers only the publish.
+    /// any `list_agents` still in flight, and every event clears
+    /// [`agents_stale`](Self::agents_stale): the daemon just spoke. A held move claim
+    /// defers only the publish.
     pub fn apply_agent_event(&self, event: AgentEventEntry) {
         self.agents_generation.fetch_add(1, Ordering::SeqCst);
-        let confirms = !matches!(event, AgentEventEntry::Removed(_));
         {
             let mut rows = lock(&self.agent_rows);
             match event {
@@ -1290,9 +1290,7 @@ impl TerminalController {
         if !self.signals_alive() {
             return;
         }
-        if confirms {
-            self.set_agents_stale(false);
-        }
+        self.set_agents_stale(false);
         self.publish_agent_rows();
     }
 
