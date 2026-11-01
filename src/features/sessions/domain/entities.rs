@@ -209,8 +209,10 @@ pub struct SessionAgent {
     /// `PaneMsg.id` of the pane the agent runs in.
     pub pane_id: u32,
     /// `TabMsg.position` (0-based) of the containing tab in its space's
-    /// layout — what the terminal's attach target addresses.
-    pub tab_position: u32,
+    /// layout — what the terminal's attach target addresses. `None` when the
+    /// layout could not place it (its space's read failed, or the tab is not in
+    /// it): the row still lists, but has nowhere to deep link to.
+    pub tab_position: Option<u32>,
     /// Opaque space id; `None` on a backend without spaces.
     pub space_id: Option<String>,
     pub space_name: Option<String>,

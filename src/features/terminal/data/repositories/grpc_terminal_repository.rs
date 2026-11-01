@@ -16,7 +16,7 @@
 //! which `GrpcTerminalFeed`'s own [`Drop`] does on unmount).
 //!
 //! **Tab keys are derived, not carried**, and uniqueness is load-bearing —
-//! [`map_tabs`]/[`unique_key`] state that contract. Failure mapping funnels through
+//! [`map_tabs`] and [`crate::net::agent_layouts::unique_tab_key`] state that contract. Failure mapping funnels through
 //! [`crate::net::error::from_status`], with `UNAUTHENTICATED` additionally invoking
 //! [`ConnectionController::on_session_expired`]; every `ActionAck`-returning call maps through
 //! [`crate::net::error::ack_result`] rather than trusting the outer `Status`.
@@ -26,15 +26,21 @@
 //! the terminal feed's [`RECONNECT_BACKOFF`] (reset by a stream that delivered), and a clean end,
 //! an `UNAUTHENTICATED` answer or a spent schedule ends the subscription for good. That answer
 //! does not fire the session-expired hook from here — it writes signals, and the attached feed
-//! reports the same expiry itself. Tab keys come from a per-space layout cache, refreshed on
-//! every snapshot and on a changed agent whose tab it lacks.
+//! reports the same expiry itself. [`WatchHandle::end`] reports which of those it was.
+//!
+//! **Agent tab keys are validated, not assumed.** Both `list_agents` and the stream join the
+//! agents with one `GetLayout` per space ([`crate::net::agent_layouts`]). The stream caches each
+//! space's layout, and a changed agent reuses it only while it is younger than the layout poll
+//! ([`LAYOUT_FRESH`]) and still names the agent's tab as the event does; otherwise that space is
+//! re-read first. A space whose read fails keeps its rows at their last known key (empty only
+//! if never known) — the poll path reports that failure once, the stream logs it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 use tonic::{Code, Status};
@@ -46,7 +52,12 @@ use crate::features::terminal::data::feeds::grpc_feed::RECONNECT_BACKOFF;
 use crate::features::terminal::domain::entities::{
     AgentEntry, AgentEventEntry, AgentMark, PaneEntry, ScrollStep, Space, TabEntry, TermLine,
 };
-use crate::features::terminal::domain::repositories::{AgentSink, TerminalRepository, WatchHandle};
+use crate::features::terminal::domain::repositories::{
+    AgentSink, TerminalRepository, WatchEnd, WatchHandle,
+};
+use crate::net::agent_layouts::{
+    AgentLayouts, TabSlot, agent_spaces, fetch_agent_layouts, tab_label, unique_tab_key,
+};
 use crate::net::proto::{
     AgentEvent, AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout,
     NewPaneReq, NewTabReq, PaneMsg, PaneTarget, RenamePaneReq, RenameSpaceReq, RenameTabReq,
@@ -67,9 +78,13 @@ const NO_SESSION: &str = "no session is bound to this terminal repository";
 /// mock's own enforcement point.
 const BLANK_SESSION: &str = "detach_session called with a blank id";
 
-/// What an unnamed tab's [`TabEntry::key`] falls back to, before the 1-based
-/// position it is completed with (`tab 3`).
-const UNNAMED_TAB: &str = "tab";
+/// How long a cached space layout may key a streamed change: the layout poll's own interval,
+/// the staleness the tab list itself already accepts.
+const LAYOUT_FRESH: Duration = Duration::from_secs(3);
+
+/// Every agent tab key this repository has resolved, by `(space id, tab id)` — what a row
+/// keeps while its space's layout cannot be read.
+type KnownKeys = HashMap<(String, u64), String>;
 
 /// The real [`TerminalRepository`], over a live `muxrd` connection. See the
 /// [module docs](self).
@@ -78,6 +93,8 @@ pub struct GrpcTerminalRepository {
     /// What every request addresses. A `Mutex` (not a `RefCell`) because this
     /// travels behind an `Arc<dyn TerminalRepository + Send + Sync>`.
     binding: Mutex<Binding>,
+    /// Shared by `list_agents` and every stream this repository opens.
+    known_keys: Arc<Mutex<KnownKeys>>,
 }
 
 /// The session and per-connection routing token
@@ -99,6 +116,7 @@ impl GrpcTerminalRepository {
         Self {
             connection,
             binding: Mutex::new(Binding::default()),
+            known_keys: Arc::new(Mutex::new(KnownKeys::new())),
         }
     }
 
@@ -150,12 +168,14 @@ impl GrpcTerminalRepository {
     }
 
     /// The handle and the unspawned pump of one agents subscription, napping through `nap` on
-    /// `schedule` — `watch_agents` spawns it; a test drives it on its own runtime.
+    /// `schedule` and reading layouts from `source` — `watch_agents` spawns it; a test drives
+    /// it on its own runtime.
     fn agent_watch(
         &self,
         sink: AgentSink,
         nap: Nap,
         schedule: Vec<Duration>,
+        source: LayoutSource,
     ) -> Result<(WatchHandle, impl Future<Output = ()> + Send + 'static), AppFailure> {
         let request = self
             .session_ref()
@@ -163,7 +183,16 @@ impl GrpcTerminalRepository {
         self.client()?;
         let watch = Arc::new(AgentWatch::default());
         let stop = Arc::clone(&watch);
-        let handle = WatchHandle::new(Arc::clone(&watch.live), move || stop.stop());
+        let handle = WatchHandle::new(
+            Arc::clone(&watch.live),
+            Arc::clone(&watch.ended),
+            move || stop.stop(),
+        );
+        let keys = StreamKeys {
+            spaces: HashMap::new(),
+            known: Arc::clone(&self.known_keys),
+            source,
+        };
         let pump = run_agent_watch(
             Arc::clone(&self.connection),
             request,
@@ -171,38 +200,118 @@ impl GrpcTerminalRepository {
             watch,
             nap,
             schedule,
+            keys,
         );
         Ok((handle, pump))
     }
 }
 
-/// Each space's mapped `GetLayout` answer, keyed by space id (`""` is the focused space).
-type Layouts = HashMap<String, Vec<TabEntry>>;
-
-/// One `GetLayout` per distinct space `list`'s agents live in, since an agent's `tab_key`
-/// derives from its tab's name and position there. A failed read leaves that space out, so its
-/// rows carry an empty `tab_key` rather than failing the inventory.
-async fn fetch_layouts(client: &MuxrClient, request: &SessionRef, list: &AgentList) -> Layouts {
-    let space_ids: HashSet<&str> = list.agents.iter().map(|a| a.space_id.as_str()).collect();
-    let mut layouts = Layouts::new();
-    for space_id in space_ids {
-        if let Some(tabs) = fetch_layout(client, request, space_id).await {
-            layouts.insert(space_id.to_string(), tabs);
-        }
-    }
-    layouts
+/// Where the stream reads a space's layout from: the wire, or a test's script.
+enum LayoutSource {
+    Wire,
+    #[cfg(test)]
+    Scripted(Arc<tests::ScriptedLayouts>),
 }
 
-/// `space_id`'s mapped layout, or `None` when the read fails.
-async fn fetch_layout(
-    client: &MuxrClient,
-    request: &SessionRef,
-    space_id: &str,
-) -> Option<Vec<TabEntry>> {
-    let mut layout_request = request.clone();
-    layout_request.space_id = space_id.to_string();
-    let response = client.authed().get_layout(layout_request).await.ok()?;
-    Some(map_tabs(response.into_inner()))
+impl LayoutSource {
+    async fn read(
+        &self,
+        client: &MuxrClient,
+        request: &SessionRef,
+        spaces: Vec<String>,
+    ) -> AgentLayouts {
+        match self {
+            LayoutSource::Wire => fetch_agent_layouts(client, request, spaces).await,
+            #[cfg(test)]
+            LayoutSource::Scripted(script) => script.read(spaces),
+        }
+    }
+
+    /// The clock layout freshness is judged on; a script may run it ahead.
+    fn now(&self) -> Instant {
+        match self {
+            LayoutSource::Wire => Instant::now(),
+            #[cfg(test)]
+            LayoutSource::Scripted(script) => script.now(),
+        }
+    }
+}
+
+/// One space's layout as the stream last read it.
+struct CachedSpace {
+    slots: HashMap<u64, TabSlot>,
+    read_at: Instant,
+}
+
+/// The stream's tab-key state: its per-space layout cache, the repository's known keys, and
+/// where layouts come from.
+struct StreamKeys {
+    spaces: HashMap<String, CachedSpace>,
+    known: Arc<Mutex<KnownKeys>>,
+    source: LayoutSource,
+}
+
+impl StreamKeys {
+    /// Read `spaces` and cache every one that answered; a failed one keeps its old entry.
+    async fn reread(&mut self, client: &MuxrClient, request: &SessionRef, spaces: Vec<String>) {
+        let layouts = self.source.read(client, request, spaces.clone()).await;
+        let read_at = self.source.now();
+        for failure in &layouts.failed {
+            log::debug!(
+                "agents stream: layout of space {:?} unread: {}",
+                failure.space_id,
+                failure.status.message()
+            );
+        }
+        for space_id in spaces {
+            if layouts.space_failed(&space_id) {
+                continue;
+            }
+            let slots = layouts
+                .tabs
+                .iter()
+                .filter(|((space, _), _)| *space == space_id)
+                .map(|((_, tab_id), slot)| (*tab_id, slot.clone()))
+                .collect();
+            self.spaces.insert(space_id, CachedSpace { slots, read_at });
+        }
+    }
+
+    /// Whether `agent`'s space layout may key it as it stands: young enough, and naming the
+    /// agent's tab as the event does.
+    fn usable_for(&self, agent: &AgentMsg) -> bool {
+        let now = self.source.now();
+        self.spaces.get(&agent.space_id).is_some_and(|cached| {
+            now.saturating_duration_since(cached.read_at) < LAYOUT_FRESH
+                && cached
+                    .slots
+                    .get(&agent.tab_id)
+                    .is_some_and(|slot| slot.name == agent.tab_name)
+        })
+    }
+
+    /// `agent`'s tab key: its space's cached layout's (none when that layout lacks the tab),
+    /// else — a space never read — the last one known, else empty.
+    fn key_for(&self, agent: &AgentMsg) -> String {
+        let mut known = lock_keys(&self.known);
+        let place = (agent.space_id.clone(), agent.tab_id);
+        let Some(cached) = self.spaces.get(&agent.space_id) else {
+            return known.get(&place).cloned().unwrap_or_default();
+        };
+        let key = cached
+            .slots
+            .get(&agent.tab_id)
+            .map(|slot| slot.tab_key.clone())
+            .unwrap_or_default();
+        if !key.is_empty() {
+            known.insert(place, key.clone());
+        }
+        key
+    }
+}
+
+fn lock_keys(known: &Mutex<KnownKeys>) -> MutexGuard<'_, KnownKeys> {
+    known.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The state an agents subscription's pump shares with its [`WatchHandle`].
@@ -211,6 +320,7 @@ struct AgentWatch {
     stop: AtomicBool,
     wake: Notify,
     live: Arc<AtomicBool>,
+    ended: Arc<AtomicU8>,
 }
 
 impl AgentWatch {
@@ -229,11 +339,13 @@ impl AgentWatch {
 }
 
 /// How one `WatchAgents` stream ended.
-enum WatchEnd {
+enum StreamEnd {
     /// A transport failure: reconnect, from the first step if this stream delivered.
     Dropped { delivered: bool },
-    /// The server ended the stream, or refused the credential: the subscription is over.
-    Over,
+    /// The server ended the stream: the subscription is over.
+    Clean,
+    /// The server refused the credential: the subscription is over.
+    Unauthenticated,
 }
 
 /// How the pump naps between reconnects: production `tokio` has no timer, so the app naps on
@@ -265,24 +377,33 @@ async fn run_agent_watch(
     watch: Arc<AgentWatch>,
     nap: Nap,
     schedule: Vec<Duration>,
+    mut keys: StreamKeys,
 ) {
-    let mut layouts = Layouts::new();
     let mut step = 0;
     loop {
-        let attempt = watch_once(&connection, &request, &sink, &watch.live, &mut layouts);
+        let attempt = watch_once(&connection, &request, &sink, &watch, &mut keys);
         let end = match race(watch.stopped(), attempt).await {
             Winner::First(()) => break,
             Winner::Second(end) => end,
         };
         watch.live.store(false, Ordering::Release);
         match end {
-            WatchEnd::Over => break,
-            WatchEnd::Dropped { delivered: true } => step = 0,
-            WatchEnd::Dropped { delivered: false } => {}
+            StreamEnd::Clean => {
+                WatchEnd::EndedClean.store(&watch.ended);
+                break;
+            }
+            StreamEnd::Unauthenticated => {
+                WatchEnd::EndedUnauthenticated.store(&watch.ended);
+                break;
+            }
+            StreamEnd::Dropped { delivered: true } => step = 0,
+            StreamEnd::Dropped { delivered: false } => {}
         }
         let Some(&delay) = schedule.get(step) else {
+            WatchEnd::Exhausted.store(&watch.ended);
             break;
         };
+        WatchEnd::Reconnecting.store(&watch.ended);
         step += 1;
         if let Winner::First(()) = race(watch.stopped(), nap.sleep(delay)).await {
             break;
@@ -296,65 +417,77 @@ async fn watch_once(
     connection: &ConnectionController,
     request: &SessionRef,
     sink: &Mutex<AgentSink>,
-    live: &AtomicBool,
-    layouts: &mut Layouts,
-) -> WatchEnd {
+    watch: &AgentWatch,
+    keys: &mut StreamKeys,
+) -> StreamEnd {
     let Some(client) = connection.client() else {
-        return WatchEnd::Dropped { delivered: false };
+        return StreamEnd::Dropped { delivered: false };
     };
     let mut stream = match client.authed().watch_agents(request.clone()).await {
         Ok(response) => response.into_inner(),
-        Err(status) => return watch_end(&status, false),
+        Err(status) => return stream_end(&status, false),
     };
-    live.store(true, Ordering::Release);
+    WatchEnd::Open.store(&watch.ended);
+    watch.live.store(true, Ordering::Release);
     let mut delivered = false;
     loop {
         match stream.message().await {
             Ok(Some(event)) => {
                 delivered = true;
-                if let Some(entry) = map_agent_event(&client, request, event, layouts).await {
+                if let Some(entry) = map_agent_event(&client, request, event, keys).await {
                     (sink.lock().unwrap_or_else(PoisonError::into_inner))(entry);
                 }
             }
-            Ok(None) => return WatchEnd::Over,
-            Err(status) => return watch_end(&status, delivered),
+            Ok(None) => return StreamEnd::Clean,
+            Err(status) => return stream_end(&status, delivered),
         }
     }
 }
 
 /// An error `status` as the end of a stream: an expired credential is over, anything else one
 /// more drop.
-fn watch_end(status: &Status, delivered: bool) -> WatchEnd {
+fn stream_end(status: &Status, delivered: bool) -> StreamEnd {
     if status.code() == Code::Unauthenticated {
-        WatchEnd::Over
+        StreamEnd::Unauthenticated
     } else {
-        WatchEnd::Dropped { delivered }
+        StreamEnd::Dropped { delivered }
     }
 }
 
-/// One wire event as an [`AgentEventEntry`], filling tab keys from `layouts` (see the [module
-/// docs](self)). `None` for an event kind this client does not know.
+/// One wire event as an [`AgentEventEntry`], keyed through `keys` (see the [module
+/// docs](self)): a snapshot re-reads every space it names, a change re-reads its own space
+/// unless the cached layout is still usable for it. Events are mapped one at a time, so a
+/// later event for the same space waits on, then reuses, the read an earlier one started.
+/// `None` for an event kind this client does not know.
 async fn map_agent_event(
     client: &MuxrClient,
     request: &SessionRef,
     event: AgentEvent,
-    layouts: &mut Layouts,
+    keys: &mut StreamKeys,
 ) -> Option<AgentEventEntry> {
     match event.kind? {
         agent_event::Kind::Snapshot(list) => {
-            *layouts = fetch_layouts(client, request, &list).await;
-            Some(AgentEventEntry::Snapshot(map_agents(list, layouts)))
+            keys.spaces.clear();
+            keys.reread(client, request, agent_spaces(&list.agents))
+                .await;
+            let mut rows: Vec<AgentEntry> = list
+                .agents
+                .into_iter()
+                .map(|agent| {
+                    let key = keys.key_for(&agent);
+                    map_agent(agent, key)
+                })
+                .collect();
+            rows.sort_by_key(|row| agent_sort_key(row.status, row.change_seq));
+            Some(AgentEventEntry::Snapshot(rows))
         }
         agent_event::Kind::Changed(agent) => {
-            let known = layouts
-                .get(&agent.space_id)
-                .is_some_and(|tabs| tabs.iter().any(|tab| tab.tab_id == agent.tab_id));
-            if !known && let Some(tabs) = fetch_layout(client, request, &agent.space_id).await {
-                layouts.insert(agent.space_id.clone(), tabs);
+            if !keys.usable_for(&agent) {
+                keys.reread(client, request, vec![agent.space_id.clone()])
+                    .await;
             }
-            Some(AgentEventEntry::Changed(Box::new(map_agent(
-                agent, layouts,
-            ))))
+            let key = keys.key_for(&agent);
+            Some(AgentEventEntry::Changed(Box::new(map_agent(agent, key))))
         }
         agent_event::Kind::RemovedPaneId(pane_id) => Some(AgentEventEntry::Removed(pane_id)),
     }
@@ -449,16 +582,28 @@ impl TerminalRepository for GrpcTerminalRepository {
             .map_err(|status| self.map_status(status))?
             .into_inner();
         // `AgentMsg` carries a tab id and a tab *name*, but `TabEntry::key` is derived from the
-        // tab's name and position within its space's layout (`unique_key`), so the key needs
-        // that layout: fetch one `GetLayout` per distinct space the agents live in (the empty
-        // space id, a backend without spaces, reads the focused space). A failed layout read
-        // leaves those rows with an empty `tab_key` rather than failing the inventory.
-        let layouts = fetch_layouts(&client, &request, &list).await;
-        Ok(map_agents(list, &layouts))
+        // tab's name and position within its space's layout, so the key needs that layout: one
+        // `GetLayout` per distinct space (the empty space id, a backend without spaces, reads
+        // the focused space). A failed space keeps its rows at their last known key, and the
+        // failure is reported once rather than failing the inventory.
+        let layouts = fetch_agent_layouts(&client, &request, agent_spaces(&list.agents)).await;
+        if let Some(first) = layouts.failed.first() {
+            let failure = self.map_status(first.status.clone());
+            log::warn!(
+                "list_agents: {} space layout(s) unread, rows keep their last tab key: {failure}",
+                layouts.failed.len()
+            );
+        }
+        Ok(map_agents(list, &layouts, &mut lock_keys(&self.known_keys)))
     }
 
     fn watch_agents(&self, sink: AgentSink) -> Result<WatchHandle, AppFailure> {
-        let (handle, pump) = self.agent_watch(sink, Nap::Frust, RECONNECT_BACKOFF.to_vec())?;
+        let (handle, pump) = self.agent_watch(
+            sink,
+            Nap::Frust,
+            RECONNECT_BACKOFF.to_vec(),
+            LayoutSource::Wire,
+        )?;
         frust::spawn(pump);
         Ok(handle)
     }
@@ -658,13 +803,13 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
         .into_iter()
         .map(|tab| {
             let index = tab.position.saturating_add(1);
-            let key = unique_key(&tab.name, index, &mut taken);
+            let key = unique_tab_key(&tab.name, index, &mut taken);
             let pane = focused_pane(&tab.panes);
             TabEntry {
                 index,
                 tab_id: u64::from(tab.tab_id),
                 key,
-                label: display_name(&tab.name, index),
+                label: tab_label(&tab.name, index),
                 // A live pane carries a title and a working directory, and nothing
                 // that corresponds to the mock's separate "name": the title *is*
                 // the name a real session shows.
@@ -714,26 +859,34 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// A `ListAgents` answer as [`AgentEntry`] rows, sorted by [`agent_sort_key`]. `layouts` holds
-/// the `GetLayout` answer per space id (the `""` entry is the focused space), already mapped by
-/// [`map_tabs`]; an agent's `tab_key` is the key of the tab with its `tab_id` in its own
-/// space's layout, so it equals the [`TabEntry::key`] a tab list yields for the same tab.
-fn map_agents(list: AgentList, layouts: &HashMap<String, Vec<TabEntry>>) -> Vec<AgentEntry> {
+/// A `ListAgents` answer as [`AgentEntry`] rows, sorted by [`agent_sort_key`]. An agent's
+/// `tab_key` is its tab's slot in `layouts` (so it equals the [`TabEntry::key`] a tab list
+/// yields for the same tab), recorded in `known`; a row whose space failed to read keeps the
+/// key `known` last held, and one whose space read fine but lacks its tab carries none.
+fn map_agents(list: AgentList, layouts: &AgentLayouts, known: &mut KnownKeys) -> Vec<AgentEntry> {
     let mut rows: Vec<AgentEntry> = list
         .agents
         .into_iter()
-        .map(|agent| map_agent(agent, layouts))
+        .map(|agent| {
+            let place = (agent.space_id.clone(), agent.tab_id);
+            let key = match layouts.tabs.get(&place) {
+                Some(slot) => {
+                    known.insert(place, slot.tab_key.clone());
+                    slot.tab_key.clone()
+                }
+                None if layouts.space_failed(&agent.space_id) => {
+                    known.get(&place).cloned().unwrap_or_default()
+                }
+                None => String::new(),
+            };
+            map_agent(agent, key)
+        })
         .collect();
     rows.sort_by_key(|row| agent_sort_key(row.status, row.change_seq));
     rows
 }
 
-fn map_agent(agent: AgentMsg, layouts: &HashMap<String, Vec<TabEntry>>) -> AgentEntry {
-    let tab_key = layouts
-        .get(&agent.space_id)
-        .and_then(|tabs| tabs.iter().find(|tab| tab.tab_id == agent.tab_id))
-        .map(|tab| tab.key.clone())
-        .unwrap_or_default();
+fn map_agent(agent: AgentMsg, tab_key: String) -> AgentEntry {
     AgentEntry {
         pane_id: agent.pane_id,
         tab_id: agent.tab_id,
@@ -865,33 +1018,6 @@ fn focused_pane(panes: &[PaneMsg]) -> Option<&PaneMsg> {
         .iter()
         .find(|pane| pane.is_focused)
         .or_else(|| panes.first())
-}
-
-/// A tab's human label: its own name, or a positional stand-in when the
-/// backend reports none (`tab 3`).
-fn display_name(name: &str, index: u32) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        format!("{UNNAMED_TAB} {index}")
-    } else {
-        name.to_string()
-    }
-}
-
-/// A [`TabEntry::key`] that no earlier tab in the same layout already took,
-/// recording it in `taken`. A repeated name is completed with its own 1-based
-/// position rather than renumbered from scratch, so the *first* `zsh` keeps the
-/// plain key and the second reads `zsh 4` — which is also what the sheet's
-/// `panes — <key>` section label then prints.
-fn unique_key(name: &str, index: u32, taken: &mut Vec<String>) -> String {
-    let base = display_name(name, index);
-    let key = if taken.contains(&base) {
-        format!("{base} {index}")
-    } else {
-        base
-    };
-    taken.push(key.clone());
-    key
 }
 
 #[cfg(test)]
@@ -1040,7 +1166,18 @@ mod tests {
                 tab(1, 8, "zsh", false, vec![pane("b", "/", true)]),
             ],
         });
-        let layouts = HashMap::from([(String::new(), tabs.clone())]);
+        let layouts = AgentLayouts {
+            tabs: crate::net::agent_layouts::layout_slots(&Layout {
+                tabs: vec![
+                    tab(0, 7, "zsh", true, Vec::new()),
+                    tab(1, 8, "zsh", false, Vec::new()),
+                ],
+            })
+            .into_iter()
+            .map(|(tab_id, slot)| ((String::new(), tab_id), slot))
+            .collect(),
+            failed: Vec::new(),
+        };
         let list = AgentList {
             agents: vec![
                 agent_msg(1, 7, WireStatus::Idle as i32, 1),
@@ -1049,7 +1186,7 @@ mod tests {
             ],
             summary: None,
         };
-        let rows = map_agents(list, &layouts);
+        let rows = map_agents(list, &layouts, &mut KnownKeys::new());
         assert_eq!(rows[0].status, AgentStatus::Blocked, "most urgent first");
         assert_eq!(rows[0].tab_key, tabs[1].key);
         assert_eq!(rows[1].status, AgentStatus::Idle);
@@ -1107,9 +1244,15 @@ mod tests {
 
     #[test]
     fn a_watch_needs_a_bound_session_and_a_live_client() {
-        let unbound = repo(None).agent_watch(recorder().0, Nap::Tokio, Vec::new());
+        let unbound =
+            repo(None).agent_watch(recorder().0, Nap::Tokio, Vec::new(), LayoutSource::Wire);
         assert!(matches!(unbound.err(), Some(AppFailure::Internal(_))));
-        let offline = repo(Some("alpha")).agent_watch(recorder().0, Nap::Tokio, Vec::new());
+        let offline = repo(Some("alpha")).agent_watch(
+            recorder().0,
+            Nap::Tokio,
+            Vec::new(),
+            LayoutSource::Wire,
+        );
         assert!(matches!(offline.err(), Some(AppFailure::Network(_))));
     }
 
@@ -1121,7 +1264,7 @@ mod tests {
         let repo = fixture_repo(&fixture).await;
         let (sink, seen) = recorder();
         let (handle, pump) = repo
-            .agent_watch(sink, Nap::Tokio, TEST_BACKOFF.to_vec())
+            .agent_watch(sink, Nap::Tokio, TEST_BACKOFF.to_vec(), LayoutSource::Wire)
             .expect("bound and connected");
         let pump = tokio::spawn(pump);
         wait_until("the stream opens", || {
@@ -1166,16 +1309,23 @@ mod tests {
         let script = fixture.agents();
         let repo = fixture_repo(&fixture).await;
         let (handle, pump) = repo
-            .agent_watch(recorder().0, Nap::Tokio, TEST_BACKOFF.to_vec())
+            .agent_watch(
+                recorder().0,
+                Nap::Tokio,
+                TEST_BACKOFF.to_vec(),
+                LayoutSource::Wire,
+            )
             .expect("bound and connected");
         let pump = tokio::spawn(pump);
         wait_until("the stream opens", || script.opened() == 1).await;
 
         script.fail();
         wait_until("it reconnects", || script.opened() == 2 && handle.is_live()).await;
+        assert_eq!(handle.end(), WatchEnd::Open);
         script.end();
         wait_until("a clean end is the last word", || pump.is_finished()).await;
         assert!(!handle.is_live());
+        assert_eq!(handle.end(), WatchEnd::EndedClean);
         assert_eq!(script.opened(), 2);
     }
 
@@ -1186,11 +1336,265 @@ mod tests {
         script.refuse_unauthenticated(true);
         let repo = fixture_repo(&fixture).await;
         let (handle, pump) = repo
-            .agent_watch(recorder().0, Nap::Tokio, TEST_BACKOFF.to_vec())
+            .agent_watch(
+                recorder().0,
+                Nap::Tokio,
+                TEST_BACKOFF.to_vec(),
+                LayoutSource::Wire,
+            )
             .expect("bound and connected");
         tokio::spawn(pump).await.expect("the pump ends on its own");
         assert_eq!((script.refused(), script.opened()), (1, 0));
         assert!(!handle.is_live());
+        assert_eq!(handle.end(), WatchEnd::EndedUnauthenticated);
+    }
+
+    #[tokio::test]
+    async fn a_spent_reconnect_schedule_ends_the_watch_as_exhausted() {
+        let fixture = MuxrdFixture::start().await;
+        let script = fixture.agents();
+        let repo = fixture_repo(&fixture).await;
+        let (handle, pump) = repo
+            .agent_watch(recorder().0, Nap::Tokio, Vec::new(), LayoutSource::Wire)
+            .expect("bound and connected");
+        let pump = tokio::spawn(pump);
+        wait_until("the stream opens", || script.opened() == 1).await;
+        script.fail();
+        wait_until("the pump gives up", || pump.is_finished()).await;
+        assert_eq!(handle.end(), WatchEnd::Exhausted);
+    }
+
+    /// Per-space layouts a test scripts for the stream's [`LayoutSource`], with a clock it can
+    /// run ahead and a count of the reads it answered.
+    #[derive(Default)]
+    pub(super) struct ScriptedLayouts {
+        layouts: Mutex<HashMap<String, Option<Layout>>>,
+        reads: std::sync::atomic::AtomicUsize,
+        ahead: Mutex<Duration>,
+    }
+
+    impl ScriptedLayouts {
+        /// Answer `space`'s reads with `tabs`, or fail them when `None`.
+        fn set(&self, space: &str, tabs: Option<Vec<TabMsg>>) {
+            self.layouts
+                .lock()
+                .expect("ok")
+                .insert(space.to_string(), tabs.map(|tabs| Layout { tabs }));
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.ahead.lock().expect("ok") += by;
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+
+        pub(super) fn now(&self) -> Instant {
+            Instant::now() + *self.ahead.lock().expect("ok")
+        }
+
+        pub(super) fn read(&self, spaces: Vec<String>) -> AgentLayouts {
+            self.reads.fetch_add(spaces.len(), Ordering::SeqCst);
+            let layouts = self.layouts.lock().expect("ok").clone();
+            let read = crate::net::agent_layouts::join_layouts(spaces, |space| {
+                let answer = layouts
+                    .get(&space)
+                    .cloned()
+                    .flatten()
+                    .ok_or_else(|| Status::unavailable("scripted layout failure"));
+                std::future::ready(answer)
+            });
+            block_on_ready(read)
+        }
+    }
+
+    /// Poll a future every part of which is already ready.
+    fn block_on_ready<T>(fut: impl Future<Output = T>) -> T {
+        let mut fut = std::pin::pin!(fut);
+        let waker = std::task::Waker::noop();
+        match fut
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(waker))
+        {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("a scripted read never waits"),
+        }
+    }
+
+    /// A stream over the fixture whose layouts come from a fresh script, opened and live.
+    async fn scripted_watch(
+        fixture: &MuxrdFixture,
+    ) -> (
+        WatchHandle,
+        Seen,
+        Arc<ScriptedLayouts>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let script = fixture.agents();
+        let repo = fixture_repo(fixture).await;
+        let layouts = Arc::new(ScriptedLayouts::default());
+        let (sink, seen) = recorder();
+        let (handle, pump) = repo
+            .agent_watch(
+                sink,
+                Nap::Tokio,
+                TEST_BACKOFF.to_vec(),
+                LayoutSource::Scripted(Arc::clone(&layouts)),
+            )
+            .expect("bound and connected");
+        let pump = tokio::spawn(pump);
+        wait_until("the stream opens", || {
+            script.opened() == 1 && handle.is_live()
+        })
+        .await;
+        (handle, seen, layouts, pump)
+    }
+
+    /// An agent in pane `pane_id` of tab `tab_id`, named `tab_name` on the wire, in space `ws`.
+    fn agent_in(pane_id: u32, tab_id: u64, tab_name: &str, change_seq: u64) -> AgentMsg {
+        AgentMsg {
+            space_id: "ws".to_string(),
+            tab_name: tab_name.to_string(),
+            ..agent_msg(pane_id, tab_id, 1, change_seq)
+        }
+    }
+
+    /// The tab key the newest recorded `Changed` carries, once `count` events have landed.
+    async fn nth_changed_key(seen: &Seen, count: usize) -> String {
+        wait_until("the event lands", || {
+            seen.lock().expect("ok").len() == count
+        })
+        .await;
+        match seen.lock().expect("ok").last() {
+            Some(AgentEventEntry::Changed(agent)) => agent.tab_key.clone(),
+            other => panic!("a change: {other:?}"),
+        }
+    }
+
+    fn snapshot_of(agents: Vec<AgentMsg>) -> AgentEvent {
+        event(agent_event::Kind::Snapshot(AgentList {
+            agents,
+            summary: None,
+        }))
+    }
+
+    fn changed(agent: AgentMsg) -> AgentEvent {
+        event(agent_event::Kind::Changed(agent))
+    }
+
+    #[tokio::test]
+    async fn after_a_tab_rename_the_next_change_carries_the_new_key() {
+        let fixture = MuxrdFixture::start().await;
+        let (_handle, seen, layouts, _pump) = scripted_watch(&fixture).await;
+        let script = fixture.agents();
+        layouts.set("ws", Some(vec![tab(0, 7, "zsh", true, Vec::new())]));
+        script.push(snapshot_of(vec![agent_in(1, 7, "zsh", 1)]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 1).await;
+
+        layouts.set("ws", Some(vec![tab(0, 7, "build", true, Vec::new())]));
+        script.push(changed(agent_in(1, 7, "build", 2)));
+        assert_eq!(nth_changed_key(&seen, 2).await, "build");
+
+        // A fresh layout naming the tab as the event does is reused, not re-read.
+        let reads = layouts.reads();
+        script.push(changed(agent_in(1, 7, "build", 3)));
+        assert_eq!(nth_changed_key(&seen, 3).await, "build");
+        assert_eq!(layouts.reads(), reads);
+    }
+
+    #[tokio::test]
+    async fn after_a_tab_close_shifts_positions_the_next_change_carries_the_right_key() {
+        let fixture = MuxrdFixture::start().await;
+        let (_handle, seen, layouts, _pump) = scripted_watch(&fixture).await;
+        let script = fixture.agents();
+        layouts.set(
+            "ws",
+            Some(vec![
+                tab(0, 6, "", true, Vec::new()),
+                tab(1, 7, "", false, Vec::new()),
+            ]),
+        );
+        script.push(snapshot_of(vec![agent_in(1, 7, "", 1)]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 1).await;
+        let first = seen.lock().expect("ok")[0].clone();
+        let AgentEventEntry::Snapshot(rows) = first else {
+            panic!("a snapshot first");
+        };
+        assert_eq!(rows[0].tab_key, "tab 2");
+
+        // Tab 6 closes: tab 7 moves to the first position, its name unchanged. Once the cached
+        // layout is older than the poll interval, the change re-reads it.
+        layouts.set("ws", Some(vec![tab(0, 7, "", true, Vec::new())]));
+        layouts.advance(LAYOUT_FRESH);
+        script.push(changed(agent_in(1, 7, "", 2)));
+        assert_eq!(nth_changed_key(&seen, 2).await, "tab 1");
+    }
+
+    #[tokio::test]
+    async fn a_failed_layout_read_keeps_the_previous_key_and_still_delivers_the_row() {
+        let fixture = MuxrdFixture::start().await;
+        let (_handle, seen, layouts, _pump) = scripted_watch(&fixture).await;
+        let script = fixture.agents();
+        layouts.set("ws", Some(vec![tab(0, 7, "zsh", true, Vec::new())]));
+        script.push(snapshot_of(vec![agent_in(1, 7, "zsh", 1)]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 1).await;
+
+        layouts.set("ws", None);
+        script.push(changed(agent_in(1, 7, "renamed", 2)));
+        assert_eq!(nth_changed_key(&seen, 2).await, "zsh");
+
+        // A snapshot whose space fails keeps the row at its last known key too.
+        script.push(snapshot_of(vec![agent_in(1, 7, "renamed", 3)]));
+        wait_until("the snapshot", || seen.lock().expect("ok").len() == 3).await;
+        let third = seen.lock().expect("ok")[2].clone();
+        let AgentEventEntry::Snapshot(rows) = third else {
+            panic!("a snapshot");
+        };
+        assert_eq!(rows[0].tab_key, "zsh");
+    }
+
+    #[test]
+    fn a_listed_agent_in_an_unread_space_keeps_its_last_known_key_and_is_never_dropped() {
+        use crate::net::agent_layouts::{SpaceFailure, TabSlot};
+        let slot = TabSlot {
+            tab_key: "zsh".to_string(),
+            position: 0,
+            name: "zsh".to_string(),
+        };
+        let read = AgentLayouts {
+            tabs: HashMap::from([(("ws".to_string(), 7), slot)]),
+            failed: Vec::new(),
+        };
+        let list = || AgentList {
+            agents: vec![agent_in(1, 7, "zsh", 1), agent_in(2, 9, "x", 2)],
+            summary: None,
+        };
+        let mut known = KnownKeys::new();
+        let rows = map_agents(list(), &read, &mut known);
+        let keys = |rows: &[AgentEntry]| -> Vec<(u32, String)> {
+            let mut keys: Vec<_> = rows
+                .iter()
+                .map(|r| (r.pane_id, r.tab_key.clone()))
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            keys(&rows),
+            [(1, "zsh".to_string()), (2, String::new())],
+            "a tab the read layout lacks carries no key"
+        );
+
+        let failed = AgentLayouts {
+            tabs: HashMap::new(),
+            failed: vec![SpaceFailure {
+                space_id: "ws".to_string(),
+                status: Status::unavailable("down"),
+            }],
+        };
+        let rows = map_agents(list(), &failed, &mut known);
+        assert_eq!(keys(&rows), [(1, "zsh".to_string()), (2, String::new())]);
     }
 
     #[test]
@@ -1199,7 +1603,7 @@ mod tests {
             agents: Vec::new(),
             summary: None,
         };
-        assert!(map_agents(list, &HashMap::new()).is_empty());
+        assert!(map_agents(list, &AgentLayouts::default(), &mut KnownKeys::new()).is_empty());
     }
 
     #[test]

@@ -71,8 +71,6 @@ use std::sync::Arc;
 
 use tonic::Status;
 
-use std::collections::HashMap;
-
 use crate::agents::{AgentStatus, AgentSummary, agent_sort_key};
 use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
@@ -81,6 +79,7 @@ use crate::features::sessions::domain::entities::{
     SessionBackend, SessionStatus, TabSummary, ThirdMetric,
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
+use crate::net::agent_layouts::{AgentLayouts, agent_spaces, fetch_agent_layouts};
 use crate::net::proto::{
     AgentList, AgentMsg, Backend, CreateSessionReq, Empty, Layout, RenameSessionReq, SessionInfo,
     SessionRef,
@@ -264,10 +263,11 @@ impl SessionsRepository for GrpcSessionsRepository {
     }
 
     /// `ListAgents`, then one `GetLayout` per distinct space the agents live
-    /// in: the wire names an agent's tab by id, and the terminal's attach
-    /// target wants its position. An agent whose tab the layout does not
-    /// carry (or whose space's layout failed to read) is left out rather than
-    /// aimed at a guessed tab.
+    /// in (the shared [`crate::net::agent_layouts`] join): the wire names an
+    /// agent's tab by id, and the terminal's attach target wants its position.
+    /// An agent the layouts cannot place keeps its row with no position rather
+    /// than being dropped or aimed at a guessed tab, and a failed space read is
+    /// reported once.
     async fn list_agents(&self, session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
         let client = self.client()?;
         let request = SessionRef {
@@ -281,26 +281,15 @@ impl SessionsRepository for GrpcSessionsRepository {
             .await
             .map_err(|status| self.map_status(status))?
             .into_inner();
-        let mut positions: HashMap<(String, u64), u32> = HashMap::new();
-        let mut spaces: Vec<&str> = list.agents.iter().map(|a| a.space_id.as_str()).collect();
-        spaces.sort_unstable();
-        spaces.dedup();
-        for space_id in spaces {
-            let mut layout_request = request.clone();
-            layout_request.space_id = space_id.to_string();
-            match client.authed().get_layout(layout_request).await {
-                Ok(response) => {
-                    for tab in response.into_inner().tabs {
-                        positions
-                            .insert((space_id.to_string(), u64::from(tab.tab_id)), tab.position);
-                    }
-                }
-                Err(status) => {
-                    self.map_status(status);
-                }
-            }
+        let layouts = fetch_agent_layouts(&client, &request, agent_spaces(&list.agents)).await;
+        if let Some(first) = layouts.failed.first() {
+            let failure = self.map_status(first.status.clone());
+            log::warn!(
+                "list_agents: {} space layout(s) unread, their agents list unplaced: {failure}",
+                layouts.failed.len()
+            );
         }
-        Ok(map_agents(list, &positions))
+        Ok(map_agents(list, &layouts))
     }
 }
 
@@ -354,16 +343,18 @@ fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
     }
 }
 
-/// A `ListAgents` answer as [`SessionAgent`] rows, most urgent first.
-/// `positions` maps `(space id, tab id)` to the tab's layout position; an
-/// agent whose tab is absent from it is dropped.
-fn map_agents(list: AgentList, positions: &HashMap<(String, u64), u32>) -> Vec<SessionAgent> {
+/// A `ListAgents` answer as [`SessionAgent`] rows, most urgent first, each
+/// placed at its tab's position in `layouts` — `None` when they cannot place it.
+fn map_agents(list: AgentList, layouts: &AgentLayouts) -> Vec<SessionAgent> {
     let mut rows: Vec<SessionAgent> = list
         .agents
         .into_iter()
-        .filter_map(|agent| {
-            let position = *positions.get(&(agent.space_id.clone(), agent.tab_id))?;
-            Some(map_agent(agent, position))
+        .map(|agent| {
+            let position = layouts
+                .tabs
+                .get(&(agent.space_id.clone(), agent.tab_id))
+                .map(|slot| slot.position);
+            map_agent(agent, position)
         })
         .collect();
     rows.sort_by_key(|row| agent_sort_key(row.status, row.change_seq));
@@ -375,7 +366,7 @@ fn non_empty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn map_agent(agent: AgentMsg, tab_position: u32) -> SessionAgent {
+fn map_agent(agent: AgentMsg, tab_position: Option<u32>) -> SessionAgent {
     SessionAgent {
         pane_id: agent.pane_id,
         tab_position,
@@ -626,19 +617,36 @@ mod tests {
             ],
             ..AgentList::default()
         };
-        let positions = HashMap::from([
-            (("a".to_string(), 10), 0),
-            (("a".to_string(), 11), 3),
-            ((String::new(), 10), 1),
-        ]);
+        let slot = |position: u32| crate::net::agent_layouts::TabSlot {
+            tab_key: format!("t{position}"),
+            position,
+            name: String::new(),
+        };
+        let layouts = AgentLayouts {
+            tabs: std::collections::HashMap::from([
+                (("a".to_string(), 10), slot(0)),
+                (("a".to_string(), 11), slot(3)),
+                ((String::new(), 10), slot(1)),
+            ]),
+            failed: Vec::new(),
+        };
 
-        let rows = map_agents(list, &positions);
+        let rows = map_agents(list, &layouts);
 
         let seen: Vec<_> = rows
             .iter()
             .map(|r| (r.pane_id, r.tab_position, r.space_id.as_deref()))
             .collect();
-        assert_eq!(seen, [(2, 3, Some("a")), (4, 1, None), (1, 0, Some("a"))]);
+        assert_eq!(
+            seen,
+            [
+                (3, None, Some("a")),
+                (2, Some(3), Some("a")),
+                (4, Some(1), None),
+                (1, Some(0), Some("a"))
+            ],
+            "an unplaced agent keeps its row"
+        );
     }
 
     #[test]
