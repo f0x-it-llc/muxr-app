@@ -238,6 +238,15 @@ impl SessionsController {
         self.retarget_agents();
     }
 
+    /// A Tablet card tap: [`select`](Self::select), then fetch the detail's agents
+    /// without waiting for the next poll tick. The fetch is the controller's own
+    /// task, so the page only forwards the tap.
+    pub fn select_and_refresh_agents(self: &Arc<Self>, id: &str) {
+        self.select(id);
+        let controller = Arc::clone(self);
+        frust::spawn_local(async move { controller.refresh_agents().await });
+    }
+
     fn forget_vanished_selection(&self, sessions: &[Session]) {
         let vanished = self
             .selected
