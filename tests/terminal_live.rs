@@ -52,9 +52,9 @@ use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
     agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
-    drop_agent_stream_for_tests, end_agent_stream_for_tests, fail_next_list_agents_for_tests,
-    open_next_agent_watch_down_for_tests, push_agent_event_for_tests, seed_agents,
-    verb_log_for_tests,
+    delay_next_list_agents_for_tests, drop_agent_stream_for_tests, end_agent_stream_for_tests,
+    fail_next_list_agents_for_tests, open_next_agent_watch_down_for_tests,
+    push_agent_event_for_tests, seed_agents, verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
 use muxr::features::terminal::domain::entities::{
@@ -2633,11 +2633,99 @@ fn a_watch_not_yet_live_is_not_stale_but_a_live_one_going_down_is_once() {
     poll_tick(&controller);
     assert_eq!(
         controller.agents_stale_raises(),
-        raises + 1,
-        "one transition, one raise"
+        raises,
+        "the drop's relist succeeded: not even an instant of stale"
     );
     assert!(
         !controller.agents_stale.get_untracked(),
         "the poll's read confirmed them"
+    );
+}
+
+#[test]
+fn a_live_stream_dropping_with_a_working_relist_never_reads_stale_but_a_failed_relist_does() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _reset) = mount_watching(blocked_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    assert!(controller.has_blocked_agent());
+    poll_tick(&controller);
+    let raises = controller.agents_stale_raises();
+
+    // Sampled on every frame the tick takes: the drop and its successful relist.
+    drop_agent_stream_for_tests();
+    assert!(controller.take_layout_poll_tick(), "the poll is armed");
+    delay_next_list_agents_for_tests(Duration::from_millis(40));
+    let tick = Arc::clone(&controller);
+    let mut tick = Box::pin(async move { tick.refresh_layout_from_poll().await });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime");
+    let mut sampled = 0;
+    runtime.block_on(async {
+        loop {
+            let finished =
+                std::future::poll_fn(|cx| Poll::Ready(tick.as_mut().poll(cx).is_ready())).await;
+            assert!(!controller.agents_stale.get_untracked(), "never stale");
+            if finished {
+                break;
+            }
+            sampled += 1;
+            h.one_frame();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    assert!(sampled > 1, "the relist was in flight across frames");
+    assert_eq!(controller.agents_stale_raises(), raises, "no flicker");
+    assert!(controller.has_blocked_agent());
+
+    // A drop whose relist fails is stale, as before.
+    let (mut h, _reset) = mount_watching(working_and_idle(), true);
+    let controller = debug_controller().expect("mounted");
+    let raises = controller.agents_stale_raises();
+    drop_agent_stream_for_tests();
+    fail_next_list_agents_for_tests();
+    poll_tick(&controller);
+    assert_eq!(controller.agents_stale_raises(), raises + 1);
+    assert!(controller.agents_stale.get_untracked());
+    h.one_frame();
+}
+
+/// A name per row, so a test can tell reassigned panes apart.
+fn named_agent(pane_id: u32, name: &str, change_seq: u64) -> AgentEntry {
+    AgentEntry {
+        name: Some(name.to_string()),
+        ..streamed_agent(pane_id, AgentStatus::Working, change_seq)
+    }
+}
+
+fn agent_names() -> Vec<(u32, String)> {
+    let mut rows: Vec<(u32, String)> = debug_controller()
+        .expect("mounted")
+        .agents
+        .get_untracked()
+        .iter()
+        .map(|row| (row.pane_id, row.name.clone().unwrap_or_default()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn a_poll_only_relist_replaces_rows_after_a_restart_reassigned_the_pane_ids() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_h, _reset) = mount_watching(vec![named_agent(1, "A", 40), named_agent(2, "B", 5)], false);
+    let controller = debug_controller().expect("mounted");
+    assert_eq!(agent_names(), [(1, "A".to_string()), (2, "B".to_string())]);
+
+    seed_agents(vec![named_agent(1, "B", 5), named_agent(2, "A", 40)]);
+    poll_tick(&controller);
+
+    assert_eq!(
+        agent_names(),
+        [(1, "B".to_string()), (2, "A".to_string())],
+        "the relist's rows outright: no duplicate A, B present"
     );
 }
