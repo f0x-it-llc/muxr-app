@@ -23,7 +23,7 @@ pub use crate::features::sessions::domain::repositories::SessionsRepository;
 pub use crate::features::settings::domain::repositories::PreferencesRepository;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
@@ -40,17 +40,66 @@ fn unsupported(verb: &str) -> AppFailure {
 /// real stream, so it must not touch a signal itself.
 pub type AgentSink = Box<dyn Fn(AgentEventEntry) + Send>;
 
+/// Where a [`WatchHandle`]'s subscription stands — why it stopped, once it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WatchEnd {
+    /// A stream is open or opening.
+    Open = 0,
+    /// A stream dropped and the next one waits out its backoff.
+    Reconnecting = 1,
+    /// The server ended the stream: nothing more will arrive on this subscription.
+    EndedClean = 2,
+    /// The server refused the credential.
+    EndedUnauthenticated = 3,
+    /// The reconnect schedule ran out.
+    Exhausted = 4,
+}
+
+impl WatchEnd {
+    /// Whether the subscription is over for good.
+    pub fn is_ended(self) -> bool {
+        matches!(
+            self,
+            Self::EndedClean | Self::EndedUnauthenticated | Self::Exhausted
+        )
+    }
+
+    /// Record `self` in the cell a [`WatchHandle`] reads.
+    pub fn store(self, cell: &AtomicU8) {
+        cell.store(self as u8, Ordering::Release);
+    }
+
+    /// The state `cell` holds; an unknown value reads [`Open`](Self::Open).
+    pub fn load(cell: &AtomicU8) -> Self {
+        match cell.load(Ordering::Acquire) {
+            1 => Self::Reconnecting,
+            2 => Self::EndedClean,
+            3 => Self::EndedUnauthenticated,
+            4 => Self::Exhausted,
+            _ => Self::Open,
+        }
+    }
+}
+
 /// An open [`TerminalRepository::watch_agents`] subscription. **Dropping it stops the stream.**
 pub struct WatchHandle {
     live: Arc<AtomicBool>,
+    ended: Arc<AtomicU8>,
     stop: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl WatchHandle {
-    /// A handle whose stream is open while `live` holds, and which runs `stop` once on drop.
-    pub fn new(live: Arc<AtomicBool>, stop: impl FnOnce() + Send + 'static) -> Self {
+    /// A handle whose stream is open while `live` holds, whose [`WatchEnd`] the implementation
+    /// keeps in `ended`, and which runs `stop` once on drop.
+    pub fn new(
+        live: Arc<AtomicBool>,
+        ended: Arc<AtomicU8>,
+        stop: impl FnOnce() + Send + 'static,
+    ) -> Self {
         Self {
             live,
+            ended,
             stop: Some(Box::new(stop)),
         }
     }
@@ -59,6 +108,11 @@ impl WatchHandle {
     /// backoff, and for good once the subscription has given up.
     pub fn is_live(&self) -> bool {
         self.live.load(Ordering::Acquire)
+    }
+
+    /// Where the subscription stands — see [`WatchEnd`].
+    pub fn end(&self) -> WatchEnd {
+        WatchEnd::load(&self.ended)
     }
 }
 
@@ -281,16 +335,28 @@ mod tests {
     }
 
     #[test]
-    fn a_watch_handle_reports_its_liveness_and_stops_once_on_drop() {
+    fn a_watch_handle_reports_its_liveness_its_end_and_stops_once_on_drop() {
         let live = Arc::new(AtomicBool::new(true));
+        let ended = Arc::new(AtomicU8::new(0));
         let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = Arc::clone(&stops);
-        let handle = WatchHandle::new(Arc::clone(&live), move || {
+        let handle = WatchHandle::new(Arc::clone(&live), Arc::clone(&ended), move || {
             counted.fetch_add(1, Ordering::SeqCst);
         });
         assert!(handle.is_live());
+        assert_eq!(handle.end(), WatchEnd::Open);
         live.store(false, Ordering::Release);
-        assert!(!handle.is_live());
+        WatchEnd::Reconnecting.store(&ended);
+        assert!(!handle.is_live() && !handle.end().is_ended());
+        for end in [
+            WatchEnd::EndedClean,
+            WatchEnd::EndedUnauthenticated,
+            WatchEnd::Exhausted,
+        ] {
+            end.store(&ended);
+            assert_eq!(handle.end(), end);
+            assert!(end.is_ended());
+        }
         drop(handle);
         assert_eq!(stops.load(Ordering::SeqCst), 1);
     }

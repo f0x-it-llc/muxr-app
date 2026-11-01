@@ -307,7 +307,7 @@ fn seed_herdr_agents() -> Vec<SessionAgent> {
         .map(
             |(&(status, kind), (name, tab_position, pane_id, summary, change_seq))| SessionAgent {
                 pane_id,
-                tab_position,
+                tab_position: Some(tab_position),
                 space_id: Some("home".to_string()),
                 space_name: Some("home".to_string()),
                 tab_name: if tab_position == 0 { "work" } else { "notes" }.to_string(),
