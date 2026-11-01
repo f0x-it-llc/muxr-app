@@ -847,9 +847,7 @@ pub(super) fn attach(state: &mut SessionsState, id: &str) {
 
 /// A Tablet card tap: select `id` for the detail pane.
 pub(super) fn select(state: &mut SessionsState, id: &str) {
-    state.actions.controller.select(id);
-    let controller = Arc::clone(&state.actions.controller);
-    spawn_local(async move { controller.refresh_agents().await });
+    state.actions.controller.select_and_refresh_agents(id);
 }
 
 pub(super) fn attach_pane(state: &mut SessionsState, id: &str, tab: u32, pane: u32) {
