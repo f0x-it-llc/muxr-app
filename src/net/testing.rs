@@ -13,7 +13,8 @@
 //!
 //! `AttachTerminal` is scripted via [`TerminalScript`] (render frame, clean
 //! [`exit`](crate::net::control::CONTROL_EXIT), mid-flight drop, or a silent
-//! stall); the one-shot workspace-verb RPCs are just recorded via [`ActionLog`].
+//! stall); `WatchAgents` via [`AgentScript`] (push an event, fail or end the stream, refuse
+//! the credential); the one-shot workspace-verb RPCs are just recorded via [`ActionLog`].
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,12 +36,12 @@ use crate::net::client::MuxrClient;
 use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::muxr_server::{Muxr, MuxrServer};
 use crate::net::proto::{
-    ActionAck, AgentList, AttachReq, ClientFrame, CloseSpaceReq, ControlEvent, CreateSessionReq,
-    CreateSpaceReq, CreateTokenReq, Empty, Layout, ListPushTargetsReq, ListPushTargetsResp,
-    LoginRequest, LoginResponse, MouseInput, MouseKind, NewPaneReq, NewTabReq, PaneTarget,
-    RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq, RenameSessionReq, RenameSpaceReq,
-    RenameTabReq, ResizePaneReq, RevokeTokenReq, ScrollDirection, ScrollReq, ServerFrame,
-    SessionInfo, SessionList, SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
+    ActionAck, AgentEvent, AgentList, AttachReq, ClientFrame, CloseSpaceReq, ControlEvent,
+    CreateSessionReq, CreateSpaceReq, CreateTokenReq, Empty, Layout, ListPushTargetsReq,
+    ListPushTargetsResp, LoginRequest, LoginResponse, MouseInput, MouseKind, NewPaneReq, NewTabReq,
+    PaneTarget, RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq, RenameSessionReq,
+    RenameSpaceReq, RenameTabReq, ResizePaneReq, RevokeTokenReq, ScrollDirection, ScrollReq,
+    ServerFrame, SessionInfo, SessionList, SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
     ToggleFullscreenReq, TokenInfo, TokenList, VersionInfo, WriteToPaneReq, client_frame,
     server_frame,
 };
@@ -98,6 +99,7 @@ pub struct MuxrdFixture {
     fingerprint_hex: String,
     terminal: Arc<TerminalScript>,
     actions: Arc<ActionLog>,
+    agents: Arc<AgentScript>,
     connections: Arc<AtomicUsize>,
     server: JoinHandle<()>,
 }
@@ -134,12 +136,14 @@ impl MuxrdFixture {
 
         let terminal = Arc::new(TerminalScript::default());
         let actions = Arc::new(ActionLog::default());
+        let agents = Arc::new(AgentScript::default());
         let router = Server::builder()
             .tls_config(ServerTlsConfig::new().identity(identity))
             .expect("the fixture identity is a valid server TLS config")
             .add_service(MuxrServer::new(FixtureService {
                 terminal: Arc::clone(&terminal),
                 actions: Arc::clone(&actions),
+                agents: Arc::clone(&agents),
             }));
         let server = tokio::spawn(async move {
             // The fixture is torn down by aborting this task, so a serve error
@@ -153,6 +157,7 @@ impl MuxrdFixture {
             fingerprint_hex,
             terminal,
             actions,
+            agents,
             connections,
             server,
         }
@@ -174,6 +179,11 @@ impl MuxrdFixture {
     /// [`ActionLog`].
     pub fn actions(&self) -> Arc<ActionLog> {
         Arc::clone(&self.actions)
+    }
+
+    /// The server side of this fixture's `WatchAgents` streams — see [`AgentScript`].
+    pub fn agents(&self) -> Arc<AgentScript> {
+        Arc::clone(&self.agents)
     }
 
     /// The loopback address the fixture is serving on.
@@ -379,6 +389,86 @@ pub struct MouseObservation {
     pub kind: MouseKind,
     pub col: u32,
     pub row: u32,
+}
+
+/// The drive half of the fixture's `WatchAgents` support: every call is counted, and the
+/// newest open stream is the one a lever reaches.
+#[derive(Default)]
+pub struct AgentScript {
+    state: Mutex<AgentState>,
+}
+
+#[derive(Default)]
+struct AgentState {
+    /// `WatchAgents` calls that opened a stream.
+    opened: usize,
+    /// `WatchAgents` calls turned away as `UNAUTHENTICATED`.
+    refused: usize,
+    /// Whether a new call is turned away as `UNAUTHENTICATED`.
+    unauthenticated: bool,
+    /// The newest stream's sender; dropping it ends that stream cleanly.
+    stream: Option<mpsc::Sender<Result<AgentEvent, Status>>>,
+}
+
+impl AgentScript {
+    fn state(&self) -> MutexGuard<'_, AgentState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many `WatchAgents` calls opened a stream.
+    pub fn opened(&self) -> usize {
+        self.state().opened
+    }
+
+    /// How many `WatchAgents` calls were refused as `UNAUTHENTICATED`.
+    pub fn refused(&self) -> usize {
+        self.state().refused
+    }
+
+    /// Refuse every new `WatchAgents` call as `UNAUTHENTICATED` (a revoked token).
+    pub fn refuse_unauthenticated(&self, refuse: bool) {
+        self.state().unauthenticated = refuse;
+    }
+
+    /// Send `event` on the newest stream. Dropped when none is open.
+    pub fn push(&self, event: AgentEvent) {
+        if let Some(stream) = self.state().stream.as_ref() {
+            let _ = stream.try_send(Ok(event));
+        }
+    }
+
+    /// End the newest stream with `UNAVAILABLE`, a transport-shaped failure.
+    pub fn fail(&self) {
+        if let Some(stream) = self.state().stream.take() {
+            let _ = stream.try_send(Err(Status::unavailable("the agents stream dropped")));
+        }
+    }
+
+    /// End the newest stream cleanly, as a server with nothing more to say does.
+    pub fn end(&self) {
+        self.state().stream = None;
+    }
+
+    /// Whether the newest stream's client side has gone away.
+    pub fn client_gone(&self) -> bool {
+        self.state()
+            .stream
+            .as_ref()
+            .is_none_or(mpsc::Sender::is_closed)
+    }
+
+    /// Count the call and answer whether it is refused; an accepted one becomes the newest
+    /// stream, its predecessor ending cleanly.
+    fn open(&self, stream: mpsc::Sender<Result<AgentEvent, Status>>) -> Result<(), Status> {
+        let mut state = self.state();
+        if state.unauthenticated {
+            state.refused += 1;
+            return Err(Status::unauthenticated("the session token was revoked"));
+        }
+        state.opened += 1;
+        state.stream = Some(stream);
+        Ok(())
+    }
 }
 
 /// What a test tells the currently-attached stream to do.
@@ -645,6 +735,7 @@ async fn serve_attach(
 struct FixtureService {
     terminal: Arc<TerminalScript>,
     actions: Arc<ActionLog>,
+    agents: Arc<AgentScript>,
 }
 
 #[tonic::async_trait]
@@ -744,6 +835,20 @@ impl Muxr for FixtureService {
         _request: Request<SessionRef>,
     ) -> Result<Response<AgentList>, Status> {
         Err(unsupported("ListAgents"))
+    }
+
+    /// Answered by [`AgentScript`]: nothing is sent until a test pushes it, so a test scripts
+    /// even the opening snapshot.
+    type WatchAgentsStream = ReceiverStream<Result<AgentEvent, Status>>;
+
+    async fn watch_agents(
+        &self,
+        request: Request<SessionRef>,
+    ) -> Result<Response<Self::WatchAgentsStream>, Status> {
+        require_bearer(&request)?;
+        let (events_tx, events_rx) = mpsc::channel(ATTACH_CAPACITY);
+        self.agents.open(events_tx)?;
+        Ok(Response::new(ReceiverStream::new(events_rx)))
     }
 
     async fn get_layout(&self, _request: Request<SessionRef>) -> Result<Response<Layout>, Status> {

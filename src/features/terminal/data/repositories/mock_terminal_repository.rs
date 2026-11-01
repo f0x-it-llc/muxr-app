@@ -24,7 +24,10 @@
 //!
 //! **Agents.** A store never seeded answers [`default_agents_for_preview`] (what the desktop
 //! preview shows, matching the sessions mock's herdr roll-up); the mock is session-agnostic, so a
-//! zellij session's terminal lists those agents too.
+//! zellij session's terminal lists those agents too. `watch_agents` opens with a snapshot of
+//! that inventory and then delivers only what a test scripts through
+//! [`push_agent_event_for_tests`]; the open/stop counters let a suite pin the subscription's
+//! lifetime.
 //!
 //! Failure mapping: an unknown tab key, space id or blank session id maps to
 //! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just rendered.
@@ -32,16 +35,16 @@
 //! real client will take.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::agents::PREVIEW_AGENT_MARKS;
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
-    AgentEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
+    AgentEntry, AgentEventEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
 };
-use crate::features::terminal::domain::repositories::TerminalRepository;
+use crate::features::terminal::domain::repositories::{AgentSink, TerminalRepository, WatchHandle};
 
 /// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
@@ -201,6 +204,67 @@ fn resolved_agents() -> Vec<AgentEntry> {
     lock_test_agents()
         .clone()
         .unwrap_or_else(default_agents_for_preview)
+}
+
+/// The one open agents subscription: its sink, its liveness, and the id its handle stops by.
+struct MockWatch {
+    id: u64,
+    sink: AgentSink,
+    live: Arc<AtomicBool>,
+}
+
+/// The newest `watch_agents` subscription — process-global like [`TEST_AGENTS`]; a newer
+/// one replaces it, dropping the older sink.
+static AGENT_WATCH: Mutex<Option<MockWatch>> = Mutex::new(None);
+
+/// Mints [`MockWatch::id`]s, so a stale handle's stop never clears a newer subscription.
+static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
+
+/// How many subscriptions `watch_agents` has opened.
+static AGENT_WATCH_OPENS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many [`WatchHandle`]s the mock has seen stopped.
+static AGENT_WATCH_STOPS: AtomicUsize = AtomicUsize::new(0);
+
+fn lock_agent_watch() -> std::sync::MutexGuard<'static, Option<MockWatch>> {
+    AGENT_WATCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Deliver `event` on the open subscription, which counts as its stream being live again;
+/// `false` when none is open. Never called by production code.
+pub fn push_agent_event_for_tests(event: AgentEventEntry) -> bool {
+    let watch = lock_agent_watch();
+    let Some(watch) = watch.as_ref() else {
+        return false;
+    };
+    watch.live.store(true, Ordering::Release);
+    (watch.sink)(event);
+    true
+}
+
+/// Mark the open subscription's stream lost, as a reconnect waiting out its backoff reports it.
+/// Never called by production code.
+pub fn drop_agent_stream_for_tests() {
+    if let Some(watch) = lock_agent_watch().as_ref() {
+        watch.live.store(false, Ordering::Release);
+    }
+}
+
+/// Whether a subscription is open (opened, and its handle not yet dropped).
+pub fn agent_watch_open_for_tests() -> bool {
+    lock_agent_watch().is_some()
+}
+
+/// How many subscriptions `watch_agents` has opened, process-wide.
+pub fn agent_watch_opens_for_tests() -> usize {
+    AGENT_WATCH_OPENS.load(Ordering::SeqCst)
+}
+
+/// How many subscription handles have been dropped, process-wide.
+pub fn agent_watch_stops_for_tests() -> usize {
+    AGENT_WATCH_STOPS.load(Ordering::SeqCst)
 }
 
 /// Stamp `PaneEntry.agent` on each pane a seeded agent targets.
@@ -550,6 +614,26 @@ impl TerminalRepository for MockTerminalRepository {
         Ok(answer)
     }
 
+    fn watch_agents(&self, sink: AgentSink) -> Result<WatchHandle, AppFailure> {
+        let id = NEXT_WATCH_ID.fetch_add(1, Ordering::SeqCst);
+        let live = Arc::new(AtomicBool::new(true));
+        // The wire's first message is always the whole inventory.
+        sink(AgentEventEntry::Snapshot(resolved_agents()));
+        *lock_agent_watch() = Some(MockWatch {
+            id,
+            sink,
+            live: Arc::clone(&live),
+        });
+        AGENT_WATCH_OPENS.fetch_add(1, Ordering::SeqCst);
+        Ok(WatchHandle::new(live, move || {
+            AGENT_WATCH_STOPS.fetch_add(1, Ordering::SeqCst);
+            let mut watch = lock_agent_watch();
+            if watch.as_ref().is_some_and(|watch| watch.id == id) {
+                *watch = None;
+            }
+        }))
+    }
+
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
         seed_lines(&key).ok_or_else(|| AppFailure::Internal(format!("tab_lines: no tab {key}")))
@@ -675,6 +759,31 @@ mod tests {
 
         clear_test_agents();
         assert!(block_on(repo.list_agents()).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn a_watch_opens_with_a_snapshot_delivers_pushes_and_stops_on_drop() {
+        let repo = MockTerminalRepository::seeded();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let stops = agent_watch_stops_for_tests();
+        let handle = repo
+            .watch_agents(Box::new(move |event| {
+                sink_seen.lock().expect("unpoisoned").push(event);
+            }))
+            .expect("the mock watches");
+        assert!(agent_watch_open_for_tests() && handle.is_live());
+        drop_agent_stream_for_tests();
+        assert!(!handle.is_live(), "a lost stream reads not live");
+        assert!(push_agent_event_for_tests(AgentEventEntry::Removed(7)));
+        assert!(handle.is_live(), "a delivered event is a live stream again");
+        let seen = seen.lock().expect("unpoisoned").clone();
+        assert!(matches!(seen[0], AgentEventEntry::Snapshot(_)), "{seen:?}");
+        assert_eq!(seen[1..], [AgentEventEntry::Removed(7)]);
+        drop(handle);
+        assert_eq!(agent_watch_stops_for_tests(), stops + 1);
+        assert!(!agent_watch_open_for_tests());
+        assert!(!push_agent_event_for_tests(AgentEventEntry::Removed(7)));
     }
 
     #[test]
