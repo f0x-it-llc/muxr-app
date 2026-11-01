@@ -23,14 +23,14 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4,
-    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox,
+    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox,
     Stack, View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area,
     scroll_view, spawn_local, use_context,
 };
@@ -38,16 +38,17 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::sync::{Notify, broadcast};
 
 use crate::AppState;
+use crate::agents::AgentSummary;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
-use crate::features::sessions::di::expect_sessions_repository;
-use crate::features::sessions::domain::entities::{Session, SessionBackend};
+use crate::features::sessions::di::{SharedSessionsRepository, expect_sessions_repository};
+use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
 use crate::net::wake::WakeReason;
 use crate::responsive::Responsive;
 use crate::routes::{
-    Nav, TERMINAL_PANE_QUERY_KEY, TERMINAL_SESSION_QUERY_KEY, TERMINAL_TAB_QUERY_KEY, app_nav,
-    sessions_back_signal,
+    Nav, TERMINAL_PANE_QUERY_KEY, TERMINAL_SESSION_QUERY_KEY, TERMINAL_SPACE_QUERY_KEY,
+    TERMINAL_TAB_QUERY_KEY, app_nav, sessions_back_signal,
 };
 use crate::ui::dialogs::{confirm_dialog, name_input_dialog};
 use crate::ui::palette::Palette;
@@ -152,6 +153,94 @@ pub struct SessionsState {
     /// release settled — a later change to the session set reaches only the
     /// live band (the read-only posture and colours stay live on both).
     loading_snapshot: Option<(Vec<Session>, bool)>,
+    /// The Tablet detail's agent list — see [`AgentFeed`].
+    pub(super) agents: AgentFeed,
+}
+
+/// What [`AgentFeed`] last asked for: a session and the roll-up it carried then.
+type AgentKey = (String, AgentSummary);
+
+/// The selected session's agents for the Tablet detail. Not the controller's
+/// business (the list poll knows nothing of them): `build` hands
+/// [`sync`](Self::sync) what the detail wants, and a fetch starts only when
+/// that changes — the session, or its roll-up, which moves whenever an agent
+/// changes status. A failed read forgets its key so the next rebuild (the
+/// list poll's) retries, and leaves the list empty meanwhile.
+pub(super) struct AgentFeed {
+    repository: SharedSessionsRepository,
+    /// Cleared on unmount, so a read landing late writes nothing.
+    alive: Arc<AtomicBool>,
+    /// The rows [`rows`](Self::rows) reads.
+    pub(super) rows: RwSignal<Vec<SessionAgent>>,
+    asked: Arc<Mutex<Option<AgentKey>>>,
+}
+
+impl AgentFeed {
+    fn new(repository: SharedSessionsRepository) -> Self {
+        let alive = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&alive);
+        on_cleanup(move || flag.store(false, Ordering::SeqCst));
+        Self {
+            repository,
+            alive,
+            rows: RwSignal::new(Vec::new()),
+            asked: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Point the feed at `wanted` (`None`: nothing to list), fetching when it
+    /// differs from the last ask.
+    fn sync(&self, wanted: Option<AgentKey>) {
+        let mut asked = self.asked.lock().unwrap_or_else(|p| p.into_inner());
+        if *asked == wanted {
+            return;
+        }
+        let same_session = asked.as_ref().map(|key| &key.0) == wanted.as_ref().map(|key| &key.0);
+        *asked = wanted.clone();
+        drop(asked);
+        let Some((id, _)) = wanted.clone() else {
+            self.replace(Vec::new());
+            return;
+        };
+        if !same_session {
+            self.replace(Vec::new());
+        }
+        let (repository, alive, rows, asked) = (
+            Arc::clone(&self.repository),
+            Arc::clone(&self.alive),
+            self.rows,
+            Arc::clone(&self.asked),
+        );
+        spawn_local(async move {
+            let answer = repository.list_agents(id).await;
+            if !alive.load(Ordering::SeqCst) {
+                return;
+            }
+            let mut asked = asked.lock().unwrap_or_else(|p| p.into_inner());
+            if *asked != wanted {
+                return;
+            }
+            match answer {
+                Ok(list) => {
+                    drop(asked);
+                    if rows.get_untracked() != list {
+                        rows.set(list);
+                    }
+                }
+                Err(failure) => {
+                    log::debug!("list_agents: {failure}");
+                    *asked = None;
+                }
+            }
+        });
+    }
+
+    /// Read-compare-then-write, so an unchanged list never rebuilds.
+    fn replace(&self, list: Vec<SessionAgent>) {
+        if self.rows.get_untracked() != list {
+            self.rows.set(list);
+        }
+    }
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -438,6 +527,7 @@ impl Component for SessionsScreen {
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
             loading_snapshot: None,
+            agents: AgentFeed::new(expect_sessions_repository()),
         }
     }
 
@@ -484,6 +574,21 @@ impl Component for SessionsScreen {
                 wide: rule.wide_clamp,
             }
         };
+        // The detail lists agents only on the Tablet, only for a running
+        // session whose roll-up says it has some.
+        let wanted = rule
+            .is_tablet()
+            .then(|| {
+                let session = sessions.iter().find(|s| Some(&s.id) == selected.as_ref())?;
+                let summary = session.agents.clone().filter(|a| !a.is_empty())?;
+                session
+                    .status
+                    .is_live()
+                    .then(|| (session.id.clone(), summary))
+            })
+            .flatten();
+        state.agents.sync(wanted);
+        let agents = state.agents.rows.get();
         let tone = if rule.is_tablet() {
             colors.surface
         } else {
@@ -540,6 +645,7 @@ impl Component for SessionsScreen {
                 let footer = settled.then(|| widgets::new_session_row(&colors, read_only));
                 let detail = widgets::detail_pane(
                     &sessions,
+                    &agents,
                     selected.as_deref(),
                     LoadPhase::of(loaded, settled),
                     read_only,
@@ -712,6 +818,13 @@ impl Actions {
 
     /// Open the create-session dialog (the dashed row and the empty state's
     /// action both land here).
+    /// Attach to `id` aimed at an agent row's pane: the same `(tab, pane)`
+    /// target as a pill, plus the agent's space when it has one.
+    pub fn attach_agent(&self, id: &str, agent: &SessionAgent) {
+        self.pause_for_push();
+        self.app_nav.push(&terminal_location_for_agent(id, agent));
+    }
+
     pub fn open_create_dialog(&self, connection: &Arc<ConnectionController>) {
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
@@ -835,6 +948,11 @@ pub(super) fn attach_pane(state: &mut SessionsState, id: &str, tab: u32, pane: u
     state.actions.attach_pane(id, tab, pane);
 }
 
+/// An agent row's tap: attach into its space, tab and pane.
+pub(super) fn attach_agent(state: &mut SessionsState, id: &str, agent: &SessionAgent) {
+    state.actions.attach_agent(id, agent);
+}
+
 /// The detail header's rename, refused with [`READ_ONLY_TOAST`] when read-only.
 pub(super) fn open_rename(state: &mut SessionsState, id: &str) {
     if !refused_read_only(state) {
@@ -890,6 +1008,17 @@ fn terminal_location(id: &str, pane: Option<(u32, u32)>) -> String {
     location
 }
 
+/// [`terminal_location`] for an agent row: its tab position and pane id, and
+/// `space` (percent-encoded) when the agent reports a space.
+fn terminal_location_for_agent(id: &str, agent: &SessionAgent) -> String {
+    let mut location = terminal_location(id, Some((agent.tab_position, agent.pane_id)));
+    if let Some(space) = &agent.space_id {
+        let space = utf8_percent_encode(space, NON_ALPHANUMERIC);
+        location.push_str(&format!("&{TERMINAL_SPACE_QUERY_KEY}={space}"));
+    }
+    location
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +1052,33 @@ mod tests {
         assert_eq!(query(TERMINAL_TAB_QUERY_KEY), Some("2"));
         assert_eq!(query(TERMINAL_PANE_QUERY_KEY), Some("7"));
         assert_eq!(terminal_location("s-1", None), "/terminal?session=s%2D1");
+    }
+
+    #[test]
+    fn an_agent_location_adds_the_encoded_space_only_when_the_agent_has_one() {
+        let mut agent = SessionAgent {
+            pane_id: 7,
+            tab_position: 2,
+            space_id: Some("sp a&b".to_string()),
+            space_name: None,
+            tab_name: "t".to_string(),
+            kind: "claude".to_string(),
+            name: None,
+            display_kind: None,
+            status: crate::agents::AgentStatus::Idle,
+            title: None,
+            summary: None,
+            change_seq: 1,
+        };
+        let loc = frust::Location::parse(&terminal_location_for_agent("herdr:h", &agent));
+        let query = |key: &str| loc.query.get(key).map(String::as_str);
+        assert_eq!(query(TERMINAL_SPACE_QUERY_KEY), Some("sp a&b"));
+        assert_eq!(query(TERMINAL_TAB_QUERY_KEY), Some("2"));
+        assert_eq!(query(TERMINAL_PANE_QUERY_KEY), Some("7"));
+
+        agent.space_id = None;
+        let raw = terminal_location_for_agent("herdr:h", &agent);
+        assert!(!raw.contains(TERMINAL_SPACE_QUERY_KEY), "{raw}");
     }
 
     /// An observer over `signal`, mounted (as `init` mounts one) at whatever

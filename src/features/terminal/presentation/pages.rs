@@ -304,6 +304,9 @@ impl Component for TerminalScreen {
         let pane = app_nav
             .param(crate::routes::TERMINAL_PANE_QUERY_KEY)
             .and_then(|value| value.parse::<u32>().ok());
+        let space = app_nav
+            .param(crate::routes::TERMINAL_SPACE_QUERY_KEY)
+            .filter(|value| !value.is_empty());
         // The screen-scoped view model over the three app-scoped repositories
         // `di` published (`sessions`'/`settings`' through their own `di.rs` — the
         // sanctioned cross-feature widening). Auto-disposed on unmount.
@@ -316,7 +319,7 @@ impl Component for TerminalScreen {
             )
         });
 
-        controller.set_attach_target(tab, pane);
+        controller.set_attach_target_in_space(space, tab, pane);
 
         // Failure → toast, for this screen's lifetime.
         use_failure_listener(controller.core().failures(), |failure: AppFailure| {
