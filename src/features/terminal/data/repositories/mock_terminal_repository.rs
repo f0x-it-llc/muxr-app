@@ -22,6 +22,10 @@
 //! untouched by it) — belongs to a serialized suite, since a suite reaches this store only as the
 //! `Arc<dyn TerminalRepository>` its `di` published, and is process-global.
 //!
+//! **Agents.** A store never seeded answers [`default_agents_for_preview`] (what the desktop
+//! preview shows, matching the sessions mock's herdr roll-up); the mock is session-agnostic, so a
+//! zellij session's terminal lists those agents too.
+//!
 //! Failure mapping: an unknown tab key, space id or blank session id maps to
 //! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just rendered.
 //! [`MOCK_LATENCY`] is a short sleep before every call, so the screen's async path is the one the
@@ -29,11 +33,12 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::{
-    AgentEntry, AgentMark, PaneEntry, Space, TabEntry, TermLine,
+    AgentEntry, AgentMark, AgentStatus, PaneEntry, Space, TabEntry, TermLine,
 };
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
@@ -86,30 +91,123 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
     }
 }
 
-/// The agents [`seed_agents`] publishes — process-global like [`TEST_TABS`].
-static TEST_AGENTS: Mutex<Vec<AgentEntry>> = Mutex::new(Vec::new());
+/// The agents [`seed_agents`] publishes — process-global like [`TEST_TABS`]. `None` (never
+/// seeded) answers [`default_agents_for_preview`]; [`clear_test_agents`] stores an empty `Some`.
+static TEST_AGENTS: Mutex<Option<Vec<AgentEntry>>> = Mutex::new(None);
+
+/// Whether the next `list_agents` answers an error — see [`fail_next_list_agents_for_tests`].
+static FAIL_NEXT_LIST_AGENTS: AtomicBool = AtomicBool::new(false);
+
+/// Extra milliseconds the next `list_agents` sleeps — see [`delay_next_list_agents_for_tests`].
+static DELAY_NEXT_LIST_AGENTS_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Make the next `list_agents` answer an error. Test-only seam; never called by production code.
+pub fn fail_next_list_agents_for_tests() {
+    FAIL_NEXT_LIST_AGENTS.store(true, Ordering::SeqCst);
+}
+
+/// Make the next `list_agents` land `by` later than usual, its answer snapshotted before the
+/// wait. Test-only seam; never called by production code.
+pub fn delay_next_list_agents_for_tests(by: Duration) {
+    let millis = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+    DELAY_NEXT_LIST_AGENTS_MS.store(millis, Ordering::SeqCst);
+}
+
+/// The four agents the desktop preview shows: one `claude` blocked, one `codex` done, one
+/// `gemini` working, one `claude` idle — rolling up to the sessions mock's herdr summary. Each
+/// points at a real pane of the seeded tab world.
+pub fn default_agents_for_preview() -> Vec<AgentEntry> {
+    let agent = |name: &str,
+                 kind: &str,
+                 status: AgentStatus,
+                 (space, tab_key, tab_id, pane_id): (&str, &str, u64, u32),
+                 summary: &str,
+                 cwd: &str,
+                 change_seq: u64| AgentEntry {
+        pane_id,
+        tab_id,
+        tab_key: tab_key.to_string(),
+        space_id: Some(space.to_string()),
+        space_name: Some(space.to_string()),
+        tab_name: tab_key.to_string(),
+        kind: kind.to_string(),
+        name: Some(name.to_string()),
+        display_kind: None,
+        status,
+        title: Some(format!("{kind} \u{b7} {name}")),
+        summary: Some(summary.to_string()),
+        cwd: Some(cwd.to_string()),
+        focused: false,
+        change_seq,
+    };
+    vec![
+        agent(
+            "reviewer",
+            "claude",
+            AgentStatus::Blocked,
+            ("forgekit", "minefit", 2, 20),
+            "Waiting for approval to run the migration",
+            "~/api",
+            4,
+        ),
+        agent(
+            "planner",
+            "codex",
+            AgentStatus::Done,
+            ("forgekit", "gohora", 3, 30),
+            "Finished the refactor plan",
+            "~/src",
+            3,
+        ),
+        agent(
+            "scout",
+            "gemini",
+            AgentStatus::Working,
+            ("forgekit", "devbox", 4, 40),
+            "Reading the build logs",
+            "/home/ed",
+            2,
+        ),
+        agent(
+            "notes",
+            "claude",
+            AgentStatus::Idle,
+            ("zelli_mobile", "logs", 101, 10),
+            "Idle since the last summary",
+            "~/logs",
+            1,
+        ),
+    ]
+}
 
 /// Replace the agent inventory every later `list_agents` answers, and mark the pane each one
 /// targets (matched by pane id and tab id) in every later tab/pane read. Never called by
 /// production code.
 pub fn seed_agents(agents: Vec<AgentEntry>) {
-    *lock_test_agents() = agents;
+    *lock_test_agents() = Some(agents);
 }
 
 /// Drop every seeded agent — a suite's own teardown and setup.
 pub fn clear_test_agents() {
-    lock_test_agents().clear();
+    *lock_test_agents() = Some(Vec::new());
 }
 
-fn lock_test_agents() -> std::sync::MutexGuard<'static, Vec<AgentEntry>> {
+fn lock_test_agents() -> std::sync::MutexGuard<'static, Option<Vec<AgentEntry>>> {
     TEST_AGENTS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The inventory `list_agents` and [`mark_agents`] both read: the seeded one, else the default.
+fn resolved_agents() -> Vec<AgentEntry> {
+    lock_test_agents()
+        .clone()
+        .unwrap_or_else(default_agents_for_preview)
+}
+
 /// Stamp `PaneEntry.agent` on each pane a seeded agent targets.
 fn mark_agents(mut tabs: Vec<TabEntry>) -> Vec<TabEntry> {
-    let agents = lock_test_agents();
+    let agents = resolved_agents();
     if agents.is_empty() {
         return tabs;
     }
@@ -445,8 +543,13 @@ impl TerminalRepository for MockTerminalRepository {
     }
 
     async fn list_agents(&self) -> Result<Vec<AgentEntry>, AppFailure> {
-        clean_signals::time::sleep(MOCK_LATENCY).await;
-        Ok(lock_test_agents().clone())
+        let answer = resolved_agents();
+        let delay = DELAY_NEXT_LIST_AGENTS_MS.swap(0, Ordering::SeqCst);
+        clean_signals::time::sleep(MOCK_LATENCY + Duration::from_millis(delay)).await;
+        if FAIL_NEXT_LIST_AGENTS.swap(false, Ordering::SeqCst) {
+            return Err(AppFailure::Internal("list_agents: seeded failure".into()));
+        }
+        Ok(answer)
     }
 
     async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
@@ -540,7 +643,6 @@ mod tests {
 
     #[test]
     fn seeded_agents_round_trip_and_mark_their_pane() {
-        use crate::agents::AgentStatus;
         let repo = MockTerminalRepository::seeded();
         clear_test_agents();
         assert!(block_on(repo.list_agents()).expect("ok").is_empty());
@@ -575,6 +677,33 @@ mod tests {
 
         clear_test_agents();
         assert!(block_on(repo.list_agents()).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn every_default_preview_agent_points_at_a_real_pane_and_its_tab_key() {
+        let repo = MockTerminalRepository::seeded();
+        let agents = default_agents_for_preview();
+        let mut panes = std::collections::HashSet::new();
+        for agent in &agents {
+            let space = agent.space_id.clone().expect("a space");
+            let tabs = block_on(repo.list_tabs_in_space(&space)).expect("tabs");
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.tab_id == agent.tab_id)
+                .unwrap_or_else(|| panic!("{}: no tab {}", agent.display_name(), agent.tab_id));
+            assert_eq!(tab.key, agent.tab_key, "{}", agent.display_name());
+            assert!(
+                tab.panes.iter().any(|pane| pane.id == agent.pane_id),
+                "{}: no pane {}",
+                agent.display_name(),
+                agent.pane_id
+            );
+            assert!(
+                panes.insert((space, agent.tab_id, agent.pane_id)),
+                "one agent per pane"
+            );
+        }
+        assert_eq!(agents.len(), 4);
     }
 
     #[test]

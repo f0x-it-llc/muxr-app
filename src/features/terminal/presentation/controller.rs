@@ -15,7 +15,9 @@
 //! [`publish_tabs`](TerminalController::publish_tabs), a self-healing active
 //! key, and single-flight claims on the poll, on creates, and on every **move**
 //! — the sheet's commit and the space switches share one claim, since either
-//! can move the tab world out from under the other.
+//! can move the tab world out from under the other. The agents read keeps its own
+//! generation, and a failed newest read flips [`agents_stale`](TerminalController::agents_stale),
+//! muting [`has_blocked_agent`](TerminalController::has_blocked_agent).
 //!
 //! **The tree sheet's own browse state** is id-keyed
 //! ([`expanded_space`](TerminalController::expanded_space)/
@@ -106,6 +108,10 @@ pub struct TerminalController {
     /// [`agent_sort_key`] — the tree's agents half. Re-read with every tab
     /// refresh ([`refresh_agents`](Self::refresh_agents)).
     pub agents: RwSignal<Vec<AgentEntry>>,
+    /// Whether the last newest-generation `list_agents` failed, so
+    /// [`agents`](Self::agents) is a list the daemon could not confirm. The rows stay
+    /// published; [`has_blocked_agent`](Self::has_blocked_agent) mutes meanwhile.
+    pub agents_stale: RwSignal<bool>,
     /// The attached session's current name, for the rename dialog's seed.
     pub session_name: RwSignal<Option<String>>,
     /// Whether the Tablet's key bar shows; the menu's "Show key bar" toggles it
@@ -153,6 +159,9 @@ pub struct TerminalController {
     /// [`begin_layout_fetch`](Self::begin_layout_fetch) before a round trip,
     /// re-checked before commit, so a slower fetch can't roll back a newer one.
     layout_generation: AtomicU64,
+    /// [`layout_generation`](Self::layout_generation)'s counterpart for
+    /// [`refresh_agents`](Self::refresh_agents): only the newest read publishes.
+    agents_generation: AtomicU64,
     /// Whether a poll-driven layout reload is outstanding — claimed by
     /// [`take_layout_poll_tick`](Self::take_layout_poll_tick), released by
     /// [`refresh_layout_from_poll`](Self::refresh_layout_from_poll), so a slow
@@ -319,6 +328,7 @@ impl TerminalController {
             browsed_space_tabs: RwSignal::new(None),
             lines: RwSignal::new(Vec::new()),
             agents: RwSignal::new(Vec::new()),
+            agents_stale: RwSignal::new(false),
             session_name: RwSignal::new(None),
             key_bar_visible: RwSignal::new(true),
             fn_row_visible: RwSignal::new(false),
@@ -336,6 +346,7 @@ impl TerminalController {
             preferences,
             appearance_writes: AtomicU64::new(0),
             layout_generation: AtomicU64::new(0),
+            agents_generation: AtomicU64::new(0),
             layout_poll_in_flight: AtomicBool::new(false),
             create_in_flight: AtomicBool::new(false),
             move_in_flight: AtomicBool::new(false),
@@ -774,10 +785,27 @@ impl TerminalController {
         if self.selected_space_id().as_deref() == Some(space_id.as_str()) {
             return self.commit_pane(tab_key, pane_id, is_plugin).await;
         }
-        let Some(_claim) = self.claim_user_move() else {
+        let Some(cached_tabs) = self.browsed_tabs_for(&space_id) else {
             return false;
         };
-        let Some(cached_tabs) = self.browsed_tabs_for(&space_id) else {
+        self.commit_pane_in_space_with(space_id, cached_tabs, tab_key, pane_id, is_plugin)
+            .await
+    }
+
+    /// [`commit_pane_in_space`](Self::commit_pane_in_space)'s body after the cache
+    /// read, for a caller already holding the target space's tabs — the claim, the
+    /// switch, the local selection, the promotion and the pane commit. Takes the
+    /// tabs by value so [`commit_agent`](Self::commit_agent)'s peek never has to be
+    /// published into [`browsed_space_tabs`](Self::browsed_space_tabs).
+    async fn commit_pane_in_space_with(
+        &self,
+        space_id: String,
+        cached_tabs: Vec<TabEntry>,
+        tab_key: String,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> bool {
+        let Some(_claim) = self.claim_user_move() else {
             return false;
         };
         if !self
@@ -1159,16 +1187,23 @@ impl TerminalController {
     }
 
     /// Re-read the session's agents and publish them sorted, read-compare-then-write.
-    /// Silent on failure — a backend without agents answers empty, and the layout's
-    /// own failure already spoke. **Never while a move is in flight**: a row
-    /// reordering under the finger that just tapped it would aim the next tap at a
-    /// different agent, so a held move claim skips this read's publish (the next
-    /// refresh catches up).
+    /// Silent on failure beyond setting [`agents_stale`](Self::agents_stale) — a
+    /// backend without agents answers empty, and the layout's own failure already
+    /// spoke. Generation-guarded: only the newest read publishes or flags.
+    /// **Never while a move is in flight**: a row reordering under the finger that
+    /// just tapped it would aim the next tap at a different agent, so a held move
+    /// claim skips this read's publish (the next refresh catches up).
     async fn refresh_agents(&self) {
-        let mut agents = match self.terminal.list_agents().await {
+        let generation = self.agents_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let answer = self.terminal.list_agents().await;
+        if self.agents_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let mut agents = match answer {
             Ok(agents) => agents,
             Err(failure) => {
                 log::debug!("list_agents: {failure}");
+                self.set_agents_stale(true);
                 return;
             }
         };
@@ -1176,14 +1211,28 @@ impl TerminalController {
         if self.move_in_flight.load(Ordering::SeqCst) {
             return;
         }
+        self.set_agents_stale(false);
         if self.agents.try_with_untracked(|current| *current != agents) == Some(true) {
             self.agents.set(agents);
         }
     }
 
+    /// Read-compare-then-write on [`agents_stale`](Self::agents_stale).
+    fn set_agents_stale(&self, stale: bool) {
+        if self.agents_stale.try_get_untracked() == Some(!stale) {
+            self.agents_stale.set(stale);
+        }
+    }
+
     /// Whether any agent is waiting on the user — the rail's `needs you` badge and
-    /// the immersive panes button's dot. A tracked read.
+    /// the immersive panes button's dot. A tracked read. `false` while
+    /// [`agents_stale`](Self::agents_stale): both are claims about *now*, and a list
+    /// the daemon could not confirm must not keep asserting them (the rows themselves
+    /// keep drawing from [`agents`](Self::agents)).
     pub fn has_blocked_agent(&self) -> bool {
+        if self.agents_stale.get() {
+            return false;
+        }
         self.agents.with(|agents| {
             agents
                 .iter()
@@ -1207,9 +1256,15 @@ impl TerminalController {
                 .commit_pane(agent.tab_key.clone(), agent.pane_id, false)
                 .await;
         };
-        if selected.as_deref() != Some(space_id.as_str())
-            && self.browsed_tabs_for(&space_id).is_none()
-        {
+        if selected.as_deref() == Some(space_id.as_str()) {
+            return self
+                .commit_pane_in_space(space_id, agent.tab_key.clone(), agent.pane_id, false)
+                .await;
+        }
+        let cached = self.browsed_tabs_for(&space_id);
+        let tabs = if let Some(tabs) = cached {
+            tabs
+        } else {
             let Ok(tabs) = self
                 .core
                 .run(
@@ -1224,9 +1279,9 @@ impl TerminalController {
             if !self.signals_alive() {
                 return false;
             }
-            self.browsed_space_tabs.set(Some((space_id.clone(), tabs)));
-        }
-        self.commit_pane_in_space(space_id, agent.tab_key.clone(), agent.pane_id, false)
+            tabs
+        };
+        self.commit_pane_in_space_with(space_id, tabs, agent.tab_key.clone(), agent.pane_id, false)
             .await
     }
 

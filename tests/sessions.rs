@@ -2135,3 +2135,19 @@ fn a_blank_name_creates_nothing_with_or_without_the_choice() {
         assert!(repo.created.lock().unwrap().is_empty());
     }
 }
+
+#[test]
+fn the_seeded_herdr_summary_is_the_rollup_of_the_terminal_mocks_default_agents() {
+    use muxr::features::terminal::data::repositories::mock_terminal_repository::default_agents_for_preview;
+    let rollup = AgentSummary::from_statuses(
+        default_agents_for_preview()
+            .iter()
+            .map(|agent| (agent.status, agent.kind.as_str())),
+    );
+    let sessions = MockSessionsRepository::seeded().snapshot();
+    let herdr = sessions
+        .iter()
+        .find(|session| session.id == SEEDED_HERDR_ID)
+        .expect("herdr");
+    assert_eq!(herdr.agents.as_ref(), Some(&rollup));
+}

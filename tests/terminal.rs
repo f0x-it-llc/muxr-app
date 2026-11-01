@@ -41,7 +41,8 @@ use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::features::sessions::data::repositories::mock_sessions_repository::SEEDED_DEV_ID;
 use muxr::features::sessions::di::expect_sessions_repository;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    clear_test_agents, clear_verb_log_for_tests, seed_agents, verb_log_for_tests,
+    clear_test_agents, clear_verb_log_for_tests, delay_next_list_agents_for_tests,
+    fail_next_list_agents_for_tests, seed_agents, verb_log_for_tests,
 };
 use muxr::features::terminal::domain::entities::{AgentEntry, AgentStatus};
 use muxr::features::terminal::presentation::pages::{
@@ -3829,4 +3830,129 @@ fn the_immersive_panes_button_has_no_dot_while_nothing_is_blocked() {
     let scene = h.settle_motion(0.0);
     assert!(node_labels(&h.root).iter().any(|l| l == PANES));
     assert_eq!(attention_dots(&scene), 0, "nothing blocked, no dot");
+}
+
+// ---------------------------------------------------------------------------
+// commit_agent leaves the browse cache alone; refresh_agents is ordered and failure-aware
+// ---------------------------------------------------------------------------
+
+/// A blocked agent in a space the mock does not have, so its peek fails.
+fn ghost_agent() -> AgentEntry {
+    agent(
+        "ghost",
+        (Some("nowhere"), "btop", 1, 11),
+        AgentStatus::Blocked,
+        1,
+    )
+}
+
+#[test]
+fn a_cross_space_agent_whose_peek_fails_moves_nothing_and_keeps_the_browse_cache() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![ghost_agent()]);
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    park_on_zelli(&mut h);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    let browsed_before = c.browsed_space_tabs.get_untracked();
+    let active_before = c.active_tab.get_untracked();
+    let agent = c.agents.get_untracked().remove(0);
+
+    assert!(!rt.block_on(c.commit_agent(&agent)));
+
+    assert_eq!(c.browsed_space_tabs.get_untracked(), browsed_before);
+    assert_eq!(c.active_tab.get_untracked(), active_before);
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "{:?}",
+        verb_log_for_tests()
+    );
+}
+
+#[test]
+fn a_cross_space_agent_whose_pane_commit_fails_leaves_the_browse_cache_as_it_was() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "lost",
+        (Some("forgekit"), "btop", 1, 99),
+        AgentStatus::Blocked,
+        1,
+    )]);
+    let mut h = Harness::mount_session(HERDR_SESSION_ID);
+    park_on_zelli(&mut h);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    let browsed_before = c.browsed_space_tabs.get_untracked();
+    let agent = c.agents.get_untracked().remove(0);
+
+    assert!(!rt.block_on(c.commit_agent(&agent)), "pane 99 is not there");
+
+    assert_eq!(c.browsed_space_tabs.get_untracked(), browsed_before);
+}
+
+#[test]
+fn an_older_agents_read_landing_last_cannot_overwrite_the_newer_inventory() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "old",
+        (None, "devbox", 4, 40),
+        AgentStatus::Working,
+        1,
+    )]);
+    let mut h = Harness::mount();
+    await_agents(&mut h, 1);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+
+    delay_next_list_agents_for_tests(Duration::from_millis(300));
+    rt.block_on(async {
+        let first = c.reload_tabs();
+        let second = async {
+            clean_signals::time::sleep(Duration::from_millis(80)).await;
+            seed_agents(vec![
+                agent("new", (None, "devbox", 4, 40), AgentStatus::Idle, 2),
+                agent("newer", (None, "devbox", 4, 41), AgentStatus::Idle, 3),
+            ]);
+            c.reload_tabs().await;
+        };
+        tokio::join!(first, second);
+    });
+
+    assert_eq!(c.agents.get_untracked().len(), 2, "the newer inventory");
+}
+
+#[test]
+fn a_failed_agents_read_mutes_the_attention_claims_until_the_next_good_one() {
+    let _g = serial();
+    let _ambient = setup();
+    let _agents = seed(vec![agent(
+        "reviewer",
+        (None, "devbox", 4, 40),
+        AgentStatus::Blocked,
+        1,
+    )]);
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+    h.pump_until("the agents to load", |h| agent_row_labels(h).len() == 1);
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    assert!(c.has_blocked_agent() && !c.agents_stale.get_untracked());
+
+    fail_next_list_agents_for_tests();
+    rt.block_on(c.reload_tabs());
+    h.pump_for(Duration::from_millis(100));
+
+    assert!(c.agents_stale.get_untracked());
+    assert_eq!(c.agents.get_untracked().len(), 1, "the rows stay published");
+    assert!(!c.has_blocked_agent(), "muted while stale");
+    let labels = node_labels(&h.root);
+    assert!(!labels.iter().any(|l| l == "needs you"), "{labels:?}");
+
+    rt.block_on(c.reload_tabs());
+    h.pump_for(Duration::from_millis(100));
+    assert!(!c.agents_stale.get_untracked());
+    assert!(c.has_blocked_agent());
+    assert!(node_labels(&h.root).iter().any(|l| l == "needs you"));
 }
