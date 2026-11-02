@@ -25,10 +25,13 @@
 //! the plugin's safe `invalidate_on_enrollment` default, so a re-enrollment
 //! surfaces as [`CredentialStatus::KeyInvalidated`].
 //!
-//! [`CredentialService::delete`] is the one ungated call: it removes the legacy
-//! entry only, since the vault cannot be rewritten without a gate. The vault
-//! entry it orphans is dropped at the next `unlock_all`, whose `endpoints` no
-//! longer name it. On desktop a gated open answers
+//! [`CredentialService::delete`] and [`CredentialService::reset_vault`] are the
+//! ungated calls. `delete` removes the legacy entry only, since the vault
+//! cannot be rewritten without a gate: a vault entry for a still-saved
+//! endpoint stays until `delete_from_vault` removes it, or until the saved row
+//! is removed and the next `unlock_all` prunes it. `reset_vault` removes the
+//! whole vault — the only way out of one that answers `KeyInvalidated` after a
+//! re-enrollment or no longer decodes. On desktop a gated open answers
 //! [`Unavailability::UnsupportedPlatform`], mapped to
 //! [`CredentialStatus::Unavailable`] — nothing degrades to plain storage.
 //!
@@ -170,34 +173,40 @@ impl CredentialService for SecureCredentialStore {
         server_key: String,
         keyring: &mut Keyring,
     ) -> Result<(), AppFailure> {
-        let rewrite = if keyring.remove(&server_key) {
-            let encoded = encode_vault(keyring);
+        if keyring.token_for(&server_key).is_some() {
+            let encoded = vault_without(keyring, &server_key);
             let written = gated(move || {
                 let store = open_gated(FORGET_REASON)?;
                 Ok(write_vault(&store, &encoded, None))
             })
             .await;
-            refused_rewrite(status_from(written))
-        } else {
-            Ok(())
-        };
-        let legacy = self.delete(server_key).await;
-        rewrite.and(legacy)
+            refused_rewrite(status_from(written))?;
+            keyring.remove(&server_key);
+        }
+        self.delete(server_key).await
     }
 
     async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
-        let key = storage_key(&server_key);
-        // Ungated, but still off the UI thread — a Keychain/Keystore write is I/O either way.
-        let removed = gated(move || {
-            let store = SecureStorage::open(STORE_NAME)?;
-            store.remove(&key)
-        })
-        .await;
-        removed.map_err(|err| {
-            log::warn!("credentials: delete failed: {err}");
-            AppFailure::Storage(DELETE_FAILED.to_string())
-        })
+        remove_ungated(storage_key(&server_key)).await
     }
+
+    async fn reset_vault(&self) -> Result<(), AppFailure> {
+        remove_ungated(VAULT_KEY.to_string()).await
+    }
+}
+
+/// Removes `key` without a gate — still off the UI thread, since a
+/// Keychain/Keystore write is I/O either way. An absent key succeeds.
+async fn remove_ungated(key: String) -> Result<(), AppFailure> {
+    let removed = gated(move || {
+        let store = SecureStorage::open(STORE_NAME)?;
+        store.remove(&key)
+    })
+    .await;
+    removed.map_err(|err| {
+        log::warn!("credentials: an ungated remove failed: {err}");
+        AppFailure::Storage(DELETE_FAILED.to_string())
+    })
 }
 
 /// The four store operations the vault algorithms use. `get`/`set` are the
@@ -376,14 +385,27 @@ pub(super) fn next_vault(
     server_key: &str,
     token: &Zeroizing<String>,
 ) -> Zeroizing<String> {
-    let mut next = Keyring::new();
-    for endpoint in keyring.endpoints() {
-        if let Some(existing) = keyring.token_for(&endpoint) {
-            next.insert(endpoint, existing);
-        }
-    }
+    let mut next = copy_keyring(keyring);
     next.insert(server_key, token.clone());
     encode_vault(&next)
+}
+
+/// The vault blob for `keyring` without `server_key`, leaving `keyring`
+/// itself untouched until the write succeeds.
+pub(super) fn vault_without(keyring: &Keyring, server_key: &str) -> Zeroizing<String> {
+    let mut next = copy_keyring(keyring);
+    next.remove(server_key);
+    encode_vault(&next)
+}
+
+fn copy_keyring(keyring: &Keyring) -> Keyring {
+    let mut copy = Keyring::new();
+    for endpoint in keyring.endpoints() {
+        if let Some(token) = keyring.token_for(&endpoint) {
+            copy.insert(endpoint, token);
+        }
+    }
+    copy
 }
 
 /// An unlocked delete's refused vault rewrite, as the failure it reports.
@@ -858,6 +880,34 @@ mod tests {
         assert_eq!(keyring.len(), 1);
         let next = KeyringVault::decode(&encoded).unwrap();
         assert_eq!(next.endpoints(), saved(&[A, B]));
+    }
+
+    #[test]
+    fn an_invalidated_vault_read_surfaces_as_key_invalidated_rather_than_failed() {
+        let mut store = FakeStore::with_legacy(&[A]).with_vault(&[(A, "ta")]);
+        store
+            .refuse_get
+            .insert(VAULT_KEY.to_string(), CredentialStatus::KeyInvalidated);
+
+        assert_eq!(
+            unlock_vault(&store, &saved(&[A])).err(),
+            Some(CredentialStatus::KeyInvalidated)
+        );
+        assert!(store.has(&storage_key(A)) && store.has(VAULT_KEY));
+    }
+
+    #[test]
+    fn the_vault_without_an_entry_leaves_the_keyring_untouched() {
+        let mut keyring = Keyring::new();
+        keyring.insert(A, Zeroizing::new("ta".to_string()));
+        keyring.insert(B, Zeroizing::new("tb".to_string()));
+        let encoded = vault_without(&keyring, B);
+
+        assert_eq!(keyring.len(), 2);
+        assert_eq!(
+            KeyringVault::decode(&encoded).unwrap().endpoints(),
+            saved(&[A])
+        );
     }
 
     #[test]

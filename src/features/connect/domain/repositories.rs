@@ -67,18 +67,30 @@ pub trait CredentialService {
         keyring: &mut Keyring,
     ) -> CredentialStatus;
 
-    /// The unlocked delete: drops `server_key` from `keyring`, rewrites the
-    /// vault without it (gated, skipped when `keyring` never held it) and
-    /// removes its legacy entry if one remains.
+    /// The unlocked delete: rewrites the vault without `server_key` behind one
+    /// gate (skipped when `keyring` never held it), then drops it from
+    /// `keyring` and removes its legacy entry. A refused rewrite is an `Err`
+    /// that leaves `keyring` and the legacy entry untouched.
     async fn delete_from_vault(
         &self,
         server_key: String,
         keyring: &mut Keyring,
     ) -> Result<(), AppFailure>;
 
-    /// Drops `server_key`'s legacy entry. No gate — forgetting a secret isn't
-    /// using it, and deleting an absent key succeeds. The vault cannot be
-    /// rewritten without a gate, so its entry stays until the next
-    /// [`Self::unlock_all`] drops it as no longer saved.
+    /// The locked delete: drops `server_key`'s legacy entry only. No gate —
+    /// forgetting a secret isn't using it, and deleting an absent key
+    /// succeeds. The vault cannot be rewritten without a gate, so a vault
+    /// entry for a still-saved endpoint stays until [`Self::delete_from_vault`]
+    /// removes it, or until its saved row is removed and the next
+    /// [`Self::unlock_all`] prunes it.
     async fn delete(&self, server_key: String) -> Result<(), AppFailure>;
+
+    /// Removes the whole vault, ungated; an absent vault succeeds. The
+    /// recovery for a vault [`Self::unlock_all`] can never read again —
+    /// [`KeyInvalidated`](super::entities::CredentialStatus::KeyInvalidated)
+    /// after a biometric re-enrollment, or
+    /// [`Failed`](super::entities::CredentialStatus::Failed) for a blob that
+    /// no longer decodes — which presentation offers on either status. Legacy
+    /// per-server entries are left for the next `unlock_all` to migrate.
+    async fn reset_vault(&self) -> Result<(), AppFailure>;
 }

@@ -11,7 +11,7 @@
 //! present or not), and [`MockCredentialService::writes`] counts every gated
 //! vault `set`. Apple prompts on reads only; Android prompts on both, so a
 //! flow's Android prompt count is `prompts().len() + writes()`. Ungated
-//! `contains`/`remove` count as neither.
+//! `contains`/`remove`, `delete` and `reset_vault` count as neither.
 //!
 //! Selected by `di`'s headless-test seam, never in a real app run. A poisoned
 //! lock is recovered rather than propagated, for the reason
@@ -23,8 +23,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use zeroize::Zeroizing;
 
 use super::secure_credential_service::{
-    DELETE_FAILED, FORGET_REASON, VAULT_KEY, VaultStore, encode_vault, next_vault, read_one,
-    refused_rewrite, storage_key, store_locked, unlock_vault, write_vault,
+    DELETE_FAILED, FORGET_REASON, VAULT_KEY, VaultStore, next_vault, read_one, refused_rewrite,
+    storage_key, store_locked, unlock_vault, vault_without, write_vault,
 };
 use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::{
@@ -246,23 +246,32 @@ impl CredentialService for MockCredentialService {
         server_key: String,
         keyring: &mut Keyring,
     ) -> Result<(), AppFailure> {
-        let rewrite = if keyring.remove(&server_key) {
-            let encoded = encode_vault(keyring);
+        if keyring.token_for(&server_key).is_some() {
+            let encoded = vault_without(keyring, &server_key);
             let written = write_vault(&self.vault_with(FORGET_REASON), &encoded, None);
-            refused_rewrite(written.err().unwrap_or(CredentialStatus::Success))
-        } else {
-            Ok(())
-        };
-        let legacy = self.delete(server_key).await;
-        rewrite.and(legacy)
+            refused_rewrite(written.err().unwrap_or(CredentialStatus::Success))?;
+            keyring.remove(&server_key);
+        }
+        self.delete(server_key).await
     }
 
     async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
+        self.remove_ungated(&storage_key(&server_key))
+    }
+
+    async fn reset_vault(&self) -> Result<(), AppFailure> {
+        self.remove_ungated(VAULT_KEY)
+    }
+}
+
+impl MockCredentialService {
+    /// An ungated remove, failing as [`Self::set_delete_failure`] scripts.
+    fn remove_ungated(&self, key: &str) -> Result<(), AppFailure> {
         let mut state = self.state();
         if state.delete_fails {
             return Err(AppFailure::Storage(DELETE_FAILED.to_string()));
         }
-        state.entries.remove(&storage_key(&server_key));
+        state.entries.remove(key);
         Ok(())
     }
 }
@@ -516,6 +525,105 @@ mod tests {
 
         block_on(service.delete_from_vault("zz:9".to_string(), &mut keyring)).expect("absent");
         assert_eq!(service.writes(), writes + 1, "nothing to rewrite, no gate");
+    }
+
+    fn unlocked_keyring(entries: &[(&str, &str)]) -> Keyring {
+        let mut keyring = Keyring::new();
+        for (endpoint, token) in entries {
+            keyring.insert(*endpoint, Zeroizing::new(token.to_string()));
+        }
+        keyring
+    }
+
+    #[test]
+    fn an_unlocked_delete_removes_a_legacy_entry_that_is_still_there() {
+        let service = MockCredentialService::new();
+        service.seed_vault(&[("a:1", "ta"), ("b:2", "tb")]);
+        service.seed("b:2", "old");
+        let mut keyring = unlocked_keyring(&[("a:1", "ta"), ("b:2", "tb")]);
+
+        block_on(service.delete_from_vault("b:2".to_string(), &mut keyring)).expect("deleted");
+        assert_eq!(service.legacy("b:2"), None, "the legacy entry went too");
+        assert_eq!(service.vault_endpoints(), Some(saved(&["a:1"])));
+        assert_eq!(keyring.endpoints(), saved(&["a:1"]));
+
+        service.seed("c:3", "legacy-only");
+        block_on(service.delete_from_vault("c:3".to_string(), &mut keyring)).expect("deleted");
+        assert_eq!(
+            service.legacy("c:3"),
+            None,
+            "no vault entry, legacy still removed"
+        );
+        assert_eq!(
+            service.writes(),
+            1,
+            "only the first delete rewrote the vault"
+        );
+    }
+
+    #[test]
+    fn a_refused_vault_rewrite_leaves_the_keyring_vault_and_legacy_entry_untouched() {
+        let service = MockCredentialService::new();
+        service.seed_vault(&[("a:1", "ta"), ("b:2", "tb")]);
+        service.seed("b:2", "old");
+        service.set_gate(CredentialStatus::Canceled);
+        let mut keyring = unlocked_keyring(&[("a:1", "ta"), ("b:2", "tb")]);
+
+        let failure = block_on(service.delete_from_vault("b:2".to_string(), &mut keyring))
+            .expect_err("a refused rewrite is reported");
+        assert!(matches!(failure, AppFailure::Storage(_)));
+        assert_eq!(keyring.endpoints(), saved(&["a:1", "b:2"]));
+        assert_eq!(service.vault_endpoints(), Some(saved(&["a:1", "b:2"])));
+        assert_eq!(service.legacy("b:2").as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn a_reset_removes_the_vault_ungated_and_leaves_legacy_entries() {
+        let service = MockCredentialService::new();
+        service.seed_vault_raw("{corrupted");
+        service.seed("a:1", "ta");
+        service.set_gate(CredentialStatus::KeyInvalidated);
+
+        let refused = block_on(service.unlock_all("Unlock", &saved(&["a:1"])));
+        assert_eq!(refused.status, CredentialStatus::KeyInvalidated);
+
+        block_on(service.reset_vault()).expect("a reset runs no gate");
+        block_on(service.reset_vault()).expect("…and an absent vault is fine");
+        assert_eq!(service.vault_endpoints(), None);
+        assert_eq!(service.legacy("a:1").as_deref(), Some("ta"));
+        assert_eq!(service.writes(), 0);
+
+        service.set_gate(CredentialStatus::Success);
+        let unlocked = block_on(service.unlock_all("Unlock", &saved(&["a:1"])));
+        assert_eq!(unlocked.status, CredentialStatus::Success);
+        assert_eq!(unlocked.migrated, saved(&["a:1"]));
+        assert_eq!(service.vault_endpoints(), Some(saved(&["a:1"])));
+    }
+
+    #[test]
+    fn a_reset_over_a_corrupted_vault_unlocks_to_an_empty_keyring() {
+        let service = MockCredentialService::new();
+        service.seed_vault_raw("{corrupted");
+        let failed = block_on(service.unlock_all("Unlock", &saved(&["a:1"])));
+        assert_eq!(failed.status, CredentialStatus::Failed);
+
+        block_on(service.reset_vault()).expect("reset");
+        let unlocked = block_on(service.unlock_all("Unlock", &saved(&["a:1"])));
+        assert_eq!(unlocked.status, CredentialStatus::Success);
+        assert!(unlocked.keyring.expect("a keyring").is_empty());
+    }
+
+    #[test]
+    fn a_scripted_delete_failure_fails_a_reset_too() {
+        let service = MockCredentialService::new();
+        service.seed_vault(&[("a:1", "ta")]);
+        service.set_delete_failure(true);
+
+        assert!(matches!(
+            block_on(service.reset_vault()),
+            Err(AppFailure::Storage(_))
+        ));
+        assert_eq!(service.vault_endpoints(), Some(saved(&["a:1"])));
     }
 
     #[test]
