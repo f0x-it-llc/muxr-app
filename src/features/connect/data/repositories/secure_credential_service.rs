@@ -38,7 +38,7 @@ use zeroize::Zeroizing;
 
 use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::{
-    CredentialStatus, StoreRequest, UnlockRequest, UnlockedCredential,
+    CredentialStatus, StoreRequest, UnlockRequest, UnlockedCredential, UnlockedKeyring,
 };
 use crate::features::connect::domain::repositories::CredentialService;
 
@@ -114,6 +114,11 @@ impl CredentialService for SecureCredentialStore {
             Ok(None) => UnlockedCredential::refused(CredentialStatus::NotFound),
             Err(err) => UnlockedCredential::refused(status_of(&err)),
         }
+    }
+
+    // stub: replaced by the secure-vault data card
+    async fn unlock_all(&self, _reason: &str, _endpoints: &[String]) -> UnlockedKeyring {
+        UnlockedKeyring::refused(CredentialStatus::Failed)
     }
 
     async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
