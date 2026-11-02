@@ -5856,14 +5856,12 @@ impl CredentialService for HeldVault {
     }
 }
 
-#[test]
-fn a_lock_during_the_unlocked_save_keeps_the_token_out_of_the_locked_handle() {
-    let _g = serial();
-    let _ambient = setup();
-    let keyring = KeyringHandle::new();
+/// An unlocked install's form-connect save to [`CRED_ENDPOINT`], held at its
+/// prompt (after the snapshot) until the returned [`HeldPrompt`] is released.
+fn hold_an_unlocked_save(keyring: &KeyringHandle) -> (Creds, Arc<HeldPrompt>) {
     keyring.publish(Keyring::new());
     let prompt = Arc::new(HeldPrompt::default());
-    let creds = keyring_fixture(Vec::new(), &keyring);
+    let creds = keyring_fixture(Vec::new(), keyring);
     let held = Arc::new(HeldVault {
         inner: Arc::clone(&creds.credentials),
         prompt: Arc::clone(&prompt),
@@ -5893,20 +5891,58 @@ fn a_lock_during_the_unlocked_save_keeps_the_token_out_of_the_locked_handle() {
     pump_until_done("the save to reach its prompt", || {
         prompt.entered.load(std::sync::atomic::Ordering::SeqCst)
     });
+    (creds, prompt)
+}
 
-    creds.connection.lock_and_disconnect(&keyring);
+/// Release `prompt` and drive the held save until the row records it.
+fn settle_the_held_save(creds: &Creds, prompt: &HeldPrompt) {
     prompt.release();
     pump_until_done("the save to settle", || {
         stored_row(&creds.servers).has_credential
     });
-
     assert!(
         creds.credentials.stored(CRED_ENDPOINT).is_some(),
         "the vault write itself went through"
     );
+}
+
+#[test]
+fn a_lock_during_the_unlocked_save_keeps_the_token_out_of_the_locked_handle() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let (creds, prompt) = hold_an_unlocked_save(&keyring);
+
+    creds.connection.lock_and_disconnect(&keyring);
+    settle_the_held_save(&creds, &prompt);
+
     assert!(
         !keyring.is_unlocked() && keyring.endpoints().is_empty(),
         "a handle locked mid-prompt stays locked and empty: {:?}",
         keyring.endpoints()
+    );
+}
+
+#[test]
+fn another_change_to_the_unlocked_handle_mid_save_still_takes_the_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let (creds, prompt) = hold_an_unlocked_save(&keyring);
+
+    keyring.insert(DOCK_B, zeroize::Zeroizing::new(DOCK_TOKEN_B.to_string()));
+    settle_the_held_save(&creds, &prompt);
+
+    assert_eq!(
+        keyring
+            .token_for(CRED_ENDPOINT)
+            .as_deref()
+            .map(String::as_str),
+        creds.credentials.stored(CRED_ENDPOINT).as_deref(),
+        "the handle stays in step with the vault it just wrote"
+    );
+    assert!(
+        keyring.token_for(DOCK_B).is_some(),
+        "…beside the other change"
     );
 }
