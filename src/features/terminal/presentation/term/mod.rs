@@ -443,8 +443,9 @@ impl SelectionSeam {
         }
     }
 
-    /// The pinch guard resets: on `ScalePhase::End`, and on every fresh first-finger `Down`
-    /// (a cancelled pinch delivers no `End`).
+    /// The pinch guard resets only on the grid's fresh first-finger `Down`: it stays set
+    /// until then, a cancelled or ended pinch alike, because the first finger's gesture
+    /// returns to the grid late and a held finger would otherwise long-press.
     pub(crate) fn pinch_ended(&self) {
         self.pinching.set(false);
     }
@@ -639,10 +640,8 @@ pub fn terminal_surface_with_pinch<State: 'static>(
     };
     any(
         pinch_detector(surface).on_scale(move |_state: &mut State, event: ScaleEvent| {
-            match event.phase {
-                ScalePhase::Begin => guard.pinch_began(),
-                ScalePhase::End => guard.pinch_ended(),
-                _ => {}
+            if matches!(event.phase, ScalePhase::Begin) {
+                guard.pinch_began();
             }
             let intent = tracker.borrow_mut().feed(event.phase, event.scale_delta);
             if let Some(intent) = intent {

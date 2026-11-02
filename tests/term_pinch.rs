@@ -311,3 +311,25 @@ fn a_plain_long_press_still_selects_with_one_haptic() {
     assert_eq!(m.seam.haptic_count(), 1);
     assert!(m.intents().is_empty());
 }
+
+#[test]
+fn a_spread_then_lifting_the_second_finger_keeps_long_press_off_until_the_first_lifts() {
+    use PointerPhase::{Down, Up};
+    let _guard = serial();
+    let _owner = setup();
+    let mut m = Mounted::new(true);
+    m.send(contact(0, Down, a()));
+    m.send(contact(1, Down, b(130.0)));
+    spread(&mut m);
+    m.send(contact(1, Up, b(220.0)));
+    hold(&mut m, 0.0);
+    assert!(m.seam.range().is_none());
+    assert_eq!(m.seam.haptic_count(), 0);
+    assert_eq!(m.intents(), [PinchIntent::EnterFullscreen]);
+    m.send(contact(0, Up, a()));
+    assert!(m.seam.range().is_none());
+    m.send(contact(0, Down, a()));
+    hold(&mut m, 2_000.0);
+    assert!(m.seam.range().is_some());
+    assert_eq!(m.seam.haptic_count(), 1);
+}

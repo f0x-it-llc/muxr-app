@@ -54,7 +54,8 @@ use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
     delay_next_list_agents_for_tests, drop_agent_stream_for_tests, end_agent_stream_for_tests,
     fail_next_list_agents_for_tests, open_next_agent_watch_down_for_tests,
-    push_agent_event_for_tests, seed_agents, seed_test_floating_overlay, verb_log_for_tests,
+    push_agent_event_for_tests, seed_agents, seed_test_floating_overlay,
+    seed_test_union_fullscreen, verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
 use muxr::features::terminal::domain::entities::{
@@ -1332,6 +1333,56 @@ fn a_hidden_full_size_floating_pane_is_never_targeted_by_a_tap_or_a_spread() {
         verb_log_for_tests().contains(&format!("focus_pane:{TEST_FLOATING_PANE_ID}")),
         "with the layer visible the floating pane takes the tap"
     );
+    seed_test_floating_overlay(None);
+}
+
+/// zellij flags every client-active pane `is_fullscreen` while one pane is fullscreen, so the
+/// converge must follow the focused pane (the one this connection fullscreened), not the first
+/// flagged pane in wire order.
+#[test]
+fn a_converge_exits_the_focused_fullscreen_pane_not_a_union_flagged_sibling() {
+    let _g = serial();
+    let _ambient = setup();
+    seed_test_floating_overlay(Some(false));
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let scene = h.frame();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    let first = focused_pane_id().expect("the mock seeds one focused pane per tab");
+    let second = first + 1;
+
+    let on_content_tap = hooks.on_content_tap.expect("zellij wires the tap hook");
+    on_content_tap(u32::from(SIBLING_CELL.0), u32::from(SIBLING_CELL.1));
+    h.pump_for(Duration::from_millis(100));
+    assert_eq!(focused_pane_id(), Some(second));
+
+    seed_test_union_fullscreen(&[first]);
+    let on_pinch = hooks.on_pinch.expect("zellij wires the pinch hook");
+    on_pinch(
+        PinchIntent::EnterFullscreen,
+        cell_point(&scene, SIBLING_CELL.0, SIBLING_CELL.1),
+    );
+    h.pump_for(Duration::from_millis(100));
+    let tab = debug_controller()
+        .and_then(|c| c.active_tab_entry())
+        .expect("an active tab");
+    assert!(tab.panes.iter().any(|p| p.id == first && p.is_fullscreen));
+    clear_verb_log_for_tests();
+
+    on_pinch(
+        PinchIntent::ExitFullscreen,
+        cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1),
+    );
+    h.pump_for(Duration::from_millis(100));
+    let log = verb_log_for_tests();
+    assert_eq!(
+        log.last(),
+        Some(&format!("toggle_pane_fullscreen:{second}:false")),
+        "got {log:?}"
+    );
+    assert!(!log.contains(&format!("toggle_pane_fullscreen:{first}:false")));
+    seed_test_union_fullscreen(&[]);
     seed_test_floating_overlay(None);
 }
 

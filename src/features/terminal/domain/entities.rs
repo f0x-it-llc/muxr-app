@@ -46,7 +46,8 @@ pub struct PaneEntry {
     /// Whether this is a plugin pane rather than a terminal one — picks the wire's
     /// `PaneId::Plugin` vs `PaneId::Terminal` namespace for pane-targeted verbs.
     pub is_plugin: bool,
-    /// Per querying client in zellij; [`TabEntry::fullscreen_active`] is the tab-global truth.
+    /// zellij flags EVERY client-active pane while the tab is fullscreen (union `is_focused`); the
+    /// tab truth is [`TabEntry::fullscreen_active`], the fullscreened pane is the focused one.
     pub is_fullscreen: bool,
     /// Geometry, in cells: left edge, top edge, height, width.
     pub x: u32,

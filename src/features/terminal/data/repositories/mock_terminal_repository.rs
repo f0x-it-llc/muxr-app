@@ -83,11 +83,25 @@ pub fn seed_test_floating_overlay(visible: Option<bool>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = visible;
 }
 
+/// Pane ids [`seed_test_union_fullscreen`] flags `is_fullscreen` while their tab is fullscreen.
+static TEST_UNION_FULLSCREEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Flag these panes `is_fullscreen` in every later `list_tabs` answer whose tab is fullscreen
+/// (`fullscreen_active`) — zellij's union shape, where every client-active pane carries the
+/// flag, not only the fullscreened one. Empty removes it; cleared by [`clear_test_tabs`].
+/// Never called by production code.
+pub fn seed_test_union_fullscreen(pane_ids: &[u32]) {
+    *TEST_UNION_FULLSCREEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = pane_ids.to_vec();
+}
+
 /// Drop every tab [`add_test_tab`] appended — a suite's own teardown, and its
 /// setup, since this store outlives any one mount of the screen.
 pub fn clear_test_tabs() {
     lock_test_tabs().clear();
     seed_test_floating_overlay(None);
+    seed_test_union_fullscreen(&[]);
 }
 
 /// The appended-tab store, poisoned locks recovered like every other lock
@@ -443,6 +457,15 @@ impl MockTerminalRepository {
                 rows: 24,
                 cols: 80,
             });
+        }
+        let union = TEST_UNION_FULLSCREEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for tab in tabs.iter_mut().filter(|tab| tab.fullscreen_active) {
+            for pane in &mut tab.panes {
+                pane.is_fullscreen |= union.contains(&pane.id);
+            }
         }
         mark_agents(tabs)
     }
