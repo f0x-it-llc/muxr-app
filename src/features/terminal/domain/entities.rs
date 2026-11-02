@@ -46,6 +46,7 @@ pub struct PaneEntry {
     /// Whether this is a plugin pane rather than a terminal one — picks the wire's
     /// `PaneId::Plugin` vs `PaneId::Terminal` namespace for pane-targeted verbs.
     pub is_plugin: bool,
+    /// Per querying client in zellij; [`TabEntry::fullscreen_active`] is the tab-global truth.
     pub is_fullscreen: bool,
     /// Geometry, in cells: left edge, top edge, height, width.
     pub x: u32,
@@ -154,8 +155,7 @@ pub struct TabEntry {
     pub has_bell: bool,
     /// The wire's `TabMsg.floating_panes_visible`; floating panes are hit-testable only while true.
     pub floating_panes_visible: bool,
-    /// The wire's `TabMsg.fullscreen_active`, tab-global and client-independent, unlike
-    /// [`PaneEntry::is_fullscreen`] which zellij computes per querying client.
+    /// The wire's `TabMsg.fullscreen_active`: tab-global and client-independent.
     pub fullscreen_active: bool,
 }
 
