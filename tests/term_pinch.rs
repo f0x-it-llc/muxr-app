@@ -12,6 +12,7 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::features::terminal::presentation::term::chip::copy_chip;
+use muxr::features::terminal::presentation::term::selection::GridPoint;
 use muxr::features::terminal::presentation::term::{
     ContentTapSink, PinchIntent, PinchSink, SelectionSeam, SharedEmulator, TerminalEmulator,
     TerminalPalette, terminal_grid, terminal_surface_with_pinch,
@@ -129,7 +130,14 @@ fn a_two_finger_spread_enters_fullscreen_once_at_the_midpoint_cell() {
     let (_, focal) = m.intents.borrow()[0];
     // R4: the focal is in the grid's own space, so it maps to the cell under the fingers.
     assert_eq!(focal, p(145.0, 100.0));
-    assert_eq!(m.seam.cell_at(focal), m.seam.cell_at(p(145.0, 100.0)));
+    let geo = m.seam.metrics().expect("laid out");
+    assert_eq!(
+        m.seam.cell_at(focal),
+        Some(GridPoint {
+            col: (145.0 / geo.width).floor() as u16,
+            row: (100.0 / geo.height).floor() as u16,
+        })
+    );
     assert!(m.seam.cell_at(focal).is_some());
     m.send(contact(1, Up, p(220.0, 100.0)));
     assert_eq!(m.intents().len(), 1);
@@ -196,6 +204,15 @@ fn without_a_sink_nothing_fires_and_the_single_finger_tap_still_lands() {
     m.send(contact(1, Up, p(190.0, 100.0)));
     m.send(contact(0, Up, p(100.0, 100.0)));
     assert!(m.intents().is_empty());
+    assert!(!m.seam.is_active());
+    assert!(m.seam.range().is_none());
+    // Without the wrapper only the first contact's own tap reaches the grid.
+    let geo = m.seam.metrics().expect("laid out");
+    let first = (
+        (100.0 / geo.width).floor() as u32,
+        (100.0 / geo.height).floor() as u32,
+    );
+    assert_eq!(*m.taps.borrow(), [first]);
     m.taps.borrow_mut().clear();
 
     m.send(pointer(Down, p(50.0, 50.0)));
