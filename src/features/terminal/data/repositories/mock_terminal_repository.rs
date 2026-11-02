@@ -67,10 +67,41 @@ pub fn add_test_tab(key: &str) {
     tabs.push(test_tab(index, key));
 }
 
+/// The floating pane id [`seed_test_floating_overlay`] lays over the `devbox` tab.
+pub const TEST_FLOATING_PANE_ID: u32 = 99;
+
+/// `None` (the default) leaves the tab world alone; `Some(visible)` overlays one full-size
+/// floating pane on `devbox` with that layer visibility — see [`seed_test_floating_overlay`].
+static TEST_FLOATING_OVERLAY: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Lay a full-grid floating pane ([`TEST_FLOATING_PANE_ID`]) over the `devbox` tab of every later
+/// `list_tabs` answer, its layer `visible` or hidden; `None` removes it. Process-global like
+/// [`TEST_TABS`]; cleared by [`clear_test_tabs`]. Never called by production code.
+pub fn seed_test_floating_overlay(visible: Option<bool>) {
+    *TEST_FLOATING_OVERLAY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = visible;
+}
+
+/// Pane ids [`seed_test_union_fullscreen`] flags `is_fullscreen` while their tab is fullscreen.
+static TEST_UNION_FULLSCREEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Flag these panes `is_fullscreen` in every later `list_tabs` answer whose tab is fullscreen
+/// (`fullscreen_active`) — zellij's union shape, where every client-active pane carries the
+/// flag, not only the fullscreened one. Empty removes it; cleared by [`clear_test_tabs`].
+/// Never called by production code.
+pub fn seed_test_union_fullscreen(pane_ids: &[u32]) {
+    *TEST_UNION_FULLSCREEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = pane_ids.to_vec();
+}
+
 /// Drop every tab [`add_test_tab`] appended — a suite's own teardown, and its
 /// setup, since this store outlives any one mount of the screen.
 pub fn clear_test_tabs() {
     lock_test_tabs().clear();
+    seed_test_floating_overlay(None);
+    seed_test_union_fullscreen(&[]);
 }
 
 /// The appended-tab store, poisoned locks recovered like every other lock
@@ -95,6 +126,8 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
         panes: seed_panes(index, &format!("ed@{key}"), "/home/ed"),
         active: false,
         has_bell: false,
+        floating_panes_visible: false,
+        fullscreen_active: false,
     }
 }
 
@@ -398,6 +431,42 @@ impl MockTerminalRepository {
             .and_then(|id| self.lock_tabs().get(&id).cloned())
             .unwrap_or_default();
         tabs.extend(lock_test_tabs().iter().cloned());
+        let overlay = *TEST_FLOATING_OVERLAY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(visible) = overlay
+            && let Some(tab) = tabs.iter_mut().find(|tab| tab.key == "devbox")
+        {
+            tab.floating_panes_visible = visible;
+            // Two tiled panes under the overlay, whatever the seed floated.
+            for pane in &mut tab.panes {
+                pane.floating = false;
+            }
+            tab.panes.push(PaneEntry {
+                agent: None,
+                id: TEST_FLOATING_PANE_ID,
+                title: String::new(),
+                cwd: String::new(),
+                focused: false,
+                floating: true,
+                exited: false,
+                is_plugin: false,
+                is_fullscreen: false,
+                x: 0,
+                y: 0,
+                rows: 24,
+                cols: 80,
+            });
+        }
+        let union = TEST_UNION_FULLSCREEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for tab in tabs.iter_mut().filter(|tab| tab.fullscreen_active) {
+            for pane in &mut tab.panes {
+                pane.is_fullscreen |= union.contains(&pane.id);
+            }
+        }
         mark_agents(tabs)
     }
 
@@ -460,6 +529,8 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
         panes: seed_panes(index, name, path),
         active: key == "devbox",
         has_bell: false,
+        floating_panes_visible: false,
+        fullscreen_active: false,
     };
     let mut tabs = vec![
         tab(
@@ -500,6 +571,7 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
     tabs[2].has_bell = true;
     tabs[0].panes[1].exited = true;
     tabs[3].panes[1].floating = true;
+    tabs[3].floating_panes_visible = true;
     tabs
 }
 
@@ -518,6 +590,8 @@ fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
         panes: seed_panes(index, "ed@zelli", path),
         active,
         has_bell: false,
+        floating_panes_visible: false,
+        fullscreen_active: false,
     };
     vec![
         tab(1, "logs", "~/logs", true),
@@ -706,6 +780,15 @@ impl TerminalRepository for MockTerminalRepository {
 
     async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
+        // The overlay pane lives only in the snapshot: record the verb, change nothing.
+        let overlaid = TEST_FLOATING_OVERLAY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some();
+        if overlaid && pane_id == TEST_FLOATING_PANE_ID && !is_plugin {
+            log_verb("focus_pane", pane_id);
+            return Ok(());
+        }
         // A pane no seeded tab carries is a bug worth surfacing, since the
         // sheet only ever commits a row it just drew. Scoped to the *selected*
         // space, like every other write this store performs.
@@ -733,6 +816,31 @@ impl TerminalRepository for MockTerminalRepository {
             pane.focused = focused;
         }
         log_verb("focus_pane", pane_id);
+        Ok(())
+    }
+
+    async fn toggle_pane_fullscreen(
+        &self,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        let unknown = || AppFailure::Internal(format!("toggle_pane_fullscreen: no pane {pane_id}"));
+        let addressed = |pane: &PaneEntry| pane.id == pane_id && pane.is_plugin == is_plugin;
+        let space_id = self.selected_space_id().ok_or_else(unknown)?;
+        let mut tabs_by_space = self.lock_tabs();
+        let tabs = tabs_by_space.get_mut(&space_id).ok_or_else(unknown)?;
+        let tab = tabs
+            .iter_mut()
+            .find(|tab| tab.panes.iter().any(addressed))
+            .ok_or_else(unknown)?;
+        // Zellij fullscreen is per tab: the addressed pane flips, and entering fullscreen
+        // clears every sibling's flag.
+        for pane in &mut tab.panes {
+            pane.is_fullscreen = addressed(pane) && !pane.is_fullscreen;
+        }
+        tab.fullscreen_active = tab.panes.iter().any(|pane| pane.is_fullscreen);
+        log_verb("toggle_pane_fullscreen", format!("{pane_id}:{is_plugin}"));
         Ok(())
     }
 }
@@ -1037,6 +1145,54 @@ mod tests {
         // The two id namespaces are separate — a plugin pane with a terminal
         // pane's id is still not a pane this store carries.
         assert!(block_on(repo.focus_pane(10, true)).is_err());
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_flips_the_flag_and_a_second_call_restores_it() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        assert!(tabs[0].panes.iter().any(|p| p.id == 11 && p.is_fullscreen));
+
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        assert!(tabs[0].panes.iter().all(|p| !p.is_fullscreen));
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_keeps_one_fullscreen_pane_per_tab() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(block_on(repo.toggle_pane_fullscreen(10, false)).is_ok());
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        let fullscreen: Vec<u32> = tabs[0]
+            .panes
+            .iter()
+            .filter(|p| p.is_fullscreen)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(fullscreen, [11]);
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_logs_the_verb_with_the_pane_and_plugin_flag() {
+        let repo = MockTerminalRepository::seeded();
+        clear_verb_log_for_tests();
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        assert!(verb_log_for_tests().contains(&"toggle_pane_fullscreen:11:false".to_string()));
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_on_an_unknown_pane_is_an_internal_error() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(matches!(
+            block_on(repo.toggle_pane_fullscreen(999, false)),
+            Err(AppFailure::Internal(_))
+        ));
+        assert!(matches!(
+            block_on(repo.toggle_pane_fullscreen(10, true)),
+            Err(AppFailure::Internal(_))
+        ));
     }
 
     #[test]

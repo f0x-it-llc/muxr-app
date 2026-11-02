@@ -46,6 +46,8 @@ pub struct PaneEntry {
     /// Whether this is a plugin pane rather than a terminal one — picks the wire's
     /// `PaneId::Plugin` vs `PaneId::Terminal` namespace for pane-targeted verbs.
     pub is_plugin: bool,
+    /// zellij flags EVERY client-active pane while the tab is fullscreen (union `is_focused`); the
+    /// tab truth is [`TabEntry::fullscreen_active`], the fullscreened pane is the focused one.
     pub is_fullscreen: bool,
     /// Geometry, in cells: left edge, top edge, height, width.
     pub x: u32,
@@ -152,6 +154,10 @@ pub struct TabEntry {
     pub active: bool,
     /// Whether the tab carries an unacknowledged bell — drawn only by the docked rail.
     pub has_bell: bool,
+    /// The wire's `TabMsg.floating_panes_visible`; floating panes are hit-testable only while true.
+    pub floating_panes_visible: bool,
+    /// The wire's `TabMsg.fullscreen_active`: tab-global and client-independent.
+    pub fullscreen_active: bool,
 }
 
 impl TabEntry {
@@ -275,6 +281,8 @@ mod tests {
             panes: Vec::new(),
             active: true,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         assert_eq!(tab.pill_label(), "4 devbox");
     }
@@ -307,6 +315,8 @@ mod tests {
             panes: Vec::new(),
             active,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         let mut workspace = Workspace {
             tabs: vec![tab("a", false), tab("b", true)],
@@ -352,6 +362,8 @@ mod tests {
             panes: vec![pane.clone()],
             active: true,
             has_bell: true,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         assert_eq!(tab.panes, vec![pane]);
         assert!(tab.has_bell);

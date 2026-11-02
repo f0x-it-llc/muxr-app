@@ -29,6 +29,7 @@ use frust::{
     spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
+use frust_haptics::{HapticEffect, Haptics};
 
 use crate::AppState;
 use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};
@@ -220,6 +221,8 @@ pub struct GridHooks {
     pub on_content_tap: Option<term::ContentTapSink>,
     /// `Some` for every live session, both backends.
     pub on_wheel: Option<term::WheelSink>,
+    /// `None` on herdr and on a read-only credential; see [`resolve_pinch_target`].
+    pub on_pinch: Option<term::PinchSink>,
 }
 
 /// The mounted screen's live grid hooks, once a live session has been entered
@@ -476,9 +479,42 @@ impl Component for TerminalScreen {
                     }
                 })
             };
+            // A credential's read-only status is fixed for the mount, so an
+            // untracked read here is the whole gate.
+            let on_pinch: Option<term::PinchSink> = if controller.is_herdr_session()
+                || state.actions.connection.is_read_only.get_untracked()
+            {
+                None
+            } else {
+                let controller = Arc::clone(&controller);
+                let selection = session.selection.clone();
+                Some(Rc::new(
+                    move |intent: term::PinchIntent, focal: frust::authoring::Point| {
+                        let Some(cell) = selection.cell_at(focal) else {
+                            return;
+                        };
+                        let Some(tab) = controller.active_tab_entry() else {
+                            return;
+                        };
+                        let Some((pane_id, is_plugin)) =
+                            resolve_pinch_target(&tab, intent, cell.col.into(), cell.row.into())
+                        else {
+                            return;
+                        };
+                        let _ = Haptics::perform(HapticEffect::SelectionClick);
+                        let controller = Arc::clone(&controller);
+                        spawn_local(async move {
+                            controller
+                                .toggle_pane_fullscreen_from_pinch(pane_id, is_plugin)
+                                .await;
+                        });
+                    },
+                ))
+            };
             *state.actions.grid_hooks.borrow_mut() = Some(GridHooks {
                 on_content_tap,
                 on_wheel: Some(on_wheel),
+                on_pinch,
             });
 
             state.live = Some(session);
@@ -563,6 +599,7 @@ impl Component for TerminalScreen {
                 .input(session.input.clone())
                 .read_only(read_only)
                 .selection(session.selection.clone());
+                let mut pinch = None;
                 if let Some(hooks) = state.actions.grid_hooks.borrow().clone() {
                     if let Some(sink) = hooks.on_content_tap {
                         grid = grid.on_content_tap(sink);
@@ -570,15 +607,17 @@ impl Component for TerminalScreen {
                     if let Some(sink) = hooks.on_wheel {
                         grid = grid.on_wheel(sink);
                     }
+                    pinch = hooks.on_pinch;
                 }
                 let mut chip = term::copy_chip(session.selection.clone());
                 if let Some(sink) = demo_copy_sink() {
                     chip = chip.copy_sink(sink);
                 }
-                Either::Left(term::terminal_surface(
+                Either::Left(term::terminal_surface_with_pinch(
                     session.selection.clone(),
                     grid,
                     chip,
+                    pinch,
                 ))
             }
             None => Either::Right(card_body(lines, epoch, &ink)),
@@ -685,9 +724,15 @@ fn active_title(tabs: &[TabEntry], active: &str) -> String {
 /// first half of [`resolve_tap_action`]'s routing.
 ///
 /// **Fullscreen wins outright** ([`is_fullscreen`](PaneEntry::is_fullscreen));
-/// **floating beats tiled** past that. An approximation: the wire carries no
-/// per-pane z-order beyond [`PaneEntry::floating`], so "topmost" is the last
-/// pane in wire order whose rect contains the cell, within its layer.
+/// **floating beats tiled** past that, but only while the tab's floating layer is
+/// visible ([`TabEntry::floating_panes_visible`]) — a hidden floating pane is not
+/// hit-testable. An approximation: the wire carries no per-pane z-order beyond
+/// [`PaneEntry::floating`], so "topmost" is the last pane in wire order whose rect
+/// contains the cell, within its layer.
+///
+/// Floating panes are hit-testable only while the tab's floating layer is visible — a hidden
+/// full-size floating pane must never capture a tap or pinch (zellij shows the layer when a
+/// floating pane is focused).
 fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
     if let Some(fullscreen) = tab.panes.iter().find(|pane| pane.is_fullscreen) {
         return Some(fullscreen);
@@ -697,13 +742,24 @@ fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry>
     };
     tab.panes
         .iter()
-        .filter(|pane| pane.floating)
+        .filter(|pane| pane.floating && tab.floating_panes_visible)
         .rfind(contains)
         .or_else(|| {
             tab.panes
                 .iter()
                 .filter(|pane| !pane.floating)
                 .rfind(contains)
+        })
+}
+
+/// The last tiled pane whose rect contains the cell — the pinch's hit test, blind to
+/// the floating layer and to fullscreen.
+fn tiled_pane_at(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
+    tab.panes
+        .iter()
+        .filter(|pane| !pane.floating)
+        .rfind(|pane| {
+            col >= pane.x && col < pane.x + pane.cols && row >= pane.y && row < pane.y + pane.rows
         })
 }
 
@@ -727,6 +783,45 @@ fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)>
     if pane.focused {
         return None;
     }
+    Some((pane.id, pane.is_plugin))
+}
+
+/// The `(pane_id, is_plugin)` a pinch should toggle fullscreen on, if any.
+///
+/// **Spread** is a no-op while the tab is fullscreen (its own flag or any pane's);
+/// otherwise it targets the *tiled* pane under the focal cell, falling back to the
+/// focused tiled pane — never a floating pane. **Converge** is a no-op unless the
+/// tab is fullscreen, and targets the focused tiled pane. It never scans
+/// `is_fullscreen` first: zellij's `is_focused` is a union over clients, so every
+/// client-active pane is flagged while one is fullscreen; muxrd's B-FOCUS override
+/// makes `focused` the relay's own pane, the one this connection fullscreened. A
+/// flagged tiled pane is only the fallback.
+fn resolve_pinch_target(
+    tab: &TabEntry,
+    intent: term::PinchIntent,
+    col: u32,
+    row: u32,
+) -> Option<(u32, bool)> {
+    let fullscreen = tab.fullscreen_active || tab.panes.iter().any(|pane| pane.is_fullscreen);
+    let focused_tiled = || tab.panes.iter().find(|pane| pane.focused && !pane.floating);
+    let pane = match intent {
+        term::PinchIntent::EnterFullscreen => {
+            if fullscreen {
+                return None;
+            }
+            tiled_pane_at(tab, col, row).or_else(focused_tiled)?
+        }
+        term::PinchIntent::ExitFullscreen => {
+            if !fullscreen {
+                return None;
+            }
+            focused_tiled().or_else(|| {
+                tab.panes
+                    .iter()
+                    .find(|pane| pane.is_fullscreen && !pane.floating)
+            })?
+        }
+    };
     Some((pane.id, pane.is_plugin))
 }
 
@@ -1515,6 +1610,8 @@ mod tests {
             panes: Vec::new(),
             active: false,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         let tabs = vec![
             tab("btop", "ed@precision: ~"),
@@ -1564,6 +1661,8 @@ mod tests {
             panes,
             active: true,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         }
     }
 
@@ -1602,7 +1701,8 @@ mod tests {
         let tiled = pane_at(10, 0, 0, 40, 24);
         let mut floating = pane_at(11, 0, 0, 40, 24);
         floating.floating = true;
-        let tab = tab_with(vec![tiled, floating]);
+        let mut tab = tab_with(vec![tiled, floating]);
+        tab.floating_panes_visible = true;
         assert_eq!(
             resolve_tapped_pane(&tab, 5, 5).map(|p| p.id),
             Some(11),
@@ -1615,7 +1715,8 @@ mod tests {
         let tiled = pane_at(10, 0, 0, 40, 24);
         let mut floating = pane_at(11, 60, 60, 10, 10);
         floating.floating = true;
-        let tab = tab_with(vec![tiled, floating]);
+        let mut tab = tab_with(vec![tiled, floating]);
+        tab.floating_panes_visible = true;
         assert_eq!(
             resolve_tapped_pane(&tab, 5, 5).map(|p| p.id),
             Some(10),
@@ -1624,7 +1725,190 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_hidden_floating_pane_covering_the_cell_is_skipped_for_the_tiled_one_beneath() {
+        let mut floating = pane_at(27, 0, 1, 80, 47);
+        floating.floating = true;
+        let mut tab = tab_with(vec![
+            pane_at(10, 0, 0, 40, 24),
+            pane_at(11, 40, 0, 40, 24),
+            floating,
+        ]);
+        tab.floating_panes_visible = false;
+        assert_eq!(resolve_tapped_pane(&tab, 5, 5).map(|p| p.id), Some(10));
+        assert_eq!(resolve_tapped_pane(&tab, 45, 5).map(|p| p.id), Some(11));
+    }
+
+    #[test]
+    fn a_visible_floating_pane_wins_over_the_tiled_one_beneath() {
+        let mut floating = pane_at(27, 0, 1, 80, 47);
+        floating.floating = true;
+        let mut tab = tab_with(vec![pane_at(10, 0, 0, 40, 24), floating]);
+        tab.floating_panes_visible = true;
+        assert_eq!(resolve_tapped_pane(&tab, 5, 5).map(|p| p.id), Some(27));
+    }
+
+    // `resolve_pinch_target` — which pane a pinch toggles.
+
+    fn two_panes() -> TabEntry {
+        let mut left = pane_at(10, 0, 0, 40, 24);
+        left.focused = true;
+        tab_with(vec![left, pane_at(11, 40, 0, 40, 24)])
+    }
+
+    #[test]
+    fn a_spread_over_a_pane_targets_that_pane() {
+        let tab = two_panes();
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_in_a_gutter_targets_the_focused_pane() {
+        let tab = two_panes();
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 90, 30),
+            Some((10, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_while_a_pane_is_fullscreen_is_a_no_op() {
+        let mut tab = two_panes();
+        tab.panes[1].is_fullscreen = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 5, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn a_converge_targets_the_focused_pane_and_is_a_no_op_without_fullscreen() {
+        let mut tab = two_panes();
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            None
+        );
+        tab.panes[0].focused = false;
+        tab.panes[1].focused = true;
+        tab.panes[1].is_fullscreen = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_converge_with_two_panes_flagged_fullscreen_targets_the_focused_tiled_one() {
+        let mut tab = two_panes();
+        tab.panes[0].is_fullscreen = true;
+        tab.panes[0].focused = false;
+        tab.panes[1].is_fullscreen = true;
+        tab.panes[1].focused = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_converge_with_a_focused_floating_pane_falls_back_to_the_flagged_tiled_pane() {
+        let mut tab = two_panes();
+        tab.fullscreen_active = true;
+        tab.panes[0].focused = false;
+        tab.panes[1].is_fullscreen = true;
+        let mut floating = pane_at(99, 0, 0, 80, 24);
+        floating.floating = true;
+        floating.focused = true;
+        tab.panes.push(floating);
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_under_a_hidden_floating_pane_targets_the_tiled_pane_beneath() {
+        let mut tab = two_panes();
+        let mut floating = pane_at(27, 0, 0, 80, 24);
+        floating.floating = true;
+        tab.panes.push(floating);
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_never_targets_a_visible_floating_pane() {
+        let mut tab = two_panes();
+        let mut floating = pane_at(27, 0, 0, 80, 24);
+        floating.floating = true;
+        floating.focused = true;
+        floating.cols = 100;
+        floating.rows = 40;
+        tab.panes.push(floating);
+        tab.floating_panes_visible = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((11, false)),
+            "the tiled pane under the focal, not the floating one over it"
+        );
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 90, 30),
+            Some((10, false)),
+            "a gutter focal under the floating pane falls back to the focused tiled pane"
+        );
+    }
+
+    #[test]
+    fn a_spread_with_the_tab_flag_but_no_pane_flag_is_a_no_op() {
+        let mut tab = two_panes();
+        tab.fullscreen_active = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 5, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn a_converge_with_the_tab_flag_but_no_pane_flag_targets_the_focused_tiled_pane() {
+        let mut tab = two_panes();
+        tab.fullscreen_active = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((10, false))
+        );
+    }
+
     // `resolve_tap_action` — adds the already-focused early-out.
+
+    #[test]
+    fn a_tap_under_a_hidden_floating_pane_focuses_the_tiled_pane_beneath() {
+        let mut floating = pane_at(27, 0, 0, 80, 24);
+        floating.floating = true;
+        let mut left = pane_at(10, 0, 0, 40, 24);
+        left.focused = true;
+        let mut tab = tab_with(vec![left, pane_at(11, 40, 0, 40, 24), floating]);
+        tab.floating_panes_visible = false;
+        assert_eq!(resolve_tap_action(&tab, 45, 5), Some((11, false)));
+
+        tab.floating_panes_visible = true;
+        assert_eq!(
+            resolve_tap_action(&tab, 45, 5),
+            Some((27, false)),
+            "with the layer visible the floating pane takes the tap"
+        );
+        tab.panes[2].focused = true;
+        tab.panes[0].focused = false;
+        assert_eq!(
+            resolve_tap_action(&tab, 45, 5),
+            None,
+            "already the focused pane"
+        );
+    }
 
     #[test]
     fn a_tap_on_another_pane_answers_its_id_and_namespace() {

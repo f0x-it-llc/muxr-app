@@ -1186,6 +1186,8 @@ mod tests {
             panes,
             active,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         }
     }
 
