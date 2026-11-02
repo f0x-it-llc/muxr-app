@@ -26,6 +26,7 @@ pub mod batch;
 pub mod chip;
 pub mod geometry;
 pub mod input;
+pub mod pinch;
 pub mod selection;
 pub mod style;
 pub mod widget;
@@ -39,7 +40,10 @@ use std::time::{Duration, Instant};
 use frust::authoring::{
     EditCommand, EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect,
 };
-use frust::{GestureDetector, GetUntracked, RwSignal, Set, StackView, stack};
+use frust::{
+    AnyView, GestureDetector, GetUntracked, RwSignal, ScaleEvent, ScalePhase, Set, StackView, any,
+    pinch_detector, stack,
+};
 use frust::{on_cleanup, spawn_blocking, spawn_local};
 use frust_haptics::{HapticEffect, Haptics};
 
@@ -51,6 +55,7 @@ use selection::{GridPoint, GridRange};
 pub use chip::{CopyChipView, CopyChipWidget, CopySink, copy_chip};
 pub use geometry::{FALLBACK_COLS, FALLBACK_ROWS};
 pub use input::{BarKey, Emission, KeystrokeSource, ModifierLatch};
+pub use pinch::{PinchIntent, PinchIntentTracker, PinchSink};
 pub use style::{TerminalPalette, terminal_palette};
 pub use widget::{TerminalGridView, TerminalGridWidget, terminal_grid};
 
@@ -349,6 +354,11 @@ pub struct SelectionSeam {
     state: SharedSelection,
     /// The screen words resolve against and copy text comes from.
     emulator: SharedEmulator,
+    /// The pinch reducer, kept here because `build` re-runs mid-gesture and a tracker made
+    /// there would forget its cumulative scale.
+    pinch: Rc<RefCell<PinchIntentTracker>>,
+    /// Whether a recognised pinch is in flight: [`begin`](Self::begin) is inert meanwhile.
+    pinching: Rc<Cell<bool>>,
 }
 
 impl SelectionSeam {
@@ -357,6 +367,8 @@ impl SelectionSeam {
         Self {
             state: Rc::new(RefCell::new(SelectionState::default())),
             emulator,
+            pinch: Rc::new(RefCell::new(PinchIntentTracker::new())),
+            pinching: Rc::new(Cell::new(false)),
         }
     }
 
@@ -376,6 +388,15 @@ impl SelectionSeam {
         }
     }
 
+    /// The cell under `at` (grid-local logical px), clamped to the grid; `None` before the
+    /// first layout publishes the cell box. The one focal-to-cell path.
+    pub fn cell_at(&self, at: Point) -> Option<GridPoint> {
+        self.state
+            .borrow()
+            .metrics
+            .map(|metrics| selection::cell_at(at, metrics))
+    }
+
     /// Record the finger at `at` (grid-local logical px), and whether it is down.
     pub fn track(&self, at: Point, pressed: bool) {
         let mut state = self.state.borrow_mut();
@@ -392,6 +413,9 @@ impl SelectionSeam {
     /// with **no finger down** (fire-on-release) resolves and goes straight to
     /// released/chip state rather than leaving an unclosed drag.
     pub fn begin(&self) {
+        if self.pinching.get() {
+            return;
+        }
         let _ = Haptics::perform(HapticEffect::SelectionClick);
         let mut state = self.state.borrow_mut();
         state.haptics += 1;
@@ -408,6 +432,22 @@ impl SelectionSeam {
             state.dragging = false;
             state.chip = state.range.map(|_| state.pointer);
         }
+    }
+
+    /// A pinch was recognised: long-press selection is inert until [`pinch_ended`](Self::pinch_ended),
+    /// and a selection drag this gesture already began is dropped.
+    pub(crate) fn pinch_began(&self) {
+        self.pinching.set(true);
+        if self.state.borrow().dragging {
+            self.clear();
+        }
+    }
+
+    /// The pinch guard resets only on the grid's fresh first-finger `Down`: it stays set
+    /// until then, a cancelled or ended pinch alike, because the first finger's gesture
+    /// returns to the grid late and a held finger would otherwise long-press.
+    pub(crate) fn pinch_ended(&self) {
+        self.pinching.set(false);
     }
 
     /// Re-resolve for the live finger: the word at the fixed anchor merged with
@@ -547,10 +587,11 @@ pub type WheelSink = Rc<dyn Fn(bool, u32, u32)>;
 /// chip over it.
 ///
 /// ```text
-/// Stack
-///  ├─ GestureDetector(on_long_press = seam.begin)   ← bottom
-///  │    └─ TerminalGridView (selection wired)
-///  └─ CopyChipView                                  ← top, full-bleed
+/// [pinch_detector]            ← OUTSIDE the stack, only with a PinchSink
+///  └─ Stack
+///      ├─ GestureDetector(on_long_press = seam.begin)   ← bottom
+///      │    └─ TerminalGridView (selection wired)
+///      └─ CopyChipView                                  ← top, full-bleed
 /// ```
 ///
 /// 1. **The chip sits above the gesture detector** so a press on the pill never
@@ -562,6 +603,12 @@ pub type WheelSink = Rc<dyn Fn(bool, u32, u32)>;
 /// 3. **The surface takes the whole offered box** (the chip overlay is
 ///    full-bleed); the grid takes only its whole-cell box inside it — the
 ///    sub-cell remainder is the tight-parent case [`TerminalGridWidget`] documents.
+/// 4. **Pinch** ([`terminal_surface_with_pinch`]): the first contact reaches the
+///    grid unchanged; a recognised pinch's Begin steals the grid's gesture with a
+///    synthesized `Cancel`, deferred to the first finger's next event. The Cancel arm
+///    drops only the drag/loupe; the seam's pinch guard is what prevents and clears a
+///    long-press selection during a pinch (the held finger still fires the timer). A
+///    cancelled pinch delivers no `End`, so the guard resets on the next first-finger `Down`.
 pub fn terminal_surface<State: 'static>(
     seam: SelectionSeam,
     grid: TerminalGridView,
@@ -574,6 +621,34 @@ pub fn terminal_surface<State: 'static>(
                 .on_long_press(move |_state: &mut State| armed.begin()),
         )
         .child(chip)
+}
+
+/// [`terminal_surface`], optionally wrapped in a pinch detector reporting one
+/// [`PinchIntent`] per gesture (and its focal, grid-local) to `pinch`. `None`
+/// returns the bare stack, so mounts that never pinch pay nothing.
+pub fn terminal_surface_with_pinch<State: 'static>(
+    seam: SelectionSeam,
+    grid: TerminalGridView,
+    chip: CopyChipView,
+    pinch: Option<PinchSink>,
+) -> AnyView<State> {
+    let tracker = Rc::clone(&seam.pinch);
+    let guard = seam.clone();
+    let surface = terminal_surface::<State>(seam, grid, chip);
+    let Some(sink) = pinch else {
+        return any(surface);
+    };
+    any(
+        pinch_detector(surface).on_scale(move |_state: &mut State, event: ScaleEvent| {
+            if matches!(event.phase, ScalePhase::Begin) {
+                guard.pinch_began();
+            }
+            let intent = tracker.borrow_mut().feed(event.phase, event.scale_delta);
+            if let Some(intent) = intent {
+                sink(intent, event.focal);
+            }
+        }),
+    )
 }
 
 /// A VT emulator sized to the grid on screen: a thin wrapper over `vt100::Parser`

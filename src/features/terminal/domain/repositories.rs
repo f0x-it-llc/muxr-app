@@ -232,6 +232,18 @@ pub trait TerminalRepository {
         Err(unsupported("focus_pane"))
     }
 
+    /// Toggle zellij pane fullscreen (the no-UI variant, muxrd PR #42) for the pane `pane_id`
+    /// (`is_plugin` as in [`rename_pane`](Self::rename_pane)). MUTATING: the server refuses it
+    /// for a read-only credential. herdr answers `ok: false` by design, which surfaces as an
+    /// `Err`.
+    async fn toggle_pane_fullscreen(
+        &self,
+        _pane_id: u32,
+        _is_plugin: bool,
+    ) -> Result<(), AppFailure> {
+        Err(unsupported("toggle_pane_fullscreen"))
+    }
+
     /// Scroll the pane `pane_id` one wheel notch in `direction` (`is_plugin` as in
     /// [`rename_pane`](Self::rename_pane)). Allowed for a read-only credential, like
     /// [`focus_pane`](Self::focus_pane).
@@ -320,6 +332,10 @@ mod tests {
         ));
         assert!(matches!(
             block_on(repo.focus_pane(1, false)),
+            Err(AppFailure::Internal(_))
+        ));
+        assert!(matches!(
+            block_on(repo.toggle_pane_fullscreen(1, false)),
             Err(AppFailure::Internal(_))
         ));
         assert!(matches!(

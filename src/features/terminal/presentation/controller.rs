@@ -202,6 +202,10 @@ pub struct TerminalController {
     /// two moves racing would leave the connection on one space with another
     /// space's tab world published.
     move_in_flight: AtomicBool,
+    /// Whether a pinch-driven fullscreen toggle is in flight — the single-flight claim
+    /// [`toggle_pane_fullscreen_from_pinch`](Self::toggle_pane_fullscreen_from_pinch)
+    /// takes. Its own slot: a pinch neither waits on nor blocks a create or move.
+    fullscreen_toggle_in_flight: AtomicBool,
     /// Focus-moving verbs currently inside [`tell_move`](Self::tell_move); while
     /// non-zero [`apply_attach_target`](Self::apply_attach_target) defers.
     focus_verbs_in_flight: AtomicUsize,
@@ -503,6 +507,7 @@ impl TerminalController {
             layout_poll_in_flight: AtomicBool::new(false),
             create_in_flight: AtomicBool::new(false),
             move_in_flight: AtomicBool::new(false),
+            fullscreen_toggle_in_flight: AtomicBool::new(false),
             focus_verbs_in_flight: AtomicUsize::new(0),
             attach_settled: AtomicBool::new(false),
             settle_generation: AtomicU64::new(0),
@@ -1380,6 +1385,31 @@ impl TerminalController {
             .await;
     }
 
+    /// Toggle the fullscreen of pane `pane_id` for the pinch hook, which fires for both
+    /// the pinch-out (enter) and the pinch-in (exit): the server's toggle is one RPC
+    /// either way. Answers whether the verb landed; a refused one emits on the failure
+    /// sink. Herdr never reaches the RPC — a herdr view already shows one pane, so there
+    /// is nothing to toggle. The no-UI fullscreen is muxrd PR #42. A read-only credential
+    /// is refused server-side, and the page never builds this hook for read-only at all.
+    /// Uses [`tell`](Self::tell), not [`tell_move`](Self::tell_move): the user's resume
+    /// view is the tab, which a fullscreen toggle leaves where it is. A landed toggle
+    /// reloads the tabs so [`PaneEntry::is_fullscreen`] converges now, not on the poll.
+    pub async fn toggle_pane_fullscreen_from_pinch(&self, pane_id: u32, is_plugin: bool) -> bool {
+        if self.is_herdr_session() {
+            return false;
+        }
+        let Some(_claim) = self.claim_fullscreen_toggle() else {
+            return false;
+        };
+        let landed = self
+            .tell(self.terminal.toggle_pane_fullscreen(pane_id, is_plugin))
+            .await;
+        if landed {
+            self.reload_tabs().await;
+        }
+        landed
+    }
+
     /// Re-list the tabs and publish them — the partial refresh every trigger but the
     /// mount's own load shares. None creates anything the server might refocus, so
     /// re-reading [`tabs`](Self::tabs) alone is enough, and a key that no longer names
@@ -1875,6 +1905,16 @@ impl TerminalController {
     fn claim_move(&self) -> Option<FlightClaim<'_>> {
         (!self.move_in_flight.swap(true, Ordering::SeqCst))
             .then(|| FlightClaim(&self.move_in_flight))
+    }
+
+    /// The pinch-toggle's own claim — [`claim_move`](Self::claim_move)'s drop-not-queue
+    /// idiom over [`fullscreen_toggle_in_flight`](Self::fullscreen_toggle_in_flight), kept
+    /// off the create and move slots in both directions.
+    fn claim_fullscreen_toggle(&self) -> Option<FlightClaim<'_>> {
+        (!self
+            .fullscreen_toggle_in_flight
+            .swap(true, Ordering::SeqCst))
+        .then(|| FlightClaim(&self.fullscreen_toggle_in_flight))
     }
 
     /// Wait out [`CREATE_SETTLE`] between a create's ack and the reload behind it.
@@ -3081,6 +3121,8 @@ mod tests {
             panes: vec![pane(base, true), pane(base + 1, false)],
             active,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         }
     }
 
@@ -3244,6 +3286,14 @@ mod tests {
             name: String,
         ) -> Result<(), AppFailure> {
             self.record(format!("rename_pane({pane_id},{is_plugin},{name})"))
+        }
+
+        async fn toggle_pane_fullscreen(
+            &self,
+            pane_id: u32,
+            is_plugin: bool,
+        ) -> Result<(), AppFailure> {
+            self.record(format!("toggle_pane_fullscreen({pane_id},{is_plugin})"))
         }
     }
 
@@ -4000,6 +4050,96 @@ mod tests {
         block_on(c.scroll_pane_from_wheel(21, false, ScrollStep::Down));
 
         assert_eq!(repository.actions(), ["scroll_pane(21,false,Down)"]);
+    }
+
+    /// The `is_fullscreen` flag of pane `id` (`is_plugin` as given) as the sheet holds it.
+    fn pane_fullscreen(controller: &TerminalController, id: u32, is_plugin: bool) -> Option<bool> {
+        controller
+            .tabs
+            .get_untracked()
+            .into_iter()
+            .flat_map(|tab| tab.panes)
+            .find(|pane| pane.id == id && pane.is_plugin == is_plugin)
+            .map(|pane| pane.is_fullscreen)
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_from_pinch_is_refused_on_herdr_before_any_rpc() {
+        let (c, repository) = recorded("herdr:work");
+        let after_load = repository.calls().len();
+
+        assert!(!block_on(c.toggle_pane_fullscreen_from_pinch(11, false)));
+
+        assert_eq!(
+            repository.calls().len(),
+            after_load,
+            "a herdr view already shows one pane — no verb, and no reload behind it"
+        );
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_from_pinch_toggles_and_reloads_the_layout_on_zellij() {
+        let c = controller(Some(SEEDED_DEV_ID));
+        block_on(c.load());
+        assert_eq!(pane_fullscreen(&c, 11, false), Some(false));
+        let writes_before = c.layout_writes();
+
+        assert!(block_on(c.toggle_pane_fullscreen_from_pinch(11, false)));
+
+        assert_eq!(pane_fullscreen(&c, 11, false), Some(true));
+        assert!(
+            c.layout_writes() > writes_before,
+            "a landed toggle reloads the tabs so the flag converges now"
+        );
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_from_pinch_is_single_flight_under_an_overlapping_call() {
+        let c = controller(Some(SEEDED_DEV_ID));
+        block_on(c.load());
+
+        let (first, second) = block_on(async {
+            tokio::join!(
+                c.toggle_pane_fullscreen_from_pinch(11, false),
+                c.toggle_pane_fullscreen_from_pinch(11, false),
+            )
+        });
+
+        assert!(
+            first ^ second,
+            "exactly one of the two overlapping calls lands"
+        );
+        assert_eq!(
+            pane_fullscreen(&c, 11, false),
+            Some(true),
+            "one flip, not two — the refused call sent no RPC"
+        );
+        assert!(
+            block_on(c.toggle_pane_fullscreen_from_pinch(11, false)),
+            "the claim releases once the first call has finished"
+        );
+        assert_eq!(pane_fullscreen(&c, 11, false), Some(false));
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_from_pinch_surfaces_a_refused_ack_on_the_failure_sink() {
+        let (c, repository) = recorded(SEEDED_DEV_ID);
+        repository.refuse("toggle_pane_fullscreen");
+        let failures = Arc::new(Mutex::new(0u32));
+        let counted = Arc::clone(&failures);
+        c.core()
+            .failures()
+            .subscribe(move |_: &AppFailure| {
+                *counted.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+            })
+            .forget();
+        let after_load = repository.calls().len();
+
+        assert!(!block_on(c.toggle_pane_fullscreen_from_pinch(11, false)));
+
+        let calls = repository.calls();
+        assert_eq!(&calls[after_load..], ["toggle_pane_fullscreen(11,false)"]);
+        assert_eq!(*failures.lock().unwrap_or_else(PoisonError::into_inner), 1);
     }
 
     #[test]

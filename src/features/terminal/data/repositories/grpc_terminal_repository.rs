@@ -61,7 +61,8 @@ use crate::net::agent_layouts::{
 use crate::net::proto::{
     AgentEvent, AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout,
     NewPaneReq, NewTabReq, PaneMsg, PaneTarget, RenamePaneReq, RenameSpaceReq, RenameTabReq,
-    ScrollDirection, ScrollReq, SessionRef, SpaceList, SwitchSpaceReq, TabTarget, agent_event,
+    ScrollDirection, ScrollReq, SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
+    ToggleFullscreenReq, agent_event,
 };
 use crate::net::{MuxrClient, error};
 
@@ -761,6 +762,31 @@ impl TerminalRepository for GrpcTerminalRepository {
         error::ack_result(&ack)
     }
 
+    async fn toggle_pane_fullscreen(
+        &self,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> Result<(), AppFailure> {
+        let (session, connection_id) = self.addressed()?;
+        let client = self.client()?;
+        // No floating hint: the relay runs its own live floating-state query, since the app
+        // does not model floating visibility.
+        let request = ToggleFullscreenReq {
+            target: Some(pane_target(session, connection_id, pane_id, is_plugin)),
+            target_is_floating: false,
+            floating_visible: false,
+            target_is_focused_floating: false,
+            has_floating_hint: false,
+        };
+        let ack = client
+            .authed()
+            .toggle_pane_fullscreen(request)
+            .await
+            .map_err(|status| self.map_status(status))?
+            .into_inner();
+        error::ack_result(&ack)
+    }
+
     async fn scroll_pane(
         &self,
         pane_id: u32,
@@ -825,6 +851,8 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
                 panes: tab.panes.iter().map(map_pane).collect(),
                 active: tab.active,
                 has_bell: tab.has_bell,
+                floating_panes_visible: tab.floating_panes_visible,
+                fullscreen_active: tab.fullscreen_active,
             }
         })
         .collect()
@@ -2238,6 +2266,45 @@ mod tests {
     fn map_scroll_step_covers_both_wheel_notches() {
         assert_eq!(map_scroll_step(ScrollStep::Up), ScrollDirection::Up);
         assert_eq!(map_scroll_step(ScrollStep::Down), ScrollDirection::Down);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_sends_the_bound_target_without_a_floating_hint() {
+        let fixture = MuxrdFixture::start().await;
+        let repo = fixture_repo(&fixture).await;
+        repo.bind(
+            Some(testing::SESSION_NAMES[0].to_string()),
+            Some("conn-9".to_string()),
+        );
+
+        repo.toggle_pane_fullscreen(7, true)
+            .await
+            .expect("the fixture acks");
+
+        let calls = fixture.actions().toggle_pane_fullscreen_calls();
+        assert_eq!(calls.len(), 1);
+        let target = calls[0].target.clone().expect("a target");
+        assert_eq!(target.session, testing::SESSION_NAMES[0]);
+        assert_eq!(target.connection_id, "conn-9");
+        assert_eq!(target.pane_id, 7);
+        assert!(target.is_plugin);
+        assert!(!calls[0].has_floating_hint);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_surfaces_a_refused_ack_as_an_error() {
+        let fixture = MuxrdFixture::start().await;
+        let repo = fixture_repo(&fixture).await;
+        fixture
+            .actions()
+            .refuse_toggle_pane_fullscreen("read-only session");
+
+        let failure = repo
+            .toggle_pane_fullscreen(1, false)
+            .await
+            .expect_err("a refused ack fails");
+        assert!(failure.to_string().contains("read-only session"));
+        assert_eq!(fixture.actions().toggle_pane_fullscreen_calls().len(), 1);
     }
 
     // -- ack + status mapping -------------------------------------------------

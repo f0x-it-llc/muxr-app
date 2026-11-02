@@ -50,11 +50,12 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
+    TEST_FLOATING_PANE_ID, add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
     agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
     delay_next_list_agents_for_tests, drop_agent_stream_for_tests, end_agent_stream_for_tests,
     fail_next_list_agents_for_tests, open_next_agent_watch_down_for_tests,
-    push_agent_event_for_tests, seed_agents, verb_log_for_tests,
+    push_agent_event_for_tests, seed_agents, seed_test_floating_overlay,
+    seed_test_union_fullscreen, verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
 use muxr::features::terminal::domain::entities::{
@@ -74,6 +75,7 @@ use muxr::features::terminal::presentation::term::chip::{CHIP_H, CHIP_W};
 use muxr::features::terminal::presentation::term::{
     Emission, InputSeam, SharedEmulator, SharedFeed, TerminalEmulator, pump_wake, run_feed,
 };
+use muxr::features::terminal::presentation::term::{PinchIntent, PinchSink};
 use muxr::routes::{app_nav, install_app_router};
 use muxr::{AppState, MuxrApp};
 
@@ -1263,6 +1265,125 @@ fn a_tap_on_an_unfocused_pane_focuses_it_and_summons_no_keyboard() {
         (true, false),
         "no later paint resurrects a surface the tap declined to publish"
     );
+}
+
+/// A hidden floating pane spanning the whole grid is not hit-testable: a tap and a spread over
+/// the left tiled pane address that pane, never the floating one; with the layer shown, the
+/// floating pane takes the tap again.
+#[test]
+fn a_hidden_full_size_floating_pane_is_never_targeted_by_a_tap_or_a_spread() {
+    let _g = serial();
+    let _ambient = setup();
+    seed_test_floating_overlay(Some(false));
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let scene = h.frame();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    let left = focused_pane_id().expect("the mock seeds one focused pane per tab");
+    let right = left + 1;
+    clear_verb_log_for_tests();
+
+    let on_content_tap = hooks.on_content_tap.expect("zellij wires the tap hook");
+    on_content_tap(u32::from(SIBLING_CELL.0), u32::from(SIBLING_CELL.1));
+    h.pump_for(Duration::from_millis(100));
+    let log = verb_log_for_tests();
+    assert!(
+        log.contains(&format!("focus_pane:{right}")),
+        "the tap focuses the tiled pane under it, got {log:?}"
+    );
+    assert!(!log.contains(&format!("focus_pane:{TEST_FLOATING_PANE_ID}")));
+
+    let on_pinch = hooks.on_pinch.expect("zellij wires the pinch hook");
+    on_pinch(
+        muxr::features::terminal::presentation::term::PinchIntent::EnterFullscreen,
+        cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1),
+    );
+    h.pump_for(Duration::from_millis(100));
+    let log = verb_log_for_tests();
+    assert!(
+        log.iter()
+            .any(|verb| verb.starts_with("toggle_pane_fullscreen:")
+                && !verb.contains(&format!(":{TEST_FLOATING_PANE_ID}:"))),
+        "the spread toggles a tiled pane, got {log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|verb| verb.contains(&format!(":{TEST_FLOATING_PANE_ID}:")))
+    );
+    assert!(
+        !log.iter()
+            .any(|verb| verb.contains(&format!(":{TEST_FLOATING_PANE_ID}"))),
+        "the hidden layer's pane never appears in the verb log, got {log:?}"
+    );
+    h.unmount_screen();
+
+    seed_test_floating_overlay(Some(true));
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    h.frame();
+    clear_verb_log_for_tests();
+    let on_content_tap = debug_grid_hooks()
+        .and_then(|hooks| hooks.on_content_tap)
+        .expect("zellij wires the tap hook");
+    on_content_tap(u32::from(FOCUSED_CELL.0), u32::from(FOCUSED_CELL.1));
+    h.pump_for(Duration::from_millis(100));
+    assert!(
+        verb_log_for_tests().contains(&format!("focus_pane:{TEST_FLOATING_PANE_ID}")),
+        "with the layer visible the floating pane takes the tap"
+    );
+    seed_test_floating_overlay(None);
+}
+
+/// zellij flags every client-active pane `is_fullscreen` while one pane is fullscreen, so the
+/// converge must follow the focused pane (the one this connection fullscreened), not the first
+/// flagged pane in wire order.
+#[test]
+fn a_converge_exits_the_focused_fullscreen_pane_not_a_union_flagged_sibling() {
+    let _g = serial();
+    let _ambient = setup();
+    seed_test_floating_overlay(Some(false));
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let scene = h.frame();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    let first = focused_pane_id().expect("the mock seeds one focused pane per tab");
+    let second = first + 1;
+
+    let on_content_tap = hooks.on_content_tap.expect("zellij wires the tap hook");
+    on_content_tap(u32::from(SIBLING_CELL.0), u32::from(SIBLING_CELL.1));
+    h.pump_for(Duration::from_millis(100));
+    assert_eq!(focused_pane_id(), Some(second));
+
+    seed_test_union_fullscreen(&[first]);
+    let on_pinch = hooks.on_pinch.expect("zellij wires the pinch hook");
+    on_pinch(
+        PinchIntent::EnterFullscreen,
+        cell_point(&scene, SIBLING_CELL.0, SIBLING_CELL.1),
+    );
+    h.pump_for(Duration::from_millis(100));
+    let tab = debug_controller()
+        .and_then(|c| c.active_tab_entry())
+        .expect("an active tab");
+    assert!(tab.panes.iter().any(|p| p.id == first && p.is_fullscreen));
+    clear_verb_log_for_tests();
+
+    on_pinch(
+        PinchIntent::ExitFullscreen,
+        cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1),
+    );
+    h.pump_for(Duration::from_millis(100));
+    let log = verb_log_for_tests();
+    assert_eq!(
+        log.last(),
+        Some(&format!("toggle_pane_fullscreen:{second}:false")),
+        "got {log:?}"
+    );
+    assert!(!log.contains(&format!("toggle_pane_fullscreen:{first}:false")));
+    seed_test_union_fullscreen(&[]);
+    seed_test_floating_overlay(None);
 }
 
 /// …and the second tap on that same pane — now the focused one, thanks to the
@@ -2728,4 +2849,139 @@ fn a_poll_only_relist_replaces_rows_after_a_restart_reassigned_the_pane_ids() {
         [(1, "B".to_string()), (2, "A".to_string())],
         "the relist's rows outright: no duplicate A, B present"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Pinch to fullscreen: the `on_pinch` hook.
+// ---------------------------------------------------------------------------
+
+/// Grid-local focal px well inside the left pane (cols 0-40 of the mock's 80).
+const PINCH_LEFT: Point = Point::new(50.0, 5.0);
+/// Grid-local focal px well inside the right pane (cols 40-80).
+const PINCH_RIGHT: Point = Point::new(450.0, 5.0);
+/// Grid-local focal px past the last pane column — a gutter.
+const PINCH_GUTTER: Point = Point::new(790.0, 5.0);
+
+/// The mounted tab's `(id, is_fullscreen)` per pane.
+fn pane_fullscreen_flags() -> Vec<(u32, bool)> {
+    debug_controller()
+        .expect("mounted")
+        .active_tab_entry()
+        .expect("a loaded tab")
+        .panes
+        .iter()
+        .map(|pane| (pane.id, pane.is_fullscreen))
+        .collect()
+}
+
+fn pinch_hook(h: &mut Harness) -> PinchSink {
+    h.enter_demo();
+    await_workspace(h);
+    debug_grid_hooks()
+        .expect("a live session is mounted")
+        .on_pinch
+        .expect("a live zellij session wires the pinch hook")
+}
+
+#[test]
+fn pinch_hook_is_wired_for_live_zellij_only() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut zellij = Harness::mount_session("zellij:dev");
+    zellij.enter_demo();
+    assert!(debug_grid_hooks().expect("live").on_pinch.is_some());
+    zellij.unmount_screen();
+
+    let mut herdr = Harness::mount_session("herdr:work");
+    herdr.enter_demo();
+    assert!(
+        debug_grid_hooks().expect("live").on_pinch.is_none(),
+        "herdr has one pane to fullscreen"
+    );
+    herdr.unmount_screen();
+
+    let mut read_only = Harness::mount_session("zellij:dev");
+    expect_connection_controller().is_read_only.set(true);
+    read_only.enter_demo();
+    assert!(
+        debug_grid_hooks().expect("live").on_pinch.is_none(),
+        "a read-only credential sends nothing"
+    );
+}
+
+#[test]
+fn pinch_spread_fullscreens_the_tiled_pane_never_the_seeded_floating_one_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session("zellij:dev");
+    let on_pinch = pinch_hook(&mut h);
+    h.settle();
+
+    clear_verb_log_for_tests();
+    on_pinch(PinchIntent::EnterFullscreen, PINCH_RIGHT);
+    h.pump_until("the fullscreen verb", |_| {
+        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:40:false")
+    });
+    h.pump_until("the reload", |_| {
+        pane_fullscreen_flags() == [(40, true), (41, false)]
+    });
+
+    h.pump_for(Duration::from_millis(150));
+    let logged = verb_log_for_tests().len();
+    on_pinch(PinchIntent::EnterFullscreen, PINCH_LEFT);
+    h.pump_for(Duration::from_millis(150));
+    assert_eq!(
+        verb_log_for_tests().len(),
+        logged,
+        "already fullscreen: no verb"
+    );
+}
+
+#[test]
+fn pinch_spread_in_a_gutter_fullscreens_the_focused_pane() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session("zellij:dev");
+    let on_pinch = pinch_hook(&mut h);
+    h.settle();
+
+    clear_verb_log_for_tests();
+    on_pinch(PinchIntent::EnterFullscreen, PINCH_GUTTER);
+    h.pump_until("the fullscreen verb", |_| {
+        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:40:false")
+    });
+}
+
+#[test]
+fn pinch_converge_restores_the_fullscreen_pane_and_is_a_no_op_without_one() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_session("zellij:dev");
+    let on_pinch = pinch_hook(&mut h);
+    h.settle();
+
+    clear_verb_log_for_tests();
+    on_pinch(PinchIntent::ExitFullscreen, PINCH_LEFT);
+    h.pump_for(Duration::from_millis(150));
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "nothing fullscreen: no verb"
+    );
+
+    on_pinch(PinchIntent::EnterFullscreen, PINCH_RIGHT);
+    h.pump_until("fullscreen", |_| {
+        pane_fullscreen_flags() == [(40, true), (41, false)]
+    });
+
+    // Let the first toggle's single-flight claim drop behind its reload.
+    h.pump_for(Duration::from_millis(150));
+    clear_verb_log_for_tests();
+    on_pinch(PinchIntent::ExitFullscreen, PINCH_LEFT);
+    h.pump_until("the restore verb", |_| {
+        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:40:false")
+    });
+    h.pump_until("restored", |_| {
+        pane_fullscreen_flags() == [(40, false), (41, false)]
+    });
 }
