@@ -6,10 +6,11 @@
 //! through the same function, so the frame it finishes on and the frame the
 //! route paints are one picture.
 //!
-//! The screen's four layers are backdrop, scrolled layout, QR affordance, and
-//! the getting-started affordance in the opposite corner. The scroll and both
-//! affordances belong to the screen, not the layout — the splash assembles
-//! into a fixed layer with nothing to scroll. That is the Compact tree; a
+//! The screen's three layers are backdrop, scrolled layout (the QR square
+//! and the unlock dock ride in its pieces), and the getting-started
+//! affordance. The scroll and the affordance belong to the screen, not the
+//! layout — the splash assembles into a fixed layer with nothing to scroll.
+//! That is the Compact tree; a
 //! Tablet window ([`Responsive`], read once per build) gets
 //! [`tablet_screen`] instead, assembled in [`super::widgets::tablet`], which
 //! the splash assembles on a Tablet window too, through that module's own
@@ -33,18 +34,22 @@ use frust::{
 };
 
 use super::controller::ConnectController;
-use super::widgets::credential_dialogs::{credential_offer_prompt, handle_saved_row_delete};
+use super::widgets::credential_dialogs::{
+    confirm_credential_reset, credential_offer_prompt, handle_saved_row_delete,
+};
 use super::widgets::getting_started::info_affordance;
 use super::widgets::layout::clamped_layout;
 pub use super::widgets::layout::connect_layout;
-use super::widgets::pro_gate::{gated_saved_row_tap, server_limit_prompt};
-use super::widgets::qr_affordance::{qr_affordance, qr_button};
+use super::widgets::pro_gate::{gated_keyring_unlock, gated_saved_row_tap, server_limit_prompt};
+use super::widgets::qr_affordance::{qr_button, qr_scan_action};
 use super::widgets::tablet::{tablet_screen, tablet_splash_layout, tablet_splash_pieces};
 use super::widgets::{Live, connect_pieces, connect_pieces_with};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
-use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
+use crate::features::connect::di::{
+    expect_credential_service, expect_keyring, expect_saved_servers,
+};
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::presentation::controller::ProController;
@@ -67,7 +72,7 @@ pub type SplashLayout<S> = Box<dyn FnOnce(Vec<AnyView<S>>) -> AnyView<S>>;
 /// layout they assemble through, for the window's size class — read here,
 /// once per build, exactly as [`ConnectScreen`]'s own `build` reads it, so
 /// the overlay's last frame is the route's first on every class. `saved` is
-/// piece 7's rows (the parity contract).
+/// piece 8's rows (the parity contract).
 pub fn splash_assembly<S: 'static>(
     theme: &frust::Theme,
     saved: &[SavedServer],
@@ -106,7 +111,7 @@ pub struct ConnectState {
     /// Whether `connected` read `true` on the last `build`. Seeded at mount, so
     /// an already-connected screen doesn't misfire a clear on its first build.
     was_connected: bool,
-    /// The FAB's single-flight latch (see [`super::widgets::qr_affordance`]).
+    /// The QR affordance's single-flight latch (see [`super::widgets::qr_affordance`]).
     /// `Rc<Cell<bool>>` because the permission check's completion runs off
     /// this handler's borrow.
     qr_permission_pending: Rc<Cell<bool>>,
@@ -125,12 +130,15 @@ impl Component for ConnectScreen {
         // Cross-feature resolve too: the free-tier server rule is `pro`'s, and
         // this screen is one of the two that gate on it.
         let pro = expect_pro_controller();
+        let keyring = expect_keyring();
         let connection = expect_connection_controller();
         let was_connected = connection.connected.get_untracked();
         let controller = use_controller::<ConnectController, AppFailure>({
             let connection = Arc::clone(&connection);
             let pro = Arc::clone(&pro);
-            move || ConnectController::new(repository, credentials, tokens, connection, pro)
+            move || {
+                ConnectController::new(repository, credentials, tokens, connection, pro, keyring)
+            }
         });
         // Installed here, where the flow's dependencies are already resolved.
         connection.set_credential_saver(controller.credential_saver());
@@ -196,6 +204,24 @@ impl Component for ConnectScreen {
                 let overlays = state.overlays.clone();
                 Rc::new(move |index| handle_saved_row_delete(&controller, &overlays, index))
             },
+            on_unlock: {
+                let controller = Arc::clone(&state.controller);
+                let overlays = state.overlays.clone();
+                let nav = state.app_nav.clone();
+                let pro = Arc::clone(&state.pro);
+                Rc::new(move || gated_keyring_unlock(&controller, &overlays, &nav, &pro))
+            },
+            on_reset_credentials: {
+                let controller = Arc::clone(&state.controller);
+                let overlays = state.overlays.clone();
+                Rc::new(move || confirm_credential_reset(&controller, &overlays))
+            },
+            on_scan: qr_scan_action(
+                &state.overlays,
+                &state.controller,
+                &state.qr_permission_pending,
+                &state.pro,
+            ),
         };
 
         // The one tracked read of the list — lets the splash hand the same
@@ -226,12 +252,6 @@ impl Component for ConnectScreen {
             stack()
                 .child(page_backdrop::<ConnectState>())
                 .child(scroll_view(content))
-                .child(qr_affordance(
-                    &state.overlays,
-                    &state.controller,
-                    &state.qr_permission_pending,
-                    &state.pro,
-                ))
                 .child(info_affordance(&state.overlays)),
         )
     }

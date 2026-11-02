@@ -18,6 +18,7 @@ use frust::{
     any, colored_box, container, row, safe_area, scroll_view, use_context,
 };
 
+use super::cta::Prominence;
 use super::getting_started::info_affordance;
 use super::layout::{clamp, gapped};
 use super::qr_affordance::splash_qr_button;
@@ -71,7 +72,7 @@ pub fn tablet_screen<S: 'static, Q: View<S>>(
     overlays: &frust::NavigatorController<AppState>,
 ) -> impl View<S> + use<S, Q> {
     let folded = (!full).then_some(saved);
-    let form = tablet_form_pieces(theme, Some(live), folded, qr);
+    let form = tablet_form_pieces(theme, Some(live), Prominence::for_saved(saved), folded, qr);
     let panel = full.then(|| tablet_panel_pieces(theme, Some(live), saved));
     // erasure: keep accumulator into Vec<AnyView>
     let mut layers = vec![
@@ -95,10 +96,11 @@ pub fn tablet_splash_pieces<S: 'static>(
 ) -> Vec<AnyView<S>> {
     let qr = splash_qr_button();
     if !full {
-        return tablet_form_pieces(theme, None, Some(saved), qr);
+        return tablet_form_pieces(theme, None, Prominence::for_saved(saved), Some(saved), qr);
     }
     let mut panel = tablet_panel_pieces(theme, None, saved).into_iter();
-    let mut form = tablet_form_pieces(theme, None, None, qr).into_iter();
+    let mut form =
+        tablet_form_pieces(theme, None, Prominence::for_saved(saved), None, qr).into_iter();
     let pieces: Vec<AnyView<S>> = FULL_STAGGER
         .iter()
         .map(|column| match column {
@@ -197,7 +199,14 @@ mod tests {
         );
         assert_eq!(
             column_count(Column::Form),
-            tablet_form_pieces::<AppState>(&theme, None, None, splash_qr_button()).len()
+            tablet_form_pieces::<AppState>(
+                &theme,
+                None,
+                Prominence::Primary,
+                None,
+                splash_qr_button()
+            )
+            .len()
         );
         assert_eq!(
             tablet_splash_pieces::<AppState>(&theme, &[], true).len(),
@@ -208,7 +217,14 @@ mod tests {
     #[test]
     fn the_collapsed_band_assembles_the_form_with_the_list_folded_under_it() {
         let theme = frust_glyph::baseline();
-        let form = tablet_form_pieces::<AppState>(&theme, None, None, splash_qr_button()).len();
+        let form = tablet_form_pieces::<AppState>(
+            &theme,
+            None,
+            Prominence::Primary,
+            None,
+            splash_qr_button(),
+        )
+        .len();
         assert_eq!(
             tablet_splash_pieces::<AppState>(&theme, &[], false).len(),
             form + 1,

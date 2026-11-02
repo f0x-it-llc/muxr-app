@@ -162,6 +162,14 @@ pub(crate) mod spec {
     /// A piece's entrance duration (`.piece{transition:opacity .5s
     /// var(--ease-spring)…}`), riding [`SPRING`]'s overshoot curve.
     pub(crate) const PIECE_IN_MS: f64 = 500.0;
+    /// Piece 7's CTA-to-QR-square gap (`.cta-row{display:flex;gap:8px}`).
+    pub(crate) const CTA_ROW_GAP: f64 = 8.0;
+    /// The QR square beside the CTA (`.qr-square{width:44px`).
+    pub(crate) const QR_SQUARE: f64 = 44.0;
+    /// The unlock dock closing piece 8 (`.unlock-dock{height:48px`).
+    pub(crate) const DOCK_HEIGHT: f64 = 48.0;
+    /// The dock's gap under the last saved row (`.unlock-dock{…margin-top:14px`).
+    pub(crate) const DOCK_GAP: f64 = 14.0;
     /// Vertical offset a piece drops in from (`transform:translateY(-70px)`).
     pub(crate) const PIECE_ENTER_DY: f64 = -70.0;
     /// Rotation a piece unwinds from, in radians (`rotate(-5deg)`).
@@ -259,6 +267,10 @@ pub mod contract {
     pub const RAIN_COL_W: f64 = super::spec::RAIN_COL_W;
     pub const BURST_COUNT: usize = super::spec::BURST_COUNT;
     pub const PIECE_DELAYS_MS: [f64; 8] = super::spec::PIECE_DELAYS_MS;
+    pub const CTA_ROW_GAP: f64 = super::spec::CTA_ROW_GAP;
+    pub const QR_SQUARE: f64 = super::spec::QR_SQUARE;
+    pub const DOCK_HEIGHT: f64 = super::spec::DOCK_HEIGHT;
+    pub const DOCK_GAP: f64 = super::spec::DOCK_GAP;
 }
 
 // ---------------------------------------------------------------------------
