@@ -102,3 +102,26 @@ fn piece_delays_match_the_mock() {
         "the `.piece` data-delay ladder drifted from spec::PIECE_DELAYS_MS"
     );
 }
+
+#[test]
+fn cta_row_and_unlock_dock_geometry_match_the_mock() {
+    same(".cta-row{display:flex;gap:", contract::CTA_ROW_GAP);
+    same(".qr-square{width:", contract::QR_SQUARE);
+    same(".unlock-dock{height:", contract::DOCK_HEIGHT);
+    same(".unlock-dock{height:48px;margin-top:", contract::DOCK_GAP);
+}
+
+#[test]
+fn piece_seven_is_the_cta_row_and_piece_eight_closes_on_the_dock() {
+    let pieces: Vec<&str> = HTML.split("piece\" data-delay=\"").skip(1).collect();
+    assert_eq!(pieces.len(), contract::PIECE_DELAYS_MS.len());
+    let before = |i: usize| {
+        HTML.split("piece\" data-delay=\"")
+            .nth(i)
+            .unwrap_or_default()
+    };
+    assert!(before(6).ends_with("cta-row "), "piece 7 is the CTA row");
+    assert!(pieces[6].contains("qr-square"), "…carrying the QR square");
+    assert!(before(7).ends_with("saved "), "piece 8 is the saved list");
+    assert!(pieces[7].contains("unlock-dock"), "…closed by the dock");
+}

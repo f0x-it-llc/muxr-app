@@ -1,5 +1,6 @@
-//! The screen's three credential dialogs: the no-verification confirm gate,
-//! the saved-row delete confirmation, and the save-credential offer. Each is
+//! The screen's credential dialogs: the no-verification confirm gate (for a
+//! row tap and for the unlock dock), the saved-row delete confirmation, the
+//! failed dock's reset confirmation, and the save-credential offer. Each is
 //! raised on the overlay host's navigator (never the route one), so it
 //! renders above every piece of app chrome.
 //!
@@ -23,13 +24,14 @@
 //! calls back only on confirm, and every way out of this one (decline,
 //! scrim, `Escape`, Android back) is an answer the held redirect awaits.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{ButtonStyle, PopResult, button};
 use frust_glyph::{glyph_dialog, show_glyph_dialog};
 
-use super::super::controller::{ConnectController, CredentialOffer, OfferPrompt};
+use super::super::controller::{ConfirmPrompt, ConnectController, CredentialOffer, OfferPrompt};
 use crate::AppState;
 use crate::routes::Nav;
 use crate::ui::dialogs::confirm_dialog;
@@ -75,13 +77,60 @@ pub(crate) fn handle_saved_row_tap(
     let nav = nav.clone();
     confirm_dialog(
         overlays,
-        "Connect without verification?",
-        "This connection can't verify the server, and the saved token will be \
-         sent over an unauthenticated channel.",
-        "Connect anyway",
+        UNVERIFIED_TITLE,
+        UNVERIFIED_BODY,
+        UNVERIFIED_CONFIRM_LABEL,
         move |_app: &mut AppState| {
             controller.recover_and_connect(server.clone(), &nav);
         },
+    );
+}
+
+const UNVERIFIED_TITLE: &str = "Connect without verification?";
+const UNVERIFIED_BODY: &str = "This connection can't verify the server, and the saved token will \
+                               be sent over an unauthenticated channel.";
+const UNVERIFIED_CONFIRM_LABEL: &str = "Connect anyway";
+
+/// The same gate for the unlock dock, asked once the keyring is open: the
+/// dock lends it, and `on_confirm` dials. Built per press.
+pub(crate) fn unverified_confirm_prompt(
+    overlays: &frust::NavigatorController<AppState>,
+) -> ConfirmPrompt {
+    let overlays = overlays.clone();
+    Rc::new(move |_server, on_confirm: Box<dyn FnOnce()>| {
+        let on_confirm = Cell::new(Some(on_confirm));
+        confirm_dialog(
+            &overlays,
+            UNVERIFIED_TITLE,
+            UNVERIFIED_BODY,
+            UNVERIFIED_CONFIRM_LABEL,
+            move |_app: &mut AppState| {
+                if let Some(dial) = on_confirm.take() {
+                    dial();
+                }
+            },
+        );
+    })
+}
+
+const RESET_TITLE: &str = "Reset saved credentials?";
+const RESET_BODY: &str = "Remove every saved credential on this device? Saved servers stay; you \
+                          will paste or scan a token again.";
+const RESET_CONFIRM_LABEL: &str = "Reset";
+
+/// The failed dock's reset, behind its confirm — `Failed` also covers a
+/// failed authentication, so it never resets unasked.
+pub(crate) fn confirm_credential_reset(
+    controller: &Arc<ConnectController>,
+    overlays: &frust::NavigatorController<AppState>,
+) {
+    let controller = Arc::clone(controller);
+    confirm_dialog(
+        overlays,
+        RESET_TITLE,
+        RESET_BODY,
+        RESET_CONFIRM_LABEL,
+        move |_app: &mut AppState| controller.reset_saved_credentials(),
     );
 }
 

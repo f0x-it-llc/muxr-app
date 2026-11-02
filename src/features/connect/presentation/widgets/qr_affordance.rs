@@ -1,13 +1,14 @@
-//! The `.fab` QR affordance and its three press-order gates: busy, the
-//! free-tier verdict, then the camera permission.
+//! The QR affordance — Compact's square beside the CTA, the Tablet form's
+//! button — and its three press-order gates: busy, the free-tier verdict,
+//! then the camera permission.
 //!
 //! The permission prompt is gated on the tap, not the sheet's mount:
 //! [`request_camera_access`] runs the blocking permission call off the UI
 //! thread and pushes [`open_qr_sheet`] only on `Granted`. Every other
 //! outcome raises a toast instead ([`permission_outcome_message`] is the
-//! whole decision table) and never mounts the sheet; the FAB stays tappable,
-//! so a re-tap is the retry. Asking before the sheet exists keeps the OS
-//! dialog from showing over the sheet's entrance animation.
+//! whole decision table) and never mounts the sheet; the affordance stays
+//! tappable, so a re-tap is the retry. Asking before the sheet exists keeps
+//! the OS dialog from showing over the sheet's entrance animation.
 //!
 //! That round trip is a real async window, so `request_camera_access` owns a
 //! single-flight latch: a re-entrant call while it reads `true` is dropped,
@@ -30,7 +31,8 @@ use std::sync::Arc;
 
 use frust::authoring::Size;
 use frust::{
-    Align, Alignment, ButtonStyle, EdgeInsets, Padding, View, button, icons, safe_area, spawn_local,
+    Align, Alignment, ButtonStyle, Either, SizedBox, Theme, View, button, container, icon, icons,
+    spawn_local,
 };
 use frust_camera::{CameraError, PermissionStatus};
 
@@ -39,20 +41,19 @@ use super::pro_gate::scan_blocked;
 use super::qr_sheet::{CAMERA_UNAVAILABLE, camera_backend_available, qr_sheet_body};
 use crate::AppState;
 use crate::features::pro::presentation::controller::ProController;
-use crate::ui::palette::active_theme;
+use crate::ui::paint::HAIRLINE;
+use crate::ui::palette::Palette;
 use crate::ui::sheet::show_sheet;
+use crate::ui::splash::spec::QR_SQUARE;
 use crate::ui::toasts::app_toasts;
 use crate::ui::topbar::icon_button;
 
 /// The QR affordance's accessible name — what a screen reader announces, and
-/// what `tests/connect.rs` addresses the button by.
+/// what `tests/connect.rs` addresses the button by. The name outlived the FAB
+/// it was minted for; `qr_sheet` titles its sheet with it.
 pub const FAB_LABEL: &str = "Pair by QR code";
 
-/// Inset from the screen's safe area. Bespoke placement geometry, not a spacing step.
-const FAB_MARGIN: f64 = 20.0;
-/// The FAB's box, in logical px — clears the 44px platform minimum tap target.
-const FAB_BOX: f64 = 46.0;
-const FAB_MARK: f64 = 22.0;
+const QR_MARK: f64 = 20.0;
 
 /// A concurrent request raced this tap's own call out. Transient, so a re-tap is the retry.
 const PERMISSION_PENDING: &str =
@@ -67,41 +68,37 @@ const PERMISSION_DENIED: &str = concat!(
 const PERMISSION_NEEDS_UI: &str =
     "The permission dialog needs muxr in the foreground — try again from here.";
 
-/// The amber QR/pair affordance, pinned to the screen's bottom-trailing safe
-/// area. The tap is the camera-permission gate (see the [module docs](self)).
-///
-/// `pending` is threaded down rather than resolved here: it has to survive
-/// across rebuilds, so two taps landing on two builds' press handlers close
-/// over the same cell. An [`icon_button`] rather than [`frust::button`]
-/// because the affordance is a mark, not a `String` label.
-pub(crate) fn qr_affordance<S: 'static>(
-    overlays: &frust::NavigatorController<AppState>,
-    controller: &Arc<ConnectController>,
-    pending: &Rc<Cell<bool>>,
-    pro: &Arc<ProController>,
+/// The secondary square beside Compact's CTA: an amber scan mark on the raised
+/// surface, outlined. `on_scan` is `None` for the splash, which paints the
+/// same square with no recognizer and no `Role::Button` node.
+pub(crate) fn qr_square<S: 'static>(
+    colors: &Palette,
+    theme: &Theme,
+    on_scan: Option<Rc<dyn Fn()>>,
 ) -> impl View<S> {
-    let theme = active_theme();
-    let scheme = theme.scheme();
-    safe_area(Align(
-        Alignment::BOTTOM_RIGHT,
-        Padding(
-            EdgeInsets::all(FAB_MARGIN),
-            icon_button(
-                icons::SCAN_MARK,
-                FAB_LABEL,
-                qr_press(overlays, controller, pending, pro),
-            )
-            .fill(scheme.primary_container)
-            .ink(scheme.on_primary_container)
-            .icon_size(FAB_MARK)
-            .box_size(Size::new(FAB_BOX, FAB_BOX))
-            .radius(FAB_BOX / 2.0),
+    let mark = match on_scan {
+        None => Either::Left(Align(
+            Alignment::CENTER,
+            icon(icons::SCAN_MARK).size(QR_MARK).color(colors.amber),
+        )),
+        Some(on_scan) => Either::Right(
+            icon_button(icons::SCAN_MARK, FAB_LABEL, move |_state: &mut S| on_scan())
+                .ink(colors.amber)
+                .icon_size(QR_MARK)
+                .box_size(Size::new(QR_SQUARE, QR_SQUARE))
+                .radius(theme.shape.small),
         ),
-    ))
+    };
+    SizedBox::<S>(Some(QR_SQUARE), Some(QR_SQUARE)).child(
+        container(mark)
+            .fill(colors.raised)
+            .radius(theme.shape.small)
+            .border(colors.outline, HAIRLINE),
+    )
 }
 
-/// The Tablet form's in-flow QR action: a secondary button under the FAB's
-/// own name, firing the FAB's press path gate for gate.
+/// The Tablet form's in-flow QR action: a secondary button under the
+/// square's own name, firing its press path gate for gate.
 ///
 /// Known gap: `frust::button` takes a text label only, so the mock's leading
 /// scan mark is not painted here.
@@ -111,7 +108,8 @@ pub(crate) fn qr_button<S: 'static>(
     pending: &Rc<Cell<bool>>,
     pro: &Arc<ProController>,
 ) -> impl View<S> {
-    styled_qr_button(qr_press(overlays, controller, pending, pro))
+    let press = qr_scan_action(overlays, controller, pending, pro);
+    styled_qr_button(move |_state: &mut S| press())
 }
 
 /// [`qr_button`] with nothing behind the press: the splash's copy of the
@@ -130,17 +128,21 @@ fn styled_qr_button<S: 'static>(on_press: impl Fn(&mut S) + 'static) -> impl Vie
 
 /// The press both QR affordances fire: busy, the free-tier gate, then
 /// [`start_scan`] (see the [module docs](self)).
-fn qr_press<S: 'static>(
+///
+/// `pending` is threaded in rather than resolved here: it has to survive
+/// across rebuilds, so two taps landing on two builds' handlers close over
+/// the same cell.
+pub(crate) fn qr_scan_action(
     overlays: &frust::NavigatorController<AppState>,
     controller: &Arc<ConnectController>,
     pending: &Rc<Cell<bool>>,
     pro: &Arc<ProController>,
-) -> impl Fn(&mut S) + 'static {
+) -> Rc<dyn Fn()> {
     let overlays = overlays.clone();
     let controller = Arc::clone(controller);
     let pending = Rc::clone(pending);
     let pro = Arc::clone(pro);
-    move |_state: &mut S| {
+    Rc::new(move || {
         if controller.busy_untracked() {
             return;
         }
@@ -157,7 +159,7 @@ fn qr_press<S: 'static>(
             return;
         }
         start_scan(&overlays, &controller, &pending);
-    }
+    })
 }
 
 /// The scan flow proper — the camera-permission gate, then the sheet it
@@ -192,7 +194,7 @@ fn open_qr_sheet(
     });
 }
 
-/// The FAB permission gate: checks/requests off the UI thread and calls
+/// The scan permission gate: checks/requests off the UI thread and calls
 /// `on_granted` only on `Granted` (see the [module docs](self)). With no
 /// camera backend there is no dialog to race, so this calls `on_granted`
 /// directly and lets the sheet render its own unavailable state.
@@ -253,10 +255,10 @@ fn permission_outcome_message(
 mod tests {
     use super::*;
     #[test]
-    fn the_fab_clears_the_minimum_tap_target() {
+    fn the_square_clears_the_minimum_tap_target() {
         const MIN_TAP_TARGET: f64 = 44.0;
-        const { assert!(FAB_BOX >= MIN_TAP_TARGET) };
-        const { assert!(FAB_MARK < FAB_BOX) };
+        const { assert!(QR_SQUARE >= MIN_TAP_TARGET) };
+        const { assert!(QR_MARK < QR_SQUARE) };
     }
 
     // The real permission arm is target-gated, so an end-to-end test cannot
