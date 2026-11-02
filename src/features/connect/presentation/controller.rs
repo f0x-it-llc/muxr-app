@@ -1118,10 +1118,12 @@ impl ConnectController {
     // -----------------------------------------------------------------------
 
     /// Gates and stores a secret. Unlocked, a snapshot of the keyring takes
-    /// the one gated vault write and the handle gains the token only on
-    /// success, and only if the handle is still the one snapshotted (no lock,
-    /// publish, insert or remove moved its generation during the prompt);
-    /// otherwise the token is dropped, the vault keeping it. Locked, the
+    /// the one gated vault write; on success the handle gains the token iff it
+    /// is still unlocked once the prompt settles. A lock during the prompt is
+    /// the one state the token must stay out of (the vault keeps it); any
+    /// other change meanwhile — another endpoint inserted or removed, a
+    /// re-unlock — still takes it, so the handle never lacks a token the vault
+    /// holds (the next snapshot-based vault write would erase it). Locked, the
     /// read-modify-write save runs through `ControllerCore::run` (whose
     /// impossible failure reads as `Failed`) and the handle is left alone.
     async fn gate_store(
@@ -1136,15 +1138,12 @@ impl ConnectController {
             reason,
         };
         if self.keyring.is_unlocked() {
-            let generation = self.keyring.generation.get_untracked();
             let mut snapshot = self.keyring.snapshot();
             let status = self
                 .save_credential
                 .run_in_vault(request, &mut snapshot)
                 .await;
-            let unchanged =
-                self.keyring.is_unlocked() && self.keyring.generation.get_untracked() == generation;
-            if status == CredentialStatus::Success && unchanged {
+            if status == CredentialStatus::Success && self.keyring.is_unlocked() {
                 self.keyring.insert(server_key, token);
             }
             return status;
