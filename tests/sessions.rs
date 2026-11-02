@@ -1536,6 +1536,117 @@ async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it()
 }
 
 // ---------------------------------------------------------------------------
+// A new connection restarts the screen: the old server's list never lingers
+// ---------------------------------------------------------------------------
+
+/// `restart()` drops an in-flight refresh's late reply (the old server's), clears the
+/// selection, and the kicked first load is what lands.
+#[test]
+fn a_restart_ignores_the_old_generations_late_reply_and_clears_the_selection() {
+    use frust_reactive::ReactiveRuntime;
+
+    let _g = serial();
+    let _ambient = setup();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let controller = Arc::new(SessionsController::new(Arc::new(RaceSessionsRepo::new())));
+    controller.select("stale");
+    runtime.block_on(async {
+        // The first read (call 0) is the slow "stale" one; the restart lands
+        // while it is parked, so its reply carries an older generation.
+        let late = {
+            let controller = Arc::clone(&controller);
+            async move { controller.refresh().await }
+        };
+        let restart = {
+            let controller = Arc::clone(&controller);
+            async move {
+                tokio::task::yield_now().await;
+                controller.restart();
+            }
+        };
+        tokio::join!(late, restart);
+    });
+    assert!(
+        controller.sessions.get_untracked().is_empty(),
+        "the late old-generation reply was ignored"
+    );
+    assert_eq!(controller.selected.get_untracked(), None);
+    assert!(!controller.loaded.get_untracked(), "the first load is anew");
+
+    let pump = ReactiveRuntime::get().expect("runtime installed by setup()");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !controller.first_load_settled.get_untracked() {
+        assert!(Instant::now() < deadline, "the restarted load never landed");
+        pump.pump_local();
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(5)).await });
+    }
+    let names: Vec<String> = controller
+        .sessions
+        .get_untracked()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, vec!["fresh".to_string()]);
+}
+
+/// A repository whose list is swapped between connections.
+struct SwitchableRepo {
+    names: Mutex<Vec<String>>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for SwitchableRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        let names = self.names.lock().expect("ok").clone();
+        Ok(names.iter().map(|n| stub_session(n)).collect())
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the switch test")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the switch test")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the switch test")
+    }
+}
+
+#[test]
+fn switching_servers_replaces_the_old_hosts_cards_with_the_new_hosts_list() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(SwitchableRepo {
+        names: Mutex::new(vec!["alpha-one".to_string(), "alpha-two".to_string()]),
+    });
+    let mut h = Harness::mount_over(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        support::surface(),
+    );
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until_values("host A's list", |v| v.iter().any(|s| s == "alpha-two"));
+
+    *repo.names.lock().expect("ok") = vec!["beta-one".to_string()];
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|s| s.starts_with("alpha")),
+        "host A's cards are gone: {values:?}"
+    );
+    assert_eq!(h.card_count(), 1);
+}
+
+// ---------------------------------------------------------------------------
 // The Tablet detail's agent list is controller state: fetched on a selection
 // change and on every poll tick while the detail shows it.
 // ---------------------------------------------------------------------------

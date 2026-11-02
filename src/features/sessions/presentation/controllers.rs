@@ -117,6 +117,24 @@ impl SessionsController {
         self.first_load_settled.set(true);
     }
 
+    /// Starts this mount over for a new connection: the generation bump drops
+    /// any in-flight refresh's reply (a stale poll, wake or mutation refresh
+    /// from the old server lands nowhere), the old server's list, selection and
+    /// agents go, the first-load flags reset so the loading rain can replay, the
+    /// poll gate is released, and the first load is kicked as `init` does.
+    pub fn restart(self: &Arc<Self>) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.sessions.set(Vec::new());
+        self.loaded.set(false);
+        self.first_load_settled.set(false);
+        self.selected.set(None);
+        self.poll_in_flight.store(false, Ordering::SeqCst);
+        self.agents_in_flight.store(false, Ordering::SeqCst);
+        self.retarget_agents();
+        let controller = Arc::clone(self);
+        frust::spawn_local(async move { controller.refresh().await });
+    }
+
     pub async fn refresh_from_poll(&self) {
         {
             let _release = ReleaseClaim(&self.poll_in_flight);
