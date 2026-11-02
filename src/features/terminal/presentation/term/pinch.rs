@@ -1,8 +1,10 @@
-//! The pinch **intent reducer**: frust's `ScaleEvent` stream (a two-finger touch pinch and a
-//! desktop ctrl/cmd+wheel alike) becomes at most one [`PinchIntent`] per gesture.
+//! The pinch **intent reducer**: frust's `ScaleEvent` stream (a two-finger touch pinch) becomes at
+//! most one [`PinchIntent`] per gesture. A bracketed desktop Scale (trackpad pinch) drives the
+//! same reducer; a lone wheel notch (scale 1.105) does not reach a threshold (ctrl+wheel on
+//! Linux/Windows arrives as lone Updates of exp(0.1×lines)).
 //!
-//! **Decision D1 (verbatim):** fingers SPREADING = zoom in = ENTER fullscreen; fingers
-//! CONVERGING = zoom out = EXIT. Swap [`ENTER_SCALE`] and [`EXIT_SCALE`] to invert.
+//! Fingers spreading enter fullscreen, converging exit; swap [`ENTER_SCALE`] and [`EXIT_SCALE`]
+//! to invert.
 //!
 //! The reducer is pure: it multiplies the per-event `scale_delta`s into a cumulative scale and
 //! answers once when that crosses a threshold, so a slow drift and a quick flick behave the same

@@ -19,7 +19,7 @@ use muxr::features::terminal::presentation::term::{
 };
 
 mod support;
-use support::{contact, ms, pointer, serial, setup};
+use support::{HELD_MS, contact, ms, pointer, serial, setup};
 
 const PHONE: Size = Size::new(392.7, 872.7);
 
@@ -43,6 +43,7 @@ struct Mounted {
 impl Mounted {
     fn new(with_sink: bool) -> Self {
         let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
+        emulator.borrow_mut().feed(b"cargo build release");
         let seam = SelectionSeam::new(Rc::clone(&emulator));
         let generation = RwSignal::new(1u64);
         let intents: Rc<RefCell<Vec<(PinchIntent, Point)>>> = Rc::default();
@@ -128,7 +129,7 @@ fn a_two_finger_spread_enters_fullscreen_once_at_the_midpoint_cell() {
     m.send(contact(1, Move, p(220.0, 100.0)));
     assert_eq!(m.intents(), [PinchIntent::EnterFullscreen]);
     let (_, focal) = m.intents.borrow()[0];
-    // R4: the focal is in the grid's own space, so it maps to the cell under the fingers.
+    // The focal is in the grid's own space, so it maps to the cell under the fingers.
     assert_eq!(focal, p(145.0, 100.0));
     let geo = m.seam.metrics().expect("laid out");
     assert_eq!(
@@ -138,7 +139,6 @@ fn a_two_finger_spread_enters_fullscreen_once_at_the_midpoint_cell() {
             row: (100.0 / geo.height).floor() as u16,
         })
     );
-    assert!(m.seam.cell_at(focal).is_some());
     m.send(contact(1, Up, p(220.0, 100.0)));
     assert_eq!(m.intents().len(), 1);
 }
@@ -218,4 +218,96 @@ fn without_a_sink_nothing_fires_and_the_single_finger_tap_still_lands() {
     m.send(pointer(Down, p(50.0, 50.0)));
     m.send(pointer(Up, p(50.0, 50.0)));
     assert_eq!(m.taps.borrow().len(), 1);
+}
+
+/// Finger A rests on the word "cargo" on row 0; finger B starts to its right on the same row.
+fn a() -> Point {
+    p(30.0, 5.0)
+}
+
+fn b(x: f64) -> Point {
+    p(x, 5.0)
+}
+
+/// Spread finger B well past the slop and the enter threshold (A never moves).
+fn spread(m: &mut Mounted) {
+    use PointerPhase::Move;
+    for x in [160.0, 190.0, 220.0] {
+        m.send(contact(1, Move, b(x)));
+    }
+}
+
+/// Hold past the long-press threshold with the clock starting at `from`, flushing the timer.
+fn hold(m: &mut Mounted, from: f64) {
+    m.frame(from);
+    m.frame(from + HELD_MS);
+    m.frame(from + HELD_MS + 20.0);
+}
+
+#[test]
+fn an_anchored_finger_through_a_spread_never_starts_a_selection() {
+    use PointerPhase::{Down, Up};
+    let _guard = serial();
+    let _owner = setup();
+    let mut m = Mounted::new(true);
+    m.send(contact(0, Down, a()));
+    m.send(contact(1, Down, b(130.0)));
+    spread(&mut m);
+    hold(&mut m, 0.0);
+    assert!(m.seam.range().is_none());
+    assert_eq!(m.seam.haptic_count(), 0);
+    assert_eq!(m.intents(), [PinchIntent::EnterFullscreen]);
+    m.send(contact(1, Up, b(220.0)));
+    m.send(contact(0, Up, a()));
+    assert!(m.seam.range().is_none());
+    assert!(!m.seam.is_active());
+}
+
+#[test]
+fn a_selection_begun_before_the_pinch_is_cleared_at_begin() {
+    use PointerPhase::Down;
+    let _guard = serial();
+    let _owner = setup();
+    let mut m = Mounted::new(true);
+    m.send(contact(0, Down, a()));
+    hold(&mut m, 0.0);
+    assert!(m.seam.range().is_some());
+    assert!(m.seam.dragging());
+    m.send(contact(1, Down, b(130.0)));
+    spread(&mut m);
+    assert!(m.seam.range().is_none());
+    assert!(m.seam.chip_anchor().is_none());
+    assert!(!m.seam.dragging());
+    assert_eq!(m.intents(), [PinchIntent::EnterFullscreen]);
+}
+
+#[test]
+fn a_cancelled_pinch_does_not_block_the_next_long_press() {
+    use PointerPhase::{Cancel, Down, Up};
+    let _guard = serial();
+    let _owner = setup();
+    let mut m = Mounted::new(true);
+    m.send(contact(0, Down, a()));
+    m.send(contact(1, Down, b(130.0)));
+    spread(&mut m);
+    m.send(contact(0, Cancel, a()));
+    m.send(contact(1, Up, b(220.0)));
+    assert!(m.seam.range().is_none());
+    m.send(contact(0, Down, a()));
+    hold(&mut m, 2_000.0);
+    assert!(m.seam.range().is_some());
+    assert_eq!(m.seam.haptic_count(), 1);
+}
+
+#[test]
+fn a_plain_long_press_still_selects_with_one_haptic() {
+    use PointerPhase::Down;
+    let _guard = serial();
+    let _owner = setup();
+    let mut m = Mounted::new(true);
+    m.send(contact(0, Down, a()));
+    hold(&mut m, 0.0);
+    assert!(m.seam.range().is_some());
+    assert_eq!(m.seam.haptic_count(), 1);
+    assert!(m.intents().is_empty());
 }

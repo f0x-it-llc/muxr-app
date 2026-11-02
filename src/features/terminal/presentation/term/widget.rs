@@ -1008,6 +1008,7 @@ impl TerminalGridWidget {
     ) -> Option<EventResult> {
         match pointer.phase {
             PointerPhase::Down => {
+                seam.pinch_ended();
                 seam.track(pointer.position, true);
                 // BEFORE anything else: a tap that dismisses a selection must
                 // not also claim focus and summon the keyboard.
