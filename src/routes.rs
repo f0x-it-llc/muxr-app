@@ -35,6 +35,12 @@
 //! publishes accessibility nodes for its top page only and outranks both
 //! navigators for the Android back press (R44-back).
 //!
+//! **Adding a server covers the shell rather than leaving it.** `/?mode=add`
+//! ([`CONNECT_MODE_QUERY_KEY`]) resolves to a second Connect page that
+//! [`Nav::push`] lays over the retained shell page on the outer stack; a
+//! back press or [`Nav::pop`] takes it off again, so the shell beneath never
+//! unwinds. It is no shell route, so the guard never sees it.
+//!
 //! **Leaving the shell is a question, not a pop**: the shell page carries
 //! [`frust::BackPolicy::DismissAnimated`] plus a dismiss-signal cell
 //! ([`sessions_back_signal`]), so a back press at `/sessions` — where the inner
@@ -55,7 +61,7 @@ use frust::{
 
 use crate::AppState;
 use crate::connection::ConnectionController;
-use crate::features::connect::presentation::pages::connect_page;
+use crate::features::connect::presentation::pages::{add_server_page, connect_page};
 use crate::features::sessions::presentation::pages::sessions_page;
 use crate::features::sessions::presentation::widgets::host_of;
 use crate::features::settings::presentation::pages::settings_page;
@@ -75,6 +81,24 @@ pub const TERMINAL_TAB_QUERY_KEY: &str = "tab";
 /// The wire pane id (unique within the tab's terminal panes) a pill targets.
 pub const TERMINAL_PANE_QUERY_KEY: &str = "pane";
 pub const TERMINAL_SPACE_QUERY_KEY: &str = "space";
+
+/// The `/` query key that picks Connect's mode; [`CONNECT_MODE_ADD`] is the
+/// one value it takes.
+pub const CONNECT_MODE_QUERY_KEY: &str = "mode";
+/// Connect's add-server mode: the form alone, pushed over the placed shell.
+pub const CONNECT_MODE_ADD: &str = "add";
+/// The `/?mode=add` key naming a saved endpoint to prefill the form with.
+pub const CONNECT_SERVER_QUERY_KEY: &str = "server";
+/// Where every add-server entry point pushes.
+pub const ADD_SERVER_LOCATION: &str = "/?mode=add";
+
+/// Whether `location` asks for Connect's add-server mode.
+fn is_add_mode(location: &Location) -> bool {
+    location
+        .query
+        .get(CONNECT_MODE_QUERY_KEY)
+        .is_some_and(|mode| mode == CONNECT_MODE_ADD)
+}
 
 /// The `/` route (and the outer navigator's initial page): Connect.
 pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
@@ -292,6 +316,7 @@ impl Nav {
     fn navigate(&self, location: &str, verb: Verb) {
         let mut chain = None;
         let mut bounced = false;
+        let mut adding = false;
         if let Resolution::Matched {
             location: resolved,
             pages,
@@ -299,6 +324,7 @@ impl Nav {
         } = self.router.resolve(location)
         {
             bounced = resolved.path != Location::parse(location).path;
+            adding = !bounced && is_add_mode(&resolved);
             *self.last_location.borrow_mut() = Some(resolved);
             chain = Some(pages);
         }
@@ -313,6 +339,9 @@ impl Nav {
                 self.place_shell(pages, verb);
                 return;
             }
+        } else if adding && matches!(verb, Verb::Push) {
+            self.cover(pages);
+            return;
         } else if placed {
             self.unwind_shell();
             return;
@@ -367,6 +396,39 @@ impl Nav {
         );
         self.pending_shell.set(Some(controller.route_generation()));
         self.pending_unwind.set(None);
+    }
+
+    /// Push a flat chain's leaf onto the outer stack **over** whatever is
+    /// there — the add-server page, laid over a placed shell it must not
+    /// unwind. Carries the route slide a plain router push has no seam for.
+    fn cover(&self, pages: Vec<ResolvedPage<AppState>>) {
+        let Some(leaf) = pages.into_iter().next_back() else {
+            return;
+        };
+        let route = leaf.location().clone();
+        self.router.controller().push_with_options(
+            move || leaf.build(),
+            PushOptions::opaque()
+                .transition(route_transition())
+                .route(route),
+        );
+    }
+
+    /// Whether the outer stack's top page sits outside the shell while a
+    /// shell page is retained beneath it — the add-server page — as of the
+    /// last publish.
+    fn shell_is_covered(&self) -> bool {
+        let stack = self.router.controller().route_stack();
+        let entries = stack.entries();
+        let top_outside_shell = matches!(
+            entries.last(),
+            Some(Some(location)) if route_meta(&location.path).is_none()
+        );
+        top_outside_shell
+            && entries
+                .iter()
+                .flatten()
+                .any(|location| route_meta(&location.path).is_some())
     }
 
     /// Take the shell page back off the outer stack — what a navigation
@@ -436,12 +498,16 @@ impl Nav {
     /// in-shell page with it, landing back on Connect.
     ///
     /// This mirrors frust's own innermost-first back arbitration by hand,
-    /// because a `‹` press and an Android back press must agree.
+    /// because a `‹` press and an Android back press must agree — including
+    /// its rule that a page covering the shell silences the inner navigator,
+    /// so the add-server page comes off first.
     /// [`NavigatorController::can_pop`] is advisory (the depth as of the last
     /// rebuild), which is exact for every call site here: each pops once, a
     /// rebuild apart.
     pub fn pop(&self) {
-        if self.inner.can_pop() {
+        if self.shell_is_covered() {
+            self.router.pop();
+        } else if self.inner.can_pop() {
             self.inner.pop();
         } else {
             self.router.pop();
@@ -681,7 +747,17 @@ pub(crate) fn build_routes(
     vec![
         Route::new(CONNECT_LOCATION, {
             let overlays = overlays.clone();
-            move |_params: &RouteParams| home_page(overlays.clone())
+            move |params: &RouteParams| {
+                if params
+                    .get(CONNECT_MODE_QUERY_KEY)
+                    .is_some_and(|mode| mode == CONNECT_MODE_ADD)
+                {
+                    let prefill = params.get(CONNECT_SERVER_QUERY_KEY).cloned();
+                    Either::Right(add_server_page(overlays.clone(), prefill))
+                } else {
+                    Either::Left(home_page(overlays.clone()))
+                }
+            }
         }),
         shell_route(
             inner,
@@ -827,6 +903,18 @@ mod tests {
                 "{path} resolves through the shell page"
             );
         }
+    }
+
+    #[test]
+    fn add_mode_is_a_flat_root_page_outside_the_guard() {
+        // `/?mode=add` must resolve flat — no shell page in its chain — or a
+        // push of it would place a second scaffold instead of covering one.
+        let router = table_router();
+        assert_eq!(router.resolve(ADD_SERVER_LOCATION).page_count(), 1);
+        assert!(is_add_mode(&Location::parse(ADD_SERVER_LOCATION)));
+        assert!(!is_add_mode(&Location::parse(CONNECT_LOCATION)));
+        let guard = session_guard_with(Arc::new(ConnectionController::detached()));
+        assert_eq!(guard(&Location::parse(ADD_SERVER_LOCATION)), None);
     }
 
     #[test]
