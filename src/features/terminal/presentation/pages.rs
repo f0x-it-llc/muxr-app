@@ -748,6 +748,17 @@ fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry>
         })
 }
 
+/// The last tiled pane whose rect contains the cell — the pinch's hit test, blind to
+/// the floating layer and to fullscreen.
+fn tiled_pane_at(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
+    tab.panes
+        .iter()
+        .filter(|pane| !pane.floating)
+        .rfind(|pane| {
+            col >= pane.x && col < pane.x + pane.cols && row >= pane.y && row < pane.y + pane.rows
+        })
+}
+
 /// The `(pane_id, is_plugin)` a content tap should focus, if any — the live
 /// grid's whole `on_content_tap` routing decision.
 ///
@@ -791,9 +802,7 @@ fn resolve_pinch_target(
             if fullscreen {
                 return None;
             }
-            resolve_tapped_pane(tab, col, row)
-                .filter(|pane| !pane.floating)
-                .or_else(focused_tiled)?
+            tiled_pane_at(tab, col, row).or_else(focused_tiled)?
         }
         term::PinchIntent::ExitFullscreen => {
             if !fullscreen {
@@ -1799,12 +1808,19 @@ mod tests {
         let mut floating = pane_at(27, 0, 0, 80, 24);
         floating.floating = true;
         floating.focused = true;
+        floating.cols = 100;
+        floating.rows = 40;
         tab.panes.push(floating);
         tab.floating_panes_visible = true;
         assert_eq!(
             resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((11, false)),
+            "the tiled pane under the focal, not the floating one over it"
+        );
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 90, 30),
             Some((10, false)),
-            "the focused tiled pane, not the floating one under the focal"
+            "a gutter focal under the floating pane falls back to the focused tiled pane"
         );
     }
 
