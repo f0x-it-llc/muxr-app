@@ -7,7 +7,7 @@
 //! secret, plus two signals screens may track — `unlocked` and a `generation`
 //! bumped on every change. Tokens never sit inside a signal.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use frust::{GetUntracked, RwSignal, Set, Update, provide_context, use_context};
@@ -97,6 +97,24 @@ pub struct KeyringHandle {
     pub unlocked: RwSignal<bool>,
     /// Bumped by every publish, insert, remove and lock.
     pub generation: RwSignal<u64>,
+    /// Bumped only by [`Self::lock`]; an unlock compares it across its await
+    /// to learn a lock overtook it. Plain atomics, never a signal.
+    lock_epoch: Arc<AtomicU64>,
+    /// Whether an unlock is in flight app-wide ([`Self::begin_unlock`]).
+    unlocking: Arc<AtomicBool>,
+}
+
+/// The app-wide unlock single-flight: held for one `unlock_all`, released on
+/// drop. Carries no secret.
+#[must_use = "dropping the ticket releases the single-flight"]
+pub struct UnlockTicket {
+    unlocking: Arc<AtomicBool>,
+}
+
+impl Drop for UnlockTicket {
+    fn drop(&mut self) {
+        self.unlocking.store(false, Ordering::SeqCst);
+    }
 }
 
 impl KeyringHandle {
@@ -106,7 +124,31 @@ impl KeyringHandle {
             keyring: Arc::new(Mutex::new(Keyring::new())),
             unlocked: RwSignal::new(false),
             generation: RwSignal::new(0),
+            lock_epoch: Arc::new(AtomicU64::new(0)),
+            unlocking: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Claims the app-wide unlock single-flight; `None` while another unlock
+    /// is already in flight (no second prompt may be raised).
+    pub fn begin_unlock(&self) -> Option<UnlockTicket> {
+        self.unlocking
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| UnlockTicket {
+                unlocking: Arc::clone(&self.unlocking),
+            })
+    }
+
+    /// Whether an unlock is in flight.
+    pub fn unlock_in_flight(&self) -> bool {
+        self.unlocking.load(Ordering::SeqCst)
+    }
+
+    /// How many times [`Self::lock`] has run. Unrelated inserts, removes and
+    /// publishes do not move it.
+    pub fn lock_epoch(&self) -> u64 {
+        self.lock_epoch.load(Ordering::SeqCst)
     }
 
     fn guard(&self) -> MutexGuard<'_, Keyring> {
@@ -172,6 +214,7 @@ impl KeyringHandle {
 
     /// Zeroize every token and mark the handle locked.
     pub fn lock(&self) {
+        self.lock_epoch.fetch_add(1, Ordering::SeqCst);
         self.guard().lock();
         self.unlocked.set(false);
         self.bump();
@@ -268,5 +311,28 @@ mod tests {
         assert!(!handle.is_unlocked());
         assert!(handle.endpoints().is_empty());
         assert!(handle.token_for("a.example:1").is_none());
+    }
+
+    #[test]
+    fn begin_unlock_is_single_flight_and_the_lock_epoch_counts_only_locks() {
+        let handle = KeyringHandle::new();
+        let clone = handle.clone();
+        let ticket = handle.begin_unlock().expect("first ticket");
+        assert!(clone.unlock_in_flight());
+        assert!(clone.begin_unlock().is_none(), "no second unlock");
+        drop(ticket);
+        assert!(!handle.unlock_in_flight());
+        assert!(clone.begin_unlock().is_some(), "released on drop");
+
+        assert_eq!(handle.lock_epoch(), 0);
+        handle.insert("a.example:1", token("tok-a"));
+        handle.publish(Keyring::new());
+        assert_eq!(
+            handle.lock_epoch(),
+            0,
+            "inserts and publishes are not locks"
+        );
+        clone.lock();
+        assert_eq!(handle.lock_epoch(), 1);
     }
 }

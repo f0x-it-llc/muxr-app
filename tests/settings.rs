@@ -24,6 +24,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -42,9 +43,18 @@ use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
-use muxr::features::connect::di::{expect_keyring, expect_saved_servers, mock_credentials};
-use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::connect::data::repositories::MockCredentialService;
+use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
+use muxr::features::connect::di::{
+    KeyringHandle, expect_keyring, expect_saved_servers, mock_credentials,
+};
+use muxr::features::connect::domain::entities::{
+    CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential,
+    UnlockedKeyring, epoch_millis,
+};
 use muxr::features::connect::domain::keyring::Keyring;
+use muxr::features::connect::domain::repositories::CredentialService;
+use muxr::features::connect::presentation::controller::ConfirmPrompt;
 use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
 use muxr::features::pro::di::{
@@ -56,13 +66,16 @@ use muxr::features::pro::domain::entities::{
 use muxr::features::pro::domain::repositories::EntitlementRepository;
 use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
-use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
+use muxr::features::settings::data::repositories::{
+    MockAuthTokensRepository, MockPreferencesRepository,
+};
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
 use muxr::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken,
 };
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
+use muxr::features::settings::presentation::controller::SettingsController;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
@@ -3441,4 +3454,197 @@ fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
             NARROW_SURFACE.width,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The app-wide unlock single-flight: a lock wins, and no second prompt
+// ---------------------------------------------------------------------------
+
+/// A parked `unlock_all`: the credential service waits here until released.
+#[derive(Default)]
+struct HeldUnlockPrompt {
+    entered: AtomicBool,
+    released: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl HeldUnlockPrompt {
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            waker.wake();
+        }
+    }
+}
+
+struct HoldUnlock(Arc<HeldUnlockPrompt>);
+
+impl Future for HoldUnlock {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let held = &self.0;
+        held.entered.store(true, Ordering::SeqCst);
+        if held.released.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        *held.waker.lock().unwrap_or_else(|p| p.into_inner()) = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// [`MockCredentialService`] whose `unlock_all` parks on a [`HeldUnlockPrompt`].
+struct HeldUnlockVault {
+    inner: Arc<MockCredentialService>,
+    prompt: Arc<HeldUnlockPrompt>,
+}
+
+#[clean_signals::async_trait]
+impl CredentialService for HeldUnlockVault {
+    async fn store(&self, request: StoreRequest) -> CredentialStatus {
+        self.inner.store(request).await
+    }
+
+    async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential {
+        self.inner.unlock(request).await
+    }
+
+    async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring {
+        HoldUnlock(Arc::clone(&self.prompt)).await;
+        self.inner.unlock_all(reason, endpoints).await
+    }
+
+    async fn store_in_vault(
+        &self,
+        request: StoreRequest,
+        keyring: &mut Keyring,
+    ) -> CredentialStatus {
+        self.inner.store_in_vault(request, keyring).await
+    }
+
+    async fn delete_from_vault(
+        &self,
+        server_key: String,
+        keyring: &mut Keyring,
+    ) -> Result<(), AppFailure> {
+        self.inner.delete_from_vault(server_key, keyring).await
+    }
+
+    async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
+        self.inner.delete(server_key).await
+    }
+
+    async fn reset_vault(&self) -> Result<(), AppFailure> {
+        self.inner.reset_vault().await
+    }
+}
+
+/// A headless Settings controller over a locked keyring and one saved row
+/// ([`CRED_ENDPOINT`]) whose vault entry sits behind a held `unlock_all`.
+fn held_switch_rig() -> (
+    Arc<SettingsController>,
+    KeyringHandle,
+    Arc<MockCredentialService>,
+    Arc<HeldUnlockPrompt>,
+) {
+    let connection = muxr::connection::provide_connection_controller();
+    let credentials = Arc::new(MockCredentialService::new());
+    credentials.seed_vault(&[(CRED_ENDPOINT, CRED_TOKEN)]);
+    let prompt = Arc::new(HeldUnlockPrompt::default());
+    let held = Arc::new(HeldUnlockVault {
+        inner: Arc::clone(&credentials),
+        prompt: Arc::clone(&prompt),
+    });
+    let keyring = KeyringHandle::new();
+    let controller = Arc::new(SettingsController::new(
+        Arc::new(MockAuthTokensRepository::seeded()),
+        Arc::new(MockPreferencesRepository::default()),
+        Arc::new(MockSavedServersRepository::with_servers(vec![
+            credential_row(true),
+        ])),
+        held as _,
+        keyring.clone(),
+        connection,
+    ));
+    (controller, keyring, credentials, prompt)
+}
+
+fn pump_runtime(rounds: usize) {
+    let runtime = ReactiveRuntime::get().expect("setup() installed the runtime");
+    for _ in 0..rounds {
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn never_confirm() -> ConfirmPrompt {
+    Rc::new(|_server, _dial| panic!("a System-trust row never asks to confirm"))
+}
+
+#[test]
+fn a_lock_and_disconnect_during_a_pending_switch_unlock_dials_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let (controller, keyring, _credentials, prompt) = held_switch_rig();
+    let connection = expect_connection_controller();
+    let switched = Rc::new(std::cell::Cell::new(false));
+
+    let landed = Rc::clone(&switched);
+    controller.switch_server(
+        CRED_ENDPOINT.to_string(),
+        never_confirm(),
+        Box::new(move || landed.set(true)),
+    );
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !prompt.entered.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the prompt"
+        );
+        pump_runtime(1);
+    }
+    assert!(controller.switching.get_untracked());
+
+    connection.lock_and_disconnect(&keyring);
+    prompt.release();
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while controller.switching.get_untracked() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the switch"
+        );
+        pump_runtime(1);
+    }
+    pump_runtime(20);
+
+    assert!(
+        !keyring.is_unlocked() && keyring.endpoints().is_empty(),
+        "the late unlock must not re-open a locked keyring"
+    );
+    assert!(!connection.connected.get_untracked(), "nothing was dialed");
+    assert!(!switched.get(), "…and nothing switched");
+    assert!(app_toasts().pending_untracked().is_empty(), "no toast");
+}
+
+#[test]
+fn a_settings_tap_while_a_dock_unlock_is_in_flight_raises_no_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let (controller, keyring, credentials, prompt) = held_switch_rig();
+    let dock_ticket = keyring.begin_unlock().expect("nothing in flight yet");
+
+    controller.switch_server(CRED_ENDPOINT.to_string(), never_confirm(), Box::new(|| {}));
+    pump_runtime(20);
+
+    assert!(
+        !prompt.entered.load(Ordering::SeqCst) && credentials.prompts().is_empty(),
+        "no second biometric prompt"
+    );
+    assert!(
+        !controller.switching.get_untracked(),
+        "…and Settings is idle"
+    );
+    assert!(!keyring.is_unlocked());
+    assert!(app_toasts().pending_untracked().is_empty(), "silent");
+    drop(dock_ticket);
 }

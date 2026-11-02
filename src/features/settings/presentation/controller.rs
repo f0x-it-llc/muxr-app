@@ -227,10 +227,13 @@ impl SettingsController {
         };
         if !self.keyring().is_unlocked() {
             let saved = self.saved_servers.list().unwrap_or_default();
-            if let KeyringUnlockOutcome::Refused(status) = self.keyring_unlock.unlock(&saved).await
-            {
-                report(status);
-                return false;
+            match self.keyring_unlock.unlock(&saved).await {
+                KeyringUnlockOutcome::Unlocked { .. } => {}
+                KeyringUnlockOutcome::Refused(status) => {
+                    report(status);
+                    return false;
+                }
+                KeyringUnlockOutcome::Busy | KeyringUnlockOutcome::Superseded => return false,
             }
             self.refresh_saved_servers();
             // An unreadable credential has already lost its claim by now.
@@ -333,6 +336,7 @@ impl SettingsController {
                     controller.dial_saved(server, confirm, on_switched);
                 }
                 KeyringUnlockOutcome::Refused(status) => report(status),
+                KeyringUnlockOutcome::Busy | KeyringUnlockOutcome::Superseded => {}
             }
         });
     }
