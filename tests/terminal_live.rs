@@ -1293,7 +1293,6 @@ fn a_hidden_full_size_floating_pane_is_never_targeted_by_a_tap_or_a_spread() {
     );
     assert!(!log.contains(&format!("focus_pane:{TEST_FLOATING_PANE_ID}")));
 
-    clear_verb_log_for_tests();
     let on_pinch = hooks.on_pinch.expect("zellij wires the pinch hook");
     on_pinch(
         muxr::features::terminal::presentation::term::PinchIntent::EnterFullscreen,
@@ -1310,6 +1309,11 @@ fn a_hidden_full_size_floating_pane_is_never_targeted_by_a_tap_or_a_spread() {
     assert!(
         !log.iter()
             .any(|verb| verb.contains(&format!(":{TEST_FLOATING_PANE_ID}:")))
+    );
+    assert!(
+        !log.iter()
+            .any(|verb| verb.contains(&format!(":{TEST_FLOATING_PANE_ID}"))),
+        "the hidden layer's pane never appears in the verb log, got {log:?}"
     );
     h.unmount_screen();
 

@@ -729,6 +729,10 @@ fn active_title(tabs: &[TabEntry], active: &str) -> String {
 /// hit-testable. An approximation: the wire carries no per-pane z-order beyond
 /// [`PaneEntry::floating`], so "topmost" is the last pane in wire order whose rect
 /// contains the cell, within its layer.
+///
+/// Floating panes are hit-testable only while the tab's floating layer is visible — a hidden
+/// full-size floating pane must never capture a tap or pinch (zellij shows the layer when a
+/// floating pane is focused).
 fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
     if let Some(fullscreen) = tab.panes.iter().find(|pane| pane.is_fullscreen) {
         return Some(fullscreen);
@@ -1845,6 +1849,31 @@ mod tests {
     }
 
     // `resolve_tap_action` — adds the already-focused early-out.
+
+    #[test]
+    fn a_tap_under_a_hidden_floating_pane_focuses_the_tiled_pane_beneath() {
+        let mut floating = pane_at(27, 0, 0, 80, 24);
+        floating.floating = true;
+        let mut left = pane_at(10, 0, 0, 40, 24);
+        left.focused = true;
+        let mut tab = tab_with(vec![left, pane_at(11, 40, 0, 40, 24), floating]);
+        tab.floating_panes_visible = false;
+        assert_eq!(resolve_tap_action(&tab, 45, 5), Some((11, false)));
+
+        tab.floating_panes_visible = true;
+        assert_eq!(
+            resolve_tap_action(&tab, 45, 5),
+            Some((27, false)),
+            "with the layer visible the floating pane takes the tap"
+        );
+        tab.panes[2].focused = true;
+        tab.panes[0].focused = false;
+        assert_eq!(
+            resolve_tap_action(&tab, 45, 5),
+            None,
+            "already the focused pane"
+        );
+    }
 
     #[test]
     fn a_tap_on_another_pane_answers_its_id_and_namespace() {
