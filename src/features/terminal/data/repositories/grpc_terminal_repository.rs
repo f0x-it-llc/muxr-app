@@ -851,6 +851,8 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
                 panes: tab.panes.iter().map(map_pane).collect(),
                 active: tab.active,
                 has_bell: tab.has_bell,
+                floating_panes_visible: tab.floating_panes_visible,
+                fullscreen_active: tab.fullscreen_active,
             }
         })
         .collect()

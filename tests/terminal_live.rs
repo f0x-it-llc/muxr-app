@@ -50,11 +50,11 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::data::repositories::mock_terminal_repository::{
-    add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
+    TEST_FLOATING_PANE_ID, add_test_tab, agent_watch_open_for_tests, agent_watch_opens_for_tests,
     agent_watch_stops_for_tests, clear_test_agents, clear_test_tabs, clear_verb_log_for_tests,
     delay_next_list_agents_for_tests, drop_agent_stream_for_tests, end_agent_stream_for_tests,
     fail_next_list_agents_for_tests, open_next_agent_watch_down_for_tests,
-    push_agent_event_for_tests, seed_agents, verb_log_for_tests,
+    push_agent_event_for_tests, seed_agents, seed_test_floating_overlay, verb_log_for_tests,
 };
 use muxr::features::terminal::di::{SharedTerminalRepository, expect_terminal_repository};
 use muxr::features::terminal::domain::entities::{
@@ -1264,6 +1264,71 @@ fn a_tap_on_an_unfocused_pane_focuses_it_and_summons_no_keyboard() {
         (true, false),
         "no later paint resurrects a surface the tap declined to publish"
     );
+}
+
+/// A hidden floating pane spanning the whole grid is not hit-testable: a tap and a spread over
+/// the left tiled pane address that pane, never the floating one; with the layer shown, the
+/// floating pane takes the tap again.
+#[test]
+fn a_hidden_full_size_floating_pane_is_never_targeted_by_a_tap_or_a_spread() {
+    let _g = serial();
+    let _ambient = setup();
+    seed_test_floating_overlay(Some(false));
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let scene = h.frame();
+    let hooks = debug_grid_hooks().expect("a live session is mounted");
+    let left = focused_pane_id().expect("the mock seeds one focused pane per tab");
+    let right = left + 1;
+    clear_verb_log_for_tests();
+
+    let on_content_tap = hooks.on_content_tap.expect("zellij wires the tap hook");
+    on_content_tap(u32::from(SIBLING_CELL.0), u32::from(SIBLING_CELL.1));
+    h.pump_for(Duration::from_millis(100));
+    let log = verb_log_for_tests();
+    assert!(
+        log.contains(&format!("focus_pane:{right}")),
+        "the tap focuses the tiled pane under it, got {log:?}"
+    );
+    assert!(!log.contains(&format!("focus_pane:{TEST_FLOATING_PANE_ID}")));
+
+    clear_verb_log_for_tests();
+    let on_pinch = hooks.on_pinch.expect("zellij wires the pinch hook");
+    on_pinch(
+        muxr::features::terminal::presentation::term::PinchIntent::EnterFullscreen,
+        cell_point(&scene, FOCUSED_CELL.0, FOCUSED_CELL.1),
+    );
+    h.pump_for(Duration::from_millis(100));
+    let log = verb_log_for_tests();
+    assert!(
+        log.iter()
+            .any(|verb| verb.starts_with("toggle_pane_fullscreen:")
+                && !verb.contains(&format!(":{TEST_FLOATING_PANE_ID}:"))),
+        "the spread toggles a tiled pane, got {log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|verb| verb.contains(&format!(":{TEST_FLOATING_PANE_ID}:")))
+    );
+    h.unmount_screen();
+
+    seed_test_floating_overlay(Some(true));
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    h.frame();
+    clear_verb_log_for_tests();
+    let on_content_tap = debug_grid_hooks()
+        .and_then(|hooks| hooks.on_content_tap)
+        .expect("zellij wires the tap hook");
+    on_content_tap(u32::from(FOCUSED_CELL.0), u32::from(FOCUSED_CELL.1));
+    h.pump_for(Duration::from_millis(100));
+    assert!(
+        verb_log_for_tests().contains(&format!("focus_pane:{TEST_FLOATING_PANE_ID}")),
+        "with the layer visible the floating pane takes the tap"
+    );
+    seed_test_floating_overlay(None);
 }
 
 /// …and the second tap on that same pane — now the focused one, thanks to the
@@ -2791,7 +2856,7 @@ fn pinch_hook_is_wired_for_live_zellij_only() {
 }
 
 #[test]
-fn pinch_spread_fullscreens_the_pane_under_the_focal_once() {
+fn pinch_spread_fullscreens_the_tiled_pane_never_the_seeded_floating_one_once() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_session("zellij:dev");
@@ -2801,10 +2866,10 @@ fn pinch_spread_fullscreens_the_pane_under_the_focal_once() {
     clear_verb_log_for_tests();
     on_pinch(PinchIntent::EnterFullscreen, PINCH_RIGHT);
     h.pump_until("the fullscreen verb", |_| {
-        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:41:false")
+        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:40:false")
     });
     h.pump_until("the reload", |_| {
-        pane_fullscreen_flags() == [(40, false), (41, true)]
+        pane_fullscreen_flags() == [(40, true), (41, false)]
     });
 
     h.pump_for(Duration::from_millis(150));
@@ -2851,7 +2916,7 @@ fn pinch_converge_restores_the_fullscreen_pane_and_is_a_no_op_without_one() {
 
     on_pinch(PinchIntent::EnterFullscreen, PINCH_RIGHT);
     h.pump_until("fullscreen", |_| {
-        pane_fullscreen_flags() == [(40, false), (41, true)]
+        pane_fullscreen_flags() == [(40, true), (41, false)]
     });
 
     // Let the first toggle's single-flight claim drop behind its reload.
@@ -2859,7 +2924,7 @@ fn pinch_converge_restores_the_fullscreen_pane_and_is_a_no_op_without_one() {
     clear_verb_log_for_tests();
     on_pinch(PinchIntent::ExitFullscreen, PINCH_LEFT);
     h.pump_until("the restore verb", |_| {
-        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:41:false")
+        verb_log_for_tests().last().map(String::as_str) == Some("toggle_pane_fullscreen:40:false")
     });
     h.pump_until("restored", |_| {
         pane_fullscreen_flags() == [(40, false), (41, false)]

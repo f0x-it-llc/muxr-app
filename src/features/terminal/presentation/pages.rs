@@ -724,9 +724,11 @@ fn active_title(tabs: &[TabEntry], active: &str) -> String {
 /// first half of [`resolve_tap_action`]'s routing.
 ///
 /// **Fullscreen wins outright** ([`is_fullscreen`](PaneEntry::is_fullscreen));
-/// **floating beats tiled** past that. An approximation: the wire carries no
-/// per-pane z-order beyond [`PaneEntry::floating`], so "topmost" is the last
-/// pane in wire order whose rect contains the cell, within its layer.
+/// **floating beats tiled** past that, but only while the tab's floating layer is
+/// visible ([`TabEntry::floating_panes_visible`]) — a hidden floating pane is not
+/// hit-testable. An approximation: the wire carries no per-pane z-order beyond
+/// [`PaneEntry::floating`], so "topmost" is the last pane in wire order whose rect
+/// contains the cell, within its layer.
 fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry> {
     if let Some(fullscreen) = tab.panes.iter().find(|pane| pane.is_fullscreen) {
         return Some(fullscreen);
@@ -736,7 +738,7 @@ fn resolve_tapped_pane(tab: &TabEntry, col: u32, row: u32) -> Option<&PaneEntry>
     };
     tab.panes
         .iter()
-        .filter(|pane| pane.floating)
+        .filter(|pane| pane.floating && tab.floating_panes_visible)
         .rfind(contains)
         .or_else(|| {
             tab.panes
@@ -771,25 +773,37 @@ fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)>
 
 /// The `(pane_id, is_plugin)` a pinch should toggle fullscreen on, if any.
 ///
-/// **Spread** is a no-op while any pane is already fullscreen; otherwise it
-/// targets the pane under the focal cell, falling back to the focused pane
-/// when the focal lands in a gutter. **Converge** targets the fullscreen pane
-/// and is a no-op when none is.
+/// **Spread** is a no-op while the tab is fullscreen (its own flag or any pane's);
+/// otherwise it targets the *tiled* pane under the focal cell, falling back to the
+/// focused tiled pane — never a floating pane. **Converge** is a no-op unless the
+/// tab is fullscreen, and targets the flagged pane, else the focused tiled pane
+/// (zellij's `is_fullscreen` is per querying client, the tab flag is not).
 fn resolve_pinch_target(
     tab: &TabEntry,
     intent: term::PinchIntent,
     col: u32,
     row: u32,
 ) -> Option<(u32, bool)> {
+    let fullscreen = tab.fullscreen_active || tab.panes.iter().any(|pane| pane.is_fullscreen);
+    let focused_tiled = || tab.panes.iter().find(|pane| pane.focused && !pane.floating);
     let pane = match intent {
         term::PinchIntent::EnterFullscreen => {
-            if tab.panes.iter().any(|pane| pane.is_fullscreen) {
+            if fullscreen {
                 return None;
             }
             resolve_tapped_pane(tab, col, row)
-                .or_else(|| tab.panes.iter().find(|pane| pane.focused))?
+                .filter(|pane| !pane.floating)
+                .or_else(focused_tiled)?
         }
-        term::PinchIntent::ExitFullscreen => tab.panes.iter().find(|pane| pane.is_fullscreen)?,
+        term::PinchIntent::ExitFullscreen => {
+            if !fullscreen {
+                return None;
+            }
+            tab.panes
+                .iter()
+                .find(|pane| pane.is_fullscreen)
+                .or_else(focused_tiled)?
+        }
     };
     Some((pane.id, pane.is_plugin))
 }
@@ -1579,6 +1593,8 @@ mod tests {
             panes: Vec::new(),
             active: false,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         let tabs = vec![
             tab("btop", "ed@precision: ~"),
@@ -1628,6 +1644,8 @@ mod tests {
             panes,
             active: true,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         }
     }
 
@@ -1666,7 +1684,8 @@ mod tests {
         let tiled = pane_at(10, 0, 0, 40, 24);
         let mut floating = pane_at(11, 0, 0, 40, 24);
         floating.floating = true;
-        let tab = tab_with(vec![tiled, floating]);
+        let mut tab = tab_with(vec![tiled, floating]);
+        tab.floating_panes_visible = true;
         assert_eq!(
             resolve_tapped_pane(&tab, 5, 5).map(|p| p.id),
             Some(11),
@@ -1679,13 +1698,37 @@ mod tests {
         let tiled = pane_at(10, 0, 0, 40, 24);
         let mut floating = pane_at(11, 60, 60, 10, 10);
         floating.floating = true;
-        let tab = tab_with(vec![tiled, floating]);
+        let mut tab = tab_with(vec![tiled, floating]);
+        tab.floating_panes_visible = true;
         assert_eq!(
             resolve_tapped_pane(&tab, 5, 5).map(|p| p.id),
             Some(10),
             "the floating pane exists but does not cover this cell, so tiled \
              still answers"
         );
+    }
+
+    #[test]
+    fn a_hidden_floating_pane_covering_the_cell_is_skipped_for_the_tiled_one_beneath() {
+        let mut floating = pane_at(27, 0, 1, 80, 47);
+        floating.floating = true;
+        let mut tab = tab_with(vec![
+            pane_at(10, 0, 0, 40, 24),
+            pane_at(11, 40, 0, 40, 24),
+            floating,
+        ]);
+        tab.floating_panes_visible = false;
+        assert_eq!(resolve_tapped_pane(&tab, 5, 5).map(|p| p.id), Some(10));
+        assert_eq!(resolve_tapped_pane(&tab, 45, 5).map(|p| p.id), Some(11));
+    }
+
+    #[test]
+    fn a_visible_floating_pane_wins_over_the_tiled_one_beneath() {
+        let mut floating = pane_at(27, 0, 1, 80, 47);
+        floating.floating = true;
+        let mut tab = tab_with(vec![pane_at(10, 0, 0, 40, 24), floating]);
+        tab.floating_panes_visible = true;
+        assert_eq!(resolve_tapped_pane(&tab, 5, 5).map(|p| p.id), Some(27));
     }
 
     // `resolve_pinch_target` — which pane a pinch toggles.
@@ -1735,6 +1778,53 @@ mod tests {
         assert_eq!(
             resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
             Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_under_a_hidden_floating_pane_targets_the_tiled_pane_beneath() {
+        let mut tab = two_panes();
+        let mut floating = pane_at(27, 0, 0, 80, 24);
+        floating.floating = true;
+        tab.panes.push(floating);
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_never_targets_a_visible_floating_pane() {
+        let mut tab = two_panes();
+        let mut floating = pane_at(27, 0, 0, 80, 24);
+        floating.floating = true;
+        floating.focused = true;
+        tab.panes.push(floating);
+        tab.floating_panes_visible = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((10, false)),
+            "the focused tiled pane, not the floating one under the focal"
+        );
+    }
+
+    #[test]
+    fn a_spread_with_the_tab_flag_but_no_pane_flag_is_a_no_op() {
+        let mut tab = two_panes();
+        tab.fullscreen_active = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 5, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn a_converge_with_the_tab_flag_but_no_pane_flag_targets_the_focused_tiled_pane() {
+        let mut tab = two_panes();
+        tab.fullscreen_active = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((10, false))
         );
     }
 

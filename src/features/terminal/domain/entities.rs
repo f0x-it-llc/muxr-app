@@ -152,6 +152,11 @@ pub struct TabEntry {
     pub active: bool,
     /// Whether the tab carries an unacknowledged bell — drawn only by the docked rail.
     pub has_bell: bool,
+    /// The wire's `TabMsg.floating_panes_visible`; floating panes are hit-testable only while true.
+    pub floating_panes_visible: bool,
+    /// The wire's `TabMsg.fullscreen_active`, tab-global and client-independent, unlike
+    /// [`PaneEntry::is_fullscreen`] which zellij computes per querying client.
+    pub fullscreen_active: bool,
 }
 
 impl TabEntry {
@@ -275,6 +280,8 @@ mod tests {
             panes: Vec::new(),
             active: true,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         assert_eq!(tab.pill_label(), "4 devbox");
     }
@@ -307,6 +314,8 @@ mod tests {
             panes: Vec::new(),
             active,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         let mut workspace = Workspace {
             tabs: vec![tab("a", false), tab("b", true)],
@@ -352,6 +361,8 @@ mod tests {
             panes: vec![pane.clone()],
             active: true,
             has_bell: true,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         };
         assert_eq!(tab.panes, vec![pane]);
         assert!(tab.has_bell);

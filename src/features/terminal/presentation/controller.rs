@@ -3121,6 +3121,8 @@ mod tests {
             panes: vec![pane(base, true), pane(base + 1, false)],
             active,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         }
     }
 
