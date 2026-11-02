@@ -7,7 +7,13 @@
 //! also why a piece takes an `Option<&`[`widgets::Live`]`>` rather than reading
 //! a controller itself — the splash has none to read (see [`widgets`]' parity
 //! contract).
+//!
+//! [`KeyringUnlock`] is this layer's one page-agnostic export to a sibling:
+//! the dock's one-prompt keyring unlock and the saved-row switch, which
+//! Settings drives too.
 
 pub mod controller;
 pub mod pages;
 pub mod widgets;
+
+pub use controller::{KeyringUnlock, KeyringUnlockOutcome};

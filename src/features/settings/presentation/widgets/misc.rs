@@ -1,6 +1,6 @@
 //! The two rows that don't fit `rows`'/`tokens`'/`saved_servers`' own
 //! clusters: the `session poll` group's bell switch, and the screen's
-//! closing `Disconnect` action.
+//! closing `Lock & disconnect` action.
 
 use frust::{
     AnyView, ButtonStyle, EdgeInsets, Padding, SizedBox, View, any, button, divider, flexible,
@@ -23,13 +23,14 @@ const DISCONNECT_MARGIN_BOTTOM: f64 = spacing::TIGHT;
 /// The bell row's `.set-value` — copy, not a preference: the switch beside it
 /// is the state, and this says what being on *means*.
 const BELL_VALUE: &str = "haptic + badge";
-/// The Disconnect confirmation's body copy, shared by the dialog and the
-/// Tablet card's row value.
-pub(in super::super) const DISCONNECT_COPY: &str =
-    "You will need the server's token to attach again.";
-/// The Disconnect action's label: the button, the Tablet card's button and the
-/// dialog's own title and confirm.
-pub(in super::super) const DISCONNECT_LABEL: &str = "Disconnect";
+/// The Lock & disconnect confirmation's body copy, shared by the dialog and
+/// the Tablet card's row value.
+pub(in super::super) const DISCONNECT_COPY: &str = "Locks the keyring on this device and \
+                                                    disconnects. You will unlock with Face ID \
+                                                    or your fingerprint next time.";
+/// The Lock & disconnect action's label: the button, the Tablet card's button
+/// and the dialog's own title and confirm.
+pub(in super::super) const DISCONNECT_LABEL: &str = "Lock & disconnect";
 
 /// A complete row with mark tile, flexible label/subtitle column, and the
 /// real, themed `frust_glyph::toggle` — structured like [`super::rows::settings_row`]

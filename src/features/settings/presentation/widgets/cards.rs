@@ -1,6 +1,6 @@
 //! The Tablet card grid: each settings group as a Glyph card, packed into two
 //! independent columns on a full-width window (a short card never holds its
-//! neighbour's row open), closed by the Disconnect card.
+//! neighbour's row open), closed by the Lock & disconnect card.
 
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
@@ -53,7 +53,7 @@ fn disconnect_card(colors: &Palette) -> impl View<SettingsState> {
         )
         .cross_axis(CrossAxisAlignment::Center);
     glyph_card::<SettingsState>()
-        .title(group_label("disconnect", colors))
+        .title(group_label("lock & disconnect", colors))
         .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row))
 }
 

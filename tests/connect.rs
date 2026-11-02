@@ -55,7 +55,10 @@ use muxr::features::connect::presentation::controller::{
     OfferPrompt, ServerLimitBlock, URL_ERROR_MESSAGE, VAULT_RESET_MESSAGE,
     set_biometrics_available_for_tests,
 };
-use muxr::features::connect::presentation::pages::{connect_layout, connect_page, splash_assembly};
+use muxr::features::connect::presentation::pages::{
+    ADD_SERVER_HEADING, ADD_SERVER_SUBTITLE, ADD_SERVER_TITLE, add_server_page, connect_layout,
+    connect_page, splash_assembly,
+};
 use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
 use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
 use muxr::features::connect::presentation::widgets::fields::{
@@ -260,6 +263,16 @@ impl Harness {
     /// [`Harness::mount_seeded`] over an install entitled as `tier` — see
     /// [`Tier`] for why every case but the gate's own mounts entitled.
     fn mount_tiered(tier: Tier, seed: impl FnOnce()) -> Self {
+        Self::mount_page(tier, seed, false)
+    }
+
+    /// [`Harness::mount_tiered`] mounting the add-server page (`/?mode=add`)
+    /// in the screen's place.
+    fn mount_add_page(tier: Tier, seed: impl FnOnce()) -> Self {
+        Self::mount_page(tier, seed, true)
+    }
+
+    fn mount_page(tier: Tier, seed: impl FnOnce(), add: bool) -> Self {
         let state = MuxrApp.init();
         entitle(tier);
         seed();
@@ -270,8 +283,13 @@ impl Harness {
         let nav_for_navigator = nav.clone();
         let nav_for_screen = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
+            let screen = if add {
+                any(add_server_page(nav_for_screen.clone(), None))
+            } else {
+                any(connect_page(nav_for_screen.clone()))
+            };
             any(Stack(vec![
-                any(connect_page(nav_for_screen.clone())),
+                screen,
                 any(navigator(&nav_for_navigator, empty_base_page)),
             ]))
         });
@@ -5945,4 +5963,168 @@ fn another_change_to_the_unlocked_handle_mid_save_still_takes_the_token() {
         keyring.token_for(DOCK_B).is_some(),
         "…beside the other change"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Add-server mode (`/?mode=add`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_add_server_page_is_the_form_alone_with_the_cta_and_the_qr_square() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let harness = Harness::mount_add_page(Tier::Pro, || {});
+
+    for copy in [ADD_SERVER_TITLE, ADD_SERVER_HEADING, ADD_SERVER_SUBTITLE] {
+        assert!(harness.shows_value(copy), "{copy:?} is on the page");
+    }
+    assert!(
+        !harness.shows_value("Connect to server"),
+        "…in place of `/`'s own heading"
+    );
+    assert_eq!(
+        harness.field_values().len(),
+        2,
+        "the server URL and the token"
+    );
+    let labels = node_labels(&harness.root);
+    for label in ["Back", CONNECT_LABEL, QR_LABEL] {
+        assert!(
+            labels.iter().any(|l| l == label),
+            "{label:?} is offered: {labels:?}"
+        );
+    }
+    let seeded = expect_saved_servers()
+        .list()
+        .expect("the mock store never fails");
+    assert!(!seeded.is_empty(), "the seeded rows exist…");
+    for row in &seeded {
+        assert!(
+            !harness.shows_value(&row.label),
+            "…but no saved row is listed here: {:?}",
+            row.label
+        );
+    }
+    assert!(
+        !labels.iter().any(|l| l.starts_with("Unlock")),
+        "…and there is no unlock dock: {labels:?}"
+    );
+}
+
+/// A controller in add-server mode over fresh stores, an entitled install and
+/// the app's real connection — connected to the mock host first, as the shell
+/// it covers always is.
+fn add_mode_fixture() -> Creds {
+    let connection = muxr::connection::provide_connection_controller();
+    let nav: NavigatorController<AppState> = NavigatorController::new();
+    let router = install_app_router(&nav, &nav, Arc::clone(&connection));
+    let servers = Arc::new(MockSavedServersRepository::with_servers(Vec::new()));
+    let credentials = Arc::new(MockCredentialService::new());
+    let tokens = Arc::new(MockAuthTokensRepository::seeded());
+    let entitled = Arc::new(MockEntitlementRepository::pro()) as SharedEntitlementRepository;
+    let pro = Arc::new(ProController::new(entitled));
+    let controller = Arc::new(
+        ConnectController::new(
+            Arc::clone(&servers) as _,
+            Arc::clone(&credentials) as _,
+            Arc::clone(&tokens) as _,
+            Arc::clone(&connection),
+            Arc::clone(&pro),
+            KeyringHandle::new(),
+        )
+        .in_add_mode(),
+    );
+    connection.connect(mock_target());
+    assert!(connection.connected.get_untracked());
+    Creds {
+        controller,
+        credentials,
+        servers,
+        tokens,
+        connection,
+        pro,
+        _router: router,
+    }
+}
+
+const ADDED_ENDPOINT: &str = "added.example:50051";
+
+#[test]
+fn an_add_mode_connect_moves_the_live_connection_and_records_the_new_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    let controller = &creds.controller;
+    controller.set_url(ADDED_ENDPOINT.to_string());
+    controller.set_token("added-token".to_string());
+    controller.toggle_remember();
+
+    controller.connect(
+        &app_nav(),
+        Rc::new(|_offer| panic!("remember is off: nothing to offer")),
+        ungated(),
+    );
+
+    let info = creds
+        .connection
+        .server_info
+        .get_untracked()
+        .expect("connected");
+    assert_eq!(
+        info.endpoint, ADDED_ENDPOINT,
+        "switch_to moved the live connection — connect_with would have refused it"
+    );
+    assert!(
+        creds
+            .servers
+            .list()
+            .expect("the mock store never fails")
+            .iter()
+            .any(|row| row.endpoint() == ADDED_ENDPOINT),
+        "the login wrote the new row"
+    );
+    assert_eq!(
+        controller.token.get_untracked().as_str(),
+        "",
+        "…and scrubbed the token"
+    );
+}
+
+#[test]
+fn an_add_mode_offer_saves_through_its_own_controller_with_no_saver_installed() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    let controller = Arc::clone(&creds.controller);
+    controller.set_url(ADDED_ENDPOINT.to_string());
+    controller.set_token("added-token".to_string());
+    let offered: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let seen = Rc::clone(&offered);
+
+    controller.connect(
+        &app_nav(),
+        Rc::new(move |offer: CredentialOffer| *seen.borrow_mut() = Some(offer.label)),
+        ungated(),
+    );
+    assert!(
+        offered.borrow().is_some(),
+        "remember on: the offer was raised"
+    );
+
+    // No `CredentialSaver` was ever installed on this connection — `/`'s is
+    // the only one, and the add page leaves it alone.
+    controller.accept_offer_then_navigate(&app_nav());
+    pump_until_done("the add page's own credential save", || {
+        creds.credentials.stored(ADDED_ENDPOINT).is_some()
+    });
+    pump_until_done("the saved row to claim its credential", || {
+        creds
+            .servers
+            .list()
+            .expect("the mock store never fails")
+            .iter()
+            .any(|row| row.endpoint() == ADDED_ENDPOINT && row.has_credential)
+    });
+    assert_eq!(creds.connection.credential_offer.get_untracked(), None);
 }

@@ -28,9 +28,9 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use frust::{AnyView, Component, GetUntracked, SizedBox, Theme, any};
+use frust::{AnyView, Component, GetUntracked, SizedBox, Theme, any, spawn_local};
 use frust_core::accesskit::Role;
 use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot};
 use frust_reactive::TrackedScope;
@@ -38,7 +38,11 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
-use muxr::routes::{app_nav, sessions_back_signal};
+use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
+use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
+use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::presentation::NOT_NOW_LABEL;
+use muxr::routes::{ADD_SERVER_LOCATION, app_nav, sessions_back_signal};
 use muxr::ui::dialogs::confirm_dialog;
 use muxr::ui::sheet::{SheetHandle, show_sheet};
 use muxr::{AppState, MuxrApp};
@@ -46,8 +50,8 @@ use muxr::{AppState, MuxrApp};
 mod support;
 use support::{
     EPSILON, RecScene, added, center, frame, frame_at, largest, ms, named_key,
-    node_centers_by_label, node_labels, node_roles, node_values, pointer, serial, settle, setup,
-    smallest, tap,
+    node_centers_by_label, node_labels, node_roles, node_values, pointer, pump_until, serial,
+    settle, setup, smallest, tap,
 };
 
 /// The mock connection every bar-titled test runs behind (the session guard
@@ -1278,6 +1282,138 @@ fn back_on_the_terminal_route_still_pops_to_sessions_with_no_question_asked() {
     );
     assert!(connected(), "…nor the connection");
     assert_titled(&h, HOST);
+}
+
+// ---------------------------------------------------------------------------
+// 3f — the add-server page covers the shell rather than leaving it
+// ---------------------------------------------------------------------------
+
+/// Unlock Pro and wait for the app's entitlement to say so — a free install
+/// with the seeded saved rows would meet the paywall on the add page first.
+fn unlock_pro(h: &mut Harness) {
+    mock_entitlement()
+        .expect("tests/support opted this process into the mock")
+        .set_entitlement(Entitlement::Pro);
+    let pro = expect_pro_controller();
+    let refreshing = Arc::clone(&pro);
+    spawn_local(async move { refreshing.refresh().await });
+    let scene = h.frame();
+    pump_until(
+        &mut h.root,
+        &mut h.logic,
+        &mut h.state,
+        &mut h.tcx,
+        scene,
+        || pro.is_pro_untracked(),
+    );
+}
+
+/// On `/sessions` with Pro unlocked, the add-server page pushed over it.
+fn on_add_server_page() -> Harness {
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    h.park();
+    assert_eq!(h.depth(), 2, "Connect plus the placed shell page");
+    h.push(ADD_SERVER_LOCATION);
+    h.park();
+    h
+}
+
+#[test]
+fn the_add_server_page_covers_the_placed_shell_without_a_bar_or_a_guard_bounce() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = on_add_server_page();
+
+    assert_eq!(h.depth(), 3, "pushed over the shell page, which stays");
+    assert!(
+        h.values().iter().any(|v| v == ADD_SERVER_HEADING),
+        "the add-server form is on screen: {:?}",
+        h.values()
+    );
+    assert!(
+        h.labels().iter().any(|l| l == BACK),
+        "…with its own back chevron: {:?}",
+        h.labels()
+    );
+    assert!(
+        !h.has_bar(),
+        "…and no shell bar over it: {:?}",
+        node_roles(&h.root)
+    );
+    assert!(connected(), "the live connection is untouched");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "Pro: no paywall first");
+}
+
+#[test]
+fn back_on_the_add_server_page_pops_to_sessions_with_the_shell_still_placed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+    let generation = sessions_back_signal().get();
+
+    press_back(&mut h);
+
+    assert_eq!(h.depth(), 2, "only the add page came off");
+    assert!(
+        h.has_bar(),
+        "the shell's bar is back: {:?}",
+        node_roles(&h.root)
+    );
+    assert_titled(&h, HOST);
+    assert_eq!(
+        sessions_back_signal().get(),
+        generation,
+        "the press never reached the Sessions page beneath"
+    );
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "…and asked nothing");
+    assert!(connected(), "the guard never fired: still connected");
+}
+
+#[test]
+fn the_add_server_pages_own_chevron_pops_it_the_same_way() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+
+    h.tap_label(BACK);
+    h.settle();
+    h.park();
+
+    assert_eq!(h.depth(), 2, "the shell page stays placed");
+    assert_titled(&h, HOST);
+}
+
+#[test]
+fn a_free_install_meets_the_paywall_first_and_not_now_pops_the_add_page() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+
+    h.push(ADD_SERVER_LOCATION);
+    h.park();
+    assert_eq!(h.depth(), 3);
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the seeded saved rows put a new server past the free tier"
+    );
+
+    let not_now = node_centers_by_label(&h.root, NOT_NOW_LABEL)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("the paywall offers Not now: {:?}", h.labels()));
+    h.tap_parked(not_now);
+    h.settle();
+    h.park();
+    h.settle();
+    h.park();
+
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "the paywall closed");
+    assert_eq!(h.depth(), 2, "…and took the add page with it");
+    assert_titled(&h, HOST);
+    assert!(connected());
 }
 
 // ---------------------------------------------------------------------------

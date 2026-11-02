@@ -22,9 +22,16 @@
 //! ([`Actions::revoke`]); [`widgets::token_rows`] renders a group whose
 //! animating rows may no longer be in `tokens` at all.
 //!
-//! **Disconnecting** clears [`ConnectionController`] then `go`es to `/` —
-//! both halves deliberate, since the router's session guard only fires at
-//! navigation time, never reactively.
+//! **Lock & disconnect** locks the keyring and clears [`ConnectionController`]
+//! (`lock_and_disconnect`) then `go`es to `/` — both halves deliberate, since
+//! the router's session guard only fires at navigation time, never
+//! reactively.
+//!
+//! **Saved servers**: a row other than the connected one switches to it —
+//! the free-tier verdict first (a block raises the paywall), then
+//! [`SettingsController::switch_server`], then a pop back to Sessions, which
+//! restarts on the new connection. A row with no stored credential opens the
+//! add-server page prefilled instead, as does the `+ add server` row blank.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,8 +46,12 @@ use frust::{
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
-use crate::features::connect::di::{expect_credential_service, expect_saved_servers};
+use crate::features::connect::di::{
+    KeyringHandle, expect_credential_service, expect_keyring, expect_saved_servers,
+};
+use crate::features::connect::presentation::widgets::credential_dialogs::unverified_confirm_prompt;
 use crate::features::pro::di::expect_pro_controller;
+use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use crate::features::pro::presentation::{
     NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY, UpgradeContext, show_upgrade_sheet,
@@ -50,13 +61,13 @@ use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
 use crate::responsive::Responsive;
-use crate::routes::{Nav, app_nav};
+use crate::routes::{ADD_SERVER_LOCATION, CONNECT_SERVER_QUERY_KEY, Nav, app_nav};
 use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::show_sheet;
 use crate::ui::toasts::app_toasts;
 
-use super::controller::SettingsController;
+use super::controller::{SettingsController, saved_server_rows};
 use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
 use super::widgets::{
     self, DISCONNECT_COPY, DISCONNECT_LABEL, FontPicker, FontRow, Picker, PickerKind, RowAction,
@@ -135,8 +146,10 @@ pub struct Actions {
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SettingsController>,
     /// The app-scoped connection handle: the `connection` group reads it,
-    /// and Disconnect clears it.
+    /// and Lock & disconnect clears it.
     pub connection: Arc<ConnectionController>,
+    /// `connect`'s app-scoped keyring, which Lock & disconnect locks.
+    pub keyring: KeyringHandle,
     /// The app-scoped entitlement handle: the `muxr pro` group reads its
     /// `entitlement`, and both of that group's actions run through it.
     pub pro: Arc<ProController>,
@@ -149,16 +162,25 @@ impl Component for SettingsScreen {
     type State = SettingsState;
 
     fn init(&self) -> SettingsState {
-        let controller = use_controller::<SettingsController, AppFailure>(|| {
-            SettingsController::new(
-                expect_auth_tokens_repository(),
-                expect_preferences_repository(),
-                // `connect`'s two stores — the cross-feature reach the
-                // terminal screen already makes (see `SettingsController`'s
-                // module docs for why the credential rows live here).
-                expect_saved_servers(),
-                expect_credential_service(),
-            )
+        let keyring = expect_keyring();
+        let connection = expect_connection_controller();
+        let controller = use_controller::<SettingsController, AppFailure>({
+            let keyring = keyring.clone();
+            let connection = Arc::clone(&connection);
+            move || {
+                SettingsController::new(
+                    expect_auth_tokens_repository(),
+                    expect_preferences_repository(),
+                    // `connect`'s two stores and its keyring — the
+                    // cross-feature reach the terminal screen already makes
+                    // (see `SettingsController`'s module docs for why the
+                    // credential rows live here).
+                    expect_saved_servers(),
+                    expect_credential_service(),
+                    keyring,
+                    connection,
+                )
+            }
         });
 
         use_failure_listener(controller.core().failures(), |failure: AppFailure| {
@@ -180,7 +202,8 @@ impl Component for SettingsScreen {
                 overlays: self.overlays.clone(),
                 app_nav: app_nav(),
                 controller,
-                connection: expect_connection_controller(),
+                connection,
+                keyring,
                 pro,
                 scrambles: RevokeAnimations::new(),
             },
@@ -234,14 +257,16 @@ impl Component for SettingsScreen {
         token_group.push(any(widgets::create_token_row(&colors, !read_only))); // erasure: keep accumulator into Vec<AnyView>
         groups.push(("auth tokens", token_group));
 
-        let saved_group = if saved.is_empty() {
-            vec![any(widgets::no_saved_servers_row(&colors))] // erasure: keep accumulator into Vec<AnyView>
-        } else {
-            saved
+        let active = info.as_ref().map(|info| info.endpoint.as_str());
+        let mut saved_group = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
+        if saved.is_empty() {
+            saved_group.push(any(widgets::no_saved_servers_row(&colors)));
+        }
+        saved_group.extend(
+            saved_server_rows(&saved, active)
                 .iter()
-                .map(|server| any(widgets::saved_server_item(server, &colors))) // erasure: keep accumulator into Vec<AnyView>
-                .collect()
-        };
+                .map(|row| any(widgets::saved_server_item(row, &colors))),
+        );
         groups.push(("saved servers", saved_group));
 
         groups.push((
@@ -721,14 +746,15 @@ impl Actions {
         );
     }
 
-    /// Open the Disconnect confirmation. Confirming both clears the
-    /// connection *and* navigates: the router's session guard only runs at
-    /// navigation time, so it is the backstop that keeps a later deep link
-    /// out — not the mechanism that gets the user to Connect. `go` rather
-    /// than `push`, since a disconnected session is a new stack, not a
+    /// Open the Lock & disconnect confirmation. Confirming locks the keyring,
+    /// clears the connection *and* navigates: the router's session guard only
+    /// runs at navigation time, so it is the backstop that keeps a later deep
+    /// link out — not the mechanism that gets the user to Connect. `go`
+    /// rather than `push`, since a disconnected session is a new stack, not a
     /// deeper one.
     pub fn open_disconnect_dialog(&self) {
         let connection = Arc::clone(&self.connection);
+        let keyring = self.keyring.clone();
         let app_nav = self.app_nav.clone();
         confirm_dialog(
             &self.overlays,
@@ -736,10 +762,57 @@ impl Actions {
             DISCONNECT_COPY,
             DISCONNECT_LABEL,
             move |_app: &mut AppState| {
-                connection.disconnect();
+                connection.lock_and_disconnect(&keyring);
                 app_nav.go(CONNECT_ROUTE);
             },
         );
+    }
+
+    /// A saved row other than the connected one was tapped: switch to it —
+    /// see the [module docs](self). The verdict comes first, so a blocked
+    /// row raises the paywall (whose unlock retries this tap) and no unlock
+    /// prompt; then the switch, landing back on Sessions.
+    pub fn switch_server(&self, endpoint: &str) {
+        let saved = self.controller.saved.get_untracked();
+        let Some(server) = saved.iter().find(|server| server.endpoint() == endpoint) else {
+            return;
+        };
+        if !server.has_credential {
+            self.open_add_server(Some(endpoint));
+            return;
+        }
+        if let ServerLimitVerdict::Blocked { .. } = self.pro.verdict_for(&saved, endpoint) {
+            let retry = self.clone();
+            let endpoint = endpoint.to_string();
+            show_upgrade_sheet(
+                &self.overlays,
+                Arc::clone(&self.pro),
+                UpgradeContext {
+                    on_unlocked: Rc::new(move || retry.switch_server(&endpoint)),
+                    server_limit: None,
+                },
+            );
+            return;
+        }
+        let nav = self.app_nav.clone();
+        self.controller.switch_server(
+            endpoint.to_string(),
+            unverified_confirm_prompt(&self.overlays),
+            // Settings is only ever pushed from Sessions, so a pop is the way
+            // back to it.
+            Box::new(move || nav.pop()),
+        );
+    }
+
+    /// Push the add-server page over the shell, prefilled from the saved
+    /// row at `endpoint` when one is named.
+    pub fn open_add_server(&self, endpoint: Option<&str>) {
+        match endpoint {
+            Some(endpoint) => self.app_nav.push(&format!(
+                "{ADD_SERVER_LOCATION}&{CONNECT_SERVER_QUERY_KEY}={endpoint}"
+            )),
+            None => self.app_nav.push(ADD_SERVER_LOCATION),
+        }
     }
 
     /// Restore prior purchases from the `muxr pro` group's `restore` row —
@@ -853,12 +926,22 @@ pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &st
     state.actions.open_forget_server_dialog(endpoint);
 }
 
+/// A saved server row other than the connected one.
+pub(super) fn switch_server(state: &mut SettingsState, endpoint: &str) {
+    state.actions.switch_server(endpoint);
+}
+
+/// The `+ add server` row.
+pub(super) fn open_add_server(state: &mut SettingsState) {
+    state.actions.open_add_server(None);
+}
+
 /// The `restore` button on the `muxr pro` group's restore row.
 pub(super) fn restore_purchases(state: &mut SettingsState) {
     state.actions.restore_purchases();
 }
 
-/// The `Disconnect` button.
+/// The `Lock & disconnect` button.
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
 }

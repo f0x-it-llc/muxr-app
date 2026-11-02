@@ -40,6 +40,7 @@ use tokio::sync::{Notify, broadcast};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
+use crate::features::connect::di::{KeyringHandle, expect_keyring};
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
@@ -249,6 +250,9 @@ pub struct Actions {
     pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SessionsController>,
+    /// `connect`'s app-scoped keyring, which the back press's confirmed
+    /// disconnect locks.
+    pub keyring: KeyringHandle,
 }
 
 /// Resolves the live session-poll cadence — `settings`' `layout_refresh_secs`
@@ -443,6 +447,7 @@ impl Component for SessionsScreen {
                 overlays: self.overlays.clone(),
                 app_nav: app_nav(),
                 controller,
+                keyring: expect_keyring(),
             },
             connection,
             heartbeat,
@@ -832,9 +837,11 @@ impl Actions {
     /// screen takes that no gesture on it can reach.
     ///
     /// Confirming does both halves the connection contract splits: the
-    /// controller closes the connection and clears its signals, and the
-    /// caller navigates — through [`Nav`], so the shell bar's mirror drops
-    /// this route's entry on the same frame rather than a reconcile later.
+    /// controller locks the keyring, closes the connection and clears its
+    /// signals (`lock_and_disconnect`, the same leave as Settings' Lock &
+    /// disconnect), and the caller navigates — through [`Nav`], so the shell
+    /// bar's mirror drops this route's entry on the same frame rather than a
+    /// reconcile later.
     /// Every dismissal route does nothing at all: the polls come back
     /// through [`Component::build`]'s own depth observation.
     pub fn open_disconnect_confirm(&self, connection: &Arc<ConnectionController>) {
@@ -847,6 +854,7 @@ impl Actions {
             .map(|info| widgets::host_of(&info.endpoint).to_string())
             .unwrap_or_else(|| DISCONNECT_UNKNOWN_HOST.to_string());
         let connection = Arc::clone(connection);
+        let keyring = self.keyring.clone();
         let app_nav = self.app_nav.clone();
         confirm_dialog(
             &self.overlays,
@@ -854,7 +862,7 @@ impl Actions {
             disconnect_message(&host),
             DISCONNECT_CONFIRM_LABEL,
             move |_app: &mut AppState| {
-                connection.disconnect();
+                connection.lock_and_disconnect(&keyring);
                 app_nav.pop();
             },
         );
