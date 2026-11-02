@@ -57,14 +57,16 @@ const FRAME_NS_120: u64 = 8_333_333;
 const REDUCED_HOLD_MS: f64 = 200.0;
 /// The heading piece's stagger (`spec::PIECE_DELAYS_MS[2]`, likewise).
 const HEADING_DELAY_MS: f64 = 260.0;
-/// How many blurred halos a **settled** Connect screen paints, land flashes excluded: one per
-/// saved-server row's `.dot-ok` glow — three, since piece 7 renders the real repository's list and
-/// every headless suite runs on `MockSavedServersRepository::seeded`'s three rigs. Asserting that
-/// exact residue rather than zero keeps the claim that every *land flash* has faded: one still
-/// running would push the count above three.
-const RESTING_SHADOWS: usize = 3;
+/// How many blurred halos a **settled** Connect screen paints: none. The saved rows' `.dot-ok`
+/// glow went with the status dot (each row now leads with a lock vector icon, which paints no
+/// shadow), and the unlock dock and the QR square paint none either. Measured on the seeded store
+/// (three rigs, dock mounted) and on an empty one: both 0. A land flash still running would push
+/// the count above zero, so this pins the claim that every *land flash* has faded.
+const RESTING_SHADOWS: usize = 0;
+/// The rows a settled screen paints for `MockSavedServersRepository::seeded`'s three rigs.
+const SEEDED_ROWS: usize = 3;
 /// Every frame of a rain-less run stays under this many glyph runs: a settled Connect screen's own
-/// 24 (measured, seeded store) plus slack — the burst adds 14 over it, a rain field hundreds.
+/// 26 (measured, seeded store) plus slack — the burst adds 14 over it, a rain field hundreds.
 const RAIN_FREE_CEILING: usize = 44;
 /// The burst's particle count (`spec::BURST_COUNT`, also `pub(crate)`).
 const BURST_COUNT: usize = 14;
@@ -245,6 +247,18 @@ fn occurrences(haystack: &[u32], needle: &[u32]) -> usize {
         .count()
 }
 
+/// How many saved-server rows a scene paints, counted by their meta lines. Each row's meta line is
+/// `"{trust} · {recency}"` at `label_small`, leading with its trust mode's label; nothing else on a
+/// settled Connect screen shapes one of those three labels. So the occurrences count the rows, one
+/// per row whatever its mode, and an empty store counts none.
+fn saved_rows_painted(scene: &Recorder) -> usize {
+    let style = frust_glyph::baseline().type_scale.label_small.clone();
+    ["no-verification TLS", "system TLS", "pinned TLS"]
+        .iter()
+        .map(|label| occurrences(&scene.glyph_ids, &glyph_ids(label, &style)))
+        .sum()
+}
+
 /// The heading piece's exact style, so its shaped ids match what `widgets::badge::heading` paints.
 fn heading_ids() -> Vec<u32> {
     let theme = frust_glyph::baseline();
@@ -411,7 +425,7 @@ fn the_sequence_walks_icon_then_burst_and_assembly_off_one_clock() {
     assert_eq!(last.images, 0, "the icon is long gone");
     assert_eq!(
         last.shadows, RESTING_SHADOWS,
-        "every land flash has faded, leaving only the saved row's own dot glow"
+        "every land flash has faded: a settled overlay paints no blurred halo"
     );
     assert!(
         !needs_frame,
@@ -496,23 +510,26 @@ fn a_store_with_no_saved_servers_assembles_no_saved_card_at_all() {
 
     // Regression: the splash used to paint one hardcoded "Home rig" row whatever the store held, so
     // an empty-store user watched a card assemble then vanish at the route handoff. Piece 7's rows
-    // are an input now — empty list in, empty list out. Each row's status dot is a glowing swatch
-    // (`draw_shadow`) and nothing else blurs on a settled overlay, so the count *is* the rows.
+    // are an input now — empty list in, empty list out. A settled overlay paints no blurred halo
+    // any more (the rows' status dot is a lock vector icon), so the rows are counted by what each
+    // one paints exactly once: its meta line, led by its trust mode's label (`saved_rows_painted`).
     let end = frame_at(sequence_end_ms() + 200.0);
     let (empty, _) = mount_sequence_at(FRAME_NS, false, end, Some(Vec::new()));
     let (last, _) = empty.last().expect("frames were painted");
     assert_eq!(
-        last.shadows, 0,
+        saved_rows_painted(last),
+        0,
         "no saved servers must assemble no saved rows"
     );
 
-    // Control: the seeded store still paints one dot per stored rig, so the assertion above is
-    // about the data, not the dot having stopped painting.
+    // Control: the seeded store still paints one meta line per stored rig, so the assertion above
+    // is about the data, not the row having stopped painting.
     let (seeded, _) = mount_sequence_at(FRAME_NS, false, end, None);
     let (last_seeded, _) = seeded.last().expect("frames were painted");
     assert_eq!(
-        last_seeded.shadows, RESTING_SHADOWS,
-        "the seeded store's rows still assemble"
+        saved_rows_painted(last_seeded),
+        SEEDED_ROWS,
+        "the seeded store's rows still assemble, one per rig"
     );
 }
 
@@ -695,8 +712,7 @@ fn reduced_motion_collapses_the_sequence_on_its_first_frame() {
         assert_eq!(scene.images, 0, "no icon animation");
         assert_eq!(
             scene.shadows, RESTING_SHADOWS,
-            "no land flashes — only the resting dot glow, which is chrome \
-             rather than motion and so survives reduced motion"
+            "no land flash under reduced motion, and the settled screen paints no halo either"
         );
         // The firing frame asks for the one frame that acts on its write; nothing left after.
         assert!(
