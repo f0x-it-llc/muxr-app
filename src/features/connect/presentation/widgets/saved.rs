@@ -325,7 +325,7 @@ fn delete_label(label: &str) -> String {
     format!("Delete {label}")
 }
 
-/// The saved-server rows the splash's copy of piece 7 renders.
+/// The saved-server rows the splash's copy of piece 8 renders.
 ///
 /// Read once per launch by the composition root and carried through every
 /// rebuild, since the real store is a preferences read plus a JSON parse.

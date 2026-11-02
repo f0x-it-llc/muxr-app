@@ -136,7 +136,7 @@ fn backed<S: 'static, V: View<S>>(child: V, colors: &Palette) -> impl View<S> + 
 }
 
 /// `live` is `Some(..)` for the screen and `None` for the splash (the parity
-/// contract); `saved` is piece 7's rows.
+/// contract); `saved` is piece 8's rows.
 pub fn connect_pieces_with<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,

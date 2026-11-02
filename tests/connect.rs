@@ -37,16 +37,18 @@ use peniko::Color;
 use muxr::connection::{
     ConnectTarget, ConnectionController, TrustMode, expect_connection_controller,
 };
+use muxr::failure::AppFailure;
 use muxr::features::connect::data::repositories::MockCredentialService;
 use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
 use muxr::features::connect::di::{
     KeyringHandle, expect_keyring, expect_saved_servers, mock_credentials,
 };
 use muxr::features::connect::domain::entities::{
-    CredentialStatus, PairingPayload, SavedServer, epoch_millis,
+    CredentialStatus, PairingPayload, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential,
+    UnlockedKeyring, epoch_millis,
 };
 use muxr::features::connect::domain::keyring::Keyring;
-use muxr::features::connect::domain::repositories::SavedServersRepository;
+use muxr::features::connect::domain::repositories::{CredentialService, SavedServersRepository};
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::{
     ConnectController, ConnectRetry, CredentialOffer, GatePrompt, MANUAL_RESET_MESSAGE,
@@ -1070,7 +1072,7 @@ fn the_getting_started_affordance_sits_in_the_top_trailing_corner() {
     let _ambient = setup();
     let harness = Harness::mount();
 
-    // Opposite the QR FAB: a store-front visitor's first tap, clear of the
+    // The top-trailing corner: a store-front visitor's first tap, clear of the
     // form and of the mark at the top of the column.
     let info = harness.bounds("the getting-started affordance", info_button);
     assert!(
@@ -1622,7 +1624,7 @@ impl Form {
             on_scan: Rc::new(|| {}),
         };
         let logic: FormLogic = Box::new(move |_state: &mut ()| {
-            // Piece 7's rows are an input to the builder now (the splash passes
+            // Piece 8's rows are an input to the builder now (the splash passes
             // its own snapshot of the same repository); the screen's own source
             // is this tracked read, so the fixture takes it too.
             let saved = live.controller.saved.get();
@@ -5767,4 +5769,144 @@ fn the_tablet_list_closes_on_the_same_dock_with_informational_rows() {
     harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
     harness.pump_until("the dock's connect", |_| connected());
     assert_eq!(dock_credentials().prompts(), vec![UNLOCK_TWO.to_string()]);
+}
+
+/// A held biometric prompt: `store_in_vault` waits here, after the snapshot
+/// was taken, until the test releases it.
+#[derive(Default)]
+struct HeldPrompt {
+    entered: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    waker: Mutex<Option<std::task::Waker>>,
+}
+
+impl HeldPrompt {
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            waker.wake();
+        }
+    }
+}
+
+struct Hold<'a>(&'a HeldPrompt);
+
+impl std::future::Future for Hold<'_> {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let held = self.0;
+        held.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if held.released.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::task::Poll::Ready(());
+        }
+        *held.waker.lock().unwrap_or_else(|p| p.into_inner()) = Some(cx.waker().clone());
+        std::task::Poll::Pending
+    }
+}
+
+/// [`MockCredentialService`] whose unlocked save holds on [`HeldPrompt`].
+struct HeldVault {
+    inner: Arc<MockCredentialService>,
+    prompt: Arc<HeldPrompt>,
+}
+
+#[clean_signals::async_trait]
+impl CredentialService for HeldVault {
+    async fn store(&self, request: StoreRequest) -> CredentialStatus {
+        self.inner.store(request).await
+    }
+
+    async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential {
+        self.inner.unlock(request).await
+    }
+
+    async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring {
+        self.inner.unlock_all(reason, endpoints).await
+    }
+
+    async fn store_in_vault(
+        &self,
+        request: StoreRequest,
+        keyring: &mut Keyring,
+    ) -> CredentialStatus {
+        Hold(&self.prompt).await;
+        self.inner.store_in_vault(request, keyring).await
+    }
+
+    async fn delete_from_vault(
+        &self,
+        server_key: String,
+        keyring: &mut Keyring,
+    ) -> Result<(), AppFailure> {
+        self.inner.delete_from_vault(server_key, keyring).await
+    }
+
+    async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
+        self.inner.delete(server_key).await
+    }
+
+    async fn reset_vault(&self) -> Result<(), AppFailure> {
+        self.inner.reset_vault().await
+    }
+}
+
+#[test]
+fn a_lock_during_the_unlocked_save_keeps_the_token_out_of_the_locked_handle() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    keyring.publish(Keyring::new());
+    let prompt = Arc::new(HeldPrompt::default());
+    let creds = keyring_fixture(Vec::new(), &keyring);
+    let held = Arc::new(HeldVault {
+        inner: Arc::clone(&creds.credentials),
+        prompt: Arc::clone(&prompt),
+    });
+    let controller = Arc::new(ConnectController::new(
+        Arc::clone(&creds.servers) as _,
+        held as _,
+        Arc::clone(&creds.tokens) as _,
+        Arc::clone(&creds.connection),
+        Arc::clone(&creds.pro),
+        keyring.clone(),
+    ));
+    let creds = Creds {
+        controller,
+        ..creds
+    };
+
+    connect_fixture(&creds);
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+    creds.connection.accept_credential_offer();
+    pump_until_done("the save to reach its prompt", || {
+        prompt.entered.load(std::sync::atomic::Ordering::SeqCst)
+    });
+
+    creds.connection.lock_and_disconnect(&keyring);
+    prompt.release();
+    pump_until_done("the save to settle", || {
+        stored_row(&creds.servers).has_credential
+    });
+
+    assert!(
+        creds.credentials.stored(CRED_ENDPOINT).is_some(),
+        "the vault write itself went through"
+    );
+    assert!(
+        !keyring.is_unlocked() && keyring.endpoints().is_empty(),
+        "a handle locked mid-prompt stays locked and empty: {:?}",
+        keyring.endpoints()
+    );
 }

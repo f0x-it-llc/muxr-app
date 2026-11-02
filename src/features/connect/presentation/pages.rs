@@ -72,7 +72,7 @@ pub type SplashLayout<S> = Box<dyn FnOnce(Vec<AnyView<S>>) -> AnyView<S>>;
 /// layout they assemble through, for the window's size class — read here,
 /// once per build, exactly as [`ConnectScreen`]'s own `build` reads it, so
 /// the overlay's last frame is the route's first on every class. `saved` is
-/// piece 7's rows (the parity contract).
+/// piece 8's rows (the parity contract).
 pub fn splash_assembly<S: 'static>(
     theme: &frust::Theme,
     saved: &[SavedServer],
