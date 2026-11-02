@@ -148,6 +148,24 @@ impl KeyringHandle {
         self.guard().endpoints()
     }
 
+    /// A token-by-token copy of the held keyring, taken under one short lock.
+    ///
+    /// The only way to hand the keyring to an async credential call:
+    /// `store_in_vault`/`delete_from_vault` hold their `&mut Keyring` across an
+    /// await, so the handle's mutex must never be held for them. The copy is
+    /// independent of the handle; a caller applies the outcome back
+    /// ([`Self::insert`]/[`Self::remove`]) only on success.
+    pub fn snapshot(&self) -> Keyring {
+        let held = self.guard();
+        let mut copy = Keyring::new();
+        for endpoint in held.endpoints() {
+            if let Some(token) = held.token_for(&endpoint) {
+                copy.insert(endpoint, token);
+            }
+        }
+        copy
+    }
+
     pub fn is_unlocked(&self) -> bool {
         self.unlocked.get_untracked()
     }
@@ -210,6 +228,33 @@ mod tests {
         assert!(handle.remove("a.example:1"));
         assert!(!handle.remove("a.example:1"));
         assert_eq!(handle.generation.get_untracked(), 2);
+    }
+
+    #[test]
+    fn a_snapshot_is_an_independent_copy_that_still_redacts() {
+        let handle = KeyringHandle::new();
+        handle.insert("a.example:1", token("tok-a"));
+        let mut copy = handle.snapshot();
+        assert_eq!(copy.token_for("a.example:1").unwrap().as_str(), "tok-a");
+
+        copy.insert("b.example:2", token("tok-b"));
+        copy.remove("a.example:1");
+        assert_eq!(
+            handle.endpoints(),
+            vec!["a.example:1"],
+            "the handle is untouched"
+        );
+        handle.lock();
+        assert!(
+            copy.token_for("b.example:2").is_some(),
+            "…and so is the copy"
+        );
+
+        let debug = format!("{copy:?}");
+        assert!(
+            debug.contains("b.example:2") && !debug.contains("tok-b"),
+            "{debug}"
+        );
     }
 
     #[test]

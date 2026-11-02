@@ -1,5 +1,9 @@
-//! Piece 7 — `.saved-hdr` + `.saved-row`: the saved-server list, and the
-//! snapshot of it the splash renders.
+//! Piece 8 — `.saved`: the saved-server list closed by the unlock dock, and
+//! the snapshot of it the splash renders.
+//!
+//! The rows are informational: the dock unlocks and dials, so a row tap does
+//! nothing — except where the device has no biometric gate, when the dock is
+//! disabled and each row keeps its own tap-to-unlock.
 
 use std::rc::Rc;
 
@@ -10,18 +14,19 @@ use frust::{
 };
 use frust_glyph::{BadgeVariant, avatar, badge};
 
+use super::super::controller::DockState;
+use super::keyring_dock::{DockActions, keyring_dock};
 use super::pairing::READ_ONLY_CHIP;
 use super::pro_gate::row_is_locked;
 use super::{Live, backed, block_column, centered_row, h_gap, v_gap};
 use crate::connection::TrustMode;
 use crate::features::connect::di::saved_servers;
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
-use crate::ui::paint::{GLOW_SPREAD, GLOW_STD_DEV, HAIRLINE};
+use crate::ui::paint::HAIRLINE;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
-const DOT: f64 = 7.0;
 const SAVED_ROW_PAD_Y: f64 = 11.0;
 /// The rule's weight.
 const RULE_HEIGHT: f64 = 1.0;
@@ -31,19 +36,16 @@ const DELETE_TARGET: f64 = 44.0;
 /// chrome beside the row's content, not a second action button.
 const DELETE_MARK: f64 = 18.0;
 
-/// The chip a saved row carries when a gated credential is stored for it — also
-/// what says a tap will raise a prompt rather than refill the form.
-pub const CREDENTIAL_CHIP: &str = "credential";
 /// What the Tablet list says in place of rows when nothing is saved.
 pub const NO_SAVED_SERVERS: &str = "no saved servers";
-/// The tag a row past the free tier's limit carries, beside its lock mark.
+/// The tag a row past the free tier's limit carries.
 pub const PRO_TAG: &str = "pro";
-/// The lock mark leading the pro tag.
+/// The lock mark leading every phone row: its credential sits in the keyring.
 const LOCK_MARK: f64 = 12.0;
 /// The Tablet row's leading initial box.
 const AVATAR: f64 = 26.0;
 
-/// Piece 7 — the saved-server list, each row tappable to refill the form.
+/// Piece 8 — the saved-server list, then the dock when anything is saved.
 /// `servers` is handed down rather than read here (the parity contract); an
 /// empty list renders the header alone on both sides.
 pub fn saved_address<S: 'static>(
@@ -64,7 +66,25 @@ pub fn saved_address<S: 'static>(
             theme, colors, server, servers, index, now, live,
         )));
     }
+    if !servers.is_empty() {
+        children.push(any(dock(theme, colors, servers, live)));
+    }
     backed(block_column::<S, _>(children), colors)
+}
+
+/// The dock as `live` wires it — idle and unwired for the splash.
+fn dock<S: 'static>(
+    theme: &Theme,
+    colors: &Palette,
+    servers: &[SavedServer],
+    live: Option<&Live>,
+) -> impl View<S> + use<S> {
+    let state = live.map_or(DockState::Idle, |live| live.controller.dock_state());
+    let actions = live.map(|live| DockActions {
+        on_unlock: Rc::clone(&live.on_unlock),
+        on_reset: Rc::clone(&live.on_reset_credentials),
+    });
+    keyring_dock(theme, colors, servers, &state, actions.as_ref())
 }
 
 /// An uppercase micro label followed by a hairline rule filling the rest of the row.
@@ -92,12 +112,29 @@ fn trust_meta_label(mode: TrustMode) -> &'static str {
     }
 }
 
-/// Status dot, `host:port` over its meta line, the credential and read-only
-/// badges, and the trailing delete affordance. Tapping a row with a stored
-/// credential unlocks and reconnects rather than refilling the form.
+/// `body` behind the row's own tap, wired only where the dock cannot unlock
+/// (see the [module docs](self)); the splash has none either.
+fn tappable<S: 'static, V: View<S>>(
+    body: V,
+    live: Option<&Live>,
+    index: usize,
+) -> impl View<S> + use<S, V> {
+    let row_tap = live
+        .filter(|live| !live.controller.biometrics_available())
+        .map(|live| Rc::clone(&live.on_saved_tap));
+    match row_tap {
+        None => Either::Left(body),
+        Some(on_tap) => {
+            Either::Right(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
+        }
+    }
+}
+
+/// The lock mark, `host:port` over `trust · recency`, the read-only chip and
+/// pro tag, and the trailing delete affordance.
 ///
-/// The delete affordance sits beside the row's own tap recognizer, not
-/// inside it: a nested press target would fire the row's tap regardless
+/// The delete affordance sits beside the row's own (fallback) tap recognizer,
+/// not inside it: a nested press target would fire the row's tap regardless
 /// (that recognizer captures on `Down`, fires on its own `Up`). Siblings are
 /// disjoint by construction.
 fn saved_row<S: 'static>(
@@ -110,20 +147,12 @@ fn saved_row<S: 'static>(
     live: Option<&Live>,
 ) -> impl View<S> + use<S> {
     let meta = format!(
-        "{} · {} · port {}",
+        "{} · {}",
         trust_meta_label(server.trust_mode),
         server.last_used_label(now_ms),
-        server.port
     );
     let mut items = vec![
-        // The glow is part of the dot, not decoration — it's what reads as "live" at 7px.
-        inflexible(
-            colored_box::<S>()
-                .size(DOT, DOT)
-                .radius(DOT / 2.0)
-                .fill(colors.success)
-                .glow(colors.success, GLOW_STD_DEV, GLOW_SPREAD),
-        ),
+        inflexible(icon(icons::LOCK).size(LOCK_MARK).color(colors.fg_dim)),
         inflexible(h_gap::<S>(spacing::MD)),
         flexible(
             1,
@@ -134,20 +163,13 @@ fn saved_row<S: 'static>(
             )),
         ),
     ];
-    items.extend(chips::<S>(colors, server, locked(server, servers, live)));
+    items.extend(chips::<S>(server, locked(server, servers, live)));
     let body = Padding(
         EdgeInsets::symmetric(0.0, SAVED_ROW_PAD_Y),
         centered_row::<S>(items),
     );
-    let tappable = match live {
-        None => Either::Left(body),
-        Some(live) => {
-            let on_tap = Rc::clone(&live.on_saved_tap);
-            Either::Right(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
-        }
-    };
     centered_row::<S>(vec![
-        flexible(1, tappable),
+        flexible(1, tappable(body, live, index)),
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),
     ])
@@ -159,33 +181,25 @@ fn locked(server: &SavedServer, servers: &[SavedServer], live: Option<&Live>) ->
     live.is_some_and(|live| row_is_locked(server, servers, live.controller.entitlement()))
 }
 
-/// The credential and read-only chips a row carries, then the pro tag when
-/// `locked`, each led by its gap.
-fn chips<S: 'static>(colors: &Palette, server: &SavedServer, locked: bool) -> Vec<FlexChild<S>> {
+/// The read-only chip, then the pro tag when `locked`, each led by its gap.
+fn chips<S: 'static>(server: &SavedServer, locked: bool) -> Vec<FlexChild<S>> {
     let mut items = Vec::new();
-    for (shown, chip) in [
-        (server.has_credential, CREDENTIAL_CHIP),
-        (server.read_only, READ_ONLY_CHIP),
+    for (shown, chip, variant) in [
+        (server.read_only, READ_ONLY_CHIP, BadgeVariant::Neutral),
+        (locked, PRO_TAG, BadgeVariant::Accent),
     ] {
         if shown {
             items.push(inflexible(h_gap::<S>(spacing::MD)));
-            items.push(inflexible(badge(chip, BadgeVariant::Neutral)));
+            items.push(inflexible(badge(chip, variant)));
         }
-    }
-    if locked {
-        items.push(inflexible(h_gap::<S>(spacing::MD)));
-        items.push(inflexible(
-            icon(icons::LOCK).size(LOCK_MARK).color(colors.amber),
-        ));
-        items.push(inflexible(h_gap::<S>(spacing::MICRO)));
-        items.push(inflexible(badge(PRO_TAG, BadgeVariant::Accent)));
     }
     items
 }
 
-/// The Tablet variant of piece 7: the same header over card rows, or a muted
-/// line when nothing is saved. Tap, delete and chips wire exactly as the
-/// phone row's do, and `live` is `None` for the splash exactly as there.
+/// The Tablet variant of piece 8: the same header over card rows (or a muted
+/// line when nothing is saved), closed by the same dock. Chips, delete and the
+/// fallback tap wire exactly as the phone row's do, and `live` is `None` for
+/// the splash exactly as there.
 pub fn tablet_saved_list<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -210,6 +224,9 @@ pub fn tablet_saved_list<S: 'static>(
         children.push(any(tablet_saved_row(
             theme, colors, server, servers, index, now, live,
         )));
+    }
+    if !servers.is_empty() {
+        children.push(any(dock(theme, colors, servers, live)));
     }
     block_column::<S, _>(children)
 }
@@ -251,17 +268,9 @@ fn tablet_saved_row<S: 'static>(
             )),
         ),
     ];
-    items.extend(chips::<S>(colors, server, locked(server, servers, live)));
-    let body = centered_row::<S>(items);
-    let tappable = match live {
-        None => Either::Left(body),
-        Some(live) => {
-            let on_tap = Rc::clone(&live.on_saved_tap);
-            Either::Right(GestureDetector(body).on_tap(move |_state: &mut S| on_tap(index)))
-        }
-    };
+    items.extend(chips::<S>(server, locked(server, servers, live)));
     let content = centered_row::<S>(vec![
-        flexible(1, tappable),
+        flexible(1, tappable(centered_row::<S>(items), live, index)),
         inflexible(h_gap::<S>(spacing::MD)),
         inflexible(delete_affordance(colors, server, index, live)),
     ]);
@@ -316,7 +325,7 @@ fn delete_label(label: &str) -> String {
     format!("Delete {label}")
 }
 
-/// The saved-server rows the splash's copy of piece 7 renders.
+/// The saved-server rows the splash's copy of piece 8 renders.
 ///
 /// Read once per launch by the composition root and carried through every
 /// rebuild, since the real store is a preferences read plus a JSON parse.
