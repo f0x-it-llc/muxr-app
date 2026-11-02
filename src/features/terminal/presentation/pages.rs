@@ -791,8 +791,11 @@ fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)>
 /// **Spread** is a no-op while the tab is fullscreen (its own flag or any pane's);
 /// otherwise it targets the *tiled* pane under the focal cell, falling back to the
 /// focused tiled pane — never a floating pane. **Converge** is a no-op unless the
-/// tab is fullscreen, and targets the flagged pane, else the focused tiled pane
-/// (zellij's `is_fullscreen` is per querying client, the tab flag is not).
+/// tab is fullscreen, and targets the focused tiled pane. It never scans
+/// `is_fullscreen` first: zellij's `is_focused` is a union over clients, so every
+/// client-active pane is flagged while one is fullscreen; muxrd's B-FOCUS override
+/// makes `focused` the relay's own pane, the one this connection fullscreened. A
+/// flagged tiled pane is only the fallback.
 fn resolve_pinch_target(
     tab: &TabEntry,
     intent: term::PinchIntent,
@@ -812,10 +815,11 @@ fn resolve_pinch_target(
             if !fullscreen {
                 return None;
             }
-            tab.panes
-                .iter()
-                .find(|pane| pane.is_fullscreen)
-                .or_else(focused_tiled)?
+            focused_tiled().or_else(|| {
+                tab.panes
+                    .iter()
+                    .find(|pane| pane.is_fullscreen && !pane.floating)
+            })?
         }
     };
     Some((pane.id, pane.is_plugin))
@@ -1781,13 +1785,44 @@ mod tests {
     }
 
     #[test]
-    fn a_converge_targets_the_fullscreen_pane_and_is_a_no_op_without_one() {
+    fn a_converge_targets_the_focused_pane_and_is_a_no_op_without_fullscreen() {
         let mut tab = two_panes();
         assert_eq!(
             resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
             None
         );
+        tab.panes[0].focused = false;
+        tab.panes[1].focused = true;
         tab.panes[1].is_fullscreen = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_converge_with_two_panes_flagged_fullscreen_targets_the_focused_tiled_one() {
+        let mut tab = two_panes();
+        tab.panes[0].is_fullscreen = true;
+        tab.panes[0].focused = false;
+        tab.panes[1].is_fullscreen = true;
+        tab.panes[1].focused = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_converge_with_a_focused_floating_pane_falls_back_to_the_flagged_tiled_pane() {
+        let mut tab = two_panes();
+        tab.fullscreen_active = true;
+        tab.panes[0].focused = false;
+        tab.panes[1].is_fullscreen = true;
+        let mut floating = pane_at(99, 0, 0, 80, 24);
+        floating.floating = true;
+        floating.focused = true;
+        tab.panes.push(floating);
         assert_eq!(
             resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
             Some((11, false))
