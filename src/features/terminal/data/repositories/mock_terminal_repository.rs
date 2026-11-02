@@ -735,6 +735,30 @@ impl TerminalRepository for MockTerminalRepository {
         log_verb("focus_pane", pane_id);
         Ok(())
     }
+
+    async fn toggle_pane_fullscreen(
+        &self,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> Result<(), AppFailure> {
+        clean_signals::time::sleep(MOCK_LATENCY).await;
+        let unknown = || AppFailure::Internal(format!("toggle_pane_fullscreen: no pane {pane_id}"));
+        let addressed = |pane: &PaneEntry| pane.id == pane_id && pane.is_plugin == is_plugin;
+        let space_id = self.selected_space_id().ok_or_else(unknown)?;
+        let mut tabs_by_space = self.lock_tabs();
+        let tabs = tabs_by_space.get_mut(&space_id).ok_or_else(unknown)?;
+        let tab = tabs
+            .iter_mut()
+            .find(|tab| tab.panes.iter().any(addressed))
+            .ok_or_else(unknown)?;
+        // Zellij fullscreen is per tab: the addressed pane flips, and entering fullscreen
+        // clears every sibling's flag.
+        for pane in &mut tab.panes {
+            pane.is_fullscreen = addressed(pane) && !pane.is_fullscreen;
+        }
+        log_verb("toggle_pane_fullscreen", format!("{pane_id}:{is_plugin}"));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1037,6 +1061,54 @@ mod tests {
         // The two id namespaces are separate — a plugin pane with a terminal
         // pane's id is still not a pane this store carries.
         assert!(block_on(repo.focus_pane(10, true)).is_err());
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_flips_the_flag_and_a_second_call_restores_it() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        assert!(tabs[0].panes.iter().any(|p| p.id == 11 && p.is_fullscreen));
+
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        assert!(tabs[0].panes.iter().all(|p| !p.is_fullscreen));
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_keeps_one_fullscreen_pane_per_tab() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(block_on(repo.toggle_pane_fullscreen(10, false)).is_ok());
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
+        let fullscreen: Vec<u32> = tabs[0]
+            .panes
+            .iter()
+            .filter(|p| p.is_fullscreen)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(fullscreen, [11]);
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_logs_the_verb_with_the_pane_and_plugin_flag() {
+        let repo = MockTerminalRepository::seeded();
+        clear_verb_log_for_tests();
+        assert!(block_on(repo.toggle_pane_fullscreen(11, false)).is_ok());
+        assert!(verb_log_for_tests().contains(&"toggle_pane_fullscreen:11:false".to_string()));
+    }
+
+    #[test]
+    fn toggle_pane_fullscreen_on_an_unknown_pane_is_an_internal_error() {
+        let repo = MockTerminalRepository::seeded();
+        assert!(matches!(
+            block_on(repo.toggle_pane_fullscreen(999, false)),
+            Err(AppFailure::Internal(_))
+        ));
+        assert!(matches!(
+            block_on(repo.toggle_pane_fullscreen(10, true)),
+            Err(AppFailure::Internal(_))
+        ));
     }
 
     #[test]

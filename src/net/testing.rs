@@ -278,6 +278,9 @@ struct ActionState {
     rename_pane: Vec<RenamePaneReq>,
     focus_pane: Vec<PaneTarget>,
     scroll_pane: Vec<ScrollReq>,
+    toggle_pane_fullscreen: Vec<ToggleFullscreenReq>,
+    /// When set, `TogglePaneFullscreen` answers a refused ack carrying this text.
+    toggle_pane_fullscreen_refusal: Option<String>,
 }
 
 impl ActionLog {
@@ -325,6 +328,22 @@ impl ActionLog {
     /// Every `ScrollPane` request seen, oldest first.
     pub fn scroll_pane_calls(&self) -> Vec<ScrollReq> {
         self.state().scroll_pane.clone()
+    }
+
+    /// Every `TogglePaneFullscreen` request seen, oldest first.
+    pub fn toggle_pane_fullscreen_calls(&self) -> Vec<ToggleFullscreenReq> {
+        self.state().toggle_pane_fullscreen.clone()
+    }
+
+    /// Make every later `TogglePaneFullscreen` answer `ok: false` with `error`.
+    pub fn refuse_toggle_pane_fullscreen(&self, error: &str) {
+        self.state().toggle_pane_fullscreen_refusal = Some(error.to_string());
+    }
+
+    fn record_toggle_pane_fullscreen(&self, request: ToggleFullscreenReq) -> Option<String> {
+        let mut state = self.state();
+        state.toggle_pane_fullscreen.push(request);
+        state.toggle_pane_fullscreen_refusal.clone()
     }
 
     fn record_create_space(&self, request: CreateSpaceReq) {
@@ -909,9 +928,20 @@ impl Muxr for FixtureService {
 
     async fn toggle_pane_fullscreen(
         &self,
-        _request: Request<ToggleFullscreenReq>,
+        request: Request<ToggleFullscreenReq>,
     ) -> Result<Response<ActionAck>, Status> {
-        Err(unsupported("TogglePaneFullscreen"))
+        require_bearer(&request)?;
+        match self
+            .actions
+            .record_toggle_pane_fullscreen(request.into_inner())
+        {
+            Some(error) => Ok(Response::new(ActionAck {
+                ok: false,
+                error,
+                info: String::new(),
+            })),
+            None => Ok(Response::new(ack_ok())),
+        }
     }
 
     async fn new_tab(&self, request: Request<NewTabReq>) -> Result<Response<ActionAck>, Status> {
