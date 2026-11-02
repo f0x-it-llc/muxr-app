@@ -23,6 +23,8 @@
 //! the endpoint is unknown until the scan completes; it raises the same
 //! sheet with no forget-and-connect action, and leaves the pairing dial a
 //! scan ends in to take its own verdict, the way [`server_limit_prompt`] does.
+//! The unlock dock ([`gated_keyring_unlock`]) takes its verdict inside the
+//! controller, before its one prompt, and a block retries the dock.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -30,7 +32,9 @@ use std::sync::Arc;
 use frust::{GetUntracked, NavigatorController};
 
 use super::super::controller::{ConnectController, ConnectRetry, GatePrompt, ServerLimitBlock};
-use super::credential_dialogs::{credential_offer_prompt, handle_saved_row_tap};
+use super::credential_dialogs::{
+    credential_offer_prompt, handle_saved_row_tap, unverified_confirm_prompt,
+};
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::domain::entities::{
@@ -97,6 +101,19 @@ pub(crate) fn gated_saved_row_tap(
     handle_saved_row_tap(controller, overlays, nav, index);
 }
 
+/// The unlock dock's press. The verdict is taken inside
+/// [`ConnectController::unlock_keyring_and_connect`], ahead of the prompt, so
+/// this only lends it the paywall and the no-verification confirm.
+pub(crate) fn gated_keyring_unlock(
+    controller: &Arc<ConnectController>,
+    overlays: &NavigatorController<AppState>,
+    nav: &Nav,
+    pro: &Arc<ProController>,
+) {
+    let gate = server_limit_prompt(controller, overlays, nav, pro);
+    controller.unlock_keyring_and_connect(nav, gate, unverified_confirm_prompt(overlays));
+}
+
 /// Whether connecting to `server`'s endpoint raises the paywall while `saved`
 /// is remembered ([`row_is_beyond_free_tier`]). The pro tag means that, not
 /// "this tap is gated": a credential-less row is tagged too, though its tap
@@ -151,6 +168,7 @@ fn retry_connect(
                     gated_saved_row_tap(&controller, &overlays, &nav, &pro, index);
                 }
             }
+            ConnectRetry::Keyring => gated_keyring_unlock(&controller, &overlays, &nav, &pro),
         }
     })
 }

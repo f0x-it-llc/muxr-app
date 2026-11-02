@@ -39,15 +39,19 @@ use muxr::connection::{
 };
 use muxr::features::connect::data::repositories::MockCredentialService;
 use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
-use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
+use muxr::features::connect::di::{
+    KeyringHandle, expect_keyring, expect_saved_servers, mock_credentials,
+};
 use muxr::features::connect::domain::entities::{
     CredentialStatus, PairingPayload, SavedServer, epoch_millis,
 };
+use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::domain::repositories::SavedServersRepository;
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::{
-    ConnectController, ConnectRetry, CredentialOffer, GatePrompt, OfferPrompt, ServerLimitBlock,
-    URL_ERROR_MESSAGE,
+    ConnectController, ConnectRetry, CredentialOffer, GatePrompt, MANUAL_RESET_MESSAGE,
+    OfferPrompt, ServerLimitBlock, URL_ERROR_MESSAGE, VAULT_RESET_MESSAGE,
+    set_biometrics_available_for_tests,
 };
 use muxr::features::connect::presentation::pages::{connect_layout, connect_page, splash_assembly};
 use muxr::features::connect::presentation::widgets::badge::{SUBTITLE, heading};
@@ -142,6 +146,11 @@ const MIN_TAP_TARGET: f64 = 44.0;
 /// (the responsive width-clamp pass), transcribed (the constant itself is
 /// private to `presentation::pages`).
 const CONNECT_CLAMP_WIDTH: f64 = 520.0;
+/// `docs/splash.html`'s `.qr-square{width:44px}` and `.cta-row{gap:8px}`,
+/// transcribed: what the CTA gives up of the layer to the square beside it.
+const QR_SQUARE: f64 = 44.0;
+const CTA_ROW_GAP: f64 = 8.0;
+const SQUARE_SHARE: f64 = QR_SQUARE + CTA_ROW_GAP;
 
 /// The seeded store's third row — pinned and read-only, so tapping it changes
 /// *both* the URL and the trust mode away from their defaults.
@@ -673,14 +682,14 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
     let _ambient = setup();
     let harness = Harness::mount();
 
-    // `.btn-primary` is block-level: it fills the layer between its two 22px
-    // paddings rather than hugging its label.
+    // `.cta-row` fills the layer between its two 22px paddings: the CTA takes
+    // all of it but the QR square and the gap before it.
     let cta = harness.bounds("the connect CTA", |node| {
         node.role() == Role::Button && node.label() == Some(CONNECT_LABEL)
     });
     let layer = SURFACE.width - 2.0 * LAYER_PAD_X;
     assert!(
-        (cta.width() - layer).abs() < 0.5,
+        (cta.width() - (layer - SQUARE_SHARE)).abs() < 0.5,
         "the CTA spans {:.1}px of a {layer:.1}px layer",
         cta.width()
     );
@@ -690,12 +699,19 @@ fn the_cta_spans_the_layer_and_clears_the_minimum_tap_target() {
         cta.height()
     );
 
-    // …and it is still the *only* full-bleed button: the QR affordance keeps
-    // its own natural size, so "the CTA" is unambiguous above.
-    let fab = harness.bounds("the QR affordance", |node| {
+    // …and the square keeps its own 44px box at the layer's trailing edge.
+    let square = harness.bounds("the QR square", |node| {
         node.role() == Role::Button && node.label() == Some(QR_LABEL)
     });
-    assert!(fab.width() < layer / 2.0, "the FAB did not stretch too");
+    assert!(
+        (square.width() - QR_SQUARE).abs() < 0.5 && (square.height() - QR_SQUARE).abs() < 0.5,
+        "{square:?}"
+    );
+    assert!(
+        (square.x1 - (SURFACE.width - LAYER_PAD_X)).abs() < 0.5
+            && (square.x0 - cta.x1 - CTA_ROW_GAP).abs() < 0.5,
+        "the square trails the CTA by the row's gap: {square:?} vs {cta:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +745,7 @@ fn wide_metrics_clamp_and_center_the_content_column() {
         margin + LAYER_PAD_X
     );
     assert!(
-        (cta.width() - (CONNECT_CLAMP_WIDTH - 2.0 * LAYER_PAD_X)).abs() < 0.5,
+        (cta.width() - (CONNECT_CLAMP_WIDTH - 2.0 * LAYER_PAD_X - SQUARE_SHARE)).abs() < 0.5,
         "the CTA spans the clamped layer, not the whole surface: {:.1}",
         cta.width()
     );
@@ -751,7 +767,7 @@ fn narrow_metrics_leave_the_layout_unclamped_like_no_metrics_at_all() {
     });
     let layer = SURFACE.width - 2.0 * LAYER_PAD_X;
     assert!(
-        (cta.width() - layer).abs() < 0.5,
+        (cta.width() - (layer - SQUARE_SHARE)).abs() < 0.5,
         "narrow metrics take the same unclamped branch as no metrics: {:.1}",
         cta.width()
     );
@@ -836,7 +852,7 @@ fn narrow_metrics_leave_the_splash_assembly_full_bleed_too() {
     // layer exactly as the live screen does (the shared function takes one
     // branch for both), so the handoff has nothing to move on a phone either.
     let splash = splash_cta_bounds(&[]);
-    let layer = SURFACE.width - 2.0 * LAYER_PAD_X;
+    let layer = SURFACE.width - 2.0 * LAYER_PAD_X - SQUARE_SHARE;
     assert!(
         (splash.width() - layer).abs() < EPSILON && (splash.x0 - LAYER_PAD_X).abs() < EPSILON,
         "narrow metrics leave the splash unclamped: {splash:?}"
@@ -980,17 +996,18 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
     // A `frust::icon` paints exactly one **filled path** each, and nothing
     // else on Connect paints one at all: every other piece is rounded rects
     // (swatches, panels, the CTA bar) and stroked borders. So "the affordance
-    // is a vector" is literally "there is a filled path inside the FAB" — one
-    // of exactly as many paths as this screen has vector marks: the FAB, the
-    // getting-started mark, plus one delete affordance per saved row.
+    // is a vector" is literally "there is a filled path inside the square" —
+    // one of exactly as many paths as this screen has vector marks: the
+    // square's, the getting-started mark, the dock's biometric mark, plus a
+    // lock and a delete mark per saved row.
     let rows = expect_saved_servers()
         .list()
         .expect("the mock store never fails")
         .len();
     assert_eq!(
         scene.paths.len(),
-        rows + 2,
-        "every vector on the screen is the FAB's mark, the getting-started mark or a row's delete mark: {:?}",
+        2 * rows + 3,
+        "every vector on the screen is the square's, the getting-started, the dock's or a row's lock/delete mark: {:?}",
         scene.paths
     );
     let (origin, size) = *scene
@@ -1004,7 +1021,7 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
         })
         .unwrap_or_else(|| {
             panic!(
-                "the scan mark paints inside the FAB's own box: {:?} in {fab:?}",
+                "the scan mark paints inside the square's own box: {:?} in {fab:?}",
                 scene.paths
             )
         });
@@ -1600,6 +1617,9 @@ impl Form {
             // exercised through `Harness` instead).
             on_saved_tap: Rc::new(|_index| {}),
             on_saved_delete: Rc::new(|_index| {}),
+            on_unlock: Rc::new(|| {}),
+            on_reset_credentials: Rc::new(|| {}),
+            on_scan: Rc::new(|| {}),
         };
         let logic: FormLogic = Box::new(move |_state: &mut ()| {
             // Piece 7's rows are an input to the builder now (the splash passes
@@ -1789,6 +1809,7 @@ fn controller_with_tokens(
         tokens,
         connection,
         pro,
+        KeyringHandle::new(),
     ))
 }
 
@@ -4644,14 +4665,11 @@ fn a_phone_keeps_the_corner_affordances_and_no_inline_paragraph() {
 
     assert!(!harness.shows_value(GETTING_STARTED_BODY));
     assert_eq!(count(&harness, info_button), 1, "the info mark is up");
-    assert_eq!(count(&harness, qr_action), 1);
     assert_eq!(count(&harness, saved_header), 1);
-    let fab = harness.bounds("the QR affordance", qr_action);
-    let cta = harness.bounds("the connect CTA", connect_cta);
-    assert!(
-        fab.width() < PHONE.width / 2.0 && (cta.x1 - cta.x0) > fab.width(),
-        "the QR action is still the corner FAB, the CTA still full-bleed: {fab:?} vs {cta:?}"
-    );
+    // The corner FAB is gone: the QR square rides in the CTA's own row.
+    assert_qr_beside_the_cta(&harness);
+    let square = harness.bounds("the QR square", qr_action);
+    assert!((square.width() - QR_SQUARE).abs() < 0.5, "{square:?}");
 }
 
 /// How many `pro` tags the screen shows.
@@ -5216,4 +5234,537 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
         "a resolvable terminal generic must collapse the fallback split, got \
          {digits:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The unlock dock
+// ---------------------------------------------------------------------------
+
+const DOCK_A: &str = "dock-a.example:50051";
+const DOCK_B: &str = "dock-b.example:50051";
+const DOCK_TOKEN_A: &str = "dock-s3cr3t-a";
+const DOCK_TOKEN_B: &str = "dock-s3cr3t-b";
+/// The dock's face and its prompt's reason, for two rows — transcribed.
+const UNLOCK_TWO: &str = "Unlock 2 servers";
+const UNVERIFIED_TITLE: &str = "Connect without verification?";
+const UNVERIFIED_CONFIRM: &str = "Connect anyway";
+const TRY_AGAIN: &str = "Try again";
+const RESET_ACTION: &str = "Reset saved credentials";
+const RESET_TITLE: &str = "Reset saved credentials?";
+const RESET_CONFIRM: &str = "Reset";
+
+/// Opts this test thread's biometric probe in for as long as it is held.
+struct Biometrics;
+
+impl Biometrics {
+    fn available() -> Self {
+        set_biometrics_available_for_tests(Some(true));
+        Biometrics
+    }
+}
+
+impl Drop for Biometrics {
+    fn drop(&mut self) {
+        set_biometrics_available_for_tests(None);
+    }
+}
+
+/// [`DOCK_A`] stamped now (the most recent row, under `trust_a`) over
+/// [`DOCK_B`] an hour older, both claiming a credential.
+fn dock_rows(trust_a: TrustMode) -> Vec<SavedServer> {
+    vec![
+        SavedServer {
+            trust_mode: trust_a,
+            ..limit_row(DOCK_A, "Dock A", true)
+        },
+        older_limit_row(DOCK_B, "Dock B", true),
+    ]
+}
+
+/// The real screen over exactly `rows`, the credential mock seeded by `seed`.
+fn mount_dock(
+    tier: Tier,
+    rows: Vec<SavedServer>,
+    seed: impl FnOnce(&MockCredentialService),
+) -> Harness {
+    Harness::mount_tiered(tier, move || {
+        only_saved(rows);
+        seed(&mock_credentials().expect("tests/support opted this process into the mock"));
+    })
+}
+
+fn seed_both_in_the_vault(credentials: &MockCredentialService) {
+    credentials.seed_vault(&[(DOCK_A, DOCK_TOKEN_A), (DOCK_B, DOCK_TOKEN_B)]);
+}
+
+fn button_labelled(label: &'static str) -> impl Fn(&Node) -> bool {
+    move |node| node.role() == Role::Button && node.label() == Some(label)
+}
+
+fn connected() -> bool {
+    expect_connection_controller().connected.get_untracked()
+}
+
+fn dock_credentials() -> Arc<MockCredentialService> {
+    mock_credentials().expect("the mock service is published")
+}
+
+/// [`credential_fixture`] for an entitled install whose controller publishes
+/// into `keyring`.
+fn keyring_fixture(rows: Vec<SavedServer>, keyring: &KeyringHandle) -> Creds {
+    let connection = muxr::connection::provide_connection_controller();
+    let nav: NavigatorController<AppState> = NavigatorController::new();
+    let router = install_app_router(&nav, &nav, Arc::clone(&connection));
+    let servers = Arc::new(MockSavedServersRepository::with_servers(rows));
+    let credentials = Arc::new(MockCredentialService::new());
+    let tokens = Arc::new(MockAuthTokensRepository::seeded());
+    let entitled = Arc::new(MockEntitlementRepository::pro()) as SharedEntitlementRepository;
+    let pro = Arc::new(ProController::new(entitled));
+    let controller = Arc::new(ConnectController::new(
+        Arc::clone(&servers) as _,
+        Arc::clone(&credentials) as _,
+        Arc::clone(&tokens) as _,
+        Arc::clone(&connection),
+        Arc::clone(&pro),
+        keyring.clone(),
+    ));
+    Creds {
+        controller,
+        credentials,
+        servers,
+        tokens,
+        connection,
+        pro,
+        _router: router,
+    }
+}
+
+/// The dock's press at controller level, with no confirm expected.
+fn unlock_through_the_dock(creds: &Creds) {
+    creds.controller.unlock_keyring_and_connect(
+        &app_nav(),
+        ungated(),
+        Rc::new(|_server, _dial| panic!("no row here needs the no-verification confirm")),
+    );
+}
+
+#[test]
+fn the_dock_unlocks_every_row_behind_one_prompt_and_lands_on_the_most_recent_one() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(
+        Tier::Pro,
+        dock_rows(TrustMode::System),
+        seed_both_in_the_vault,
+    );
+    let before = harness.nav.depth();
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.pump_until("the dock's connect", |_| connected());
+    harness.settle();
+
+    assert_eq!(dock_credentials().prompts(), vec![UNLOCK_TWO.to_string()]);
+    let info = expect_connection_controller()
+        .server_info
+        .get_untracked()
+        .expect("a connected controller carries its facts");
+    assert_eq!(info.endpoint, DOCK_A, "the most recent row is the target");
+    assert!(harness.nav.depth() > before, "…and it landed on /sessions");
+    let keyring = expect_keyring();
+    assert!(keyring.is_unlocked(), "the unlocked keyring is published");
+    assert_eq!(
+        keyring.token_for(DOCK_B).as_deref().map(String::as_str),
+        Some(DOCK_TOKEN_B),
+        "…holding every row's token, not just the one it dialed"
+    );
+}
+
+#[test]
+fn legacy_entries_migrate_on_the_first_unlock_and_the_next_reads_the_vault_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(dock_rows(TrustMode::System), &keyring);
+    creds.credentials.seed(DOCK_A, DOCK_TOKEN_A);
+    creds.credentials.seed(DOCK_B, DOCK_TOKEN_B);
+
+    unlock_through_the_dock(&creds);
+    pump_until_done("the first unlock's connect", || {
+        creds.connection.connected.get_untracked()
+    });
+    assert_eq!(
+        creds.credentials.prompts().len(),
+        3,
+        "one vault read plus one read per legacy entry"
+    );
+    assert_eq!(
+        creds.credentials.vault_endpoints(),
+        Some(vec![DOCK_A.to_string(), DOCK_B.to_string()])
+    );
+    assert_eq!(creds.credentials.legacy(DOCK_B), None, "migrated once");
+
+    creds.connection.lock_and_disconnect(&keyring);
+    unlock_through_the_dock(&creds);
+    pump_until_done("the second unlock's connect", || {
+        creds.connection.connected.get_untracked()
+    });
+    assert_eq!(
+        creds.credentials.prompts().len(),
+        4,
+        "the next unlock reads the vault alone"
+    );
+}
+
+#[test]
+fn a_free_install_with_two_rows_raises_the_paywall_before_any_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(
+        Tier::Free,
+        dock_rows(TrustMode::System),
+        seed_both_in_the_vault,
+    );
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.flush();
+
+    assert!(
+        shows_text(&harness, UPGRADE_TITLE),
+        "{:?}",
+        node_labels(&harness.root)
+    );
+    assert!(dock_credentials().prompts().is_empty(), "no prompt at all");
+    assert!(!connected());
+}
+
+#[test]
+fn a_canceled_dock_unlock_is_silent_and_leaves_the_dock_idle() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(Tier::Pro, dock_rows(TrustMode::System), |credentials| {
+        seed_both_in_the_vault(credentials);
+        credentials.set_gate(CredentialStatus::Canceled);
+    });
+    app_toasts().clear();
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.pump_until("the canceled unlock to settle", |harness| {
+        dock_credentials().prompts().len() == 1 && count(harness, button_labelled(UNLOCK_TWO)) == 1
+    });
+
+    assert!(!connected());
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a cancel says nothing"
+    );
+    assert!(!expect_keyring().is_unlocked());
+    let disabled = harness
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| button_labelled(UNLOCK_TWO)(node))
+        .map(|(_, node)| node.is_disabled());
+    assert_eq!(disabled, Some(false), "the idle dock takes the next tap");
+}
+
+#[test]
+fn a_no_verification_target_asks_once_after_the_unlock_and_dials_on_confirm() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(
+        Tier::Pro,
+        dock_rows(TrustMode::NoVerification),
+        seed_both_in_the_vault,
+    );
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.pump_until("the confirm", |harness| {
+        shows_text(harness, UNVERIFIED_TITLE)
+    });
+    assert_eq!(dock_credentials().prompts().len(), 1);
+    assert!(!connected(), "nothing dials before the confirm");
+
+    harness.tap_node("the confirm", button_labelled(UNVERIFIED_CONFIRM));
+    harness.pump_until("the confirmed connect", |_| connected());
+    assert_eq!(
+        dock_credentials().prompts().len(),
+        1,
+        "asked once, prompted once"
+    );
+}
+
+#[test]
+fn an_unreadable_legacy_row_is_forgotten_while_the_most_recent_one_connects() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(dock_rows(TrustMode::System), &keyring);
+    creds.credentials.seed_vault(&[(DOCK_A, DOCK_TOKEN_A)]);
+    creds.credentials.seed(DOCK_B, DOCK_TOKEN_B);
+    // Op 0 reads the vault; op 1 is DOCK_B's legacy read.
+    creds
+        .credentials
+        .set_gate_at(1, CredentialStatus::KeyInvalidated);
+
+    unlock_through_the_dock(&creds);
+    pump_until_done("the connect", || creds.connection.connected.get_untracked());
+
+    let row = |endpoint: &str| {
+        creds
+            .servers
+            .list()
+            .expect("the mock store never fails")
+            .into_iter()
+            .find(|server| server.endpoint() == endpoint)
+            .expect("both rows stay")
+    };
+    assert!(
+        !row(DOCK_B).has_credential,
+        "the unreadable row is forgotten"
+    );
+    assert_eq!(creds.credentials.legacy(DOCK_B), None);
+    assert!(row(DOCK_A).has_credential);
+    let info = creds
+        .connection
+        .server_info
+        .get_untracked()
+        .expect("connected");
+    assert_eq!(info.endpoint, DOCK_A);
+}
+
+#[test]
+fn a_vault_invalidated_by_re_enrollment_is_reset_and_every_row_cleared() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(Tier::Pro, dock_rows(TrustMode::System), |credentials| {
+        seed_both_in_the_vault(credentials);
+        credentials.set_gate_at(0, CredentialStatus::KeyInvalidated);
+    });
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.pump_until("the reset's copy", |harness| {
+        harness.shows_value(VAULT_RESET_MESSAGE)
+    });
+
+    let credentials = dock_credentials();
+    assert!(credentials.vault_endpoints().unwrap_or_default().is_empty());
+    assert!(!saved_row(DOCK_A).has_credential && !saved_row(DOCK_B).has_credential);
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "the reset itself is ungated"
+    );
+    assert_eq!(credentials.writes(), 0);
+    assert!(!connected());
+    assert_eq!(count(&harness, button_labelled(TRY_AGAIN)), 1);
+    assert_eq!(
+        count(&harness, button_labelled(RESET_ACTION)),
+        0,
+        "nothing left to reset"
+    );
+}
+
+#[test]
+fn a_failed_unlock_offers_the_reset_only_behind_its_confirm() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(Tier::Pro, dock_rows(TrustMode::System), |credentials| {
+        seed_both_in_the_vault(credentials);
+        credentials.set_gate_at(0, CredentialStatus::Failed);
+    });
+    app_toasts().clear();
+    let both = Some(vec![DOCK_A.to_string(), DOCK_B.to_string()]);
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.pump_until("the failed dock", |harness| {
+        count(harness, button_labelled(RESET_ACTION)) == 1
+    });
+    assert_eq!(count(&harness, button_labelled(TRY_AGAIN)), 1);
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .contains(&GATE_FAILED_TOAST.to_string()),
+        "the failure toasts as every flow does"
+    );
+    assert_eq!(
+        dock_credentials().vault_endpoints(),
+        both,
+        "never reset unasked"
+    );
+
+    harness.tap_node("the reset action", button_labelled(RESET_ACTION));
+    assert!(shows_text(&harness, RESET_TITLE));
+    assert_eq!(
+        dock_credentials().vault_endpoints(),
+        both,
+        "…nor before the confirm"
+    );
+
+    harness.tap_node("the reset confirm", button_labelled(RESET_CONFIRM));
+    harness.pump_until("the reset's copy", |harness| {
+        harness.shows_value(MANUAL_RESET_MESSAGE)
+    });
+    assert!(
+        dock_credentials()
+            .vault_endpoints()
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert!(!saved_row(DOCK_A).has_credential && !saved_row(DOCK_B).has_credential);
+    assert_eq!(dock_credentials().prompts().len(), 1);
+}
+
+/// Connect through the form to [`CRED_ENDPOINT`] and accept the save offer.
+fn save_through_the_offer(creds: &Creds) {
+    connect_fixture(creds);
+    creds
+        .connection
+        .set_credential_saver(creds.controller.credential_saver());
+    creds
+        .connection
+        .credential_offer
+        .set(Some("Cred rig".to_string()));
+    creds.connection.accept_credential_offer();
+    pump_until_done("the credential save", || {
+        stored_row(&creds.servers).has_credential
+    });
+}
+
+#[test]
+fn a_form_connect_while_unlocked_saves_with_one_vault_write_into_the_handle() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    keyring.publish(Keyring::new());
+    let creds = keyring_fixture(Vec::new(), &keyring);
+
+    save_through_the_offer(&creds);
+
+    assert_eq!(creds.credentials.writes(), 1);
+    assert!(creds.credentials.prompts().is_empty(), "no read at all");
+    let stored = creds
+        .credentials
+        .stored(CRED_ENDPOINT)
+        .expect("in the vault");
+    assert_eq!(
+        keyring
+            .token_for(CRED_ENDPOINT)
+            .as_deref()
+            .map(String::as_str),
+        Some(stored.as_str()),
+        "the handle holds the new token"
+    );
+}
+
+#[test]
+fn a_form_connect_while_locked_takes_the_locked_save_and_leaves_the_handle_alone() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(Vec::new(), &keyring);
+
+    save_through_the_offer(&creds);
+
+    assert_eq!(
+        creds.credentials.prompts().len(),
+        1,
+        "the read of the read-modify-write"
+    );
+    assert_eq!(creds.credentials.writes(), 1);
+    assert!(creds.credentials.stored(CRED_ENDPOINT).is_some());
+    assert!(!keyring.is_unlocked() && keyring.endpoints().is_empty());
+}
+
+/// The fill of the rounded rect the CTA paints, found by its size.
+fn cta_fill(harness: &mut Harness) -> Color {
+    let cta = harness.bounds("the connect CTA", connect_cta);
+    let scene = harness.settle();
+    scene
+        .rounded_fills
+        .iter()
+        .find(|(_, size, _, _)| {
+            (size.width - cta.width()).abs() < 1.0 && (size.height - cta.height()).abs() < 1.0
+        })
+        .map(|(_, _, _, color)| *color)
+        .expect("the CTA paints its fill")
+}
+
+#[test]
+fn the_cta_steps_down_to_secondary_once_servers_are_saved() {
+    let _g = serial();
+    let _ambient = setup();
+    // The harness paints buttons with their unthemed style constants, so the
+    // read is the change of fill between the two styles, not a palette token.
+    let mut empty = mount_limited(Tier::Pro, Vec::new());
+    let primary = cta_fill(&mut empty);
+    assert_eq!(count(&empty, button_labelled(UNLOCK_TWO)), 0, "no dock");
+    assert_qr_beside_the_cta(&empty);
+
+    let mut saved = mount_limited(Tier::Pro, dock_rows(TrustMode::System));
+    let secondary = cta_fill(&mut saved);
+    assert_ne!(primary, secondary, "the CTA steps down beside the dock");
+    assert_eq!(count(&saved, button_labelled(UNLOCK_TWO)), 1);
+    assert_qr_beside_the_cta(&saved);
+
+    let mut emptied = mount_limited(Tier::Pro, Vec::new());
+    assert_eq!(cta_fill(&mut emptied), primary, "…and back up without rows");
+}
+
+#[test]
+fn rows_are_informational_while_the_dock_can_unlock_and_delete_stays_ungated() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(
+        Tier::Pro,
+        dock_rows(TrustMode::System),
+        seed_both_in_the_vault,
+    );
+
+    harness.tap_node("the older row", |node| node.value() == Some(DOCK_B));
+    harness.flush();
+    assert_eq!(
+        harness.field_values().first().map(String::as_str),
+        Some(""),
+        "the row tap refills nothing"
+    );
+    assert!(dock_credentials().prompts().is_empty() && !connected());
+
+    harness.tap_node("the older row's delete", button_labelled("Delete Dock B"));
+    harness.tap_node("the remove confirm", button_labelled(REMOVE_CONFIRM));
+    harness.pump_until("the row to go", |_| {
+        app_saved_endpoints() == vec![DOCK_A.to_string()]
+    });
+    assert!(dock_credentials().prompts().is_empty(), "delete is ungated");
+}
+
+#[test]
+fn the_tablet_list_closes_on_the_same_dock_with_informational_rows() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = sized(FULL_TABLET, || {
+        mount_dock(
+            Tier::Pro,
+            dock_rows(TrustMode::System),
+            seed_both_in_the_vault,
+        )
+    });
+
+    harness.tap_node("the older tablet row", |node| {
+        node.value() == Some("Dock B")
+    });
+    harness.flush();
+    assert!(dock_credentials().prompts().is_empty() && !connected());
+
+    harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
+    harness.pump_until("the dock's connect", |_| connected());
+    assert_eq!(dock_credentials().prompts(), vec![UNLOCK_TWO.to_string()]);
 }

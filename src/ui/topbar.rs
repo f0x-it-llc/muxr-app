@@ -8,6 +8,10 @@
 //! *around* that mounted bar (`frust_widgets::scaffold`'s own R-B4-inset
 //! contract), so a bar-bearing page reserves no clearance of its own —
 //! there is no `topbar_clearance` here to call.
+//!
+//! `icon_button` is never a FAB: `frust_glyph::fab` (frust 0.6.5) is the
+//! app's one FAB primitive. Its [`IconButtonView::fill`] stays for the
+//! terminal rail's filled tiles.
 use std::rc::Rc;
 
 use frust::authoring::text::LineHeight;
@@ -182,7 +186,7 @@ impl<State: 'static> IconButtonView<State> {
         self
     }
 
-    /// Fill the button's box behind the mark (a FAB's accent disc).
+    /// Fill the button's box behind the mark (a rail tile's tone).
     pub fn fill(mut self, fill: Color) -> Self {
         self.fill = fill;
         self

@@ -1,17 +1,19 @@
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use clean_signals::{ControllerCore, RunOptions};
+use clean_signals::{ControllerCore, Failure, RunOptions};
 use frust::{Get, GetUntracked, RwSignal, Set, With, spawn_local};
+use frust_secure_storage::{CanAuthenticate, SecureStorage};
 use zeroize::Zeroizing;
 
 use crate::connection::{ConnectTarget, ConnectionController, CredentialSaver, TrustMode};
 use crate::failure::AppFailure;
-use crate::features::connect::di::{Credentials, SavedServers};
+use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
 use crate::features::connect::domain::entities::{
     CredentialStatus, PairingPayload, PairingTrust, SavedServer, StoreRequest, UnlockRequest,
-    UnlockedCredential, epoch_millis,
+    UnlockedCredential, UnlockedKeyring, epoch_millis,
 };
 use crate::features::connect::domain::use_cases::parse_endpoint::{Endpoint, parse_endpoint};
 use crate::features::connect::domain::use_cases::{SaveCredential, UnlockCredential};
@@ -43,6 +45,55 @@ pub enum ConnectRetry {
     Manual,
     Pairing,
     Saved(SavedServer),
+    /// The unlock dock, which re-reads the most recent row.
+    Keyring,
+}
+
+/// Raised by the dock's unlock before it dials a [`TrustMode::NoVerification`]
+/// row: the screen confirms, and `on_confirm` dials. Lent per call.
+pub type ConfirmPrompt = Rc<dyn Fn(SavedServer, Box<dyn FnOnce()>)>;
+
+/// The dock copy after re-enrollment made the vault unreadable and it was reset.
+pub const VAULT_RESET_MESSAGE: &str =
+    "Biometrics changed — saved credentials were reset. Connect again with a token.";
+/// The dock copy after the user reset saved credentials from a failed unlock.
+pub const MANUAL_RESET_MESSAGE: &str = "Saved credentials were reset. Connect again with a token.";
+
+/// What the unlock dock shows, derived from the controller's signals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DockState {
+    Idle,
+    Unlocking,
+    Failed(DockFailure),
+    /// No biometric gate on this device: the rows keep their own tap-to-unlock.
+    Unavailable,
+}
+
+/// A failed unlock's copy, and whether it offers the credential reset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockFailure {
+    pub message: String,
+    pub offers_reset: bool,
+}
+
+thread_local! {
+    static BIOMETRICS_FOR_TESTS: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Overrides this thread's biometric probe (`None` restores the real one).
+pub fn set_biometrics_available_for_tests(available: Option<bool>) {
+    BIOMETRICS_FOR_TESTS.with(|cell| cell.set(available));
+}
+
+/// Whether the device can show a biometric prompt now — never prompts itself.
+fn probe_biometrics() -> bool {
+    if let Some(available) = BIOMETRICS_FOR_TESTS.with(Cell::get) {
+        return available;
+    }
+    matches!(
+        SecureStorage::can_authenticate(),
+        CanAuthenticate::Available
+    )
 }
 
 /// What the free-tier server rule refused: the remembered rows standing in the
@@ -99,6 +150,10 @@ pub struct ConnectController {
     /// The app-scoped entitlement view model every dial's free-tier verdict is
     /// asked of. `Arc<ProController>`, so this controller stays `Send + Sync`.
     pro: Arc<ProController>,
+    /// The app-scoped unlocked keyring the dock publishes into.
+    keyring: KeyringHandle,
+    /// Probed once per mount: enrollment can change while the app is away.
+    biometrics_available: bool,
     saving_credential: AtomicBool,
     pub url: RwSignal<String>,
     pub token: RwSignal<Zeroizing<String>>,
@@ -113,6 +168,8 @@ pub struct ConnectController {
     pub pending_pairing: RwSignal<Option<PairingPayload>>,
     pub unlocking: RwSignal<bool>,
     pub resolving_offer: RwSignal<bool>,
+    /// The dock's last failed unlock, cleared by the next attempt.
+    pub dock_failure: RwSignal<Option<DockFailure>>,
 }
 
 impl ConnectController {
@@ -122,6 +179,7 @@ impl ConnectController {
         tokens: SharedAuthTokensRepository,
         connection: Arc<ConnectionController>,
         pro: Arc<ProController>,
+        keyring: KeyringHandle,
     ) -> Self {
         let controller = Self {
             core: ControllerCore::new(),
@@ -132,6 +190,8 @@ impl ConnectController {
             tokens,
             connection,
             pro,
+            keyring,
+            biometrics_available: probe_biometrics(),
             saving_credential: AtomicBool::new(false),
             url: RwSignal::new(String::new()),
             token: RwSignal::new(Zeroizing::new(String::new())),
@@ -143,6 +203,7 @@ impl ConnectController {
             pending_pairing: RwSignal::new(None),
             unlocking: RwSignal::new(false),
             resolving_offer: RwSignal::new(false),
+            dock_failure: RwSignal::new(None),
         };
         controller.reload_saved();
         controller
@@ -819,6 +880,182 @@ impl ConnectController {
     }
 
     // -----------------------------------------------------------------------
+    // The unlock dock — one prompt for the whole keyring, then the MRU row
+    // -----------------------------------------------------------------------
+
+    pub fn biometrics_available(&self) -> bool {
+        self.biometrics_available
+    }
+
+    /// What the dock shows — tracked.
+    pub fn dock_state(&self) -> DockState {
+        if !self.biometrics_available {
+            return DockState::Unavailable;
+        }
+        if self.unlocking.get() {
+            return DockState::Unlocking;
+        }
+        self.dock_failure
+            .get()
+            .map_or(DockState::Idle, DockState::Failed)
+    }
+
+    /// The dock's press: the free-tier verdict for the most recent row first
+    /// (a block raises `gate_prompt` and no biometric prompt), then one
+    /// `unlock_all` prompt, the keyring published, and that row dialed with
+    /// its token. Single-flight on [`Self::unlocking`].
+    pub fn unlock_keyring_and_connect(
+        self: &Arc<Self>,
+        nav: &Nav,
+        gate_prompt: GatePrompt,
+        confirm: ConfirmPrompt,
+    ) {
+        if self.busy_untracked() {
+            return;
+        }
+        let saved = self.saved.get_untracked();
+        let Some(target) = saved.first().cloned() else {
+            return;
+        };
+        if self.blocked(&target.endpoint(), ConnectRetry::Keyring, &gate_prompt) {
+            return;
+        }
+        self.dock_failure.set(None);
+        self.unlocking.set(true);
+        let controller = Arc::clone(self);
+        let nav = nav.clone();
+        spawn_local(async move {
+            controller
+                .unlock_all_then_connect(saved, target, nav, confirm)
+                .await;
+        });
+    }
+
+    /// [`Self::unlock_keyring_and_connect`]'s body. A cancel is silent; a
+    /// vault re-enrollment can never be read again, so it is reset; `Failed`
+    /// offers that reset behind a confirm instead (it also covers a failed
+    /// authentication); every other refusal fails the dock and toasts.
+    async fn unlock_all_then_connect(
+        self: &Arc<Self>,
+        saved: Vec<SavedServer>,
+        target: SavedServer,
+        nav: Nav,
+        confirm: ConfirmPrompt,
+    ) {
+        let endpoints: Vec<String> = saved.iter().map(SavedServer::endpoint).collect();
+        let UnlockedKeyring {
+            status,
+            keyring,
+            unreadable,
+            ..
+        } = self
+            .unlock_credential
+            .run_all(&unlock_reason(&saved), &endpoints)
+            .await;
+        let keyring = match (status, keyring) {
+            (CredentialStatus::Success, Some(keyring)) => keyring,
+            (CredentialStatus::Canceled, _) => {
+                self.unlocking.set(false);
+                return;
+            }
+            (CredentialStatus::KeyInvalidated, _) => {
+                self.reset_credentials(VAULT_RESET_MESSAGE).await;
+                self.unlocking.set(false);
+                return;
+            }
+            (status, _) => {
+                self.unlocking.set(false);
+                self.fail_dock(match status {
+                    CredentialStatus::Success => CredentialStatus::Failed,
+                    other => other,
+                });
+                return;
+            }
+        };
+        for endpoint in &unreadable {
+            self.forget_unreadable(endpoint).await;
+        }
+        let endpoint = target.endpoint();
+        let token = keyring.token_for(&endpoint);
+        self.keyring.publish(keyring);
+        self.unlocking.set(false);
+        let Some(token) = token else {
+            self.fail_dock(if unreadable.contains(&endpoint) {
+                CredentialStatus::KeyInvalidated
+            } else {
+                CredentialStatus::NotFound
+            });
+            self.prefill(&target);
+            return;
+        };
+        if target.trust_mode != TrustMode::NoVerification {
+            self.connect_recovered(&target, token, &nav);
+            return;
+        }
+        let controller = Arc::clone(self);
+        let server = target.clone();
+        confirm(
+            target,
+            Box::new(move || controller.connect_recovered(&server, token, &nav)),
+        );
+    }
+
+    /// Fails the dock with `status`'s message and toasts it, as every flow does.
+    fn fail_dock(&self, status: CredentialStatus) {
+        self.dock_failure
+            .set(status.message().map(|message| DockFailure {
+                message: message.to_string(),
+                offers_reset: status == CredentialStatus::Failed,
+            }));
+        self.report(status);
+    }
+
+    /// The failed dock's confirmed reset: the vault goes, ungated, and every
+    /// saved row stops claiming a credential. Ignored while busy.
+    pub fn reset_saved_credentials(self: &Arc<Self>) {
+        if self.busy_untracked() {
+            return;
+        }
+        self.unlocking.set(true);
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            controller.reset_credentials(MANUAL_RESET_MESSAGE).await;
+            controller.unlocking.set(false);
+        });
+    }
+
+    /// Removes the vault (ungated), clears every row's credential fields — the
+    /// next unlock re-migrates any legacy leftovers — and locks the handle.
+    async fn reset_credentials(&self, message: &str) {
+        if let Err(failure) = self.credentials.reset_vault().await {
+            app_toasts().raise(&failure);
+            self.dock_failure.set(Some(DockFailure {
+                message: failure.user_message(),
+                offers_reset: true,
+            }));
+            return;
+        }
+        if let Ok(rows) = self.repository.list() {
+            for mut row in rows {
+                if !row.has_credential && row.token_name.is_none() {
+                    continue;
+                }
+                row.has_credential = false;
+                row.token_name = None;
+                if let Err(failure) = self.repository.save(row) {
+                    app_toasts().raise(&failure);
+                }
+            }
+        }
+        self.reload_saved();
+        self.keyring.lock();
+        self.dock_failure.set(Some(DockFailure {
+            message: message.to_string(),
+            offers_reset: false,
+        }));
+    }
+
+    // -----------------------------------------------------------------------
     // Flow 4 — forgetting a saved server (this device only)
     // -----------------------------------------------------------------------
 
@@ -880,25 +1117,35 @@ impl ConnectController {
     // Shared credential plumbing
     // -----------------------------------------------------------------------
 
-    /// Gates and stores a secret through `ControllerCore::run` (keeps the
-    /// blocking call off the UI thread). A run failure can't happen by
-    /// contract; treated as [`CredentialStatus::Failed`] anyway, to stay total.
+    /// Gates and stores a secret. Unlocked, a snapshot of the keyring takes
+    /// the one gated vault write and the handle gains the token only on
+    /// success; locked, the read-modify-write save runs through
+    /// `ControllerCore::run` (whose impossible failure reads as `Failed`) and
+    /// the handle is left alone.
     async fn gate_store(
         &self,
         server_key: String,
         token: Zeroizing<String>,
         reason: String,
     ) -> CredentialStatus {
+        let request = StoreRequest {
+            server_key: server_key.clone(),
+            token: token.clone(),
+            reason,
+        };
+        if self.keyring.is_unlocked() {
+            let mut snapshot = self.keyring.snapshot();
+            let status = self
+                .save_credential
+                .run_in_vault(request, &mut snapshot)
+                .await;
+            if status == CredentialStatus::Success {
+                self.keyring.insert(server_key, token);
+            }
+            return status;
+        }
         self.core
-            .run(
-                &self.save_credential,
-                StoreRequest {
-                    server_key,
-                    token,
-                    reason,
-                },
-                RunOptions::default(),
-            )
+            .run(&self.save_credential, request, RunOptions::default())
             .await
             .unwrap_or(CredentialStatus::Failed)
     }
@@ -992,6 +1239,14 @@ impl LoginUpsert {
 /// ([`SavedServer::endpoint`]) and the free-tier rule is judged in.
 fn target_endpoint(target: &ConnectTarget) -> String {
     format!("{}:{}", target.host, target.port)
+}
+
+/// The keyring prompt's rationale: the one row by label, else the count.
+fn unlock_reason(saved: &[SavedServer]) -> String {
+    match saved {
+        [only] => format!("Unlock {}", only.label),
+        rows => format!("Unlock {} servers", rows.len()),
+    }
 }
 
 /// `muxr-mobile-<label>-<base36 timestamp>` — the stamp keeps names unique
@@ -1224,6 +1479,23 @@ mod tests {
             target.label, "rig.example.com:50051",
             "a QR that named no label still labels its saved row with something"
         );
+    }
+
+    #[test]
+    fn the_keyring_prompt_names_one_row_and_counts_several() {
+        let row = |label: &str| SavedServer {
+            host: "rig".to_string(),
+            port: 1,
+            trust_mode: TrustMode::System,
+            label: label.to_string(),
+            last_used_ms: 0,
+            read_only: false,
+            has_credential: true,
+            token_name: None,
+            fingerprint: None,
+        };
+        assert_eq!(unlock_reason(&[row("devbox")]), "Unlock devbox");
+        assert_eq!(unlock_reason(&[row("a"), row("b")]), "Unlock 2 servers");
     }
 
     #[test]
