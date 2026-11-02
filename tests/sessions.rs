@@ -1597,12 +1597,30 @@ fn a_restart_ignores_the_old_generations_late_reply_and_clears_the_selection() {
 /// A repository whose list is swapped between connections.
 struct SwitchableRepo {
     names: Mutex<Vec<String>>,
+    /// While set, a list read parks until [`open`](Self::open) — so a test can look at the
+    /// screen between a switch and its first load landing.
+    gated: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl SwitchableRepo {
+    fn open(&self) {
+        self.gated.store(false, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 impl SessionsRepository for SwitchableRepo {
     async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        while self.gated.load(Ordering::SeqCst) {
+            let parked = self.release.notified();
+            if !self.gated.load(Ordering::SeqCst) {
+                break;
+            }
+            parked.await;
+        }
         let names = self.names.lock().expect("ok").clone();
         Ok(names.iter().map(|n| stub_session(n)).collect())
     }
@@ -1640,6 +1658,8 @@ impl Drop for RainOn {
 fn switchable(names: &[&str], wait_for: &str) -> (Harness, Arc<SwitchableRepo>) {
     let repo = Arc::new(SwitchableRepo {
         names: Mutex::new(names.iter().map(|n| n.to_string()).collect()),
+        gated: std::sync::atomic::AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
     });
     let mut h = Harness::mount_over(
         Some(Arc::clone(&repo) as SharedSessionsRepository),
@@ -1694,8 +1714,26 @@ fn switching_servers_across_frames_replaces_the_old_hosts_cards_and_selection() 
         "the screen is still mounted, showing host A's last list"
     );
 
+    // Host B's first load is held open, so the frames after the dial show only what the
+    // restart itself did (the poll cannot run: its cadence is seconds of wall time, and it
+    // is armed only by a loaded list).
     set_names(&repo, &["beta-one"]);
+    repo.gated.store(true, Ordering::SeqCst);
     connection.connect(mock_target(false));
+    h.pump_until("the dial to settle", |_| {
+        connection.connected.get_untracked()
+    });
+    for _ in 0..2 {
+        h.frame();
+    }
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|s| s.starts_with("alpha")),
+        "host A's cards are gone as soon as host B is up, before its list lands: {values:?}"
+    );
+    assert_eq!(h.card_count(), 0);
+
+    repo.open();
     h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
     assert_only_beta(&mut h);
 }
