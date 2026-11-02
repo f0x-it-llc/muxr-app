@@ -11,7 +11,7 @@
 //! a system prompt.
 
 use super::entities::{
-    CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential,
+    CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential, UnlockedKeyring,
 };
 use crate::failure::AppFailure;
 
@@ -46,10 +46,15 @@ pub trait CredentialService {
     /// the secret is unlockable later.
     async fn store(&self, request: StoreRequest) -> CredentialStatus;
 
-    /// Gates, then reads the token for `request`'s server key; nothing stored
+    /// Legacy single-key read (pre-keyring): gates, then reads the token for
+    /// `request`'s server key; nothing stored
     /// after a passed gate answers
     /// [`NotFound`](super::entities::CredentialStatus::NotFound).
     async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential;
+
+    /// Gates once, then reads the whole keyring. `endpoints` is the saved list's
+    /// endpoints, used to find legacy per-server entries to migrate.
+    async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring;
 
     /// Drops the credential for `server_key`. No gate — forgetting a secret
     /// isn't using it, and deleting an absent key succeeds.

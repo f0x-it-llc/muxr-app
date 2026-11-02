@@ -3,7 +3,9 @@ use std::sync::Arc;
 use clean_signals::UseCase;
 
 use crate::failure::AppFailure;
-use crate::features::connect::domain::entities::{UnlockRequest, UnlockedCredential};
+use crate::features::connect::domain::entities::{
+    UnlockRequest, UnlockedCredential, UnlockedKeyring,
+};
 use crate::features::connect::domain::repositories::CredentialService;
 
 pub struct UnlockCredential {
@@ -13,6 +15,11 @@ pub struct UnlockCredential {
 impl UnlockCredential {
     pub fn new(service: Arc<dyn CredentialService + Send + Sync>) -> Self {
         Self { service }
+    }
+
+    /// Unlocks the whole keyring behind one gate.
+    pub async fn run_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring {
+        self.service.unlock_all(reason, endpoints).await
     }
 }
 
