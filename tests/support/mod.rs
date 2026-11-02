@@ -540,6 +540,18 @@ pub fn pointer(phase: PointerPhase, p: Point) -> InputEvent {
     })
 }
 
+/// One contact of a multi-touch gesture: touch slot `id`'s `phase` at `p`.
+pub fn contact(id: u32, phase: PointerPhase, p: Point) -> InputEvent {
+    InputEvent::PointerContact {
+        pointer_id: frust::PointerId::touch(id),
+        event: PointerEvent {
+            phase,
+            position: p,
+            button: PointerButton::Primary,
+        },
+    }
+}
+
 /// A full tap (Down then Up) at `p` — fires a `Button`'s `on_press` only when both land inside
 /// its bounds (`docs/CODE_STANDARDS.md`'s "fire on up-inside" convention).
 pub fn tap<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, p: Point) {
