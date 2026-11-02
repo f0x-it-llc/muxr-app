@@ -29,6 +29,7 @@ use frust::{
     spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
+use frust_haptics::{HapticEffect, Haptics};
 
 use crate::AppState;
 use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};
@@ -220,6 +221,8 @@ pub struct GridHooks {
     pub on_content_tap: Option<term::ContentTapSink>,
     /// `Some` for every live session, both backends.
     pub on_wheel: Option<term::WheelSink>,
+    /// `None` on herdr and on a read-only credential; see [`resolve_pinch_target`].
+    pub on_pinch: Option<term::PinchSink>,
 }
 
 /// The mounted screen's live grid hooks, once a live session has been entered
@@ -476,9 +479,42 @@ impl Component for TerminalScreen {
                     }
                 })
             };
+            // A credential's read-only status is fixed for the mount, so an
+            // untracked read here is the whole gate.
+            let on_pinch: Option<term::PinchSink> = if controller.is_herdr_session()
+                || state.actions.connection.is_read_only.get_untracked()
+            {
+                None
+            } else {
+                let controller = Arc::clone(&controller);
+                let selection = session.selection.clone();
+                Some(Rc::new(
+                    move |intent: term::PinchIntent, focal: frust::authoring::Point| {
+                        let Some(cell) = selection.cell_at(focal) else {
+                            return;
+                        };
+                        let Some(tab) = controller.active_tab_entry() else {
+                            return;
+                        };
+                        let Some((pane_id, is_plugin)) =
+                            resolve_pinch_target(&tab, intent, cell.col.into(), cell.row.into())
+                        else {
+                            return;
+                        };
+                        let _ = Haptics::perform(HapticEffect::SelectionClick);
+                        let controller = Arc::clone(&controller);
+                        spawn_local(async move {
+                            controller
+                                .toggle_pane_fullscreen_from_pinch(pane_id, is_plugin)
+                                .await;
+                        });
+                    },
+                ))
+            };
             *state.actions.grid_hooks.borrow_mut() = Some(GridHooks {
                 on_content_tap,
                 on_wheel: Some(on_wheel),
+                on_pinch,
             });
 
             state.live = Some(session);
@@ -563,6 +599,7 @@ impl Component for TerminalScreen {
                 .input(session.input.clone())
                 .read_only(read_only)
                 .selection(session.selection.clone());
+                let mut pinch = None;
                 if let Some(hooks) = state.actions.grid_hooks.borrow().clone() {
                     if let Some(sink) = hooks.on_content_tap {
                         grid = grid.on_content_tap(sink);
@@ -570,15 +607,17 @@ impl Component for TerminalScreen {
                     if let Some(sink) = hooks.on_wheel {
                         grid = grid.on_wheel(sink);
                     }
+                    pinch = hooks.on_pinch;
                 }
                 let mut chip = term::copy_chip(session.selection.clone());
                 if let Some(sink) = demo_copy_sink() {
                     chip = chip.copy_sink(sink);
                 }
-                Either::Left(term::terminal_surface(
+                Either::Left(term::terminal_surface_with_pinch(
                     session.selection.clone(),
                     grid,
                     chip,
+                    pinch,
                 ))
             }
             None => Either::Right(card_body(lines, epoch, &ink)),
@@ -727,6 +766,31 @@ fn resolve_tap_action(tab: &TabEntry, col: u32, row: u32) -> Option<(u32, bool)>
     if pane.focused {
         return None;
     }
+    Some((pane.id, pane.is_plugin))
+}
+
+/// The `(pane_id, is_plugin)` a pinch should toggle fullscreen on, if any.
+///
+/// **Spread** is a no-op while any pane is already fullscreen; otherwise it
+/// targets the pane under the focal cell, falling back to the focused pane
+/// when the focal lands in a gutter. **Converge** targets the fullscreen pane
+/// and is a no-op when none is.
+fn resolve_pinch_target(
+    tab: &TabEntry,
+    intent: term::PinchIntent,
+    col: u32,
+    row: u32,
+) -> Option<(u32, bool)> {
+    let pane = match intent {
+        term::PinchIntent::EnterFullscreen => {
+            if tab.panes.iter().any(|pane| pane.is_fullscreen) {
+                return None;
+            }
+            resolve_tapped_pane(tab, col, row)
+                .or_else(|| tab.panes.iter().find(|pane| pane.focused))?
+        }
+        term::PinchIntent::ExitFullscreen => tab.panes.iter().find(|pane| pane.is_fullscreen)?,
+    };
     Some((pane.id, pane.is_plugin))
 }
 
@@ -1621,6 +1685,56 @@ mod tests {
             Some(10),
             "the floating pane exists but does not cover this cell, so tiled \
              still answers"
+        );
+    }
+
+    // `resolve_pinch_target` — which pane a pinch toggles.
+
+    fn two_panes() -> TabEntry {
+        let mut left = pane_at(10, 0, 0, 40, 24);
+        left.focused = true;
+        tab_with(vec![left, pane_at(11, 40, 0, 40, 24)])
+    }
+
+    #[test]
+    fn a_spread_over_a_pane_targets_that_pane() {
+        let tab = two_panes();
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 45, 5),
+            Some((11, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_in_a_gutter_targets_the_focused_pane() {
+        let tab = two_panes();
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 90, 30),
+            Some((10, false))
+        );
+    }
+
+    #[test]
+    fn a_spread_while_a_pane_is_fullscreen_is_a_no_op() {
+        let mut tab = two_panes();
+        tab.panes[1].is_fullscreen = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::EnterFullscreen, 5, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn a_converge_targets_the_fullscreen_pane_and_is_a_no_op_without_one() {
+        let mut tab = two_panes();
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            None
+        );
+        tab.panes[1].is_fullscreen = true;
+        assert_eq!(
+            resolve_pinch_target(&tab, term::PinchIntent::ExitFullscreen, 5, 5),
+            Some((11, false))
         );
     }
 
