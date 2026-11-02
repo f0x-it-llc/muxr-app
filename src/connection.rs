@@ -713,8 +713,9 @@ impl ConnectionController {
     /// navigate away themselves — this never touches the router.
     pub fn disconnect(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        self.tear_down();
+        self.backend.disconnect();
         self.connecting.set(false);
+        self.clear_server_state();
     }
 
     /// Lock `keyring` (zeroizing every token), then [`Self::disconnect`].
@@ -727,6 +728,11 @@ impl ConnectionController {
     /// in that order, so no screen sees a live connection with a dead client.
     fn tear_down(&self) {
         self.backend.disconnect();
+        self.clear_server_state();
+    }
+
+    /// Clear the server-scoped signals and move the epoch.
+    fn clear_server_state(&self) {
         self.server_info.set(None);
         self.is_read_only.set(false);
         self.credential_offer.set(None);
