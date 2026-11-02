@@ -1047,7 +1047,9 @@ impl ConnectController {
     ) {
         let unreadable = match self.keyring_unlock.unlock(&saved).await {
             KeyringUnlockOutcome::Unlocked { unreadable } => unreadable,
-            KeyringUnlockOutcome::Refused(CredentialStatus::Canceled) => {
+            KeyringUnlockOutcome::Refused(CredentialStatus::Canceled)
+            | KeyringUnlockOutcome::Busy
+            | KeyringUnlockOutcome::Superseded => {
                 self.unlocking.set(false);
                 return;
             }
@@ -1268,6 +1270,13 @@ pub enum KeyringUnlockOutcome {
     Unlocked { unreadable: Vec<String> },
     /// Nothing was published. Never [`CredentialStatus::Success`].
     Refused(CredentialStatus),
+    /// Another unlock is already in flight app-wide: no prompt was raised.
+    /// Callers treat it silently.
+    Busy,
+    /// A lock landed while the prompt was pending, so the unlocked keyring
+    /// was dropped unpublished. Callers treat it as a silent cancel: no dial,
+    /// no toast.
+    Superseded,
 }
 
 /// The page-agnostic keyring seam the Connect dock and Settings share: one
@@ -1307,6 +1316,10 @@ impl KeyringUnlock {
     /// success, rows whose legacy entry was unreadable lose their credential
     /// claim first, then the keyring is published.
     pub async fn unlock(&self, saved: &[SavedServer]) -> KeyringUnlockOutcome {
+        let Some(_ticket) = self.keyring.begin_unlock() else {
+            return KeyringUnlockOutcome::Busy;
+        };
+        let epoch = self.keyring.lock_epoch();
         let endpoints: Vec<String> = saved.iter().map(SavedServer::endpoint).collect();
         let UnlockedKeyring {
             status,
@@ -1324,8 +1337,15 @@ impl KeyringUnlock {
             }
             (status, _) => return KeyringUnlockOutcome::Refused(status),
         };
+        if self.keyring.lock_epoch() != epoch {
+            // Lock & disconnect won: the keyring zeroizes on drop.
+            return KeyringUnlockOutcome::Superseded;
+        }
         for endpoint in &unreadable {
             self.forget_unreadable(endpoint).await;
+        }
+        if self.keyring.lock_epoch() != epoch {
+            return KeyringUnlockOutcome::Superseded;
         }
         self.keyring.publish(keyring);
         KeyringUnlockOutcome::Unlocked { unreadable }

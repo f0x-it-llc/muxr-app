@@ -51,7 +51,7 @@ use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::domain::repositories::{CredentialService, SavedServersRepository};
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::{
-    ConnectController, ConnectRetry, CredentialOffer, GatePrompt, MANUAL_RESET_MESSAGE,
+    ConnectController, ConnectRetry, CredentialOffer, DockState, GatePrompt, MANUAL_RESET_MESSAGE,
     OfferPrompt, ServerLimitBlock, URL_ERROR_MESSAGE, VAULT_RESET_MESSAGE,
     set_biometrics_available_for_tests,
 };
@@ -5963,6 +5963,155 @@ fn another_change_to_the_unlocked_handle_mid_save_still_takes_the_token() {
         keyring.token_for(DOCK_B).is_some(),
         "…beside the other change"
     );
+}
+
+/// [`MockCredentialService`] whose `unlock_all` holds on [`HeldPrompt`] and
+/// counts how many prompts were raised.
+struct HeldUnlock {
+    inner: Arc<MockCredentialService>,
+    prompt: Arc<HeldPrompt>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[clean_signals::async_trait]
+impl CredentialService for HeldUnlock {
+    async fn store(&self, request: StoreRequest) -> CredentialStatus {
+        self.inner.store(request).await
+    }
+
+    async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential {
+        self.inner.unlock(request).await
+    }
+
+    async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Hold(&self.prompt).await;
+        self.inner.unlock_all(reason, endpoints).await
+    }
+
+    async fn store_in_vault(
+        &self,
+        request: StoreRequest,
+        keyring: &mut Keyring,
+    ) -> CredentialStatus {
+        self.inner.store_in_vault(request, keyring).await
+    }
+
+    async fn delete_from_vault(
+        &self,
+        server_key: String,
+        keyring: &mut Keyring,
+    ) -> Result<(), AppFailure> {
+        self.inner.delete_from_vault(server_key, keyring).await
+    }
+
+    async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
+        self.inner.delete(server_key).await
+    }
+
+    async fn reset_vault(&self) -> Result<(), AppFailure> {
+        self.inner.reset_vault().await
+    }
+}
+
+/// A locked install with both dock rows in the vault, whose controller's
+/// `unlock_all` parks on the returned [`HeldPrompt`]; the counter tallies the
+/// prompts it raised.
+fn hold_a_dock_unlock(
+    keyring: &KeyringHandle,
+) -> (Creds, Arc<HeldPrompt>, Arc<std::sync::atomic::AtomicUsize>) {
+    let creds = keyring_fixture(dock_rows(TrustMode::System), keyring);
+    seed_both_in_the_vault(&creds.credentials);
+    let prompt = Arc::new(HeldPrompt::default());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held = Arc::new(HeldUnlock {
+        inner: Arc::clone(&creds.credentials),
+        prompt: Arc::clone(&prompt),
+        calls: Arc::clone(&calls),
+    });
+    let controller = Arc::new(ConnectController::new(
+        Arc::clone(&creds.servers) as _,
+        held as _,
+        Arc::clone(&creds.tokens) as _,
+        Arc::clone(&creds.connection),
+        Arc::clone(&creds.pro),
+        keyring.clone(),
+    ));
+    (
+        Creds {
+            controller,
+            ..creds
+        },
+        prompt,
+        calls,
+    )
+}
+
+#[test]
+fn a_lock_during_a_pending_dock_unlock_wins_with_no_publish_no_dial_and_no_toast() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let keyring = KeyringHandle::new();
+    let (creds, prompt, _calls) = hold_a_dock_unlock(&keyring);
+
+    unlock_through_the_dock(&creds);
+    pump_until_done("the unlock to reach its prompt", || {
+        prompt.entered.load(std::sync::atomic::Ordering::SeqCst)
+    });
+    assert!(creds.controller.unlocking.get_untracked());
+    creds.connection.lock_and_disconnect(&keyring);
+    prompt.release();
+    pump_until_done("the dock to settle", || {
+        !creds.controller.unlocking.get_untracked()
+    });
+    for _ in 0..20 {
+        frust_reactive::ReactiveRuntime::get()
+            .expect("setup() installed the runtime")
+            .pump_local();
+    }
+
+    assert!(
+        !keyring.is_unlocked() && keyring.endpoints().is_empty(),
+        "the late unlock must not re-open a locked keyring: {:?}",
+        keyring.endpoints()
+    );
+    assert!(
+        !creds.connection.connected.get_untracked(),
+        "nothing dialed"
+    );
+    assert!(creds.connection.server_info.get_untracked().is_none());
+    assert_eq!(creds.controller.dock_state(), DockState::Idle);
+    assert!(app_toasts().pending_untracked().is_empty(), "no toast");
+    assert!(!keyring.unlock_in_flight(), "the ticket was released");
+}
+
+#[test]
+fn a_dock_press_while_another_unlock_is_in_flight_raises_no_second_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let keyring = KeyringHandle::new();
+    let (creds, prompt, calls) = hold_a_dock_unlock(&keyring);
+
+    let ticket = keyring.begin_unlock().expect("nothing is in flight yet");
+    unlock_through_the_dock(&creds);
+    for _ in 0..20 {
+        frust_reactive::ReactiveRuntime::get()
+            .expect("setup() installed the runtime")
+            .pump_local();
+    }
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no prompt"
+    );
+    assert!(!prompt.entered.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!creds.controller.unlocking.get_untracked(), "dock idle");
+    assert!(!keyring.is_unlocked() && !creds.connection.connected.get_untracked());
+    assert!(app_toasts().pending_untracked().is_empty(), "silent");
+    drop(ticket);
 }
 
 // ---------------------------------------------------------------------------
