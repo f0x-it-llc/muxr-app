@@ -21,7 +21,7 @@ use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::SharedAuthTokensRepository;
 use crate::features::settings::domain::entities::CreateTokenRequest;
-use crate::routes::Nav;
+use crate::routes::{Nav, PageMark};
 use crate::ui::toasts::app_toasts;
 
 pub const SESSIONS_LOCATION: &str = "/sessions";
@@ -117,12 +117,28 @@ pub enum ConnectMode {
     Add,
 }
 
-/// Where a settled connect goes next: Home pushes Sessions, Add pops back to
-/// the shell it covers (whose Sessions screen restarts on the new epoch).
-fn land(mode: ConnectMode, nav: &Nav) {
-    match mode {
-        ConnectMode::Home => nav.push(SESSIONS_LOCATION),
-        ConnectMode::Add => nav.pop(),
+/// Where a settled connect goes next: Home pushes Sessions; Add pops back to
+/// the shell it covers (whose Sessions screen restarts on the new epoch) —
+/// but only its own page, marked when the dial started, so a dial settling
+/// after the user already backed out never pops the shell — and latches the
+/// page shut against a second dial.
+#[derive(Clone)]
+struct Landing {
+    nav: Nav,
+    /// `Some` exactly in [`ConnectMode::Add`].
+    mark: Option<PageMark>,
+    landed: Arc<AtomicBool>,
+}
+
+impl Landing {
+    fn land(&self) {
+        match &self.mark {
+            None => self.nav.push(SESSIONS_LOCATION),
+            Some(mark) => {
+                self.landed.store(true, Ordering::SeqCst);
+                self.nav.pop_marked(mark);
+            }
+        }
     }
 }
 
@@ -173,6 +189,12 @@ pub struct ConnectController {
     /// The dock's one-prompt unlock, shared with Settings.
     keyring_unlock: KeyringUnlock,
     mode: ConnectMode,
+    /// Add mode: set once a settled connect lands — the page is leaving, so
+    /// every later dial is refused (see [`Self::busy_untracked`]).
+    landed: Arc<AtomicBool>,
+    /// Add mode: the page mark the last dial started on, for an offer
+    /// answered after it settled.
+    landing_mark: std::sync::Mutex<Option<PageMark>>,
     /// Probed once per mount: enrollment can change while the app is away.
     biometrics_available: bool,
     saving_credential: AtomicBool,
@@ -220,6 +242,8 @@ impl ConnectController {
             keyring,
             keyring_unlock,
             mode: ConnectMode::Home,
+            landed: Arc::new(AtomicBool::new(false)),
+            landing_mark: std::sync::Mutex::new(None),
             biometrics_available: probe_biometrics(),
             saving_credential: AtomicBool::new(false),
             url: RwSignal::new(String::new()),
@@ -246,6 +270,40 @@ impl ConnectController {
 
     pub fn mode(&self) -> ConnectMode {
         self.mode
+    }
+
+    /// Where a dial starting now lands once it settles: in Add mode, marks
+    /// the page on top now and keeps that mark for the offer's answer.
+    fn landing(&self, nav: &Nav) -> Landing {
+        let mark = (self.mode == ConnectMode::Add).then(|| nav.mark_top());
+        if mark.is_some() {
+            *self
+                .landing_mark
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = mark;
+        }
+        Landing {
+            nav: nav.clone(),
+            mark,
+            landed: Arc::clone(&self.landed),
+        }
+    }
+
+    /// [`Self::landing`] for an answer to the offer the last dial raised:
+    /// the dial's own mark, else (no dial recorded one) the page on top now.
+    fn offer_landing(&self, nav: &Nav) -> Landing {
+        let stored = self
+            .landing_mark
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let mark =
+            (self.mode == ConnectMode::Add).then(|| stored.unwrap_or_else(|| nav.mark_top()));
+        Landing {
+            nav: nav.clone(),
+            mark,
+            landed: Arc::clone(&self.landed),
+        }
     }
 
     /// Dial `target` the way this page dials: `/` opens the first
@@ -392,9 +450,12 @@ impl ConnectController {
     }
 
     /// [`Self::busy`] without subscribing, for press handlers with no owner to
-    /// subscribe. `pub(crate)` for the QR affordance's own use.
+    /// subscribe — plus an add-server page that has already landed, whose
+    /// second dial (a double tap) would re-dial with a scrubbed form.
+    /// `pub(crate)` for the QR affordance's own use.
     pub(crate) fn busy_untracked(&self) -> bool {
-        self.connection.connecting.get_untracked()
+        self.landed.load(Ordering::SeqCst)
+            || self.connection.connecting.get_untracked()
             || self.unlocking.get_untracked()
             || self.resolving_offer.get_untracked()
     }
@@ -504,7 +565,7 @@ impl ConnectController {
             return;
         }
         self.clear_url_validation();
-        let nav = nav.clone();
+        let landing = self.landing(nav);
         // Both `Copy`; the closure may outlive this borrow (see `Self::connect`).
         let token = self.token;
         let pending = self.pending_pairing;
@@ -514,14 +575,13 @@ impl ConnectController {
         let scanned = payload.token.clone();
         let label = target.label.clone();
         let endpoint = upsert.endpoint();
-        let mode = self.mode;
         self.dial(target, move |outcome| {
             if outcome.is_ok() {
                 upsert.run();
                 token.set(Zeroizing::new(String::new()));
                 pending.set(None);
                 controller.save_paired_credential(endpoint, label, scanned);
-                land(mode, &nav);
+                landing.land();
             }
         });
     }
@@ -604,7 +664,7 @@ impl ConnectController {
                     return;
                 }
                 self.clear_url_validation();
-                let nav = nav.clone();
+                let landing = self.landing(nav);
                 // Token's job ends once the connection opens with it; captured by
                 // value (`RwSignal` is `Copy`) since the closure may outlive this borrow.
                 let token = self.token;
@@ -614,7 +674,6 @@ impl ConnectController {
                 // Whether this offer would be a *replacement* — read before the dial.
                 let replacing = self.stores_credential_for(&target.host, target.port);
                 let upsert = self.login_upsert(&target);
-                let mode = self.mode;
                 self.dial(target, move |outcome| {
                     if outcome.is_err() {
                         return;
@@ -626,7 +685,7 @@ impl ConnectController {
                             resolving.set(true);
                             offer_prompt(CredentialOffer { label, replacing });
                         }
-                        None => land(mode, &nav),
+                        None => landing.land(),
                     }
                 });
             }
@@ -648,9 +707,9 @@ impl ConnectController {
         }
     }
 
-    /// Runs the accepted offer's save, then lands ([`land`]) once it settles
-    /// (however it settled) — the prompt is answered on Connect, not over
-    /// Sessions.
+    /// Runs the accepted offer's save, then lands ([`Landing`]) once it
+    /// settles (however it settled) — the prompt is answered on Connect, not
+    /// over Sessions.
     ///
     /// The add-server page saves through itself rather than the connection's
     /// installed [`CredentialSaver`]: that saver is `/`'s, still retained
@@ -658,14 +717,13 @@ impl ConnectController {
     /// save is the same [`Self::begin_credential_save`] either way, with the
     /// connection's own guards (no offer, no endpoint) mirrored here.
     pub fn accept_offer_then_navigate(self: &Arc<Self>, nav: &Nav) {
-        let nav = nav.clone();
+        let landing = self.offer_landing(nav);
         let resolving = self.resolving_offer;
-        let mode = self.mode;
         let finish = move || {
             resolving.set(false);
-            land(mode, &nav);
+            landing.land();
         };
-        if mode == ConnectMode::Home {
+        if self.mode == ConnectMode::Home {
             self.connection.accept_credential_offer_with(finish);
             return;
         }
@@ -687,7 +745,7 @@ impl ConnectController {
     pub fn decline_offer_then_navigate(&self, nav: &Nav) {
         self.connection.dismiss_credential_offer();
         self.resolving_offer.set(false);
-        land(self.mode, nav);
+        self.offer_landing(nav).land();
     }
 
     // -----------------------------------------------------------------------
@@ -909,12 +967,11 @@ impl ConnectController {
     fn connect_recovered(&self, server: &SavedServer, token: Zeroizing<String>, nav: &Nav) {
         let target = saved_target(server, token);
         let upsert = self.login_upsert(&target);
-        let nav = nav.clone();
-        let mode = self.mode;
+        let landing = self.landing(nav);
         self.dial(target, move |outcome| {
             if outcome.is_ok() {
                 upsert.run();
-                land(mode, &nav);
+                landing.land();
             }
         });
     }

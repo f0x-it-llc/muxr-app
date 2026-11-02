@@ -61,7 +61,7 @@ use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
 use crate::responsive::Responsive;
-use crate::routes::{ADD_SERVER_LOCATION, CONNECT_SERVER_QUERY_KEY, Nav, app_nav};
+use crate::routes::{Nav, add_server_location, app_nav};
 use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::show_sheet;
@@ -772,7 +772,23 @@ impl Actions {
     /// see the [module docs](self). The verdict comes first, so a blocked
     /// row raises the paywall (whose unlock retries this tap) and no unlock
     /// prompt; then the switch, landing back on Sessions.
+    ///
+    /// Single-flight: ignored while a switch's unlock or any dial is in
+    /// flight, and once `endpoint` is already the connected one (a double tap
+    /// on a backend that settles at once). The settle-time pop is marked, so
+    /// it never fires once the user has left Settings on their own.
     pub fn switch_server(&self, endpoint: &str) {
+        let active = self
+            .connection
+            .server_info
+            .get_untracked()
+            .is_some_and(|info| info.endpoint == endpoint);
+        if active
+            || self.controller.switching.get_untracked()
+            || self.connection.connecting.get_untracked()
+        {
+            return;
+        }
         let saved = self.controller.saved.get_untracked();
         let Some(server) = saved.iter().find(|server| server.endpoint() == endpoint) else {
             return;
@@ -795,24 +811,20 @@ impl Actions {
             return;
         }
         let nav = self.app_nav.clone();
+        let mark = nav.mark_top();
         self.controller.switch_server(
             endpoint.to_string(),
             unverified_confirm_prompt(&self.overlays),
             // Settings is only ever pushed from Sessions, so a pop is the way
             // back to it.
-            Box::new(move || nav.pop()),
+            Box::new(move || nav.pop_marked(&mark)),
         );
     }
 
     /// Push the add-server page over the shell, prefilled from the saved
     /// row at `endpoint` when one is named.
     pub fn open_add_server(&self, endpoint: Option<&str>) {
-        match endpoint {
-            Some(endpoint) => self.app_nav.push(&format!(
-                "{ADD_SERVER_LOCATION}&{CONNECT_SERVER_QUERY_KEY}={endpoint}"
-            )),
-            None => self.app_nav.push(ADD_SERVER_LOCATION),
-        }
+        self.app_nav.push(&add_server_location(endpoint));
     }
 
     /// Restore prior purchases from the `muxr pro` group's `restore` row —
