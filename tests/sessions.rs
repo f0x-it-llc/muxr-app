@@ -47,7 +47,9 @@ use muxr::features::sessions::domain::entities::{
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
-use muxr::features::sessions::presentation::pages::{resolve_poll_interval, sessions_page};
+use muxr::features::sessions::presentation::pages::{
+    resolve_poll_interval, sessions_page, set_loading_rain_for_tests,
+};
 use muxr::features::settings::data::repositories::MockPreferencesRepository;
 use muxr::features::settings::di::SharedPreferencesRepository;
 use muxr::features::settings::domain::entities::{AppearancePrefs, PollPrefs, Preferences};
@@ -57,9 +59,9 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, added, by_width, center, char_key, frame_sized, largest, long_press,
-    named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer,
-    pump_frames, serial, settle_sized, setup, smallest, tap,
+    EPSILON, RecScene, added, by_width, center, char_key, frame_at_sized, frame_sized, largest,
+    long_press, named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values,
+    pointer, pump_frames, serial, settle_sized, setup, smallest, tap,
 };
 
 /// A point in the top-left corner — scrim on every overlay this screen pushes
@@ -1618,26 +1620,41 @@ impl SessionsRepository for SwitchableRepo {
     }
 }
 
-#[test]
-fn switching_servers_replaces_the_old_hosts_cards_with_the_new_hosts_list() {
-    let _g = serial();
-    let _ambient = setup();
+/// Opts the loading rain in for one test and back out when dropped, even on a panic.
+struct RainOn;
+
+impl RainOn {
+    fn new() -> Self {
+        set_loading_rain_for_tests(true);
+        RainOn
+    }
+}
+
+impl Drop for RainOn {
+    fn drop(&mut self) {
+        set_loading_rain_for_tests(false);
+    }
+}
+
+/// A harness over a [`SwitchableRepo`] listing `names`, connected and showing `wait_for`.
+fn switchable(names: &[&str], wait_for: &str) -> (Harness, Arc<SwitchableRepo>) {
     let repo = Arc::new(SwitchableRepo {
-        names: Mutex::new(vec!["alpha-one".to_string(), "alpha-two".to_string()]),
+        names: Mutex::new(names.iter().map(|n| n.to_string()).collect()),
     });
     let mut h = Harness::mount_over(
         Some(Arc::clone(&repo) as SharedSessionsRepository),
         support::surface(),
     );
     expect_connection_controller().connect(mock_target(false));
-    h.pump_until_values("host A's list", |v| v.iter().any(|s| s == "alpha-two"));
+    h.pump_until_values("host A's list", |v| v.iter().any(|s| s == wait_for));
+    (h, repo)
+}
 
-    *repo.names.lock().expect("ok") = vec!["beta-one".to_string()];
-    let connection = expect_connection_controller();
-    connection.disconnect();
-    connection.connect(mock_target(false));
+fn set_names(repo: &SwitchableRepo, names: &[&str]) {
+    *repo.names.lock().expect("ok") = names.iter().map(|n| n.to_string()).collect();
+}
 
-    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+fn assert_only_beta(h: &mut Harness) {
     let values = node_values(&h.root);
     assert!(
         !values.iter().any(|s| s.starts_with("alpha")),
@@ -1645,6 +1662,98 @@ fn switching_servers_replaces_the_old_hosts_cards_with_the_new_hosts_list() {
     );
     assert_eq!(h.card_count(), 1);
 }
+
+#[test]
+fn switching_servers_in_one_frame_replaces_the_old_hosts_cards() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = switchable(&["alpha-one", "alpha-two"], "alpha-two");
+    set_names(&repo, &["beta-one"]);
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    assert_only_beta(&mut h);
+}
+
+/// The real `switch_to` shape: the teardown lands in one frame, the dial in a later one.
+#[test]
+fn switching_servers_across_frames_replaces_the_old_hosts_cards_and_selection() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = switchable(&["alpha-one", "alpha-two"], "alpha-two");
+    let connection = expect_connection_controller();
+
+    connection.disconnect();
+    for _ in 0..3 {
+        h.frame();
+    }
+    assert!(
+        node_values(&h.root).iter().any(|s| s == "alpha-two"),
+        "the screen is still mounted, showing host A's last list"
+    );
+
+    set_names(&repo, &["beta-one"]);
+    connection.connect(mock_target(false));
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    assert_only_beta(&mut h);
+}
+
+#[test]
+fn a_switch_replays_the_loading_rain_and_the_new_first_load_releases_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one", "alpha-two"], "alpha-two");
+    let mut clock = 0.0;
+    let run_to = |h: &mut Harness, clock: &mut f64, until: f64| {
+        let mut scene = h.frame();
+        while *clock < until {
+            *clock += 100.0;
+            scene = frame_at_sized(
+                &mut h.root,
+                &mut h.logic,
+                &mut h.state,
+                &mut h.tcx,
+                h.surface,
+                support::ms(*clock),
+            );
+        }
+        scene
+    };
+
+    let up = h.frame();
+    assert!(up.glyph_runs > RAIN_RUNS, "the first load opens under rain");
+    let released = run_to(&mut h, &mut clock, 5_000.0);
+    assert!(
+        released.glyph_runs < RAIN_RUNS,
+        "the first load released it"
+    );
+
+    set_names(&repo, &["beta-one"]);
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    assert_only_beta(&mut h);
+    let replay = h.frame();
+    assert!(
+        replay.glyph_runs > RAIN_RUNS,
+        "the switch re-mounts the rain: {} runs",
+        replay.glyph_runs
+    );
+    let until = clock + 5_000.0;
+    let released = run_to(&mut h, &mut clock, until);
+    assert!(
+        released.glyph_runs < RAIN_RUNS,
+        "the new first load releases it: {} runs",
+        released.glyph_runs
+    );
+}
+
+/// Glyph runs above which a frame is the dense rain (`sessions_loading`'s `DENSE_RUNS`).
+const RAIN_RUNS: usize = 100;
 
 // ---------------------------------------------------------------------------
 // The Tablet detail's agent list is controller state: fetched on a selection

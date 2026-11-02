@@ -158,9 +158,9 @@ pub struct SessionsState {
     /// The `connection_epoch` this screen last reacted to; a change while
     /// connected restarts the controller (see `build`).
     seen_epoch: u64,
-    /// Whether the last build saw the connection up — told apart from a first
-    /// connect, which the load `init` already issued serves.
-    seen_connected: bool,
+    /// Sticky: whether this mount has ever seen the connection up. Told apart
+    /// from a first connect, which the load `init` already issued serves.
+    has_connected: bool,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -451,7 +451,7 @@ impl Component for SessionsScreen {
             loading_snapshot: None,
             rain,
             seen_epoch: connection_epoch,
-            seen_connected,
+            has_connected: seen_connected,
         }
     }
 
@@ -472,11 +472,12 @@ impl Component for SessionsScreen {
         let epoch = state.connection.connection_epoch.get_untracked();
         let connected = state.connection.connected.get_untracked();
         if epoch != state.seen_epoch {
-            // A switch is a connected screen seeing a new epoch, or a teardown
+            // A switch is a screen that has ever seen the connection up (across
+            // frames too: a teardown frame, then a dial frame) seeing a new epoch, or a teardown
             // and re-dial inside one frame (two or more moves). A lone move
             // from disconnected is the first connect, which the load `init`
             // issued already serves.
-            let switched = state.seen_connected || epoch - state.seen_epoch >= 2;
+            let switched = state.has_connected || epoch - state.seen_epoch >= 2;
             state.seen_epoch = epoch;
             if connected && switched {
                 state.loading_snapshot = None;
@@ -484,7 +485,7 @@ impl Component for SessionsScreen {
                 state.actions.controller.restart();
             }
         }
-        state.seen_connected = connected;
+        state.has_connected |= connected;
 
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.
