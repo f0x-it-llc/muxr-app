@@ -1864,6 +1864,93 @@ fn deleting_a_credential_with_the_keyring_unlocked_rewrites_the_vault_once() {
 }
 
 #[test]
+fn forgetting_while_unlocked_drops_the_handles_token_even_when_the_vault_rewrite_is_refused() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    let credentials = mock_credentials().expect("the mock service is published");
+    credentials.set_gate(CredentialStatus::Canceled);
+    let keyring = expect_keyring();
+
+    let dialog = open_dialog_by_label(&mut h, "forget");
+    confirm(&mut h, &dialog);
+    h.pump_until_values("the row to disappear", |values| {
+        !values.iter().any(|v| v == CRED_LABEL)
+    });
+
+    assert!(
+        keyring.token_for(CRED_ENDPOINT).is_none(),
+        "the handle dropped it: {:?}",
+        keyring.endpoints()
+    );
+    assert_eq!(
+        credentials.vault_endpoints(),
+        Some(vec![CRED_ENDPOINT.to_string()]),
+        "the refused rewrite left the vault's copy for the next unlock to prune"
+    );
+}
+
+#[test]
+fn tapping_a_row_without_a_credential_opens_the_add_page_and_never_spends_a_keyring_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_seeded(|| {
+        expect_saved_servers()
+            .save(credential_row(false))
+            .expect("the mock store never fails");
+        let mut keyring = Keyring::new();
+        keyring.insert(
+            CRED_ENDPOINT,
+            zeroize::Zeroizing::new(CRED_TOKEN.to_string()),
+        );
+        expect_keyring().publish(keyring);
+        mock_entitlement()
+            .expect("tests/support opted this process into the mock")
+            .set_entitlement(Entitlement::Pro);
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.await_tokens();
+    h.pump_until_values("the saved-server rows", |values| {
+        values.iter().any(|v| v == CRED_LABEL)
+    });
+
+    h.tap_value(CRED_LABEL);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the add-server page is pushed");
+    assert!(
+        node_values(&h.root).iter().any(|v| v == ADD_SERVER_HEADING),
+        "{:?}",
+        node_values(&h.root)
+    );
+    assert_eq!(connected_endpoint().as_deref(), Some("mock.example:7777"));
+}
+
+#[test]
+fn a_row_that_lost_its_credential_behind_the_screens_back_is_never_dialed_with_a_keyring_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, true);
+    expect_saved_servers()
+        .save(credential_row(false))
+        .expect("the mock store never fails");
+
+    h.tap_value(CRED_LABEL);
+    h.pump_once();
+    h.settle();
+
+    assert_eq!(
+        connected_endpoint().as_deref(),
+        Some("mock.example:7777"),
+        "the switch refused the keyring's token"
+    );
+    assert!(
+        expect_keyring().token_for(CRED_ENDPOINT).is_some(),
+        "…without touching the keyring"
+    );
+}
+
+#[test]
 fn the_add_server_row_closes_the_group_and_pushes_the_add_page() {
     let _g = serial();
     let _ambient = setup();

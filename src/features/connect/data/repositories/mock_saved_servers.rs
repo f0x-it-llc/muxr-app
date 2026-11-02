@@ -16,6 +16,10 @@
 //!
 //! Ordering isn't this store's own rule: [`super::prefs_saved_servers::upsert`]
 //! is what both implementations sort through.
+//!
+//! It answers [`SavedServersRepository::is_persistent`] `true`, standing in
+//! for the real store; [`MockSavedServersRepository::not_persistent`] marks
+//! the production fallback's copy, whose demo rows must never drive a prune.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -29,21 +33,28 @@ const HOUR_MS: i64 = 60 * 60 * 1000;
 /// The in-memory saved-server store. See the [module docs](self).
 pub struct MockSavedServersRepository {
     servers: Mutex<Vec<SavedServer>>,
+    persistent: bool,
 }
 
 impl MockSavedServersRepository {
     /// See the [module docs](self) for the seeded rigs.
     pub fn seeded() -> Self {
-        Self {
-            servers: Mutex::new(seed()),
-        }
+        Self::with_servers(seed())
     }
 
     /// A store holding exactly `servers` — for tests that need a known list.
     pub fn with_servers(servers: Vec<SavedServer>) -> Self {
         Self {
             servers: Mutex::new(servers),
+            persistent: true,
         }
+    }
+
+    /// This store, answering [`SavedServersRepository::is_persistent`]
+    /// `false`.
+    pub fn not_persistent(mut self) -> Self {
+        self.persistent = false;
+        self
     }
 }
 
@@ -102,6 +113,10 @@ impl SavedServersRepository for MockSavedServersRepository {
         let mut servers = self.servers.lock().unwrap_or_else(PoisonError::into_inner);
         servers.retain(|existing| existing.endpoint() != endpoint);
         Ok(())
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.persistent
     }
 }
 
@@ -175,6 +190,16 @@ mod tests {
         let listed = repo.list().expect("list succeeds");
         assert_eq!(listed.len(), 2, "no duplicate row");
         assert_eq!(listed[0].label, "renamed", "…and it moved to the top");
+    }
+
+    #[test]
+    fn the_mock_stands_in_for_a_persistent_store_unless_marked_otherwise() {
+        assert!(MockSavedServersRepository::seeded().is_persistent());
+        assert!(
+            !MockSavedServersRepository::seeded()
+                .not_persistent()
+                .is_persistent()
+        );
     }
 
     #[test]

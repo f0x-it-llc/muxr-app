@@ -52,7 +52,8 @@ fn platform_saved_servers() -> SavedServers {
         Ok(repository) => Arc::new(repository),
         Err(err) => {
             log::warn!("saved servers: falling back to the in-memory store: {err}");
-            Arc::new(MockSavedServersRepository::seeded())
+            // Not persistent: its demo rows must never drive a keyring prune.
+            Arc::new(MockSavedServersRepository::seeded().not_persistent())
         }
     }
 }

@@ -26,13 +26,14 @@
 //! drops it; locked, a forget takes the ungated legacy delete (the row goes
 //! too, so the next unlock prunes the vault's copy), while a credential
 //! delete keeps the row and so unlocks first rather than claim a vault copy
-//! it cannot reach. A refused rewrite leaves the row's credential claim as it
-//! was.
+//! it cannot reach. A refused rewrite leaves a credential delete's claim as
+//! it was, while a forget drops the handle's token regardless.
 //!
 //! **Switching servers**: [`switch_server`](SettingsController::switch_server)
 //! dials a saved row with its stored token through `connect`'s page-agnostic
 //! [`KeyringUnlock`] — from the unlocked keyring, else after its one
-//! `unlock_all` prompt — moving the live connection with `switch_to`.
+//! `unlock_all` prompt — moving the live connection with `switch_to`, and
+//! only while the row, read fresh, still claims a credential.
 //!
 //! **The one-time secret**: [`pending_token_secret`](Self::pending_token_secret)
 //! is what the reveal sheet reads — a landed [`create_token`](Self::create_token)
@@ -53,7 +54,9 @@ use crate::connection::{ConnectionController, TrustMode};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
 use crate::features::connect::domain::entities::{CredentialStatus, SavedServer};
-use crate::features::connect::presentation::controller::ConfirmPrompt;
+use crate::features::connect::presentation::controller::{
+    ConfirmPrompt, SAVED_LIST_UNAVAILABLE_MESSAGE,
+};
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences,
@@ -226,11 +229,14 @@ impl SettingsController {
             return false;
         };
         if !self.keyring().is_unlocked() {
-            let saved = self.saved_servers.list().unwrap_or_default();
-            match self.keyring_unlock.unlock(&saved).await {
+            match self.keyring_unlock.unlock().await {
                 KeyringUnlockOutcome::Unlocked { .. } => {}
                 KeyringUnlockOutcome::Refused(status) => {
                     report(status);
+                    return false;
+                }
+                KeyringUnlockOutcome::ListUnavailable => {
+                    app_toasts().show(SAVED_LIST_UNAVAILABLE_MESSAGE);
                     return false;
                 }
                 KeyringUnlockOutcome::Busy | KeyringUnlockOutcome::Superseded => return false,
@@ -258,7 +264,9 @@ impl SettingsController {
     /// otherwise be unreachable forever once the row stops being listed.
     /// Never prompts to unlock: locked, the ungated legacy delete runs and
     /// the vault's copy is pruned by the next unlock, the row being gone. A
-    /// failed eviction is emitted and the row still goes.
+    /// failed eviction is emitted and the row still goes; unlocked, the
+    /// handle drops its token whatever the vault rewrite said, and a refused
+    /// rewrite falls back to the ungated legacy delete.
     pub async fn forget_server(&self, endpoint: String) -> bool {
         let Some(server) = self.saved_row(&endpoint) else {
             return false;
@@ -268,7 +276,16 @@ impl SettingsController {
                 self.revoke_quietly(name).await;
             }
             let evicted = if self.keyring().is_unlocked() {
-                self.evict_unlocked(&endpoint).await
+                let evicted = self.evict_unlocked(&endpoint).await;
+                self.keyring().remove(&endpoint);
+                if evicted.is_err()
+                    && let Err(failure) = self.credentials.delete(endpoint.clone()).await
+                {
+                    log::warn!(
+                        "credentials: legacy delete after a refused eviction failed: {failure}"
+                    );
+                }
+                evicted
             } else {
                 self.credentials.delete(endpoint.clone()).await
             };
@@ -307,7 +324,9 @@ impl SettingsController {
     /// it first (a refusal toasts; a cancel is silent). A
     /// [`TrustMode::NoVerification`] row asks `confirm` before its token is
     /// sent. The free-tier verdict is the caller's, ahead of this. Ignored
-    /// while a switch's unlock is already in flight.
+    /// while a switch's unlock is already in flight. A row that no longer
+    /// claims a credential is never dialed with a keyring token: the list is
+    /// re-read so the next tap opens the add page instead.
     pub fn switch_server(
         self: &Arc<Self>,
         endpoint: String,
@@ -317,38 +336,54 @@ impl SettingsController {
         if self.switching.get_untracked() {
             return;
         }
-        let Some(server) = self.saved_row(&endpoint) else {
+        if !self.claims_credential(&endpoint) {
+            self.refresh_saved_servers();
+            report(CredentialStatus::NotFound);
             return;
-        };
+        }
         if self.keyring().is_unlocked() {
-            self.dial_saved(server, confirm, on_switched);
+            self.dial_saved(&endpoint, confirm, on_switched);
             return;
         }
         self.switching.set(true);
         let controller = Arc::clone(self);
         spawn_local(async move {
-            let saved = controller.saved_servers.list().unwrap_or_default();
-            let outcome = controller.keyring_unlock.unlock(&saved).await;
+            let outcome = controller.keyring_unlock.unlock().await;
             controller.switching.set(false);
             controller.refresh_saved_servers();
             match outcome {
                 KeyringUnlockOutcome::Unlocked { .. } => {
-                    controller.dial_saved(server, confirm, on_switched);
+                    controller.dial_saved(&endpoint, confirm, on_switched);
                 }
                 KeyringUnlockOutcome::Refused(status) => report(status),
+                KeyringUnlockOutcome::ListUnavailable => {
+                    app_toasts().show(SAVED_LIST_UNAVAILABLE_MESSAGE);
+                }
                 KeyringUnlockOutcome::Busy | KeyringUnlockOutcome::Superseded => {}
             }
         });
     }
 
-    /// [`Self::switch_server`]'s dial, the keyring already open.
+    /// Whether the saved row at `endpoint`, read fresh, claims a credential.
+    fn claims_credential(&self, endpoint: &str) -> bool {
+        self.saved_row(endpoint)
+            .is_some_and(|server| server.has_credential)
+    }
+
+    /// [`Self::switch_server`]'s dial, the keyring already open: the row is
+    /// re-read, and dials only while it claims a credential the keyring holds.
     fn dial_saved(
         self: &Arc<Self>,
-        server: SavedServer,
+        endpoint: &str,
         confirm: ConfirmPrompt,
         on_switched: Box<dyn FnOnce()>,
     ) {
-        let Some(token) = self.keyring().token_for(&server.endpoint()) else {
+        let found = self
+            .saved_row(endpoint)
+            .filter(|server| server.has_credential)
+            .and_then(|server| Some((self.keyring().token_for(endpoint)?, server)));
+        let Some((token, server)) = found else {
+            self.refresh_saved_servers();
             report(CredentialStatus::NotFound);
             return;
         };
