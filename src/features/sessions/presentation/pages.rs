@@ -30,7 +30,7 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4,
-    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox,
+    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox,
     Stack, View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area,
     scroll_view, spawn_local, use_context,
 };
@@ -152,6 +152,15 @@ pub struct SessionsState {
     /// release settled — a later change to the session set reaches only the
     /// live band (the read-only posture and colours stay live on both).
     loading_snapshot: Option<(Vec<Session>, bool)>,
+    /// Whether the rain is enabled for this mount (read once in `init`), so a
+    /// connection change can re-arm `loading_done` the way `init` seeded it.
+    rain: bool,
+    /// The `connection_epoch` this screen last reacted to; a change while
+    /// connected restarts the controller (see `build`).
+    seen_epoch: u64,
+    /// Whether the last build saw the connection up — told apart from a first
+    /// connect, which the load `init` already issued serves.
+    seen_connected: bool,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -425,6 +434,8 @@ impl Component for SessionsScreen {
         // Read once per mount — a process-wide test opt-out, not observed
         // state, so never from `build` or a spawned block.
         let rain = LOADING_RAIN.load(Ordering::Relaxed);
+        let connection_epoch = connection.connection_epoch.get_untracked();
+        let seen_connected = connection.connected.get_untracked();
 
         SessionsState {
             actions: Actions {
@@ -438,6 +449,9 @@ impl Component for SessionsScreen {
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
             loading_snapshot: None,
+            rain,
+            seen_epoch: connection_epoch,
+            seen_connected,
         }
     }
 
@@ -449,6 +463,28 @@ impl Component for SessionsScreen {
         if state.back.take_request(depth) {
             state.actions.open_disconnect_confirm(&state.connection);
         }
+
+        // A new connection (the epoch moved while connected) starts this mount
+        // over: the old server's list, selection and rain snapshot go, and the
+        // rain replays over the new first load. A move to disconnected is the
+        // guard/back flow's business. Untracked: `server_info`, set in the same
+        // step, is what wakes this rebuild.
+        let epoch = state.connection.connection_epoch.get_untracked();
+        let connected = state.connection.connected.get_untracked();
+        if epoch != state.seen_epoch {
+            // A switch is a connected screen seeing a new epoch, or a teardown
+            // and re-dial inside one frame (two or more moves). A lone move
+            // from disconnected is the first connect, which the load `init`
+            // issued already serves.
+            let switched = state.seen_connected || epoch - state.seen_epoch >= 2;
+            state.seen_epoch = epoch;
+            if connected && switched {
+                state.loading_snapshot = None;
+                state.loading_done.set(!state.rain);
+                state.actions.controller.restart();
+            }
+        }
+        state.seen_connected = connected;
 
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.
