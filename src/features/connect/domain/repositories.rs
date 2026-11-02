@@ -28,6 +28,9 @@ pub trait SavedServersRepository {
 
     /// Removing an absent endpoint succeeds — the post-condition already holds.
     fn remove(&self, endpoint: &str) -> Result<(), AppFailure>;
+
+    /// Whether this is the device's persisted list: a keyring unlock prunes the vault to it.
+    fn is_persistent(&self) -> bool;
 }
 
 /// The per-server auth-token secret, gated by the device's biometric prompt:

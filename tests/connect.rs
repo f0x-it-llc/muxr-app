@@ -51,9 +51,9 @@ use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::domain::repositories::{CredentialService, SavedServersRepository};
 use muxr::features::connect::domain::use_cases::parse_pairing::parse_pairing_uri;
 use muxr::features::connect::presentation::controller::{
-    ConnectController, ConnectRetry, CredentialOffer, DockState, GatePrompt, MANUAL_RESET_MESSAGE,
-    OfferPrompt, ServerLimitBlock, URL_ERROR_MESSAGE, VAULT_RESET_MESSAGE,
-    set_biometrics_available_for_tests,
+    ConnectController, ConnectRetry, CredentialOffer, DockFailure, DockState, GatePrompt,
+    MANUAL_RESET_MESSAGE, OfferPrompt, SAVED_LIST_UNAVAILABLE_MESSAGE, ServerLimitBlock,
+    URL_ERROR_MESSAGE, VAULT_RESET_MESSAGE, set_biometrics_available_for_tests,
 };
 use muxr::features::connect::presentation::pages::{
     ADD_SERVER_HEADING, ADD_SERVER_SUBTITLE, ADD_SERVER_TITLE, add_server_page, connect_layout,
@@ -6112,6 +6112,285 @@ fn a_dock_press_while_another_unlock_is_in_flight_raises_no_second_prompt() {
     assert!(!keyring.is_unlocked() && !creds.connection.connected.get_untracked());
     assert!(app_toasts().pending_untracked().is_empty(), "silent");
     drop(ticket);
+}
+
+// ---------------------------------------------------------------------------
+// The retained `/`: unlocks, dock targets and forgets over the fresh list
+// ---------------------------------------------------------------------------
+
+/// A keyring published over exactly `entries` (endpoint, token).
+fn publish(keyring: &KeyringHandle, entries: &[(&str, &str)]) {
+    let mut unlocked = Keyring::new();
+    for (endpoint, token) in entries {
+        unlocked.insert(*endpoint, zeroize::Zeroizing::new(token.to_string()));
+    }
+    keyring.publish(unlocked);
+}
+
+/// The saved row for `endpoint` as `creds`' store holds it now.
+fn row_in(creds: &Creds, endpoint: &str) -> Option<SavedServer> {
+    creds
+        .servers
+        .list()
+        .expect("the mock store never fails")
+        .into_iter()
+        .find(|server| server.endpoint() == endpoint)
+}
+
+/// The endpoint `creds`' connection is up on, once the dock's dial settles.
+fn dock_dialed(creds: &Creds) -> String {
+    pump_until_done("the dock's connect", || {
+        creds.connection.connected.get_untracked()
+    });
+    creds
+        .connection
+        .server_info
+        .get_untracked()
+        .expect("a connected controller carries its facts")
+        .endpoint
+}
+
+#[test]
+fn a_dock_unlock_on_the_retained_page_keeps_a_server_added_behind_its_back() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(vec![older_limit_row(DOCK_A, "Dock A", true)], &keyring);
+    creds.credentials.seed_vault(&[(DOCK_A, DOCK_TOKEN_A)]);
+    assert_eq!(creds.controller.saved.get_untracked().len(), 1);
+
+    // The add page's own controller lands B and its saved credential; this
+    // retained page never re-reads, then Lock & disconnect returns to it.
+    creds
+        .servers
+        .save(limit_row(DOCK_B, "Dock B", true))
+        .expect("the mock store never fails");
+    seed_both_in_the_vault(&creds.credentials);
+    creds.connection.lock_and_disconnect(&keyring);
+
+    unlock_through_the_dock(&creds);
+    assert_eq!(
+        dock_dialed(&creds),
+        DOCK_B,
+        "the most recent credentialed row"
+    );
+
+    assert_eq!(
+        creds.credentials.vault_endpoints(),
+        Some(vec![DOCK_A.to_string(), DOCK_B.to_string()]),
+        "the unlock pruned nothing the store still lists"
+    );
+    assert!(row_in(&creds, DOCK_B).expect("B stays").has_credential);
+    assert_eq!(
+        keyring.token_for(DOCK_B).as_deref().map(String::as_str),
+        Some(DOCK_TOKEN_B)
+    );
+    assert_eq!(
+        creds.controller.saved.get_untracked().len(),
+        2,
+        "the page lists the truth after the unlock"
+    );
+}
+
+#[test]
+fn a_dock_over_a_saved_list_that_is_not_persisted_raises_no_prompt_and_prunes_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(Vec::new(), &keyring);
+    seed_both_in_the_vault(&creds.credentials);
+    let servers = Arc::new(
+        MockSavedServersRepository::with_servers(dock_rows(TrustMode::System)).not_persistent(),
+    );
+    let controller = Arc::new(ConnectController::new(
+        Arc::clone(&servers) as _,
+        Arc::clone(&creds.credentials) as _,
+        Arc::clone(&creds.tokens) as _,
+        Arc::clone(&creds.connection),
+        Arc::clone(&creds.pro),
+        keyring.clone(),
+    ));
+    let creds = Creds {
+        controller,
+        servers,
+        ..creds
+    };
+    app_toasts().clear();
+
+    unlock_through_the_dock(&creds);
+    pump_until_done("the dock to settle", || {
+        !creds.controller.unlocking.get_untracked()
+    });
+
+    assert!(creds.credentials.prompts().is_empty(), "no prompt");
+    assert_eq!(
+        creds.credentials.vault_endpoints(),
+        Some(vec![DOCK_A.to_string(), DOCK_B.to_string()]),
+        "nothing pruned"
+    );
+    assert!(!keyring.is_unlocked() && !creds.connection.connected.get_untracked());
+    assert_eq!(
+        creds.controller.dock_state(),
+        DockState::Failed(DockFailure {
+            message: SAVED_LIST_UNAVAILABLE_MESSAGE.to_string(),
+            offers_reset: false,
+        }),
+        "a failure that offers no reset"
+    );
+    assert!(
+        app_toasts()
+            .pending_untracked()
+            .contains(&SAVED_LIST_UNAVAILABLE_MESSAGE.to_string())
+    );
+}
+
+#[test]
+fn the_dock_targets_the_most_recent_row_that_claims_a_credential() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let rows = vec![
+        limit_row(DOCK_A, "Dock A", false),
+        older_limit_row(DOCK_B, "Dock B", true),
+    ];
+    let creds = keyring_fixture(rows, &keyring);
+    creds.credentials.seed_vault(&[(DOCK_B, DOCK_TOKEN_B)]);
+
+    unlock_through_the_dock(&creds);
+
+    assert_eq!(dock_dialed(&creds), DOCK_B);
+    assert_eq!(
+        creds.credentials.prompts(),
+        vec!["Unlock Dock B".to_string()]
+    );
+}
+
+#[test]
+fn a_dock_with_no_credentialed_row_does_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(vec![limit_row(DOCK_A, "Dock A", false)], &keyring);
+
+    unlock_through_the_dock(&creds);
+
+    assert!(creds.credentials.prompts().is_empty());
+    assert!(!creds.controller.unlocking.get_untracked());
+    assert!(!creds.connection.connected.get_untracked());
+}
+
+#[test]
+fn forgetting_on_the_page_while_unlocked_evicts_the_token_from_the_handle_and_the_vault() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(dock_rows(TrustMode::System), &keyring);
+    seed_both_in_the_vault(&creds.credentials);
+    publish(&keyring, &[(DOCK_A, DOCK_TOKEN_A), (DOCK_B, DOCK_TOKEN_B)]);
+
+    let row = row_in(&creds, DOCK_A).expect("A is saved");
+    creds.controller.forget_saved_server(row);
+    pump_until_done("the row to go", || row_in(&creds, DOCK_A).is_none());
+
+    assert_eq!(keyring.endpoints(), vec![DOCK_B], "the handle dropped it");
+    assert_eq!(
+        creds.credentials.vault_endpoints(),
+        Some(vec![DOCK_B.to_string()]),
+        "…and so did the vault"
+    );
+    assert_eq!(creds.credentials.writes(), 1, "one gated rewrite");
+}
+
+#[test]
+fn forgetting_then_re_adding_without_a_credential_never_dials_the_old_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    let creds = keyring_fixture(dock_rows(TrustMode::System), &keyring);
+    seed_both_in_the_vault(&creds.credentials);
+    publish(&keyring, &[(DOCK_A, DOCK_TOKEN_A), (DOCK_B, DOCK_TOKEN_B)]);
+
+    // The forget's vault rewrite is refused, so the vault keeps A's token.
+    creds.credentials.set_gate(CredentialStatus::Canceled);
+    let row = row_in(&creds, DOCK_A).expect("A is saved");
+    creds.controller.forget_saved_server(row);
+    pump_until_done("the row to go", || row_in(&creds, DOCK_A).is_none());
+    assert!(keyring.token_for(DOCK_A).is_none(), "the handle dropped it");
+    creds.credentials.set_gate(CredentialStatus::Success);
+
+    // Re-added through a read-only token: no save is offered, no claim.
+    creds
+        .servers
+        .save(limit_row(DOCK_A, "Dock A", false))
+        .expect("the mock store never fails");
+    creds.controller.reload_saved();
+    creds.connection.lock_and_disconnect(&keyring);
+
+    unlock_through_the_dock(&creds);
+
+    assert_eq!(
+        dock_dialed(&creds),
+        DOCK_B,
+        "A is never dialed with the old token"
+    );
+    assert_eq!(
+        creds.credentials.vault_endpoints(),
+        Some(vec![DOCK_B.to_string()]),
+        "the next unlock pruned A's stale vault entry"
+    );
+    assert!(keyring.token_for(DOCK_A).is_none());
+    assert!(
+        !row_in(&creds, DOCK_A)
+            .expect("A stays saved")
+            .has_credential
+    );
+}
+
+#[test]
+fn a_login_that_writes_a_row_without_a_credential_drops_the_handles_stale_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let keyring = KeyringHandle::new();
+    publish(
+        &keyring,
+        &[(CRED_ENDPOINT, "stale"), (DOCK_B, DOCK_TOKEN_B)],
+    );
+    let creds = keyring_fixture(Vec::new(), &keyring);
+    creds.controller.toggle_remember();
+
+    connect_fixture(&creds);
+
+    assert!(!stored_row(&creds.servers).has_credential);
+    assert!(keyring.token_for(CRED_ENDPOINT).is_none(), "dropped");
+    assert_eq!(keyring.endpoints(), vec![DOCK_B], "…and nothing else");
+}
+
+#[test]
+fn the_retained_page_re_reads_its_list_once_the_keyring_moves() {
+    let _g = serial();
+    let _ambient = setup();
+    let _bio = Biometrics::available();
+    let mut harness = mount_dock(
+        Tier::Pro,
+        vec![limit_row(DOCK_A, "Dock A", true)],
+        |credentials| credentials.seed_vault(&[(DOCK_A, DOCK_TOKEN_A)]),
+    );
+    assert_eq!(count(&harness, button_labelled(UNLOCK_TWO)), 0);
+
+    expect_saved_servers()
+        .save(older_limit_row(DOCK_B, "Dock B", true))
+        .expect("the mock store never fails");
+    expect_keyring().lock();
+    harness.settle();
+    harness.settle();
+
+    assert_eq!(
+        count(&harness, button_labelled(UNLOCK_TWO)),
+        1,
+        "the dock counts the row added behind the page's back: {:?}",
+        node_labels(&harness.root)
+    );
 }
 
 // ---------------------------------------------------------------------------

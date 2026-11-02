@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use clean_signals::{ControllerCore, Failure, RunOptions};
 use frust::{Get, GetUntracked, RwSignal, Set, With, spawn_local};
@@ -45,7 +45,7 @@ pub enum ConnectRetry {
     Manual,
     Pairing,
     Saved(SavedServer),
-    /// The unlock dock, which re-reads the most recent row.
+    /// The unlock dock, which re-reads the most recent credentialed row.
     Keyring,
 }
 
@@ -58,6 +58,10 @@ pub const VAULT_RESET_MESSAGE: &str =
     "Biometrics changed — saved credentials were reset. Connect again with a token.";
 /// The dock copy after the user reset saved credentials from a failed unlock.
 pub const MANUAL_RESET_MESSAGE: &str = "Saved credentials were reset. Connect again with a token.";
+/// The copy when an unlock refused to run over the saved list
+/// ([`KeyringUnlockOutcome::ListUnavailable`]).
+pub const SAVED_LIST_UNAVAILABLE_MESSAGE: &str =
+    "Saved servers aren't available right now. Connect with a token instead.";
 
 /// What the unlock dock shows, derived from the controller's signals.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +201,9 @@ pub struct ConnectController {
     landing_mark: std::sync::Mutex<Option<PageMark>>,
     /// Probed once per mount: enrollment can change while the app is away.
     biometrics_available: bool,
+    /// The connection epoch and keyring generation [`Self::saved`] was last
+    /// re-read against (see [`Self::refresh_saved_if_moved`]).
+    seen_marks: Mutex<(u64, u64)>,
     saving_credential: AtomicBool,
     pub url: RwSignal<String>,
     pub token: RwSignal<Zeroizing<String>>,
@@ -245,6 +252,7 @@ impl ConnectController {
             landed: Arc::new(AtomicBool::new(false)),
             landing_mark: std::sync::Mutex::new(None),
             biometrics_available: probe_biometrics(),
+            seen_marks: Mutex::new((0, 0)),
             saving_credential: AtomicBool::new(false),
             url: RwSignal::new(String::new()),
             token: RwSignal::new(Zeroizing::new(String::new())),
@@ -258,6 +266,7 @@ impl ConnectController {
             resolving_offer: RwSignal::new(false),
             dock_failure: RwSignal::new(None),
         };
+        controller.refresh_saved_if_moved();
         controller.reload_saved();
         controller
     }
@@ -330,6 +339,32 @@ impl ConnectController {
         match self.repository.list() {
             Ok(servers) => self.saved.set(servers),
             Err(failure) => app_toasts().raise(&failure),
+        }
+    }
+
+    /// Re-reads [`Self::saved`] once the connection epoch or the keyring
+    /// generation moved since the last look: `/` stays retained under the
+    /// shell while the add page and Settings edit the same list. Untracked
+    /// reads and a seen pair, so a build may call it every frame.
+    fn refresh_saved_if_moved(&self) {
+        let marks = (
+            self.connection.connection_epoch.get_untracked(),
+            self.keyring.generation.get_untracked(),
+        );
+        {
+            let mut seen = self
+                .seen_marks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *seen == marks {
+                return;
+            }
+            *seen = marks;
+        }
+        if let Ok(servers) = self.repository.list()
+            && self.saved.get_untracked() != servers
+        {
+            self.saved.set(servers);
         }
     }
 
@@ -755,7 +790,13 @@ impl ConnectController {
     /// The metadata write a successful connect performs; built before `target`
     /// moves into the connection controller, run from the completion.
     fn login_upsert(&self, target: &ConnectTarget) -> LoginUpsert {
-        LoginUpsert::new(&self.repository, &self.connection, Some(self.saved), target)
+        LoginUpsert::new(
+            &self.repository,
+            &self.connection,
+            &self.keyring,
+            Some(self.saved),
+            target,
+        )
     }
 
     /// [`Self::reload_saved`] by another name, callable from the completion
@@ -990,8 +1031,10 @@ impl ConnectController {
         self.biometrics_available
     }
 
-    /// What the dock shows — tracked.
+    /// What the dock shows — tracked. Also the `/` build's per-frame look at
+    /// whether the list moved behind its back ([`Self::refresh_saved_if_moved`]).
     pub fn dock_state(&self) -> DockState {
+        self.refresh_saved_if_moved();
         if !self.biometrics_available {
             return DockState::Unavailable;
         }
@@ -1003,7 +1046,9 @@ impl ConnectController {
             .map_or(DockState::Idle, DockState::Failed)
     }
 
-    /// The dock's press: the free-tier verdict for the most recent row first
+    /// The dock's press, over the saved list read fresh now (never the
+    /// retained page's copy): the target is the most recent row claiming a
+    /// credential, none meaning nothing to do. Its free-tier verdict first
     /// (a block raises `gate_prompt` and no biometric prompt), then one
     /// `unlock_all` prompt, the keyring published, and that row dialed with
     /// its token. Single-flight on [`Self::unlocking`].
@@ -1016,8 +1061,13 @@ impl ConnectController {
         if self.busy_untracked() {
             return;
         }
-        let saved = self.saved.get_untracked();
-        let Some(target) = saved.first().cloned() else {
+        self.reload_saved();
+        let Some(target) = self
+            .saved
+            .get_untracked()
+            .into_iter()
+            .find(|row| row.has_credential)
+        else {
             return;
         };
         if self.blocked(&target.endpoint(), ConnectRetry::Keyring, &gate_prompt) {
@@ -1029,7 +1079,7 @@ impl ConnectController {
         let nav = nav.clone();
         spawn_local(async move {
             controller
-                .unlock_all_then_connect(saved, target, nav, confirm)
+                .unlock_all_then_connect(target, nav, confirm)
                 .await;
         });
     }
@@ -1037,15 +1087,16 @@ impl ConnectController {
     /// [`Self::unlock_keyring_and_connect`]'s body. A cancel is silent; a
     /// vault re-enrollment can never be read again, so it is reset; `Failed`
     /// offers that reset behind a confirm instead (it also covers a failed
-    /// authentication); every other refusal fails the dock and toasts.
+    /// authentication); every other refusal fails the dock and toasts. The
+    /// target dials only if, re-read after the unlock, it still claims a
+    /// credential the keyring holds.
     async fn unlock_all_then_connect(
         self: &Arc<Self>,
-        saved: Vec<SavedServer>,
         target: SavedServer,
         nav: Nav,
         confirm: ConfirmPrompt,
     ) {
-        let unreadable = match self.keyring_unlock.unlock(&saved).await {
+        let unreadable = match self.keyring_unlock.unlock().await {
             KeyringUnlockOutcome::Unlocked { unreadable } => unreadable,
             KeyringUnlockOutcome::Refused(CredentialStatus::Canceled)
             | KeyringUnlockOutcome::Busy
@@ -1063,14 +1114,26 @@ impl ConnectController {
                 self.fail_dock(status);
                 return;
             }
+            KeyringUnlockOutcome::ListUnavailable => {
+                self.unlocking.set(false);
+                self.dock_failure.set(Some(DockFailure {
+                    message: SAVED_LIST_UNAVAILABLE_MESSAGE.to_string(),
+                    offers_reset: false,
+                }));
+                app_toasts().show(SAVED_LIST_UNAVAILABLE_MESSAGE);
+                return;
+            }
         };
-        if !unreadable.is_empty() {
-            self.reload_saved();
-        }
+        self.reload_saved();
         let endpoint = target.endpoint();
-        let token = self.keyring.token_for(&endpoint);
+        let row = self
+            .saved
+            .get_untracked()
+            .into_iter()
+            .find(|row| row.endpoint() == endpoint && row.has_credential);
+        let token = row.as_ref().and_then(|_| self.keyring.token_for(&endpoint));
         self.unlocking.set(false);
-        let Some(token) = token else {
+        let (Some(target), Some(token)) = (row, token) else {
             self.fail_dock(if unreadable.contains(&endpoint) {
                 CredentialStatus::KeyInvalidated
             } else {
@@ -1183,12 +1246,15 @@ impl ConnectController {
     }
 
     /// [`Self::forget_saved_server`]'s body. Ordering contract: secret first,
-    /// row second, and only if the secret's delete succeeded — the row is the
-    /// secret's own key, so removing it first could strand the secret
-    /// unreachable.
+    /// row second. Locked, the row goes only if the ungated legacy delete
+    /// succeeded — the row is the secret's own key, so removing it first could
+    /// strand the secret unreachable. Unlocked, the keyring evicts it
+    /// ([`Self::evict_forgotten`]) and the row goes whatever the vault said.
     async fn forget_saved(&self, server: SavedServer) {
         let endpoint = server.endpoint();
-        if let Err(failure) = self.credentials.delete(endpoint.clone()).await {
+        if self.keyring.is_unlocked() {
+            self.evict_forgotten(&endpoint).await;
+        } else if let Err(failure) = self.credentials.delete(endpoint.clone()).await {
             app_toasts().raise(&failure);
             return;
         }
@@ -1202,6 +1268,26 @@ impl ConnectController {
             return;
         }
         self.reload_saved();
+    }
+
+    /// The unlocked forget: one gated vault rewrite without `endpoint` over a
+    /// snapshot, then the handle drops its token whatever the rewrite said —
+    /// a token left there would ride the next snapshot-based vault write back
+    /// in. A refused rewrite toasts and falls back to the ungated legacy
+    /// delete; the vault copy is pruned by the next unlock, the row being gone.
+    async fn evict_forgotten(&self, endpoint: &str) {
+        let mut snapshot = self.keyring.snapshot();
+        let evicted = self
+            .credentials
+            .delete_from_vault(endpoint.to_string(), &mut snapshot)
+            .await;
+        self.keyring.remove(endpoint);
+        if let Err(failure) = evicted {
+            app_toasts().raise(&failure);
+            if let Err(failure) = self.credentials.delete(endpoint.to_string()).await {
+                log::warn!("credentials: legacy delete after a refused eviction failed: {failure}");
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1277,6 +1363,10 @@ pub enum KeyringUnlockOutcome {
     /// was dropped unpublished. Callers treat it as a silent cancel: no dial,
     /// no toast.
     Superseded,
+    /// The saved list could not be read, or is not the persisted one, so no
+    /// prompt was raised: a prune over it could drop every real entry.
+    /// Callers toast [`SAVED_LIST_UNAVAILABLE_MESSAGE`].
+    ListUnavailable,
 }
 
 /// The page-agnostic keyring seam the Connect dock and Settings share: one
@@ -1312,15 +1402,20 @@ impl KeyringUnlock {
         &self.keyring
     }
 
-    /// One gated read of the whole keyring for `saved`'s endpoints. On
-    /// success, rows whose legacy entry was unreadable lose their credential
-    /// claim first, then the keyring is published.
-    pub async fn unlock(&self, saved: &[SavedServer]) -> KeyringUnlockOutcome {
+    /// One gated read of the whole keyring over the saved list as it stands
+    /// now, never a page's copy: only rows claiming a credential are handed
+    /// to `unlock_all`, so their legacy entries migrate and every other vault
+    /// entry is pruned. On success, rows whose legacy entry was unreadable
+    /// lose their credential claim first, then the keyring is published.
+    pub async fn unlock(&self) -> KeyringUnlockOutcome {
         let Some(_ticket) = self.keyring.begin_unlock() else {
             return KeyringUnlockOutcome::Busy;
         };
+        let Some(credentialed) = self.credentialed_rows() else {
+            return KeyringUnlockOutcome::ListUnavailable;
+        };
         let epoch = self.keyring.lock_epoch();
-        let endpoints: Vec<String> = saved.iter().map(SavedServer::endpoint).collect();
+        let endpoints: Vec<String> = credentialed.iter().map(SavedServer::endpoint).collect();
         let UnlockedKeyring {
             status,
             keyring,
@@ -1328,7 +1423,7 @@ impl KeyringUnlock {
             ..
         } = self
             .unlock_credential
-            .run_all(&unlock_reason(saved), &endpoints)
+            .run_all(&unlock_reason(&credentialed), &endpoints)
             .await;
         let keyring = match (status, keyring) {
             (CredentialStatus::Success, Some(keyring)) => keyring,
@@ -1349,6 +1444,22 @@ impl KeyringUnlock {
         }
         self.keyring.publish(keyring);
         KeyringUnlockOutcome::Unlocked { unreadable }
+    }
+
+    /// The saved rows claiming a credential, most recent first, read fresh;
+    /// `None` when the list cannot be read or is not the persisted one.
+    fn credentialed_rows(&self) -> Option<Vec<SavedServer>> {
+        if !self.repository.is_persistent() {
+            log::warn!("keyring: refusing to unlock over a saved list that is not persisted");
+            return None;
+        }
+        match self.repository.list() {
+            Ok(rows) => Some(rows.into_iter().filter(|row| row.has_credential).collect()),
+            Err(failure) => {
+                log::warn!("keyring: the saved list could not be read: {failure}");
+                None
+            }
+        }
     }
 
     /// Drops a credential the device can no longer read (key invalidated by
@@ -1381,7 +1492,13 @@ impl KeyringUnlock {
         on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
     ) {
         let target = saved_target(server, token);
-        let upsert = LoginUpsert::new(&self.repository, &self.connection, None, &target);
+        let upsert = LoginUpsert::new(
+            &self.repository,
+            &self.connection,
+            &self.keyring,
+            None,
+            &target,
+        );
         self.connection.switch_to(target, move |outcome| {
             if outcome.is_ok() {
                 upsert.run();
@@ -1427,6 +1544,7 @@ impl CredentialSaver for ControllerCredentialSaver {
 struct LoginUpsert {
     repository: SavedServers,
     connection: Arc<ConnectionController>,
+    keyring: KeyringHandle,
     /// The list signal to re-read into, when the caller renders one.
     saved: Option<RwSignal<Vec<SavedServer>>>,
     host: String,
@@ -1440,12 +1558,14 @@ impl LoginUpsert {
     fn new(
         repository: &SavedServers,
         connection: &Arc<ConnectionController>,
+        keyring: &KeyringHandle,
         saved: Option<RwSignal<Vec<SavedServer>>>,
         target: &ConnectTarget,
     ) -> Self {
         Self {
             repository: Arc::clone(repository),
             connection: Arc::clone(connection),
+            keyring: keyring.clone(),
             saved,
             host: target.host.clone(),
             port: target.port,
@@ -1462,7 +1582,9 @@ impl LoginUpsert {
 
     /// Writes the row from a settled connect. Credential fields are carried
     /// forward from any existing row — rebuilding them would wipe
-    /// `has_credential` on every login, including the recover path's own.
+    /// `has_credential` on every login, including the recover path's own. A
+    /// row written with no credential claim takes any token the handle still
+    /// holds for it out, so no later vault write resurrects it.
     fn run(&self) {
         let existing = self
             .repository
@@ -1485,9 +1607,13 @@ impl LoginUpsert {
                 _ => None,
             },
         };
+        let claims_credential = server.has_credential;
         if let Err(failure) = self.repository.save(server) {
             app_toasts().raise(&failure);
             return;
+        }
+        if !claims_credential {
+            self.keyring.remove(&self.endpoint());
         }
         if let Some(saved) = self.saved {
             ConnectController::reload_into(&self.repository, saved);
@@ -1504,6 +1630,7 @@ fn target_endpoint(target: &ConnectTarget) -> String {
 /// The keyring prompt's rationale: the one row by label, else the count.
 fn unlock_reason(saved: &[SavedServer]) -> String {
     match saved {
+        [] => "Unlock saved servers".to_string(),
         [only] => format!("Unlock {}", only.label),
         rows => format!("Unlock {} servers", rows.len()),
     }
