@@ -13,6 +13,7 @@
 use super::entities::{
     CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential, UnlockedKeyring,
 };
+use super::keyring::Keyring;
 use crate::failure::AppFailure;
 
 /// The saved-server store the Connect screen reads and edits. Consumed as
@@ -42,21 +43,42 @@ pub trait SavedServersRepository {
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 pub trait CredentialService {
-    /// Gates, then stores `request`'s token — authenticating first guarantees
-    /// the secret is unlockable later.
+    /// The locked save: behind one gate, reads the vault, adds `request`'s
+    /// token and writes the vault back. A vault that does not decode answers
+    /// [`Failed`](super::entities::CredentialStatus::Failed) and is left as is.
     async fn store(&self, request: StoreRequest) -> CredentialStatus;
 
-    /// Legacy single-key read (pre-keyring): gates, then reads the token for
-    /// `request`'s server key; nothing stored
-    /// after a passed gate answers
-    /// [`NotFound`](super::entities::CredentialStatus::NotFound).
+    /// Single-endpoint read behind one gate: a not-yet-migrated per-server
+    /// entry when one exists, otherwise the vault's entry; nothing stored
+    /// answers [`NotFound`](super::entities::CredentialStatus::NotFound).
     async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential;
 
     /// Gates once, then reads the whole keyring. `endpoints` is the saved list's
-    /// endpoints, used to find legacy per-server entries to migrate.
+    /// endpoints: their legacy per-server entries are folded into the vault,
+    /// and vault entries for any other endpoint are dropped.
     async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring;
 
-    /// Drops the credential for `server_key`. No gate — forgetting a secret
-    /// isn't using it, and deleting an absent key succeeds.
+    /// The unlocked save: writes `keyring` plus `request`'s token as the new
+    /// vault behind one gate, and inserts the token into `keyring` only once
+    /// that write succeeded.
+    async fn store_in_vault(
+        &self,
+        request: StoreRequest,
+        keyring: &mut Keyring,
+    ) -> CredentialStatus;
+
+    /// The unlocked delete: drops `server_key` from `keyring`, rewrites the
+    /// vault without it (gated, skipped when `keyring` never held it) and
+    /// removes its legacy entry if one remains.
+    async fn delete_from_vault(
+        &self,
+        server_key: String,
+        keyring: &mut Keyring,
+    ) -> Result<(), AppFailure>;
+
+    /// Drops `server_key`'s legacy entry. No gate — forgetting a secret isn't
+    /// using it, and deleting an absent key succeeds. The vault cannot be
+    /// rewritten without a gate, so its entry stays until the next
+    /// [`Self::unlock_all`] drops it as no longer saved.
     async fn delete(&self, server_key: String) -> Result<(), AppFailure>;
 }
