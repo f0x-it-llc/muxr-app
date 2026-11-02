@@ -41,7 +41,7 @@ use frust::authoring::{
     EditCommand, EditingState, ImeContentType, ImeEvent, ImeState, InputEvent, Point, Rect,
 };
 use frust::{
-    AnyView, GestureDetector, GetUntracked, RwSignal, ScaleEvent, Set, StackView, any,
+    AnyView, GestureDetector, GetUntracked, RwSignal, ScaleEvent, ScalePhase, Set, StackView, any,
     pinch_detector, stack,
 };
 use frust::{on_cleanup, spawn_blocking, spawn_local};
@@ -357,6 +357,8 @@ pub struct SelectionSeam {
     /// The pinch reducer, kept here because `build` re-runs mid-gesture and a tracker made
     /// there would forget its cumulative scale.
     pinch: Rc<RefCell<PinchIntentTracker>>,
+    /// Whether a recognised pinch is in flight: [`begin`](Self::begin) is inert meanwhile.
+    pinching: Rc<Cell<bool>>,
 }
 
 impl SelectionSeam {
@@ -366,6 +368,7 @@ impl SelectionSeam {
             state: Rc::new(RefCell::new(SelectionState::default())),
             emulator,
             pinch: Rc::new(RefCell::new(PinchIntentTracker::new())),
+            pinching: Rc::new(Cell::new(false)),
         }
     }
 
@@ -410,6 +413,9 @@ impl SelectionSeam {
     /// with **no finger down** (fire-on-release) resolves and goes straight to
     /// released/chip state rather than leaving an unclosed drag.
     pub fn begin(&self) {
+        if self.pinching.get() {
+            return;
+        }
         let _ = Haptics::perform(HapticEffect::SelectionClick);
         let mut state = self.state.borrow_mut();
         state.haptics += 1;
@@ -426,6 +432,21 @@ impl SelectionSeam {
             state.dragging = false;
             state.chip = state.range.map(|_| state.pointer);
         }
+    }
+
+    /// A pinch was recognised: long-press selection is inert until [`pinch_ended`](Self::pinch_ended),
+    /// and a selection drag this gesture already began is dropped.
+    pub(crate) fn pinch_began(&self) {
+        self.pinching.set(true);
+        if self.state.borrow().dragging {
+            self.clear();
+        }
+    }
+
+    /// The pinch guard resets: on `ScalePhase::End`, and on every fresh first-finger `Down`
+    /// (a cancelled pinch delivers no `End`).
+    pub(crate) fn pinch_ended(&self) {
+        self.pinching.set(false);
     }
 
     /// Re-resolve for the live finger: the word at the fixed anchor merged with
@@ -583,7 +604,10 @@ pub type WheelSink = Rc<dyn Fn(bool, u32, u32)>;
 ///    sub-cell remainder is the tight-parent case [`TerminalGridWidget`] documents.
 /// 4. **Pinch** ([`terminal_surface_with_pinch`]): the first contact reaches the
 ///    grid unchanged; a recognised pinch's Begin steals the grid's gesture with a
-///    synthesized `Cancel`, which the grid's Cancel arm already disarms.
+///    synthesized `Cancel`, deferred to the first finger's next event. The Cancel arm
+///    drops only the drag/loupe; the seam's pinch guard is what prevents and clears a
+///    long-press selection during a pinch (the held finger still fires the timer). A
+///    cancelled pinch delivers no `End`, so the guard resets on the next first-finger `Down`.
 pub fn terminal_surface<State: 'static>(
     seam: SelectionSeam,
     grid: TerminalGridView,
@@ -608,12 +632,18 @@ pub fn terminal_surface_with_pinch<State: 'static>(
     pinch: Option<PinchSink>,
 ) -> AnyView<State> {
     let tracker = Rc::clone(&seam.pinch);
+    let guard = seam.clone();
     let surface = terminal_surface::<State>(seam, grid, chip);
     let Some(sink) = pinch else {
         return any(surface);
     };
     any(
         pinch_detector(surface).on_scale(move |_state: &mut State, event: ScaleEvent| {
+            match event.phase {
+                ScalePhase::Begin => guard.pinch_began(),
+                ScalePhase::End => guard.pinch_ended(),
+                _ => {}
+            }
             let intent = tracker.borrow_mut().feed(event.phase, event.scale_delta);
             if let Some(intent) = intent {
                 sink(intent, event.focal);
