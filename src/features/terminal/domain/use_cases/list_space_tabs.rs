@@ -105,6 +105,8 @@ mod tests {
             panes: Vec::<PaneEntry>::new(),
             active: false,
             has_bell: false,
+            floating_panes_visible: false,
+            fullscreen_active: false,
         }
     }
 

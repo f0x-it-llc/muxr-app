@@ -67,10 +67,27 @@ pub fn add_test_tab(key: &str) {
     tabs.push(test_tab(index, key));
 }
 
+/// The floating pane id [`seed_test_floating_overlay`] lays over the `devbox` tab.
+pub const TEST_FLOATING_PANE_ID: u32 = 99;
+
+/// `None` (the default) leaves the tab world alone; `Some(visible)` overlays one full-size
+/// floating pane on `devbox` with that layer visibility — see [`seed_test_floating_overlay`].
+static TEST_FLOATING_OVERLAY: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Lay a full-grid floating pane ([`TEST_FLOATING_PANE_ID`]) over the `devbox` tab of every later
+/// `list_tabs` answer, its layer `visible` or hidden; `None` removes it. Process-global like
+/// [`TEST_TABS`]; cleared by [`clear_test_tabs`]. Never called by production code.
+pub fn seed_test_floating_overlay(visible: Option<bool>) {
+    *TEST_FLOATING_OVERLAY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = visible;
+}
+
 /// Drop every tab [`add_test_tab`] appended — a suite's own teardown, and its
 /// setup, since this store outlives any one mount of the screen.
 pub fn clear_test_tabs() {
     lock_test_tabs().clear();
+    seed_test_floating_overlay(None);
 }
 
 /// The appended-tab store, poisoned locks recovered like every other lock
@@ -95,6 +112,8 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
         panes: seed_panes(index, &format!("ed@{key}"), "/home/ed"),
         active: false,
         has_bell: false,
+        floating_panes_visible: false,
+        fullscreen_active: false,
     }
 }
 
@@ -398,6 +417,33 @@ impl MockTerminalRepository {
             .and_then(|id| self.lock_tabs().get(&id).cloned())
             .unwrap_or_default();
         tabs.extend(lock_test_tabs().iter().cloned());
+        let overlay = *TEST_FLOATING_OVERLAY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(visible) = overlay
+            && let Some(tab) = tabs.iter_mut().find(|tab| tab.key == "devbox")
+        {
+            tab.floating_panes_visible = visible;
+            // Two tiled panes under the overlay, whatever the seed floated.
+            for pane in &mut tab.panes {
+                pane.floating = false;
+            }
+            tab.panes.push(PaneEntry {
+                agent: None,
+                id: TEST_FLOATING_PANE_ID,
+                title: String::new(),
+                cwd: String::new(),
+                focused: false,
+                floating: true,
+                exited: false,
+                is_plugin: false,
+                is_fullscreen: false,
+                x: 0,
+                y: 0,
+                rows: 24,
+                cols: 80,
+            });
+        }
         mark_agents(tabs)
     }
 
@@ -460,6 +506,8 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
         panes: seed_panes(index, name, path),
         active: key == "devbox",
         has_bell: false,
+        floating_panes_visible: false,
+        fullscreen_active: false,
     };
     let mut tabs = vec![
         tab(
@@ -500,6 +548,7 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
     tabs[2].has_bell = true;
     tabs[0].panes[1].exited = true;
     tabs[3].panes[1].floating = true;
+    tabs[3].floating_panes_visible = true;
     tabs
 }
 
@@ -518,6 +567,8 @@ fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
         panes: seed_panes(index, "ed@zelli", path),
         active,
         has_bell: false,
+        floating_panes_visible: false,
+        fullscreen_active: false,
     };
     vec![
         tab(1, "logs", "~/logs", true),
@@ -706,6 +757,15 @@ impl TerminalRepository for MockTerminalRepository {
 
     async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
+        // The overlay pane lives only in the snapshot: record the verb, change nothing.
+        let overlaid = TEST_FLOATING_OVERLAY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some();
+        if overlaid && pane_id == TEST_FLOATING_PANE_ID && !is_plugin {
+            log_verb("focus_pane", pane_id);
+            return Ok(());
+        }
         // A pane no seeded tab carries is a bug worth surfacing, since the
         // sheet only ever commits a row it just drew. Scoped to the *selected*
         // space, like every other write this store performs.
@@ -756,6 +816,7 @@ impl TerminalRepository for MockTerminalRepository {
         for pane in &mut tab.panes {
             pane.is_fullscreen = addressed(pane) && !pane.is_fullscreen;
         }
+        tab.fullscreen_active = tab.panes.iter().any(|pane| pane.is_fullscreen);
         log_verb("toggle_pane_fullscreen", format!("{pane_id}:{is_plugin}"));
         Ok(())
     }
