@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use clean_signals::ControllerCore;
 use clean_signals_frust::{expect_controller, provide_controller};
-use frust::{GetUntracked, RwSignal, Set, WithUntracked, spawn, spawn_local};
+use frust::{GetUntracked, RwSignal, Set, Update, WithUntracked, spawn, spawn_local};
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -168,6 +168,9 @@ pub enum ConnectRun {
 /// The work behind [`ConnectionController`]: opening a connection, tearing one
 /// down, and holding the live client in between.
 pub trait ConnectionBackend: Send + Sync + 'static {
+    /// Start a dial. One superseded by a later `begin_connect` or
+    /// `disconnect` before it lands must drop what it opened rather than
+    /// install it — the controller discards such a stale outcome unseen.
     fn begin_connect(&self, target: ConnectTarget) -> ConnectRun;
 
     /// Tear the live connection down. Idempotent: a backend with nothing open
@@ -199,6 +202,13 @@ pub trait CredentialSaver: Send + Sync {
     /// which the offer showed the user as `label`, and run `on_done` once that
     /// save has settled — **however** it settled.
     fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>);
+}
+
+/// What [`ConnectionController::lock_and_disconnect`] locks — the `connect`
+/// feature's keyring, named here by contract rather than by type.
+pub trait KeyringLock {
+    /// Zeroize every held token and mark the keyring locked.
+    fn lock_keyring(&self);
 }
 
 const MOCK_LATENCY_MS: u32 = 36;
@@ -234,18 +244,30 @@ impl ConnectionBackend for MockConnectionBackend {
 /// [`crate::net`], holding the connected [`MuxrClient`] until a teardown drops
 /// it.
 pub struct NetConnectionBackend {
-    live: Arc<Mutex<Option<MuxrClient>>>,
+    live: Arc<Mutex<LiveSlot>>,
+}
+
+/// The one live client, and the ticket of the newest dial or teardown: a dial
+/// installs its client only while its own ticket is still the newest.
+#[derive(Default)]
+struct LiveSlot {
+    client: Option<MuxrClient>,
+    ticket: u64,
 }
 
 impl NetConnectionBackend {
     pub fn new() -> Self {
         Self {
-            live: Arc::new(Mutex::new(None)),
+            live: Arc::new(Mutex::new(LiveSlot::default())),
         }
     }
-    fn slot(&self) -> MutexGuard<'_, Option<MuxrClient>> {
-        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    fn slot(&self) -> MutexGuard<'_, LiveSlot> {
+        lock_slot(&self.live)
     }
+}
+
+fn lock_slot(live: &Mutex<LiveSlot>) -> MutexGuard<'_, LiveSlot> {
+    live.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Default for NetConnectionBackend {
@@ -260,15 +282,26 @@ impl ConnectionBackend for NetConnectionBackend {
             Ok(trust) => trust,
             Err(failure) => return ConnectRun::Ready(Err(failure)),
         };
+        let ticket = {
+            let mut slot = self.slot();
+            slot.ticket += 1;
+            slot.ticket
+        };
         ConnectRun::Pending(Box::pin(open_session(
             Arc::clone(&self.live),
+            ticket,
             target,
             trust,
         )))
     }
 
     fn disconnect(&self) {
-        let Some(client) = self.slot().take() else {
+        let taken = {
+            let mut slot = self.slot();
+            slot.ticket += 1;
+            slot.client.take()
+        };
+        let Some(client) = taken else {
             return;
         };
         // Scrub the credential before letting go: dropping this handle closes
@@ -279,7 +312,7 @@ impl ConnectionBackend for NetConnectionBackend {
     }
 
     fn client(&self) -> Option<MuxrClient> {
-        self.slot().clone()
+        self.slot().client.clone()
     }
 
     fn reconnect(&self) -> ReconnectFuture {
@@ -306,9 +339,11 @@ fn trust_config_for(target: &ConnectTarget) -> Result<TrustConfig, AppFailure> {
 }
 
 /// The whole wire flow, in order: dial, log in, install the session token, time
-/// a `GetVersion`, keep the client, and hand back what the screens render.
+/// a `GetVersion`, keep the client (unless `ticket` was superseded meanwhile),
+/// and hand back what the screens render.
 async fn open_session(
-    live: Arc<Mutex<Option<MuxrClient>>>,
+    live: Arc<Mutex<LiveSlot>>,
+    ticket: u64,
     mut target: ConnectTarget,
     trust: TrustConfig,
 ) -> ConnectOutcome {
@@ -341,7 +376,13 @@ async fn open_session(
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
 
     let info = server_info(&target, &version, login.is_read_only, latency_ms);
-    *live.lock().unwrap_or_else(PoisonError::into_inner) = Some(client);
+    let mut slot = lock_slot(&live);
+    if slot.ticket == ticket {
+        slot.client = Some(client);
+    } else {
+        // Superseded: installing would overwrite the newer connection's client.
+        client.clear_session_token();
+    }
     Ok(info)
 }
 
@@ -419,6 +460,9 @@ pub struct ConnectionController {
     pub connecting: RwSignal<bool>,
     pub server_info: RwSignal<Option<ServerInfo>>,
     pub is_read_only: RwSignal<bool>,
+    /// Bumped by every published connect and every teardown, so a screen
+    /// holding per-server state resets it when this moves.
+    pub connection_epoch: RwSignal<u64>,
     /// Whether a [`ping`](Self::ping) is in flight — its single-flight claim.
     /// A tick arriving mid-round-trip is dropped, not queued: a queued
     /// reading would already be stale, and queuing would grow one RPC per
@@ -442,6 +486,7 @@ impl ConnectionController {
             generation: AtomicU64::new(0),
             connected: RwSignal::new(false),
             connecting: RwSignal::new(false),
+            connection_epoch: RwSignal::new(0),
             server_info: RwSignal::new(None),
             is_read_only: RwSignal::new(false),
             pinging: AtomicBool::new(false),
@@ -506,7 +551,9 @@ impl ConnectionController {
     /// Connect to `target` and run `on_done` on the UI thread once the attempt
     /// settles — with the mock backend, before this call even returns.
     ///
-    /// Ignored while another connect is in flight: one app, one connection.
+    /// Ignored while another connect is in flight, and — logged — while
+    /// already connected: one app, one connection. Moving to another server
+    /// goes through [`Self::switch_to`], which tears the live one down first.
     ///
     /// `on_done` is for what only the caller can do (navigate, scrub its
     /// form) — not the failure path, which is emitted on [`Self::core`]'s
@@ -519,13 +566,50 @@ impl ConnectionController {
         if self.connecting.get_untracked() {
             return;
         }
+        if self.connected.get_untracked() {
+            log::warn!("connect ignored: already connected (switch servers with switch_to)");
+            return;
+        }
+        let generation = self.next_generation();
+        self.dial(generation, target, on_done);
+    }
+
+    /// Move to `target`: tear the live connection down first, then dial under
+    /// one fresh generation, so a dial still in flight can never publish over
+    /// the new one. Ignored (logged) while a connect is in flight. `on_done`
+    /// as for [`Self::connect_with`].
+    pub fn switch_to(
+        self: &Arc<Self>,
+        target: ConnectTarget,
+        on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
+        if self.connecting.get_untracked() {
+            log::warn!("switch ignored: a connect is already in flight");
+            return;
+        }
+        let generation = self.next_generation();
+        if self.connected.get_untracked() {
+            self.tear_down();
+        }
+        self.dial(generation, target, on_done);
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1)
+    }
+
+    /// Start a dial under `generation` and settle it on the UI thread.
+    fn dial(
+        self: &Arc<Self>,
+        generation: u64,
+        target: ConnectTarget,
+        on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
         // The caller's half of the credential-offer decision, taken before the
         // target moves into the backend.
         let offer = target.offer_credential.then(|| target.label.clone());
-        let generation = self
-            .generation
-            .fetch_add(1, Ordering::SeqCst)
-            .wrapping_add(1);
         self.connecting.set(true);
 
         match self.backend.begin_connect(target) {
@@ -557,12 +641,10 @@ impl ConnectionController {
         on_done: impl FnOnce(Result<(), AppFailure>),
     ) {
         if self.generation.load(Ordering::SeqCst) != generation {
-            // A teardown landed while this dial was in flight, so whatever it
-            // opened belongs to nobody: drop it rather than publishing a
-            // connection the user already walked away from.
-            if outcome.is_ok() {
-                self.backend.disconnect();
-            }
+            // A teardown or a newer dial landed while this one was in flight,
+            // so its outcome belongs to nobody. The backend already declined
+            // to install what it opened (see `begin_connect`); a teardown here
+            // would close the newer connection instead.
             return;
         }
         self.connecting.set(false);
@@ -573,6 +655,7 @@ impl ConnectionController {
                 self.is_read_only.set(read_only);
                 self.server_info.set(Some(info));
                 self.connected.set(true);
+                self.bump_epoch();
                 // A read-only credential is never offered for saving
                 if let Some(label) = offer
                     && !read_only
@@ -630,12 +713,29 @@ impl ConnectionController {
     /// navigate away themselves — this never touches the router.
     pub fn disconnect(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        self.backend.disconnect();
+        self.tear_down();
         self.connecting.set(false);
+    }
+
+    /// Lock `keyring` (zeroizing every token), then [`Self::disconnect`].
+    pub fn lock_and_disconnect(&self, keyring: &dyn KeyringLock) {
+        keyring.lock_keyring();
+        self.disconnect();
+    }
+
+    /// Let the backend's client go, then clear the server-scoped signals —
+    /// in that order, so no screen sees a live connection with a dead client.
+    fn tear_down(&self) {
+        self.backend.disconnect();
         self.server_info.set(None);
         self.is_read_only.set(false);
         self.credential_offer.set(None);
         self.connected.set(false);
+        self.bump_epoch();
+    }
+
+    fn bump_epoch(&self) {
+        self.connection_epoch.update(|epoch| *epoch += 1);
     }
 
     /// The server rejected this session's credential — every
@@ -1161,6 +1261,175 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Switching servers, the epoch, and locking
+    // -----------------------------------------------------------------------
+
+    fn target_at(host: &str) -> ConnectTarget {
+        ConnectTarget {
+            host: host.to_string(),
+            ..target(false)
+        }
+    }
+
+    fn recorded() -> (Arc<RecordingBackend>, Arc<ConnectionController>) {
+        let backend = Arc::new(RecordingBackend::default());
+        let controller = Arc::new(ConnectionController::new(
+            Arc::clone(&backend) as Arc<dyn ConnectionBackend>
+        ));
+        (backend, controller)
+    }
+
+    fn connected_endpoint(controller: &ConnectionController) -> Option<String> {
+        controller
+            .server_info
+            .get_untracked()
+            .map(|info| info.endpoint)
+    }
+
+    fn settled_flag() -> (
+        Arc<AtomicBool>,
+        impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
+        let (flag, set) = flag();
+        (flag, move |_outcome| set())
+    }
+
+    #[test]
+    fn switch_to_while_connected_disconnects_first_then_connects_the_new_host() {
+        let (backend, controller) = recorded();
+        controller.connect(target_at("a.example"));
+        backend.clear();
+        let epoch = controller.connection_epoch.get_untracked();
+
+        let (done, on_done) = settled_flag();
+        controller.switch_to(target_at("b.example"), on_done);
+
+        assert_eq!(backend.events(), ["disconnect", "connect b.example:7777"]);
+        assert!(controller.connected.get_untracked());
+        assert_eq!(
+            connected_endpoint(&controller).as_deref(),
+            Some("b.example:7777")
+        );
+        assert_eq!(
+            controller.connection_epoch.get_untracked(),
+            epoch + 2,
+            "one bump for the teardown, one for the new connection"
+        );
+        assert!(done.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn switch_to_while_disconnected_only_connects() {
+        let (backend, controller) = recorded();
+        controller.switch_to(target_at("b.example"), |_| {});
+
+        assert_eq!(backend.events(), ["connect b.example:7777"]);
+        assert_eq!(controller.connection_epoch.get_untracked(), 1);
+    }
+
+    #[test]
+    fn a_dial_started_before_switch_to_settles_after_it_and_is_dropped() {
+        let (backend, controller) = recorded();
+        // A pending dial's prologue, as `dial` runs it for a real backend.
+        let stale = controller.next_generation();
+        controller.connecting.set(true);
+        // Backed out of (an app lock, say), then a switch to another server.
+        controller.disconnect();
+        controller.switch_to(target_at("b.example"), |_| {});
+        let epoch = controller.connection_epoch.get_untracked();
+        backend.clear();
+
+        let (done, on_done) = settled_flag();
+        let late = MockConnectionBackend.begin_connect(target_at("x.example"));
+        let ConnectRun::Ready(outcome) = late else {
+            unreachable!("the mock always answers on the spot");
+        };
+        controller.settle(stale, outcome, Some("X".to_string()), on_done);
+
+        assert_eq!(
+            connected_endpoint(&controller).as_deref(),
+            Some("b.example:7777"),
+            "the late result never publishes over the switch"
+        );
+        assert!(controller.connected.get_untracked());
+        assert_eq!(controller.connection_epoch.get_untracked(), epoch);
+        assert_eq!(controller.credential_offer.get_untracked(), None);
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "a dropped dial reports nothing"
+        );
+        assert!(
+            backend.events().is_empty(),
+            "dropping it tears nothing down — the live connection is the switch's"
+        );
+    }
+
+    #[test]
+    fn connect_with_while_connected_is_ignored() {
+        let (backend, controller) = recorded();
+        controller.connect(target_at("a.example"));
+
+        let (done, on_done) = settled_flag();
+        controller.connect_with(target_at("b.example"), on_done);
+
+        assert_eq!(backend.events(), ["connect a.example:7777"]);
+        assert_eq!(
+            connected_endpoint(&controller).as_deref(),
+            Some("a.example:7777")
+        );
+        assert!(!done.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn switch_to_while_a_connect_is_in_flight_is_ignored() {
+        let (backend, controller) = recorded();
+        controller.connecting.set(true);
+
+        controller.switch_to(target_at("b.example"), |_| {});
+
+        assert!(backend.events().is_empty());
+        assert!(!controller.connected.get_untracked());
+    }
+
+    #[test]
+    fn the_epoch_moves_on_a_published_connect_and_on_every_disconnect() {
+        let failing = Arc::new(ConnectionController::new(Arc::new(CannedBackend {
+            outcome: Mutex::new(Some(Err(AppFailure::Network("down".to_string())))),
+        })));
+        failing.connect(target(false));
+        assert_eq!(failing.connection_epoch.get_untracked(), 0, "a failure");
+
+        let controller = controller();
+        controller.connect(target(false));
+        assert_eq!(controller.connection_epoch.get_untracked(), 1);
+        controller.disconnect();
+        assert_eq!(controller.connection_epoch.get_untracked(), 2);
+    }
+
+    #[test]
+    fn lock_and_disconnect_locks_the_keyring_and_drops_the_connection() {
+        use crate::features::connect::di::KeyringHandle;
+        use crate::features::connect::domain::keyring::Keyring;
+
+        let keyring = KeyringHandle::new();
+        let mut unlocked = Keyring::new();
+        unlocked.insert("a.example:7777", Zeroizing::new("tok".to_string()));
+        keyring.publish(unlocked);
+        let (backend, controller) = recorded();
+        controller.connect(target_at("a.example"));
+
+        controller.lock_and_disconnect(&keyring);
+
+        assert!(!keyring.unlocked.get_untracked());
+        assert!(keyring.endpoints().is_empty());
+        assert!(!controller.connected.get_untracked());
+        assert_eq!(
+            backend.events().last().map(String::as_str),
+            Some("disconnect")
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Trust mapping
     // -----------------------------------------------------------------------
 
@@ -1288,9 +1557,85 @@ mod tests {
         );
     }
 
+    fn fixture_target(fixture: &crate::net::testing::MuxrdFixture) -> ConnectTarget {
+        ConnectTarget {
+            host: "127.0.0.1".to_string(),
+            port: fixture.port(),
+            trust_mode: TrustMode::Pinned,
+            token: Zeroizing::new(crate::net::testing::AUTH_TOKEN.to_string()),
+            fingerprint: Some(fixture.fingerprint_hex().to_string()),
+            ..target(false)
+        }
+    }
+
+    fn pending(run: ConnectRun) -> ConnectFuture {
+        match run {
+            ConnectRun::Pending(work) => work,
+            ConnectRun::Ready(_) => panic!("a real dial is never decided before it runs"),
+        }
+    }
+
+    /// A dial overtaken by a teardown or a newer dial keeps nothing: it can
+    /// neither resurrect a closed connection nor overwrite the newer client.
+    #[tokio::test]
+    async fn a_superseded_dial_never_installs_its_client() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let backend = NetConnectionBackend::new();
+
+        let orphan = pending(backend.begin_connect(fixture_target(&fixture)));
+        backend.disconnect();
+        orphan.await.expect("the dial itself succeeds");
+        assert!(backend.client().is_none(), "a teardown outranks the dial");
+
+        let older = pending(backend.begin_connect(fixture_target(&fixture)));
+        let newer = pending(backend.begin_connect(fixture_target(&fixture)));
+        newer.await.expect("the newer dial lands first");
+        older.await.expect("the older dial lands second");
+        assert!(
+            backend
+                .client()
+                .expect("the newer dial's client stays installed")
+                .has_session_token(),
+            "the older dial scrubbed only its own client, never the installed one"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Test doubles
     // -----------------------------------------------------------------------
+
+    /// The mock's answers, plus an ordered log of every backend call.
+    #[derive(Default)]
+    struct RecordingBackend {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl RecordingBackend {
+        fn log(&self) -> MutexGuard<'_, Vec<String>> {
+            self.events.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.log().clone()
+        }
+
+        fn clear(&self) {
+            self.log().clear();
+        }
+    }
+
+    impl ConnectionBackend for RecordingBackend {
+        fn begin_connect(&self, target: ConnectTarget) -> ConnectRun {
+            self.log().push(format!("connect {}", endpoint_of(&target)));
+            MockConnectionBackend.begin_connect(target)
+        }
+
+        fn disconnect(&self) {
+            self.log().push("disconnect".to_string());
+        }
+    }
 
     /// A read-only server's facts, for the offer-eligibility test.
     fn read_only_info() -> ServerInfo {
