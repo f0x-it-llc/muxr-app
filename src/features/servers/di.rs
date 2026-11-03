@@ -75,6 +75,20 @@ pub fn keep_peers(open: bool) -> bool {
         .is_some_and(|closed| now.saturating_duration_since(closed) < PEER_TAIL)
 }
 
+/// Whether the stage is fully at rest: not open, not expanding (both are
+/// `open` to [`keep_peers`]), not mid-close, and past its [`PEER_TAIL`]. Reads
+/// the same clock and state as [`keep_peers`]; a stage never seen open is
+/// settled.
+pub fn stage_settled() -> bool {
+    if STAGE_WAS_OPEN.with(Cell::get) {
+        return false;
+    }
+    let now = stage_now();
+    STAGE_CLOSED_AT
+        .with(Cell::get)
+        .is_none_or(|closed| now.saturating_duration_since(closed) >= PEER_TAIL)
+}
+
 /// The per-process last-seen map, shared. Cloning shares the same map.
 #[derive(Clone, Default)]
 pub struct LastSeenHandle {

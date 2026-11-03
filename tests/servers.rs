@@ -35,7 +35,8 @@ use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
-    PEER_TAIL, expect_servers_controller, set_stage_clock_for_tests, use_last_seen,
+    PEER_TAIL, expect_servers_controller, keep_peers, set_stage_clock_for_tests, stage_settled,
+    use_last_seen,
 };
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
@@ -743,6 +744,23 @@ fn pin_stage_clock() -> Instant {
     let at = Instant::now();
     set_stage_clock_for_tests(Some(at));
     at
+}
+
+#[test]
+fn the_stage_is_settled_only_once_closed_and_past_its_tail() {
+    let at = pin_stage_clock();
+    assert!(stage_settled(), "a stage never opened is at rest");
+    keep_peers(true);
+    assert!(!stage_settled(), "open (or expanding) is not at rest");
+    keep_peers(false);
+    assert!(!stage_settled(), "the close tail is not at rest");
+    set_stage_clock_for_tests(Some(at + PEER_TAIL - Duration::from_millis(1)));
+    assert!(!stage_settled());
+    set_stage_clock_for_tests(Some(at + PEER_TAIL));
+    assert!(stage_settled(), "closed and past the tail");
+    keep_peers(true);
+    assert!(!stage_settled(), "reopening cancels the rest");
+    set_stage_clock_for_tests(None);
 }
 
 /// Tap a strip card and stop at the moment the select is in flight (the press

@@ -43,6 +43,9 @@ use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::expect_servers_controller;
+use muxr::features::servers::di::{
+    PEER_TAIL, keep_peers, set_stage_clock_for_tests, stage_settled,
+};
 use muxr::features::servers::presentation::controller::{SwitchGate, peer_endpoints};
 use muxr::features::sessions::data::repositories::mock_sessions_repository::{
     MockSessionsRepository, SEEDED_DEV_ID, SEEDED_HERDR_ID,
@@ -55,7 +58,8 @@ use muxr::features::sessions::domain::entities::{
 use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
 use muxr::features::sessions::presentation::pages::{
-    resolve_poll_interval, sessions_page, set_loading_rain_for_tests,
+    deferred_rain_arms_for_tests, rain_overlay_builds_for_tests, resolve_poll_interval,
+    sessions_page, set_loading_rain_for_tests,
 };
 use muxr::features::settings::data::repositories::MockPreferencesRepository;
 use muxr::features::settings::di::SharedPreferencesRepository;
@@ -1807,6 +1811,173 @@ fn a_switch_replays_the_loading_rain_and_the_new_first_load_releases_it() {
         released.glyph_runs < RAIN_RUNS,
         "the new first load releases it: {} runs",
         released.glyph_runs
+    );
+}
+
+/// A pinned stage clock that is released when dropped, even on a panic.
+struct StageClock(Instant);
+
+impl StageClock {
+    /// Pins the clock and walks the stage through open then closed, so the close tail runs.
+    fn closing() -> Self {
+        let at = Instant::now();
+        set_stage_clock_for_tests(Some(at));
+        keep_peers(true);
+        keep_peers(false);
+        assert!(!stage_settled(), "the close tail is running");
+        StageClock(at)
+    }
+
+    fn advance(&self, by: Duration) {
+        set_stage_clock_for_tests(Some(self.0 + by));
+    }
+}
+
+impl Drop for StageClock {
+    fn drop(&mut self) {
+        set_stage_clock_for_tests(None);
+    }
+}
+
+/// Pumps frames for `wall` of real time (the deferred arm polls on a real timer) and returns
+/// how many builds carried the rain overlay meanwhile.
+fn rain_builds_over(h: &mut Harness, wall: Duration) -> usize {
+    let before = rain_overlay_builds_for_tests();
+    let end = Instant::now() + wall;
+    h.frame();
+    while Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        h.frame();
+    }
+    rain_overlay_builds_for_tests() - before
+}
+
+/// Lets the first rain run out on a synthetic clock, then holds host B's list open.
+fn rain_released_then_gated(h: &mut Harness, repo: &SwitchableRepo) {
+    let mut clock = 0.0;
+    let mut runs = h.frame().glyph_runs;
+    assert!(runs > RAIN_RUNS, "the first load opens under rain");
+    while runs >= RAIN_RUNS {
+        assert!(clock < 5_000.0, "the first rain never ended");
+        clock += 100.0;
+        runs = frame_at_sized(
+            &mut h.root,
+            &mut h.logic,
+            &mut h.state,
+            &mut h.tcx,
+            h.surface,
+            support::ms(clock),
+        )
+        .glyph_runs;
+    }
+    repo.gated.store(true, Ordering::SeqCst);
+}
+
+fn switch_hosts(h: &mut Harness) {
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+    h.pump_until("the dial to settle", |_| {
+        connection.connected.get_untracked()
+    });
+    for _ in 0..2 {
+        h.frame();
+    }
+}
+
+#[test]
+fn a_switch_during_the_stage_defers_the_rain_until_the_stage_settles() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let stage = StageClock::closing();
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    switch_hosts(&mut h);
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(250)) == 0,
+        "no rain during the handshake and the tail"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms);
+
+    stage.advance(PEER_TAIL);
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(400)) > 0,
+        "the rain arms once the stage settles, the first load still pending"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms + 1);
+}
+
+#[test]
+fn a_first_load_settling_before_the_stage_skips_the_rain() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let stage = StageClock::closing();
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    switch_hosts(&mut h);
+    repo.open();
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    stage.advance(PEER_TAIL);
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(400)) == 0,
+        "the rain never arms over a settled load"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms);
+}
+
+#[test]
+fn a_switch_with_the_stage_at_rest_arms_the_rain_at_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+    h.pump_until("the dial to settle", |_| {
+        connection.connected.get_untracked()
+    });
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(100)) > 0,
+        "a Settings-initiated switch replays the rain immediately"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms, "no deferral");
+}
+
+#[test]
+fn a_second_switch_cancels_the_pending_deferred_arm() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let stage = StageClock::closing();
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    switch_hosts(&mut h);
+    rain_builds_over(&mut h, Duration::from_millis(120));
+    switch_hosts(&mut h);
+
+    stage.advance(PEER_TAIL);
+    assert!(rain_builds_over(&mut h, Duration::from_millis(500)) > 0);
+    assert_eq!(
+        deferred_rain_arms_for_tests(),
+        arms + 1,
+        "the stale arm did not also fire"
     );
 }
 
