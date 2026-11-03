@@ -591,13 +591,35 @@ impl ServersSwitcherController {
         go(LOCKED_LOCATION);
     }
 
-    /// Open the add-server page; the page runs its own free-tier verdict.
-    pub fn add(&self, nav: &Nav) {
-        self.add_with(|location| nav.push(location));
+    /// Open the add-server page, mirroring Connect's QR scan on the free
+    /// tier: a blocked add raises the paywall in place and leaves the stage
+    /// open; an allowed (or just-unlocked) add closes the stage and pushes.
+    pub fn add(self: &Arc<Self>, gate: &SwitchGate, nav: &Nav) {
+        let nav = nav.clone();
+        self.add_with(&gate.paywall, Rc::new(move |location| nav.push(location)));
     }
 
-    /// [`Self::add`] with the navigation lent as a closure.
-    pub fn add_with(&self, push: impl FnOnce(&str)) {
+    /// [`Self::add`] with the paywall and the navigation lent as closures.
+    pub fn add_with(self: &Arc<Self>, paywall: &Rc<dyn Fn(Retry)>, push: Rc<dyn Fn(&str)>) {
+        let saved = self.saved_servers.list().unwrap_or_default();
+        if let ServerLimitVerdict::Blocked { .. } = self.pro.new_server_verdict(&saved) {
+            let epoch = self.stage_epoch.load(Ordering::SeqCst);
+            let controller = Arc::clone(self);
+            // The retry belongs to the stage that raised the paywall.
+            paywall(Rc::new(move || {
+                if controller.stage_epoch.load(Ordering::SeqCst) != epoch
+                    || !controller.open.get_untracked()
+                {
+                    return;
+                }
+                controller.open_add_page(&*push);
+            }));
+            return;
+        }
+        self.open_add_page(&*push);
+    }
+
+    fn open_add_page(&self, push: &dyn Fn(&str)) {
         // The stage must not outlive the push (its open flag, poll pause and
         // strip would persist under the add page and reappear on pop).
         self.close_stage();
@@ -970,9 +992,13 @@ mod tests {
         assert!(!rig.keyring.is_unlocked());
         assert!(!rig.connection.connected.get_untracked());
 
-        let pushed = RefCell::new(None);
-        rig.controller
-            .add_with(|to| *pushed.borrow_mut() = Some(to.to_string()));
+        let pushed = Rc::new(RefCell::new(None));
+        let paywall: Rc<dyn Fn(Retry)> = Rc::new(|_| panic!("a Pro add never meets the paywall"));
+        let sink = Rc::clone(&pushed);
+        rig.controller.add_with(
+            &paywall,
+            Rc::new(move |to| *sink.borrow_mut() = Some(to.to_string())),
+        );
         assert_eq!(pushed.borrow().as_deref(), Some("/?mode=add"));
     }
 
@@ -1395,7 +1421,8 @@ mod tests {
         let rig = rig(vec![server("a", 20, true)], true);
         connect_to(&rig, "a");
         rig.controller.open();
-        rig.controller.add_with(|_| {});
+        let paywall: Rc<dyn Fn(Retry)> = Rc::new(|_| panic!("a Pro add never meets the paywall"));
+        rig.controller.add_with(&paywall, Rc::new(|_| {}));
         assert!(!rig.controller.open.get_untracked());
     }
 }

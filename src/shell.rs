@@ -136,6 +136,7 @@ fn switcher_host(
         .collect();
 
     let gate = SwitchGate::standard(overlays, &expect_pro_controller(), nav);
+    let add_gate = gate.clone();
     let on_select = {
         let switcher = Arc::clone(switcher);
         move |_: &mut AppState, peer_index: usize| switcher.select(peer_index, &gate)
@@ -152,8 +153,9 @@ fn switcher_host(
         };
         let add = {
             let (switcher, nav) = (Arc::clone(switcher), nav.clone());
-            // `add` closes the stage itself before it pushes.
-            Rc::new(move || switcher.add(&nav)) as Rc<dyn Fn()>
+            // A blocked add raises the paywall over the open stage; an
+            // allowed one closes the stage itself before it pushes.
+            Rc::new(move || switcher.add(&add_gate, &nav)) as Rc<dyn Fn()>
         };
         let close = {
             let switcher = Arc::clone(switcher);

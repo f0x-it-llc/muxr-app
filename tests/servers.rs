@@ -31,6 +31,7 @@ use muxr::connection::{
 use muxr::features::connect::di::{expect_keyring, expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::connect::domain::keyring::Keyring;
+use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{expect_servers_controller, use_last_seen};
@@ -670,4 +671,83 @@ fn closing_the_stage_after_a_failed_switch_lands_on_connect() {
 
     assert!(!stage_is_open());
     assert_eq!(h.depth(), 1, "landing on Connect, not a dead Sessions");
+}
+
+/// The stage bar's add chip label and the paywall sheet's two actions, transcribed.
+const ADD_CHIP: &str = "add server";
+const NOT_NOW: &str = "Not now";
+const RESTORE: &str = "Restore purchases";
+
+/// A free install with saved rows, the stage open and the add chip tapped: the paywall is up.
+/// Also returns the route depth before the tap.
+fn free_stage_with_the_paywall_raised() -> (Harness, usize) {
+    let mut h = three_servers(TrustMode::System, true);
+    set_entitlement(&mut h, Entitlement::Free);
+    h.open_stage();
+    let depth = h.depth();
+    let add = node_centers_by_label(&h.root, ADD_CHIP)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no add chip: {:?}", h.labels()));
+    h.tap_parked(add);
+    h.pump_until(|h| h.overlay_depth() > REST_DEPTH);
+    h.settle();
+    h.park();
+    (h, depth)
+}
+
+#[test]
+fn the_add_chip_on_a_free_install_raises_the_paywall_in_place_and_dismissing_it_returns_to_the_stage()
+ {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, depth) = free_stage_with_the_paywall_raised();
+
+    assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the paywall is up");
+    assert_eq!(h.depth(), depth, "no add page was pushed");
+    assert!(stage_is_open(), "the stage waits under the paywall");
+
+    let not_now = node_centers_by_label(&h.root, NOT_NOW)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no Not now: {:?}", h.labels()));
+    h.tap_parked(not_now);
+    h.settle();
+    h.park();
+    h.settle();
+    h.park();
+
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "the paywall closed");
+    assert_eq!(h.depth(), depth, "still on Sessions");
+    assert!(stage_is_open(), "dismissing returns to the open stage");
+}
+
+#[test]
+fn unlocking_pro_from_the_add_chips_paywall_closes_the_stage_and_opens_the_add_page() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, depth) = free_stage_with_the_paywall_raised();
+    mock_entitlement()
+        .expect("tests/support opted this process into the mock")
+        .set_entitlement(Entitlement::Pro);
+
+    let restore = node_centers_by_label(&h.root, RESTORE)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no Restore: {:?}", h.labels()));
+    h.tap_parked(restore);
+    let pro = expect_pro_controller();
+    h.pump_until(|_| pro.is_pro_untracked());
+    for _ in 0..4 {
+        h.settle();
+        h.park();
+    }
+
+    assert!(!stage_is_open(), "the unlocked add took the stage down");
+    assert_eq!(h.depth(), depth + 1, "the add page is pushed");
+    assert!(
+        h.values().iter().any(|v| v == ADD_SERVER_HEADING),
+        "the add form is up: {:?}",
+        h.values()
+    );
 }
