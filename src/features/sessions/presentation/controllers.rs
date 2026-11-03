@@ -126,6 +126,9 @@ impl SessionsController {
 
     pub async fn refresh(&self) {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // Named before the await: a switch landing mid-list must not file the
+        // old server's rows under the new endpoint.
+        let endpoint = self.glimpse_endpoint();
         let result = self
             .core
             .run(&self.list, NoParams, RunOptions::default())
@@ -135,7 +138,7 @@ impl SessionsController {
         }
         if let Ok(sessions) = result {
             self.forget_vanished_selection(&sessions);
-            self.publish_glimpse(&sessions);
+            self.publish_glimpse(endpoint.as_deref(), &sessions);
             self.sessions.set(sessions);
             self.loaded.set(true);
             self.retarget_agents();
@@ -147,14 +150,20 @@ impl SessionsController {
     /// server switcher's cached face. Plain data through the servers slice's
     /// last-seen handle; does nothing without one, or with no connected
     /// endpoint to file it under.
-    fn publish_glimpse(&self, sessions: &[Session]) {
-        let Some((handle, connection)) = &self.glimpse_sink else {
+    fn publish_glimpse(&self, endpoint: Option<&str>, sessions: &[Session]) {
+        let (Some((handle, _)), Some(endpoint)) = (&self.glimpse_sink, endpoint) else {
             return;
         };
-        let Some(info) = connection.server_info.get_untracked() else {
-            return;
-        };
-        handle.record(&info.endpoint, sessions.iter().map(glimpse_of).collect());
+        handle.record(endpoint, sessions.iter().map(glimpse_of).collect());
+    }
+
+    /// The connected server's endpoint, when a glimpse sink exists to file it.
+    fn glimpse_endpoint(&self) -> Option<String> {
+        let (_, connection) = self.glimpse_sink.as_ref()?;
+        connection
+            .server_info
+            .get_untracked()
+            .map(|info| info.endpoint)
     }
 
     /// Starts this mount over for a new connection: the generation bump drops
@@ -579,16 +588,31 @@ mod tests {
     }
 
     #[test]
-    fn publish_glimpse_is_a_no_op_without_a_handle() {
+    fn publish_glimpse_files_nothing_without_a_handle_or_without_a_connected_endpoint() {
+        use crate::connection::MockConnectionBackend;
+
         let c = controller();
         assert!(
             c.glimpse_sink.is_none(),
             "no handle provided in a bare suite"
         );
-
         block_on(c.refresh());
-
         assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
+
+        let handle = LastSeenHandle::new();
+        let mut c = controller();
+        c.glimpse_sink = Some((
+            handle.clone(),
+            Arc::new(ConnectionController::with_backend(Arc::new(
+                MockConnectionBackend,
+            ))),
+        ));
+        block_on(c.refresh());
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
+        assert!(
+            handle.snapshot().is_empty(),
+            "a handle with no connected endpoint to file under stays empty"
+        );
     }
 
     #[test]

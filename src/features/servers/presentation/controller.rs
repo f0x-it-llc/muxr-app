@@ -34,12 +34,17 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust::{GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
+use crate::connection::TrustMode;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
+use crate::features::connect::domain::entities::SavedServer;
+use crate::features::connect::presentation::controller::ConfirmPrompt;
+use crate::features::connect::presentation::widgets::credential_dialogs::unverified_confirm_prompt;
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::ProController;
@@ -65,6 +70,10 @@ pub struct SwitchGate {
     pub paywall: Rc<dyn Fn(Retry)>,
     /// Open the add-server page prefilled with this endpoint.
     pub add_server: Rc<dyn Fn(String)>,
+    /// Ask before a stored token is replayed to a
+    /// [`TrustMode::NoVerification`] row; `on_confirm` dials. A decline simply
+    /// never calls it.
+    pub confirm: ConfirmPrompt,
 }
 
 impl SwitchGate {
@@ -78,6 +87,7 @@ impl SwitchGate {
         let overlays = overlays.clone();
         let pro = Arc::clone(pro);
         let nav = nav.clone();
+        let confirm = unverified_confirm_prompt(&overlays);
         Self {
             paywall: Rc::new(move |retry| {
                 show_upgrade_sheet(
@@ -90,6 +100,7 @@ impl SwitchGate {
                 );
             }),
             add_server: Rc::new(move |endpoint| nav.push(&add_server_location(Some(&endpoint)))),
+            confirm,
         }
     }
 }
@@ -121,6 +132,10 @@ pub struct ServersSwitcherController {
     pub busy: RwSignal<Option<String>>,
     /// Endpoint to the message of its last failed switch.
     pub failures: RwSignal<BTreeMap<String, String>>,
+    /// Bumped by every [`close`](Self::close) and lock: a switch captures it
+    /// and abandons silently when it moved while an unlock or confirm was
+    /// pending, so a dismissed stage never dials.
+    stage_epoch: AtomicU64,
 }
 
 impl ServersSwitcherController {
@@ -149,6 +164,7 @@ impl ServersSwitcherController {
             expanding: RwSignal::new(None),
             busy: RwSignal::new(None),
             failures: RwSignal::new(BTreeMap::new()),
+            stage_epoch: AtomicU64::new(0),
         }
     }
 
@@ -189,39 +205,62 @@ impl ServersSwitcherController {
 
     /// Dismiss the stage; a half-grown card shrinks back with it.
     pub fn close(&self) {
+        self.stage_epoch.fetch_add(1, Ordering::SeqCst);
         self.expanding.set(None);
         self.open.set(false);
     }
 
-    /// Switch to the peer card at `peer_index`. Marks the card `expanding` at
-    /// once; the rest runs on the UI executor (an unlock prompt may be
-    /// pending). See the [module docs](self).
+    /// Switch to the peer card at `peer_index` (resolved to its endpoint now,
+    /// at the tap). Ignored while a switch is in flight.
     pub fn select(self: &Arc<Self>, peer_index: usize, gate: &SwitchGate) {
-        self.expanding.set(Some(peer_index));
-        let controller = Arc::clone(self);
-        let gate = gate.clone();
-        spawn_local(async move { controller.run_select(peer_index, gate).await });
-    }
-
-    /// [`Self::select`]'s work, awaitable.
-    pub async fn run_select(self: &Arc<Self>, peer_index: usize, gate: SwitchGate) {
         if self.busy.get_untracked().is_some() {
             return;
         }
-        let Some(endpoint) = peer_endpoints(&self.faces.get_untracked())
+        if let Some(endpoint) = self.endpoint_of_peer(peer_index) {
+            self.select_endpoint(endpoint, gate);
+        }
+    }
+
+    /// [`Self::select`] by endpoint — what the paywall's retry carries. Marks
+    /// the card `expanding` at once; the rest runs on the UI executor (an
+    /// unlock prompt may be pending). See the [module docs](self).
+    pub fn select_endpoint(self: &Arc<Self>, endpoint: String, gate: &SwitchGate) {
+        if self.busy.get_untracked().is_some() {
+            return;
+        }
+        self.expanding.set(self.peer_index_of(&endpoint));
+        let controller = Arc::clone(self);
+        let gate = gate.clone();
+        spawn_local(async move { controller.run_select_endpoint(endpoint, gate).await });
+    }
+
+    fn endpoint_of_peer(&self, peer_index: usize) -> Option<String> {
+        peer_endpoints(&self.faces.get_untracked())
             .get(peer_index)
             .cloned()
-        else {
-            self.expanding.set(None);
+    }
+
+    fn peer_index_of(&self, endpoint: &str) -> Option<usize> {
+        peer_endpoints(&self.faces.get_untracked())
+            .iter()
+            .position(|peer| peer == endpoint)
+    }
+
+    /// [`Self::select`]'s work for peer `peer_index`, awaitable.
+    pub async fn run_select(self: &Arc<Self>, peer_index: usize, gate: SwitchGate) {
+        if let Some(endpoint) = self.endpoint_of_peer(peer_index) {
+            self.run_select_endpoint(endpoint, gate).await;
+        }
+    }
+
+    /// The switch itself, awaitable.
+    pub async fn run_select_endpoint(self: &Arc<Self>, endpoint: String, gate: SwitchGate) {
+        if self.busy.get_untracked().is_some() {
             return;
-        };
-        self.expanding.set(Some(peer_index));
-        let Some(row) = self
-            .saved_servers
-            .list()
-            .ok()
-            .and_then(|rows| rows.into_iter().find(|row| row.endpoint() == endpoint))
-        else {
+        }
+        let epoch = self.stage_epoch.load(Ordering::SeqCst);
+        self.expanding.set(self.peer_index_of(&endpoint));
+        let Some(row) = self.saved_row(&endpoint) else {
             self.expanding.set(None);
             self.refresh_faces();
             return;
@@ -236,8 +275,9 @@ impl ServersSwitcherController {
             self.expanding.set(None);
             let controller = Arc::clone(self);
             let retry_gate = gate.clone();
+            let retry_endpoint = endpoint.clone();
             (gate.paywall)(Rc::new(move || {
-                controller.select(peer_index, &retry_gate);
+                controller.select_endpoint(retry_endpoint.clone(), &retry_gate);
             }));
             return;
         }
@@ -246,15 +286,66 @@ impl ServersSwitcherController {
             return;
         }
         self.busy.set(Some(endpoint.clone()));
-        if !self.keyring_unlock.keyring().is_unlocked() && !self.unlock(&endpoint).await {
+        if !self.keyring_unlock.keyring().is_unlocked() {
+            let unlocked = self.unlock(&endpoint).await;
+            if !unlocked {
+                return;
+            }
+            if self.stage_epoch.load(Ordering::SeqCst) != epoch {
+                self.abandon();
+                return;
+            }
+        }
+        if row.trust_mode == TrustMode::NoVerification {
+            // The dialog is outside the in-flight state: a decline never calls
+            // back, so nothing may stay claimed while it is up.
+            self.busy.set(None);
+            self.expanding.set(None);
+            let controller = Arc::clone(self);
+            (gate.confirm)(
+                row,
+                Box::new(move || controller.dial_confirmed(&endpoint, epoch)),
+            );
             return;
         }
-        let Some(token) = self.keyring_unlock.keyring().token_for(&endpoint) else {
-            self.fail(&endpoint, NO_CREDENTIAL_MESSAGE.to_string());
+        self.dial(&endpoint);
+    }
+
+    /// The confirm's accept: dial only if the stage was not dismissed since.
+    fn dial_confirmed(self: &Arc<Self>, endpoint: &str, epoch: u64) {
+        if self.stage_epoch.load(Ordering::SeqCst) != epoch
+            || self.busy.get_untracked().is_some()
+            || self.connection.connecting.get_untracked()
+        {
+            return;
+        }
+        self.busy.set(Some(endpoint.to_string()));
+        self.expanding.set(self.peer_index_of(endpoint));
+        self.dial(endpoint);
+    }
+
+    /// The saved row for `endpoint`, read fresh.
+    fn saved_row(&self, endpoint: &str) -> Option<SavedServer> {
+        self.saved_servers
+            .list()
+            .ok()?
+            .into_iter()
+            .find(|row| row.endpoint() == endpoint)
+    }
+
+    /// Dial `endpoint` with the keyring's token, the row read fresh and only
+    /// while it still claims a credential the keyring holds. `busy` is held.
+    fn dial(self: &Arc<Self>, endpoint: &str) {
+        let found = self
+            .saved_row(endpoint)
+            .filter(|row| row.has_credential)
+            .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)));
+        let Some((token, row)) = found else {
+            self.fail(endpoint, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
         let controller = Arc::clone(self);
-        let dialed = endpoint.clone();
+        let dialed = endpoint.to_string();
         self.keyring_unlock
             .switch_to_saved(&row, token, move |outcome| match outcome {
                 Ok(()) => controller.settle(&dialed),
@@ -299,7 +390,8 @@ impl ServersSwitcherController {
         self.refresh_faces();
     }
 
-    /// The connection settled on `endpoint`: stage down, card grown, together.
+    /// The connection settled on `endpoint`: stage down, card grown, together
+    /// (both writes are synchronous, so no frame sits between them).
     fn settle(&self, endpoint: &str) {
         let mut failures = self.failures.get_untracked();
         failures.remove(endpoint);
@@ -326,6 +418,8 @@ impl ServersSwitcherController {
 
     /// [`Self::lock`] with the navigation lent as a closure.
     pub fn lock_with(&self, go: impl FnOnce(&str)) {
+        self.stage_epoch.fetch_add(1, Ordering::SeqCst);
+        self.failures.set(BTreeMap::new());
         self.connection
             .lock_and_disconnect(self.keyring_unlock.keyring());
         self.busy.set(None);
@@ -381,7 +475,7 @@ mod tests {
         SavedServer {
             host: host.to_string(),
             port: 7777,
-            trust_mode: TrustMode::NoVerification,
+            trust_mode: TrustMode::System,
             label: host.to_string(),
             last_used_ms,
             read_only: false,
@@ -400,6 +494,72 @@ mod tests {
     }
 
     fn rig_with(backend: Arc<dyn ConnectionBackend>, rows: Vec<SavedServer>, pro: bool) -> Rig {
+        rig_over(backend, rows, pro, |mock| mock as Credentials)
+    }
+
+    /// A credential store whose `unlock_all` waits for the test to release it,
+    /// so a prompt can be pending while the stage is dismissed.
+    struct GatedCredentials {
+        inner: Arc<MockCredentialService>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[clean_signals::async_trait]
+    impl crate::features::connect::domain::repositories::CredentialService for GatedCredentials {
+        async fn store(
+            &self,
+            request: crate::features::connect::domain::entities::StoreRequest,
+        ) -> crate::features::connect::domain::entities::CredentialStatus {
+            self.inner.store(request).await
+        }
+
+        async fn unlock(
+            &self,
+            request: crate::features::connect::domain::entities::UnlockRequest,
+        ) -> crate::features::connect::domain::entities::UnlockedCredential {
+            self.inner.unlock(request).await
+        }
+
+        async fn unlock_all(
+            &self,
+            reason: &str,
+            endpoints: &[String],
+        ) -> crate::features::connect::domain::entities::UnlockedKeyring {
+            self.release.notified().await;
+            self.inner.unlock_all(reason, endpoints).await
+        }
+
+        async fn store_in_vault(
+            &self,
+            request: crate::features::connect::domain::entities::StoreRequest,
+            keyring: &mut crate::features::connect::domain::keyring::Keyring,
+        ) -> crate::features::connect::domain::entities::CredentialStatus {
+            self.inner.store_in_vault(request, keyring).await
+        }
+
+        async fn delete_from_vault(
+            &self,
+            server_key: String,
+            keyring: &mut crate::features::connect::domain::keyring::Keyring,
+        ) -> Result<(), AppFailure> {
+            self.inner.delete_from_vault(server_key, keyring).await
+        }
+
+        async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
+            self.inner.delete(server_key).await
+        }
+
+        async fn reset_vault(&self) -> Result<(), AppFailure> {
+            self.inner.reset_vault().await
+        }
+    }
+
+    fn rig_over(
+        backend: Arc<dyn ConnectionBackend>,
+        rows: Vec<SavedServer>,
+        pro: bool,
+        over: impl FnOnce(Arc<MockCredentialService>) -> Credentials,
+    ) -> Rig {
         let credentials = Arc::new(MockCredentialService::new());
         let connection = Arc::new(ConnectionController::with_backend(backend));
         let entitlement = Arc::new(if pro {
@@ -411,7 +571,7 @@ mod tests {
         let last_seen = LastSeenHandle::new();
         let controller = Arc::new(ServersSwitcherController::new(
             Arc::new(MockSavedServersRepository::with_servers(rows)),
-            Arc::clone(&credentials) as Credentials,
+            over(Arc::clone(&credentials)),
             Arc::clone(&connection),
             Arc::new(ProController::new(entitlement)),
             keyring.clone(),
@@ -452,15 +612,18 @@ mod tests {
         rig.keyring.publish(keyring);
     }
 
-    /// A gate recording what it was asked, raising nothing.
+    /// A gate recording what it was asked, raising nothing. The confirm
+    /// answers `accept` at once.
     struct Probe {
         gate: SwitchGate,
         paywalls: Rc<Cell<usize>>,
+        confirms: Rc<Cell<usize>>,
         added: Rc<RefCell<Vec<String>>>,
     }
 
-    fn probe() -> Probe {
+    fn probe_answering(accept: bool) -> Probe {
         let paywalls = Rc::new(Cell::new(0));
+        let confirms = Rc::new(Cell::new(0));
         let added = Rc::new(RefCell::new(Vec::new()));
         let gate = SwitchGate {
             paywall: {
@@ -471,16 +634,30 @@ mod tests {
                 let added = Rc::clone(&added);
                 Rc::new(move |endpoint| added.borrow_mut().push(endpoint))
             },
+            confirm: {
+                let confirms = Rc::clone(&confirms);
+                Rc::new(move |_row, on_confirm| {
+                    confirms.set(confirms.get() + 1);
+                    if accept {
+                        on_confirm();
+                    }
+                })
+            },
         };
         Probe {
             gate,
             paywalls,
+            confirms,
             added,
         }
     }
 
+    fn probe() -> Probe {
+        probe_answering(true)
+    }
+
     #[tokio::test]
-    async fn select_on_pro_switches_and_settles_in_one_write() {
+    async fn select_on_pro_switches_and_settles_open_and_expanding() {
         let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
         connect_to(&rig, "a");
         unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
@@ -652,5 +829,108 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A `NoVerification` credentialed peer `b` under a live `a`, keyring open.
+    fn unverified_rig() -> Rig {
+        let mut b = server("b", 10, true);
+        b.trust_mode = TrustMode::NoVerification;
+        let rig = rig(vec![server("a", 20, true), b], true);
+        connect_to(&rig, "a");
+        unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
+        rig.controller.open();
+        rig
+    }
+
+    #[tokio::test]
+    async fn an_unverified_row_asks_once_and_a_decline_dials_nothing() {
+        let rig = unverified_rig();
+        let declined = probe_answering(false);
+        let epoch = rig.connection.connection_epoch.get_untracked();
+
+        rig.controller.run_select(0, declined.gate.clone()).await;
+
+        assert_eq!(declined.confirms.get(), 1);
+        assert_eq!(rig.connection.connection_epoch.get_untracked(), epoch);
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "a:7777");
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+        assert_eq!(rig.controller.expanding.get_untracked(), None);
+        assert!(rig.controller.open.get_untracked());
+    }
+
+    #[tokio::test]
+    async fn an_unverified_row_dials_once_the_confirm_is_accepted() {
+        let rig = unverified_rig();
+        let accepted = probe_answering(true);
+
+        rig.controller.run_select(0, accepted.gate.clone()).await;
+
+        assert_eq!(accepted.confirms.get(), 1);
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "b:7777");
+        assert!(!rig.controller.open.get_untracked());
+    }
+
+    #[tokio::test]
+    async fn closing_the_stage_while_the_unlock_is_pending_dials_nothing() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate_release = Arc::clone(&release);
+        let rig = rig_over(
+            Arc::new(MockConnectionBackend),
+            vec![server("a", 20, true), server("b", 10, true)],
+            true,
+            move |inner| {
+                inner.seed_vault(&[("a:7777", "ta"), ("b:7777", "tb")]);
+                Arc::new(GatedCredentials {
+                    inner,
+                    release: gate_release,
+                }) as Credentials
+            },
+        );
+        connect_to(&rig, "a");
+        rig.controller.open();
+        let epoch = rig.connection.connection_epoch.get_untracked();
+        let probe = probe();
+
+        let select = rig.controller.run_select(0, probe.gate.clone());
+        let dismiss = async {
+            tokio::task::yield_now().await;
+            rig.controller.close();
+            release.notify_one();
+        };
+        tokio::join!(select, dismiss);
+
+        assert_eq!(rig.connection.connection_epoch.get_untracked(), epoch);
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "a:7777");
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+        assert_eq!(rig.controller.expanding.get_untracked(), None);
+        assert_eq!(probe.confirms.get(), 0);
+    }
+
+    #[test]
+    fn a_tap_during_an_in_flight_switch_leaves_expanding_alone() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        connect_to(&rig, "a");
+        rig.controller.open();
+        rig.controller.busy.set(Some("b:7777".to_string()));
+        rig.controller.expanding.set(Some(3));
+
+        rig.controller.select(0, &probe().gate);
+
+        assert_eq!(rig.controller.expanding.get_untracked(), Some(3));
+    }
+
+    #[test]
+    fn lock_forgets_recorded_failures() {
+        let rig = rig(vec![server("a", 20, true)], true);
+        rig.controller
+            .failures
+            .set(BTreeMap::from([("a:7777".to_string(), "down".to_string())]));
+
+        rig.controller.lock_with(|_| {});
+
+        assert!(rig.controller.failures.get_untracked().is_empty());
     }
 }
