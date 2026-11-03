@@ -9,7 +9,10 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{Notify, broadcast};
 
 use crate::agents::agent_sort_key;
+use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
+use crate::features::servers::di::{LastSeenHandle, use_last_seen};
+use crate::features::servers::domain::entities::SessionGlimpse;
 use crate::features::sessions::domain::entities::{
     CreateSessionParams, RenameRequest, Session, SessionAgent, SessionBackend,
 };
@@ -24,6 +27,21 @@ use crate::net::wake::WakeReason;
 const NOT_PAUSED: usize = usize::MAX;
 
 pub const POLL_PERIOD_SECS: u32 = 3;
+
+/// One session as a non-live switcher face remembers it.
+fn glimpse_of(session: &Session) -> SessionGlimpse {
+    SessionGlimpse {
+        name: session.name.clone(),
+        backend: session.backend.label().to_string(),
+        running: session.status.is_live(),
+        meta_line: format!(
+            "{} · {} tabs · {} panes",
+            session.age_label(),
+            session.layout.tabs,
+            session.layout.panes
+        ),
+    }
+}
 
 /// Releases a single-flight claim when dropped, however the claimed work ends.
 struct ReleaseClaim<'a>(&'a AtomicBool);
@@ -53,6 +71,12 @@ pub struct SessionsController {
     /// selection change and every poll tick while the detail shows them.
     pub agents: RwSignal<Vec<SessionAgent>>,
     repository: Arc<dyn SessionsRepository + Send + Sync>,
+    /// Where a successful list is remembered for the server switcher's
+    /// non-live faces: the app's last-seen handle and the connection naming
+    /// the endpoint it belongs to. Both resolved once, here; `None` (no
+    /// handle provided, as in every headless suite) makes
+    /// [`publish_glimpse`](Self::publish_glimpse) a no-op.
+    glimpse_sink: Option<(LastSeenHandle, Arc<ConnectionController>)>,
     /// Whether the detail pane is on screen — the page sets it from its size
     /// class each build, so a Compact window never pays for the agent reads.
     detail_visible: AtomicBool,
@@ -84,6 +108,7 @@ impl SessionsController {
             selected: RwSignal::new(None),
             agents: RwSignal::new(Vec::new()),
             repository,
+            glimpse_sink: use_last_seen().zip(frust::use_context::<Arc<ConnectionController>>()),
             detail_visible: AtomicBool::new(false),
             agents_for: Mutex::new(None),
             agents_generation: AtomicU64::new(0),
@@ -110,11 +135,26 @@ impl SessionsController {
         }
         if let Ok(sessions) = result {
             self.forget_vanished_selection(&sessions);
+            self.publish_glimpse(&sessions);
             self.sessions.set(sessions);
             self.loaded.set(true);
             self.retarget_agents();
         }
         self.first_load_settled.set(true);
+    }
+
+    /// Remember `sessions` as what the connected server last showed, for the
+    /// server switcher's cached face. Plain data through the servers slice's
+    /// last-seen handle; does nothing without one, or with no connected
+    /// endpoint to file it under.
+    fn publish_glimpse(&self, sessions: &[Session]) {
+        let Some((handle, connection)) = &self.glimpse_sink else {
+            return;
+        };
+        let Some(info) = connection.server_info.get_untracked() else {
+            return;
+        };
+        handle.record(&info.endpoint, sessions.iter().map(glimpse_of).collect());
     }
 
     /// Starts this mount over for a new connection: the generation bump drops
@@ -502,6 +542,53 @@ mod tests {
 
         assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
         assert!(c.loaded.get_untracked());
+    }
+
+    #[test]
+    fn publish_glimpse_fills_the_last_seen_handle_after_a_successful_list() {
+        use crate::connection::{ConnectTarget, MockConnectionBackend, TrustMode};
+
+        let connection = Arc::new(ConnectionController::with_backend(Arc::new(
+            MockConnectionBackend,
+        )));
+        connection.connect(ConnectTarget {
+            host: "rig".to_string(),
+            port: 7777,
+            trust_mode: TrustMode::NoVerification,
+            label: "rig".to_string(),
+            offer_credential: false,
+            token: zeroize::Zeroizing::new("t".to_string()),
+            remember: false,
+            fingerprint: None,
+        });
+        let handle = LastSeenHandle::new();
+        let mut c = controller();
+        c.glimpse_sink = Some((handle.clone(), connection));
+
+        block_on(c.refresh());
+
+        let seen = handle.snapshot();
+        let (glimpses, stamp) = seen.get("rig:7777").expect("filed under the endpoint");
+        assert_eq!(glimpses.len(), SEEDED_COUNT);
+        assert!(*stamp > 0);
+        assert!(
+            glimpses
+                .iter()
+                .all(|g| !g.name.is_empty() && !g.meta_line.is_empty())
+        );
+    }
+
+    #[test]
+    fn publish_glimpse_is_a_no_op_without_a_handle() {
+        let c = controller();
+        assert!(
+            c.glimpse_sink.is_none(),
+            "no handle provided in a bare suite"
+        );
+
+        block_on(c.refresh());
+
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
     }
 
     #[test]
