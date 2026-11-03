@@ -3,7 +3,6 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust::{
     AnyView, Get, GetUntracked, Location, NavigatorController, Stack, View, any, icons, navigator,
@@ -12,6 +11,8 @@ use frust_glyph::{TitleDirection, TitlePosition, app_bar, card_switcher, peer_ca
 
 use crate::AppState;
 use crate::connection::ConnectionController;
+use crate::features::connect::domain::entities::epoch_millis;
+use crate::features::pro::di::expect_pro_controller;
 use crate::features::servers::di::{expect_servers_controller, expect_switcher_back};
 use crate::features::servers::domain::entities::FaceKind;
 use crate::features::servers::presentation::controller::{ServersSwitcherController, SwitchGate};
@@ -76,7 +77,7 @@ pub(crate) fn shell_page(
     // The stage never outlives `/sessions`: the FAB is the only way up, and
     // a stage left open on another inner route would swallow its back press.
     if !nav.on_sessions() && switcher.open.get_untracked() {
-        switcher.close();
+        switcher.close_stage();
     }
     let bar = shell_bar(&nav, connection);
     let landing = nav.clone();
@@ -119,7 +120,7 @@ fn switcher_host(
 ) -> impl View<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
-    let now_ms = now_ms();
+    let now_ms = epoch_millis();
     let faces_now = switcher.faces.get();
     let live_index = faces_now
         .iter()
@@ -134,7 +135,7 @@ fn switcher_host(
         })
         .collect();
 
-    let gate = SwitchGate::standard(overlays, &expect_pro(), nav);
+    let gate = SwitchGate::standard(overlays, &expect_pro_controller(), nav);
     let on_select = {
         let switcher = Arc::clone(switcher);
         move |_: &mut AppState, peer_index: usize| switcher.select(peer_index, &gate)
@@ -151,13 +152,8 @@ fn switcher_host(
         };
         let add = {
             let (switcher, nav) = (Arc::clone(switcher), nav.clone());
-            // The controller's `add` only pushes; the stage must not outlive
-            // the push (its open flag, poll pause and strip would persist
-            // under the add page and reappear on pop).
-            Rc::new(move || {
-                switcher.close();
-                switcher.add(&nav);
-            }) as Rc<dyn Fn()>
+            // `add` closes the stage itself before it pushes.
+            Rc::new(move || switcher.add(&nav)) as Rc<dyn Fn()>
         };
         let close = {
             let switcher = Arc::clone(switcher);
@@ -186,16 +182,6 @@ fn switcher_host(
         stage = stage.live_label(label_row(&theme, &colors, live));
     }
     stage
-}
-
-fn expect_pro() -> Arc<crate::features::pro::presentation::controller::ProController> {
-    crate::features::pro::di::expect_pro_controller()
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(0))
 }
 
 /// The Glyph app bar for whatever route the inner navigator has on top.

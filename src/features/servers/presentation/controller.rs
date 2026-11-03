@@ -31,10 +31,11 @@
 //! call ([`SwitchGate`], [`lock`](ServersSwitcherController::lock)), which
 //! keeps this controller `Send + Sync`.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use frust::{GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
 
@@ -58,6 +59,21 @@ use crate::ui::toasts::app_toasts;
 const NO_CREDENTIAL_MESSAGE: &str = "No saved credential found.";
 /// Where a lock sends the app: Connect.
 const LOCKED_LOCATION: &str = "/";
+
+/// Navigation lent to a close that leaves the app disconnected.
+type Landing = Rc<dyn Fn(&str)>;
+
+thread_local! {
+    /// How a close that leaves the app disconnected navigates (installed by
+    /// `di::provide_controller`; unset in a process without the shell, where
+    /// a close simply closes).
+    static LANDING: RefCell<Option<Landing>> = const { RefCell::new(None) };
+}
+
+/// Install how [`ServersSwitcherController::close`] reaches Connect.
+pub fn install_landing(go: Landing) {
+    LANDING.with(|cell| *cell.borrow_mut() = Some(go));
+}
 
 /// A follow-on the paywall runs once Pro is unlocked.
 pub type Retry = Rc<dyn Fn()>;
@@ -136,6 +152,15 @@ pub struct ServersSwitcherController {
     /// and abandons silently when it moved while an unlock or confirm was
     /// pending, so a dismissed stage never dials.
     stage_epoch: AtomicU64,
+    /// The connection's dial generation under which the in-flight claim's dial
+    /// was started, once it is dialing (`None` while it is still unlocking or
+    /// confirming). The connection drops a dial's `on_done` when a teardown or
+    /// a newer dial supersedes it, so a claim whose generation moved can never
+    /// be released by its dial: [`Self::release_if_stale`] does it.
+    dial_claim: Mutex<Option<u64>>,
+    /// The keyring's `lock_epoch` the last-seen map and recorded failures
+    /// were last reconciled with; a move means a lock happened somewhere.
+    seen_lock_epoch: AtomicU64,
 }
 
 impl ServersSwitcherController {
@@ -147,6 +172,7 @@ impl ServersSwitcherController {
         keyring: KeyringHandle,
         last_seen: LastSeenHandle,
     ) -> Self {
+        let seen_lock_epoch = AtomicU64::new(keyring.lock_epoch());
         let keyring_unlock = KeyringUnlock::new(
             Arc::clone(&saved_servers),
             credentials,
@@ -165,6 +191,8 @@ impl ServersSwitcherController {
             busy: RwSignal::new(None),
             failures: RwSignal::new(BTreeMap::new()),
             stage_epoch: AtomicU64::new(0),
+            dial_claim: Mutex::new(None),
+            seen_lock_epoch,
         }
     }
 
@@ -172,10 +200,12 @@ impl ServersSwitcherController {
     /// keyring, the last-seen map and the recorded failures. A saved list that
     /// cannot be read leaves the previous strip in place.
     pub fn refresh_faces(&self) {
+        self.release_if_stale();
         let Ok(saved) = self.saved_servers.list() else {
             return;
         };
         let active = self.active_endpoint();
+        self.reconcile_memory(active.as_deref());
         let faces = faces_for(
             &saved,
             active.as_deref(),
@@ -184,6 +214,47 @@ impl ServersSwitcherController {
             &self.failures.get_untracked(),
         );
         self.faces.set(faces);
+    }
+
+    /// Forget what a keyring lock (from any page) invalidated, and any failure
+    /// of the endpoint now connected.
+    fn reconcile_memory(&self, active: Option<&str>) {
+        let lock_epoch = self.keyring_unlock.keyring().lock_epoch();
+        if self.seen_lock_epoch.swap(lock_epoch, Ordering::SeqCst) != lock_epoch {
+            self.last_seen.clear();
+            self.failures.set(BTreeMap::new());
+        }
+        if let Some(endpoint) = active {
+            let mut failures = self.failures.get_untracked();
+            if failures.remove(endpoint).is_some() {
+                self.failures.set(failures);
+            }
+        }
+    }
+
+    fn claim(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+        self.dial_claim
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Give up the in-flight claim: `busy` and `expanding` together.
+    fn release_claim(&self) {
+        *self.claim() = None;
+        self.busy.set(None);
+        self.expanding.set(None);
+    }
+
+    /// Release a claim whose dial can no longer report: it dialed under a
+    /// connection generation that a teardown or a newer dial has moved past.
+    fn release_if_stale(&self) {
+        if self.busy.get_untracked().is_none() {
+            return;
+        }
+        let dialed = *self.claim();
+        if dialed.is_some_and(|generation| generation != self.connection.dial_generation()) {
+            self.release_claim();
+        }
     }
 
     /// The connected server's endpoint, if any.
@@ -203,8 +274,32 @@ impl ServersSwitcherController {
         self.open.set(true);
     }
 
-    /// Dismiss the stage; a half-grown card shrinks back with it.
+    /// Dismiss the stage; a half-grown card shrinks back with it. With no
+    /// connection live or dialing (a failed switch tore the old one down) it
+    /// lands on Connect, as the lock chip does, rather than leave a
+    /// disconnected Sessions.
     pub fn close(&self) {
+        self.close_with(|location| {
+            if let Some(go) = LANDING.with(|cell| cell.borrow().clone()) {
+                go(location);
+            }
+        });
+    }
+
+    /// [`Self::close`] with the navigation lent as a closure.
+    pub fn close_with(&self, go: impl FnOnce(&str)) {
+        let was_open = self.open.get_untracked();
+        self.close_stage();
+        if was_open
+            && !self.connection.connected.get_untracked()
+            && !self.connection.connecting.get_untracked()
+        {
+            go(LOCKED_LOCATION);
+        }
+    }
+
+    /// Take the stage down without any navigation.
+    pub(crate) fn close_stage(&self) {
         self.stage_epoch.fetch_add(1, Ordering::SeqCst);
         self.expanding.set(None);
         self.open.set(false);
@@ -213,6 +308,7 @@ impl ServersSwitcherController {
     /// Switch to the peer card at `peer_index` (resolved to its endpoint now,
     /// at the tap). Ignored while a switch is in flight.
     pub fn select(self: &Arc<Self>, peer_index: usize, gate: &SwitchGate) {
+        self.release_if_stale();
         if self.busy.get_untracked().is_some() {
             return;
         }
@@ -225,13 +321,16 @@ impl ServersSwitcherController {
     /// the card `expanding` at once; the rest runs on the UI executor (an
     /// unlock prompt may be pending). See the [module docs](self).
     pub fn select_endpoint(self: &Arc<Self>, endpoint: String, gate: &SwitchGate) {
+        self.release_if_stale();
         if self.busy.get_untracked().is_some() {
             return;
         }
+        // The stage this tap belongs to: the task abandons if it moved.
+        let epoch = self.stage_epoch.load(Ordering::SeqCst);
         self.expanding.set(self.peer_index_of(&endpoint));
         let controller = Arc::clone(self);
         let gate = gate.clone();
-        spawn_local(async move { controller.run_select_endpoint(endpoint, gate).await });
+        spawn_local(async move { controller.run_select_endpoint(endpoint, gate, epoch).await });
     }
 
     fn endpoint_of_peer(&self, peer_index: usize) -> Option<String> {
@@ -247,18 +346,26 @@ impl ServersSwitcherController {
     }
 
     /// [`Self::select`]'s work for peer `peer_index`, awaitable.
+    #[cfg(test)]
     pub async fn run_select(self: &Arc<Self>, peer_index: usize, gate: SwitchGate) {
         if let Some(endpoint) = self.endpoint_of_peer(peer_index) {
-            self.run_select_endpoint(endpoint, gate).await;
+            let epoch = self.stage_epoch.load(Ordering::SeqCst);
+            self.run_select_endpoint(endpoint, gate, epoch).await;
         }
     }
 
-    /// The switch itself, awaitable.
-    pub async fn run_select_endpoint(self: &Arc<Self>, endpoint: String, gate: SwitchGate) {
-        if self.busy.get_untracked().is_some() {
+    /// The switch itself, awaitable. `epoch` is the stage epoch captured at
+    /// the tap: a stage dismissed since abandons the switch.
+    pub async fn run_select_endpoint(
+        self: &Arc<Self>,
+        endpoint: String,
+        gate: SwitchGate,
+        epoch: u64,
+    ) {
+        self.release_if_stale();
+        if self.busy.get_untracked().is_some() || self.stage_epoch.load(Ordering::SeqCst) != epoch {
             return;
         }
-        let epoch = self.stage_epoch.load(Ordering::SeqCst);
         self.expanding.set(self.peer_index_of(&endpoint));
         let Some(row) = self.saved_row(&endpoint) else {
             self.expanding.set(None);
@@ -276,7 +383,13 @@ impl ServersSwitcherController {
             let controller = Arc::clone(self);
             let retry_gate = gate.clone();
             let retry_endpoint = endpoint.clone();
+            // The retry belongs to the stage that raised the paywall.
             (gate.paywall)(Rc::new(move || {
+                if controller.stage_epoch.load(Ordering::SeqCst) != epoch
+                    || !controller.open.get_untracked()
+                {
+                    return;
+                }
                 controller.select_endpoint(retry_endpoint.clone(), &retry_gate);
             }));
             return;
@@ -296,32 +409,66 @@ impl ServersSwitcherController {
                 return;
             }
         }
+        self.vet_and_dial(endpoint, gate, epoch);
+    }
+
+    /// Decide everything on a **fresh** row (the unlock may have taken a
+    /// while): gone -> abandon; no credential -> the add page; another
+    /// connect underway -> abandon; `NoVerification` -> the confirm; else dial.
+    /// `busy` is held by the caller.
+    fn vet_and_dial(self: &Arc<Self>, endpoint: String, gate: SwitchGate, epoch: u64) {
+        let Some(row) = self.saved_row(&endpoint) else {
+            self.abandon();
+            return;
+        };
+        if !row.has_credential {
+            self.abandon();
+            (gate.add_server)(endpoint);
+            return;
+        }
+        if self.connection.connecting.get_untracked() {
+            self.abandon();
+            return;
+        }
         if row.trust_mode == TrustMode::NoVerification {
             // The dialog is outside the in-flight state: a decline never calls
             // back, so nothing may stay claimed while it is up.
-            self.busy.set(None);
-            self.expanding.set(None);
+            self.release_claim();
             let controller = Arc::clone(self);
+            let vetted = row.trust_mode;
+            let again = gate.clone();
             (gate.confirm)(
                 row,
-                Box::new(move || controller.dial_confirmed(&endpoint, epoch)),
+                Box::new(move || controller.dial_confirmed(endpoint, again, epoch, vetted)),
             );
             return;
         }
-        self.dial(&endpoint);
+        self.dial(&endpoint, epoch);
     }
 
-    /// The confirm's accept: dial only if the stage was not dismissed since.
-    fn dial_confirmed(self: &Arc<Self>, endpoint: &str, epoch: u64) {
+    /// The confirm's accept: dial only if the stage was not dismissed since,
+    /// and only with the trust mode that was confirmed - a row that changed
+    /// under the dialog is vetted again.
+    fn dial_confirmed(
+        self: &Arc<Self>,
+        endpoint: String,
+        gate: SwitchGate,
+        epoch: u64,
+        vetted: TrustMode,
+    ) {
+        self.release_if_stale();
         if self.stage_epoch.load(Ordering::SeqCst) != epoch
             || self.busy.get_untracked().is_some()
             || self.connection.connecting.get_untracked()
         {
             return;
         }
-        self.busy.set(Some(endpoint.to_string()));
-        self.expanding.set(self.peer_index_of(endpoint));
-        self.dial(endpoint);
+        self.busy.set(Some(endpoint.clone()));
+        self.expanding.set(self.peer_index_of(&endpoint));
+        match self.saved_row(&endpoint) {
+            Some(row) if row.trust_mode == vetted => self.dial(&endpoint, epoch),
+            _ => self.vet_and_dial(endpoint, gate, epoch),
+        }
     }
 
     /// The saved row for `endpoint`, read fresh.
@@ -335,25 +482,30 @@ impl ServersSwitcherController {
 
     /// Dial `endpoint` with the keyring's token, the row read fresh and only
     /// while it still claims a credential the keyring holds. `busy` is held.
-    fn dial(self: &Arc<Self>, endpoint: &str) {
+    fn dial(self: &Arc<Self>, endpoint: &str, epoch: u64) {
         let found = self
             .saved_row(endpoint)
             .filter(|row| row.has_credential)
             .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)));
         let Some((token, row)) = found else {
-            self.fail(endpoint, NO_CREDENTIAL_MESSAGE.to_string());
+            self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
         let controller = Arc::clone(self);
         let dialed = endpoint.to_string();
         self.keyring_unlock
             .switch_to_saved(&row, token, move |outcome| match outcome {
-                Ok(()) => controller.settle(&dialed),
+                Ok(()) => controller.settle(&dialed, epoch),
                 Err(failure) => {
                     use clean_signals::Failure;
-                    controller.fail(&dialed, failure.user_message());
+                    controller.fail(&dialed, epoch, failure.user_message());
                 }
             });
+        // A dial that settled in place already released the claim; one still
+        // pending is tied to the generation it started under.
+        if self.busy.get_untracked().is_some() {
+            *self.claim() = Some(self.connection.dial_generation());
+        }
     }
 
     /// One `unlock_all` prompt; `false` (state already reset) when the dial
@@ -385,29 +537,40 @@ impl ServersSwitcherController {
 
     /// Give up a switch with nothing marked failed.
     fn abandon(&self) {
-        self.busy.set(None);
-        self.expanding.set(None);
+        self.release_claim();
         self.refresh_faces();
     }
 
     /// The connection settled on `endpoint`: stage down, card grown, together
-    /// (both writes are synchronous, so no frame sits between them).
-    fn settle(&self, endpoint: &str) {
+    /// (both writes are synchronous, so no frame sits between them). A dial
+    /// from a stage since dismissed only releases its claim: the stage a
+    /// later open raised is not its to take down.
+    fn settle(&self, endpoint: &str, epoch: u64) {
         let mut failures = self.failures.get_untracked();
         failures.remove(endpoint);
         self.failures.set(failures);
+        let current = self.stage_epoch.load(Ordering::SeqCst) == epoch;
+        *self.claim() = None;
         self.busy.set(None);
-        self.expanding.set(None);
-        self.open.set(false);
+        if current {
+            self.expanding.set(None);
+            self.open.set(false);
+        } else {
+            self.refresh_faces();
+        }
     }
 
-    /// The dial to `endpoint` failed: reverse the ramp, mark the face.
-    fn fail(&self, endpoint: &str, message: String) {
+    /// The dial to `endpoint` failed: reverse the ramp, mark the face. A dial
+    /// from a stage since dismissed leaves the current stage's ramp alone.
+    fn fail(&self, endpoint: &str, epoch: u64, message: String) {
         let mut failures = self.failures.get_untracked();
         failures.insert(endpoint.to_string(), message);
         self.failures.set(failures);
+        *self.claim() = None;
         self.busy.set(None);
-        self.expanding.set(None);
+        if self.stage_epoch.load(Ordering::SeqCst) == epoch {
+            self.expanding.set(None);
+        }
         self.refresh_faces();
     }
 
@@ -420,10 +583,11 @@ impl ServersSwitcherController {
     pub fn lock_with(&self, go: impl FnOnce(&str)) {
         self.stage_epoch.fetch_add(1, Ordering::SeqCst);
         self.failures.set(BTreeMap::new());
+        self.last_seen.clear();
         self.connection
             .lock_and_disconnect(self.keyring_unlock.keyring());
-        self.busy.set(None);
-        self.close();
+        self.release_claim();
+        self.close_stage();
         go(LOCKED_LOCATION);
     }
 
@@ -434,6 +598,9 @@ impl ServersSwitcherController {
 
     /// [`Self::add`] with the navigation lent as a closure.
     pub fn add_with(&self, push: impl FnOnce(&str)) {
+        // The stage must not outlive the push (its open flag, poll pause and
+        // strip would persist under the add page and reappear on pop).
+        self.close_stage();
         push(ADD_SERVER_LOCATION);
     }
 }
@@ -491,6 +658,7 @@ mod tests {
         credentials: Arc<MockCredentialService>,
         keyring: KeyringHandle,
         last_seen: LastSeenHandle,
+        saved: SavedServers,
     }
 
     fn rig_with(backend: Arc<dyn ConnectionBackend>, rows: Vec<SavedServer>, pro: bool) -> Rig {
@@ -569,8 +737,9 @@ mod tests {
         });
         let keyring = KeyringHandle::new();
         let last_seen = LastSeenHandle::new();
+        let saved: SavedServers = Arc::new(MockSavedServersRepository::with_servers(rows));
         let controller = Arc::new(ServersSwitcherController::new(
-            Arc::new(MockSavedServersRepository::with_servers(rows)),
+            Arc::clone(&saved),
             over(Arc::clone(&credentials)),
             Arc::clone(&connection),
             Arc::new(ProController::new(entitlement)),
@@ -583,6 +752,7 @@ mod tests {
             credentials,
             keyring,
             last_seen,
+            saved,
         }
     }
 
@@ -932,5 +1102,300 @@ mod tests {
         rig.controller.lock_with(|_| {});
 
         assert!(rig.controller.failures.get_untracked().is_empty());
+    }
+
+    /// A locked rig over `a` (live) and `b`, whose `unlock_all` waits on the
+    /// returned notify.
+    fn gated_rig(rows: Vec<SavedServer>) -> (Rig, Arc<tokio::sync::Notify>) {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate_release = Arc::clone(&release);
+        let rig = rig_over(Arc::new(MockConnectionBackend), rows, true, move |inner| {
+            inner.seed_vault(&[("a:7777", "ta"), ("b:7777", "tb")]);
+            Arc::new(GatedCredentials {
+                inner,
+                release: gate_release,
+            }) as Credentials
+        });
+        connect_to(&rig, "a");
+        rig.controller.open();
+        (rig, release)
+    }
+
+    /// Pretend a dial started under the connection's current generation is
+    /// still pending for `b`.
+    fn claim_pending_dial(rig: &Rig) {
+        rig.controller.busy.set(Some("b:7777".to_string()));
+        *rig.controller.claim() = Some(rig.connection.dial_generation());
+    }
+
+    #[test]
+    fn a_claim_whose_dial_was_superseded_is_released_at_the_next_tap() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        connect_to(&rig, "a");
+        unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
+        rig.controller.open();
+        claim_pending_dial(&rig);
+        // The dial is still genuinely pending: taps are swallowed.
+        rig.controller.select(0, &probe().gate);
+        assert!(rig.controller.busy.get_untracked().is_some());
+
+        // A teardown drops the dial's `on_done`; the connection is then
+        // re-established elsewhere.
+        rig.connection.disconnect();
+        connect_to(&rig, "a");
+        rig.controller.expanding.set(Some(0));
+        rig.controller.open();
+
+        assert_eq!(rig.controller.busy.get_untracked(), None, "released");
+        assert_eq!(rig.controller.expanding.get_untracked(), None);
+    }
+
+    #[tokio::test]
+    async fn a_tap_after_a_superseded_dial_switches_instead_of_being_swallowed() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        connect_to(&rig, "a");
+        unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
+        rig.controller.open();
+        claim_pending_dial(&rig);
+        rig.connection.disconnect();
+        connect_to(&rig, "a");
+        rig.controller.open();
+
+        rig.controller.run_select(0, probe().gate).await;
+
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "b:7777");
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+    }
+
+    #[tokio::test]
+    async fn a_connect_started_during_the_unlock_prompt_leaves_nothing_busy() {
+        let (rig, release) = gated_rig(vec![server("a", 20, true), server("b", 10, true)]);
+        let epoch = rig.connection.connection_epoch.get_untracked();
+        let probe = probe();
+
+        let select = rig.controller.run_select(0, probe.gate.clone());
+        let meanwhile = async {
+            tokio::task::yield_now().await;
+            rig.connection.connecting.set(true);
+            release.notify_one();
+        };
+        tokio::join!(select, meanwhile);
+
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+        assert_eq!(rig.controller.expanding.get_untracked(), None);
+        assert_eq!(rig.connection.connection_epoch.get_untracked(), epoch);
+    }
+
+    #[test]
+    fn a_late_settle_or_fail_of_a_dismissed_stage_leaves_a_reopened_stage_alone() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        connect_to(&rig, "a");
+        rig.controller.open();
+        let dialed_under = rig.controller.stage_epoch.load(Ordering::SeqCst);
+        rig.controller.close_stage();
+        rig.controller.open();
+        rig.controller.expanding.set(Some(0));
+        rig.controller.busy.set(Some("b:7777".to_string()));
+
+        rig.controller.settle("b:7777", dialed_under);
+
+        assert!(rig.controller.open.get_untracked(), "still up");
+        assert_eq!(rig.controller.expanding.get_untracked(), Some(0));
+        assert_eq!(rig.controller.busy.get_untracked(), None, "claim freed");
+
+        rig.controller.busy.set(Some("b:7777".to_string()));
+        rig.controller
+            .fail("b:7777", dialed_under, "down".to_string());
+
+        assert!(rig.controller.open.get_untracked());
+        assert_eq!(rig.controller.expanding.get_untracked(), Some(0));
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+    }
+
+    #[tokio::test]
+    async fn a_switch_whose_stage_was_dismissed_before_the_task_ran_dials_nothing() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        connect_to(&rig, "a");
+        unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
+        rig.controller.open();
+        let tapped_under = rig.controller.stage_epoch.load(Ordering::SeqCst);
+        let connection_epoch = rig.connection.connection_epoch.get_untracked();
+        rig.controller.close_stage();
+
+        rig.controller
+            .run_select_endpoint("b:7777".to_string(), probe().gate, tapped_under)
+            .await;
+
+        assert_eq!(
+            rig.connection.connection_epoch.get_untracked(),
+            connection_epoch
+        );
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+        assert_eq!(rig.controller.expanding.get_untracked(), None);
+    }
+
+    #[tokio::test]
+    async fn a_paywall_retry_from_a_dismissed_or_closed_stage_does_nothing() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], false);
+        connect_to(&rig, "a");
+        unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
+        rig.controller.open();
+        let retries: Rc<RefCell<Vec<Retry>>> = Rc::new(RefCell::new(Vec::new()));
+        let mut gate = probe().gate;
+        gate.paywall = {
+            let retries = Rc::clone(&retries);
+            Rc::new(move |retry| retries.borrow_mut().push(retry))
+        };
+        rig.controller.run_select(0, gate.clone()).await;
+        assert_eq!(retries.borrow().len(), 1);
+
+        rig.controller.close_stage();
+        rig.controller.open();
+        retries.borrow()[0]();
+        assert_eq!(
+            rig.controller.expanding.get_untracked(),
+            None,
+            "a retry from another stage never starts a switch"
+        );
+
+        rig.controller.run_select(0, gate).await;
+        rig.controller.close_stage();
+        retries.borrow()[1]();
+        assert_eq!(rig.controller.expanding.get_untracked(), None);
+    }
+
+    #[tokio::test]
+    async fn a_credential_forgotten_during_the_unlock_goes_to_the_add_page() {
+        let (rig, release) = gated_rig(vec![server("a", 20, true), server("b", 10, true)]);
+        let probe = probe();
+
+        let select = rig.controller.run_select(0, probe.gate.clone());
+        let meanwhile = async {
+            tokio::task::yield_now().await;
+            rig.saved.save(server("b", 10, false)).unwrap();
+            release.notify_one();
+        };
+        tokio::join!(select, meanwhile);
+
+        assert_eq!(*probe.added.borrow(), ["b:7777"]);
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "a:7777", "nothing was dialed");
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+        assert!(rig.controller.failures.get_untracked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_row_turning_unverified_during_the_unlock_raises_the_confirm() {
+        let (rig, release) = gated_rig(vec![server("a", 20, true), server("b", 10, true)]);
+        let declined = probe_answering(false);
+
+        let select = rig.controller.run_select(0, declined.gate.clone());
+        let meanwhile = async {
+            tokio::task::yield_now().await;
+            let mut b = server("b", 10, true);
+            b.trust_mode = TrustMode::NoVerification;
+            rig.saved.save(b).unwrap();
+            release.notify_one();
+        };
+        tokio::join!(select, meanwhile);
+
+        assert_eq!(declined.confirms.get(), 1, "no silent dial");
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "a:7777");
+    }
+
+    #[tokio::test]
+    async fn a_row_that_changed_trust_under_the_confirm_is_vetted_again() {
+        let rig = unverified_rig();
+        let saved = Arc::clone(&rig.saved);
+        let confirms = Rc::new(Cell::new(0));
+        let mut gate = probe().gate;
+        gate.confirm = {
+            let confirms = Rc::clone(&confirms);
+            Rc::new(move |_row, on_confirm| {
+                confirms.set(confirms.get() + 1);
+                if confirms.get() == 1 {
+                    // The row turns Pinned-ish (System) under the dialog, then
+                    // the user accepts the old confirm.
+                    saved.save(server("b", 10, true)).unwrap();
+                }
+                on_confirm();
+            })
+        };
+
+        rig.controller.run_select(0, gate).await;
+
+        let info = rig.connection.server_info.get_untracked().expect("live");
+        assert_eq!(info.endpoint, "b:7777", "re-vetted and dialed as System");
+        assert_eq!(confirms.get(), 1);
+    }
+
+    #[test]
+    fn any_keyring_lock_drops_last_seen_and_failures_at_the_next_strip() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        connect_to(&rig, "a");
+        unlocked(&rig, &[("a:7777", "ta"), ("b:7777", "tb")]);
+        rig.last_seen.record_at("b:7777", Vec::new(), 7);
+        rig.controller
+            .failures
+            .set(BTreeMap::from([("b:7777".to_string(), "down".to_string())]));
+
+        // A lock from Settings or the Sessions disconnect: not the chip.
+        rig.keyring.lock();
+        rig.controller.open();
+
+        assert!(rig.last_seen.snapshot().is_empty());
+        assert!(rig.controller.failures.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn a_failure_is_dropped_once_that_endpoint_connects_by_any_path() {
+        let rig = rig(vec![server("a", 20, true), server("b", 10, true)], true);
+        rig.controller.failures.set(BTreeMap::from([
+            ("a:7777".to_string(), "down".to_string()),
+            ("b:7777".to_string(), "down".to_string()),
+        ]));
+        connect_to(&rig, "a");
+
+        rig.controller.open();
+
+        let failures = rig.controller.failures.get_untracked();
+        assert!(!failures.contains_key("a:7777"));
+        assert!(failures.contains_key("b:7777"), "other faces keep theirs");
+    }
+
+    #[test]
+    fn closing_with_no_connection_live_or_dialing_lands_on_connect() {
+        let rig = rig(vec![server("a", 20, true)], true);
+        rig.controller.open();
+        let went = RefCell::new(None);
+        rig.controller
+            .close_with(|to| *went.borrow_mut() = Some(to.to_string()));
+        assert_eq!(went.borrow().as_deref(), Some("/"));
+
+        connect_to(&rig, "a");
+        rig.controller.open();
+        let again = RefCell::new(None);
+        rig.controller
+            .close_with(|to| *again.borrow_mut() = Some(to.to_string()));
+        assert_eq!(*again.borrow(), None, "a live connection stays put");
+
+        rig.connection.disconnect();
+        rig.connection.connecting.set(true);
+        rig.controller.open();
+        let dialing = RefCell::new(None);
+        rig.controller
+            .close_with(|to| *dialing.borrow_mut() = Some(to.to_string()));
+        assert_eq!(*dialing.borrow(), None, "a dial in flight stays put");
+    }
+
+    #[test]
+    fn add_closes_the_stage_itself() {
+        let rig = rig(vec![server("a", 20, true)], true);
+        connect_to(&rig, "a");
+        rig.controller.open();
+        rig.controller.add_with(|_| {});
+        assert!(!rig.controller.open.get_untracked());
     }
 }
