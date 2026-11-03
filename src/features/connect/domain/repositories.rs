@@ -11,8 +11,9 @@
 //! a system prompt.
 
 use super::entities::{
-    CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential,
+    CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential, UnlockedKeyring,
 };
+use super::keyring::Keyring;
 use crate::failure::AppFailure;
 
 /// The saved-server store the Connect screen reads and edits. Consumed as
@@ -27,6 +28,9 @@ pub trait SavedServersRepository {
 
     /// Removing an absent endpoint succeeds — the post-condition already holds.
     fn remove(&self, endpoint: &str) -> Result<(), AppFailure>;
+
+    /// Whether this is the device's persisted list: a keyring unlock prunes the vault to it.
+    fn is_persistent(&self) -> bool;
 }
 
 /// The per-server auth-token secret, gated by the device's biometric prompt:
@@ -42,16 +46,54 @@ pub trait SavedServersRepository {
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
 #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
 pub trait CredentialService {
-    /// Gates, then stores `request`'s token — authenticating first guarantees
-    /// the secret is unlockable later.
+    /// The locked save: behind one gate, reads the vault, adds `request`'s
+    /// token and writes the vault back. A vault that does not decode answers
+    /// [`Failed`](super::entities::CredentialStatus::Failed) and is left as is.
     async fn store(&self, request: StoreRequest) -> CredentialStatus;
 
-    /// Gates, then reads the token for `request`'s server key; nothing stored
-    /// after a passed gate answers
-    /// [`NotFound`](super::entities::CredentialStatus::NotFound).
+    /// Single-endpoint read behind one gate: a not-yet-migrated per-server
+    /// entry when one exists, otherwise the vault's entry; nothing stored
+    /// answers [`NotFound`](super::entities::CredentialStatus::NotFound).
     async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential;
 
-    /// Drops the credential for `server_key`. No gate — forgetting a secret
-    /// isn't using it, and deleting an absent key succeeds.
+    /// Gates once, then reads the whole keyring. `endpoints` is the saved list's
+    /// endpoints: their legacy per-server entries are folded into the vault,
+    /// and vault entries for any other endpoint are dropped.
+    async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring;
+
+    /// The unlocked save: writes `keyring` plus `request`'s token as the new
+    /// vault behind one gate, and inserts the token into `keyring` only once
+    /// that write succeeded.
+    async fn store_in_vault(
+        &self,
+        request: StoreRequest,
+        keyring: &mut Keyring,
+    ) -> CredentialStatus;
+
+    /// The unlocked delete: rewrites the vault without `server_key` behind one
+    /// gate (skipped when `keyring` never held it), then drops it from
+    /// `keyring` and removes its legacy entry. A refused rewrite is an `Err`
+    /// that leaves `keyring` and the legacy entry untouched.
+    async fn delete_from_vault(
+        &self,
+        server_key: String,
+        keyring: &mut Keyring,
+    ) -> Result<(), AppFailure>;
+
+    /// The locked delete: drops `server_key`'s legacy entry only. No gate —
+    /// forgetting a secret isn't using it, and deleting an absent key
+    /// succeeds. The vault cannot be rewritten without a gate, so a vault
+    /// entry for a still-saved endpoint stays until [`Self::delete_from_vault`]
+    /// removes it, or until its saved row is removed and the next
+    /// [`Self::unlock_all`] prunes it.
     async fn delete(&self, server_key: String) -> Result<(), AppFailure>;
+
+    /// Removes the whole vault, ungated; an absent vault succeeds. The
+    /// recovery for a vault [`Self::unlock_all`] can never read again —
+    /// [`KeyInvalidated`](super::entities::CredentialStatus::KeyInvalidated)
+    /// after a biometric re-enrollment, or
+    /// [`Failed`](super::entities::CredentialStatus::Failed) for a blob that
+    /// no longer decodes — which presentation offers on either status. Legacy
+    /// per-server entries are left for the next `unlock_all` to migrate.
+    async fn reset_vault(&self) -> Result<(), AppFailure>;
 }

@@ -20,11 +20,20 @@
 //! stores, resolved through that feature's own `di::expect_*` (the same
 //! cross-feature widening the terminal screen makes). It lives here because
 //! deleting a credential is *also* a token revocation, which this feature
-//! owns. Deleting is deliberately **ungated** (forgetting a secret is not a
-//! use of it); the token revoke that rides along is best-effort — its
-//! failure unshown, the local credential removed either way, since a token
-//! that can't be reached must not leave a credential the user asked to be
-//! rid of on the device.
+//! owns. The token revoke that rides along is best-effort — its failure
+//! unshown — but the secret itself leaves through the keyring: with the
+//! keyring unlocked, one gated vault rewrite without it, then the handle
+//! drops it; locked, a forget takes the ungated legacy delete (the row goes
+//! too, so the next unlock prunes the vault's copy), while a credential
+//! delete keeps the row and so unlocks first rather than claim a vault copy
+//! it cannot reach. A refused rewrite leaves a credential delete's claim as
+//! it was, while a forget drops the handle's token regardless.
+//!
+//! **Switching servers**: [`switch_server`](SettingsController::switch_server)
+//! dials a saved row with its stored token through `connect`'s page-agnostic
+//! [`KeyringUnlock`] — from the unlocked keyring, else after its one
+//! `unlock_all` prompt — moving the live connection with `switch_to`, and
+//! only while the row, read fresh, still claims a credential.
 //!
 //! **The one-time secret**: [`pending_token_secret`](Self::pending_token_secret)
 //! is what the reveal sheet reads — a landed [`create_token`](Self::create_token)
@@ -38,11 +47,17 @@
 use std::sync::Arc;
 
 use clean_signals::{ControllerCore, NoParams, RunOptions};
-use frust::{GetUntracked, RwSignal, Set};
+use frust::{GetUntracked, RwSignal, Set, spawn_local};
+use zeroize::Zeroizing;
 
+use crate::connection::{ConnectionController, TrustMode};
 use crate::failure::AppFailure;
-use crate::features::connect::di::{Credentials, SavedServers};
-use crate::features::connect::domain::entities::SavedServer;
+use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
+use crate::features::connect::domain::entities::{CredentialStatus, SavedServer};
+use crate::features::connect::presentation::controller::{
+    ConfirmPrompt, SAVED_LIST_UNAVAILABLE_MESSAGE,
+};
+use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences,
 };
@@ -52,6 +67,36 @@ use crate::features::settings::domain::repositories::{
 use crate::features::settings::domain::use_cases::{
     CreateToken, ListTokens, LoadPreferences, RevokeToken, UpdateAppearance, UpdatePollPrefs,
 };
+use crate::ui::toasts::app_toasts;
+
+/// One row of the `saved servers` group, as the screen renders it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavedServerRow {
+    /// A remembered server; `active` while it is the connected endpoint.
+    Server { server: SavedServer, active: bool },
+    /// The trailing `+ add server` row.
+    AddServer,
+}
+
+/// `saved`'s rows, the connected `active` endpoint marked, closed by the
+/// `+ add server` row.
+pub fn saved_server_rows(saved: &[SavedServer], active: Option<&str>) -> Vec<SavedServerRow> {
+    saved
+        .iter()
+        .map(|server| SavedServerRow::Server {
+            active: active == Some(server.endpoint().as_str()),
+            server: server.clone(),
+        })
+        .chain(std::iter::once(SavedServerRow::AddServer))
+        .collect()
+}
+
+/// Toast `status`'s message, when it has one to say.
+fn report(status: CredentialStatus) {
+    if let Some(message) = status.message() {
+        app_toasts().show(message);
+    }
+}
 
 /// The `/settings` screen's view model. See the [module docs](self).
 pub struct SettingsController {
@@ -66,6 +111,11 @@ pub struct SettingsController {
     saved_servers: SavedServers,
     /// …and its credential store.
     credentials: Credentials,
+    /// `connect`'s keyring seam: the unlock, the handle and the switch.
+    keyring_unlock: KeyringUnlock,
+    /// Whether a switch's keyring unlock is in flight — its single-flight
+    /// claim (the dial itself is guarded by the connection's own).
+    pub switching: RwSignal<bool>,
     /// The token set as last read from the repository — the `auth tokens`
     /// group's rows.
     pub tokens: RwSignal<Vec<AuthToken>>,
@@ -89,15 +139,26 @@ pub struct SettingsController {
 impl SettingsController {
     /// A fresh controller over the four injected stores — built once by the
     /// composition root (see [`crate::features::settings::di`] and, for the
-    /// two from `connect`, that feature's own `di`).
+    /// two from `connect`, that feature's own `di`) — plus the app-scoped
+    /// keyring and connection a switch moves.
     pub fn new(
         tokens: Arc<dyn AuthTokensRepository + Send + Sync>,
         preferences: Arc<dyn PreferencesRepository + Send + Sync>,
         saved_servers: SavedServers,
         credentials: Credentials,
+        keyring: KeyringHandle,
+        connection: Arc<ConnectionController>,
     ) -> Self {
         let defaults = Preferences::defaults();
+        let keyring_unlock = KeyringUnlock::new(
+            Arc::clone(&saved_servers),
+            Arc::clone(&credentials),
+            connection,
+            keyring,
+        );
         Self {
+            keyring_unlock,
+            switching: RwSignal::new(false),
             core: ControllerCore::new(),
             list_tokens: ListTokens::new(Arc::clone(&tokens)),
             create_token: CreateToken::new(Arc::clone(&tokens)),
@@ -155,37 +216,82 @@ impl SettingsController {
     }
 
     /// Delete the stored credential for `endpoint`, and the server-side token
-    /// behind it. No biometric prompt (see the [module docs](self)). Order:
-    /// revoke the token best-effort first (while the session that can revoke
-    /// it is still up), then drop the secret, then clear the row's
-    /// credential fields — the last step runs even if the secure-store
-    /// delete failed, since a row still claiming a deleted credential would
-    /// offer a prompt that can only refuse. Answers whether the whole thing
-    /// succeeded, which the screen's confirmation toast keys off.
+    /// behind it, keeping the saved server. A locked keyring is unlocked
+    /// first (one prompt; a refusal toasts and deletes nothing — see the
+    /// [module docs](self)). Order: evict the secret, then revoke the token
+    /// best-effort and clear the row's credential fields — both only once the
+    /// eviction landed, so a refused vault rewrite leaves the credential, its
+    /// token and the row's claim exactly as they were.
+    /// Answers whether the whole thing succeeded, which the screen's
+    /// confirmation toast keys off.
     pub async fn delete_credential(&self, endpoint: String) -> bool {
-        let Some(server) = self.saved_row(&endpoint) else {
+        let Some(mut server) = self.saved_row(&endpoint) else {
             return false;
         };
+        if !self.keyring().is_unlocked() {
+            match self.keyring_unlock.unlock().await {
+                KeyringUnlockOutcome::Unlocked { .. } => {}
+                KeyringUnlockOutcome::Refused(status) => {
+                    report(status);
+                    return false;
+                }
+                KeyringUnlockOutcome::ListUnavailable => {
+                    app_toasts().show(SAVED_LIST_UNAVAILABLE_MESSAGE);
+                    return false;
+                }
+                KeyringUnlockOutcome::Busy | KeyringUnlockOutcome::Superseded => return false,
+            }
+            self.refresh_saved_servers();
+            // An unreadable credential has already lost its claim by now.
+            let Some(row) = self.saved_row(&endpoint) else {
+                return false;
+            };
+            server = row;
+        }
+        if let Err(failure) = self.evict_unlocked(&endpoint).await {
+            self.core.failures().emit(&failure);
+            return false;
+        }
         if let Some(name) = server.token_name.clone() {
             self.revoke_quietly(name).await;
         }
-        let deleted = self.credentials.delete(endpoint.clone()).await;
-        if let Err(failure) = &deleted {
-            self.core.failures().emit(failure);
-        }
         self.clear_credential_fields(server);
-        deleted.is_ok()
+        true
     }
 
     /// Remove the saved server at `endpoint` entirely — its stored credential
     /// with it, since it's filed under this same endpoint key and would
     /// otherwise be unreachable forever once the row stops being listed.
+    /// Never prompts to unlock: locked, the ungated legacy delete runs and
+    /// the vault's copy is pruned by the next unlock, the row being gone. A
+    /// failed eviction is emitted and the row still goes; unlocked, the
+    /// handle drops its token whatever the vault rewrite said, and a refused
+    /// rewrite falls back to the ungated legacy delete.
     pub async fn forget_server(&self, endpoint: String) -> bool {
         let Some(server) = self.saved_row(&endpoint) else {
             return false;
         };
-        if server.has_credential {
-            self.delete_credential(endpoint.clone()).await;
+        if server.has_credential || self.keyring().token_for(&endpoint).is_some() {
+            if let Some(name) = server.token_name.clone() {
+                self.revoke_quietly(name).await;
+            }
+            let evicted = if self.keyring().is_unlocked() {
+                let evicted = self.evict_unlocked(&endpoint).await;
+                self.keyring().remove(&endpoint);
+                if evicted.is_err()
+                    && let Err(failure) = self.credentials.delete(endpoint.clone()).await
+                {
+                    log::warn!(
+                        "credentials: legacy delete after a refused eviction failed: {failure}"
+                    );
+                }
+                evicted
+            } else {
+                self.credentials.delete(endpoint.clone()).await
+            };
+            if let Err(failure) = evicted {
+                self.core.failures().emit(&failure);
+            }
         }
         let removed = self.saved_servers.remove(&endpoint);
         if let Err(failure) = &removed {
@@ -193,6 +299,118 @@ impl SettingsController {
         }
         self.refresh_saved_servers();
         removed.is_ok()
+    }
+
+    /// The app-scoped keyring handle.
+    fn keyring(&self) -> &KeyringHandle {
+        self.keyring_unlock.keyring()
+    }
+
+    /// The unlocked eviction: one gated vault rewrite without `endpoint`
+    /// (over a snapshot, never the handle's own lock), then the handle drops
+    /// it too — only once the rewrite landed.
+    async fn evict_unlocked(&self, endpoint: &str) -> Result<(), AppFailure> {
+        let mut snapshot = self.keyring().snapshot();
+        self.credentials
+            .delete_from_vault(endpoint.to_string(), &mut snapshot)
+            .await?;
+        self.keyring().remove(endpoint);
+        Ok(())
+    }
+
+    /// Move the live connection to the saved server at `endpoint` with its
+    /// stored token, then run `on_switched`. Unlocked, the token comes
+    /// straight off the keyring; locked, one `unlock_all` prompt publishes
+    /// it first (a refusal toasts; a cancel is silent). A
+    /// [`TrustMode::NoVerification`] row asks `confirm` before its token is
+    /// sent. The free-tier verdict is the caller's, ahead of this. Ignored
+    /// while a switch's unlock is already in flight. A row that no longer
+    /// claims a credential is never dialed with a keyring token: the list is
+    /// re-read so the next tap opens the add page instead.
+    pub fn switch_server(
+        self: &Arc<Self>,
+        endpoint: String,
+        confirm: ConfirmPrompt,
+        on_switched: Box<dyn FnOnce()>,
+    ) {
+        if self.switching.get_untracked() {
+            return;
+        }
+        if !self.claims_credential(&endpoint) {
+            self.refresh_saved_servers();
+            report(CredentialStatus::NotFound);
+            return;
+        }
+        if self.keyring().is_unlocked() {
+            self.dial_saved(&endpoint, confirm, on_switched);
+            return;
+        }
+        self.switching.set(true);
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            let outcome = controller.keyring_unlock.unlock().await;
+            controller.switching.set(false);
+            controller.refresh_saved_servers();
+            match outcome {
+                KeyringUnlockOutcome::Unlocked { .. } => {
+                    controller.dial_saved(&endpoint, confirm, on_switched);
+                }
+                KeyringUnlockOutcome::Refused(status) => report(status),
+                KeyringUnlockOutcome::ListUnavailable => {
+                    app_toasts().show(SAVED_LIST_UNAVAILABLE_MESSAGE);
+                }
+                KeyringUnlockOutcome::Busy | KeyringUnlockOutcome::Superseded => {}
+            }
+        });
+    }
+
+    /// Whether the saved row at `endpoint`, read fresh, claims a credential.
+    fn claims_credential(&self, endpoint: &str) -> bool {
+        self.saved_row(endpoint)
+            .is_some_and(|server| server.has_credential)
+    }
+
+    /// [`Self::switch_server`]'s dial, the keyring already open: the row is
+    /// re-read, and dials only while it claims a credential the keyring holds.
+    fn dial_saved(
+        self: &Arc<Self>,
+        endpoint: &str,
+        confirm: ConfirmPrompt,
+        on_switched: Box<dyn FnOnce()>,
+    ) {
+        let found = self
+            .saved_row(endpoint)
+            .filter(|server| server.has_credential)
+            .and_then(|server| Some((self.keyring().token_for(endpoint)?, server)));
+        let Some((token, server)) = found else {
+            self.refresh_saved_servers();
+            report(CredentialStatus::NotFound);
+            return;
+        };
+        if server.trust_mode != TrustMode::NoVerification {
+            self.switch_now(&server, token, on_switched);
+            return;
+        }
+        let controller = Arc::clone(self);
+        let row = server.clone();
+        confirm(
+            server,
+            Box::new(move || controller.switch_now(&row, token, on_switched)),
+        );
+    }
+
+    fn switch_now(
+        &self,
+        server: &SavedServer,
+        token: Zeroizing<String>,
+        on_switched: Box<dyn FnOnce()>,
+    ) {
+        self.keyring_unlock
+            .switch_to_saved(server, token, move |outcome| {
+                if outcome.is_ok() {
+                    on_switched();
+                }
+            });
     }
 
     /// The saved row for `endpoint`, as last read from the store.
@@ -361,12 +579,35 @@ mod tests {
         servers: MockSavedServersRepository,
         credentials: Option<Arc<MockCredentialService>>,
     ) -> SettingsController {
+        controller_with_keyring(servers, credentials, KeyringHandle::new())
+    }
+
+    /// [`controller_over`] sharing `keyring` (locked unless the caller
+    /// publishes into it).
+    fn controller_with_keyring(
+        servers: MockSavedServersRepository,
+        credentials: Option<Arc<MockCredentialService>>,
+        keyring: KeyringHandle,
+    ) -> SettingsController {
         SettingsController::new(
             Arc::new(MockAuthTokensRepository::seeded()),
             Arc::new(MockPreferencesRepository::seeded()),
             Arc::new(servers),
             credentials.unwrap_or_else(|| Arc::new(MockCredentialService::new())),
+            keyring,
+            Arc::new(ConnectionController::detached()),
         )
+    }
+
+    /// A keyring unlocked over exactly `entries`.
+    fn unlocked_keyring(entries: &[(&str, &str)]) -> KeyringHandle {
+        let mut keyring = crate::features::connect::domain::keyring::Keyring::new();
+        for (endpoint, token) in entries {
+            keyring.insert(*endpoint, Zeroizing::new(token.to_string()));
+        }
+        let handle = KeyringHandle::new();
+        handle.publish(keyring);
+        handle
     }
 
     /// A saved row for [`SAVED_ENDPOINT`], with or without a stored credential.
@@ -559,9 +800,11 @@ mod tests {
             None,
             "the secret is gone"
         );
+        let prompts = credentials.prompts();
         assert!(
-            credentials.prompts().is_empty(),
-            "a delete raises no biometric prompt"
+            !prompts.is_empty() && prompts.iter().all(|reason| reason == "Unlock Rig"),
+            "a locked delete runs the keyring unlock rather than leave its vault copy: \
+             {prompts:?}"
         );
         let row = &c.saved.get_untracked()[0];
         assert!(!row.has_credential, "…and the row stops claiming one");
@@ -581,9 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_secure_store_delete_still_clears_the_rows_credential_fields() {
-        // Otherwise the row keeps offering a one-tap unlock for a credential
-        // the user has already asked to be rid of.
+    fn a_refused_eviction_leaves_the_rows_credential_claim_as_it_was() {
+        // A row that stopped claiming a credential the store still holds
+        // would hide a secret the user can no longer reach to delete.
         let credentials = Arc::new(MockCredentialService::new());
         credentials.set_delete_failure(true);
         let c = controller_over(
@@ -594,7 +837,95 @@ mod tests {
 
         assert!(!block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
 
+        assert!(c.saved.get_untracked()[0].has_credential);
+    }
+
+    #[test]
+    fn an_unlocked_delete_rewrites_the_vault_once_and_drops_the_keyrings_copy() {
+        let credentials = Arc::new(MockCredentialService::new());
+        credentials.seed_vault(&[(SAVED_ENDPOINT, "s3cr3t"), ("other.example:1", "keep")]);
+        let keyring = unlocked_keyring(&[(SAVED_ENDPOINT, "s3cr3t"), ("other.example:1", "keep")]);
+        let c = controller_with_keyring(
+            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
+            Some(Arc::clone(&credentials)),
+            keyring.clone(),
+        );
+        block_on(c.refresh());
+
+        assert!(block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
+
+        assert_eq!(credentials.writes(), 1, "one gated vault rewrite");
+        assert!(credentials.prompts().is_empty(), "…and no unlock prompt");
+        assert_eq!(
+            credentials.vault_endpoints(),
+            Some(vec!["other.example:1".to_string()])
+        );
+        assert_eq!(credentials.stored(SAVED_ENDPOINT), None);
+        assert_eq!(keyring.endpoints(), vec!["other.example:1"]);
         assert!(!c.saved.get_untracked()[0].has_credential);
+    }
+
+    #[test]
+    fn a_refused_vault_rewrite_keeps_the_keyring_and_the_rows_claim() {
+        let credentials = Arc::new(MockCredentialService::new());
+        credentials.seed_vault(&[(SAVED_ENDPOINT, "s3cr3t")]);
+        credentials.set_gate(CredentialStatus::Canceled);
+        let keyring = unlocked_keyring(&[(SAVED_ENDPOINT, "s3cr3t")]);
+        let c = controller_with_keyring(
+            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
+            Some(Arc::clone(&credentials)),
+            keyring.clone(),
+        );
+        block_on(c.refresh());
+
+        assert!(!block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
+
+        assert_eq!(
+            credentials.stored(SAVED_ENDPOINT).as_deref(),
+            Some("s3cr3t")
+        );
+        assert_eq!(keyring.endpoints(), vec![SAVED_ENDPOINT]);
+        assert!(c.saved.get_untracked()[0].has_credential);
+    }
+
+    #[test]
+    fn a_locked_forget_takes_the_ungated_delete_and_prompts_nothing() {
+        let credentials = Arc::new(MockCredentialService::new());
+        credentials.seed(SAVED_ENDPOINT, "s3cr3t");
+        let c = controller_over(
+            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
+            Some(Arc::clone(&credentials)),
+        );
+        block_on(c.refresh());
+
+        assert!(block_on(c.forget_server(SAVED_ENDPOINT.to_string())));
+
+        assert!(credentials.prompts().is_empty());
+        assert_eq!(credentials.writes(), 0);
+        assert_eq!(credentials.legacy(SAVED_ENDPOINT), None);
+    }
+
+    #[test]
+    fn the_saved_rows_mark_the_connected_endpoint_and_close_with_add_server() {
+        let rows = saved_server_rows(&[saved_row(true)], Some(SAVED_ENDPOINT));
+        assert_eq!(
+            rows,
+            vec![
+                SavedServerRow::Server {
+                    server: saved_row(true),
+                    active: true,
+                },
+                SavedServerRow::AddServer,
+            ]
+        );
+        assert_eq!(
+            saved_server_rows(&[], None),
+            vec![SavedServerRow::AddServer]
+        );
+        assert!(matches!(
+            saved_server_rows(&[saved_row(false)], Some("elsewhere:1"))[0],
+            SavedServerRow::Server { active: false, .. }
+        ));
     }
 
     #[test]

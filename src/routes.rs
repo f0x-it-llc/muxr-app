@@ -35,6 +35,12 @@
 //! publishes accessibility nodes for its top page only and outranks both
 //! navigators for the Android back press (R44-back).
 //!
+//! **Adding a server covers the shell rather than leaving it.** `/?mode=add`
+//! ([`CONNECT_MODE_QUERY_KEY`]) resolves to a second Connect page that
+//! [`Nav::push`] lays over the retained shell page on the outer stack; a
+//! back press or [`Nav::pop`] takes it off again, so the shell beneath never
+//! unwinds. It is no shell route, so the guard never sees it.
+//!
 //! **Leaving the shell is a question, not a pop**: the shell page carries
 //! [`frust::BackPolicy::DismissAnimated`] plus a dismiss-signal cell
 //! ([`sessions_back_signal`]), so a back press at `/sessions` — where the inner
@@ -47,6 +53,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
 use frust::{
     BackPolicy, Either, Get, GetUntracked, Location, NavigatorController, PushOptions, Resolution,
     ResolvedPage, Route, RouteObserver, RouteParams, Router, RwSignal, Set, SizedBox,
@@ -55,7 +63,7 @@ use frust::{
 
 use crate::AppState;
 use crate::connection::ConnectionController;
-use crate::features::connect::presentation::pages::connect_page;
+use crate::features::connect::presentation::pages::{add_server_page, connect_page};
 use crate::features::sessions::presentation::pages::sessions_page;
 use crate::features::sessions::presentation::widgets::host_of;
 use crate::features::settings::presentation::pages::settings_page;
@@ -75,6 +83,37 @@ pub const TERMINAL_TAB_QUERY_KEY: &str = "tab";
 /// The wire pane id (unique within the tab's terminal panes) a pill targets.
 pub const TERMINAL_PANE_QUERY_KEY: &str = "pane";
 pub const TERMINAL_SPACE_QUERY_KEY: &str = "space";
+
+/// The `/` query key that picks Connect's mode; [`CONNECT_MODE_ADD`] is the
+/// one value it takes.
+pub const CONNECT_MODE_QUERY_KEY: &str = "mode";
+/// Connect's add-server mode: the form alone, pushed over the placed shell.
+pub const CONNECT_MODE_ADD: &str = "add";
+/// The `/?mode=add` key naming a saved endpoint to prefill the form with.
+pub const CONNECT_SERVER_QUERY_KEY: &str = "server";
+/// Where every add-server entry point pushes.
+pub const ADD_SERVER_LOCATION: &str = "/?mode=add";
+
+/// The add-server location, prefilled from the saved row at `endpoint` when
+/// one is named. The endpoint is percent-encoded whole, so no character in it
+/// can end its value or start another key; the router decodes it back.
+pub fn add_server_location(endpoint: Option<&str>) -> String {
+    match endpoint {
+        Some(endpoint) => format!(
+            "{ADD_SERVER_LOCATION}&{CONNECT_SERVER_QUERY_KEY}={}",
+            utf8_percent_encode(endpoint, NON_ALPHANUMERIC)
+        ),
+        None => ADD_SERVER_LOCATION.to_string(),
+    }
+}
+
+/// Whether `location` asks for Connect's add-server mode.
+fn is_add_mode(location: &Location) -> bool {
+    location
+        .query
+        .get(CONNECT_MODE_QUERY_KEY)
+        .is_some_and(|mode| mode == CONNECT_MODE_ADD)
+}
 
 /// The `/` route (and the outer navigator's initial page): Connect.
 pub(crate) fn home_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
@@ -235,6 +274,19 @@ pub struct Nav {
     /// by [`Self::shell_is_placed`] so a navigation back into the shell on that
     /// same frame places a fresh scaffold rather than aiming at a dying one.
     pending_unwind: Rc<Cell<Option<u64>>>,
+    /// The stack (`true` = outer) and published generation at which this
+    /// handle last queued a pop — so a second pop aimed at the same page on
+    /// the same frame ([`Self::pop_marked`]) sees it already going.
+    queued_pop: Rc<Cell<Option<(bool, u64)>>>,
+}
+
+/// The page the user was on when an async flow started — the only page that
+/// flow's settle-time [`Nav::pop_marked`] may take off. Plain data, so a
+/// `Send + Sync` controller can hold one across its dial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageMark {
+    outer: bool,
+    generation: u64,
 }
 
 /// A `Send + Sync` handle to just the bar's fullscreen flag — see
@@ -292,6 +344,7 @@ impl Nav {
     fn navigate(&self, location: &str, verb: Verb) {
         let mut chain = None;
         let mut bounced = false;
+        let mut adding = false;
         if let Resolution::Matched {
             location: resolved,
             pages,
@@ -299,6 +352,7 @@ impl Nav {
         } = self.router.resolve(location)
         {
             bounced = resolved.path != Location::parse(location).path;
+            adding = !bounced && is_add_mode(&resolved);
             *self.last_location.borrow_mut() = Some(resolved);
             chain = Some(pages);
         }
@@ -313,6 +367,9 @@ impl Nav {
                 self.place_shell(pages, verb);
                 return;
             }
+        } else if adding && matches!(verb, Verb::Push) {
+            self.cover(pages);
+            return;
         } else if placed {
             self.unwind_shell();
             return;
@@ -369,6 +426,39 @@ impl Nav {
         self.pending_unwind.set(None);
     }
 
+    /// Push a flat chain's leaf onto the outer stack **over** whatever is
+    /// there — the add-server page, laid over a placed shell it must not
+    /// unwind. Carries the route slide a plain router push has no seam for.
+    fn cover(&self, pages: Vec<ResolvedPage<AppState>>) {
+        let Some(leaf) = pages.into_iter().next_back() else {
+            return;
+        };
+        let route = leaf.location().clone();
+        self.router.controller().push_with_options(
+            move || leaf.build(),
+            PushOptions::opaque()
+                .transition(route_transition())
+                .route(route),
+        );
+    }
+
+    /// Whether the outer stack's top page sits outside the shell while a
+    /// shell page is retained beneath it — the add-server page — as of the
+    /// last publish.
+    fn shell_is_covered(&self) -> bool {
+        let stack = self.router.controller().route_stack();
+        let entries = stack.entries();
+        let top_outside_shell = matches!(
+            entries.last(),
+            Some(Some(location)) if route_meta(&location.path).is_none()
+        );
+        top_outside_shell
+            && entries
+                .iter()
+                .flatten()
+                .any(|location| route_meta(&location.path).is_some())
+    }
+
     /// Take the shell page back off the outer stack — what a navigation
     /// resolving **outside** the shell subtree does while the scaffold is still
     /// on it: the guard bouncing a push made after the connection dropped, and
@@ -385,11 +475,29 @@ impl Nav {
     /// the one route outside the shell, and where the bounce was going.
     /// [`Self::landing`] is left alone: the leaving page rebuilds through it
     /// while the pop plays.
+    ///
+    /// A page covering the shell (the add-server page) comes off first, in
+    /// the same frame: popping only the top would leave the shell placed
+    /// under a dead connection.
     fn unwind_shell(&self) {
         let controller = self.router.controller();
-        controller.pop();
+        let stack = controller.route_stack();
+        let entries = stack.entries();
+        let covering = entries
+            .iter()
+            .rposition(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|location| route_meta(&location.path).is_some())
+            })
+            .map_or(0, |shell| entries.len() - 1 - shell);
+        for _ in 0..=covering {
+            controller.pop();
+        }
         self.pending_shell.set(None);
         self.pending_unwind.set(Some(controller.route_generation()));
+        self.queued_pop
+            .set(Some((true, controller.route_generation())));
     }
 
     /// The landing page's own location — the inner navigator's root route
@@ -436,16 +544,58 @@ impl Nav {
     /// in-shell page with it, landing back on Connect.
     ///
     /// This mirrors frust's own innermost-first back arbitration by hand,
-    /// because a `‹` press and an Android back press must agree.
+    /// because a `‹` press and an Android back press must agree — including
+    /// its rule that a page covering the shell silences the inner navigator,
+    /// so the add-server page comes off first.
     /// [`NavigatorController::can_pop`] is advisory (the depth as of the last
     /// rebuild), which is exact for every call site here: each pops once, a
     /// rebuild apart.
     pub fn pop(&self) {
-        if self.inner.can_pop() {
-            self.inner.pop();
+        let outer = self.shell_is_covered() || !self.inner.can_pop();
+        self.pop_on(outer);
+    }
+
+    /// Pop the outer (`true`) or inner stack, noting it in [`Self::queued_pop`].
+    fn pop_on(&self, outer: bool) {
+        let controller = if outer {
+            self.router.controller()
         } else {
-            self.router.pop();
+            &self.inner
+        };
+        self.queued_pop
+            .set(Some((outer, controller.route_generation())));
+        controller.pop();
+    }
+
+    /// Mark the page the user is on now — the outer stack's top while it
+    /// covers the shell or no shell is placed, else the inner navigator's —
+    /// for a later [`Self::pop_marked`].
+    pub fn mark_top(&self) -> PageMark {
+        let outer = self.shell_is_covered() || !self.shell_is_placed();
+        let generation = if outer {
+            self.router.controller().route_generation()
+        } else {
+            self.inner.route_generation()
+        };
+        PageMark { outer, generation }
+    }
+
+    /// Pop the page `mark` was taken on, and only that page: skipped once its
+    /// stack has published any change since (the user backed out, or went
+    /// on), or when this handle already queued a pop of it on this frame. An
+    /// async flow settling after its page has gone must not pop the one now
+    /// on top — off the add-server page, that would be the shell itself.
+    pub fn pop_marked(&self, mark: &PageMark) {
+        let generation = if mark.outer {
+            self.router.controller().route_generation()
+        } else {
+            self.inner.route_generation()
+        };
+        if generation != mark.generation || self.queued_pop.get() == Some((mark.outer, generation))
+        {
+            return;
         }
+        self.pop_on(mark.outer);
     }
 
     /// The bar's state for this frame, derived from the inner navigator's
@@ -589,6 +739,7 @@ pub fn install_app_router(
             last_location: Rc::new(RefCell::new(None)),
             pending_shell: Rc::new(Cell::new(None)),
             pending_unwind: Rc::new(Cell::new(None)),
+            queued_pop: Rc::new(Cell::new(None)),
         });
     });
     router
@@ -681,7 +832,17 @@ pub(crate) fn build_routes(
     vec![
         Route::new(CONNECT_LOCATION, {
             let overlays = overlays.clone();
-            move |_params: &RouteParams| home_page(overlays.clone())
+            move |params: &RouteParams| {
+                if params
+                    .get(CONNECT_MODE_QUERY_KEY)
+                    .is_some_and(|mode| mode == CONNECT_MODE_ADD)
+                {
+                    let prefill = params.get(CONNECT_SERVER_QUERY_KEY).cloned();
+                    Either::Right(add_server_page(overlays.clone(), prefill))
+                } else {
+                    Either::Left(home_page(overlays.clone()))
+                }
+            }
         }),
         shell_route(
             inner,
@@ -827,6 +988,46 @@ mod tests {
                 "{path} resolves through the shell page"
             );
         }
+    }
+
+    #[test]
+    fn add_mode_is_a_flat_root_page_outside_the_guard() {
+        // `/?mode=add` must resolve flat — no shell page in its chain — or a
+        // push of it would place a second scaffold instead of covering one.
+        let router = table_router();
+        assert_eq!(router.resolve(ADD_SERVER_LOCATION).page_count(), 1);
+        assert!(is_add_mode(&Location::parse(ADD_SERVER_LOCATION)));
+        assert!(!is_add_mode(&Location::parse(CONNECT_LOCATION)));
+        let guard = session_guard_with(Arc::new(ConnectionController::detached()));
+        assert_eq!(guard(&Location::parse(ADD_SERVER_LOCATION)), None);
+    }
+
+    #[test]
+    fn a_hostile_prefill_round_trips_without_touching_the_query() {
+        // Every delimiter the query parser splits on, a stray escape, and a
+        // second `mode` all stay inside the one `server` value.
+        let hostile = "evil.example:1&mode=home&server=x%41=y#z?q [::1]";
+        let raw = add_server_location(Some(hostile));
+        let location = Location::parse(&raw);
+        assert_eq!(location.path, CONNECT_LOCATION);
+        assert!(is_add_mode(&location), "{raw}");
+        assert_eq!(
+            location
+                .query
+                .get(CONNECT_SERVER_QUERY_KEY)
+                .map(String::as_str),
+            Some(hostile),
+            "{raw}"
+        );
+        assert_eq!(location.query.len(), 2, "no extra key leaked: {raw}");
+
+        let params = table_router().resolve(&raw).params();
+        assert_eq!(
+            params.get(CONNECT_SERVER_QUERY_KEY).map(String::as_str),
+            Some(hostile),
+            "the route builder reads it decoded"
+        );
+        assert_eq!(add_server_location(None), ADD_SERVER_LOCATION);
     }
 
     #[test]

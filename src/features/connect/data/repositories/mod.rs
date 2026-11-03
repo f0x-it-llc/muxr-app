@@ -4,6 +4,8 @@
 //! signals/widgets here, with one exception: the two real stores reach
 //! `frust::spawn_blocking` to keep their platform calls off the UI thread — for
 //! the credential store that is a hard safety rule, not a nicety.
+//! [`MockCredentialService`] runs that store's own vault algorithms over an
+//! in-memory map, so both walk the same migration and write steps.
 //!
 //! [`json`] is not a repository: it's the hand-rolled encoder/parser the
 //! saved-server store's payload needs, scoped to this module.

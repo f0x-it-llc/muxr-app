@@ -6,5 +6,6 @@
 //! than minting a second trust-mode enum.
 
 pub mod entities;
+pub mod keyring;
 pub mod repositories;
 pub mod use_cases;

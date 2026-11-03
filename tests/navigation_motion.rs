@@ -28,26 +28,35 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use frust::{AnyView, Component, GetUntracked, SizedBox, Theme, any};
+use frust::{AnyView, Component, GetUntracked, SizedBox, Theme, any, spawn_local};
 use frust_core::accesskit::Role;
-use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot};
+use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot, ScrollDelta};
 use frust_reactive::TrackedScope;
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
-use muxr::routes::{app_nav, sessions_back_signal};
+use muxr::features::connect::di::{expect_keyring, expect_saved_servers, mock_credentials};
+use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::connect::domain::keyring::Keyring;
+use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
+use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
+use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
+use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::pro::presentation::NOT_NOW_LABEL;
+use muxr::routes::{ADD_SERVER_LOCATION, add_server_location, app_nav, sessions_back_signal};
 use muxr::ui::dialogs::confirm_dialog;
 use muxr::ui::sheet::{SheetHandle, show_sheet};
 use muxr::{AppState, MuxrApp};
+use zeroize::Zeroizing;
 
 mod support;
 use support::{
     EPSILON, RecScene, added, center, frame, frame_at, largest, ms, named_key,
-    node_centers_by_label, node_labels, node_roles, node_values, pointer, serial, settle, setup,
-    smallest, tap,
+    node_centers_by_label, node_centers_by_value, node_labels, node_roles, node_values, pointer,
+    pump_frames, pump_until, serial, settle, setup, smallest, tap,
 };
 
 /// The mock connection every bar-titled test runs behind (the session guard
@@ -1278,6 +1287,402 @@ fn back_on_the_terminal_route_still_pops_to_sessions_with_no_question_asked() {
     );
     assert!(connected(), "…nor the connection");
     assert_titled(&h, HOST);
+}
+
+// ---------------------------------------------------------------------------
+// 3f — the add-server page covers the shell rather than leaving it
+// ---------------------------------------------------------------------------
+
+/// Unlock Pro and wait for the app's entitlement to say so — a free install
+/// with the seeded saved rows would meet the paywall on the add page first.
+fn unlock_pro(h: &mut Harness) {
+    mock_entitlement()
+        .expect("tests/support opted this process into the mock")
+        .set_entitlement(Entitlement::Pro);
+    let pro = expect_pro_controller();
+    let refreshing = Arc::clone(&pro);
+    spawn_local(async move { refreshing.refresh().await });
+    let scene = h.frame();
+    pump_until(
+        &mut h.root,
+        &mut h.logic,
+        &mut h.state,
+        &mut h.tcx,
+        scene,
+        || pro.is_pro_untracked(),
+    );
+}
+
+/// On `/sessions` with Pro unlocked, the add-server page pushed over it.
+fn on_add_server_page() -> Harness {
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    h.park();
+    assert_eq!(h.depth(), 2, "Connect plus the placed shell page");
+    h.push(ADD_SERVER_LOCATION);
+    h.park();
+    h
+}
+
+#[test]
+fn the_add_server_page_covers_the_placed_shell_without_a_bar_or_a_guard_bounce() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = on_add_server_page();
+
+    assert_eq!(h.depth(), 3, "pushed over the shell page, which stays");
+    assert!(
+        h.values().iter().any(|v| v == ADD_SERVER_HEADING),
+        "the add-server form is on screen: {:?}",
+        h.values()
+    );
+    assert!(
+        h.labels().iter().any(|l| l == BACK),
+        "…with its own back chevron: {:?}",
+        h.labels()
+    );
+    assert!(
+        !h.has_bar(),
+        "…and no shell bar over it: {:?}",
+        node_roles(&h.root)
+    );
+    assert!(connected(), "the live connection is untouched");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "Pro: no paywall first");
+}
+
+#[test]
+fn back_on_the_add_server_page_pops_to_sessions_with_the_shell_still_placed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+    let generation = sessions_back_signal().get();
+
+    press_back(&mut h);
+
+    assert_eq!(h.depth(), 2, "only the add page came off");
+    assert!(
+        h.has_bar(),
+        "the shell's bar is back: {:?}",
+        node_roles(&h.root)
+    );
+    assert_titled(&h, HOST);
+    assert_eq!(
+        sessions_back_signal().get(),
+        generation,
+        "the press never reached the Sessions page beneath"
+    );
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "…and asked nothing");
+    assert!(connected(), "the guard never fired: still connected");
+}
+
+#[test]
+fn the_add_server_pages_own_chevron_pops_it_the_same_way() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+
+    h.tap_label(BACK);
+    h.settle();
+    h.park();
+
+    assert_eq!(h.depth(), 2, "the shell page stays placed");
+    assert_titled(&h, HOST);
+}
+
+#[test]
+fn a_free_install_meets_the_paywall_first_and_not_now_pops_the_add_page() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+
+    h.push(ADD_SERVER_LOCATION);
+    h.park();
+    assert_eq!(h.depth(), 3);
+    assert_eq!(
+        h.overlay_depth(),
+        REST_DEPTH + 1,
+        "the seeded saved rows put a new server past the free tier"
+    );
+
+    let not_now = node_centers_by_label(&h.root, NOT_NOW_LABEL)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("the paywall offers Not now: {:?}", h.labels()));
+    h.tap_parked(not_now);
+    h.settle();
+    h.park();
+    h.settle();
+    h.park();
+
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "the paywall closed");
+    assert_eq!(h.depth(), 2, "…and took the add page with it");
+    assert_titled(&h, HOST);
+    assert!(connected());
+}
+
+// ---------------------------------------------------------------------------
+// 3g — a flow settling after its page is gone pops nothing
+// ---------------------------------------------------------------------------
+
+/// The saved server the switch cases move to.
+const SAVED_HOST: &str = "saved.example";
+const SAVED_ENDPOINT: &str = "saved.example:50051";
+const SAVED_LABEL: &str = "Saved rig";
+const SAVED_TOKEN: &str = "saved-s3cr3t";
+/// The connect form's remember switch, transcribed (private to its widget).
+const REMEMBER_LABEL: &str = "Remember for 4 weeks";
+
+/// The endpoint the app is connected to now.
+fn connected_endpoint() -> Option<String> {
+    expect_connection_controller()
+        .server_info
+        .get_untracked()
+        .map(|info| info.endpoint)
+}
+
+/// Pump the UI-thread task queue (and frames) until `done`.
+fn pump_until_true(h: &mut Harness, done: impl FnMut() -> bool) {
+    let scene = h.frame();
+    pump_until(
+        &mut h.root,
+        &mut h.logic,
+        &mut h.state,
+        &mut h.tcx,
+        scene,
+        done,
+    );
+}
+
+/// On `/settings` over `/sessions`, Pro unlocked, with [`SAVED_ENDPOINT`]
+/// remembered and its token in the vault — the keyring published over it
+/// when `unlocked`.
+fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    expect_saved_servers()
+        .save(SavedServer {
+            host: SAVED_HOST.to_string(),
+            port: 50051,
+            trust_mode: TrustMode::System,
+            label: SAVED_LABEL.to_string(),
+            last_used_ms: epoch_millis(),
+            read_only: false,
+            has_credential: true,
+            token_name: None,
+            fingerprint: None,
+        })
+        .expect("the mock store never fails");
+    mock_credentials()
+        .expect("tests/support opted this process into the mock")
+        .seed_vault(&[(SAVED_ENDPOINT, SAVED_TOKEN)]);
+    if unlocked {
+        let mut keyring = Keyring::new();
+        keyring.insert(SAVED_ENDPOINT, Zeroizing::new(SAVED_TOKEN.to_string()));
+        expect_keyring().publish(keyring);
+    }
+    h.push("/settings");
+    // Settings reads the saved list on its async first load.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !h.values().iter().any(|v| v == SAVED_LABEL) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the saved row never rendered: {:?}",
+            h.values()
+        );
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    h.park();
+    assert_titled(&h, "server settings");
+    h
+}
+
+/// Where the saved row's label sits on screen, wheeling Settings until it
+/// is inside the default surface (the group sits below the first screenful).
+fn saved_row_point(h: &mut Harness) -> Point {
+    let label_at = |h: &Harness| {
+        node_centers_by_value(&h.root, SAVED_LABEL)
+            .first()
+            .copied()
+            .unwrap_or_else(|| panic!("no saved row on screen: {:?}", h.values()))
+    };
+    for _ in 0..40 {
+        let point = label_at(h);
+        if point.y < support::H - 60.0 {
+            return point;
+        }
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: Point::new(support::W / 2.0, support::H / 2.0),
+                delta: ScrollDelta::Lines(0.0, 3.0),
+            },
+        );
+        h.settle();
+    }
+    panic!("the saved row never scrolled into view");
+}
+
+#[test]
+fn a_dial_settling_after_back_left_the_add_page_pops_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+    // What the add page's connect captures as it starts its dial.
+    let mark = app_nav().mark_top();
+
+    press_back(&mut h);
+    assert_eq!(h.depth(), 2, "back took the add page off");
+
+    // The dial settles now, with its page already gone.
+    app_nav().pop_marked(&mark);
+    h.settle();
+    h.park();
+
+    assert_eq!(h.depth(), 2, "the shell is still placed");
+    assert_titled(&h, HOST);
+    assert!(connected(), "…on a live connection");
+}
+
+#[test]
+fn a_marked_pop_still_takes_its_own_page_off_and_only_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+    let mark = app_nav().mark_top();
+
+    app_nav().pop_marked(&mark);
+    app_nav().pop_marked(&mark);
+    h.settle();
+    h.park();
+
+    assert_eq!(h.depth(), 2, "the add page came off, the shell did not");
+    assert_titled(&h, HOST);
+}
+
+#[test]
+fn a_settings_switch_settling_after_back_lands_on_sessions_still_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_settings_with_a_saved_server(false);
+
+    // A locked keyring: the switch first runs its unlock off the UI thread's
+    // queue, so it is still in flight when the user backs out.
+    let row = saved_row_point(&mut h);
+    tap(&mut h.root, &mut h.state, row);
+    assert_ne!(connected_endpoint().as_deref(), Some(SAVED_ENDPOINT));
+    h.tap_label(BACK);
+    h.settle();
+    h.park();
+    assert_titled(&h, HOST);
+
+    pump_until_true(&mut h, || {
+        connected_endpoint().as_deref() == Some(SAVED_ENDPOINT)
+    });
+    h.settle();
+    h.park();
+
+    assert_eq!(h.depth(), 2, "the shell is still placed");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "nothing asked anything");
+    assert_titled(&h, SAVED_HOST);
+    assert!(connected(), "…on the switched-to server");
+}
+
+#[test]
+fn a_double_tap_on_a_saved_row_switches_and_pops_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_settings_with_a_saved_server(true);
+    let epoch = expect_connection_controller()
+        .connection_epoch
+        .get_untracked();
+
+    let row = saved_row_point(&mut h);
+    tap(&mut h.root, &mut h.state, row);
+    tap(&mut h.root, &mut h.state, row);
+    h.settle();
+    h.park();
+
+    assert_eq!(
+        expect_connection_controller()
+            .connection_epoch
+            .get_untracked(),
+        epoch + 2,
+        "one switch: one teardown, one connect"
+    );
+    assert_eq!(h.depth(), 2, "one pop: Settings off, the shell kept");
+    assert_titled(&h, SAVED_HOST);
+    assert!(connected());
+}
+
+#[test]
+fn a_double_tap_on_the_add_pages_connect_switches_and_pops_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    h.park();
+    // Prefilled from a seeded saved row, so the form needs no typing.
+    h.push(&add_server_location(Some("100.71.31.57:50051")));
+    h.park();
+    h.tap_label(REMEMBER_LABEL);
+    h.park();
+    let epoch = expect_connection_controller()
+        .connection_epoch
+        .get_untracked();
+
+    let cta = node_centers_by_label(&h.root, CONNECT_LABEL)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no connect CTA: {:?}", h.labels()));
+    tap(&mut h.root, &mut h.state, cta);
+    tap(&mut h.root, &mut h.state, cta);
+    h.settle();
+    h.park();
+
+    assert_eq!(
+        connected_endpoint().as_deref(),
+        Some("100.71.31.57:50051"),
+        "the add page switched"
+    );
+    assert_eq!(
+        expect_connection_controller()
+            .connection_epoch
+            .get_untracked(),
+        epoch + 2,
+        "…once"
+    );
+    assert_eq!(h.depth(), 2, "…and popped once, keeping the shell");
+    assert_titled(&h, "100.71.31.57");
+}
+
+#[test]
+fn an_unwind_with_the_add_page_covering_takes_it_and_the_shell_off() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_add_server_page();
+    assert_eq!(h.depth(), 3);
+
+    // The connection drops under the covering page; the next navigation
+    // into the shell is bounced by the guard, which unwinds.
+    expect_connection_controller().disconnect();
+    app_nav().push("/settings");
+    h.settle();
+    h.park();
+
+    assert_eq!(h.depth(), 1, "no shell page is left placed");
+    assert!(!h.has_bar(), "…so no bar: {:?}", node_roles(&h.root));
+    assert_eq!(
+        h.state
+            .nav
+            .controller()
+            .route_stack()
+            .current_route()
+            .map(|location| location.path.clone())
+            .as_deref(),
+        Some("/"),
+        "the outer root, Connect, is what is left"
+    );
 }
 
 // ---------------------------------------------------------------------------

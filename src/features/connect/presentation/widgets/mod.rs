@@ -4,9 +4,10 @@
 //! [`connect_pieces_with`] returns the eight pieces in stagger order:
 //! [`mark::connect_mark`], [`badge::server_badge`], [`badge::heading`],
 //! [`fields::server_url_field`], [`fields::token_field`],
-//! [`trust::remember_row`], [`cta::connect_button`], [`saved::saved_address`].
-//! [`qr_affordance`], [`qr_sheet`], [`credential_dialogs`], [`pro_gate`] and
-//! [`getting_started`] are screen chrome, never staggered pieces.
+//! [`trust::remember_row`], [`cta::connect_button`] (the CTA row, with the
+//! [`qr_affordance`] square) and [`saved::saved_address`] (the rows, closed by
+//! the [`keyring_dock`]). [`qr_sheet`], [`credential_dialogs`], [`pro_gate`]
+//! and [`getting_started`] are screen chrome, never staggered pieces.
 //!
 //! # The parity contract
 //!
@@ -15,9 +16,9 @@
 //! controller exists) paints the same pixels with no callbacks. Three
 //! guarantees hold that true:
 //!
-//! 1. Piece 7's rows are an input — the screen passes its controller's
+//! 1. Piece 8's rows are an input — the screen passes its controller's
 //!    signal, the splash [`saved::splash_saved_servers`]' snapshot of the
-//!    same repository.
+//!    same repository; piece 7's prominence and the dock's label follow them.
 //! 2. The splash's fields are `read_only`, never `enabled(false)`: the same
 //!    focus gate without the dimming.
 //! 3. The layout is one function per size class, which both callers
@@ -29,8 +30,9 @@
 //!    the page's `splash_assembly` reads the class once per build, as the
 //!    screen does, to pick the pair.
 //!
-//! One accepted difference: the saved rows' pro tag paints only under `Some(..)`,
-//! since the splash has no entitlement to read.
+//! Accepted differences: the saved rows' pro tag paints only under `Some(..)`,
+//! since the splash has no entitlement to read, and the splash's dock is
+//! always idle (it probes no biometrics and has no unlock in flight).
 //!
 //! Every piece is `<State>`-generic (the splash composes under
 //! [`crate::AppState`], the screen under its own `ConnectState`), reads no
@@ -41,6 +43,7 @@ pub mod credential_dialogs;
 pub mod cta;
 pub mod fields;
 pub mod getting_started;
+pub mod keyring_dock;
 pub mod layout;
 pub mod mark;
 pub mod pairing;
@@ -59,13 +62,14 @@ use frust::{
     container, inflexible,
 };
 
+use self::cta::Prominence;
 use super::controller::ConnectController;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::ui::palette::Palette;
 use crate::ui::spacing;
 
 /// What a piece needs to be a control rather than a picture: the screen's
-/// hosted controller, plus the four actions it cannot express itself.
+/// hosted controller, plus the actions it cannot express itself.
 ///
 /// Built fresh on every `ConnectScreen::build` and passed down by reference.
 /// Actions are `Rc<dyn Fn(..)>` — they navigate or raise an overlay, so
@@ -80,11 +84,17 @@ pub struct Live {
     /// the pinned CTA, which renders only while one is stashed.
     pub on_connect_pinned: Rc<dyn Fn()>,
     /// A saved row tapped, by index — refills the form, or unlocks its stored
-    /// credential and connects.
+    /// credential and connects. Wired only while the dock is unavailable.
     pub on_saved_tap: Rc<dyn Fn(usize)>,
     /// A saved row's delete pressed, by index: confirm, then drop this
     /// device's copy (nothing is deleted on the server).
     pub on_saved_delete: Rc<dyn Fn(usize)>,
+    /// The dock: the verdict, one keyring prompt, then the most recent row.
+    pub on_unlock: Rc<dyn Fn()>,
+    /// The failed dock's reset: confirm, then drop every saved credential.
+    pub on_reset_credentials: Rc<dyn Fn()>,
+    /// The QR square: the free-tier gate, then the camera permission.
+    pub on_scan: Rc<dyn Fn()>,
 }
 
 /// A `gap`-tall spacer between stacked pieces/rows.
@@ -126,7 +136,7 @@ fn backed<S: 'static, V: View<S>>(child: V, colors: &Palette) -> impl View<S> + 
 }
 
 /// `live` is `Some(..)` for the screen and `None` for the splash (the parity
-/// contract); `saved` is piece 7's rows.
+/// contract); `saved` is piece 8's rows.
 pub fn connect_pieces_with<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,
@@ -141,7 +151,12 @@ pub fn connect_pieces_with<S: 'static>(
         any(fields::server_url_field(theme, &colors, live)),
         any(fields::token_field(theme, &colors, live)),
         any(trust::remember_row(theme, &colors, live)),
-        any(cta::connect_button(theme, &colors, live)),
+        any(cta::connect_button(
+            theme,
+            &colors,
+            live,
+            Prominence::for_saved(saved),
+        )),
         any(saved::saved_address(theme, &colors, saved, live)),
     ]
 }
@@ -175,6 +190,7 @@ pub fn tablet_panel_pieces<S: 'static>(
 pub fn tablet_form_pieces<S: 'static>(
     theme: &Theme,
     live: Option<&Live>,
+    prominence: Prominence,
     folded: Option<&[SavedServer]>,
     secondary: impl View<S>,
 ) -> Vec<AnyView<S>> // erasure: keep accumulator into Vec<AnyView>
@@ -185,7 +201,9 @@ pub fn tablet_form_pieces<S: 'static>(
         any(fields::server_url_field(theme, &colors, live)),
         any(fields::token_field(theme, &colors, live)),
         any(trust::remember_row(theme, &colors, live)),
-        any(cta::connect_actions(theme, &colors, live, secondary)),
+        any(cta::connect_actions(
+            theme, &colors, live, prominence, secondary,
+        )),
     ];
     if let Some(saved) = folded {
         pieces.push(any(saved::tablet_saved_list(theme, &colors, saved, live)));

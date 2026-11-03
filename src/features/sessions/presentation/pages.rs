@@ -30,7 +30,7 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4,
-    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, SizedBox,
+    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox,
     Stack, View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area,
     scroll_view, spawn_local, use_context,
 };
@@ -40,6 +40,7 @@ use tokio::sync::{Notify, broadcast};
 use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
+use crate::features::connect::di::{KeyringHandle, expect_keyring};
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
@@ -152,6 +153,15 @@ pub struct SessionsState {
     /// release settled — a later change to the session set reaches only the
     /// live band (the read-only posture and colours stay live on both).
     loading_snapshot: Option<(Vec<Session>, bool)>,
+    /// Whether the rain is enabled for this mount (read once in `init`), so a
+    /// connection change can re-arm `loading_done` the way `init` seeded it.
+    rain: bool,
+    /// The `connection_epoch` this screen last reacted to; a change while
+    /// connected restarts the controller (see `build`).
+    seen_epoch: u64,
+    /// Sticky: whether this mount has ever seen the connection up. Told apart
+    /// from a first connect, which the load `init` already issued serves.
+    has_connected: bool,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -240,6 +250,9 @@ pub struct Actions {
     pub app_nav: Nav,
     /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SessionsController>,
+    /// `connect`'s app-scoped keyring, which the back press's confirmed
+    /// disconnect locks.
+    pub keyring: KeyringHandle,
 }
 
 /// Resolves the live session-poll cadence — `settings`' `layout_refresh_secs`
@@ -425,6 +438,8 @@ impl Component for SessionsScreen {
         // Read once per mount — a process-wide test opt-out, not observed
         // state, so never from `build` or a spawned block.
         let rain = LOADING_RAIN.load(Ordering::Relaxed);
+        let connection_epoch = connection.connection_epoch.get_untracked();
+        let seen_connected = connection.connected.get_untracked();
 
         SessionsState {
             actions: Actions {
@@ -432,12 +447,16 @@ impl Component for SessionsScreen {
                 overlays: self.overlays.clone(),
                 app_nav: app_nav(),
                 controller,
+                keyring: expect_keyring(),
             },
             connection,
             heartbeat,
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
             loading_snapshot: None,
+            rain,
+            seen_epoch: connection_epoch,
+            has_connected: seen_connected,
         }
     }
 
@@ -449,6 +468,29 @@ impl Component for SessionsScreen {
         if state.back.take_request(depth) {
             state.actions.open_disconnect_confirm(&state.connection);
         }
+
+        // A new connection (the epoch moved while connected) starts this mount
+        // over: the old server's list, selection and rain snapshot go, and the
+        // rain replays over the new first load. A move to disconnected is the
+        // guard/back flow's business. Untracked: `server_info`, set in the same
+        // step, is what wakes this rebuild.
+        let epoch = state.connection.connection_epoch.get_untracked();
+        let connected = state.connection.connected.get_untracked();
+        if epoch != state.seen_epoch {
+            // A switch is a screen that has ever seen the connection up (across
+            // frames too: a teardown frame, then a dial frame) seeing a new epoch, or a teardown
+            // and re-dial inside one frame (two or more moves). A lone move
+            // from disconnected is the first connect, which the load `init`
+            // issued already serves.
+            let switched = state.has_connected || epoch - state.seen_epoch >= 2;
+            state.seen_epoch = epoch;
+            if connected && switched {
+                state.loading_snapshot = None;
+                state.loading_done.set(!state.rain);
+                state.actions.controller.restart();
+            }
+        }
+        state.has_connected |= connected;
 
         // Tracked reads: a load, a mutation, or a connection change is what
         // wakes this rebuild.
@@ -795,9 +837,11 @@ impl Actions {
     /// screen takes that no gesture on it can reach.
     ///
     /// Confirming does both halves the connection contract splits: the
-    /// controller closes the connection and clears its signals, and the
-    /// caller navigates — through [`Nav`], so the shell bar's mirror drops
-    /// this route's entry on the same frame rather than a reconcile later.
+    /// controller locks the keyring, closes the connection and clears its
+    /// signals (`lock_and_disconnect`, the same leave as Settings' Lock &
+    /// disconnect), and the caller navigates — through [`Nav`], so the shell
+    /// bar's mirror drops this route's entry on the same frame rather than a
+    /// reconcile later.
     /// Every dismissal route does nothing at all: the polls come back
     /// through [`Component::build`]'s own depth observation.
     pub fn open_disconnect_confirm(&self, connection: &Arc<ConnectionController>) {
@@ -810,6 +854,7 @@ impl Actions {
             .map(|info| widgets::host_of(&info.endpoint).to_string())
             .unwrap_or_else(|| DISCONNECT_UNKNOWN_HOST.to_string());
         let connection = Arc::clone(connection);
+        let keyring = self.keyring.clone();
         let app_nav = self.app_nav.clone();
         confirm_dialog(
             &self.overlays,
@@ -817,7 +862,7 @@ impl Actions {
             disconnect_message(&host),
             DISCONNECT_CONFIRM_LABEL,
             move |_app: &mut AppState| {
-                connection.disconnect();
+                connection.lock_and_disconnect(&keyring);
                 app_nav.pop();
             },
         );
