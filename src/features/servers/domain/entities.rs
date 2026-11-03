@@ -2,12 +2,16 @@
 //! and the pure [`faces_for`] that orders and classifies them.
 //!
 //! Deviation: reads `connect`'s own [`SavedServer`] and [`TrustMode`] rather
-//! than minting a second saved-server type (the `pro` domain does the same).
+//! than minting a second saved-server type (the `pro` domain does the same),
+//! and carries `sessions`' own domain [`Session`] in a [`PageSnapshot`] rather
+//! than mirroring it: the cache holds the list exactly as the page rendered it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::connection::TrustMode;
+use crate::connection::{ServerInfo, TrustMode};
 use crate::features::connect::domain::entities::SavedServer;
+use crate::features::sessions::domain::entities::Session;
 
 /// One session as a non-live face remembers it. Strings only, so the
 /// `sessions` slice can fill it without sharing a type.
@@ -21,12 +25,36 @@ pub struct SessionGlimpse {
     pub meta_line: String,
 }
 
-/// What each server last showed this process: endpoint to its glimpses and
-/// the epoch-ms stamp they were seen at. Never persisted, never a secret.
-pub type LastSeen = BTreeMap<String, (Vec<SessionGlimpse>, i64)>;
+/// The Sessions page as a server last showed it: the list items exactly as
+/// the page renders them (agents summary included) and the header facts the
+/// page prints. Plain data, never a secret (`ServerInfo` carries the
+/// endpoint, versions and posture, no token).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageSnapshot {
+    pub sessions: Vec<Session>,
+    /// The handshake facts the strip and the bar title read; `None` when the
+    /// connection named none.
+    pub info: Option<ServerInfo>,
+    pub read_only: bool,
+}
+
+/// Everything remembered about one server's last listing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeenServer {
+    /// The glimpse list: the fallback face for an entry with no `page`.
+    pub glimpses: Vec<SessionGlimpse>,
+    /// The epoch-ms stamp the listing was seen at.
+    pub seen_at_ms: i64,
+    /// The full page state the snapshot card re-renders; shared, so a strip
+    /// refresh copies a pointer, not the list.
+    pub page: Option<Arc<PageSnapshot>>,
+}
+
+/// What each server last showed this process, by endpoint. Never persisted.
+pub type LastSeen = BTreeMap<String, SeenServer>;
 
 /// What a card shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FaceKind {
     /// The connected server; the switcher scales the real page instead of
     /// drawing a face.
@@ -35,6 +63,9 @@ pub enum FaceKind {
     Cached {
         sessions: Vec<SessionGlimpse>,
         last_seen_ms: i64,
+        /// The full page state, when the listing filed one: the shell renders
+        /// it as the card; without it the glimpse list is the face.
+        page: Option<Arc<PageSnapshot>>,
     },
     /// Never connected in this process, and nothing to unlock.
     Never,
@@ -45,7 +76,7 @@ pub enum FaceKind {
 }
 
 /// One card of the strip.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ServerFace {
     /// `host:port`, the row's identity.
     pub endpoint: String,
@@ -89,10 +120,11 @@ pub fn faces_for(
                 }
             } else if row.has_credential && !keyring_unlocked {
                 FaceKind::Locked
-            } else if let Some((sessions, last_seen_ms)) = cache.get(&endpoint) {
+            } else if let Some(seen) = cache.get(&endpoint) {
                 FaceKind::Cached {
-                    sessions: sessions.clone(),
-                    last_seen_ms: *last_seen_ms,
+                    sessions: seen.glimpses.clone(),
+                    last_seen_ms: seen.seen_at_ms,
+                    page: seen.page.clone(),
                 }
             } else {
                 FaceKind::Never
@@ -126,16 +158,17 @@ mod tests {
         }
     }
 
-    fn glimpse() -> (Vec<SessionGlimpse>, i64) {
-        (
-            vec![SessionGlimpse {
+    fn glimpse() -> SeenServer {
+        SeenServer {
+            glimpses: vec![SessionGlimpse {
                 name: "main".to_string(),
                 backend: "zellij".to_string(),
                 running: true,
                 meta_line: "1h".to_string(),
             }],
-            42,
-        )
+            seen_at_ms: 42,
+            page: None,
+        }
     }
 
     fn endpoints(faces: &[ServerFace]) -> Vec<&str> {
@@ -204,12 +237,13 @@ mod tests {
             &cache,
             &BTreeMap::new(),
         );
-        let (sessions, last_seen_ms) = glimpse();
+        let seen = glimpse();
         assert_eq!(
             faces[0].kind,
             FaceKind::Cached {
-                sessions,
-                last_seen_ms
+                sessions: seen.glimpses,
+                last_seen_ms: seen.seen_at_ms,
+                page: None,
             }
         );
     }

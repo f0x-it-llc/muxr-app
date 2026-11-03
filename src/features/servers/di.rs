@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use frust::{provide_context, use_context};
 use frust_glyph::SwitcherBack;
 
-use super::domain::entities::{LastSeen, SessionGlimpse};
+use super::domain::entities::{LastSeen, SeenServer, SessionGlimpse};
 use super::presentation::controller::{ServersSwitcherController, install_landing};
 use crate::connection::expect_connection_controller;
 use crate::features::connect::di::{
@@ -54,12 +54,34 @@ impl LastSeenHandle {
         self.record_at(endpoint, sessions, epoch_millis());
     }
 
-    /// [`Self::record`] with an explicit stamp.
+    /// [`Self::record`] with an explicit stamp. Glimpses only: the face falls
+    /// back to the glimpse list, there being no page state to re-render.
     pub fn record_at(&self, endpoint: &str, sessions: Vec<SessionGlimpse>, seen_at_ms: i64) {
+        self.record_seen(
+            endpoint,
+            SeenServer {
+                glimpses: sessions,
+                seen_at_ms,
+                page: None,
+            },
+        );
+    }
+
+    /// Remember `seen` as everything `endpoint` last showed, replacing the
+    /// previous entry.
+    pub fn record_seen(&self, endpoint: &str, seen: SeenServer) {
         self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(endpoint.to_string(), (sessions, seen_at_ms));
+            .insert(endpoint.to_string(), seen);
+    }
+
+    /// Drop the entries whose endpoint `keep` rejects (a forgotten row).
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|endpoint, _| keep(endpoint));
     }
 
     /// Forget every glimpse (a keyring lock invalidates what was cached).
