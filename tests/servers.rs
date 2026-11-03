@@ -341,12 +341,24 @@ fn open_pro_stage(b_trust: TrustMode, unlocked: bool) -> Harness {
     h
 }
 
-/// Strip index of `endpoint` (live page 0, then the peers).
+/// Strip index of `endpoint`: its position among the faces (the live page sits at its own slot).
 fn strip_index(endpoint: &str) -> usize {
-    1 + peer_endpoints(&switcher().faces.get_untracked())
+    switcher()
+        .faces
+        .get_untracked()
         .iter()
-        .position(|peer| peer == endpoint)
-        .unwrap_or_else(|| panic!("{endpoint} is not a peer card"))
+        .position(|face| face.endpoint == endpoint)
+        .unwrap_or_else(|| panic!("{endpoint} has no card"))
+}
+
+/// Strip index of the live card.
+fn live_strip_index() -> usize {
+    switcher()
+        .faces
+        .get_untracked()
+        .iter()
+        .position(|face| face.kind == FaceKind::Live)
+        .expect("a live card")
 }
 
 fn face_kind(endpoint: &str) -> FaceKind {
@@ -374,11 +386,11 @@ fn a_tap_on_a_peer_cards_rect_switches_the_server_and_the_stage_comes_down_on_it
     assert_eq!(
         peer_endpoints(&switcher().faces.get_untracked()),
         [B_ENDPOINT, C_ENDPOINT],
-        "A is live, then the peers newest first"
+        "A is live, then the peers in the strip order"
     );
     let before = epoch();
 
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     settle_on(&mut h, B_ENDPOINT);
 
     assert!(epoch() > before, "the connection epoch advanced");
@@ -440,7 +452,7 @@ fn a_locked_keyring_costs_one_prompt_then_switches() {
     let credentials = mock_credentials().expect("mock credential service");
     assert!(credentials.prompts().is_empty(), "nothing prompted yet");
 
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     settle_on(&mut h, B_ENDPOINT);
 
     assert_eq!(
@@ -464,7 +476,7 @@ fn a_failed_dial_marks_the_face_keeps_the_stage_and_a_second_tap_retries() {
     let b = strip_index(B_ENDPOINT);
     fail_next_mock_dials_for_tests(1);
 
-    h.tap_card(b, 0);
+    h.tap_card(b, live_strip_index());
     h.pump_until(|_| matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
     h.park();
 
@@ -478,13 +490,9 @@ fn a_failed_dial_marks_the_face_keeps_the_stage_and_a_second_tap_retries() {
     assert!(switcher().busy.get_untracked().is_none());
     assert!(switcher().expanding.get_untracked().is_none());
 
-    // Retry: B is the centred card now, so the second tap lands on the middle of the stage.
-    let faces = switcher().faces.get_untracked();
-    let b_now = faces
-        .iter()
-        .position(|face| face.endpoint == B_ENDPOINT)
-        .expect("B still has a face")
-        + 1;
+    // Retry: B is the centred card now (no face is live after the failure, so the strip is the
+    // empty live page and then every face), so the second tap lands on the middle of the stage.
+    let b_now = strip_index(B_ENDPOINT) + 1;
     h.tap_card(b_now, b);
     settle_on(&mut h, B_ENDPOINT);
 
@@ -507,7 +515,7 @@ fn a_free_install_with_saved_rows_meets_the_paywall_and_dials_nothing() {
     h.open_stage();
     let before = epoch();
 
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     h.pump_until(|h| h.overlay_depth() > REST_DEPTH);
     h.settle();
     h.park();
@@ -527,7 +535,7 @@ fn an_unverified_peer_asks_first_and_declining_dials_nothing() {
     let mut h = open_pro_stage(TrustMode::NoVerification, true);
     let before = epoch();
 
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     h.pump_until(|h| h.overlay_depth() > REST_DEPTH);
     h.settle();
     h.park();
@@ -564,6 +572,37 @@ fn an_unverified_peer_asks_first_and_declining_dials_nothing() {
 }
 
 #[test]
+fn the_strip_keeps_its_order_after_a_switch_and_the_live_card_keeps_its_slot() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    let order = || {
+        switcher()
+            .faces
+            .get_untracked()
+            .into_iter()
+            .map(|f| f.endpoint)
+            .collect::<Vec<_>>()
+    };
+    let before = order();
+    assert_eq!(before, [A_ENDPOINT, B_ENDPOINT, C_ENDPOINT]);
+
+    // The right-hand peer (the card beside the live one).
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    settle_on(&mut h, B_ENDPOINT);
+    h.open_stage();
+
+    assert_eq!(order(), before, "connecting B did not reorder the cards");
+    assert_eq!(face_kind(B_ENDPOINT), FaceKind::Live);
+    assert_eq!(live_strip_index(), 1, "B's live card sits where B was");
+    assert_eq!(
+        peer_endpoints(&switcher().faces.get_untracked()),
+        [A_ENDPOINT, C_ENDPOINT],
+        "the peers are the others in strip order"
+    );
+}
+
+#[test]
 fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_back() {
     let _g = serial();
     let _ambient = setup();
@@ -573,13 +612,13 @@ fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_bac
         "B has never been seen"
     );
 
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     settle_on(&mut h, B_ENDPOINT);
     let last_seen = use_last_seen().expect("the app provides the last-seen handle");
     h.pump_until(|_| last_seen.snapshot().contains_key(B_ENDPOINT));
 
     h.open_stage();
-    h.tap_card(strip_index(A_ENDPOINT), 0);
+    h.tap_card(strip_index(A_ENDPOINT), live_strip_index());
     settle_on(&mut h, A_ENDPOINT);
     h.open_stage();
 
@@ -598,7 +637,7 @@ fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_bac
 /// Tap B with its dial held open, and wait until the claim shows.
 fn tap_b_with_a_held_dial(h: &mut Harness) -> HeldDial {
     let held = hold_next_mock_dials_for_tests(1).remove(0);
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     h.pump_until(|_| switcher().busy.get_untracked().is_some());
     held
 }
@@ -619,7 +658,7 @@ fn a_dial_superseded_by_a_disconnect_does_not_leave_the_switcher_busy_for_good()
     h.open_stage();
     assert_eq!(connected_endpoint().as_deref(), Some(A_ENDPOINT));
 
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     settle_on(&mut h, B_ENDPOINT);
 
     assert!(!stage_is_open(), "the tap on a peer switched");
@@ -656,7 +695,7 @@ fn closing_the_stage_after_a_failed_switch_lands_on_connect() {
     let _ambient = setup();
     let mut h = open_pro_stage(TrustMode::System, true);
     fail_next_mock_dials_for_tests(1);
-    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     h.pump_until(|_| matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
     h.park();
     assert!(

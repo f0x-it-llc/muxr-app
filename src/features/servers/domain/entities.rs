@@ -55,26 +55,29 @@ pub struct ServerFace {
     pub kind: FaceKind,
 }
 
-/// The strip: `saved` most recently used first with the `active` endpoint
-/// moved to the front. A non-active row is `Failed` when `failures` names it,
-/// else `Locked` when it claims a credential and the keyring is shut, else
-/// `Cached` when `cache` holds it, else `Never`.
+/// The strip, in `order` (endpoints, left to right): a saved row `order` does
+/// not name goes after the named ones, in the saved list's own order. Nothing
+/// reorders on use: the `active` row keeps its slot. A non-active row is
+/// `Failed` when `failures` names it, else `Locked` when it claims a
+/// credential and the keyring is shut, else `Cached` when `cache` holds it,
+/// else `Never`.
 pub fn faces_for(
     saved: &[SavedServer],
+    order: &[String],
     active: Option<&str>,
     keyring_unlocked: bool,
     cache: &LastSeen,
     failures: &BTreeMap<String, String>,
 ) -> Vec<ServerFace> {
     let mut rows: Vec<&SavedServer> = saved.iter().collect();
-    rows.sort_by_key(|row| std::cmp::Reverse(row.last_used_ms));
-    if let Some(at) = rows
-        .iter()
-        .position(|row| active == Some(row.endpoint().as_str()))
-    {
-        let live = rows.remove(at);
-        rows.insert(0, live);
-    }
+    // Stable sort: unnamed rows (key `order.len()`) keep their saved order.
+    rows.sort_by_key(|row| {
+        let endpoint = row.endpoint();
+        order
+            .iter()
+            .position(|e| *e == endpoint)
+            .unwrap_or(order.len())
+    });
     rows.into_iter()
         .map(|row| {
             let endpoint = row.endpoint();
@@ -139,32 +142,53 @@ mod tests {
         faces.iter().map(|f| f.endpoint.as_str()).collect()
     }
 
-    #[test]
-    fn faces_are_most_recently_used_first_with_the_active_server_leading() {
-        let saved = [row("a", 10, true), row("b", 30, true), row("c", 20, true)];
-        let faces = faces_for(
-            &saved,
-            Some("a:7777"),
-            true,
-            &LastSeen::new(),
-            &BTreeMap::new(),
-        );
-        assert_eq!(endpoints(&faces), ["a:7777", "b:7777", "c:7777"]);
-        assert_eq!(faces[0].kind, FaceKind::Live);
+    fn order(of: &[&str]) -> Vec<String> {
+        of.iter().map(|h| format!("{h}:7777")).collect()
+    }
 
-        let none_active = faces_for(&saved, None, true, &LastSeen::new(), &BTreeMap::new());
-        assert_eq!(endpoints(&none_active), ["b:7777", "c:7777", "a:7777"]);
+    #[test]
+    fn the_active_server_keeps_its_slot_whatever_its_recency() {
+        let saved = [row("a", 10, true), row("b", 30, true), row("c", 20, true)];
+        let o = order(&["a", "b", "c"]);
+        for active in ["a:7777", "b:7777", "c:7777"] {
+            let faces = faces_for(
+                &saved,
+                &o,
+                Some(active),
+                true,
+                &LastSeen::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(endpoints(&faces), ["a:7777", "b:7777", "c:7777"]);
+            assert_eq!(
+                faces.iter().position(|f| f.kind == FaceKind::Live),
+                o.iter().position(|e| e == active)
+            );
+        }
+        let none_active = faces_for(&saved, &o, None, true, &LastSeen::new(), &BTreeMap::new());
+        assert_eq!(endpoints(&none_active), ["a:7777", "b:7777", "c:7777"]);
         assert!(none_active.iter().all(|f| f.kind != FaceKind::Live));
+    }
+
+    #[test]
+    fn a_new_row_appends_and_a_removed_row_drops() {
+        let o = order(&["a", "b"]);
+        let grown = [row("c", 99, true), row("b", 1, true), row("a", 2, true)];
+        let faces = faces_for(&grown, &o, None, true, &LastSeen::new(), &BTreeMap::new());
+        assert_eq!(endpoints(&faces), ["a:7777", "b:7777", "c:7777"]);
+        let shrunk = [row("b", 1, true)];
+        let faces = faces_for(&shrunk, &o, None, true, &LastSeen::new(), &BTreeMap::new());
+        assert_eq!(endpoints(&faces), ["b:7777"]);
     }
 
     #[test]
     fn a_shut_keyring_locks_only_the_rows_that_claim_a_credential() {
         let saved = [row("a", 3, true), row("b", 2, false)];
-        let faces = faces_for(&saved, None, false, &LastSeen::new(), &BTreeMap::new());
+        let faces = faces_for(&saved, &[], None, false, &LastSeen::new(), &BTreeMap::new());
         assert_eq!(faces[0].kind, FaceKind::Locked);
         assert_eq!(faces[1].kind, FaceKind::Never);
 
-        let open = faces_for(&saved, None, true, &LastSeen::new(), &BTreeMap::new());
+        let open = faces_for(&saved, &[], None, true, &LastSeen::new(), &BTreeMap::new());
         assert_eq!(open[0].kind, FaceKind::Never);
     }
 
@@ -172,7 +196,14 @@ mod tests {
     fn a_cached_row_shows_what_it_last_listed() {
         let mut cache = LastSeen::new();
         cache.insert("a:7777".to_string(), glimpse());
-        let faces = faces_for(&[row("a", 1, true)], None, true, &cache, &BTreeMap::new());
+        let faces = faces_for(
+            &[row("a", 1, true)],
+            &[],
+            None,
+            true,
+            &cache,
+            &BTreeMap::new(),
+        );
         let (sessions, last_seen_ms) = glimpse();
         assert_eq!(
             faces[0].kind,
@@ -192,10 +223,10 @@ mod tests {
         failures.insert("b:7777".to_string(), "down".to_string());
         let saved = [row("a", 2, true), row("b", 1, true)];
 
-        let faces = faces_for(&saved, Some("b:7777"), false, &cache, &failures);
-        assert_eq!(faces[0].kind, FaceKind::Live, "the active row is live");
+        let faces = faces_for(&saved, &[], Some("b:7777"), false, &cache, &failures);
+        assert_eq!(faces[1].kind, FaceKind::Live, "the active row is live");
         assert_eq!(
-            faces[1].kind,
+            faces[0].kind,
             FaceKind::Failed {
                 message: "down".to_string()
             }
@@ -208,7 +239,14 @@ mod tests {
         saved.read_only = true;
         saved.trust_mode = TrustMode::Pinned;
         saved.label = "rig".to_string();
-        let faces = faces_for(&[saved], None, true, &LastSeen::new(), &BTreeMap::new());
+        let faces = faces_for(
+            &[saved],
+            &[],
+            None,
+            true,
+            &LastSeen::new(),
+            &BTreeMap::new(),
+        );
         assert_eq!(faces[0].label, "rig");
         assert_eq!(faces[0].trust_mode, TrustMode::Pinned);
         assert!(faces[0].read_only);
