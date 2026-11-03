@@ -701,7 +701,7 @@ fn close_stage(h: &mut Harness) {
 }
 
 #[test]
-fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapshot_widget() {
+fn a_cached_peer_card_keeps_its_page_but_renders_the_simple_face() {
     let _g = serial();
     let _ambient = setup();
     let mut h = open_pro_stage(TrustMode::System, true);
@@ -709,11 +709,13 @@ fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapsho
 
     let before = snapshots_built_for_tests();
     h.open_stage();
-    let with_snapshot = h.park().glyph_runs;
-    assert!(
-        snapshots_built_for_tests() > before,
-        "opening the stage built B's snapshot card"
+    h.park();
+    assert_eq!(
+        snapshots_built_for_tests(),
+        before,
+        "opening the stage builds no snapshot card"
     );
+    // The cached page is still filed: it drives the instant switch.
     match face_kind(B_ENDPOINT) {
         FaceKind::Cached {
             page: Some(page), ..
@@ -727,18 +729,6 @@ fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapsho
         }
         other => panic!("B should read Cached with its page, got {other:?}"),
     }
-
-    // The same card without a page falls back to the dimmed glimpse list; the
-    // snapshot paints the whole screen (bar, strip, cards, create row) instead.
-    close_stage(&mut h);
-    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
-    last_seen.record_at(B_ENDPOINT, Vec::new(), 1);
-    h.open_stage();
-    let without_snapshot = h.park().glyph_runs;
-    assert!(
-        with_snapshot > without_snapshot + 5,
-        "the snapshot card paints the real screen: {with_snapshot} vs {without_snapshot}"
-    );
 }
 
 /// Pin the stage clock, so the close tail is stepped rather than slept through.

@@ -213,6 +213,11 @@ fn switcher_host(
     stage
 }
 
+/// Whether recents peer cards render the cached page as a full Sessions
+/// snapshot. Off because frust 0.6.5's render scheduler cannot host full-page
+/// peer cards; flip back once frust handles nested card layers.
+const SNAPSHOT_PEER_FACES: bool = false;
+
 /// A peer card's face: a cached server that filed its page is the inert
 /// Sessions screen re-rendered from that state (composed here, at app level, so
 /// `servers` never imports `sessions`' presentation); every other face is
@@ -229,7 +234,7 @@ fn peer_face(
     match &face.kind {
         FaceKind::Cached {
             page: Some(page), ..
-        } if steady => any(sessions_snapshot::<AppState>(page, rule)),
+        } if SNAPSHOT_PEER_FACES && steady => any(sessions_snapshot::<AppState>(page, rule)),
         _ => faces::server_face(theme, colors, face, now_ms),
     }
 }
