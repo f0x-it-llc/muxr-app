@@ -1,6 +1,7 @@
 //! The non-live card faces, as the Penpot "Components" frame draws them:
 //!
-//! - cached — a dimmed list of the sessions the server last showed, a hollow
+//! - cached — when the listing filed no page state (the shell otherwise
+//!   composes the Sessions snapshot instead), a dimmed list of the sessions the server last showed, a hollow
 //!   heartbeat and `last seen …`;
 //! - never / locked / failed — a centred vector glyph over two lines.
 //!
@@ -71,6 +72,7 @@ pub fn server_face<S: 'static>(
         FaceKind::Cached {
             sessions,
             last_seen_ms,
+            ..
         } => any(cached_face(theme, colors, sessions, *last_seen_ms, now_ms)),
         FaceKind::Never => any(glyph_face(
             theme,
