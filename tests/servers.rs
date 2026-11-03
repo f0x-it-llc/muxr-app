@@ -70,10 +70,8 @@ const B_ENDPOINT: &str = "bravo.example:50051";
 const C_HOST: &str = "charlie.example";
 const C_ENDPOINT: &str = "charlie.example:50051";
 const TOKEN: &str = "t0ken-s3cr3t";
-/// The unverified-trust confirm's title and its two actions, transcribed.
+/// The retired unverified-trust confirm's title, kept to assert it never shows.
 const UNVERIFIED_TITLE: &str = "Connect without verification?";
-const UNVERIFIED_CONFIRM: &str = "Connect anyway";
-const CANCEL: &str = "Cancel";
 /// A session name the mock sessions repository always lists.
 const SESSION_NAME: &str = "dev";
 
@@ -532,46 +530,22 @@ fn a_free_install_with_saved_rows_meets_the_paywall_and_dials_nothing() {
 }
 
 #[test]
-fn an_unverified_peer_asks_first_and_declining_dials_nothing() {
+fn a_saved_unverified_peer_dials_with_no_confirm() {
     let _g = serial();
     let _ambient = setup();
     let mut h = open_pro_stage(TrustMode::NoVerification, true);
-    let before = epoch();
 
     h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
-    h.pump_until(|h| h.overlay_depth() > REST_DEPTH);
-    h.settle();
-    h.park();
+    settle_on(&mut h, B_ENDPOINT);
 
-    assert_eq!(
-        h.overlay_depth(),
-        REST_DEPTH + 1,
-        "the confirm is above the stage"
-    );
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "no confirm was raised");
     assert!(
-        h.values().iter().any(|v| v == UNVERIFIED_TITLE),
-        "the confirm names itself: {:?}",
+        !h.values().iter().any(|v| v == UNVERIFIED_TITLE),
+        "no confirm names itself: {:?}",
         h.values()
     );
-    assert!(h.labels().iter().any(|l| l == UNVERIFIED_CONFIRM));
-    assert!(stage_is_open());
-    assert_eq!(epoch(), before, "nothing dialed while it is up");
-
-    let cancel = node_centers_by_label(&h.root, CANCEL)
-        .first()
-        .copied()
-        .unwrap_or_else(|| panic!("no Cancel: {:?}", h.labels()));
-    h.tap_parked(cancel);
-    h.settle();
-    h.park();
-    h.settle();
-    h.park();
-
-    assert_eq!(h.overlay_depth(), REST_DEPTH, "the confirm closed");
-    assert_eq!(connected_endpoint().as_deref(), Some(A_ENDPOINT));
-    assert_eq!(epoch(), before, "declining dialed nothing");
+    assert_eq!(connected_endpoint().as_deref(), Some(B_ENDPOINT));
     assert!(switcher().busy.get_untracked().is_none());
-    assert!(stage_is_open(), "the stage is still up");
 }
 
 #[test]

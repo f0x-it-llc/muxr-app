@@ -44,11 +44,8 @@ use frust::{GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
-use crate::connection::TrustMode;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
 use crate::features::connect::domain::entities::SavedServer;
-use crate::features::connect::presentation::controller::ConfirmPrompt;
-use crate::features::connect::presentation::widgets::credential_dialogs::unverified_confirm_prompt;
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::ProController;
@@ -89,10 +86,6 @@ pub struct SwitchGate {
     pub paywall: Rc<dyn Fn(Retry)>,
     /// Open the add-server page prefilled with this endpoint.
     pub add_server: Rc<dyn Fn(String)>,
-    /// Ask before a stored token is replayed to a
-    /// [`TrustMode::NoVerification`] row; `on_confirm` dials. A decline simply
-    /// never calls it.
-    pub confirm: ConfirmPrompt,
 }
 
 impl SwitchGate {
@@ -106,7 +99,6 @@ impl SwitchGate {
         let overlays = overlays.clone();
         let pro = Arc::clone(pro);
         let nav = nav.clone();
-        let confirm = unverified_confirm_prompt(&overlays);
         Self {
             paywall: Rc::new(move |retry| {
                 show_upgrade_sheet(
@@ -119,7 +111,6 @@ impl SwitchGate {
                 );
             }),
             add_server: Rc::new(move |endpoint| nav.push(&add_server_location(Some(&endpoint)))),
-            confirm,
         }
     }
 }
@@ -432,7 +423,7 @@ impl ServersSwitcherController {
 
     /// Decide everything on a **fresh** row (the unlock may have taken a
     /// while): gone -> abandon; no credential -> the add page; another
-    /// connect underway -> abandon; `NoVerification` -> the confirm; else dial.
+    /// connect underway -> abandon; else dial (a saved trust-anyway row too).
     /// `busy` is held by the caller.
     fn vet_and_dial(self: &Arc<Self>, endpoint: String, gate: SwitchGate, epoch: u64) {
         let Some(row) = self.saved_row(&endpoint) else {
@@ -448,45 +439,7 @@ impl ServersSwitcherController {
             self.abandon();
             return;
         }
-        if row.trust_mode == TrustMode::NoVerification {
-            // The dialog is outside the in-flight state: a decline never calls
-            // back, so nothing may stay claimed while it is up.
-            self.release_claim();
-            let controller = Arc::clone(self);
-            let vetted = row.trust_mode;
-            let again = gate.clone();
-            (gate.confirm)(
-                row,
-                Box::new(move || controller.dial_confirmed(endpoint, again, epoch, vetted)),
-            );
-            return;
-        }
         self.dial(&endpoint, epoch);
-    }
-
-    /// The confirm's accept: dial only if the stage was not dismissed since,
-    /// and only with the trust mode that was confirmed - a row that changed
-    /// under the dialog is vetted again.
-    fn dial_confirmed(
-        self: &Arc<Self>,
-        endpoint: String,
-        gate: SwitchGate,
-        epoch: u64,
-        vetted: TrustMode,
-    ) {
-        self.release_if_stale();
-        if self.stage_epoch.load(Ordering::SeqCst) != epoch
-            || self.busy.get_untracked().is_some()
-            || self.connection.connecting.get_untracked()
-        {
-            return;
-        }
-        self.busy.set(Some(endpoint.clone()));
-        self.expanding.set(self.peer_index_of(&endpoint));
-        match self.saved_row(&endpoint) {
-            Some(row) if row.trust_mode == vetted => self.dial(&endpoint, epoch),
-            _ => self.vet_and_dial(endpoint, gate, epoch),
-        }
     }
 
     /// The saved row for `endpoint`, read fresh.
@@ -822,18 +775,15 @@ mod tests {
         rig.keyring.publish(keyring);
     }
 
-    /// A gate recording what it was asked, raising nothing. The confirm
-    /// answers `accept` at once.
+    /// A gate recording what it was asked, raising nothing.
     struct Probe {
         gate: SwitchGate,
         paywalls: Rc<Cell<usize>>,
-        confirms: Rc<Cell<usize>>,
         added: Rc<RefCell<Vec<String>>>,
     }
 
-    fn probe_answering(accept: bool) -> Probe {
+    fn probe() -> Probe {
         let paywalls = Rc::new(Cell::new(0));
-        let confirms = Rc::new(Cell::new(0));
         let added = Rc::new(RefCell::new(Vec::new()));
         let gate = SwitchGate {
             paywall: {
@@ -844,26 +794,12 @@ mod tests {
                 let added = Rc::clone(&added);
                 Rc::new(move |endpoint| added.borrow_mut().push(endpoint))
             },
-            confirm: {
-                let confirms = Rc::clone(&confirms);
-                Rc::new(move |_row, on_confirm| {
-                    confirms.set(confirms.get() + 1);
-                    if accept {
-                        on_confirm();
-                    }
-                })
-            },
         };
         Probe {
             gate,
             paywalls,
-            confirms,
             added,
         }
-    }
-
-    fn probe() -> Probe {
-        probe_answering(true)
     }
 
     #[tokio::test]
@@ -1057,33 +993,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unverified_row_asks_once_and_a_decline_dials_nothing() {
+    async fn a_saved_unverified_row_dials_straight_through() {
         let rig = unverified_rig();
-        let declined = probe_answering(false);
-        let epoch = rig.connection.connection_epoch.get_untracked();
+        let probe = probe();
 
-        rig.controller.run_select(0, declined.gate.clone()).await;
+        rig.controller.run_select(0, probe.gate.clone()).await;
 
-        assert_eq!(declined.confirms.get(), 1);
-        assert_eq!(rig.connection.connection_epoch.get_untracked(), epoch);
-        let info = rig.connection.server_info.get_untracked().expect("live");
-        assert_eq!(info.endpoint, "a:7777");
-        assert_eq!(rig.controller.busy.get_untracked(), None);
-        assert_eq!(rig.controller.expanding.get_untracked(), None);
-        assert!(rig.controller.open.get_untracked());
-    }
-
-    #[tokio::test]
-    async fn an_unverified_row_dials_once_the_confirm_is_accepted() {
-        let rig = unverified_rig();
-        let accepted = probe_answering(true);
-
-        rig.controller.run_select(0, accepted.gate.clone()).await;
-
-        assert_eq!(accepted.confirms.get(), 1);
         let info = rig.connection.server_info.get_untracked().expect("live");
         assert_eq!(info.endpoint, "b:7777");
         assert!(!rig.controller.open.get_untracked());
+        assert_eq!(rig.controller.busy.get_untracked(), None);
+        assert_eq!(probe.paywalls.get(), 0);
+        assert!(probe.added.borrow().is_empty());
     }
 
     #[tokio::test]
@@ -1120,7 +1041,6 @@ mod tests {
         assert_eq!(info.endpoint, "a:7777");
         assert_eq!(rig.controller.busy.get_untracked(), None);
         assert_eq!(rig.controller.expanding.get_untracked(), None);
-        assert_eq!(probe.confirms.get(), 0);
     }
 
     #[test]
@@ -1330,11 +1250,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_row_turning_unverified_during_the_unlock_raises_the_confirm() {
+    async fn a_row_turning_unverified_during_the_unlock_still_dials() {
         let (rig, release) = gated_rig(vec![server("a", 20, true), server("b", 10, true)]);
-        let declined = probe_answering(false);
+        let probe = probe();
 
-        let select = rig.controller.run_select(0, declined.gate.clone());
+        let select = rig.controller.run_select(0, probe.gate.clone());
         let meanwhile = async {
             tokio::task::yield_now().await;
             let mut b = server("b", 10, true);
@@ -1344,35 +1264,8 @@ mod tests {
         };
         tokio::join!(select, meanwhile);
 
-        assert_eq!(declined.confirms.get(), 1, "no silent dial");
         let info = rig.connection.server_info.get_untracked().expect("live");
-        assert_eq!(info.endpoint, "a:7777");
-    }
-
-    #[tokio::test]
-    async fn a_row_that_changed_trust_under_the_confirm_is_vetted_again() {
-        let rig = unverified_rig();
-        let saved = Arc::clone(&rig.saved);
-        let confirms = Rc::new(Cell::new(0));
-        let mut gate = probe().gate;
-        gate.confirm = {
-            let confirms = Rc::clone(&confirms);
-            Rc::new(move |_row, on_confirm| {
-                confirms.set(confirms.get() + 1);
-                if confirms.get() == 1 {
-                    // The row turns Pinned-ish (System) under the dialog, then
-                    // the user accepts the old confirm.
-                    saved.save(server("b", 10, true)).unwrap();
-                }
-                on_confirm();
-            })
-        };
-
-        rig.controller.run_select(0, gate).await;
-
-        let info = rig.connection.server_info.get_untracked().expect("live");
-        assert_eq!(info.endpoint, "b:7777", "re-vetted and dialed as System");
-        assert_eq!(confirms.get(), 1);
+        assert_eq!(info.endpoint, "b:7777");
     }
 
     #[test]
