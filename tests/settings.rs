@@ -1724,6 +1724,70 @@ fn tapping_a_saved_row_with_the_keyring_unlocked_switches_to_it_without_a_prompt
     );
 }
 
+/// The mock host's saved row, without a stored credential.
+fn mock_row_without_credential() -> SavedServer {
+    SavedServer {
+        host: "mock.example".to_string(),
+        port: 7777,
+        trust_mode: TrustMode::NoVerification,
+        label: "Mock rig".to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: true,
+        has_credential: false,
+        token_name: None,
+        fingerprint: None,
+    }
+}
+
+fn saved_endpoints() -> Vec<String> {
+    expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .map(SavedServer::endpoint)
+        .collect()
+}
+
+#[test]
+fn switching_away_from_a_credentialless_server_via_a_settings_row_forgets_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, true);
+    expect_saved_servers()
+        .save(mock_row_without_credential())
+        .expect("the mock store never fails");
+
+    h.tap_value(CRED_LABEL);
+    h.pump_once();
+
+    assert_eq!(connected_endpoint().as_deref(), Some(CRED_ENDPOINT));
+    let saved = saved_endpoints();
+    assert!(
+        !saved.iter().any(|e| e == "mock.example:7777"),
+        "the credential-less row is gone: {saved:?}"
+    );
+    assert!(saved.iter().any(|e| e == CRED_ENDPOINT));
+}
+
+#[test]
+fn lock_and_disconnect_from_a_credentialless_server_keeps_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    expect_saved_servers()
+        .save(mock_row_without_credential())
+        .expect("the mock store never fails");
+
+    let dialog = open_dialog_by_label(&mut h, LOCK_AND_DISCONNECT);
+    confirm(&mut h, &dialog);
+
+    assert!(!expect_connection_controller().connected.get_untracked());
+    assert!(
+        saved_endpoints().iter().any(|e| e == "mock.example:7777"),
+        "only switching away forgets"
+    );
+}
+
 #[test]
 fn tapping_a_saved_row_with_the_keyring_locked_prompts_once_then_switches() {
     let _g = serial();
