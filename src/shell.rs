@@ -13,12 +13,17 @@ use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::pro::di::expect_pro_controller;
-use crate::features::servers::di::{expect_servers_controller, expect_switcher_back};
-use crate::features::servers::domain::entities::FaceKind;
+use crate::features::servers::di::{
+    expect_servers_controller, expect_switcher_back, keep_peers, use_last_seen,
+};
+use crate::features::servers::domain::entities::{FaceKind, ServerFace};
 use crate::features::servers::presentation::controller::{ServersSwitcherController, SwitchGate};
 use crate::features::servers::presentation::widgets::{bar::servers_bar, faces, label_row};
-use crate::features::sessions::presentation::widgets::{shell_responsive, switcher_fab};
+use crate::features::sessions::presentation::widgets::{
+    sessions_snapshot, shell_responsive, switcher_fab,
+};
 use crate::features::terminal::presentation::pages::open_terminal_menu;
+use crate::responsive::Responsive;
 use crate::routes::{
     BarAction, BarDirection, BarLeading, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
     route_transition,
@@ -100,7 +105,7 @@ pub(crate) fn shell_page(
         PHONE_CARD_SCALE
     };
     any(switcher_host(
-        &switcher, overlays, &nav, card_scale, scaffold,
+        &switcher, overlays, &nav, rule, card_scale, scaffold,
     ))
 }
 
@@ -110,11 +115,14 @@ pub(crate) fn shell_page(
 ///
 /// Strip order is the controller's: the live card is the scaled shell page at
 /// `live_index`, the peers are every other face. Peers are rebuilt from the
-/// current faces on every build (after a failed switch no face is live).
+/// current faces on every build while the stage is open and through its close
+/// ramp (after a failed switch no face is live); a stage closed longer builds none, so the real Sessions widgets
+/// of a cached peer are never constructed for a screen nobody sees.
 fn switcher_host(
     switcher: &Arc<ServersSwitcherController>,
     overlays: &NavigatorController<AppState>,
     nav: &Nav,
+    rule: Responsive,
     card_scale: f64,
     page: impl View<AppState>,
 ) -> impl View<AppState> {
@@ -126,14 +134,25 @@ fn switcher_host(
         .iter()
         .position(|face| face.kind == FaceKind::Live)
         .unwrap_or(0);
-    let peers: Vec<_> = faces_now
-        .iter()
-        .filter(|face| face.kind != FaceKind::Live)
-        .map(|face| {
-            peer_card(faces::server_face(&theme, &colors, face, now_ms))
-                .label(label_row(&theme, &colors, face))
-        })
-        .collect();
+    let open = switcher.open.get();
+    // Kept through the close ramp too (see `keep_peers`).
+    let peers: Vec<_> = if keep_peers(open) {
+        // A forgotten row's remembered page goes with it. A plain map edit, not
+        // a signal write, so it can never re-trigger this build.
+        if let Some(last_seen) = use_last_seen() {
+            last_seen.retain(|endpoint| faces_now.iter().any(|face| face.endpoint == endpoint));
+        }
+        faces_now
+            .iter()
+            .filter(|face| face.kind != FaceKind::Live)
+            .map(|face| {
+                peer_card(peer_face(&theme, &colors, face, now_ms, rule))
+                    .label(label_row(&theme, &colors, face))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let gate = SwitchGate::standard(overlays, &expect_pro_controller(), nav);
     let add_gate = gate.clone();
@@ -164,7 +183,7 @@ fn switcher_host(
         servers_bar::<AppState>(lock, add, close)
     };
 
-    let mut stage = card_switcher(switcher.open.get(), page)
+    let mut stage = card_switcher(open, page)
         .peers(peers)
         .live_index(live_index)
         .on_select(on_select)
@@ -184,6 +203,26 @@ fn switcher_host(
         stage = stage.live_label(label_row(&theme, &colors, live));
     }
     stage
+}
+
+/// A peer card's face: a cached server that filed its page is the inert
+/// Sessions screen re-rendered from that state (composed here, at app level, so
+/// `servers` never imports `sessions`' presentation); every other face is
+/// `servers`' own.
+fn peer_face(
+    theme: &frust::Theme,
+    colors: &Palette,
+    face: &ServerFace,
+    now_ms: i64,
+    rule: Responsive,
+) -> AnyView<AppState> // erasure: the snapshot and the servers faces are different view types
+{
+    match &face.kind {
+        FaceKind::Cached {
+            page: Some(page), ..
+        } => any(sessions_snapshot::<AppState>(page, rule)),
+        _ => faces::server_face(theme, colors, face, now_ms),
+    }
 }
 
 /// The Glyph app bar for whatever route the inner navigator has on top.

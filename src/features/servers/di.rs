@@ -17,14 +17,15 @@
 //!   wired but not the live back path: the shell's dismiss page outranks it
 //!   and Sessions' dismiss consumer closes the stage.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use frust::{provide_context, use_context};
 use frust_glyph::SwitcherBack;
 
-use super::domain::entities::{LastSeen, SessionGlimpse};
+use super::domain::entities::{LastSeen, SeenServer, SessionGlimpse};
 use super::presentation::controller::{ServersSwitcherController, install_landing};
 use crate::connection::expect_connection_controller;
 use crate::features::connect::di::{
@@ -34,8 +35,44 @@ use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::pro::di::expect_pro_controller;
 use crate::routes::app_nav;
 
+/// How long after the stage closes its peer cards are still built: the close
+/// ramp (320 ms, 120 ms under reduced motion) keeps painting them, and the
+/// component tears down any peer the next view omits at once.
+pub const PEER_TAIL: Duration = Duration::from_millis(500);
+
 thread_local! {
     static SWITCHER_BACK: RefCell<Option<SwitcherBack>> = const { RefCell::new(None) };
+    static STAGE_WAS_OPEN: Cell<bool> = const { Cell::new(false) };
+    static STAGE_CLOSED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+    static CLOCK_OVERRIDE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn stage_now() -> Instant {
+    CLOCK_OVERRIDE.with(Cell::get).unwrap_or_else(Instant::now)
+}
+
+/// Pins (`Some`) or releases (`None`) the clock [`keep_peers`] reads, so a suite
+/// can step past [`PEER_TAIL`] without sleeping.
+pub fn set_stage_clock_for_tests(at: Option<Instant>) {
+    CLOCK_OVERRIDE.with(|cell| cell.set(at));
+}
+
+/// Whether the shell should build the stage's peer cards this build: while the
+/// stage is `open`, and for [`PEER_TAIL`] after it was seen to close. Nothing
+/// rebuilds at the tail's end; the peers drop at the first build after it.
+pub fn keep_peers(open: bool) -> bool {
+    let now = stage_now();
+    if open {
+        STAGE_WAS_OPEN.with(|cell| cell.set(true));
+        STAGE_CLOSED_AT.with(|cell| cell.set(None));
+        return true;
+    }
+    if STAGE_WAS_OPEN.with(|cell| cell.replace(false)) {
+        STAGE_CLOSED_AT.with(|cell| cell.set(Some(now)));
+    }
+    STAGE_CLOSED_AT
+        .with(Cell::get)
+        .is_some_and(|closed| now.saturating_duration_since(closed) < PEER_TAIL)
 }
 
 /// The per-process last-seen map, shared. Cloning shares the same map.
@@ -54,12 +91,34 @@ impl LastSeenHandle {
         self.record_at(endpoint, sessions, epoch_millis());
     }
 
-    /// [`Self::record`] with an explicit stamp.
+    /// [`Self::record`] with an explicit stamp. Glimpses only: the face falls
+    /// back to the glimpse list, there being no page state to re-render.
     pub fn record_at(&self, endpoint: &str, sessions: Vec<SessionGlimpse>, seen_at_ms: i64) {
+        self.record_seen(
+            endpoint,
+            SeenServer {
+                glimpses: sessions,
+                seen_at_ms,
+                page: None,
+            },
+        );
+    }
+
+    /// Remember `seen` as everything `endpoint` last showed, replacing the
+    /// previous entry.
+    pub fn record_seen(&self, endpoint: &str, seen: SeenServer) {
         self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(endpoint.to_string(), (sessions, seen_at_ms));
+            .insert(endpoint.to_string(), seen);
+    }
+
+    /// Drop the entries whose endpoint `keep` rejects (a forgotten row).
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|endpoint, _| keep(endpoint));
     }
 
     /// Forget every glimpse (a keyring lock invalidates what was cached).

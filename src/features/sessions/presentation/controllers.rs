@@ -9,10 +9,11 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{Notify, broadcast};
 
 use crate::agents::agent_sort_key;
-use crate::connection::ConnectionController;
+use crate::connection::{ConnectionController, ServerInfo};
 use crate::failure::AppFailure;
+use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::servers::di::{LastSeenHandle, use_last_seen};
-use crate::features::servers::domain::entities::SessionGlimpse;
+use crate::features::servers::domain::entities::{PageSnapshot, SeenServer, SessionGlimpse};
 use crate::features::sessions::domain::entities::{
     CreateSessionParams, RenameRequest, Session, SessionAgent, SessionBackend,
 };
@@ -41,6 +42,12 @@ fn glimpse_of(session: &Session) -> SessionGlimpse {
             session.layout.panes
         ),
     }
+}
+
+/// How many inert Sessions snapshots (the switcher's cached peer cards) this
+/// process has built: what a suite reads to prove a closed stage builds none.
+pub fn snapshots_built_for_tests() -> usize {
+    super::widgets::snapshots_built()
 }
 
 /// Releases a single-flight claim when dropped, however the claimed work ends.
@@ -126,9 +133,8 @@ impl SessionsController {
 
     pub async fn refresh(&self) {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        // Named before the await: a switch landing mid-list must not file the
-        // old server's rows under the new endpoint.
-        let endpoint = self.glimpse_endpoint();
+        // Named before the await (see `glimpse_source`).
+        let source = self.glimpse_source();
         let result = self
             .core
             .run(&self.list, NoParams, RunOptions::default())
@@ -138,7 +144,7 @@ impl SessionsController {
         }
         if let Ok(sessions) = result {
             self.forget_vanished_selection(&sessions);
-            self.publish_glimpse(endpoint.as_deref(), &sessions);
+            self.publish_glimpse(source, &sessions);
             self.sessions.set(sessions);
             self.loaded.set(true);
             self.retarget_agents();
@@ -147,23 +153,37 @@ impl SessionsController {
     }
 
     /// Remember `sessions` as what the connected server last showed, for the
-    /// server switcher's cached face. Plain data through the servers slice's
-    /// last-seen handle; does nothing without one, or with no connected
-    /// endpoint to file it under.
-    fn publish_glimpse(&self, endpoint: Option<&str>, sessions: &[Session]) {
-        let (Some((handle, _)), Some(endpoint)) = (&self.glimpse_sink, endpoint) else {
+    /// server switcher's non-live faces: the glimpse list and the whole page
+    /// state (list items as rendered plus the header facts) its snapshot card
+    /// re-renders. Plain data through the servers slice's last-seen handle;
+    /// does nothing without one, or with no connected server to file it under.
+    /// `source` is the handshake facts captured before the list awaited.
+    fn publish_glimpse(&self, source: Option<ServerInfo>, sessions: &[Session]) {
+        let (Some((handle, connection)), Some(info)) = (&self.glimpse_sink, source) else {
             return;
         };
-        handle.record(endpoint, sessions.iter().map(glimpse_of).collect());
+        let endpoint = info.endpoint.clone();
+        let page = PageSnapshot {
+            sessions: sessions.to_vec(),
+            read_only: connection.is_read_only.get_untracked(),
+            info: Some(info),
+        };
+        handle.record_seen(
+            &endpoint,
+            SeenServer {
+                glimpses: sessions.iter().map(glimpse_of).collect(),
+                seen_at_ms: epoch_millis(),
+                page: Some(Arc::new(page)),
+            },
+        );
     }
 
-    /// The connected server's endpoint, when a glimpse sink exists to file it.
-    fn glimpse_endpoint(&self) -> Option<String> {
+    /// The connected server's handshake facts, when a glimpse sink exists to
+    /// file them. Named before the list's await: a switch landing mid-list
+    /// must not file the old server's rows under the new endpoint.
+    fn glimpse_source(&self) -> Option<ServerInfo> {
         let (_, connection) = self.glimpse_sink.as_ref()?;
-        connection
-            .server_info
-            .get_untracked()
-            .map(|info| info.endpoint)
+        connection.server_info.get_untracked()
     }
 
     /// Starts this mount over for a new connection: the generation bump drops
@@ -577,9 +597,16 @@ mod tests {
         block_on(c.refresh());
 
         let seen = handle.snapshot();
-        let (glimpses, stamp) = seen.get("rig:7777").expect("filed under the endpoint");
+        let filed = seen.get("rig:7777").expect("filed under the endpoint");
+        let glimpses = &filed.glimpses;
         assert_eq!(glimpses.len(), SEEDED_COUNT);
-        assert!(*stamp > 0);
+        assert!(filed.seen_at_ms > 0);
+        let page = filed.page.as_ref().expect("the full page state is filed");
+        assert_eq!(page.sessions, c.sessions.get_untracked());
+        assert_eq!(
+            page.info.as_ref().map(|info| info.endpoint.as_str()),
+            Some("rig:7777")
+        );
         assert!(
             glimpses
                 .iter()

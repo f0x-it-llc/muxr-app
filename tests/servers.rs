@@ -34,11 +34,14 @@ use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
-use muxr::features::servers::di::{expect_servers_controller, use_last_seen};
+use muxr::features::servers::di::{
+    PEER_TAIL, expect_servers_controller, set_stage_clock_for_tests, use_last_seen,
+};
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
     ServersSwitcherController, peer_endpoints,
 };
+use muxr::features::sessions::presentation::controllers::snapshots_built_for_tests;
 use muxr::routes::app_nav;
 use muxr::{AppState, MuxrApp};
 use zeroize::Zeroizing;
@@ -701,6 +704,194 @@ fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_bac
         }
         other => panic!("B should read Cached, got {other:?}"),
     }
+}
+
+/// Visit B (its list loaded and filed), then come back to A, leaving the stage closed.
+fn visit_b_and_return_to_a(h: &mut Harness) {
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    settle_on(h, B_ENDPOINT);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    h.pump_until(|_| last_seen.snapshot().contains_key(B_ENDPOINT));
+    h.open_stage();
+    h.tap_card(strip_index(A_ENDPOINT), live_strip_index());
+    settle_on(h, A_ENDPOINT);
+}
+
+/// Close the open stage and run to the parking point.
+fn close_stage(h: &mut Harness) {
+    switcher().close_with(|_| {});
+    h.park();
+}
+
+#[test]
+fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapshot_widget() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+
+    let before = snapshots_built_for_tests();
+    h.open_stage();
+    let with_snapshot = h.park().glyph_runs;
+    assert!(
+        snapshots_built_for_tests() > before,
+        "opening the stage built B's snapshot card"
+    );
+    match face_kind(B_ENDPOINT) {
+        FaceKind::Cached {
+            page: Some(page), ..
+        } => {
+            assert!(page.sessions.iter().any(|s| s.name == SESSION_NAME));
+            assert_eq!(
+                page.info.as_ref().map(|info| info.endpoint.as_str()),
+                Some(B_ENDPOINT),
+                "the header facts are B's"
+            );
+        }
+        other => panic!("B should read Cached with its page, got {other:?}"),
+    }
+
+    // The same card without a page falls back to the dimmed glimpse list; the
+    // snapshot paints the whole screen (bar, strip, cards, create row) instead.
+    close_stage(&mut h);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    last_seen.record_at(B_ENDPOINT, Vec::new(), 1);
+    h.open_stage();
+    let without_snapshot = h.park().glyph_runs;
+    assert!(
+        with_snapshot > without_snapshot + 5,
+        "the snapshot card paints the real screen: {with_snapshot} vs {without_snapshot}"
+    );
+}
+
+/// Pin the stage clock, so the close tail is stepped rather than slept through.
+fn pin_stage_clock() -> Instant {
+    let at = Instant::now();
+    set_stage_clock_for_tests(Some(at));
+    at
+}
+
+#[test]
+fn a_stage_closed_past_its_tail_builds_no_peer_snapshots() {
+    let _g = serial();
+    let _ambient = setup();
+    let t0 = pin_stage_clock();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    h.park();
+
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL + Duration::from_millis(100)));
+    let before = snapshots_built_for_tests();
+    switcher().refresh_faces();
+    h.park();
+    h.frame();
+    assert_eq!(
+        snapshots_built_for_tests(),
+        before,
+        "the first build after the tail builds no peer face"
+    );
+    set_stage_clock_for_tests(None);
+}
+
+#[test]
+fn closing_the_stage_keeps_building_the_peers_through_the_close_tail() {
+    let _g = serial();
+    let _ambient = setup();
+    let t0 = pin_stage_clock();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+
+    h.open_stage();
+    let live_open = live_strip_index();
+    let opened = snapshots_built_for_tests();
+    close_stage(&mut h);
+    assert!(
+        snapshots_built_for_tests() > opened,
+        "the build that closes the stage still passes the peers (the ramp paints them)"
+    );
+    assert_eq!(
+        live_strip_index(),
+        live_open,
+        "the strip keeps its live slot"
+    );
+
+    // Within the tail a rebuild still carries them; reopening is a normal open.
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL / 2));
+    let mid = snapshots_built_for_tests();
+    switcher().refresh_faces();
+    h.park();
+    assert!(snapshots_built_for_tests() > mid, "still inside the tail");
+    h.open_stage();
+    assert!(stage_is_open());
+    assert!(matches!(
+        face_kind(B_ENDPOINT),
+        FaceKind::Cached { page: Some(_), .. }
+    ));
+    close_stage(&mut h);
+
+    // Past the tail the next rebuild drops them.
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL * 3));
+    let late = snapshots_built_for_tests();
+    switcher().refresh_faces();
+    h.park();
+    assert_eq!(snapshots_built_for_tests(), late);
+    set_stage_clock_for_tests(None);
+}
+
+#[test]
+fn a_tap_on_a_snapshot_card_selects_the_server_and_never_opens_a_session() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    h.open_stage();
+    let depth = h.depth();
+
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    settle_on(&mut h, B_ENDPOINT);
+
+    assert_eq!(h.depth(), depth, "no terminal route was pushed");
+    assert_eq!(connected_endpoint().as_deref(), Some(B_ENDPOINT));
+}
+
+#[test]
+fn a_keyring_lock_drops_every_snapshot() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    assert!(last_seen.snapshot().contains_key(B_ENDPOINT));
+
+    switcher().lock_with(|_| {});
+    h.park();
+
+    assert!(
+        last_seen.snapshot().is_empty(),
+        "the lock cleared the cache"
+    );
+}
+
+#[test]
+fn forgetting_a_row_drops_its_snapshot() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    assert!(last_seen.snapshot().contains_key(B_ENDPOINT));
+
+    expect_saved_servers()
+        .remove(B_ENDPOINT)
+        .expect("the mock store never fails");
+    h.open_stage();
+    h.park();
+
+    assert!(!strip_has(B_ENDPOINT));
+    assert!(
+        !last_seen.snapshot().contains_key(B_ENDPOINT),
+        "B's remembered page went with its row"
+    );
 }
 
 /// Tap B with its dial held open, and wait until the claim shows.
