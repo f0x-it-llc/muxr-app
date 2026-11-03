@@ -192,6 +192,11 @@ pub struct SessionsState {
     rain_generation: Arc<AtomicU64>,
     /// Cleared when the screen unmounts, ending any pending arm task.
     alive: Arc<AtomicBool>,
+    /// Bumped when the close tail ends, so a build resumes the poll the tail
+    /// held paused (nothing else rebuilds at the tail's end).
+    tail_wake: RwSignal<u64>,
+    /// Whether a task is already waiting out a close tail.
+    tail_watch: Arc<AtomicBool>,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -328,6 +333,33 @@ fn spawn_deferred_rain(state: &SessionsState, generation: u64) {
         }
         RAIN_ARMS.fetch_add(1, Ordering::SeqCst);
         loading_done.set(false);
+    });
+}
+
+/// Waits out the stage's close tail, then wakes a rebuild so the poll resumes.
+/// One task at a time; a reopen ends it (the next close spawns another).
+fn spawn_tail_watch(state: &SessionsState) {
+    if state.tail_watch.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let watching = Arc::clone(&state.tail_watch);
+    let alive = Arc::clone(&state.alive);
+    let switcher = state.switcher.clone();
+    let wake = state.tail_wake;
+    spawn_local(async move {
+        loop {
+            clean_signals::time::sleep(RAIN_SETTLE_POLL).await;
+            let reopened = switcher.as_ref().is_some_and(|s| s.open.get_untracked());
+            if !alive.load(Ordering::SeqCst) || reopened {
+                watching.store(false, Ordering::SeqCst);
+                return;
+            }
+            if stage_settled() {
+                watching.store(false, Ordering::SeqCst);
+                wake.set(wake.get_untracked() + 1);
+                return;
+            }
+        }
     });
 }
 
@@ -523,6 +555,8 @@ impl Component for SessionsScreen {
             has_connected: seen_connected,
             rain_generation: Arc::new(AtomicU64::new(0)),
             alive,
+            tail_wake: RwSignal::new(0),
+            tail_watch: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -533,8 +567,16 @@ impl Component for SessionsScreen {
         // Tracked, so a close wakes this build and the observe above resumes
         // the poll; while open, re-mark the pause at the current depth right
         // after that observe (nothing polls between the two, same thread).
-        if state.switcher.as_ref().is_some_and(|s| s.open.get()) {
-            state.actions.pause_for_push();
+        // The close tail keeps the pause too: the live page must not change
+        // while the neighbours still paint (`stage_settled`).
+        state.tail_wake.get();
+        if let Some(switcher) = state.switcher.clone() {
+            if switcher.open.get() {
+                state.actions.pause_for_push();
+            } else if !stage_settled() {
+                state.actions.pause_for_push();
+                spawn_tail_watch(state);
+            }
         }
 
         if state.back.take_request(depth) {

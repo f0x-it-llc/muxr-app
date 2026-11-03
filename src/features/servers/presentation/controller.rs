@@ -524,6 +524,10 @@ impl ServersSwitcherController {
         *self.claim() = None;
         self.busy.set(None);
         if current {
+            // Faces first, so `live_index` names the new live server; the close
+            // then builds no peers (a settle has no tail), so nothing can jump.
+            self.refresh_faces();
+            crate::features::servers::di::skip_close_tail();
             self.expanding.set(None);
             self.open.set(false);
         } else {
