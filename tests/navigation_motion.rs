@@ -2055,7 +2055,7 @@ fn back_with_the_stage_open_closes_it_before_any_navigator_pops() {
 }
 
 #[test]
-fn the_stage_bars_add_chip_pushes_the_add_server_page() {
+fn the_stage_bars_add_chip_pushes_the_add_server_page_under_pro() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::on_sessions();
