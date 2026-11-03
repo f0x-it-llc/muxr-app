@@ -1552,6 +1552,9 @@ struct LoginUpsert {
     trust_mode: TrustMode,
     label: String,
     fingerprint: Option<String>,
+    /// The endpoint live when the switch began, captured before the dial tears
+    /// it down: switching away from it forgets a row holding no credential.
+    previous: Option<String>,
 }
 
 impl LoginUpsert {
@@ -1572,6 +1575,35 @@ impl LoginUpsert {
             trust_mode: target.trust_mode,
             label: target.label.clone(),
             fingerprint: target.fingerprint.clone(),
+            previous: connection
+                .connected
+                .get_untracked()
+                .then(|| connection.server_info.get_untracked())
+                .flatten()
+                .map(|info| info.endpoint),
+        }
+    }
+
+    /// Forgets the row of the server just switched away from when it holds no
+    /// credential: it can only reopen the add page, so it is not worth a
+    /// card. Every switch path builds a `LoginUpsert` before dialing and runs
+    /// it on success, so this is the one place the rule lives. A failed
+    /// switch never runs it, and neither does a plain disconnect.
+    fn forget_previous_without_credential(&self) {
+        let Some(previous) = self.previous.as_deref() else {
+            return;
+        };
+        if previous == self.endpoint() {
+            return;
+        }
+        let Ok(rows) = self.repository.list() else {
+            return;
+        };
+        let forgettable = rows
+            .iter()
+            .any(|row| row.endpoint() == previous && !row.has_credential);
+        if forgettable && let Err(failure) = self.repository.remove(previous) {
+            app_toasts().raise(&failure);
         }
     }
 
@@ -1615,6 +1647,7 @@ impl LoginUpsert {
         if !claims_credential {
             self.keyring.remove(&self.endpoint());
         }
+        self.forget_previous_without_credential();
         if let Some(saved) = self.saved {
             ConnectController::reload_into(&self.repository, saved);
         }

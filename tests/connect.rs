@@ -6519,6 +6519,99 @@ fn an_add_mode_connect_moves_the_live_connection_and_records_the_new_row() {
     );
 }
 
+/// The mock host's saved row (the add-mode fixture's live server), with or
+/// without a stored credential.
+fn live_row(has_credential: bool) -> SavedServer {
+    SavedServer {
+        host: "mock.example".to_string(),
+        port: 7777,
+        trust_mode: TrustMode::NoVerification,
+        label: "Mock rig".to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: true,
+        has_credential,
+        token_name: None,
+        fingerprint: None,
+    }
+}
+
+fn add_mode_connect_away(creds: &Creds) {
+    creds.controller.set_url(ADDED_ENDPOINT.to_string());
+    creds.controller.set_token("added-token".to_string());
+    creds.controller.toggle_remember();
+    creds.controller.connect(
+        &app_nav(),
+        Rc::new(|_offer| panic!("remember is off: nothing to offer")),
+        ungated(),
+    );
+}
+
+fn saved_endpoints(creds: &Creds) -> Vec<String> {
+    creds
+        .servers
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .map(SavedServer::endpoint)
+        .collect()
+}
+
+#[test]
+fn an_add_mode_connect_away_from_a_credentialless_server_forgets_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    creds.servers.save(live_row(false)).expect("mock store");
+
+    add_mode_connect_away(&creds);
+
+    let saved = saved_endpoints(&creds);
+    assert!(
+        !saved.iter().any(|e| e == "mock.example:7777"),
+        "the credential-less row is gone: {saved:?}"
+    );
+    assert!(
+        saved.iter().any(|e| e == ADDED_ENDPOINT),
+        "the new row stays"
+    );
+}
+
+#[test]
+fn an_add_mode_connect_away_from_a_credentialed_server_keeps_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    creds.servers.save(live_row(true)).expect("mock store");
+
+    add_mode_connect_away(&creds);
+
+    assert!(
+        saved_endpoints(&creds)
+            .iter()
+            .any(|e| e == "mock.example:7777"),
+        "a row holding a credential is kept"
+    );
+}
+
+#[test]
+fn a_failed_add_mode_connect_keeps_the_credentialless_row_it_was_leaving() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    creds.servers.save(live_row(false)).expect("mock store");
+    muxr::connection::fail_next_mock_dials_for_tests(1);
+
+    add_mode_connect_away(&creds);
+    muxr::connection::fail_next_mock_dials_for_tests(0);
+
+    assert!(
+        saved_endpoints(&creds)
+            .iter()
+            .any(|e| e == "mock.example:7777"),
+        "a failed switch forgets nothing"
+    );
+}
+
 #[test]
 fn an_add_mode_offer_saves_through_its_own_controller_with_no_saver_installed() {
     let _g = serial();

@@ -602,6 +602,75 @@ fn the_strip_keeps_its_order_after_a_switch_and_the_live_card_keeps_its_slot() {
     );
 }
 
+/// Make the live server A a saved row with no stored credential.
+fn strip_a_of_its_credential() {
+    expect_saved_servers()
+        .save(row(A_HOST, 7777, 0, TrustMode::System, false))
+        .expect("the mock store never fails");
+}
+
+fn saved_has(endpoint: &str) -> bool {
+    expect_saved_servers()
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .any(|saved| saved.endpoint() == endpoint)
+}
+
+fn strip_has(endpoint: &str) -> bool {
+    switcher()
+        .faces
+        .get_untracked()
+        .iter()
+        .any(|face| face.endpoint == endpoint)
+}
+
+#[test]
+fn switching_away_from_a_credentialless_server_forgets_its_row_and_card() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    strip_a_of_its_credential();
+
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    settle_on(&mut h, B_ENDPOINT);
+    h.open_stage();
+
+    assert!(!saved_has(A_ENDPOINT), "A's row is gone from the list");
+    assert!(!strip_has(A_ENDPOINT), "and from the strip");
+    assert!(saved_has(B_ENDPOINT) && saved_has(C_ENDPOINT));
+}
+
+#[test]
+fn switching_away_from_a_credentialed_server_keeps_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    settle_on(&mut h, B_ENDPOINT);
+    h.open_stage();
+
+    assert!(saved_has(A_ENDPOINT));
+    assert!(strip_has(A_ENDPOINT));
+}
+
+#[test]
+fn a_failed_switch_away_from_a_credentialless_server_keeps_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    strip_a_of_its_credential();
+    fail_next_mock_dials_for_tests(1);
+
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
+    h.park();
+
+    assert!(saved_has(A_ENDPOINT), "the failed switch forgot nothing");
+    assert!(strip_has(A_ENDPOINT));
+}
+
 #[test]
 fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_back() {
     let _g = serial();
