@@ -95,6 +95,9 @@ pub struct SessionsController {
     /// The poll tick's own single-flight claim on the agents fetch, apart from
     /// [`poll_in_flight`](Self::poll_in_flight): a hung agents read never stalls the list.
     agents_in_flight: AtomicBool,
+    /// Whether the page shows a cached snapshot with no live connection behind
+    /// it: no poll, wake refresh or retry runs, and the page's actions are off.
+    offline: AtomicBool,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
@@ -120,6 +123,7 @@ impl SessionsController {
             agents_for: Mutex::new(None),
             agents_generation: AtomicU64::new(0),
             agents_in_flight: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
@@ -186,12 +190,47 @@ impl SessionsController {
         connection.server_info.get_untracked()
     }
 
+    /// Replace the list with a cached snapshot, without ever emptying it: the
+    /// rows swap in one write, the first load counts as settled, a reply still
+    /// in flight from the previous server is dropped, and a selection the
+    /// snapshot does not carry is forgotten.
+    pub fn seed_from(&self, page: &PageSnapshot) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.poll_in_flight.store(false, Ordering::SeqCst);
+        self.agents_in_flight.store(false, Ordering::SeqCst);
+        self.forget_vanished_selection(&page.sessions);
+        self.sessions.set(page.sessions.clone());
+        self.loaded.set(true);
+        self.first_load_settled.set(true);
+        self.retarget_agents();
+    }
+
+    /// Mark whether the page is showing a snapshot with no live connection.
+    pub fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::Relaxed);
+    }
+
+    /// Whether the page is showing a snapshot with no live connection.
+    pub fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::Relaxed)
+    }
+
+    /// The seeded connection landed: refresh in place (no clear, no restart,
+    /// no first-load flags reset) and let the poll run again. The rows are
+    /// replaced where the new list says so; a failed read keeps the snapshot.
+    pub fn refresh_in_place(self: &Arc<Self>) {
+        self.set_offline(false);
+        let controller = Arc::clone(self);
+        frust::spawn_local(async move { controller.refresh().await });
+    }
+
     /// Starts this mount over for a new connection: the generation bump drops
     /// any in-flight refresh's reply (a stale poll, wake or mutation refresh
     /// from the old server lands nowhere), the old server's list, selection and
     /// agents go, the first-load flags reset so the loading rain can replay, the
     /// poll gate is released, and the first load is kicked as `init` does.
     pub fn restart(self: &Arc<Self>) {
+        self.set_offline(false);
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.sessions.set(Vec::new());
         self.loaded.set(false);
@@ -332,6 +371,7 @@ impl SessionsController {
     /// [`take_poll_tick`](Self::take_poll_tick).
     fn take_retry(&self) -> bool {
         self.is_polling()
+            && !self.is_offline()
             && self.first_load_settled.get_untracked()
             && !self.loaded.get_untracked()
             && !self.poll_in_flight.swap(true, Ordering::SeqCst)
@@ -434,6 +474,7 @@ impl SessionsController {
 
     pub fn take_poll_tick(&self) -> bool {
         let poll = self.is_polling()
+            && !self.is_offline()
             && self.loaded.get_untracked()
             && !self.poll_in_flight.swap(true, Ordering::SeqCst);
         if poll {

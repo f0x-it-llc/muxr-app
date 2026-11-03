@@ -30,6 +30,19 @@
 //! reverses, the stage stays open) and marks that face
 //! [`FaceKind::Failed`]; a second tap retries.
 //!
+//! **A cached switch** (the target has a [`PageSnapshot`] in the last-seen map)
+//! commits instead of waiting: once the select path has vetted the row it
+//! publishes a [`ReconnectSeed`] (the Sessions page seeds itself from it and
+//! stays on screen, actions off), closes the stage at once with the settle-close
+//! semantics (no peers), shows [`ReconnectBanner::Connecting`] and dials in the
+//! background. The target counts as live while that dial is in flight, so the
+//! strip names it. Landing flips the banner to `Connected` for
+//! `banner_success_ms`, then clears it; a failure shows `Failed` until the next
+//! switch or `banner_failure_ms` and marks the face failed. Every banner change
+//! bumps a generation that fences the clearing timers. A second select while a
+//! background dial is in flight supersedes it (the connection is torn down and
+//! the new switch dials). A target with no cached page keeps the stage-held path.
+//!
 //! No `Nav`, overlay or other `Rc` handle is stored: the caller lends them per
 //! call ([`SwitchGate`], [`lock`](ServersSwitcherController::lock)), which
 //! keeps this controller `Send + Sync`.
@@ -40,7 +53,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use frust::{GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
+use frust::{Get, GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
@@ -51,7 +64,7 @@ use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::pro::presentation::{UpgradeContext, show_upgrade_sheet};
 use crate::features::servers::di::LastSeenHandle;
-use crate::features::servers::domain::entities::{FaceKind, ServerFace, faces_for};
+use crate::features::servers::domain::entities::{FaceKind, PageSnapshot, ServerFace, faces_for};
 use crate::routes::{ADD_SERVER_LOCATION, Nav, add_server_location};
 use crate::ui::toasts::app_toasts;
 
@@ -125,6 +138,44 @@ pub fn peer_endpoints(faces: &[ServerFace]) -> Vec<String> {
         .collect()
 }
 
+/// What the Sessions page seeds itself from when a cached switch commits.
+/// `generation` is unique per commit, so the page applies each seed once.
+#[derive(Clone, Debug)]
+pub struct ReconnectSeed {
+    pub generation: u64,
+    pub endpoint: String,
+    pub host: String,
+    pub page: Arc<PageSnapshot>,
+}
+
+/// The app bar banner's state for a background reconnect.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReconnectBanner {
+    Connecting { host: String },
+    Connected,
+    Failed { host: String },
+}
+
+impl ReconnectBanner {
+    /// The strip's text for this state.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Connecting { host } => format!("Connecting to {host}\u{2026}"),
+            Self::Connected => "Connected".to_string(),
+            Self::Failed { host } => format!("Couldn't reach {host}"),
+        }
+    }
+}
+
+/// The background dial in flight: its target and the seed generation that
+/// started it. `dialed` is the connection's dial generation once it is known.
+#[derive(Clone, Debug)]
+struct BackgroundDial {
+    endpoint: String,
+    id: u64,
+    dialed: Option<u64>,
+}
+
 /// The server switcher's view model. See the [module docs](self).
 pub struct ServersSwitcherController {
     saved_servers: SavedServers,
@@ -157,6 +208,17 @@ pub struct ServersSwitcherController {
     seen_lock_epoch: AtomicU64,
     /// The strip's endpoint order for this process.
     strip_order: Mutex<Vec<String>>,
+    /// The cached page the latest committed switch seeded (see the
+    /// [module docs](self)); kept until the next commit or a lock.
+    pub seed: RwSignal<Option<Arc<ReconnectSeed>>>,
+    /// The app bar's connection banner, `None` when closed.
+    pub banner: RwSignal<Option<ReconnectBanner>>,
+    /// Bumped by every banner change: a clearing timer fires only if it still holds.
+    banner_generation: AtomicU64,
+    /// Source of [`ReconnectSeed::generation`].
+    seed_generation: AtomicU64,
+    /// The background dial in flight, if any.
+    bg: Mutex<Option<BackgroundDial>>,
 }
 
 impl ServersSwitcherController {
@@ -190,6 +252,11 @@ impl ServersSwitcherController {
             dial_claim: Mutex::new(None),
             seen_lock_epoch,
             strip_order: Mutex::new(Vec::new()),
+            seed: RwSignal::new(None),
+            banner: RwSignal::new(None),
+            banner_generation: AtomicU64::new(0),
+            seed_generation: AtomicU64::new(0),
+            bg: Mutex::new(None),
         }
     }
 
@@ -198,6 +265,7 @@ impl ServersSwitcherController {
     /// cannot be read leaves the previous strip in place.
     pub fn refresh_faces(&self) {
         self.release_if_stale();
+        self.release_bg_if_stale();
         let Ok(saved) = self.saved_servers.list() else {
             return;
         };
@@ -266,8 +334,58 @@ impl ServersSwitcherController {
         }
     }
 
-    /// The connected server's endpoint, if any.
+    fn bg(&self) -> std::sync::MutexGuard<'_, Option<BackgroundDial>> {
+        self.bg.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Drop a background dial the connection can no longer report on (a
+    /// teardown or a newer dial moved its generation), closing its banner.
+    fn release_bg_if_stale(&self) {
+        let stale = self.bg().as_ref().is_some_and(|bg| {
+            bg.dialed
+                .is_some_and(|generation| generation != self.connection.dial_generation())
+        });
+        if stale {
+            *self.bg() = None;
+            self.set_banner(None);
+        }
+    }
+
+    /// Show `banner` (or close the strip), fencing every earlier timer.
+    /// Answers the new banner generation.
+    fn set_banner(&self, banner: Option<ReconnectBanner>) -> u64 {
+        let generation = self.banner_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.banner.get_untracked() != banner {
+            self.banner.set(banner);
+        }
+        generation
+    }
+
+    /// Close the banner after `after_ms`, unless another change came first.
+    fn clear_banner_later(self: &Arc<Self>, generation: u64, after_ms: u64) {
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            clean_signals::time::sleep(std::time::Duration::from_millis(after_ms)).await;
+            if controller.banner_generation.load(Ordering::SeqCst) == generation {
+                controller.set_banner(None);
+            }
+        });
+    }
+
+    /// The host the Sessions page is still showing from a cached switch while
+    /// the connection is down: what the bar's title reads in place of the
+    /// disconnected name. Tracked.
+    pub fn offline_host(&self) -> Option<String> {
+        let seed = self.seed.get()?;
+        (!self.connection.connected.get()).then(|| seed.host.clone())
+    }
+
+    /// The connected server's endpoint, if any; a background dial in flight
+    /// counts as its target being live.
     fn active_endpoint(&self) -> Option<String> {
+        if let Some(bg) = self.bg().as_ref() {
+            return Some(bg.endpoint.clone());
+        }
         if !self.connection.connected.get_untracked() {
             return None;
         }
@@ -403,7 +521,7 @@ impl ServersSwitcherController {
             }));
             return;
         }
-        if self.connection.connecting.get_untracked() {
+        if self.connection.connecting.get_untracked() && !self.supersede_bg() {
             self.expanding.set(None);
             return;
         }
@@ -435,11 +553,131 @@ impl ServersSwitcherController {
             (gate.add_server)(endpoint);
             return;
         }
-        if self.connection.connecting.get_untracked() {
+        if self.connection.connecting.get_untracked() && !self.supersede_bg() {
             self.abandon();
             return;
         }
+        if let Some(page) = self.cached_page(&endpoint)
+            && self.stage_epoch.load(Ordering::SeqCst) == epoch
+        {
+            self.commit_cached(&endpoint, page);
+            return;
+        }
         self.dial(&endpoint, epoch);
+    }
+
+    /// Cancel the background dial in flight, if there is one: the connection is
+    /// torn down (its dial's outcome is dropped) so the next switch can dial.
+    /// `false` when the dial in flight is not a background one.
+    fn supersede_bg(&self) -> bool {
+        if self.bg().take().is_none() {
+            return false;
+        }
+        self.connection.disconnect();
+        self.set_banner(None);
+        true
+    }
+
+    /// The page `endpoint` last showed, if the last-seen map filed one.
+    fn cached_page(&self, endpoint: &str) -> Option<Arc<PageSnapshot>> {
+        self.last_seen.snapshot().get(endpoint)?.page.clone()
+    }
+
+    /// The cached switch: seed the page, close the stage at once (no peers) and
+    /// dial in the background. `busy` is held by the caller and released here.
+    fn commit_cached(self: &Arc<Self>, endpoint: &str, page: Arc<PageSnapshot>) {
+        let found = self
+            .saved_row(endpoint)
+            .filter(|row| row.has_credential)
+            .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)));
+        let epoch = self.stage_epoch.load(Ordering::SeqCst);
+        let Some((token, row)) = found else {
+            self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
+            return;
+        };
+        let id = self.seed_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let host = row.host.clone();
+        *self.bg() = Some(BackgroundDial {
+            endpoint: endpoint.to_string(),
+            id,
+            dialed: None,
+        });
+        self.set_banner(Some(ReconnectBanner::Connecting { host: host.clone() }));
+        self.seed.set(Some(Arc::new(ReconnectSeed {
+            generation: id,
+            endpoint: endpoint.to_string(),
+            host,
+            page,
+        })));
+        self.release_claim();
+        // Faces first, so the target is the live card; the close then builds
+        // no peers (freeze fix v3).
+        self.refresh_faces();
+        crate::features::servers::di::skip_close_tail();
+        self.close_stage();
+        let controller = Arc::clone(self);
+        let dialed = endpoint.to_string();
+        self.keyring_unlock
+            .switch_to_saved(&row, token, move |outcome| match outcome {
+                Ok(()) => controller.settle_bg(&dialed, id),
+                Err(failure) => {
+                    use clean_signals::Failure;
+                    controller.fail_bg(&dialed, id, failure.user_message());
+                }
+            });
+        if let Some(bg) = self.bg().as_mut()
+            && bg.id == id
+        {
+            bg.dialed = Some(self.connection.dial_generation());
+        }
+    }
+
+    /// Takes background dial `id` if it is still the one in flight.
+    fn finish_bg(&self, id: u64) -> bool {
+        let mut bg = self.bg();
+        if bg.as_ref().is_some_and(|dial| dial.id == id) {
+            *bg = None;
+            return true;
+        }
+        false
+    }
+
+    /// The background dial landed: flash `Connected`, then clear.
+    fn settle_bg(self: &Arc<Self>, endpoint: &str, id: u64) {
+        if !self.finish_bg(id) {
+            return;
+        }
+        let mut failures = self.failures.get_untracked();
+        failures.remove(endpoint);
+        self.failures.set(failures);
+        self.refresh_faces();
+        let generation = self.set_banner(Some(ReconnectBanner::Connected));
+        self.clear_banner_later(
+            generation,
+            crate::features::servers::di::banner_success_ms(),
+        );
+    }
+
+    /// The background dial failed: the cached page stays, the face is marked,
+    /// the banner reads `Failed` until the next change or its timeout.
+    fn fail_bg(self: &Arc<Self>, endpoint: &str, id: u64, message: String) {
+        if !self.finish_bg(id) {
+            return;
+        }
+        let mut failures = self.failures.get_untracked();
+        failures.insert(endpoint.to_string(), message);
+        self.failures.set(failures);
+        self.refresh_faces();
+        let host = self
+            .seed
+            .get_untracked()
+            .map(|seed| seed.host.clone())
+            .unwrap_or_else(|| endpoint.to_string());
+        let generation = self.set_banner(Some(ReconnectBanner::Failed { host }));
+        self.clear_banner_later(
+            generation,
+            crate::features::servers::di::banner_failure_ms(),
+        );
     }
 
     /// The saved row for `endpoint`, read fresh.
@@ -559,6 +797,9 @@ impl ServersSwitcherController {
         self.stage_epoch.fetch_add(1, Ordering::SeqCst);
         self.failures.set(BTreeMap::new());
         self.last_seen.clear();
+        *self.bg() = None;
+        self.set_banner(None);
+        self.seed.set(None);
         self.connection
             .lock_and_disconnect(self.keyring_unlock.keyring());
         self.release_claim();

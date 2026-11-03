@@ -7,7 +7,9 @@ use std::sync::Arc;
 use frust::{
     AnyView, Get, GetUntracked, Location, NavigatorController, Stack, View, any, icons, navigator,
 };
-use frust_glyph::{TitleDirection, TitlePosition, app_bar, card_switcher, peer_card};
+use frust_glyph::{
+    BannerVariant, TitleDirection, TitlePosition, app_bar, banner_spec, card_switcher, peer_card,
+};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
@@ -17,7 +19,9 @@ use crate::features::servers::di::{
     expect_servers_controller, expect_switcher_back, keep_peers, use_last_seen,
 };
 use crate::features::servers::domain::entities::{FaceKind, ServerFace};
-use crate::features::servers::presentation::controller::{ServersSwitcherController, SwitchGate};
+use crate::features::servers::presentation::controller::{
+    ReconnectBanner, ServersSwitcherController, SwitchGate,
+};
 use crate::features::servers::presentation::widgets::{bar::servers_bar, faces, label_row};
 use crate::features::sessions::presentation::widgets::{
     sessions_snapshot, shell_responsive, switcher_fab,
@@ -25,7 +29,7 @@ use crate::features::sessions::presentation::widgets::{
 use crate::features::terminal::presentation::pages::open_terminal_menu;
 use crate::responsive::Responsive;
 use crate::routes::{
-    BarAction, BarDirection, BarLeading, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
+    BarAction, BarDirection, BarLeading, BarTitle, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
     route_transition,
 };
 use crate::ui::palette::{Palette, active_theme};
@@ -249,7 +253,26 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
         BarDirection::Forward => TitleDirection::Forward,
         BarDirection::Back => TitleDirection::Back,
     };
-    let mut bar = app_bar::<AppState>(meta.resolve_title(connection))
+    // A cached switch keeps its page on screen while the connection is down:
+    // the title names that server, and the banner reports the dial.
+    let switcher = expect_servers_controller();
+    let mut title = meta.resolve_title(connection);
+    if meta.title == BarTitle::ConnectedHost
+        && let Some(host) = switcher.offline_host()
+    {
+        title = host;
+    }
+    let banner = switcher.banner.get().map(|state| {
+        let variant = match state {
+            ReconnectBanner::Connected => BannerVariant::Success,
+            ReconnectBanner::Connecting { .. } | ReconnectBanner::Failed { .. } => {
+                BannerVariant::Warning
+            }
+        };
+        banner_spec(state.text(), variant)
+    });
+    let mut bar = app_bar::<AppState>(title)
+        .banner(banner)
         .title_direction(direction)
         .title_position(TitlePosition::Center);
     bar = match meta.leading {

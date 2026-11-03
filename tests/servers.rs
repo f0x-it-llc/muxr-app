@@ -15,6 +15,7 @@
 //! part of it that is on screen.
 
 use std::any::Any;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,12 +36,12 @@ use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
-    PEER_TAIL, expect_servers_controller, keep_peers, set_stage_clock_for_tests, stage_settled,
-    use_last_seen,
+    PEER_TAIL, expect_servers_controller, keep_peers, set_banner_timings_for_tests,
+    set_stage_clock_for_tests, stage_settled, use_last_seen,
 };
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
-    ServersSwitcherController, peer_endpoints,
+    ReconnectBanner, ServersSwitcherController, SwitchGate, peer_endpoints,
 };
 use muxr::features::sessions::presentation::controllers::snapshots_built_for_tests;
 use muxr::routes::app_nav;
@@ -1130,4 +1131,266 @@ fn a_settle_close_builds_no_peers_and_the_faces_name_the_new_live_server() {
     close_stage(&mut h);
     assert!(keep_peers(false), "a plain close keeps the tail");
     set_stage_clock_for_tests(None);
+}
+
+// ---------------------------------------------------------------------------
+// Background reconnect: a cached target goes live from its cache at once.
+// ---------------------------------------------------------------------------
+
+/// A session name only the cache knows, so the cached rows are told from the live ones.
+const CACHED_ONLY: &str = "cachedonly";
+/// The strip's disconnected line: it must never paint on a cached switch.
+const NOT_CONNECTED: &str = "not connected";
+
+/// Rewrite `endpoint`'s filed page so its first session reads [`CACHED_ONLY`].
+fn taint_cached_page(endpoint: &str) {
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    let mut seen = last_seen.snapshot().remove(endpoint).expect("filed");
+    let mut page = (**seen.page.as_ref().expect("a page was filed")).clone();
+    page.sessions[0].name = CACHED_ONLY.to_string();
+    seen.page = Some(Arc::new(page));
+    last_seen.record_seen(endpoint, seen);
+}
+
+/// Visit B, taint its cache, return to A (stage closed): B is a cached target.
+fn cached_b() -> Harness {
+    set_banner_timings_for_tests(60, 60);
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    taint_cached_page(B_ENDPOINT);
+    h
+}
+
+fn reset_reconnect_rig() {
+    hold_next_mock_dials_for_tests(0);
+    fail_next_mock_dials_for_tests(0);
+    set_banner_timings_for_tests(1_500, 6_000);
+}
+
+fn banner() -> Option<ReconnectBanner> {
+    switcher().banner.get_untracked()
+}
+
+fn connecting_to(host: &str) -> Option<ReconnectBanner> {
+    Some(ReconnectBanner::Connecting {
+        host: host.to_string(),
+    })
+}
+
+/// The page is on screen with its rows and its header: never empty, never "not connected".
+fn assert_page_shown(h: &Harness, rows: &[&str]) {
+    let values = h.values();
+    assert!(!values.iter().any(|v| v == NOT_CONNECTED), "{values:?}");
+    assert!(
+        rows.iter().any(|row| values.iter().any(|v| v == row)),
+        "no row of {rows:?} on screen: {values:?}"
+    );
+}
+
+/// The bar names `host` once its title transition has run.
+fn assert_title(h: &mut Harness, host: &str) {
+    h.park();
+    assert!(h.labels().iter().any(|v| v == host), "{:?}", h.labels());
+}
+
+/// The app bar's banner strip reads `text`.
+fn assert_banner_text(h: &Harness, text: &str) {
+    assert!(h.labels().iter().any(|v| v == text), "{:?}", h.labels());
+}
+
+/// Open the stage and select `endpoint` through the controller (a card two slots
+/// from the centre is off screen), then wait for the connection to land there.
+fn switch_via_controller(h: &mut Harness, endpoint: &str) {
+    h.open_stage();
+    let gate = SwitchGate {
+        paywall: Rc::new(|_| {}),
+        add_server: Rc::new(|_| {}),
+    };
+    switcher().select_endpoint(endpoint.to_string(), &gate);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(endpoint) && !stage_is_open());
+}
+
+/// Open the stage and tap the cached B with its dial held open.
+fn tap_cached_b_held(h: &mut Harness) -> HeldDial {
+    h.open_stage();
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| banner() == connecting_to(B_HOST));
+    held
+}
+
+#[test]
+fn a_cached_switch_closes_the_stage_at_once_and_refreshes_in_place_when_the_dial_lands() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+
+    let held = tap_cached_b_held(&mut h);
+
+    // (a) the very next frames: stage down, cached rows and header up, banner
+    // Connecting, nothing needing the server works.
+    assert!(!stage_is_open(), "the stage closed at once");
+    assert_eq!(banner(), connecting_to(B_HOST));
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "the dial is still pending"
+    );
+    let depth = h.depth();
+    for _ in 0..5 {
+        h.frame();
+        assert_page_shown(&h, &[CACHED_ONLY]);
+    }
+    assert_title(&mut h, B_HOST);
+    assert_banner_text(&h, "Connecting to bravo.example\u{2026}");
+    let row = node_centers_by_value(&h.root, CACHED_ONLY)[0];
+    h.tap_parked(row);
+    assert_eq!(h.depth(), depth, "attach is off until connected");
+    assert_page_shown(&h, &[CACHED_ONLY]);
+
+    // The dial lands: banner Success, then cleared; rows refresh in place with
+    // no frame that shows an empty list or the disconnected strip.
+    held.release(true);
+    h.pump_until(|h| {
+        assert_page_shown(h, &[CACHED_ONLY, SESSION_NAME]);
+        connected_endpoint().as_deref() == Some(B_ENDPOINT)
+    });
+    assert_eq!(banner(), Some(ReconnectBanner::Connected));
+    h.pump_until(|h| {
+        assert_page_shown(h, &[CACHED_ONLY, SESSION_NAME]);
+        h.values().iter().any(|v| v == SESSION_NAME) && banner().is_none()
+    });
+    assert!(!h.values().iter().any(|v| v == CACHED_ONLY), "replaced");
+    assert_eq!(face_kind(B_ENDPOINT), FaceKind::Live);
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_cached_switch_keeps_the_page_continuous_through_the_disconnect_and_dial_window() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+
+    let held = tap_cached_b_held(&mut h);
+    // Frame by frame across the pending dial: the torn-down connection never
+    // leaks into the page.
+    for _ in 0..20 {
+        h.frame();
+        assert_page_shown(&h, &[CACHED_ONLY]);
+    }
+    held.release(true);
+    h.pump_until(|h| {
+        assert_page_shown(h, &[CACHED_ONLY, SESSION_NAME]);
+        connected_endpoint().as_deref() == Some(B_ENDPOINT)
+    });
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_failed_background_dial_keeps_the_cached_page_and_marks_the_face_failed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+    set_banner_timings_for_tests(60, 600);
+    h.open_stage();
+    fail_next_mock_dials_for_tests(1);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+
+    assert_eq!(
+        banner(),
+        Some(ReconnectBanner::Failed {
+            host: B_HOST.to_string()
+        })
+    );
+    assert!(!stage_is_open());
+    for _ in 0..3 {
+        h.frame();
+        assert_page_shown(&h, &[CACHED_ONLY]);
+    }
+    assert_title(&mut h, B_HOST);
+    assert_banner_text(&h, "Couldn't reach bravo.example");
+    assert!(matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
+
+    // The failure banner clears on its own; a tap on the failed face retries.
+    h.pump_until(|_| banner().is_none());
+    switch_via_controller(&mut h, B_ENDPOINT);
+    h.pump_until(|_| switcher().failures.get_untracked().is_empty());
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_never_visited_server_keeps_the_stage_held_path() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| switcher().busy.get_untracked().is_some());
+
+    assert!(stage_is_open(), "the stage holds the growing card");
+    assert!(switcher().seed.get_untracked().is_none());
+    assert_eq!(banner(), None);
+    held.release(true);
+    settle_on(&mut h, B_ENDPOINT);
+    assert_eq!(banner(), None, "no banner on the plain path");
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_second_switch_during_a_background_dial_supersedes_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+    // C visited too, so both targets are cached.
+    switch_via_controller(&mut h, C_ENDPOINT);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    h.pump_until(|_| last_seen.snapshot().contains_key(C_ENDPOINT));
+    switch_via_controller(&mut h, A_ENDPOINT);
+    h.pump_until(|_| banner().is_none());
+
+    let mut held = hold_next_mock_dials_for_tests(2);
+    let second = held.remove(1);
+    let first = held.remove(0);
+    h.open_stage();
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| banner() == connecting_to(B_HOST));
+
+    h.open_stage();
+    h.tap_card(strip_index(C_ENDPOINT), live_strip_index());
+    h.pump_until(|_| banner() == connecting_to(C_HOST));
+    assert!(!stage_is_open());
+
+    // The superseded dial lands late: nothing follows it.
+    first.release(true);
+    for _ in 0..5 {
+        h.frame();
+    }
+    assert_ne!(connected_endpoint().as_deref(), Some(B_ENDPOINT));
+    assert_eq!(banner(), connecting_to(C_HOST), "no stale banner");
+
+    second.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(C_ENDPOINT));
+    assert_eq!(banner(), Some(ReconnectBanner::Connected));
+    h.pump_until(|_| banner().is_none());
+    assert_eq!(face_kind(C_ENDPOINT), FaceKind::Live);
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_commit_close_builds_no_peers() {
+    let _g = serial();
+    let _ambient = setup();
+    let _t0 = pin_stage_clock();
+    let mut h = cached_b();
+
+    let held = tap_cached_b_held(&mut h);
+    h.park();
+
+    assert!(!keep_peers(false), "a commit-close keeps no tail of peers");
+    held.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(B_ENDPOINT));
+    assert!(!keep_peers(false));
+    set_stage_clock_for_tests(None);
+    reset_reconnect_rig();
 }
