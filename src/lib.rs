@@ -152,6 +152,10 @@ impl Component for MuxrApp {
 
         features::connect::di::provide();
         features::pro::di::provide();
+        // The last-seen handle before any sessions controller (it resolves the
+        // handle once); the controller needs connect and pro published.
+        features::servers::di::provide_last_seen();
+        features::servers::di::provide_controller();
         features::sessions::di::provide();
         features::terminal::di::provide();
         features::settings::di::provide();

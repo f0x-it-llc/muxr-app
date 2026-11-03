@@ -41,6 +41,8 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{KeyringHandle, expect_keyring};
+use crate::features::servers::di::use_servers_controller;
+use crate::features::servers::presentation::controller::ServersSwitcherController;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
@@ -138,6 +140,10 @@ pub struct SessionsState {
     /// The app-scoped connection handle, for the strip, the top bar's title
     /// and the read-only posture that gates this screen's mutations.
     pub connection: Arc<ConnectionController>,
+    /// The server switcher, when the shell provided one: the poll pauses while
+    /// its stage is open (the stage covers this screen without moving a
+    /// navigator, so the depth mark alone cannot see it).
+    switcher: Option<Arc<ServersSwitcherController>>,
     /// The `.conn-row` strip's heartbeat clocks — written by the ping
     /// interval `init` starts, read by every rebuild that renders the strip
     /// (see [`super::heartbeat`]). Screen-internal, unlike the two handles
@@ -450,6 +456,7 @@ impl Component for SessionsScreen {
                 keyring: expect_keyring(),
             },
             connection,
+            switcher: use_servers_controller(),
             heartbeat,
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
@@ -464,9 +471,21 @@ impl Component for SessionsScreen {
         // Plain atomic, not a signal — see `BackConfirm`'s doc for why.
         let depth = state.actions.stack_depth();
         state.actions.controller.observe_depth(depth);
+        // Tracked, so a close wakes this build and the observe above resumes
+        // the poll; while open, re-mark the pause at the current depth right
+        // after that observe (nothing polls between the two, same thread).
+        if state.switcher.as_ref().is_some_and(|s| s.open.get()) {
+            state.actions.pause_for_push();
+        }
 
         if state.back.take_request(depth) {
-            state.actions.open_disconnect_confirm(&state.connection);
+            // The route navigator outranks the switcher's `SwitcherBack`
+            // fallback, so a press with the stage up arrives here as this
+            // page's dismiss request: it closes the stage, not the session.
+            match state.switcher.as_ref().filter(|s| s.open.get_untracked()) {
+                Some(switcher) => switcher.close(),
+                None => state.actions.open_disconnect_confirm(&state.connection),
+            }
         }
 
         // A new connection (the epoch moved while connected) starts this mount

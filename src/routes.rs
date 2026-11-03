@@ -617,6 +617,12 @@ impl Nav {
         }
     }
 
+    /// Whether the inner navigator has `/sessions` on top — read tracked, so a
+    /// navigation wakes the rebuild that shows or drops the switcher FAB.
+    pub fn on_sessions(&self) -> bool {
+        self.routes.path() == SESSIONS_ROUTE
+    }
+
     /// The inner navigator's route observer — what
     /// [`crate::shell::shell_page`] attaches to the navigator it mounts.
     pub(crate) fn route_observer(&self) -> RouteObserver {
@@ -848,7 +854,10 @@ pub(crate) fn build_routes(
             inner,
             {
                 let inner = inner.clone();
-                move |_params: &RouteParams| crate::shell::shell_page(&inner, &connection)
+                let overlays = overlays.clone();
+                move |_params: &RouteParams| {
+                    crate::shell::shell_page(&inner, &overlays, &connection)
+                }
             },
             vec![
                 Route::new(SESSIONS_ROUTE, {

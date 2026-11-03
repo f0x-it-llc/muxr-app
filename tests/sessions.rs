@@ -37,6 +37,7 @@ use kurbo::{Point, Size};
 use muxr::agents::{AgentStatus, AgentSummary};
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
+use muxr::features::servers::di::expect_servers_controller;
 use muxr::features::sessions::data::repositories::mock_sessions_repository::{
     MockSessionsRepository, SEEDED_DEV_ID, SEEDED_HERDR_ID,
 };
@@ -151,11 +152,24 @@ impl Harness {
     /// [`mount`](Self::mount) laid out at `surface`, over `repository` in
     /// place of the seeded mock when one is given.
     fn mount_over(repository: Option<SharedSessionsRepository>, surface: Size) -> Self {
+        Harness::mount_with(repository, None, surface)
+    }
+
+    /// [`mount_over`](Self::mount_over), also swapping in `preferences` (the
+    /// poll cadence's source) when given.
+    fn mount_with(
+        repository: Option<SharedSessionsRepository>,
+        preferences: Option<SharedPreferencesRepository>,
+        surface: Size,
+    ) -> Self {
         // The real composition root, unbuilt: publishes DI including this
         // feature's repository, but never plays a splash.
         let state = MuxrApp.init();
         if let Some(repository) = repository {
             provide_context(repository);
+        }
+        if let Some(preferences) = preferences {
+            provide_context(preferences);
         }
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-points `routes::app_nav()` at this fixture's own navigator, real
@@ -2758,4 +2772,69 @@ fn the_seeded_herdr_summary_is_the_rollup_of_the_terminal_mocks_default_agents()
         .find(|session| session.id == SEEDED_HERDR_ID)
         .expect("herdr");
     assert_eq!(herdr.agents.as_ref(), Some(&rollup));
+}
+
+// ---------------------------------------------------------------------------
+// 13 — the server switcher stage covers the screen without moving a
+// navigator, so the poll pauses on the stage itself
+// ---------------------------------------------------------------------------
+
+/// Preferences whose poll runs every second, so a pause is observable in a
+/// couple of real seconds.
+struct FastPollPreferences;
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl PreferencesRepository for FastPollPreferences {
+    async fn load_preferences(&self) -> Result<Preferences, AppFailure> {
+        let mut prefs = Preferences::defaults();
+        prefs.poll.layout_refresh_secs = 1;
+        Ok(prefs)
+    }
+
+    async fn save_appearance(
+        &self,
+        _prefs: AppearancePrefs,
+    ) -> Result<AppearancePrefs, AppFailure> {
+        unreachable!("not exercised by the pause test")
+    }
+
+    async fn save_poll_prefs(&self, _prefs: PollPrefs) -> Result<PollPrefs, AppFailure> {
+        unreachable!("not exercised by the pause test")
+    }
+}
+
+#[test]
+fn the_poll_pauses_while_the_switcher_stage_is_open_and_resumes_on_close() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(CountingSessionsRepo::new());
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        Some(Arc::new(FastPollPreferences)),
+        support::surface(),
+    );
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until("the first load", |_| repo.calls() >= 1);
+
+    let switcher = expect_servers_controller();
+    switcher.open();
+    h.frame();
+    // A poll already in flight when the stage rose may still land.
+    h.pump_until("the in-flight poll to drain", |_| true);
+    let covered_at = repo.calls();
+    let until = Instant::now() + Duration::from_millis(2600);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert!(
+        repo.calls() <= covered_at + 1,
+        "no ListSessions while the stage is open: {} -> {}",
+        covered_at,
+        repo.calls()
+    );
+    let held = repo.calls();
+
+    switcher.close();
+    h.pump_until("the poll to resume", |_| repo.calls() > held);
 }
