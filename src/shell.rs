@@ -116,7 +116,7 @@ pub(crate) fn shell_page(
 /// Strip order is the controller's: the live card is the scaled shell page at
 /// `live_index`, the peers are every other face. Peers are rebuilt from the
 /// current faces on every build while the stage is open and through its close
-/// ramp (after a failed switch no face is live); a stage closed longer builds none, so the real Sessions widgets
+/// ramp (after a failed switch no face is live). A cached peer is a Sessions snapshot only in the steady open state (not expanding); otherwise the light face. A stage closed longer builds none, so the real Sessions widgets
 /// of a cached peer are never constructed for a screen nobody sees.
 fn switcher_host(
     switcher: &Arc<ServersSwitcherController>,
@@ -135,6 +135,10 @@ fn switcher_host(
         .position(|face| face.kind == FaceKind::Live)
         .unwrap_or(0);
     let open = switcher.open.get();
+    // Snapshot cards only in the steady open state: during the expand handshake
+    // and the close tail the live page's own layers (the loading rain) would
+    // stack on them and exceed frust-render 0.6.5's layer scheduler (device freeze).
+    let steady = open && switcher.expanding.get().is_none();
     // Kept through the close ramp too (see `keep_peers`).
     let peers: Vec<_> = if keep_peers(open) {
         // A forgotten row's remembered page goes with it. A plain map edit, not
@@ -146,7 +150,7 @@ fn switcher_host(
             .iter()
             .filter(|face| face.kind != FaceKind::Live)
             .map(|face| {
-                peer_card(peer_face(&theme, &colors, face, now_ms, rule))
+                peer_card(peer_face(&theme, &colors, face, now_ms, rule, steady))
                     .label(label_row(&theme, &colors, face))
             })
             .collect()
@@ -215,12 +219,13 @@ fn peer_face(
     face: &ServerFace,
     now_ms: i64,
     rule: Responsive,
+    steady: bool,
 ) -> AnyView<AppState> // erasure: the snapshot and the servers faces are different view types
 {
     match &face.kind {
         FaceKind::Cached {
             page: Some(page), ..
-        } => any(sessions_snapshot::<AppState>(page, rule)),
+        } if steady => any(sessions_snapshot::<AppState>(page, rule)),
         _ => faces::server_face(theme, colors, face, now_ms),
     }
 }

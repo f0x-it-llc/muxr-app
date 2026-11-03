@@ -745,6 +745,67 @@ fn pin_stage_clock() -> Instant {
     at
 }
 
+/// Tap a strip card and stop at the moment the select is in flight (the press
+/// ramp before it is still the steady open stage, which may build snapshots).
+fn tap_without_settling(h: &mut Harness, card: usize) {
+    let rect = strip_card_rect(WINDOW, CARD_SCALE, card, live_strip_index());
+    let point = on_screen_centre(rect, WINDOW).expect("card on screen");
+    h.dispatch(&pointer(PointerPhase::Down, point));
+    h.dispatch(&pointer(PointerPhase::Up, point));
+}
+
+fn peer_count() -> usize {
+    switcher()
+        .faces
+        .get_untracked()
+        .iter()
+        .filter(|face| face.kind != FaceKind::Live)
+        .count()
+}
+
+#[test]
+fn a_select_in_flight_builds_no_peer_snapshot_and_keeps_the_peers() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    h.open_stage();
+    h.park();
+    let peers = peer_count();
+    tap_without_settling(&mut h, strip_index(B_ENDPOINT));
+    assert!(
+        switcher().expanding.get_untracked().is_some(),
+        "select in flight"
+    );
+    let before = snapshots_built_for_tests();
+    h.park();
+    assert_eq!(
+        snapshots_built_for_tests(),
+        before,
+        "no snapshot mid-select"
+    );
+    assert_eq!(peer_count(), peers);
+}
+
+#[test]
+fn the_repro_sequence_builds_no_snapshot_during_the_handshake_or_the_tail() {
+    let _g = serial();
+    let _ambient = setup();
+    let t0 = pin_stage_clock();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+    // A -> B -> A again with B cached: the switch back is the freezing one.
+    h.open_stage();
+    h.park();
+    tap_without_settling(&mut h, strip_index(B_ENDPOINT));
+    let before = snapshots_built_for_tests();
+    settle_on(&mut h, B_ENDPOINT);
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL / 2));
+    h.park();
+    assert_eq!(snapshots_built_for_tests(), before);
+    set_stage_clock_for_tests(None);
+}
+
 #[test]
 fn a_stage_closed_past_its_tail_builds_no_peer_snapshots() {
     let _g = serial();
@@ -778,11 +839,14 @@ fn closing_the_stage_keeps_building_the_peers_through_the_close_tail() {
     h.open_stage();
     let live_open = live_strip_index();
     let opened = snapshots_built_for_tests();
+    let peers_open = peer_count();
     close_stage(&mut h);
-    assert!(
-        snapshots_built_for_tests() > opened,
-        "the build that closes the stage still passes the peers (the ramp paints them)"
+    assert_eq!(
+        snapshots_built_for_tests(),
+        opened,
+        "the close tail builds light faces, never snapshots"
     );
+    assert_eq!(peer_count(), peers_open, "the peers are still present");
     assert_eq!(
         live_strip_index(),
         live_open,
@@ -794,7 +858,7 @@ fn closing_the_stage_keeps_building_the_peers_through_the_close_tail() {
     let mid = snapshots_built_for_tests();
     switcher().refresh_faces();
     h.park();
-    assert!(snapshots_built_for_tests() > mid, "still inside the tail");
+    assert_eq!(snapshots_built_for_tests(), mid, "still inside the tail");
     h.open_stage();
     assert!(stage_is_open());
     assert!(matches!(
