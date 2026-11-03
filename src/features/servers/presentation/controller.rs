@@ -7,9 +7,12 @@
 //! into the live page, and which endpoint a switch is [`busy`](Self::busy)
 //! dialing.
 //!
-//! **Strip order.** `faces` is published active-first; the live card is the
-//! switcher component's real page, so the component's *peers* are the faces
-//! that are not [`FaceKind::Live`], in order. [`peer_endpoints`] is that
+//! **Strip order.** `faces` keeps one stable per-process order (the saved
+//! list's stored order on first build, new rows appended, removed rows
+//! dropped; a connect, switch or keyring lock never reorders it). The live
+//! card is the switcher component's real page at its own slot, so the
+//! component's *peers* are the faces that are not [`FaceKind::Live`], in
+//! order. [`peer_endpoints`] is that
 //! mapping and [`select`](ServersSwitcherController::select) takes the
 //! component's peer index through it.
 //!
@@ -140,7 +143,7 @@ pub struct ServersSwitcherController {
     last_seen: LastSeenHandle,
     /// Whether the stage is up.
     pub open: RwSignal<bool>,
-    /// The strip, active first (see the [module docs](self)).
+    /// The strip in its stable order (see the [module docs](self)).
     pub faces: RwSignal<Vec<ServerFace>>,
     /// The peer index growing into the live page, while a switch runs.
     pub expanding: RwSignal<Option<usize>>,
@@ -161,6 +164,8 @@ pub struct ServersSwitcherController {
     /// The keyring's `lock_epoch` the last-seen map and recorded failures
     /// were last reconciled with; a move means a lock happened somewhere.
     seen_lock_epoch: AtomicU64,
+    /// The strip's endpoint order for this process.
+    strip_order: Mutex<Vec<String>>,
 }
 
 impl ServersSwitcherController {
@@ -193,6 +198,7 @@ impl ServersSwitcherController {
             stage_epoch: AtomicU64::new(0),
             dial_claim: Mutex::new(None),
             seen_lock_epoch,
+            strip_order: Mutex::new(Vec::new()),
         }
     }
 
@@ -206,8 +212,20 @@ impl ServersSwitcherController {
         };
         let active = self.active_endpoint();
         self.reconcile_memory(active.as_deref());
+        let order = {
+            let mut order = self.strip_order.lock().expect("strip order lock");
+            let present: Vec<String> = saved.iter().map(|row| row.endpoint()).collect();
+            order.retain(|e| present.contains(e));
+            for endpoint in present {
+                if !order.contains(&endpoint) {
+                    order.push(endpoint);
+                }
+            }
+            order.clone()
+        };
         let faces = faces_for(
             &saved,
+            &order,
             active.as_deref(),
             self.keyring_unlock.keyring().is_unlocked(),
             &self.last_seen.snapshot(),
