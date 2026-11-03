@@ -44,6 +44,7 @@ thread_local! {
     static SWITCHER_BACK: RefCell<Option<SwitcherBack>> = const { RefCell::new(None) };
     static STAGE_WAS_OPEN: Cell<bool> = const { Cell::new(false) };
     static STAGE_CLOSED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+    static SETTLE_CLOSE: Cell<bool> = const { Cell::new(false) };
     static CLOCK_OVERRIDE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
@@ -57,18 +58,31 @@ pub fn set_stage_clock_for_tests(at: Option<Instant>) {
     CLOCK_OVERRIDE.with(|cell| cell.set(at));
 }
 
+/// Marks the stage close about to happen as a switch's settle: the shell then
+/// builds no peers from the close on (no [`PEER_TAIL`] of neighbours), so the
+/// selected card is centred alone and the live slot cannot jump while the new
+/// server's list populates. Cleared when the stage next opens.
+pub fn skip_close_tail() {
+    SETTLE_CLOSE.with(|cell| cell.set(true));
+}
+
 /// Whether the shell should build the stage's peer cards this build: while the
-/// stage is `open`, and for [`PEER_TAIL`] after it was seen to close. Nothing
-/// rebuilds at the tail's end; the peers drop at the first build after it.
+/// stage is `open`, and for [`PEER_TAIL`] after it was seen to close (never
+/// after a settle-close, see [`skip_close_tail`]). Nothing rebuilds at the
+/// tail's end; the peers drop at the first build after it.
 pub fn keep_peers(open: bool) -> bool {
     let now = stage_now();
     if open {
         STAGE_WAS_OPEN.with(|cell| cell.set(true));
         STAGE_CLOSED_AT.with(|cell| cell.set(None));
+        SETTLE_CLOSE.with(|cell| cell.set(false));
         return true;
     }
     if STAGE_WAS_OPEN.with(|cell| cell.replace(false)) {
         STAGE_CLOSED_AT.with(|cell| cell.set(Some(now)));
+    }
+    if SETTLE_CLOSE.with(Cell::get) {
+        return false;
     }
     STAGE_CLOSED_AT
         .with(Cell::get)

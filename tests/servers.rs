@@ -1106,3 +1106,28 @@ fn unlocking_pro_from_the_add_chips_paywall_closes_the_stage_and_opens_the_add_p
         h.values()
     );
 }
+
+#[test]
+fn a_settle_close_builds_no_peers_and_the_faces_name_the_new_live_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let _t0 = pin_stage_clock();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    settle_on(&mut h, B_ENDPOINT);
+    assert_eq!(
+        face_kind(B_ENDPOINT),
+        FaceKind::Live,
+        "settle refreshed the faces: B is live"
+    );
+    assert_ne!(face_kind(A_ENDPOINT), FaceKind::Live);
+    // The clock is still at the close instant, deep inside what would be the
+    // tail: a settle-close keeps no peers.
+    assert!(!keep_peers(false), "no tail after a settle-close");
+    // A plain close of the next stage keeps its tail.
+    h.open_stage();
+    h.park();
+    close_stage(&mut h);
+    assert!(keep_peers(false), "a plain close keeps the tail");
+    set_stage_clock_for_tests(None);
+}

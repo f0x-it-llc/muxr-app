@@ -3298,3 +3298,42 @@ fn selecting_a_peer_on_a_collapsed_tablet_lands_on_the_new_servers_master_detail
     let _ambient = setup();
     select_a_peer_at(COLLAPSED_TABLET);
 }
+
+#[test]
+fn the_poll_stays_paused_through_the_close_tail_and_resumes_after_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(CountingSessionsRepo::new());
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        Some(Arc::new(FastPollPreferences)),
+        support::surface(),
+    );
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until("the first load", |_| repo.calls() >= 1);
+
+    let switcher = expect_servers_controller();
+    switcher.open();
+    h.frame();
+    switcher.close();
+    // The shell's builds, played by hand: open seen, then closed, tail running.
+    let clock = StageClock::closing();
+    h.frame();
+    let mut stable = 0;
+    let mut last = repo.calls();
+    while stable < 5 {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        let now = repo.calls();
+        stable = if now == last { stable + 1 } else { 0 };
+        last = now;
+    }
+    let held = last;
+    let until = Instant::now() + Duration::from_millis(2600);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert_eq!(repo.calls(), held, "no ListSessions through the close tail");
+
+    clock.advance(PEER_TAIL);
+    h.pump_until("the poll to resume after the tail", |_| repo.calls() > held);
+}
