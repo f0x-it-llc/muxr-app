@@ -19,6 +19,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,26 @@ use crate::routes::app_nav;
 /// ramp (320 ms, 120 ms under reduced motion) keeps painting them, and the
 /// component tears down any peer the next view omits at once.
 pub const PEER_TAIL: Duration = Duration::from_millis(500);
+
+/// How long the `Connected` banner shows, and how long a `Failed` one is kept.
+static BANNER_SUCCESS_MS: AtomicU64 = AtomicU64::new(1_500);
+static BANNER_FAILURE_MS: AtomicU64 = AtomicU64::new(6_000);
+
+/// The `Connected` banner's lifetime, ms.
+pub fn banner_success_ms() -> u64 {
+    BANNER_SUCCESS_MS.load(Ordering::Relaxed)
+}
+
+/// The `Failed` banner's lifetime, ms.
+pub fn banner_failure_ms() -> u64 {
+    BANNER_FAILURE_MS.load(Ordering::Relaxed)
+}
+
+/// Overrides the banner lifetimes (process-wide), so a suite need not wait them out.
+pub fn set_banner_timings_for_tests(success_ms: u64, failure_ms: u64) {
+    BANNER_SUCCESS_MS.store(success_ms, Ordering::Relaxed);
+    BANNER_FAILURE_MS.store(failure_ms, Ordering::Relaxed);
+}
 
 thread_local! {
     static SWITCHER_BACK: RefCell<Option<SwitcherBack>> = const { RefCell::new(None) };

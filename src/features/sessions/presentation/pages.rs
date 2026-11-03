@@ -42,6 +42,7 @@ use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{KeyringHandle, expect_keyring};
 use crate::features::servers::di::{stage_settled, use_servers_controller};
+use crate::features::servers::domain::entities::PageSnapshot;
 use crate::features::servers::presentation::controller::ServersSwitcherController;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
@@ -187,6 +188,14 @@ pub struct SessionsState {
     /// Sticky: whether this mount has ever seen the connection up. Told apart
     /// from a first connect, which the load `init` already issued serves.
     has_connected: bool,
+    /// The endpoint of the cached snapshot this mount was seeded with and has
+    /// not yet seen land (a connection landing there refreshes in place).
+    seeded: Option<String>,
+    /// The latest [`ReconnectSeed`] generation this mount applied.
+    seeded_gen: u64,
+    /// The snapshot behind [`Self::seeded`]: what the header facts read while
+    /// the connection is down.
+    seeded_page: Option<Arc<PageSnapshot>>,
     /// Generation of the deferred rain arm: every restart bumps it, so a stale
     /// arm task finds itself superseded and does nothing.
     rain_generation: Arc<AtomicU64>,
@@ -551,6 +560,11 @@ impl Component for SessionsScreen {
             loading_done: RwSignal::new(!rain),
             loading_snapshot: None,
             rain,
+            seeded: None,
+            seeded_gen: use_servers_controller()
+                .and_then(|switcher| switcher.seed.get_untracked())
+                .map_or(0, |seed| seed.generation),
+            seeded_page: None,
             seen_epoch: connection_epoch,
             has_connected: seen_connected,
             rain_generation: Arc::new(AtomicU64::new(0)),
@@ -589,6 +603,21 @@ impl Component for SessionsScreen {
             }
         }
 
+        // A cached switch committed: show its snapshot from this very build on
+        // (one write, never an empty list) and stay plain, no rain. The
+        // connection landing there refreshes in place, below.
+        if let Some(seed) = state.switcher.as_ref().and_then(|s| s.seed.get())
+            && seed.generation != state.seeded_gen
+        {
+            state.seeded_gen = seed.generation;
+            state.seeded = Some(seed.endpoint.clone());
+            state.seeded_page = Some(Arc::clone(&seed.page));
+            state.loading_snapshot = None;
+            state.rain_generation.fetch_add(1, Ordering::SeqCst);
+            state.loading_done.set(true);
+            state.actions.controller.seed_from(&seed.page);
+        }
+
         // A new connection (the epoch moved while connected) starts this mount
         // over: the old server's list, selection and rain snapshot go, and the
         // rain replays over the new first load. A move to disconnected is the
@@ -604,7 +633,19 @@ impl Component for SessionsScreen {
             // issued already serves.
             let switched = state.has_connected || epoch - state.seen_epoch >= 2;
             state.seen_epoch = epoch;
-            if connected && switched {
+            let landed = state
+                .connection
+                .server_info
+                .get_untracked()
+                .map(|info| info.endpoint);
+            if connected && switched && landed.is_some() && state.seeded == landed {
+                // The endpoint this mount was seeded for: refresh in place.
+                state.seeded = None;
+                state.seeded_page = None;
+                state.actions.controller.refresh_in_place();
+            } else if connected && switched {
+                state.seeded = None;
+                state.seeded_page = None;
                 state.loading_snapshot = None;
                 let generation = state.rain_generation.fetch_add(1, Ordering::SeqCst) + 1;
                 if state.rain && !stage_settled() {
@@ -628,10 +669,22 @@ impl Component for SessionsScreen {
         let loaded = state.actions.controller.loaded.get();
         let settled = state.actions.controller.first_load_settled.get();
         let loading_done = state.loading_done.get();
-        let info = state.connection.server_info.get();
+        let live_info = state.connection.server_info.get();
+        let live_read_only = state.connection.is_read_only.get();
+        // A seeded page with no connection behind it keeps showing the
+        // snapshot's header facts through the disconnect and the dial, and
+        // every action that needs the server is off.
+        let offline = state.seeded.is_some() && !state.connection.connected.get_untracked();
+        state.actions.controller.set_offline(offline);
+        let seeded_page = state.seeded_page.clone().filter(|_| offline);
+        let info = match &seeded_page {
+            Some(page) if live_info.is_none() => page.info.clone(),
+            _ => live_info,
+        };
+        let strip_read_only = seeded_page.as_ref().map_or(live_read_only, |p| p.read_only);
         // Gates create/rename/kill (never attach) — see
         // `widgets::new_session_row`'s doc for the disabled-state pattern.
-        let read_only = state.connection.is_read_only.get();
+        let read_only = live_read_only || offline;
 
         let theme = widgets::active_theme();
         let colors = Palette::from_theme(&theme);
@@ -712,7 +765,7 @@ impl Component for SessionsScreen {
                 state.loading_done,
             ));
         }
-        let strip = widgets::server_strip(info.as_ref(), beat, read_only, &colors);
+        let strip = widgets::server_strip(info.as_ref(), beat, strip_read_only, &colors);
         let list = Stack(children);
         let mut bands = match layout {
             ListLayout::Compact { .. } => vec![inflexible(strip), flexible(1, list)],
@@ -879,6 +932,9 @@ impl Actions {
     /// a query param. A card tap and the management sheet's own Attach row
     /// both land here.
     pub fn attach(&self, id: &str) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         self.app_nav.push(&terminal_location(id, None));
     }
@@ -887,6 +943,9 @@ impl Actions {
     /// The terminal honours that target once Phase 4's attach-into-pane card
     /// lands; until then it attaches at the session's server focus.
     pub fn attach_pane(&self, id: &str, tab: u32, pane: u32) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         self.app_nav.push(&terminal_location(id, Some((tab, pane))));
     }
@@ -898,6 +957,9 @@ impl Actions {
         let Some(location) = terminal_location_for_agent(id, agent) else {
             return;
         };
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         self.app_nav.push(&location);
     }
@@ -905,6 +967,9 @@ impl Actions {
     /// Open the create-session dialog (the dashed row and the empty state's
     /// action both land here).
     pub fn open_create_dialog(&self, connection: &Arc<ConnectionController>) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
         let available = connection
@@ -926,6 +991,9 @@ impl Actions {
     /// name — re-read from the controller rather than captured, so a sheet
     /// opened several frames ago can't seed a stale name.
     pub fn open_rename_dialog(&self, id: &str) {
+        if self.controller.is_offline() {
+            return;
+        }
         let Some(session) = self.controller.session(id) else {
             // List moved since paint (a poll landed between paint and tap)
             // — nothing to rename.
@@ -948,6 +1016,9 @@ impl Actions {
 
     /// Open the kill confirmation for `id`.
     pub fn open_kill_dialog(&self, id: &str) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
@@ -1004,6 +1075,9 @@ impl Actions {
     /// carries no buttons. `read_only` disables the Rename/Kill rows, never
     /// Attach — see [`widgets::sheet_body`] for the sheet's own layout.
     pub fn open_manage_sheet(&self, id: &str, read_only: bool) {
+        if self.controller.is_offline() {
+            return;
+        }
         let Some(session) = self.controller.session(id) else {
             return;
         };
