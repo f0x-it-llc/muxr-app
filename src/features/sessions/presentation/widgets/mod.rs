@@ -33,7 +33,7 @@ use crate::ui::palette::Palette;
 use super::pages::SessionsState;
 
 pub(crate) use server_strip::host_of;
-pub(crate) use switcher_fab::switcher_fab;
+pub(crate) use switcher_fab::{shell_responsive, switcher_fab};
 
 pub(in crate::features::sessions::presentation) use crate::ui::palette::active_theme;
 pub(in crate::features::sessions::presentation) use detail::detail_pane;

@@ -16,7 +16,7 @@ use crate::features::servers::di::{expect_servers_controller, expect_switcher_ba
 use crate::features::servers::domain::entities::FaceKind;
 use crate::features::servers::presentation::controller::{ServersSwitcherController, SwitchGate};
 use crate::features::servers::presentation::widgets::{bar::servers_bar, faces, label_row};
-use crate::features::sessions::presentation::widgets::switcher_fab;
+use crate::features::sessions::presentation::widgets::{shell_responsive, switcher_fab};
 use crate::features::terminal::presentation::pages::open_terminal_menu;
 use crate::routes::{
     BarAction, BarDirection, BarLeading, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
@@ -28,6 +28,11 @@ use crate::ui::topbar::{BACK_LABEL, bar_icon, brand_leading};
 const SETTINGS_LABEL: &str = "Settings";
 /// The card's scale at full open on a phone (the tablet card sets 0.58).
 const PHONE_CARD_SCALE: f64 = 0.62;
+/// The card's scale at full open on the Tablet class (the design's value).
+const TABLET_CARD_SCALE: f64 = 0.58;
+/// The FAB's inset from the window's edges on the Tablet class; the
+/// scaffold's default (16 px) is the Compact parity.
+const TABLET_FAB_MARGIN: f64 = 24.0;
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 
 /// The overlay host's root page: the outer navigator, and `overlay` (the
@@ -65,6 +70,7 @@ pub(crate) fn shell_page(
     connection: &ConnectionController,
 ) -> AnyView<AppState> // erasure: one return type for the host-wrapped shell
 {
+    let rule = shell_responsive();
     let nav = app_nav();
     let switcher = expect_servers_controller();
     // The stage never outlives `/sessions`: the FAB is the only way up, and
@@ -80,9 +86,21 @@ pub(crate) fn shell_page(
     }
     let mut scaffold = frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar);
     if nav.on_sessions() {
+        // The detail pane is the right-hand pane, so the window's bottom-right
+        // corner (the scaffold's own placement) is the detail pane's.
         scaffold = scaffold.fab(switcher_fab(&switcher));
+        if rule.is_tablet() {
+            scaffold = scaffold.fab_margin(TABLET_FAB_MARGIN);
+        }
     }
-    any(switcher_host(&switcher, overlays, &nav, scaffold))
+    let card_scale = if rule.is_tablet() {
+        TABLET_CARD_SCALE
+    } else {
+        PHONE_CARD_SCALE
+    };
+    any(switcher_host(
+        &switcher, overlays, &nav, card_scale, scaffold,
+    ))
 }
 
 /// The whole shell page (bar included) as the live card of the server
@@ -96,6 +114,7 @@ fn switcher_host(
     switcher: &Arc<ServersSwitcherController>,
     overlays: &NavigatorController<AppState>,
     nav: &Nav,
+    card_scale: f64,
     page: impl View<AppState>,
 ) -> impl View<AppState> {
     let theme = active_theme();
@@ -154,7 +173,7 @@ fn switcher_host(
         .on_close(on_close)
         .action_bar(bar)
         .expanding(switcher.expanding.get())
-        .card_scale(PHONE_CARD_SCALE)
+        .card_scale(card_scale)
         // Wired per the component contract. It is NOT the back path in this
         // shell: the shell's `DismissAnimated` page outranks a `BackFallback`,
         // so the press reaches Sessions' dismiss consumer, which closes the

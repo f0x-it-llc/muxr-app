@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, WindowMetrics,
-    any, navigator, provide_context,
+    any, navigator, provide_context, spawn_local,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
@@ -37,7 +37,13 @@ use kurbo::{Point, Size};
 use muxr::agents::{AgentStatus, AgentSummary};
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
+use muxr::features::connect::di::{expect_keyring, expect_saved_servers};
+use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::connect::domain::keyring::Keyring;
+use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
+use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::expect_servers_controller;
+use muxr::features::servers::presentation::controller::{SwitchGate, peer_endpoints};
 use muxr::features::sessions::data::repositories::mock_sessions_repository::{
     MockSessionsRepository, SEEDED_DEV_ID, SEEDED_HERDR_ID,
 };
@@ -55,7 +61,7 @@ use muxr::features::settings::data::repositories::MockPreferencesRepository;
 use muxr::features::settings::di::SharedPreferencesRepository;
 use muxr::features::settings::domain::entities::{AppearancePrefs, PollPrefs, Preferences};
 use muxr::features::settings::domain::repositories::PreferencesRepository;
-use muxr::routes::install_app_router;
+use muxr::routes::{app_nav, install_app_router};
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -2845,4 +2851,279 @@ fn the_poll_pauses_while_the_switcher_stage_is_open_and_resumes_on_close() {
 
     switcher.close();
     h.pump_until("the poll to resume", |_| repo.calls() > held);
+}
+
+// ---------------------------------------------------------------------------
+// 13 — The server switcher on Tablet: the FAB's corner and the card scale
+// ---------------------------------------------------------------------------
+
+/// The Tablet FAB's inset from the window edge, and the Compact one.
+const TABLET_FAB_INSET: f64 = 24.0;
+const COMPACT_FAB_INSET: f64 = 16.0;
+/// The switcher card's scale at full open on a Tablet window / a phone.
+const TABLET_CARD_SCALE: f64 = 0.58;
+const PHONE_CARD_SCALE: f64 = 0.62;
+/// `.s-side{width:300px}` and the collapsed band's 240px, transcribed.
+const FULL_SIDE_WIDTH: f64 = 300.0;
+const COLLAPSED_SIDE_WIDTH: f64 = 240.0;
+const SERVERS_FAB: &str = "Servers";
+const SAVED_HOST: &str = "saved.example";
+const SAVED_ENDPOINT: &str = "saved.example:50051";
+
+/// The whole app (shell, bar, FAB, switcher host) at `size`, on `/sessions`.
+struct Shell {
+    root: RenderRoot<AppState, AnyView<AppState>>,
+    logic: Logic,
+    state: AppState,
+    tcx: TextContext,
+    surface: Size,
+}
+
+impl Shell {
+    fn mount(size: Size) -> Shell {
+        // The splash plays once per process: spend that claim on a throwaway.
+        static SPENT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        SPENT.get_or_init(|| {
+            let mut throwaway = MuxrApp.init();
+            let _ = MuxrApp.build(&mut throwaway);
+        });
+        provide_context(support::metrics_at(size.width, size.height));
+        let mut shell = Shell {
+            root: RenderRoot::new(),
+            logic: Box::new(|state: &mut AppState| AnyView::new(MuxrApp.build(state))),
+            state: MuxrApp.init(),
+            tcx: TextContext::new(),
+            surface: size,
+        };
+        shell.settle();
+        expect_connection_controller().connect(mock_target(false));
+        app_nav().push("/sessions");
+        shell.settle();
+        shell.pump_until("the seeded sessions", |s| s.shows_seeded());
+        shell.settle();
+        shell
+    }
+
+    fn shows_seeded(&self) -> bool {
+        let values = node_values(&self.root);
+        SEEDED.iter().all(|name| values.iter().any(|v| v == name))
+    }
+
+    fn settle(&mut self) -> RecScene {
+        settle_sized(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            self.surface,
+        )
+    }
+
+    fn pump_until(&mut self, what: &str, done: impl Fn(&Shell) -> bool) {
+        let deadline = Instant::now() + PUMP_DEADLINE;
+        while !done(self) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            pump_frames(
+                &mut self.root,
+                &mut self.logic,
+                &mut self.state,
+                &mut self.tcx,
+                1,
+            );
+            self.settle();
+        }
+    }
+
+    /// The first node labelled `label`'s on-screen bounds.
+    fn bounds(&self, label: &str) -> frust::accesskit::Rect {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .and_then(|(_, node)| node.bounds())
+            .unwrap_or_else(|| panic!("no bounds for {label:?}"))
+    }
+
+    /// Raise the stage and run a real clock past its motion.
+    fn open_stage(&mut self) -> RecScene {
+        expect_servers_controller().open();
+        let mut scene = RecScene::default();
+        for step in 1..=240 {
+            scene = frame_at_sized(
+                &mut self.root,
+                &mut self.logic,
+                &mut self.state,
+                &mut self.tcx,
+                self.surface,
+                support::ms(support::SETTLE_MS + f64::from(step) * 16.0),
+            );
+        }
+        scene
+    }
+}
+
+fn assert_fab_corner(shell: &Shell, size: Size, inset: f64) {
+    let fab = shell.bounds(SERVERS_FAB);
+    assert!(
+        (size.width - fab.x1 - inset).abs() < EPSILON,
+        "right inset {} != {inset}: {fab:?}",
+        size.width - fab.x1
+    );
+    assert!(
+        (size.height - fab.y1 - inset).abs() < EPSILON,
+        "bottom inset {} != {inset}: {fab:?}",
+        size.height - fab.y1
+    );
+}
+
+#[test]
+fn the_tablet_fab_sits_in_the_detail_panes_corner_at_24px() {
+    let _g = serial();
+    let _ambient = setup();
+    let shell = Shell::mount(FULL_TABLET);
+    assert_fab_corner(&shell, FULL_TABLET, TABLET_FAB_INSET);
+    assert!(
+        shell.bounds(SERVERS_FAB).x0 > FULL_SIDE_WIDTH,
+        "right of the list column, over the detail pane"
+    );
+}
+
+#[test]
+fn the_collapsed_tablet_fab_sits_in_the_same_corner_clear_of_the_list_column() {
+    let _g = serial();
+    let _ambient = setup();
+    let shell = Shell::mount(COLLAPSED_TABLET);
+    assert_fab_corner(&shell, COLLAPSED_TABLET, TABLET_FAB_INSET);
+    assert!(shell.bounds(SERVERS_FAB).x0 > COLLAPSED_SIDE_WIDTH);
+}
+
+#[test]
+fn the_phone_fab_keeps_the_compact_16px_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let shell = Shell::mount(PHONE);
+    assert_fab_corner(&shell, PHONE, COMPACT_FAB_INSET);
+}
+
+/// Every uniform scale the scene pushes a transform for.
+fn scales(scene: &RecScene) -> Vec<f64> {
+    scene
+        .transforms
+        .iter()
+        .map(|t| t.as_coeffs())
+        .filter(|c| (c[0] - c[3]).abs() < 1e-9)
+        .map(|c| c[0])
+        .collect()
+}
+
+/// Whether `scene` pushed a uniform scale of `wanted` (the card's).
+fn paints_scale(scene: &RecScene, wanted: f64) -> bool {
+    scales(scene).iter().any(|s| (s - wanted).abs() < 0.005)
+}
+
+/// Mount at `size`, raise the stage, and say which of the two card scales the
+/// settled open frame paints (and that the closed page painted neither).
+fn open_card_scales(size: Size) -> (bool, bool) {
+    let mut shell = Shell::mount(size);
+    let closed = shell.settle();
+    assert!(
+        !paints_scale(&closed, TABLET_CARD_SCALE) && !paints_scale(&closed, PHONE_CARD_SCALE),
+        "the closed page paints at full size: {:?}",
+        scales(&closed)
+    );
+    let open = shell.open_stage();
+    (
+        paints_scale(&open, TABLET_CARD_SCALE),
+        paints_scale(&open, PHONE_CARD_SCALE),
+    )
+}
+
+#[test]
+fn opening_the_switcher_on_a_full_tablet_scales_the_whole_page_to_0_58() {
+    let _g = serial();
+    let _ambient = setup();
+    assert_eq!(open_card_scales(FULL_TABLET), (true, false));
+}
+
+#[test]
+fn opening_the_switcher_on_a_collapsed_tablet_scales_the_whole_page_to_0_58() {
+    let _g = serial();
+    let _ambient = setup();
+    assert_eq!(open_card_scales(COLLAPSED_TABLET), (true, false));
+}
+
+#[test]
+fn opening_the_switcher_on_a_phone_keeps_the_0_62_scale() {
+    let _g = serial();
+    let _ambient = setup();
+    assert_eq!(open_card_scales(PHONE), (false, true));
+}
+
+fn select_a_peer_at(size: Size) {
+    let mut shell = Shell::mount(size);
+    mock_entitlement()
+        .expect("tests/support opted this process into the mock")
+        .set_entitlement(Entitlement::Pro);
+    let pro = expect_pro_controller();
+    let refreshing = Arc::clone(&pro);
+    spawn_local(async move { refreshing.refresh().await });
+    shell.pump_until("pro", |_| pro.is_pro_untracked());
+    expect_saved_servers()
+        .save(SavedServer {
+            host: SAVED_HOST.to_string(),
+            port: 50051,
+            trust_mode: TrustMode::System,
+            label: "Saved rig".to_string(),
+            last_used_ms: epoch_millis(),
+            read_only: false,
+            has_credential: true,
+            token_name: None,
+            fingerprint: None,
+        })
+        .expect("the mock store never fails");
+    let mut keyring = Keyring::new();
+    keyring.insert(
+        SAVED_ENDPOINT,
+        zeroize::Zeroizing::new("s3cr3t".to_string()),
+    );
+    expect_keyring().publish(keyring);
+    shell.open_stage();
+
+    let switcher = expect_servers_controller();
+    let peer = peer_endpoints(&switcher.faces.get_untracked())
+        .iter()
+        .position(|e| e == SAVED_ENDPOINT)
+        .expect("the saved row is a peer card");
+    let gate = SwitchGate::standard(&shell.state.overlays, &pro, &app_nav());
+    switcher.select(peer, &gate);
+    shell.pump_until("the switch to land", |_| {
+        !switcher.open.get_untracked()
+            && expect_connection_controller()
+                .server_info
+                .get_untracked()
+                .is_some_and(|info| info.endpoint == SAVED_ENDPOINT)
+    });
+    shell.pump_until("the new server's list", |s| s.shows_seeded());
+    assert_fab_corner(&shell, size, TABLET_FAB_INSET);
+    assert!(
+        node_labels(&shell.root)
+            .iter()
+            .any(|l| l == "Select a session"),
+        "{size:?}: the master-detail is up with nothing selected"
+    );
+}
+
+#[test]
+fn selecting_a_peer_on_a_full_tablet_lands_on_the_new_servers_master_detail() {
+    let _g = serial();
+    let _ambient = setup();
+    select_a_peer_at(FULL_TABLET);
+}
+
+#[test]
+fn selecting_a_peer_on_a_collapsed_tablet_lands_on_the_new_servers_master_detail() {
+    let _g = serial();
+    let _ambient = setup();
+    select_a_peer_at(COLLAPSED_TABLET);
 }

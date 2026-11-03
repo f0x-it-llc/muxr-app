@@ -8,10 +8,11 @@
 
 use std::sync::Arc;
 
-use frust::IconSource;
+use frust::{IconSource, WindowMetrics, use_context};
 use frust_glyph::{FabView, fab};
 
 use crate::features::servers::presentation::controller::ServersSwitcherController;
+use crate::responsive::Responsive;
 
 /// The FAB's accessible name (a Button node with this name).
 pub const SWITCHER_FAB_LABEL: &str = "Servers";
@@ -26,4 +27,12 @@ const STACK_MARK: IconSource = IconSource {
 pub fn switcher_fab<S: 'static>(switcher: &Arc<ServersSwitcherController>) -> FabView<S> {
     let switcher = Arc::clone(switcher);
     fab(STACK_MARK, move |_state: &mut S| switcher.open()).tooltip(SWITCHER_FAB_LABEL)
+}
+
+/// The window's responsive rule for the shell page, read once per
+/// `shell_page` build (which rebuilds on resize). The lookup lives here, in a
+/// presentation file, because the layering tripwire sanctions context reads
+/// only there; the shell passes the value down and never reads per widget.
+pub fn shell_responsive() -> Responsive {
+    Responsive::of(use_context::<WindowMetrics>())
 }
