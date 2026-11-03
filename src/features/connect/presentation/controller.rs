@@ -49,10 +49,6 @@ pub enum ConnectRetry {
     Keyring,
 }
 
-/// Raised by the dock's unlock before it dials a [`TrustMode::NoVerification`]
-/// row: the screen confirms, and `on_confirm` dials. Lent per call.
-pub type ConfirmPrompt = Rc<dyn Fn(SavedServer, Box<dyn FnOnce()>)>;
-
 /// The dock copy after re-enrollment made the vault unreadable and it was reset.
 pub const VAULT_RESET_MESSAGE: &str =
     "Biometrics changed — saved credentials were reset. Connect again with a token.";
@@ -461,15 +457,6 @@ impl ConnectController {
         } else {
             self.prefill(&server);
         }
-    }
-
-    /// The row at `index`, if a tap must confirm before unlocking: a stored
-    /// credential under [`TrustMode::NoVerification`] would replay a real secret
-    /// over an unauthenticated channel. Predicate only — the dialog itself
-    /// belongs to the screen.
-    pub fn saved_row_needs_confirmation(&self, index: usize) -> Option<SavedServer> {
-        let server = self.saved_row(index)?;
-        (server.has_credential && server.trust_mode == TrustMode::NoVerification).then_some(server)
     }
 
     /// Whether a dial is in flight (the connection controller's own signal, not
@@ -1052,12 +1039,7 @@ impl ConnectController {
     /// (a block raises `gate_prompt` and no biometric prompt), then one
     /// `unlock_all` prompt, the keyring published, and that row dialed with
     /// its token. Single-flight on [`Self::unlocking`].
-    pub fn unlock_keyring_and_connect(
-        self: &Arc<Self>,
-        nav: &Nav,
-        gate_prompt: GatePrompt,
-        confirm: ConfirmPrompt,
-    ) {
+    pub fn unlock_keyring_and_connect(self: &Arc<Self>, nav: &Nav, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
         }
@@ -1078,9 +1060,7 @@ impl ConnectController {
         let controller = Arc::clone(self);
         let nav = nav.clone();
         spawn_local(async move {
-            controller
-                .unlock_all_then_connect(target, nav, confirm)
-                .await;
+            controller.unlock_all_then_connect(target, nav).await;
         });
     }
 
@@ -1090,12 +1070,7 @@ impl ConnectController {
     /// authentication); every other refusal fails the dock and toasts. The
     /// target dials only if, re-read after the unlock, it still claims a
     /// credential the keyring holds.
-    async fn unlock_all_then_connect(
-        self: &Arc<Self>,
-        target: SavedServer,
-        nav: Nav,
-        confirm: ConfirmPrompt,
-    ) {
+    async fn unlock_all_then_connect(self: &Arc<Self>, target: SavedServer, nav: Nav) {
         let unreadable = match self.keyring_unlock.unlock().await {
             KeyringUnlockOutcome::Unlocked { unreadable } => unreadable,
             KeyringUnlockOutcome::Refused(CredentialStatus::Canceled)
@@ -1142,16 +1117,7 @@ impl ConnectController {
             self.prefill(&target);
             return;
         };
-        if target.trust_mode != TrustMode::NoVerification {
-            self.connect_recovered(&target, token, &nav);
-            return;
-        }
-        let controller = Arc::clone(self);
-        let server = target.clone();
-        confirm(
-            target,
-            Box::new(move || controller.connect_recovered(&server, token, &nav)),
-        );
+        self.connect_recovered(&target, token, &nav);
     }
 
     /// Fails the dock with `status`'s message and toasts it, as every flow does.

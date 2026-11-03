@@ -50,13 +50,11 @@ use clean_signals::{ControllerCore, NoParams, RunOptions};
 use frust::{GetUntracked, RwSignal, Set, spawn_local};
 use zeroize::Zeroizing;
 
-use crate::connection::{ConnectionController, TrustMode};
+use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
 use crate::features::connect::domain::entities::{CredentialStatus, SavedServer};
-use crate::features::connect::presentation::controller::{
-    ConfirmPrompt, SAVED_LIST_UNAVAILABLE_MESSAGE,
-};
+use crate::features::connect::presentation::controller::SAVED_LIST_UNAVAILABLE_MESSAGE;
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences,
@@ -321,18 +319,11 @@ impl SettingsController {
     /// Move the live connection to the saved server at `endpoint` with its
     /// stored token, then run `on_switched`. Unlocked, the token comes
     /// straight off the keyring; locked, one `unlock_all` prompt publishes
-    /// it first (a refusal toasts; a cancel is silent). A
-    /// [`TrustMode::NoVerification`] row asks `confirm` before its token is
-    /// sent. The free-tier verdict is the caller's, ahead of this. Ignored
+    /// it first (a refusal toasts; a cancel is silent). The free-tier verdict is the caller's, ahead of this. Ignored
     /// while a switch's unlock is already in flight. A row that no longer
     /// claims a credential is never dialed with a keyring token: the list is
     /// re-read so the next tap opens the add page instead.
-    pub fn switch_server(
-        self: &Arc<Self>,
-        endpoint: String,
-        confirm: ConfirmPrompt,
-        on_switched: Box<dyn FnOnce()>,
-    ) {
+    pub fn switch_server(self: &Arc<Self>, endpoint: String, on_switched: Box<dyn FnOnce()>) {
         if self.switching.get_untracked() {
             return;
         }
@@ -342,7 +333,7 @@ impl SettingsController {
             return;
         }
         if self.keyring().is_unlocked() {
-            self.dial_saved(&endpoint, confirm, on_switched);
+            self.dial_saved(&endpoint, on_switched);
             return;
         }
         self.switching.set(true);
@@ -353,7 +344,7 @@ impl SettingsController {
             controller.refresh_saved_servers();
             match outcome {
                 KeyringUnlockOutcome::Unlocked { .. } => {
-                    controller.dial_saved(&endpoint, confirm, on_switched);
+                    controller.dial_saved(&endpoint, on_switched);
                 }
                 KeyringUnlockOutcome::Refused(status) => report(status),
                 KeyringUnlockOutcome::ListUnavailable => {
@@ -372,12 +363,7 @@ impl SettingsController {
 
     /// [`Self::switch_server`]'s dial, the keyring already open: the row is
     /// re-read, and dials only while it claims a credential the keyring holds.
-    fn dial_saved(
-        self: &Arc<Self>,
-        endpoint: &str,
-        confirm: ConfirmPrompt,
-        on_switched: Box<dyn FnOnce()>,
-    ) {
+    fn dial_saved(self: &Arc<Self>, endpoint: &str, on_switched: Box<dyn FnOnce()>) {
         let found = self
             .saved_row(endpoint)
             .filter(|server| server.has_credential)
@@ -387,16 +373,7 @@ impl SettingsController {
             report(CredentialStatus::NotFound);
             return;
         };
-        if server.trust_mode != TrustMode::NoVerification {
-            self.switch_now(&server, token, on_switched);
-            return;
-        }
-        let controller = Arc::clone(self);
-        let row = server.clone();
-        confirm(
-            server,
-            Box::new(move || controller.switch_now(&row, token, on_switched)),
-        );
+        self.switch_now(&server, token, on_switched);
     }
 
     fn switch_now(

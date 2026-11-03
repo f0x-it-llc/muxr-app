@@ -3275,7 +3275,7 @@ fn mount_with_gated_row(trust_mode: TrustMode) -> Harness {
 }
 
 #[test]
-fn a_no_verification_saved_row_gates_behind_a_confirmation_before_any_unlock() {
+fn a_no_verification_saved_row_tap_unlocks_and_connects_with_no_confirm() {
     let _g = serial();
     let _ambient = setup();
     let mut harness = mount_with_gated_row(TrustMode::NoVerification);
@@ -3285,74 +3285,11 @@ fn a_no_verification_saved_row_gates_behind_a_confirmation_before_any_unlock() {
     harness.tap_node("the no-verification saved row", |node| {
         node.value() == Some(CRED_ENDPOINT)
     });
-
     assert_eq!(
         harness.nav.depth(),
-        before + 1,
-        "the confirm dialog is pushed as its own page, ahead of any unlock"
+        before,
+        "no confirm dialog is pushed: choosing trust-anyway when saving was the consent"
     );
-    assert_eq!(
-        credentials.prompts().len(),
-        0,
-        "the biometric prompt must not fire until the dialog is confirmed"
-    );
-    assert!(
-        !expect_connection_controller().connected.get_untracked(),
-        "nothing has connected yet"
-    );
-}
-
-#[test]
-fn canceling_the_no_verification_gate_fires_no_prompt_and_leaves_the_form_untouched() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
-    let credentials = mock_credentials().expect("the mock service is published");
-    let before = harness.nav.depth();
-
-    harness.tap_node("the no-verification saved row", |node| {
-        node.value() == Some(CRED_ENDPOINT)
-    });
-    // A scrim tap is `confirm_dialog`'s cancel route: it pops with an empty
-    // result, which reads as "cancelled" (see `ui::dialogs`' module docs), so
-    // `ConnectController::recover_and_connect` is never called at all.
-    harness.tap(SCRIM_POINT);
-    harness.settle();
-
-    assert_eq!(harness.nav.depth(), before, "the dialog closed");
-    assert_eq!(
-        credentials.prompts().len(),
-        0,
-        "a canceled gate must never raise the biometric prompt — the whole \
-         point of gating before the unlock rather than after it"
-    );
-    assert!(
-        !expect_connection_controller().connected.get_untracked(),
-        "nothing connected"
-    );
-    assert_eq!(
-        harness.field_values().first().map(String::as_str),
-        Some(""),
-        "cancel backs out silently: the manual form is untouched, not prefilled"
-    );
-}
-
-#[test]
-fn confirming_the_no_verification_gate_unlocks_and_connects() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
-    let credentials = mock_credentials().expect("the mock service is published");
-    let before = harness.nav.depth();
-
-    harness.tap_node("the no-verification saved row", |node| {
-        node.value() == Some(CRED_ENDPOINT)
-    });
-    assert_eq!(harness.nav.depth(), before + 1, "the confirm dialog opened");
-
-    harness.tap_node("the dialog's confirm action", |node| {
-        node.role() == Role::Button && node.label() == Some("Connect anyway")
-    });
     pump_until_done("the recovered connect", || {
         expect_connection_controller().connected.get_untracked()
     });
@@ -3361,8 +3298,7 @@ fn confirming_the_no_verification_gate_unlocks_and_connects() {
     assert_eq!(
         credentials.prompts().len(),
         1,
-        "confirming raised exactly one biometric prompt — the same mock \
-         semantics as an ungated row"
+        "exactly one biometric prompt, the same as any other saved row"
     );
     assert!(harness.nav.depth() > before, "…and landed on /sessions");
 }
@@ -5267,7 +5203,6 @@ const DOCK_TOKEN_B: &str = "dock-s3cr3t-b";
 /// The dock's face and its prompt's reason, for two rows — transcribed.
 const UNLOCK_TWO: &str = "Unlock 2 servers";
 const UNVERIFIED_TITLE: &str = "Connect without verification?";
-const UNVERIFIED_CONFIRM: &str = "Connect anyway";
 const TRY_AGAIN: &str = "Try again";
 const RESET_ACTION: &str = "Reset saved credentials";
 const RESET_TITLE: &str = "Reset saved credentials?";
@@ -5359,13 +5294,11 @@ fn keyring_fixture(rows: Vec<SavedServer>, keyring: &KeyringHandle) -> Creds {
     }
 }
 
-/// The dock's press at controller level, with no confirm expected.
+/// The dock's press at controller level.
 fn unlock_through_the_dock(creds: &Creds) {
-    creds.controller.unlock_keyring_and_connect(
-        &app_nav(),
-        ungated(),
-        Rc::new(|_server, _dial| panic!("no row here needs the no-verification confirm")),
-    );
+    creds
+        .controller
+        .unlock_keyring_and_connect(&app_nav(), ungated());
 }
 
 #[test]
@@ -5492,7 +5425,7 @@ fn a_canceled_dock_unlock_is_silent_and_leaves_the_dock_idle() {
 }
 
 #[test]
-fn a_no_verification_target_asks_once_after_the_unlock_and_dials_on_confirm() {
+fn a_no_verification_target_connects_after_the_unlock_with_no_confirm() {
     let _g = serial();
     let _ambient = setup();
     let _bio = Biometrics::available();
@@ -5503,18 +5436,16 @@ fn a_no_verification_target_asks_once_after_the_unlock_and_dials_on_confirm() {
     );
 
     harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
-    harness.pump_until("the confirm", |harness| {
-        shows_text(harness, UNVERIFIED_TITLE)
-    });
-    assert_eq!(dock_credentials().prompts().len(), 1);
-    assert!(!connected(), "nothing dials before the confirm");
+    harness.pump_until("the connect", |_| connected());
 
-    harness.tap_node("the confirm", button_labelled(UNVERIFIED_CONFIRM));
-    harness.pump_until("the confirmed connect", |_| connected());
+    assert!(
+        !shows_text(&harness, UNVERIFIED_TITLE),
+        "no confirm was raised"
+    );
     assert_eq!(
         dock_credentials().prompts().len(),
         1,
-        "asked once, prompted once"
+        "one unlock prompt, nothing else"
     );
 }
 

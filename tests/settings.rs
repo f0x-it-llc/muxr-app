@@ -54,7 +54,6 @@ use muxr::features::connect::domain::entities::{
 };
 use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::domain::repositories::CredentialService;
-use muxr::features::connect::presentation::controller::ConfirmPrompt;
 use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
 use muxr::features::pro::di::{
@@ -1721,6 +1720,61 @@ fn tapping_a_saved_row_with_the_keyring_unlocked_switches_to_it_without_a_prompt
         node_values(&h.root).iter().any(|v| v == CONNECTED_CHIP),
         "the switched-to row now wears the connected chip: {:?}",
         node_values(&h.root)
+    );
+}
+
+/// Re-save [`credential_row`] as a trust-anyway row: choosing "Trust anyway"
+/// when it was added is the consent, so no switch path asks again.
+fn make_credential_row_unverified() {
+    let mut row = credential_row(true);
+    row.trust_mode = TrustMode::NoVerification;
+    expect_saved_servers()
+        .save(row)
+        .expect("the mock store never fails");
+}
+
+const RETIRED_UNVERIFIED_TITLE: &str = "Connect without verification?";
+
+#[test]
+fn a_saved_unverified_row_switches_unlocked_with_no_confirm_and_no_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, true);
+    make_credential_row_unverified();
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    h.tap_value(CRED_LABEL);
+    h.pump_once();
+
+    assert_eq!(connected_endpoint().as_deref(), Some(CRED_ENDPOINT));
+    assert!(credentials.prompts().is_empty(), "no biometric prompt");
+    assert!(
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v == RETIRED_UNVERIFIED_TITLE),
+        "no confirm overlay"
+    );
+}
+
+#[test]
+fn a_saved_unverified_row_switches_locked_with_exactly_one_prompt_and_no_confirm() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(false, true);
+    make_credential_row_unverified();
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    h.tap_value(CRED_LABEL);
+    pump_until(&mut h, "the switch to land", || {
+        connected_endpoint().as_deref() == Some(CRED_ENDPOINT)
+    });
+
+    assert_eq!(credentials.prompts().len(), 1, "one keyring prompt only");
+    assert!(
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v == RETIRED_UNVERIFIED_TITLE),
+        "no confirm overlay"
     );
 }
 
@@ -3728,10 +3782,6 @@ fn pump_runtime(rounds: usize) {
     }
 }
 
-fn never_confirm() -> ConfirmPrompt {
-    Rc::new(|_server, _dial| panic!("a System-trust row never asks to confirm"))
-}
-
 #[test]
 fn a_lock_and_disconnect_during_a_pending_switch_unlock_dials_nothing() {
     let _g = serial();
@@ -3743,7 +3793,6 @@ fn a_lock_and_disconnect_during_a_pending_switch_unlock_dials_nothing() {
     let landed = Rc::clone(&switched);
     controller.switch_server(
         CRED_ENDPOINT.to_string(),
-        never_confirm(),
         Box::new(move || landed.set(true)),
     );
     let deadline = Instant::now() + PUMP_DEADLINE;
@@ -3784,7 +3833,7 @@ fn a_settings_tap_while_a_dock_unlock_is_in_flight_raises_no_prompt() {
     let (controller, keyring, credentials, prompt) = held_switch_rig();
     let dock_ticket = keyring.begin_unlock().expect("nothing in flight yet");
 
-    controller.switch_server(CRED_ENDPOINT.to_string(), never_confirm(), Box::new(|| {}));
+    controller.switch_server(CRED_ENDPOINT.to_string(), Box::new(|| {}));
     pump_runtime(20);
 
     assert!(
