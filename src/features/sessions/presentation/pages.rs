@@ -24,7 +24,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
@@ -41,7 +41,7 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{KeyringHandle, expect_keyring};
-use crate::features::servers::di::use_servers_controller;
+use crate::features::servers::di::{stage_settled, use_servers_controller};
 use crate::features::servers::presentation::controller::ServersSwitcherController;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
@@ -99,6 +99,25 @@ const LOADING_RAIN_SEED: u64 = 0x6D75_7872;
 
 /// The list band's loading rain, on by default (see [`set_loading_rain_for_tests`]).
 static LOADING_RAIN: AtomicBool = AtomicBool::new(true);
+
+/// How often a deferred rain arm re-checks that the switcher stage has settled.
+const RAIN_SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// How many deferred rain arms have fired in this process (a test seam).
+static RAIN_ARMS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of deferred rain arms fired so far; tests compare deltas.
+pub fn deferred_rain_arms_for_tests() -> usize {
+    RAIN_ARMS.load(Ordering::SeqCst)
+}
+
+/// How many builds have carried the rain overlay in this process (a test seam).
+static RAIN_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of builds that carried the rain overlay so far; tests compare deltas.
+pub fn rain_overlay_builds_for_tests() -> usize {
+    RAIN_BUILDS.load(Ordering::SeqCst)
+}
 
 /// Opts the process out of the loading rain for its remaining life — every
 /// page-level suite taps under a pinned frame clock an overlay never advances.
@@ -168,6 +187,11 @@ pub struct SessionsState {
     /// Sticky: whether this mount has ever seen the connection up. Told apart
     /// from a first connect, which the load `init` already issued serves.
     has_connected: bool,
+    /// Generation of the deferred rain arm: every restart bumps it, so a stale
+    /// arm task finds itself superseded and does nothing.
+    rain_generation: Arc<AtomicU64>,
+    /// Cleared when the screen unmounts, ending any pending arm task.
+    alive: Arc<AtomicBool>,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -275,6 +299,36 @@ pub async fn resolve_poll_interval(preferences: &SharedPreferencesRepository) ->
         .map(|prefs| prefs.poll.layout_refresh_secs)
         .unwrap_or(POLL_PERIOD_SECS);
     Duration::from_secs(u64::from(secs))
+}
+
+/// Arms the loading rain once the switcher stage has settled, provided the
+/// restarted first load has not settled by then and no later restart or unmount
+/// superseded this `generation`. Handles are resolved here, not in the task.
+fn spawn_deferred_rain(state: &SessionsState, generation: u64) {
+    let current = Arc::clone(&state.rain_generation);
+    let alive = Arc::clone(&state.alive);
+    let switcher = state.switcher.clone();
+    let first_load_settled = state.actions.controller.first_load_settled;
+    let loading_done = state.loading_done;
+    let fenced =
+        move || !alive.load(Ordering::SeqCst) || current.load(Ordering::SeqCst) != generation;
+    spawn_local(async move {
+        loop {
+            clean_signals::time::sleep(RAIN_SETTLE_POLL).await;
+            if fenced() {
+                return;
+            }
+            let open = switcher.as_ref().is_some_and(|s| s.open.get_untracked());
+            if !open && stage_settled() {
+                break;
+            }
+        }
+        if first_load_settled.get_untracked() {
+            return;
+        }
+        RAIN_ARMS.fetch_add(1, Ordering::SeqCst);
+        loading_done.set(false);
+    });
 }
 
 /// Starts a self-rescheduling loop running `tick` forever, re-resolving
@@ -446,6 +500,9 @@ impl Component for SessionsScreen {
         let rain = LOADING_RAIN.load(Ordering::Relaxed);
         let connection_epoch = connection.connection_epoch.get_untracked();
         let seen_connected = connection.connected.get_untracked();
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_flag = Arc::clone(&alive);
+        on_cleanup(move || alive_flag.store(false, Ordering::SeqCst));
 
         SessionsState {
             actions: Actions {
@@ -464,6 +521,8 @@ impl Component for SessionsScreen {
             rain,
             seen_epoch: connection_epoch,
             has_connected: seen_connected,
+            rain_generation: Arc::new(AtomicU64::new(0)),
+            alive,
         }
     }
 
@@ -505,8 +564,18 @@ impl Component for SessionsScreen {
             state.seen_epoch = epoch;
             if connected && switched {
                 state.loading_snapshot = None;
-                state.loading_done.set(!state.rain);
-                state.actions.controller.restart();
+                let generation = state.rain_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                if state.rain && !stage_settled() {
+                    // The switcher stage is still animating: the rain's
+                    // offscreen layers must not nest inside it. Stay plain and
+                    // arm the rain once the stage settles.
+                    state.loading_done.set(true);
+                    state.actions.controller.restart();
+                    spawn_deferred_rain(state, generation);
+                } else {
+                    state.loading_done.set(!state.rain);
+                    state.actions.controller.restart();
+                }
             }
         }
         state.has_connected |= connected;
@@ -569,6 +638,7 @@ impl Component for SessionsScreen {
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
         let mut children = vec![any(live_scroller)]; // erasure: keep accumulator into Vec<AnyView>
         if !loading_done {
+            RAIN_BUILDS.fetch_add(1, Ordering::SeqCst);
             let (overlay_pieces, stale) = if settled {
                 let frozen = state
                     .loading_snapshot
