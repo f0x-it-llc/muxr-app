@@ -583,3 +583,27 @@ pub fn named_key(key: NamedKey) -> InputEvent {
         repeat: false,
     })
 }
+
+/// The card switcher's on-screen gap between neighbouring cards (`frust-widgets`'s `GAP`,
+/// private there — transcribed).
+pub const STRIP_GAP: f64 = 16.0;
+
+/// Where strip card `card` sits on a settled-open stage over a `window`-sized page when strip
+/// card `centred` is in the middle: each card is the window at `card_scale` about its own
+/// centre, `window.width × card_scale + `[`STRIP_GAP`] apart. Strip order is the live page
+/// first, then the peers, in the order `ServersSwitcherController::faces` lists them.
+pub fn strip_card_rect(window: Size, card_scale: f64, card: usize, centred: usize) -> Rect {
+    let stride = window.width * card_scale + STRIP_GAP;
+    let centre = Point::new(
+        window.width / 2.0 + (card as f64 - centred as f64) * stride,
+        window.height / 2.0,
+    );
+    Rect::from_center_size(centre, window * card_scale)
+}
+
+/// The centre of the part of `rect` that is on screen — where a tap must land on a card that
+/// hangs off the window edge. `None` when none of it is.
+pub fn on_screen_centre(rect: Rect, window: Size) -> Option<Point> {
+    let visible = rect.intersect(Rect::from_origin_size(Point::ZERO, window));
+    (visible.width() > 0.0 && visible.height() > 0.0).then(|| visible.center())
+}

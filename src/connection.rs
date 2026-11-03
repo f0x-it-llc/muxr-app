@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
@@ -216,11 +216,15 @@ const MOCK_SERVER_VERSION: &str = "zellij 0.44.3";
 const MOCK_ZELLIJ_VERSION: &str = "0.44.3";
 
 /// The in-memory backend: derives a [`ServerInfo`] from the target and answers
-/// on the spot. Never fails, and never touches a socket.
+/// on the spot. Never touches a socket, and fails only when a test scripted it
+/// to ([`fail_next_mock_dials_for_tests`]).
 pub struct MockConnectionBackend;
 
 impl ConnectionBackend for MockConnectionBackend {
     fn begin_connect(&self, target: ConnectTarget) -> ConnectRun {
+        if take_mock_dial_failure() {
+            return ConnectRun::Ready(Err(AppFailure::Network(MOCK_DIAL_REFUSED.to_string())));
+        }
         ConnectRun::Ready(Ok(ServerInfo {
             endpoint: endpoint_of(&target),
             trust_mode: target.trust_mode,
@@ -850,6 +854,30 @@ static USE_MOCK_CONNECTION_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 /// this module.
 pub fn use_mock_connection_for_tests() {
     USE_MOCK_CONNECTION_FOR_TESTS.store(true, Ordering::Relaxed);
+}
+
+/// Dials the mock backend still has to refuse, set by
+/// [`fail_next_mock_dials_for_tests`].
+static MOCK_DIAL_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+/// What a refused mock dial reports (the user sees the generic network text).
+const MOCK_DIAL_REFUSED: &str = "mock dial refused";
+
+/// Make the next `count` dials of [`MockConnectionBackend`] fail with an
+/// ordinary network failure, then succeed again. Process-wide, so a suite
+/// that uses it holds the serial guard; leftovers are the caller's to reset
+/// with `0`. Test-only behaviour: the real backend never reads it.
+pub fn fail_next_mock_dials_for_tests(count: usize) {
+    MOCK_DIAL_FAILURES.store(count, Ordering::SeqCst);
+}
+
+/// Consume one scripted mock failure, if any is left.
+fn take_mock_dial_failure() -> bool {
+    MOCK_DIAL_FAILURES
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
 }
 
 /// The backend [`provide_connection_controller`] drives.
