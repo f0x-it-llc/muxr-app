@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 
 use crate::ui::recency;
 
+use super::keyring::Keyring;
+
 pub use crate::connection::TrustMode;
 
 /// A `muxrd` endpoint the user has connected to before. [`Self::last_used_ms`]
@@ -175,6 +177,41 @@ impl std::fmt::Debug for UnlockedCredential {
         f.debug_struct("UnlockedCredential")
             .field("status", &self.status)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// Result of unlocking the whole keyring behind one gate. `Debug` redacts
+/// (the keyring prints endpoints only).
+pub struct UnlockedKeyring {
+    pub status: CredentialStatus,
+    /// `Some` exactly when [`Self::status`] is [`CredentialStatus::Success`].
+    pub keyring: Option<Keyring>,
+    /// Endpoints whose legacy per-server entries were folded into the vault.
+    pub migrated: Vec<String>,
+    /// Endpoints whose legacy entries could not be read.
+    pub unreadable: Vec<String>,
+}
+
+impl UnlockedKeyring {
+    /// A non-success outcome, carrying no keyring.
+    pub fn refused(status: CredentialStatus) -> Self {
+        Self {
+            status,
+            keyring: None,
+            migrated: Vec::new(),
+            unreadable: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for UnlockedKeyring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockedKeyring")
+            .field("status", &self.status)
+            .field("keyring", &self.keyring)
+            .field("migrated", &self.migrated)
+            .field("unreadable", &self.unreadable)
             .finish()
     }
 }

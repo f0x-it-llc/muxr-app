@@ -138,6 +138,10 @@ impl SavedServersRepository for PrefsSavedServersRepository {
         self.persist();
         Ok(())
     }
+
+    fn is_persistent(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

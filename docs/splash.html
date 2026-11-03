@@ -65,9 +65,18 @@ canvas.show{ opacity:1; }
 .toggle{ width:36px; height:21px; border-radius:999px; background:var(--amber-faint); border:1px solid var(--amber-border); position:relative; flex-shrink:0; }
 .toggle::after{ content:''; position:absolute; top:2px; left:17px; width:15px; height:15px; border-radius:50%; background:var(--amber); }
 .btn-primary{ background:var(--amber); color:#241a04; border:none; border-radius:var(--radius-sm); padding:13px; font-family:var(--font-mono); font-size:12.5px; font-weight:600; letter-spacing:0.03em; text-align:center; }
-.saved{ display:flex; align-items:center; gap:10px; font-size:11px; background:var(--bg-void); }
-.dot-ok{ width:7px; height:7px; border-radius:50%; background:var(--success); box-shadow:0 0 5px var(--success); flex-shrink:0; }
+/* piece 7 with saved servers: the CTA steps down to secondary, the QR square sits beside it */
+.btn-secondary{ flex:1; background:var(--bg-raised); color:var(--fg); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:13px; font-family:var(--font-mono); font-size:12.5px; font-weight:600; letter-spacing:0.03em; text-align:center; }
+.cta-row{display:flex;gap:8px; align-items:stretch; background:var(--bg-void); }
+.qr-square{width:44px;height:44px; flex-shrink:0; display:flex; align-items:center; justify-content:center; color:var(--amber); background:var(--bg-raised); border:1px solid var(--border-bright); border-radius:var(--radius-sm); }
+/* piece 8: informational saved rows, closed by the unlock dock */
+.saved{ display:flex; flex-direction:column; gap:10px; font-size:11px; background:var(--bg-void); }
+.saved-row{ display:flex; align-items:center; gap:10px; }
+.saved-row .lock{ width:12px; height:12px; color:var(--fg-dim); flex-shrink:0; }
 .saved .addr{ color:var(--fg); }
+.saved .meta{ color:var(--fg-dim); font-size:10px; }
+.unlock-dock{height:48px;margin-top:14px; display:flex; align-items:center; gap:10px; padding:0 16px; border-radius:var(--radius-sm); background:var(--amber); color:#241a04; font-size:13px; font-weight:600; }
+.unlock-dock .target{ margin-left:auto; font-size:11px; font-weight:400; opacity:0.7; }
 
 .controls{ display:flex; align-items:center; gap:14px; }
 .replay-btn{ font-family:var(--font-mono); font-size:12px; color:var(--fg); background:var(--bg-raised); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:10px 18px; cursor:pointer; }
@@ -107,8 +116,11 @@ canvas.show{ opacity:1; }
         <div class="field piece" data-delay="390"><label>server url</label><input placeholder="zelli.example.com:50051" readonly></div>
         <div class="field piece" data-delay="480"><label>login token</label><input placeholder="paste or scan a token" readonly></div>
         <div class="remember-row piece" data-delay="580">Remember for 4 weeks<div class="toggle"></div></div>
-        <div class="btn-primary piece" data-delay="720">→ connect</div>
-        <div class="saved piece" data-delay="860"><span class="dot-ok"></span><span class="addr">100.71.31.57:50051</span></div>
+        <div class="cta-row piece" data-delay="720"><div class="btn-secondary">→ connect</div><div class="qr-square"><svg viewBox="0 0 24 24" width="20" height="20" aria-label="Pair by QR code"><path fill="currentColor" d="M 2 7 v -5 h 5 v 2 H 4 v 3 H 2 Z m 0 15 v -5 h 2 v 3 h 3 v 2 H 2 Z m 15 0 v -2 h 3 v -3 h 2 v 5 H 17 Z m 3 -15 v -3 H 17 v -2 h 5 v 5 h -2 Z M 13 5 h 6 v 6 H 13 Z M 5 13 h 6 v 6 H 5 Z M 5 5 h 6 v 6 H 5 Z M 14 14 h 5 v 5 h -5 Z"/></svg></div></div>
+        <div class="saved piece" data-delay="860">
+          <div class="saved-row"><svg class="lock" viewBox="0 0 24 24"><path fill="currentColor" d="M 6 22 q -0.825 0 -1.4125 -0.5875 T 4 20 v -10 q 0 -0.825 0.5875 -1.4125 T 6 8 h 1 v -2 q 0 -2.075 1.4625 -3.5375 T 12 1 q 2.075 0 3.5375 1.4625 T 17 6 v 2 h 1 q 0.825 0 1.4125 0.5875 T 20 10 v 10 q 0 0.825 -0.5875 1.4125 T 18 22 H 6 Z m 0 -2 h 12 v -10 H 6 v 10 Z M 9 8 h 6 v -2 q 0 -1.25 -0.875 -2.125 t -2.125 -0.875 q -1.25 0 -2.125 0.875 t -0.875 2.125 v 2 Z"/></svg><div><div class="addr">100.71.31.57:50051</div><div class="meta">pinned TLS · 2 h ago</div></div></div>
+          <div class="unlock-dock"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" fill-rule="evenodd" d="M 12 2 A 10 10 0 1 1 12 22 A 10 10 0 1 1 12 2 Z M 12 4 A 8 8 0 1 0 12 20 A 8 8 0 1 0 12 4 Z M 12 8 A 4 4 0 1 1 12 16 A 4 4 0 1 1 12 8 Z"/></svg>Unlock<span class="target">→ 100.71.31.57</span></div>
+        </div>
       </div>
     </div>
   </div>

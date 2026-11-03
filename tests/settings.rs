@@ -24,6 +24,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -42,8 +43,19 @@ use kurbo::{Point, Size};
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
-use muxr::features::connect::di::{expect_saved_servers, mock_credentials};
-use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::connect::data::repositories::MockCredentialService;
+use muxr::features::connect::data::repositories::mock_saved_servers::MockSavedServersRepository;
+use muxr::features::connect::di::{
+    KeyringHandle, expect_keyring, expect_saved_servers, mock_credentials,
+};
+use muxr::features::connect::domain::entities::{
+    CredentialStatus, SavedServer, StoreRequest, UnlockRequest, UnlockedCredential,
+    UnlockedKeyring, epoch_millis,
+};
+use muxr::features::connect::domain::keyring::Keyring;
+use muxr::features::connect::domain::repositories::CredentialService;
+use muxr::features::connect::presentation::controller::ConfirmPrompt;
+use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
 use muxr::features::pro::di::{
     SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
@@ -54,13 +66,16 @@ use muxr::features::pro::domain::entities::{
 use muxr::features::pro::domain::repositories::EntitlementRepository;
 use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
-use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
+use muxr::features::settings::data::repositories::{
+    MockAuthTokensRepository, MockPreferencesRepository,
+};
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
 use muxr::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken,
 };
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
+use muxr::features::settings::presentation::controller::SettingsController;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
@@ -103,6 +118,12 @@ const MOCK_LATENCY_VALUE: &str = "36ms";
 /// `presentation::widgets`) — what the Disconnect button spans the width
 /// *between*, inside whatever box the scroller itself is laid out at.
 const ROW_PAD_X: f64 = 16.0;
+/// The screen's closing action: its button, the Tablet card's button and the
+/// confirmation's own title and confirm.
+const LOCK_AND_DISCONNECT: &str = "Lock & disconnect";
+/// The connected saved server's chip, and the saved group's closing row.
+const CONNECTED_CHIP: &str = "connected";
+const ADD_SERVER_ROW: &str = "add server";
 
 /// The seeded token names `data`'s mock repository ships — the redesign's two
 /// `.token-item`s, in order.
@@ -631,7 +652,10 @@ fn all_six_groups_and_the_disconnect_action_render() {
     // The freshly-mocked install is Free, so the plan row prints it.
     assert!(values.iter().any(|v| v == "Free"), "{values:?}");
     let labels = node_labels(&h.root);
-    assert!(labels.iter().any(|l| l == "Disconnect"), "{labels:?}");
+    assert!(
+        labels.iter().any(|l| l == LOCK_AND_DISCONNECT),
+        "{labels:?}"
+    );
 }
 
 #[test]
@@ -1569,9 +1593,13 @@ fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_toke
         None,
         "the secret is gone from the store"
     );
+    // Locked, the delete keeps the row, so it unlocks the keyring rather
+    // than claim a vault copy it could not reach: its only prompt is the
+    // keyring's own.
+    let prompts = credentials.prompts();
     assert!(
-        credentials.prompts().is_empty(),
-        "…and no biometric prompt was ever raised: a delete runs no gate"
+        !prompts.is_empty() && prompts.iter().all(|reason| reason.starts_with("Unlock ")),
+        "…and the only prompt raised was the keyring unlock: {prompts:?}"
     );
     let values = node_values(&h.root);
     assert!(
@@ -1606,6 +1634,337 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
         node_centers_by_label(&h.root, "forget").len(),
         3,
         "…and only that row went"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3b — the keyring: switching servers, eviction, the add-server row
+// ---------------------------------------------------------------------------
+
+/// Mount connected (to the mock host, which is no saved row) with
+/// [`credential_row`]'s token in the **vault**, the keyring published over it
+/// when `unlocked`, and Pro unlocked when `pro` — the seeded rows past the
+/// first make a free install's switch a blocked one.
+fn with_vault_credential(unlocked: bool, pro: bool) -> Harness {
+    let mut harness = Harness::mount_seeded(|| {
+        expect_saved_servers()
+            .save(credential_row(true))
+            .expect("the mock store never fails");
+        mock_credentials()
+            .expect("tests/support opted this process into the mock")
+            .seed_vault(&[(CRED_ENDPOINT, CRED_TOKEN)]);
+        if unlocked {
+            let mut keyring = Keyring::new();
+            keyring.insert(
+                CRED_ENDPOINT,
+                zeroize::Zeroizing::new(CRED_TOKEN.to_string()),
+            );
+            expect_keyring().publish(keyring);
+        }
+        if pro {
+            mock_entitlement()
+                .expect("tests/support opted this process into the mock")
+                .set_entitlement(Entitlement::Pro);
+        }
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    harness.await_tokens();
+    harness.pump_until_values("the saved-server rows", |values| {
+        values.iter().any(|v| v == CRED_LABEL)
+    });
+    if pro {
+        harness.pump_until_values("the plan row to read Pro", |values| {
+            values.iter().any(|v| v == "Pro")
+        });
+    }
+    harness
+}
+
+/// The connected endpoint, as the connection reports it.
+fn connected_endpoint() -> Option<String> {
+    expect_connection_controller()
+        .server_info
+        .get_untracked()
+        .map(|info| info.endpoint)
+}
+
+#[test]
+fn tapping_a_saved_row_with_the_keyring_unlocked_switches_to_it_without_a_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, true);
+    let credentials = mock_credentials().expect("the mock service is published");
+    assert_eq!(connected_endpoint().as_deref(), Some("mock.example:7777"));
+    assert!(
+        !node_values(&h.root).iter().any(|v| v == CONNECTED_CHIP),
+        "no saved row is the connected one yet"
+    );
+
+    h.tap_value(CRED_LABEL);
+    h.pump_once();
+
+    assert_eq!(
+        connected_endpoint().as_deref(),
+        Some(CRED_ENDPOINT),
+        "the connection moved to the tapped row"
+    );
+    assert!(
+        expect_connection_controller().connected.get_untracked(),
+        "…and it is up"
+    );
+    assert!(
+        credentials.prompts().is_empty(),
+        "the token came straight off the unlocked keyring"
+    );
+    h.frame();
+    assert!(
+        node_values(&h.root).iter().any(|v| v == CONNECTED_CHIP),
+        "the switched-to row now wears the connected chip: {:?}",
+        node_values(&h.root)
+    );
+}
+
+#[test]
+fn tapping_a_saved_row_with_the_keyring_locked_prompts_once_then_switches() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(false, true);
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    h.tap_value(CRED_LABEL);
+    pump_until(&mut h, "the switch to land", || {
+        connected_endpoint().as_deref() == Some(CRED_ENDPOINT)
+    });
+
+    assert_eq!(
+        credentials.prompts().len(),
+        1,
+        "one keyring prompt: {:?}",
+        credentials.prompts()
+    );
+    assert!(
+        expect_keyring().is_unlocked(),
+        "…which published the keyring"
+    );
+}
+
+#[test]
+fn a_blocked_switch_raises_the_paywall_and_dials_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    h.tap_value(CRED_LABEL);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the paywall is up");
+    assert!(
+        node_center_by_label(&h.root, NOT_NOW_LABEL).is_some(),
+        "{:?}",
+        node_labels(&h.root)
+    );
+    assert_eq!(
+        connected_endpoint().as_deref(),
+        Some("mock.example:7777"),
+        "the free tier refused the switch before it dialed"
+    );
+    assert!(credentials.prompts().is_empty(), "…or unlocked anything");
+}
+
+#[test]
+fn lock_and_disconnect_locks_the_keyring_and_returns_to_connect() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    let keyring = expect_keyring();
+    assert!(keyring.is_unlocked());
+
+    let dialog = open_dialog_by_label(&mut h, LOCK_AND_DISCONNECT);
+    assert!(
+        node_values(&h.root)
+            .iter()
+            .any(|v| v.starts_with("Locks the keyring on this device")),
+        "the confirmation says what locking means: {:?}",
+        node_values(&h.root)
+    );
+    confirm(&mut h, &dialog);
+
+    assert!(!keyring.is_unlocked(), "the keyring is locked");
+    assert!(keyring.endpoints().is_empty(), "…and holds no token");
+    assert!(!expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        h.nav
+            .route_stack()
+            .current_route()
+            .map(|location| location.path.clone())
+            .as_deref(),
+        Some("/"),
+        "…and the stack went to Connect"
+    );
+}
+
+#[test]
+fn forgetting_with_the_keyring_unlocked_evicts_its_entry() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let keyring = expect_keyring();
+
+    let dialog = open_dialog_by_label(&mut h, "forget");
+    confirm(&mut h, &dialog);
+    h.pump_until_values("the row to disappear", |values| {
+        !values.iter().any(|v| v == CRED_LABEL)
+    });
+
+    assert!(
+        !keyring.endpoints().iter().any(|e| e == CRED_ENDPOINT),
+        "the keyring dropped it: {:?}",
+        keyring.endpoints()
+    );
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT),
+        None,
+        "…and so did the vault"
+    );
+}
+
+#[test]
+fn deleting_a_credential_with_the_keyring_unlocked_rewrites_the_vault_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let keyring = expect_keyring();
+
+    let dialog = open_dialog_by_label(&mut h, "delete credential");
+    confirm(&mut h, &dialog);
+    h.pump_until_values("the credential chip to disappear", |values| {
+        !values.iter().any(|v| v == "credential saved")
+    });
+
+    assert!(
+        !credentials
+            .vault_endpoints()
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e == CRED_ENDPOINT),
+        "the vault no longer lists it: {:?}",
+        credentials.vault_endpoints()
+    );
+    assert_eq!(credentials.stored(CRED_ENDPOINT), None);
+    assert_eq!(credentials.writes(), 1, "one gated vault write");
+    assert!(credentials.prompts().is_empty(), "…and no unlock prompt");
+    assert!(keyring.endpoints().is_empty(), "the keyring dropped it too");
+    assert!(
+        node_values(&h.root).iter().any(|v| v == CRED_LABEL),
+        "the saved server itself is kept"
+    );
+}
+
+#[test]
+fn forgetting_while_unlocked_drops_the_handles_token_even_when_the_vault_rewrite_is_refused() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, false);
+    let credentials = mock_credentials().expect("the mock service is published");
+    credentials.set_gate(CredentialStatus::Canceled);
+    let keyring = expect_keyring();
+
+    let dialog = open_dialog_by_label(&mut h, "forget");
+    confirm(&mut h, &dialog);
+    h.pump_until_values("the row to disappear", |values| {
+        !values.iter().any(|v| v == CRED_LABEL)
+    });
+
+    assert!(
+        keyring.token_for(CRED_ENDPOINT).is_none(),
+        "the handle dropped it: {:?}",
+        keyring.endpoints()
+    );
+    assert_eq!(
+        credentials.vault_endpoints(),
+        Some(vec![CRED_ENDPOINT.to_string()]),
+        "the refused rewrite left the vault's copy for the next unlock to prune"
+    );
+}
+
+#[test]
+fn tapping_a_row_without_a_credential_opens_the_add_page_and_never_spends_a_keyring_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount_seeded(|| {
+        expect_saved_servers()
+            .save(credential_row(false))
+            .expect("the mock store never fails");
+        let mut keyring = Keyring::new();
+        keyring.insert(
+            CRED_ENDPOINT,
+            zeroize::Zeroizing::new(CRED_TOKEN.to_string()),
+        );
+        expect_keyring().publish(keyring);
+        mock_entitlement()
+            .expect("tests/support opted this process into the mock")
+            .set_entitlement(Entitlement::Pro);
+    });
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.await_tokens();
+    h.pump_until_values("the saved-server rows", |values| {
+        values.iter().any(|v| v == CRED_LABEL)
+    });
+
+    h.tap_value(CRED_LABEL);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the add-server page is pushed");
+    assert!(
+        node_values(&h.root).iter().any(|v| v == ADD_SERVER_HEADING),
+        "{:?}",
+        node_values(&h.root)
+    );
+    assert_eq!(connected_endpoint().as_deref(), Some("mock.example:7777"));
+}
+
+#[test]
+fn a_row_that_lost_its_credential_behind_the_screens_back_is_never_dialed_with_a_keyring_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, true);
+    expect_saved_servers()
+        .save(credential_row(false))
+        .expect("the mock store never fails");
+
+    h.tap_value(CRED_LABEL);
+    h.pump_once();
+    h.settle();
+
+    assert_eq!(
+        connected_endpoint().as_deref(),
+        Some("mock.example:7777"),
+        "the switch refused the keyring's token"
+    );
+    assert!(
+        expect_keyring().token_for(CRED_ENDPOINT).is_some(),
+        "…without touching the keyring"
+    );
+}
+
+#[test]
+fn the_add_server_row_closes_the_group_and_pushes_the_add_page() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(true, true);
+    assert_eq!(h.depth(), 1);
+
+    h.tap_value(ADD_SERVER_ROW);
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the add-server page is pushed");
+    assert!(
+        node_values(&h.root).iter().any(|v| v == ADD_SERVER_HEADING),
+        "{:?}",
+        node_values(&h.root)
     );
 }
 
@@ -2786,7 +3145,7 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
     assert!(expect_connection_controller().connected.get_untracked());
 
     // A dismissed confirmation disconnects nothing.
-    open_dialog_by_label(&mut h, "Disconnect");
+    open_dialog_by_label(&mut h, LOCK_AND_DISCONNECT);
     assert_eq!(h.depth(), 2);
     h.tap(SCRIM_POINT);
     h.flush();
@@ -2796,7 +3155,7 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
     );
 
     // Confirming clears the connection and resets the stack to `/`.
-    let dialog = open_dialog_by_label(&mut h, "Disconnect");
+    let dialog = open_dialog_by_label(&mut h, LOCK_AND_DISCONNECT);
     confirm(&mut h, &dialog);
 
     let connection = expect_connection_controller();
@@ -2836,7 +3195,7 @@ fn wide_metrics_clamp_and_center_the_groups_column() {
     // read on where the clamped column itself sits: centered,
     // `SETTINGS_CLAMP_WIDTH` wide, minus the row's own `ROW_PAD_X` margin on
     // each side.
-    let disconnect = bounds_by_label(&h.root, "Disconnect");
+    let disconnect = bounds_by_label(&h.root, LOCK_AND_DISCONNECT);
     let margin = (SURFACE.width - SETTINGS_CLAMP_WIDTH) / 2.0;
     assert!(
         (disconnect.x0 - (margin + ROW_PAD_X)).abs() < 0.5,
@@ -2861,7 +3220,7 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
     let mut h = mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
     h.frame();
 
-    let disconnect = bounds_by_label(&h.root, "Disconnect");
+    let disconnect = bounds_by_label(&h.root, LOCK_AND_DISCONNECT);
     let expected_width = SURFACE.width - 2.0 * ROW_PAD_X;
     assert!(
         (disconnect.width() - expected_width).abs() < 0.5,
@@ -2908,7 +3267,9 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
         "the right column packs upward: pro {pro:?} vs saved {saved:?}"
     );
     assert!(
-        node_labels(&h.root).iter().any(|l| l == "Disconnect"),
+        node_labels(&h.root)
+            .iter()
+            .any(|l| l == LOCK_AND_DISCONNECT),
         "the Disconnect card's button renders"
     );
 }
@@ -3180,4 +3541,197 @@ fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
             NARROW_SURFACE.width,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The app-wide unlock single-flight: a lock wins, and no second prompt
+// ---------------------------------------------------------------------------
+
+/// A parked `unlock_all`: the credential service waits here until released.
+#[derive(Default)]
+struct HeldUnlockPrompt {
+    entered: AtomicBool,
+    released: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl HeldUnlockPrompt {
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            waker.wake();
+        }
+    }
+}
+
+struct HoldUnlock(Arc<HeldUnlockPrompt>);
+
+impl Future for HoldUnlock {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let held = &self.0;
+        held.entered.store(true, Ordering::SeqCst);
+        if held.released.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        *held.waker.lock().unwrap_or_else(|p| p.into_inner()) = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+/// [`MockCredentialService`] whose `unlock_all` parks on a [`HeldUnlockPrompt`].
+struct HeldUnlockVault {
+    inner: Arc<MockCredentialService>,
+    prompt: Arc<HeldUnlockPrompt>,
+}
+
+#[clean_signals::async_trait]
+impl CredentialService for HeldUnlockVault {
+    async fn store(&self, request: StoreRequest) -> CredentialStatus {
+        self.inner.store(request).await
+    }
+
+    async fn unlock(&self, request: UnlockRequest) -> UnlockedCredential {
+        self.inner.unlock(request).await
+    }
+
+    async fn unlock_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring {
+        HoldUnlock(Arc::clone(&self.prompt)).await;
+        self.inner.unlock_all(reason, endpoints).await
+    }
+
+    async fn store_in_vault(
+        &self,
+        request: StoreRequest,
+        keyring: &mut Keyring,
+    ) -> CredentialStatus {
+        self.inner.store_in_vault(request, keyring).await
+    }
+
+    async fn delete_from_vault(
+        &self,
+        server_key: String,
+        keyring: &mut Keyring,
+    ) -> Result<(), AppFailure> {
+        self.inner.delete_from_vault(server_key, keyring).await
+    }
+
+    async fn delete(&self, server_key: String) -> Result<(), AppFailure> {
+        self.inner.delete(server_key).await
+    }
+
+    async fn reset_vault(&self) -> Result<(), AppFailure> {
+        self.inner.reset_vault().await
+    }
+}
+
+/// A headless Settings controller over a locked keyring and one saved row
+/// ([`CRED_ENDPOINT`]) whose vault entry sits behind a held `unlock_all`.
+fn held_switch_rig() -> (
+    Arc<SettingsController>,
+    KeyringHandle,
+    Arc<MockCredentialService>,
+    Arc<HeldUnlockPrompt>,
+) {
+    let connection = muxr::connection::provide_connection_controller();
+    let credentials = Arc::new(MockCredentialService::new());
+    credentials.seed_vault(&[(CRED_ENDPOINT, CRED_TOKEN)]);
+    let prompt = Arc::new(HeldUnlockPrompt::default());
+    let held = Arc::new(HeldUnlockVault {
+        inner: Arc::clone(&credentials),
+        prompt: Arc::clone(&prompt),
+    });
+    let keyring = KeyringHandle::new();
+    let controller = Arc::new(SettingsController::new(
+        Arc::new(MockAuthTokensRepository::seeded()),
+        Arc::new(MockPreferencesRepository::default()),
+        Arc::new(MockSavedServersRepository::with_servers(vec![
+            credential_row(true),
+        ])),
+        held as _,
+        keyring.clone(),
+        connection,
+    ));
+    (controller, keyring, credentials, prompt)
+}
+
+fn pump_runtime(rounds: usize) {
+    let runtime = ReactiveRuntime::get().expect("setup() installed the runtime");
+    for _ in 0..rounds {
+        runtime.pump_local();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn never_confirm() -> ConfirmPrompt {
+    Rc::new(|_server, _dial| panic!("a System-trust row never asks to confirm"))
+}
+
+#[test]
+fn a_lock_and_disconnect_during_a_pending_switch_unlock_dials_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let (controller, keyring, _credentials, prompt) = held_switch_rig();
+    let connection = expect_connection_controller();
+    let switched = Rc::new(std::cell::Cell::new(false));
+
+    let landed = Rc::clone(&switched);
+    controller.switch_server(
+        CRED_ENDPOINT.to_string(),
+        never_confirm(),
+        Box::new(move || landed.set(true)),
+    );
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !prompt.entered.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the prompt"
+        );
+        pump_runtime(1);
+    }
+    assert!(controller.switching.get_untracked());
+
+    connection.lock_and_disconnect(&keyring);
+    prompt.release();
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while controller.switching.get_untracked() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the switch"
+        );
+        pump_runtime(1);
+    }
+    pump_runtime(20);
+
+    assert!(
+        !keyring.is_unlocked() && keyring.endpoints().is_empty(),
+        "the late unlock must not re-open a locked keyring"
+    );
+    assert!(!connection.connected.get_untracked(), "nothing was dialed");
+    assert!(!switched.get(), "…and nothing switched");
+    assert!(app_toasts().pending_untracked().is_empty(), "no toast");
+}
+
+#[test]
+fn a_settings_tap_while_a_dock_unlock_is_in_flight_raises_no_prompt() {
+    let _g = serial();
+    let _ambient = setup();
+    let (controller, keyring, credentials, prompt) = held_switch_rig();
+    let dock_ticket = keyring.begin_unlock().expect("nothing in flight yet");
+
+    controller.switch_server(CRED_ENDPOINT.to_string(), never_confirm(), Box::new(|| {}));
+    pump_runtime(20);
+
+    assert!(
+        !prompt.entered.load(Ordering::SeqCst) && credentials.prompts().is_empty(),
+        "no second biometric prompt"
+    );
+    assert!(
+        !controller.switching.get_untracked(),
+        "…and Settings is idle"
+    );
+    assert!(!keyring.is_unlocked());
+    assert!(app_toasts().pending_untracked().is_empty(), "silent");
+    drop(dock_ticket);
 }

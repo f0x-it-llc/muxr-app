@@ -47,7 +47,9 @@ use muxr::features::sessions::domain::entities::{
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
 use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
-use muxr::features::sessions::presentation::pages::{resolve_poll_interval, sessions_page};
+use muxr::features::sessions::presentation::pages::{
+    resolve_poll_interval, sessions_page, set_loading_rain_for_tests,
+};
 use muxr::features::settings::data::repositories::MockPreferencesRepository;
 use muxr::features::settings::di::SharedPreferencesRepository;
 use muxr::features::settings::domain::entities::{AppearancePrefs, PollPrefs, Preferences};
@@ -57,9 +59,9 @@ use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
-    EPSILON, RecScene, added, by_width, center, char_key, frame_sized, largest, long_press,
-    named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values, pointer,
-    pump_frames, serial, settle_sized, setup, smallest, tap,
+    EPSILON, RecScene, added, by_width, center, char_key, frame_at_sized, frame_sized, largest,
+    long_press, named_key, node_centers_by_label, node_centers_by_value, node_labels, node_values,
+    pointer, pump_frames, serial, settle_sized, setup, smallest, tap,
 };
 
 /// A point in the top-left corner — scrim on every overlay this screen pushes
@@ -1534,6 +1536,262 @@ async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it()
         "the newer, faster refresh's result wins, not the older, slower one: {names:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A new connection restarts the screen: the old server's list never lingers
+// ---------------------------------------------------------------------------
+
+/// `restart()` drops an in-flight refresh's late reply (the old server's), clears the
+/// selection, and the kicked first load is what lands.
+#[test]
+fn a_restart_ignores_the_old_generations_late_reply_and_clears_the_selection() {
+    use frust_reactive::ReactiveRuntime;
+
+    let _g = serial();
+    let _ambient = setup();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let controller = Arc::new(SessionsController::new(Arc::new(RaceSessionsRepo::new())));
+    controller.select("stale");
+    runtime.block_on(async {
+        // The first read (call 0) is the slow "stale" one; the restart lands
+        // while it is parked, so its reply carries an older generation.
+        let late = {
+            let controller = Arc::clone(&controller);
+            async move { controller.refresh().await }
+        };
+        let restart = {
+            let controller = Arc::clone(&controller);
+            async move {
+                tokio::task::yield_now().await;
+                controller.restart();
+            }
+        };
+        tokio::join!(late, restart);
+    });
+    assert!(
+        controller.sessions.get_untracked().is_empty(),
+        "the late old-generation reply was ignored"
+    );
+    assert_eq!(controller.selected.get_untracked(), None);
+    assert!(!controller.loaded.get_untracked(), "the first load is anew");
+
+    let pump = ReactiveRuntime::get().expect("runtime installed by setup()");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while !controller.first_load_settled.get_untracked() {
+        assert!(Instant::now() < deadline, "the restarted load never landed");
+        pump.pump_local();
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(5)).await });
+    }
+    let names: Vec<String> = controller
+        .sessions
+        .get_untracked()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, vec!["fresh".to_string()]);
+}
+
+/// A repository whose list is swapped between connections.
+struct SwitchableRepo {
+    names: Mutex<Vec<String>>,
+    /// While set, a list read parks until [`open`](Self::open) — so a test can look at the
+    /// screen between a switch and its first load landing.
+    gated: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl SwitchableRepo {
+    fn open(&self) {
+        self.gated.store(false, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for SwitchableRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        while self.gated.load(Ordering::SeqCst) {
+            let parked = self.release.notified();
+            if !self.gated.load(Ordering::SeqCst) {
+                break;
+            }
+            parked.await;
+        }
+        let names = self.names.lock().expect("ok").clone();
+        Ok(names.iter().map(|n| stub_session(n)).collect())
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the switch test")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the switch test")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        unreachable!("not exercised by the switch test")
+    }
+}
+
+/// Opts the loading rain in for one test and back out when dropped, even on a panic.
+struct RainOn;
+
+impl RainOn {
+    fn new() -> Self {
+        set_loading_rain_for_tests(true);
+        RainOn
+    }
+}
+
+impl Drop for RainOn {
+    fn drop(&mut self) {
+        set_loading_rain_for_tests(false);
+    }
+}
+
+/// A harness over a [`SwitchableRepo`] listing `names`, connected and showing `wait_for`.
+fn switchable(names: &[&str], wait_for: &str) -> (Harness, Arc<SwitchableRepo>) {
+    let repo = Arc::new(SwitchableRepo {
+        names: Mutex::new(names.iter().map(|n| n.to_string()).collect()),
+        gated: std::sync::atomic::AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut h = Harness::mount_over(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        support::surface(),
+    );
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until_values("host A's list", |v| v.iter().any(|s| s == wait_for));
+    (h, repo)
+}
+
+fn set_names(repo: &SwitchableRepo, names: &[&str]) {
+    *repo.names.lock().expect("ok") = names.iter().map(|n| n.to_string()).collect();
+}
+
+fn assert_only_beta(h: &mut Harness) {
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|s| s.starts_with("alpha")),
+        "host A's cards are gone: {values:?}"
+    );
+    assert_eq!(h.card_count(), 1);
+}
+
+#[test]
+fn switching_servers_in_one_frame_replaces_the_old_hosts_cards() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = switchable(&["alpha-one", "alpha-two"], "alpha-two");
+    set_names(&repo, &["beta-one"]);
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    assert_only_beta(&mut h);
+}
+
+/// The real `switch_to` shape: the teardown lands in one frame, the dial in a later one.
+#[test]
+fn switching_servers_across_frames_replaces_the_old_hosts_cards_and_selection() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, repo) = switchable(&["alpha-one", "alpha-two"], "alpha-two");
+    let connection = expect_connection_controller();
+
+    connection.disconnect();
+    for _ in 0..3 {
+        h.frame();
+    }
+    assert!(
+        node_values(&h.root).iter().any(|s| s == "alpha-two"),
+        "the screen is still mounted, showing host A's last list"
+    );
+
+    // Host B's first load is held open, so the frames after the dial show only what the
+    // restart itself did (the poll cannot run: its cadence is seconds of wall time, and it
+    // is armed only by a loaded list).
+    set_names(&repo, &["beta-one"]);
+    repo.gated.store(true, Ordering::SeqCst);
+    connection.connect(mock_target(false));
+    h.pump_until("the dial to settle", |_| {
+        connection.connected.get_untracked()
+    });
+    for _ in 0..2 {
+        h.frame();
+    }
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|s| s.starts_with("alpha")),
+        "host A's cards are gone as soon as host B is up, before its list lands: {values:?}"
+    );
+    assert_eq!(h.card_count(), 0);
+
+    repo.open();
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    assert_only_beta(&mut h);
+}
+
+#[test]
+fn a_switch_replays_the_loading_rain_and_the_new_first_load_releases_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one", "alpha-two"], "alpha-two");
+    let mut clock = 0.0;
+    let run_to = |h: &mut Harness, clock: &mut f64, until: f64| {
+        let mut scene = h.frame();
+        while *clock < until {
+            *clock += 100.0;
+            scene = frame_at_sized(
+                &mut h.root,
+                &mut h.logic,
+                &mut h.state,
+                &mut h.tcx,
+                h.surface,
+                support::ms(*clock),
+            );
+        }
+        scene
+    };
+
+    let up = h.frame();
+    assert!(up.glyph_runs > RAIN_RUNS, "the first load opens under rain");
+    let released = run_to(&mut h, &mut clock, 5_000.0);
+    assert!(
+        released.glyph_runs < RAIN_RUNS,
+        "the first load released it"
+    );
+
+    set_names(&repo, &["beta-one"]);
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    assert_only_beta(&mut h);
+    let replay = h.frame();
+    assert!(
+        replay.glyph_runs > RAIN_RUNS,
+        "the switch re-mounts the rain: {} runs",
+        replay.glyph_runs
+    );
+    let until = clock + 5_000.0;
+    let released = run_to(&mut h, &mut clock, until);
+    assert!(
+        released.glyph_runs < RAIN_RUNS,
+        "the new first load releases it: {} runs",
+        released.glyph_runs
+    );
+}
+
+/// Glyph runs above which a frame is the dense rain (`sessions_loading`'s `DENSE_RUNS`).
+const RAIN_RUNS: usize = 100;
 
 // ---------------------------------------------------------------------------
 // The Tablet detail's agent list is controller state: fetched on a selection
