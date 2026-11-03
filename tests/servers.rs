@@ -36,8 +36,9 @@ use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
-    PEER_TAIL, expect_servers_controller, keep_peers, set_banner_timings_for_tests,
-    set_stage_clock_for_tests, stage_settled, use_last_seen,
+    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, expect_servers_controller, keep_peers,
+    set_banner_connecting_delay_for_tests, set_banner_timings_for_tests, set_stage_clock_for_tests,
+    stage_settled, use_last_seen,
 };
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
@@ -1155,6 +1156,7 @@ fn taint_cached_page(endpoint: &str) {
 /// Visit B, taint its cache, return to A (stage closed): B is a cached target.
 fn cached_b() -> Harness {
     set_banner_timings_for_tests(60, 60);
+    set_banner_connecting_delay_for_tests(60);
     let mut h = open_pro_stage(TrustMode::System, true);
     visit_b_and_return_to_a(&mut h);
     taint_cached_page(B_ENDPOINT);
@@ -1165,6 +1167,124 @@ fn reset_reconnect_rig() {
     hold_next_mock_dials_for_tests(0);
     fail_next_mock_dials_for_tests(0);
     set_banner_timings_for_tests(1_500, 6_000);
+    set_banner_connecting_delay_for_tests(BANNER_CONNECTING_DELAY_MS);
+}
+
+/// Pump frames for `ms` of wall time, running `each` after every frame.
+fn pump_for(h: &mut Harness, ms: u64, mut each: impl FnMut()) {
+    let runtime = ReactiveRuntime::get().expect("setup() installs the reactive runtime");
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while std::time::Instant::now() < end {
+        runtime.pump_local();
+        h.frame();
+        each();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_dial_that_lands_before_the_delay_shows_no_banner_in_any_frame() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+    set_banner_connecting_delay_for_tests(250);
+    h.open_stage();
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| {
+        assert_eq!(banner(), None, "never Connecting, never Connected");
+        connected_endpoint().as_deref() == Some(B_ENDPOINT)
+    });
+    pump_for(&mut h, 500, || {
+        assert_eq!(banner(), None, "never Connecting, never Connected");
+    });
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_dial_pending_past_the_delay_shows_connecting_then_flashes_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+    set_banner_connecting_delay_for_tests(150);
+    h.open_stage();
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| switcher().seed.get_untracked().is_some());
+    assert_eq!(banner(), None, "not before the delay");
+    h.pump_until(|_| banner() == connecting_to(B_HOST));
+    held.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(B_ENDPOINT));
+    assert_eq!(banner(), Some(ReconnectBanner::Connected));
+    h.pump_until(|_| banner().is_none());
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_failure_before_the_delay_still_shows_the_failure_banner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+    set_banner_connecting_delay_for_tests(2_000);
+    set_banner_timings_for_tests(60, 600);
+    h.open_stage();
+    fail_next_mock_dials_for_tests(1);
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+    assert_eq!(
+        banner(),
+        Some(ReconnectBanner::Failed {
+            host: B_HOST.to_string()
+        })
+    );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_second_switch_during_the_delay_leaves_no_stale_banner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = cached_b();
+    switch_via_controller(&mut h, C_ENDPOINT);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    h.pump_until(|_| last_seen.snapshot().contains_key(C_ENDPOINT));
+    switch_via_controller(&mut h, A_ENDPOINT);
+    h.pump_until(|_| banner().is_none());
+
+    set_banner_connecting_delay_for_tests(250);
+    let mut held = hold_next_mock_dials_for_tests(2);
+    let second = held.remove(1);
+    let first = held.remove(0);
+    h.open_stage();
+    h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
+    h.pump_until(|_| switcher().seed.get_untracked().is_some() && !stage_is_open());
+    pump_for(&mut h, 100, || {
+        assert_eq!(banner(), None, "still inside B's delay")
+    });
+    h.open_stage();
+    let gate = SwitchGate {
+        paywall: Rc::new(|_| {}),
+        add_server: Rc::new(|_| {}),
+    };
+    switcher().select_endpoint(C_ENDPOINT.to_string(), &gate);
+    // Only C's own delay may bring a banner, and it names C, never B.
+    let mut seen = Vec::new();
+    pump_for(&mut h, 600, || {
+        assert_ne!(banner(), connecting_to(B_HOST), "no stale banner");
+        if seen.last() != Some(&banner()) {
+            seen.push(banner());
+        }
+    });
+    assert_eq!(
+        banner(),
+        connecting_to(C_HOST),
+        "{seen:?} {} {:?}",
+        stage_is_open(),
+        switcher().seed.get_untracked().map(|s| s.host.clone())
+    );
+    first.release(true);
+    second.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(C_ENDPOINT));
+    reset_reconnect_rig();
 }
 
 fn banner() -> Option<ReconnectBanner> {

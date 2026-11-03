@@ -34,10 +34,11 @@
 //! commits instead of waiting: once the select path has vetted the row it
 //! publishes a [`ReconnectSeed`] (the Sessions page seeds itself from it and
 //! stays on screen, actions off), closes the stage at once with the settle-close
-//! semantics (no peers), shows [`ReconnectBanner::Connecting`] and dials in the
+//! semantics (no peers), dials in the
 //! background. The target counts as live while that dial is in flight, so the
-//! strip names it. Landing flips the banner to `Connected` for
-//! `banner_success_ms`, then clears it; a failure shows `Failed` until the next
+//! strip names it. `Connecting` shows only if the dial is still pending after
+//! `banner_connecting_delay_ms`; landing then flips it to `Connected` for
+//! `banner_success_ms` (a dial that lands first shows no banner), then clears it; a failure shows `Failed` until the next
 //! switch or `banner_failure_ms` and marks the face failed. Every banner change
 //! bumps a generation that fences the clearing timers. A second select while a
 //! background dial is in flight supersedes it (the connection is torn down and
@@ -372,6 +373,18 @@ impl ServersSwitcherController {
         });
     }
 
+    /// Show `Connecting` for `host` after the delay, unless the banner changed first.
+    fn show_connecting_later(self: &Arc<Self>, generation: u64, host: String) {
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            let delay = crate::features::servers::di::banner_connecting_delay_ms();
+            clean_signals::time::sleep(std::time::Duration::from_millis(delay)).await;
+            if controller.banner_generation.load(Ordering::SeqCst) == generation {
+                controller.set_banner(Some(ReconnectBanner::Connecting { host }));
+            }
+        });
+    }
+
     /// The host the Sessions page is still showing from a cached switch while
     /// the connection is down: what the bar's title reads in place of the
     /// disconnected name. Tracked.
@@ -602,7 +615,10 @@ impl ServersSwitcherController {
             id,
             dialed: None,
         });
-        self.set_banner(Some(ReconnectBanner::Connecting { host: host.clone() }));
+        // `Connecting` shows only if the dial is still pending after the delay;
+        // any later banner change (landing, failure, a newer switch) fences it.
+        let pending = self.set_banner(None);
+        self.show_connecting_later(pending, host.clone());
         self.seed.set(Some(Arc::new(ReconnectSeed {
             generation: id,
             endpoint: endpoint.to_string(),
@@ -651,6 +667,15 @@ impl ServersSwitcherController {
         failures.remove(endpoint);
         self.failures.set(failures);
         self.refresh_faces();
+        // Flash only if `Connecting` was actually shown; else stay silent.
+        let shown = matches!(
+            self.banner.get_untracked(),
+            Some(ReconnectBanner::Connecting { .. })
+        );
+        if !shown {
+            self.set_banner(None);
+            return;
+        }
         let generation = self.set_banner(Some(ReconnectBanner::Connected));
         self.clear_banner_later(
             generation,
