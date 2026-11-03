@@ -58,7 +58,7 @@ use crate::features::connect::domain::repositories::CredentialService;
 const STORE_NAME: &str = "muxr.credentials";
 
 /// The single entry holding every saved server's token.
-pub(super) const VAULT_KEY: &str = "zelli_keyring";
+pub(super) const VAULT_KEY: &str = "muxr_keyring";
 
 /// The legacy per-server key's prefix — the Flutter client's own.
 const KEY_PREFIX: &str = "zelli_cred_";
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn the_vault_key_is_its_own_name_and_never_a_legacy_key() {
-        assert_eq!(VAULT_KEY, "zelli_keyring");
+        assert_eq!(VAULT_KEY, "muxr_keyring");
         assert!(!VAULT_KEY.starts_with(KEY_PREFIX));
     }
 
