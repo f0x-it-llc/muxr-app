@@ -45,6 +45,20 @@ pub const PEER_TAIL: Duration = Duration::from_millis(500);
 static BANNER_SUCCESS_MS: AtomicU64 = AtomicU64::new(1_500);
 static BANNER_FAILURE_MS: AtomicU64 = AtomicU64::new(6_000);
 
+/// How long a background dial may stay pending before `Connecting` shows, ms.
+pub const BANNER_CONNECTING_DELAY_MS: u64 = 400;
+static BANNER_CONNECTING_MS: AtomicU64 = AtomicU64::new(BANNER_CONNECTING_DELAY_MS);
+
+/// The `Connecting` banner's show delay, ms.
+pub fn banner_connecting_delay_ms() -> u64 {
+    BANNER_CONNECTING_MS.load(Ordering::Relaxed)
+}
+
+/// Overrides the `Connecting` show delay (process-wide).
+pub fn set_banner_connecting_delay_for_tests(ms: u64) {
+    BANNER_CONNECTING_MS.store(ms, Ordering::Relaxed);
+}
+
 /// The `Connected` banner's lifetime, ms.
 pub fn banner_success_ms() -> u64 {
     BANNER_SUCCESS_MS.load(Ordering::Relaxed)
