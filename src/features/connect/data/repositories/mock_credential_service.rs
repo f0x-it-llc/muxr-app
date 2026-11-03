@@ -23,8 +23,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use zeroize::Zeroizing;
 
 use super::secure_credential_service::{
-    DELETE_FAILED, FORGET_REASON, VAULT_KEY, VaultStore, next_vault, read_one, refused_rewrite,
-    storage_key, store_locked, unlock_vault, vault_without, write_vault,
+    DELETE_FAILED, FORGET_REASON, VAULT_KEY, VaultStore, VaultWrite, next_vault, read_one,
+    refused_rewrite, storage_key, store_locked, unlock_vault, vault_without, write_vault,
 };
 use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::{
@@ -232,7 +232,12 @@ impl CredentialService for MockCredentialService {
     ) -> CredentialStatus {
         let encoded = next_vault(keyring, &request.server_key, &request.token);
         let legacy = storage_key(&request.server_key);
-        match write_vault(&self.vault_with(&request.reason), &encoded, Some(&legacy)) {
+        match write_vault(
+            &self.vault_with(&request.reason),
+            &encoded,
+            Some(&legacy),
+            VaultWrite::Store(&request.server_key),
+        ) {
             Ok(()) => {
                 keyring.insert(request.server_key, request.token);
                 CredentialStatus::Success
@@ -248,7 +253,12 @@ impl CredentialService for MockCredentialService {
     ) -> Result<(), AppFailure> {
         if keyring.token_for(&server_key).is_some() {
             let encoded = vault_without(keyring, &server_key);
-            let written = write_vault(&self.vault_with(FORGET_REASON), &encoded, None);
+            let written = write_vault(
+                &self.vault_with(FORGET_REASON),
+                &encoded,
+                None,
+                VaultWrite::Evict(&server_key),
+            );
             refused_rewrite(written.err().unwrap_or(CredentialStatus::Success))?;
             keyring.remove(&server_key);
         }

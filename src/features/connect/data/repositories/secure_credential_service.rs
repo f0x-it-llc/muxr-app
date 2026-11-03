@@ -155,10 +155,16 @@ impl CredentialService for SecureCredentialStore {
         } = request;
         let encoded = next_vault(keyring, &server_key, &token);
         let legacy = storage_key(&server_key);
+        let logged = server_key.clone();
         // Only the encoded blob crosses into the blocking task.
         let written = gated(move || {
             let store = open_gated(&reason)?;
-            Ok(write_vault(&store, &encoded, Some(&legacy)))
+            Ok(write_vault(
+                &store,
+                &encoded,
+                Some(&legacy),
+                VaultWrite::Store(&logged),
+            ))
         })
         .await;
         let status = status_from(written);
@@ -175,9 +181,15 @@ impl CredentialService for SecureCredentialStore {
     ) -> Result<(), AppFailure> {
         if keyring.token_for(&server_key).is_some() {
             let encoded = vault_without(keyring, &server_key);
+            let evicted = server_key.clone();
             let written = gated(move || {
                 let store = open_gated(FORGET_REASON)?;
-                Ok(write_vault(&store, &encoded, None))
+                Ok(write_vault(
+                    &store,
+                    &encoded,
+                    None,
+                    VaultWrite::Evict(&evicted),
+                ))
             })
             .await;
             refused_rewrite(status_from(written))?;
@@ -261,6 +273,7 @@ impl UnlockedVault {
 /// Reads and strictly decodes the vault (one gated `get`): no vault is an
 /// empty keyring, an undecodable one [`CredentialStatus::Failed`].
 pub(super) fn read_vault(store: &impl VaultStore) -> Result<Keyring, CredentialStatus> {
+    log::info!("credentials: gated read of the vault");
     match store.get(VAULT_KEY)? {
         None => Ok(Keyring::new()),
         Some(raw) => KeyringVault::decode(&raw).map_err(|err| {
@@ -289,6 +302,7 @@ pub(super) fn unlock_vault(
         if !store.contains(&key)? {
             continue;
         }
+        log::info!("credentials: legacy entry present for {endpoint}");
         if keyring.token_for(endpoint).is_some() {
             stale.push(key);
             continue;
@@ -303,14 +317,19 @@ pub(super) fn unlock_vault(
             Err(status) => return Err(status),
         }
     }
-    let mut pruned = false;
+    let mut pruned = Vec::new();
     for endpoint in keyring.endpoints() {
-        if !endpoints.contains(&endpoint) {
-            pruned |= keyring.remove(&endpoint);
+        if !endpoints.contains(&endpoint) && keyring.remove(&endpoint) {
+            pruned.push(endpoint);
         }
     }
-    if !migrated.is_empty() || pruned {
+    if !migrated.is_empty() || !pruned.is_empty() {
+        log::info!(
+            "credentials: gated write (unlock) of the vault: migrated {migrated:?}, pruned {pruned:?}"
+        );
         store.set(VAULT_KEY, &encode_vault(&keyring))?;
+    } else {
+        log::info!("credentials: unlock wrote nothing (no migration, no prune)");
     }
     for key in migrated.iter().map(|endpoint| storage_key(endpoint)) {
         remove_quietly(store, &key);
@@ -333,17 +352,41 @@ pub(super) fn store_locked(
 ) -> Result<(), CredentialStatus> {
     let mut keyring = read_vault(store)?;
     let legacy = storage_key(&server_key);
-    keyring.insert(server_key, token);
-    write_vault(store, &encode_vault(&keyring), Some(&legacy))
+    keyring.insert(server_key.clone(), token);
+    write_vault(
+        store,
+        &encode_vault(&keyring),
+        Some(&legacy),
+        VaultWrite::Store(&server_key),
+    )
+}
+
+/// Why a gated vault `set` happened, for the info log: the vault writes are
+/// the only source of Android's per-write prompt.
+#[derive(Clone, Copy)]
+pub(super) enum VaultWrite<'a> {
+    /// A credential for this endpoint was saved.
+    Store(&'a str),
+    /// A credential for this endpoint was evicted.
+    Evict(&'a str),
 }
 
 /// One gated `set` of an encoded vault, then the quiet removal of the legacy
-/// entry it supersedes.
+/// entry it supersedes. Logs the endpoint and the reason, never a token.
 pub(super) fn write_vault(
     store: &impl VaultStore,
     encoded: &str,
     superseded: Option<&str>,
+    why: VaultWrite<'_>,
 ) -> Result<(), CredentialStatus> {
+    match why {
+        VaultWrite::Store(endpoint) => {
+            log::info!("credentials: gated write (store) of the vault for {endpoint}");
+        }
+        VaultWrite::Evict(endpoint) => {
+            log::info!("credentials: gated write (evict) of the vault for {endpoint}");
+        }
+    }
     store.set(VAULT_KEY, encoded)?;
     if let Some(key) = superseded {
         remove_quietly(store, key);
@@ -359,8 +402,10 @@ pub(super) fn read_one(
 ) -> Result<Option<Zeroizing<String>>, CredentialStatus> {
     let legacy = storage_key(server_key);
     if store.contains(&legacy)? {
+        log::info!("credentials: gated read (legacy entry) for {server_key}");
         return store.get(&legacy);
     }
+    log::info!("credentials: gated read (single) for {server_key}");
     Ok(read_vault(store)?.token_for(server_key))
 }
 
