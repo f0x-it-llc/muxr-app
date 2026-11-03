@@ -2820,15 +2820,23 @@ fn the_poll_pauses_while_the_switcher_stage_is_open_and_resumes_on_close() {
     let switcher = expect_servers_controller();
     switcher.open();
     h.frame();
-    // A poll already in flight when the stage rose may still land.
-    h.pump_until("the in-flight poll to drain", |_| true);
-    let covered_at = repo.calls();
+    // A poll already in flight when the stage rose may still land: wait for
+    // the count to hold still over several frames.
+    let mut stable = 0;
+    let mut last = repo.calls();
+    while stable < 5 {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        let now = repo.calls();
+        stable = if now == last { stable + 1 } else { 0 };
+        last = now;
+    }
+    let covered_at = last;
     let until = Instant::now() + Duration::from_millis(2600);
     while Instant::now() < until {
         pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
     }
     assert!(
-        repo.calls() <= covered_at + 1,
+        repo.calls() == covered_at,
         "no ListSessions while the stage is open: {} -> {}",
         covered_at,
         repo.calls()

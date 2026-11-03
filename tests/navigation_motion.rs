@@ -1960,7 +1960,14 @@ fn the_servers_fab_exists_only_on_sessions() {
         "sessions carries the FAB: {:?}",
         h.labels()
     );
-    assert!(node_roles(&h.root).contains(&Role::Button));
+    let fab_role = h
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(SERVERS_FAB))
+        .map(|(_, node)| node.role());
+    assert_eq!(fab_role, Some(Role::Button), "the FAB node is a Button");
 
     h.push("/settings");
     h.park();
@@ -2066,6 +2073,36 @@ fn the_stage_bars_add_chip_pushes_the_add_server_page() {
         h.values()
     );
     assert_eq!(h.depth(), 3, "pushed over the placed shell");
+    assert!(!stage_is_open(), "the add chip took the stage down with it");
+
+    press_back(&mut h);
+    assert_eq!(h.depth(), 2, "the add page popped back to the shell");
+    assert!(!stage_is_open(), "the stage does not reappear on pop");
+    assert!(
+        h.labels().iter().all(|l| !l.starts_with("page ")),
+        "no dots: {:?}",
+        h.labels()
+    );
+}
+
+#[test]
+fn the_stage_never_outlives_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    open_stage(&mut h);
+    assert!(stage_is_open());
+
+    app_nav().push("/settings");
+    h.settle();
+    h.park();
+
+    assert!(!stage_is_open(), "leaving /sessions closed the stage");
+    assert!(
+        h.labels().iter().all(|l| !l.starts_with("page ")),
+        "no dots: {:?}",
+        h.labels()
+    );
 }
 
 #[test]
