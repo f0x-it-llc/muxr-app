@@ -1,8 +1,9 @@
 //! `servers`'s composition-root wiring seam (see `docs/FEATURES_ARCHITECTURE.md`'s
 //! DI pattern). Two app-scoped singletons, both published with
 //! [`frust::provide_context`] and both meant to be called from
-//! `crate::MuxrApp::init` (the shell wiring card does; this slice does not edit
-//! `lib.rs`):
+//! `crate::MuxrApp::init` (`MuxrApp::init` calls `provide_last_seen` and
+//! `provide_controller`; this slice does not edit `lib.rs`; see
+//! `APP_FEATURES_ARCHITECTURE.md`):
 //!
 //! - [`provide_last_seen`] — the [`LastSeenHandle`], what each server last
 //!   listed in this process. Plain data, shared and interior-mutable, no
@@ -17,19 +18,21 @@
 //!   and Sessions' dismiss consumer closes the stage.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust::{provide_context, use_context};
 use frust_glyph::SwitcherBack;
 
 use super::domain::entities::{LastSeen, SessionGlimpse};
-use super::presentation::controller::ServersSwitcherController;
+use super::presentation::controller::{ServersSwitcherController, install_landing};
 use crate::connection::expect_connection_controller;
 use crate::features::connect::di::{
     expect_credential_service, expect_keyring, expect_saved_servers,
 };
+use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::pro::di::expect_pro_controller;
+use crate::routes::app_nav;
 
 thread_local! {
     static SWITCHER_BACK: RefCell<Option<SwitcherBack>> = const { RefCell::new(None) };
@@ -48,7 +51,7 @@ impl LastSeenHandle {
 
     /// Remember `sessions` as what `endpoint` showed just now.
     pub fn record(&self, endpoint: &str, sessions: Vec<SessionGlimpse>) {
-        self.record_at(endpoint, sessions, now_ms());
+        self.record_at(endpoint, sessions, epoch_millis());
     }
 
     /// [`Self::record`] with an explicit stamp.
@@ -59,6 +62,14 @@ impl LastSeenHandle {
             .insert(endpoint.to_string(), (sessions, seen_at_ms));
     }
 
+    /// Forget every glimpse (a keyring lock invalidates what was cached).
+    pub fn clear(&self) {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// A copy of the map as it stands.
     pub fn snapshot(&self) -> LastSeen {
         self.seen
@@ -66,12 +77,6 @@ impl LastSeenHandle {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(0))
 }
 
 /// Publishes the process's one [`LastSeenHandle`] and hands it back.
@@ -100,6 +105,7 @@ pub fn provide_controller() -> Arc<ServersSwitcherController> {
         last_seen,
     ));
     provide_context(Arc::clone(&controller));
+    install_landing(Rc::new(|location| app_nav().go(location)));
     // One per app, created under the reactive runtime (`MuxrApp::init`). The
     // handle is `Rc`-based, so it cannot go through `provide_context` (which
     // wants `Send + Sync`): it is this thread's, like `routes::app_nav`.

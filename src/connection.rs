@@ -225,23 +225,38 @@ impl ConnectionBackend for MockConnectionBackend {
         if take_mock_dial_failure() {
             return ConnectRun::Ready(Err(AppFailure::Network(MOCK_DIAL_REFUSED.to_string())));
         }
-        ConnectRun::Ready(Ok(ServerInfo {
-            endpoint: endpoint_of(&target),
-            trust_mode: target.trust_mode,
-            tls_label: target.trust_mode.label().to_string(),
-            version: MOCK_SERVER_VERSION.to_string(),
-            latency_ms: MOCK_LATENCY_MS,
-            backend_versions: vec![BackendVersion {
-                backend: ServerBackend::Zellij,
-                version: MOCK_ZELLIJ_VERSION.to_string(),
-            }],
-            available_backends: vec![ServerBackend::Zellij],
-            capabilities: BTreeSet::from([CAP_MOUSE_INPUT.to_string()]),
-            is_read_only: false,
-        }))
+        let info = mock_server_info(&target);
+        if let Some(held) = take_mock_dial_hold() {
+            return ConnectRun::Pending(Box::pin(async move {
+                if held.await.unwrap_or(false) {
+                    Ok(info)
+                } else {
+                    Err(AppFailure::Network(MOCK_DIAL_REFUSED.to_string()))
+                }
+            }));
+        }
+        ConnectRun::Ready(Ok(info))
     }
 
     fn disconnect(&self) {}
+}
+
+/// The facts the mock backend reports for a successful dial of `target`.
+fn mock_server_info(target: &ConnectTarget) -> ServerInfo {
+    ServerInfo {
+        endpoint: endpoint_of(target),
+        trust_mode: target.trust_mode,
+        tls_label: target.trust_mode.label().to_string(),
+        version: MOCK_SERVER_VERSION.to_string(),
+        latency_ms: MOCK_LATENCY_MS,
+        backend_versions: vec![BackendVersion {
+            backend: ServerBackend::Zellij,
+            version: MOCK_ZELLIJ_VERSION.to_string(),
+        }],
+        available_backends: vec![ServerBackend::Zellij],
+        capabilities: BTreeSet::from([CAP_MOUSE_INPUT.to_string()]),
+        is_read_only: false,
+    }
 }
 
 /// The `muxrd` backend: a real dial + `Login` + `GetVersion` over
@@ -598,6 +613,15 @@ impl ConnectionController {
         self.dial(generation, target, on_done);
     }
 
+    /// The dial generation: bumped by every accepted connect or switch and by
+    /// every teardown. A caller whose dial's `on_done` never arrived compares
+    /// it against the value it read right after starting the dial to learn the
+    /// dial was superseded (a superseded dial's `on_done` is dropped, see
+    /// `settle`). Read-only.
+    pub fn dial_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     fn next_generation(&self) -> u64 {
         self.generation
             .fetch_add(1, Ordering::SeqCst)
@@ -869,6 +893,48 @@ const MOCK_DIAL_REFUSED: &str = "mock dial refused";
 /// with `0`. Test-only behaviour: the real backend never reads it.
 pub fn fail_next_mock_dials_for_tests(count: usize) {
     MOCK_DIAL_FAILURES.store(count, Ordering::SeqCst);
+}
+
+/// A mock dial held open by [`hold_next_mock_dials_for_tests`].
+pub struct HeldDial {
+    release: oneshot::Sender<bool>,
+}
+
+impl HeldDial {
+    /// Let the held dial finish: `true` succeeds, `false` fails like a
+    /// refused dial. Dropping a `HeldDial` unreleased fails it.
+    pub fn release(self, succeed: bool) {
+        let _ = self.release.send(succeed);
+    }
+}
+
+/// Dials the mock backend still has to hold open, oldest first.
+static MOCK_DIAL_HOLDS: Mutex<Vec<oneshot::Receiver<bool>>> = Mutex::new(Vec::new());
+
+/// Make the next `count` dials of [`MockConnectionBackend`] (that are not
+/// scripted to fail) stay pending until the returned handle (one per dial, in
+/// dial order) is released. Process-wide like [`fail_next_mock_dials_for_tests`];
+/// calling with `0` drops any leftovers. Test-only behaviour.
+pub fn hold_next_mock_dials_for_tests(count: usize) -> Vec<HeldDial> {
+    let mut holds = MOCK_DIAL_HOLDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    holds.clear();
+    (0..count)
+        .map(|_| {
+            let (release, held) = oneshot::channel();
+            holds.push(held);
+            HeldDial { release }
+        })
+        .collect()
+}
+
+/// Take the oldest hold, if any is left.
+fn take_mock_dial_hold() -> Option<oneshot::Receiver<bool>> {
+    let mut holds = MOCK_DIAL_HOLDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    (!holds.is_empty()).then(|| holds.remove(0))
 }
 
 /// Consume one scripted mock failure, if any is left.

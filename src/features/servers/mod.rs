@@ -3,12 +3,14 @@
 //! raises, not a screen.
 //!
 //! `{domain, presentation}`, dependencies pointing inward only; [`di`] is the
-//! composition-root seam (`crate::MuxrApp::init` calls into it from the shell
-//! wiring card). There is no `data` layer: the only state is the app-scoped
+//! composition-root seam (`crate::MuxrApp::init` calls into it). There is no `data` layer: the only state is the app-scoped
 //! last-seen handle, plain data in [`di`].
 //!
-//! `sessions` writes into the last-seen handle through [`di`] and
-//! [`domain`] only, never through this slice's presentation.
+//! `sessions` depends on this slice in two places: it writes into the
+//! last-seen handle through [`di`] and [`domain`], and it imports
+//! `presentation::controller::ServersSwitcherController` for the switcher FAB
+//! and the poll pause while the stage is open. Nothing else of this slice's
+//! presentation is reached from `sessions`.
 
 pub mod di;
 pub mod domain;

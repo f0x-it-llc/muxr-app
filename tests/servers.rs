@@ -25,7 +25,8 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::connection::{
-    ConnectTarget, TrustMode, expect_connection_controller, fail_next_mock_dials_for_tests,
+    ConnectTarget, HeldDial, TrustMode, expect_connection_controller,
+    fail_next_mock_dials_for_tests, hold_next_mock_dials_for_tests,
 };
 use muxr::features::connect::di::{expect_keyring, expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
@@ -591,4 +592,82 @@ fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_bac
         }
         other => panic!("B should read Cached, got {other:?}"),
     }
+}
+
+/// Tap B with its dial held open, and wait until the claim shows.
+fn tap_b_with_a_held_dial(h: &mut Harness) -> HeldDial {
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.pump_until(|_| switcher().busy.get_untracked().is_some());
+    held
+}
+
+#[test]
+fn a_dial_superseded_by_a_disconnect_does_not_leave_the_switcher_busy_for_good() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    let held = tap_b_with_a_held_dial(&mut h);
+
+    switcher().close();
+    h.park();
+    expect_connection_controller().disconnect();
+    expect_connection_controller().connect(mock_target());
+    held.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(A_ENDPOINT));
+    h.open_stage();
+    assert_eq!(connected_endpoint().as_deref(), Some(A_ENDPOINT));
+
+    h.tap_card(strip_index(B_ENDPOINT), 0);
+    settle_on(&mut h, B_ENDPOINT);
+
+    assert!(!stage_is_open(), "the tap on a peer switched");
+    assert!(switcher().busy.get_untracked().is_none());
+    hold_next_mock_dials_for_tests(0);
+}
+
+#[test]
+fn a_late_settle_does_not_take_down_a_stage_reopened_meanwhile() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    let held = tap_b_with_a_held_dial(&mut h);
+
+    switcher().close();
+    h.park();
+    h.open_stage();
+    held.release(true);
+    h.pump_until(|_| {
+        switcher().busy.get_untracked().is_none()
+            && connected_endpoint().as_deref() == Some(B_ENDPOINT)
+    });
+
+    assert!(
+        stage_is_open(),
+        "the reopened stage is not the dial's to close"
+    );
+    hold_next_mock_dials_for_tests(0);
+}
+
+#[test]
+fn closing_the_stage_after_a_failed_switch_lands_on_connect() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    fail_next_mock_dials_for_tests(1);
+    h.tap_card(strip_index(B_ENDPOINT), 0);
+    h.pump_until(|_| matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
+    h.park();
+    assert!(
+        connected_endpoint().is_none(),
+        "the failed switch tore A down"
+    );
+    assert_eq!(h.depth(), 2);
+
+    switcher().close();
+    h.settle();
+    h.park();
+
+    assert!(!stage_is_open());
+    assert_eq!(h.depth(), 1, "landing on Connect, not a dead Sessions");
 }

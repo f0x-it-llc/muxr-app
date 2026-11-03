@@ -2,7 +2,7 @@
 //! shell scaffold's `fab` slot (bottom-right, the scaffold owns placement)
 //! that raises the server switcher stage.
 //!
-//! The 0.6.5 FAB is pointer-only (frust act_000001a197874048qAwbVt2Y): it is
+//! frust 0.6.5's FAB is pointer-only: it is
 //! named for assistive technology through its tooltip but has no keyboard or
 //! shortcut activation. That is the framework's limit, not worked around here.
 
