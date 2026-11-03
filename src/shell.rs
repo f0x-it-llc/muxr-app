@@ -14,7 +14,7 @@ use crate::connection::ConnectionController;
 use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::servers::di::{
-    expect_servers_controller, expect_switcher_back, use_last_seen,
+    expect_servers_controller, expect_switcher_back, keep_peers, use_last_seen,
 };
 use crate::features::servers::domain::entities::{FaceKind, ServerFace};
 use crate::features::servers::presentation::controller::{ServersSwitcherController, SwitchGate};
@@ -115,8 +115,8 @@ pub(crate) fn shell_page(
 ///
 /// Strip order is the controller's: the live card is the scaled shell page at
 /// `live_index`, the peers are every other face. Peers are rebuilt from the
-/// current faces on every build while the stage is open (after a failed switch
-/// no face is live); a closed stage builds none, so the real Sessions widgets
+/// current faces on every build while the stage is open and through its close
+/// ramp (after a failed switch no face is live); a stage closed longer builds none, so the real Sessions widgets
 /// of a cached peer are never constructed for a screen nobody sees.
 fn switcher_host(
     switcher: &Arc<ServersSwitcherController>,
@@ -135,8 +135,10 @@ fn switcher_host(
         .position(|face| face.kind == FaceKind::Live)
         .unwrap_or(0);
     let open = switcher.open.get();
-    let peers: Vec<_> = if open {
-        // A forgotten row's remembered page goes with it.
+    // Kept through the close ramp too (see `keep_peers`).
+    let peers: Vec<_> = if keep_peers(open) {
+        // A forgotten row's remembered page goes with it. A plain map edit, not
+        // a signal write, so it can never re-trigger this build.
         if let Some(last_seen) = use_last_seen() {
             last_seen.retain(|endpoint| faces_now.iter().any(|face| face.endpoint == endpoint));
         }
