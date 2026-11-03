@@ -34,7 +34,9 @@ use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
-use muxr::features::servers::di::{expect_servers_controller, use_last_seen};
+use muxr::features::servers::di::{
+    PEER_TAIL, expect_servers_controller, set_stage_clock_for_tests, use_last_seen,
+};
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
     ServersSwitcherController, peer_endpoints,
@@ -762,24 +764,78 @@ fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapsho
     );
 }
 
+/// Pin the stage clock, so the close tail is stepped rather than slept through.
+fn pin_stage_clock() -> Instant {
+    let at = Instant::now();
+    set_stage_clock_for_tests(Some(at));
+    at
+}
+
 #[test]
-fn a_closed_stage_builds_no_peer_snapshots() {
+fn a_stage_closed_past_its_tail_builds_no_peer_snapshots() {
     let _g = serial();
     let _ambient = setup();
+    let t0 = pin_stage_clock();
     let mut h = open_pro_stage(TrustMode::System, true);
     visit_b_and_return_to_a(&mut h);
     h.park();
 
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL + Duration::from_millis(100)));
     let before = snapshots_built_for_tests();
-    for _ in 0..3 {
-        h.frame();
-    }
+    switcher().refresh_faces();
     h.park();
+    h.frame();
     assert_eq!(
         snapshots_built_for_tests(),
         before,
-        "frames with the stage closed build no peer face"
+        "the first build after the tail builds no peer face"
     );
+    set_stage_clock_for_tests(None);
+}
+
+#[test]
+fn closing_the_stage_keeps_building_the_peers_through_the_close_tail() {
+    let _g = serial();
+    let _ambient = setup();
+    let t0 = pin_stage_clock();
+    let mut h = open_pro_stage(TrustMode::System, true);
+    visit_b_and_return_to_a(&mut h);
+
+    h.open_stage();
+    let live_open = live_strip_index();
+    let opened = snapshots_built_for_tests();
+    close_stage(&mut h);
+    assert!(
+        snapshots_built_for_tests() > opened,
+        "the build that closes the stage still passes the peers (the ramp paints them)"
+    );
+    assert_eq!(
+        live_strip_index(),
+        live_open,
+        "the strip keeps its live slot"
+    );
+
+    // Within the tail a rebuild still carries them; reopening is a normal open.
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL / 2));
+    let mid = snapshots_built_for_tests();
+    switcher().refresh_faces();
+    h.park();
+    assert!(snapshots_built_for_tests() > mid, "still inside the tail");
+    h.open_stage();
+    assert!(stage_is_open());
+    assert!(matches!(
+        face_kind(B_ENDPOINT),
+        FaceKind::Cached { page: Some(_), .. }
+    ));
+    close_stage(&mut h);
+
+    // Past the tail the next rebuild drops them.
+    set_stage_clock_for_tests(Some(t0 + PEER_TAIL * 3));
+    let late = snapshots_built_for_tests();
+    switcher().refresh_faces();
+    h.park();
+    assert_eq!(snapshots_built_for_tests(), late);
+    set_stage_clock_for_tests(None);
 }
 
 #[test]
