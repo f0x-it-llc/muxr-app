@@ -11,8 +11,10 @@
 //!   test that never provided it is unaffected.
 //! - [`provide_controller`] — the one [`ServersSwitcherController`], built
 //!   over the other features' own seams and the handle above. It also
-//!   publishes the app's one [`SwitcherBack`] (the stage's Android back
-//!   claim), closing the stage through that controller.
+//!   publishes the app's one [`SwitcherBack`] (the component's back
+//!   handle, closing the stage through that controller). In the shell it is
+//!   wired but not the live back path: the shell's dismiss page outranks it
+//!   and Sessions' dismiss consumer closes the stage.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, PoisonError};

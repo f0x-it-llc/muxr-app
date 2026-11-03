@@ -5,7 +5,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use frust::{AnyView, Get, Location, NavigatorController, Stack, View, any, icons, navigator};
+use frust::{
+    AnyView, Get, GetUntracked, Location, NavigatorController, Stack, View, any, icons, navigator,
+};
 use frust_glyph::{TitleDirection, TitlePosition, app_bar, card_switcher, peer_card};
 
 use crate::AppState;
@@ -65,6 +67,11 @@ pub(crate) fn shell_page(
 {
     let nav = app_nav();
     let switcher = expect_servers_controller();
+    // The stage never outlives `/sessions`: the FAB is the only way up, and
+    // a stage left open on another inner route would swallow its back press.
+    if !nav.on_sessions() && switcher.open.get_untracked() {
+        switcher.close();
+    }
     let bar = shell_bar(&nav, connection);
     let landing = nav.clone();
     let mut pages = navigator(inner, move || landing.landing_page()).transition(route_transition());
@@ -125,7 +132,13 @@ fn switcher_host(
         };
         let add = {
             let (switcher, nav) = (Arc::clone(switcher), nav.clone());
-            Rc::new(move || switcher.add(&nav)) as Rc<dyn Fn()>
+            // The controller's `add` only pushes; the stage must not outlive
+            // the push (its open flag, poll pause and strip would persist
+            // under the add page and reappear on pop).
+            Rc::new(move || {
+                switcher.close();
+                switcher.add(&nav);
+            }) as Rc<dyn Fn()>
         };
         let close = {
             let switcher = Arc::clone(switcher);
@@ -142,6 +155,10 @@ fn switcher_host(
         .action_bar(bar)
         .expanding(switcher.expanding.get())
         .card_scale(PHONE_CARD_SCALE)
+        // Wired per the component contract. It is NOT the back path in this
+        // shell: the shell's `DismissAnimated` page outranks a `BackFallback`,
+        // so the press reaches Sessions' dismiss consumer, which closes the
+        // stage (see `SessionsScreen::build`).
         .back(&expect_switcher_back());
     if let Some(live) = faces_now
         .get(live_index)
