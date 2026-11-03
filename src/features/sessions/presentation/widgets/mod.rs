@@ -23,6 +23,7 @@ mod manage_sheet;
 mod new_session_dialog;
 mod server_strip;
 mod session_card;
+mod switcher_fab;
 
 use frust::View;
 use frust::{Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, container, inflexible};
@@ -32,6 +33,7 @@ use crate::ui::palette::Palette;
 use super::pages::SessionsState;
 
 pub(crate) use server_strip::host_of;
+pub(crate) use switcher_fab::switcher_fab;
 
 pub(in crate::features::sessions::presentation) use crate::ui::palette::active_theme;
 pub(in crate::features::sessions::presentation) use detail::detail_pane;

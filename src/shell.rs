@@ -1,19 +1,31 @@
 //! The overlay host's root page, and the shell page the route table hangs the
 //! three bar-bearing routes off.
 
-use frust::{AnyView, Location, NavigatorController, Stack, View, any, icons, navigator};
-use frust_glyph::{TitleDirection, TitlePosition, app_bar};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use frust::{AnyView, Get, Location, NavigatorController, Stack, View, any, icons, navigator};
+use frust_glyph::{TitleDirection, TitlePosition, app_bar, card_switcher, peer_card};
 
 use crate::AppState;
 use crate::connection::ConnectionController;
+use crate::features::servers::di::{expect_servers_controller, expect_switcher_back};
+use crate::features::servers::domain::entities::FaceKind;
+use crate::features::servers::presentation::controller::{ServersSwitcherController, SwitchGate};
+use crate::features::servers::presentation::widgets::{bar::servers_bar, faces, label_row};
+use crate::features::sessions::presentation::widgets::switcher_fab;
 use crate::features::terminal::presentation::pages::open_terminal_menu;
 use crate::routes::{
     BarAction, BarDirection, BarLeading, CONNECT_LOCATION, Nav, SETTINGS_ROUTE, app_nav,
     route_transition,
 };
+use crate::ui::palette::{Palette, active_theme};
 use crate::ui::topbar::{BACK_LABEL, bar_icon, brand_leading};
 
 const SETTINGS_LABEL: &str = "Settings";
+/// The card's scale at full open on a phone (the tablet card sets 0.58).
+const PHONE_CARD_SCALE: f64 = 0.62;
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 
 /// The overlay host's root page: the outer navigator, and `overlay` (the
@@ -47,16 +59,107 @@ pub fn root_view(
 /// shell rather than popping to a placeholder under the landing screen.
 pub(crate) fn shell_page(
     inner: &NavigatorController<AppState>,
+    overlays: &NavigatorController<AppState>,
     connection: &ConnectionController,
-) -> impl View<AppState> + use<> {
+) -> AnyView<AppState> // erasure: one return type for the host-wrapped shell
+{
     let nav = app_nav();
+    let switcher = expect_servers_controller();
     let bar = shell_bar(&nav, connection);
     let landing = nav.clone();
     let mut pages = navigator(inner, move || landing.landing_page()).transition(route_transition());
     if let Some(route) = nav.landing_route() {
         pages = pages.root_route(route);
     }
-    frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar)
+    let mut scaffold = frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar);
+    if nav.on_sessions() {
+        scaffold = scaffold.fab(switcher_fab(&switcher));
+    }
+    any(switcher_host(&switcher, overlays, &nav, scaffold))
+}
+
+/// The whole shell page (bar included) as the live card of the server
+/// switcher stage. The host sits under the overlay host and the toast layer,
+/// so dialogs (the paywall, the unverified confirm) and toasts outrank it.
+///
+/// Strip order is the controller's: the live card is the scaled shell page at
+/// `live_index`, the peers are every other face. Peers are rebuilt from the
+/// current faces on every build (after a failed switch no face is live).
+fn switcher_host(
+    switcher: &Arc<ServersSwitcherController>,
+    overlays: &NavigatorController<AppState>,
+    nav: &Nav,
+    page: impl View<AppState>,
+) -> impl View<AppState> {
+    let theme = active_theme();
+    let colors = Palette::from_theme(&theme);
+    let now_ms = now_ms();
+    let faces_now = switcher.faces.get();
+    let live_index = faces_now
+        .iter()
+        .position(|face| face.kind == FaceKind::Live)
+        .unwrap_or(0);
+    let peers: Vec<_> = faces_now
+        .iter()
+        .filter(|face| face.kind != FaceKind::Live)
+        .map(|face| {
+            peer_card(faces::server_face(&theme, &colors, face, now_ms))
+                .label(label_row(&theme, &colors, face))
+        })
+        .collect();
+
+    let gate = SwitchGate::standard(overlays, &expect_pro(), nav);
+    let on_select = {
+        let switcher = Arc::clone(switcher);
+        move |_: &mut AppState, peer_index: usize| switcher.select(peer_index, &gate)
+    };
+    let on_close = {
+        let switcher = Arc::clone(switcher);
+        move |_: &mut AppState| switcher.close()
+    };
+
+    let bar = {
+        let lock = {
+            let (switcher, nav) = (Arc::clone(switcher), nav.clone());
+            Rc::new(move || switcher.lock(&nav)) as Rc<dyn Fn()>
+        };
+        let add = {
+            let (switcher, nav) = (Arc::clone(switcher), nav.clone());
+            Rc::new(move || switcher.add(&nav)) as Rc<dyn Fn()>
+        };
+        let close = {
+            let switcher = Arc::clone(switcher);
+            Rc::new(move || switcher.close()) as Rc<dyn Fn()>
+        };
+        servers_bar::<AppState>(lock, add, close)
+    };
+
+    let mut stage = card_switcher(switcher.open.get(), page)
+        .peers(peers)
+        .live_index(live_index)
+        .on_select(on_select)
+        .on_close(on_close)
+        .action_bar(bar)
+        .expanding(switcher.expanding.get())
+        .card_scale(PHONE_CARD_SCALE)
+        .back(&expect_switcher_back());
+    if let Some(live) = faces_now
+        .get(live_index)
+        .filter(|f| f.kind == FaceKind::Live)
+    {
+        stage = stage.live_label(label_row(&theme, &colors, live));
+    }
+    stage
+}
+
+fn expect_pro() -> Arc<crate::features::pro::presentation::controller::ProController> {
+    crate::features::pro::di::expect_pro_controller()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(0))
 }
 
 /// The Glyph app bar for whatever route the inner navigator has on top.

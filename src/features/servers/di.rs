@@ -10,12 +10,16 @@
 //!   through it when present and does nothing when absent, so a process or
 //!   test that never provided it is unaffected.
 //! - [`provide_controller`] — the one [`ServersSwitcherController`], built
-//!   over the other features' own seams and the handle above.
+//!   over the other features' own seams and the handle above. It also
+//!   publishes the app's one [`SwitcherBack`] (the stage's Android back
+//!   claim), closing the stage through that controller.
 
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust::{provide_context, use_context};
+use frust_glyph::SwitcherBack;
 
 use super::domain::entities::{LastSeen, SessionGlimpse};
 use super::presentation::controller::ServersSwitcherController;
@@ -24,6 +28,10 @@ use crate::features::connect::di::{
     expect_credential_service, expect_keyring, expect_saved_servers,
 };
 use crate::features::pro::di::expect_pro_controller;
+
+thread_local! {
+    static SWITCHER_BACK: RefCell<Option<SwitcherBack>> = const { RefCell::new(None) };
+}
 
 /// The per-process last-seen map, shared. Cloning shares the same map.
 #[derive(Clone, Default)]
@@ -90,7 +98,27 @@ pub fn provide_controller() -> Arc<ServersSwitcherController> {
         last_seen,
     ));
     provide_context(Arc::clone(&controller));
+    // One per app, created under the reactive runtime (`MuxrApp::init`). The
+    // handle is `Rc`-based, so it cannot go through `provide_context` (which
+    // wants `Send + Sync`): it is this thread's, like `routes::app_nav`.
+    let closing = Arc::clone(&controller);
+    SWITCHER_BACK
+        .with(|cell| *cell.borrow_mut() = Some(SwitcherBack::new(move || closing.close())));
     controller
+}
+
+/// The app's one [`SwitcherBack`], passed to the stage on every build.
+pub fn expect_switcher_back() -> SwitcherBack {
+    SWITCHER_BACK.with(|cell| cell.borrow().clone()).expect(
+        "expect_switcher_back: features::servers::di::provide_controller() must run first \
+         (the shell wiring calls it from MuxrApp::init)",
+    )
+}
+
+/// The switcher controller if [`provide_controller`] ran — the optional lookup
+/// for screens (Sessions) that also mount in a process without the shell.
+pub fn use_servers_controller() -> Option<Arc<ServersSwitcherController>> {
+    use_context::<Arc<ServersSwitcherController>>()
 }
 
 pub fn expect_servers_controller() -> Arc<ServersSwitcherController> {
