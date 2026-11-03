@@ -3,8 +3,9 @@
 //! 02 — one submodule per visual cluster: [`server_strip`] (`.conn-row`),
 //! [`session_card`] (`.sess-card`), [`list`] (new-session button, empty and
 //! failed states, the Tablet list column beside the detail), [`detail`] (the
-//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows) and
-//! [`new_session_dialog`] (name + backend choice). Page-coupled by design
+//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows),
+//! [`new_session_dialog`] (name + backend choice) and [`snapshot`] (the screen
+//! as an inert picture). Page-coupled by design
 //! (`APP_FEATURES_ARCHITECTURE.md`'s widgets/ paragraph): each reads the
 //! page's state type or calls its `pages::*` action shims directly.
 //!
@@ -23,6 +24,7 @@ mod manage_sheet;
 mod new_session_dialog;
 mod server_strip;
 mod session_card;
+mod snapshot;
 mod switcher_fab;
 
 use frust::View;
@@ -33,6 +35,7 @@ use crate::ui::palette::Palette;
 use super::pages::SessionsState;
 
 pub(crate) use server_strip::host_of;
+pub(crate) use snapshot::{built as snapshots_built, sessions_snapshot};
 pub(crate) use switcher_fab::{shell_responsive, switcher_fab};
 
 pub(in crate::features::sessions::presentation) use crate::ui::palette::active_theme;
