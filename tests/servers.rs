@@ -6,7 +6,8 @@
 //! reduce-motion) and select through the controller seam; `tests/sessions.rs` the tablet card.
 //! This suite owns what those do not: a tap on a peer card's on-screen rect, the inert page, the
 //! locked-keyring prompt count, the failed-dial face and its retry, the paywall and the
-//! unverified-trust confirm gates, and the cached face after a round trip.
+//! unverified-trust confirm gates, the cached face after a round trip, and the in-place renewal
+//! of an expired live session.
 //!
 //! **Peer cards have no accessibility nodes** (frust 0.6.5), so what a peer face shows is read
 //! off the controller's `faces`, and a peer is *tapped* at a rect computed from the strip
@@ -36,9 +37,9 @@ use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
-    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, expect_servers_controller, keep_peers,
-    set_banner_connecting_delay_for_tests, set_banner_timings_for_tests, set_stage_clock_for_tests,
-    stage_settled, use_last_seen,
+    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, expect_servers_controller,
+    installed_session_renewer_for_tests, keep_peers, set_banner_connecting_delay_for_tests,
+    set_banner_timings_for_tests, set_stage_clock_for_tests, stage_settled, use_last_seen,
 };
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
@@ -46,6 +47,7 @@ use muxr::features::servers::presentation::controller::{
 };
 use muxr::features::sessions::presentation::controllers::snapshots_built_for_tests;
 use muxr::routes::app_nav;
+use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 use zeroize::Zeroizing;
 
@@ -1411,6 +1413,7 @@ fn a_failed_background_dial_keeps_the_cached_page_and_marks_the_face_failed() {
     set_banner_timings_for_tests(60, 600);
     h.open_stage();
     fail_next_mock_dials_for_tests(1);
+    app_toasts().clear();
     h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     h.pump_until(|_| matches!(banner(), Some(ReconnectBanner::Failed { .. })));
 
@@ -1419,6 +1422,10 @@ fn a_failed_background_dial_keeps_the_cached_page_and_marks_the_face_failed() {
         Some(ReconnectBanner::Failed {
             host: B_HOST.to_string()
         })
+    );
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "the banner and the face report it, never a toast too"
     );
     assert!(!stage_is_open());
     for _ in 0..3 {
@@ -1512,5 +1519,202 @@ fn a_commit_close_keeps_its_peer_tail() {
     // tail does not cut it short.
     assert!(keep_peers(false));
     set_stage_clock_for_tests(None);
+    reset_reconnect_rig();
+}
+
+// ---------------------------------------------------------------------------
+// Renewing an expired live session in place
+// ---------------------------------------------------------------------------
+//
+// The mock backend reports no live client, so `ConnectionController::on_session_expired_for`
+// (whose live-client fence and burst flag `connection.rs`'s unit tests cover) never reaches the
+// renewer here. These tests drive the renewer `servers::di::provide_controller` installed on the
+// connection directly, the way that hook does, and fall back exactly as it does when declined.
+
+/// What the connection does with a live session's expiry once past its fence: offer it to the
+/// installed renewer, and log out (one Auth toast) when the renewer declines. Answers whether
+/// the renewer took it over.
+fn expire_live_session() -> bool {
+    let endpoint = connected_endpoint().expect("a live session to expire");
+    let renewed = renew(&endpoint);
+    if !renewed {
+        expect_connection_controller().on_session_expired();
+    }
+    renewed
+}
+
+/// Ask the installed renewer to renew `endpoint`.
+fn renew(endpoint: &str) -> bool {
+    installed_session_renewer_for_tests()
+        .expect("provide_controller installs the switcher's renewer")
+        .renew(endpoint)
+}
+
+fn dial_generation() -> u64 {
+    expect_connection_controller().dial_generation()
+}
+
+/// [`three_servers`] with the Sessions page listed on A and filed in the last-seen map, the
+/// banner timings shortened and the toast queue empty.
+fn listed_on_a(unlocked: bool) -> Harness {
+    set_banner_timings_for_tests(60, 600);
+    set_banner_connecting_delay_for_tests(60);
+    let mut h = three_servers(TrustMode::System, unlocked);
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    h.pump_until(|h| {
+        last_seen
+            .snapshot()
+            .get(A_ENDPOINT)
+            .is_some_and(|seen| seen.page.is_some())
+            && h.values().iter().any(|v| v == SESSION_NAME)
+    });
+    h.park();
+    app_toasts().clear();
+    h
+}
+
+#[test]
+fn a_live_expiry_with_an_unlocked_keyring_renews_in_place_under_the_banner() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = listed_on_a(true);
+    let (depth, before) = (h.depth(), dial_generation());
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+
+    assert!(expire_live_session(), "the switcher takes the renewal over");
+
+    // While the dial is pending: still on Sessions, the list on screen and inert, the stage
+    // untouched, `Connecting` only past the delay.
+    assert!(!stage_is_open(), "the stage is never raised");
+    assert_eq!(
+        switcher()
+            .seed
+            .get_untracked()
+            .map(|seed| seed.endpoint.clone()),
+        Some(A_ENDPOINT.to_string()),
+        "the page is seeded with the live server's own"
+    );
+    h.pump_until(|h| {
+        assert_page_shown(h, &[SESSION_NAME]);
+        banner() == connecting_to(A_HOST)
+    });
+    for _ in 0..5 {
+        h.frame();
+        assert_page_shown(&h, &[SESSION_NAME]);
+    }
+    assert!(app_nav().on_sessions(), "still on Sessions");
+    let row = node_centers_by_value(&h.root, SESSION_NAME)[0];
+    h.tap_parked(row);
+    assert_eq!(h.depth(), depth, "attach is off until the renewal lands");
+
+    // Landing: `Connected` flashes, then clears; the list never empties; nothing toasts.
+    held.release(true);
+    h.pump_until(|h| {
+        assert_page_shown(h, &[SESSION_NAME]);
+        connected_endpoint().as_deref() == Some(A_ENDPOINT)
+    });
+    assert_eq!(banner(), Some(ReconnectBanner::Connected));
+    h.pump_until(|h| {
+        assert_page_shown(h, &[SESSION_NAME]);
+        banner().is_none()
+    });
+    assert!(!stage_is_open());
+    assert_eq!(dial_generation(), before + 1, "one dial");
+    assert_eq!(face_kind(A_ENDPOINT), FaceKind::Live);
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "{:?}",
+        app_toasts().pending_untracked()
+    );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_live_expiry_with_the_keyring_locked_falls_back_to_one_auth_toast() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = listed_on_a(false);
+    assert!(!expect_keyring().is_unlocked());
+    let before = dial_generation();
+
+    assert!(!expire_live_session(), "no token to renew with");
+    h.settle();
+
+    assert!(!expect_connection_controller().connected.get_untracked());
+    assert_eq!(
+        app_toasts().pending_untracked().len(),
+        1,
+        "{:?}",
+        app_toasts().pending_untracked()
+    );
+    assert!(switcher().seed.get_untracked().is_none(), "nothing seeded");
+    assert_eq!(banner(), None);
+    assert_eq!(
+        dial_generation(),
+        before + 1,
+        "only the logout's teardown, no dial"
+    );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_failed_renewal_shows_the_failed_banner_never_toasts_and_never_retries() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = listed_on_a(true);
+    let before = dial_generation();
+    fail_next_mock_dials_for_tests(1);
+
+    assert!(expire_live_session());
+    h.pump_until(|_| matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+
+    assert_eq!(
+        banner(),
+        Some(ReconnectBanner::Failed {
+            host: A_HOST.to_string()
+        })
+    );
+    assert!(matches!(face_kind(A_ENDPOINT), FaceKind::Failed { .. }));
+    for _ in 0..3 {
+        h.frame();
+        assert_page_shown(&h, &[SESSION_NAME]);
+    }
+    assert!(app_nav().on_sessions(), "still on Sessions");
+    assert_banner_text(&h, "Couldn't reach mock.example");
+
+    // Nothing dials again on its own, and with nothing live a renewal is refused.
+    pump_for(&mut h, 300, || {});
+    assert_eq!(dial_generation(), before + 1, "one dial, no retry");
+    assert!(!expect_connection_controller().connected.get_untracked());
+    assert!(!switcher().reconnect_live(), "nothing live to renew");
+    assert_eq!(dial_generation(), before + 1);
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "{:?}",
+        app_toasts().pending_untracked()
+    );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn concurrent_expiries_cost_one_renewal_and_a_peer_endpoint_is_never_renewed() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = listed_on_a(true);
+    assert!(!renew(B_ENDPOINT), "B is not the live server");
+    let before = dial_generation();
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+
+    for _ in 0..3 {
+        assert!(renew(A_ENDPOINT), "each expiry is the renewal's to report");
+    }
+    assert!(switcher().reconnect_live(), "a direct request joins it too");
+    assert_eq!(dial_generation(), before + 1, "one dial for the burst");
+
+    held.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(A_ENDPOINT));
+    h.pump_until(|_| banner().is_none());
+    assert_eq!(dial_generation(), before + 1, "still one dial");
+    assert!(app_toasts().pending_untracked().is_empty());
     reset_reconnect_rig();
 }
