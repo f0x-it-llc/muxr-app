@@ -430,6 +430,17 @@ fn beat(
     });
 }
 
+/// Starts the one background renewal a persistent failure streak armed: the
+/// servers controller's `reconnect_live` shows it under the banner. Without a
+/// servers controller (no shell) there is nobody to renew.
+fn renew_if_due(controller: &SessionsController, servers: Option<&Arc<ServersSwitcherController>>) {
+    if controller.take_renewal()
+        && let Some(servers) = servers
+    {
+        servers.reconnect_live();
+    }
+}
+
 /// Runs a wake-driven refresh and heartbeat ping for every wake on `wakes`
 /// while the screen is mounted, and ends the loop at unmount. `wakes` is
 /// injected: production passes [`crate::net::wake::subscribe`], tests a
@@ -437,12 +448,13 @@ fn beat(
 /// single-flight paths the poll uses, so a wake never starts a second one in
 /// flight.
 ///
-/// A [`WakeReason::NetworkChanged`] wake first rebuilds the shared client's
+/// Every wake, a [`WakeReason::NetworkChanged`] one and a
+/// [`WakeReason::Foregrounded`] one alike, first rebuilds the shared client's
 /// channel (single-flight with the terminal feed's own), so the refresh and
-/// the ping do not ride a half-open one until keepalive notices; a failed
-/// rebuild is logged and the refresh still runs, whose own error surfacing
-/// then applies. A [`WakeReason::Foregrounded`] wake skips the redial. A wake
-/// while the poll is covered does nothing at all.
+/// the ping do not ride a half-open one (a suspended app's channel is dead on
+/// return) until keepalive notices; a failed rebuild is logged and the refresh
+/// still runs, whose own error handling then applies. A wake while the poll is
+/// covered does nothing at all.
 ///
 /// Must run where a reactive `Owner` is ambient, as `on_cleanup` no-ops
 /// otherwise.
@@ -452,26 +464,27 @@ fn spawn_wake_loop(
     connection: Arc<ConnectionController>,
     heartbeat: HeartbeatState,
 ) {
+    let servers = use_servers_controller();
     let cancel = Arc::new(Notify::new());
     let stop = Arc::clone(&cancel);
     on_cleanup(move || stop.notify_one());
 
     spawn_local(async move {
-        each_wake(wakes, &cancel, move |reason| {
+        each_wake(wakes, &cancel, move |_reason| {
             if !controller.is_polling() {
                 return;
             }
             let controller = Arc::clone(&controller);
             let connection = Arc::clone(&connection);
+            let servers = servers.clone();
             spawn_local(async move {
-                if reason == WakeReason::NetworkChanged
-                    && let Err(failure) = connection.reconnect().await
-                {
-                    log::debug!("sessions: reconnect on a network change failed: {failure:?}");
+                if let Err(failure) = connection.reconnect().await {
+                    log::debug!("sessions: reconnect on a wake failed: {failure:?}");
                 }
                 let refresh = Arc::clone(&controller);
                 spawn_local(async move {
                     refresh.refresh_on_wake().await;
+                    renew_if_due(&refresh, servers.as_ref());
                 });
                 beat(&controller, &connection, heartbeat);
             });
@@ -496,7 +509,7 @@ impl Component for SessionsScreen {
         });
 
         let first_load = Arc::clone(&controller);
-        spawn_local(async move { first_load.refresh().await });
+        spawn_local(async move { first_load.refresh_background().await });
 
         // Resolved synchronously in `init`, never inside a spawned future's
         // body: a future's first poll has no ambient owner, so a
@@ -504,13 +517,19 @@ impl Component for SessionsScreen {
         // crosses into the loops below.
         let preferences = expect_preferences_repository();
 
+        let servers = use_servers_controller();
+
         // Session-list poll: re-resolves `layout_refresh_secs` live, not
         // just at mount.
         let polling = Arc::clone(&controller);
         spawn_cadence_loop(Arc::clone(&preferences), move || {
             if polling.take_poll_tick() {
                 let handle = Arc::clone(&polling);
-                spawn_local(async move { handle.refresh_from_poll().await });
+                let servers = servers.clone();
+                spawn_local(async move {
+                    handle.refresh_from_poll().await;
+                    renew_if_due(&handle, servers.as_ref());
+                });
             }
         });
 
@@ -1490,16 +1509,27 @@ mod tests {
     }
 
     #[test]
-    fn a_foregrounded_wake_refreshes_and_pings_without_a_redial() {
+    fn a_foregrounded_wake_redials_then_refreshes_once_and_pings_once() {
         let rig = WakeRig::mount();
 
         rig.bus.publish(WakeReason::Foregrounded);
         rig.pump();
 
         let events = noted(&rig.events);
-        assert!(!events.contains(&"reconnect"), "{events:?}");
-        assert!(
-            events.contains(&"refresh") && events.contains(&"ping"),
+        assert_eq!(events.first(), Some(&"reconnect"), "{events:?}");
+        assert_eq!(
+            events.iter().filter(|e| **e == "reconnect").count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "refresh").count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "ping").count(),
+            1,
             "{events:?}"
         );
     }
