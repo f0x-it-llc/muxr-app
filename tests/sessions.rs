@@ -35,6 +35,7 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::agents::{AgentStatus, AgentSummary};
+use muxr::connection::hold_next_mock_dials_for_tests;
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::connect::di::{expect_keyring, expect_saved_servers};
@@ -42,7 +43,9 @@ use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
-use muxr::features::servers::di::expect_servers_controller;
+use muxr::features::servers::di::{
+    BANNER_CONNECTING_DELAY_MS, expect_servers_controller, set_banner_connecting_delay_for_tests,
+};
 use muxr::features::servers::di::{
     PEER_TAIL, keep_peers, set_stage_clock_for_tests, stage_settled,
 };
@@ -2692,9 +2695,19 @@ fn read_only_on_tablet_chips_the_strip_and_leaves_only_attach_working() {
         h.settle();
         assert_eq!(h.depth(), 1, "a read-only {action} opens nothing");
     }
+    // The second identical refusal inside the dedupe window adds no toast.
     let raised = toasts.pending_untracked();
-    assert_eq!(raised.len(), 2, "each refusal says why: {raised:?}");
+    assert_eq!(raised.len(), 1, "one refusal, deduped: {raised:?}");
     assert!(raised.iter().all(|t| t.starts_with("Read-only session")));
+    // Past the window the same refusal shows again.
+    muxr::ui::toasts::advance_toast_clock_for_tests(
+        muxr::ui::toasts::DEDUPE_WINDOW + Duration::from_millis(1),
+    );
+    h.tap_label("kill");
+    h.settle();
+    let raised = toasts.pending_untracked();
+    assert_eq!(raised.len(), 2, "past the window it shows: {raised:?}");
+    assert_eq!(h.depth(), 1, "still nothing opened");
 
     h.tap_label("\u{2192} attach");
     h.settle();
@@ -3336,4 +3349,233 @@ fn the_poll_stays_paused_through_the_close_tail_and_resumes_after_it() {
 
     clock.advance(PEER_TAIL);
     h.pump_until("the poll to resume after the tail", |_| repo.calls() > held);
+}
+
+// ---------------------------------------------------------------------------
+// Connection-class failures belong to the banner, never a toast
+// ---------------------------------------------------------------------------
+
+/// A repository whose list and kill fail on demand, counting each list call.
+struct ScriptedRepo {
+    list_failure: Mutex<Option<AppFailure>>,
+    kill_failure: Mutex<Option<AppFailure>>,
+    list_calls: AtomicU32,
+}
+
+impl ScriptedRepo {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            list_failure: Mutex::new(None),
+            kill_failure: Mutex::new(None),
+            list_calls: AtomicU32::new(0),
+        })
+    }
+
+    fn fail_list(&self, failure: Option<AppFailure>) {
+        *self.list_failure.lock().expect("ok") = failure;
+    }
+
+    fn list_calls(&self) -> u32 {
+        self.list_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for ScriptedRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        match self.list_failure.lock().expect("ok").clone() {
+            Some(failure) => Err(failure),
+            None => Ok(vec![stub_session("a")]),
+        }
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the banner tests")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the banner tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        match self.kill_failure.lock().expect("ok").clone() {
+            Some(failure) => Err(failure),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A controller over `repo` plus a count of the failures it emitted.
+fn counting_controller(repo: &Arc<ScriptedRepo>) -> (SessionsController, Arc<AtomicU32>) {
+    let controller = SessionsController::new(Arc::clone(repo) as SharedSessionsRepository);
+    let emitted = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&emitted);
+    controller
+        .core()
+        .failures()
+        .subscribe(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .forget();
+    (controller, emitted)
+}
+
+#[tokio::test]
+async fn background_refreshes_raise_no_failure_for_connection_class_errors() {
+    let repo = ScriptedRepo::new();
+    let (controller, emitted) = counting_controller(&repo);
+    controller.refresh_background().await;
+    for failure in [
+        AppFailure::Network("not connected to a server".to_string()),
+        AppFailure::Auth("expired".to_string()),
+    ] {
+        repo.fail_list(Some(failure));
+        controller.refresh_background().await;
+        controller.refresh_from_poll().await;
+    }
+    assert_eq!(emitted.load(Ordering::SeqCst), 0, "no toast-bound failure");
+
+    // Any other class still reaches the sink.
+    repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
+    controller.refresh_background().await;
+    assert_eq!(emitted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_user_action_failure_still_reaches_the_sink() {
+    let repo = ScriptedRepo::new();
+    *repo.kill_failure.lock().expect("ok") = Some(AppFailure::Network("dropped".to_string()));
+    let (controller, emitted) = counting_controller(&repo);
+    controller.kill("a".to_string()).await;
+    assert_eq!(
+        emitted.load(Ordering::SeqCst),
+        1,
+        "the kill's failure shows"
+    );
+}
+
+#[tokio::test]
+async fn two_consecutive_failed_polls_arm_exactly_one_renewal_per_streak() {
+    let repo = ScriptedRepo::new();
+    let (controller, _) = counting_controller(&repo);
+    controller.refresh_background().await;
+    repo.fail_list(Some(AppFailure::Network("down".to_string())));
+
+    controller.refresh_from_poll().await;
+    assert!(!controller.take_renewal(), "one failure is not a streak");
+    controller.refresh_from_poll().await;
+    assert!(controller.take_renewal(), "the second one arms the renewal");
+    assert!(!controller.take_renewal(), "taken once");
+    controller.refresh_from_poll().await;
+    controller.refresh_from_poll().await;
+    assert!(!controller.take_renewal(), "never again within the streak");
+
+    // A success resets the streak; a fresh streak arms one more.
+    repo.fail_list(None);
+    controller.refresh_from_poll().await;
+    repo.fail_list(Some(AppFailure::Network("down".to_string())));
+    controller.refresh_from_poll().await;
+    assert!(!controller.take_renewal());
+    controller.refresh_from_poll().await;
+    assert!(controller.take_renewal());
+}
+
+/// Poll every second, so a wall-clock test sees ticks quickly.
+fn poll_fast() -> Option<SharedPreferencesRepository> {
+    Some(Arc::new(FastPollPreferences))
+}
+
+#[test]
+fn persistent_poll_failures_renew_once_under_the_banner_and_toast_nothing() {
+    use muxr::features::servers::presentation::controller::ReconnectBanner;
+
+    let _g = serial();
+    let _ambient = setup();
+    let repo = ScriptedRepo::new();
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        poll_fast(),
+        support::surface(),
+    );
+    expect_saved_servers()
+        .save(SavedServer {
+            host: "mock.example".to_string(),
+            port: 7777,
+            trust_mode: TrustMode::NoVerification,
+            label: "Mock rig".to_string(),
+            last_used_ms: epoch_millis(),
+            read_only: false,
+            has_credential: true,
+            token_name: None,
+            fingerprint: None,
+        })
+        .expect("the mock store never fails");
+    let mut keyring = Keyring::new();
+    keyring.insert(
+        "mock.example:7777",
+        zeroize::Zeroizing::new("s3cr3t".to_string()),
+    );
+    expect_keyring().publish(keyring);
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until("the first load", |_| repo.list_calls() >= 1);
+    let toasts = muxr::ui::toasts::app_toasts();
+    toasts.clear();
+    let connection = expect_connection_controller();
+    let dials = connection.dial_generation();
+    // Hold the renewal's dial open past a short delay so the banner shows.
+    set_banner_connecting_delay_for_tests(50);
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+
+    repo.fail_list(Some(AppFailure::Network(
+        "not connected to a server".to_string(),
+    )));
+    let banner = || expect_servers_controller().banner.get_untracked();
+    h.pump_until("the renewal's Connecting banner", |_| {
+        matches!(banner(), Some(ReconnectBanner::Connecting { .. }))
+    });
+    assert_eq!(connection.dial_generation(), dials + 1, "one renewal dial");
+    assert!(
+        repo.list_calls() >= 3,
+        "the first load plus the two failed ticks"
+    );
+    held.release(true);
+    h.pump_until("the renewal to land", |_| {
+        banner() == Some(ReconnectBanner::Connected)
+    });
+    set_banner_connecting_delay_for_tests(BANNER_CONNECTING_DELAY_MS);
+    hold_next_mock_dials_for_tests(0);
+    assert!(
+        toasts.pending_untracked().is_empty(),
+        "no toast: {:?}",
+        toasts.pending_untracked()
+    );
+}
+
+#[test]
+fn a_disconnected_screen_polls_nothing_and_toasts_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = ScriptedRepo::new();
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        poll_fast(),
+        support::surface(),
+    );
+    h.pump_until("the first load", |_| repo.list_calls() >= 1);
+    let after_first = repo.list_calls();
+    repo.fail_list(Some(AppFailure::Network(
+        "not connected to a server".to_string(),
+    )));
+    let toasts = muxr::ui::toasts::app_toasts();
+    toasts.clear();
+    assert!(!expect_connection_controller().connected.get_untracked());
+
+    let until = Instant::now() + Duration::from_millis(2600);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert_eq!(repo.list_calls(), after_first, "no poll RPC while offline");
+    assert!(toasts.pending_untracked().is_empty());
 }
