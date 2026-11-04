@@ -50,7 +50,20 @@
 //! left as it is — what `di` installs as the connection's
 //! [`SessionRenewer`](crate::connection::SessionRenewer), so an expired session
 //! logs back in under the banner instead of dropping to Connect. It is
-//! single-flight against any background dial in flight and never retries.
+//! single-flight against any background dial in flight.
+//!
+//! **A pending reconnect.** A background dial (cached switch or renewal) that
+//! fails with a network failure while nothing else connected keeps its target
+//! pending: the seeded page and the `Failed` banner stay (no auto-clear), and
+//! the target is redialed on every [`retry_pending`](ServersSwitcherController::retry_pending)
+//! (the Sessions wake loop) and on a backoff timer ([`retry_backoff`]). A user
+//! switch, a lock, a successful connect or the Sessions screen leaving cancels
+//! it; a keyring that no longer holds the token drops it.
+//!
+//! **Connection trouble.** [`report_trouble`](ServersSwitcherController::report_trouble)
+//! and [`report_recovered`](ServersSwitcherController::report_recovered) put a
+//! live connection's failing polls under the same banner without touching the
+//! connection; a background dial in flight owns the banner and they yield.
 //!
 //! No `Nav`, overlay or other `Rc` handle is stored: the caller lends them per
 //! call ([`SwitchGate`], [`lock`](ServersSwitcherController::lock)), which
@@ -59,14 +72,16 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use frust::{Get, GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
 use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::connection::ConnectionController;
+use crate::failure::AppFailure;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
 use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
@@ -84,6 +99,33 @@ use crate::ui::toasts::app_toasts;
 const NO_CREDENTIAL_MESSAGE: &str = "No saved credential found.";
 /// Where a lock sends the app: Connect.
 const LOCKED_LOCATION: &str = "/";
+
+/// The pending reconnect's backoff: the first delays, then [`RETRY_BACKOFF_CAP`].
+const RETRY_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+    Duration::from_secs(40),
+];
+const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(60);
+/// A uniform backoff a suite pinned, ms; `0` is the real schedule.
+static RETRY_BACKOFF_OVERRIDE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The delay before retry `attempt` (0-based) of a pending reconnect.
+pub fn retry_backoff(attempt: u32) -> Duration {
+    match RETRY_BACKOFF_OVERRIDE_MS.load(Ordering::Relaxed) {
+        0 => RETRY_BACKOFF
+            .get(attempt as usize)
+            .copied()
+            .unwrap_or(RETRY_BACKOFF_CAP),
+        ms => Duration::from_millis(ms),
+    }
+}
+
+/// Pins every backoff delay to `ms` (process-wide); `None` restores the schedule.
+pub fn set_retry_backoff_for_tests(ms: Option<u64>) {
+    RETRY_BACKOFF_OVERRIDE_MS.store(ms.unwrap_or(0), Ordering::Relaxed);
+}
 
 /// Navigation lent to a close that leaves the app disconnected.
 type Landing = Rc<dyn Fn(&str)>;
@@ -188,6 +230,14 @@ struct BackgroundDial {
     dialed: Option<u64>,
 }
 
+/// A failed background dial's target, redialed until something supersedes it.
+/// `attempt` indexes [`retry_backoff`].
+#[derive(Clone, Debug)]
+struct PendingReconnect {
+    endpoint: String,
+    attempt: u32,
+}
+
 /// The server switcher's view model. See the [module docs](self).
 pub struct ServersSwitcherController {
     saved_servers: SavedServers,
@@ -231,6 +281,12 @@ pub struct ServersSwitcherController {
     seed_generation: AtomicU64,
     /// The background dial in flight, if any.
     bg: Mutex<Option<BackgroundDial>>,
+    /// The failed background dial waiting for a retry, if any.
+    pending: Mutex<Option<PendingReconnect>>,
+    /// Bumped by every retry and cancel: a backoff timer fires only if it still holds.
+    retry_generation: AtomicU64,
+    /// Whether the banner is showing a live connection's trouble report.
+    trouble: AtomicBool,
 }
 
 impl ServersSwitcherController {
@@ -269,6 +325,9 @@ impl ServersSwitcherController {
             banner_generation: AtomicU64::new(0),
             seed_generation: AtomicU64::new(0),
             bg: Mutex::new(None),
+            pending: Mutex::new(None),
+            retry_generation: AtomicU64::new(0),
+            trouble: AtomicBool::new(false),
         }
     }
 
@@ -581,6 +640,7 @@ impl ServersSwitcherController {
             self.abandon();
             return;
         }
+        self.drop_reports();
         if let Some(page) = self.cached_page(&endpoint)
             && self.stage_epoch.load(Ordering::SeqCst) == epoch
         {
@@ -624,7 +684,7 @@ impl ServersSwitcherController {
     }
 
     /// Renew the **live** server's session in place, in the background — what
-    /// an expired session or a run of failed polls asks for. Answers `false`
+    /// an expired session asks for. Answers `false`
     /// (the caller falls back: logs out, reports) when there is no live
     /// server, its saved row claims no credential, or the keyring holds no
     /// token for it (locked included). `true` means the renewal is this
@@ -637,7 +697,7 @@ impl ServersSwitcherController {
     /// was), so it stays on screen with its actions off while the connection
     /// is down; `Connecting` shows only past the delay; landing flashes
     /// `Connected`, a failure shows `Failed` and marks the face — never a toast
-    /// (the dial is quiet), and nothing retries on its own.
+    /// (the dial is quiet); a network failure leaves a pending reconnect.
     ///
     /// Runs on the UI thread, like every other entry point here.
     pub fn reconnect_live(self: &Arc<Self>) -> bool {
@@ -714,6 +774,7 @@ impl ServersSwitcherController {
             id,
             dialed: None,
         });
+        self.trouble.store(false, Ordering::SeqCst);
         // `Connecting` shows only if the dial is still pending after the delay;
         // any later banner change (landing, failure, a newer switch) fences it.
         let pending = self.set_banner(None);
@@ -743,7 +804,8 @@ impl ServersSwitcherController {
                 Ok(()) => controller.settle_bg(&dialed, id),
                 Err(failure) => {
                     use clean_signals::Failure;
-                    controller.fail_bg(&dialed, id, failure.user_message());
+                    let retryable = matches!(failure, AppFailure::Network(_));
+                    controller.fail_bg(&dialed, id, failure.user_message(), retryable);
                 }
             });
         if let Some(bg) = self.bg().as_mut()
@@ -768,14 +830,20 @@ impl ServersSwitcherController {
         if !self.finish_bg(id) {
             return;
         }
+        self.cancel_pending();
         let mut failures = self.failures.get_untracked();
         failures.remove(endpoint);
         self.failures.set(failures);
         self.refresh_faces();
-        // Flash only if `Connecting` was actually shown; else stay silent.
+        self.flash_connected();
+    }
+
+    /// Flash `Connected` only if `Connecting` or `Failed` was shown (a retry
+    /// lands over `Failed`); else close the banner silently.
+    fn flash_connected(self: &Arc<Self>) {
         let shown = matches!(
             self.banner.get_untracked(),
-            Some(ReconnectBanner::Connecting { .. })
+            Some(ReconnectBanner::Connecting { .. } | ReconnectBanner::Failed { .. })
         );
         if !shown {
             self.set_banner(None);
@@ -789,8 +857,10 @@ impl ServersSwitcherController {
     }
 
     /// The background dial failed: the cached page stays, the face is marked,
-    /// the banner reads `Failed` until the next change or its timeout.
-    fn fail_bg(self: &Arc<Self>, endpoint: &str, id: u64, message: String) {
+    /// the banner reads `Failed`. A `retryable` failure with nothing else
+    /// connected keeps the target pending (banner kept, backoff armed); any
+    /// other clears the banner after its timeout.
+    fn fail_bg(self: &Arc<Self>, endpoint: &str, id: u64, message: String, retryable: bool) {
         if !self.finish_bg(id) {
             return;
         }
@@ -804,10 +874,185 @@ impl ServersSwitcherController {
             .map(|seed| seed.host.clone())
             .unwrap_or_else(|| endpoint.to_string());
         let generation = self.set_banner(Some(ReconnectBanner::Failed { host }));
+        let idle = !self.connection.connected.get_untracked()
+            && !self.connection.connecting.get_untracked();
+        if retryable && idle && self.credential_for(endpoint).is_some() {
+            let attempt = self
+                .pending()
+                .as_ref()
+                .filter(|pending| pending.endpoint == endpoint)
+                .map_or(0, |pending| pending.attempt + 1);
+            *self.pending() = Some(PendingReconnect {
+                endpoint: endpoint.to_string(),
+                attempt,
+            });
+            self.schedule_retry(attempt);
+            return;
+        }
+        self.cancel_pending();
         self.clear_banner_later(
             generation,
             crate::features::servers::di::banner_failure_ms(),
         );
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<PendingReconnect>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The endpoint a failed background dial left pending, if any.
+    pub fn pending_reconnect(&self) -> Option<String> {
+        self.pending()
+            .as_ref()
+            .map(|pending| pending.endpoint.clone())
+    }
+
+    /// Forget the pending reconnect and fence its timer; answers whether one was pending.
+    fn cancel_pending(&self) -> bool {
+        self.retry_generation.fetch_add(1, Ordering::SeqCst);
+        self.pending().take().is_some()
+    }
+
+    /// Redial the pending target after `retry_backoff(attempt)`, unless a
+    /// retry or cancel came first.
+    fn schedule_retry(self: &Arc<Self>, attempt: u32) {
+        let generation = self.retry_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            clean_signals::time::sleep(retry_backoff(attempt)).await;
+            if controller.retry_generation.load(Ordering::SeqCst) == generation {
+                controller.retry_pending();
+            }
+        });
+    }
+
+    /// Redial the pending reconnect's target now — what a wake and the backoff
+    /// timer call — through the same quiet background dial; `Failed` stays
+    /// until `Connecting` shows past the delay. Answers whether a dial started.
+    /// A dial in flight starts nothing; a connection up cancels it; an open
+    /// stage or a connect underway defers it one backoff step; a keyring no
+    /// longer holding the token drops it, the banner clearing after its timeout.
+    pub fn retry_pending(self: &Arc<Self>) -> bool {
+        self.release_bg_if_stale();
+        let Some(pending) = self.pending().clone() else {
+            return false;
+        };
+        if self.bg().is_some() {
+            return false;
+        }
+        if self.connection.connected.get_untracked() {
+            self.cancel_pending();
+            if matches!(
+                self.banner.get_untracked(),
+                Some(ReconnectBanner::Failed { .. })
+            ) {
+                self.set_banner(None);
+            }
+            return false;
+        }
+        if self.connection.connecting.get_untracked() || self.open.get_untracked() {
+            self.schedule_retry(pending.attempt);
+            return false;
+        }
+        let Some((token, row)) = self.credential_for(&pending.endpoint) else {
+            self.cancel_pending();
+            self.clear_banner_later(
+                self.banner_generation.load(Ordering::SeqCst),
+                crate::features::servers::di::banner_failure_ms(),
+            );
+            return false;
+        };
+        self.retry_generation.fetch_add(1, Ordering::SeqCst);
+        let id = self.seed_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.bg() = Some(BackgroundDial {
+            endpoint: pending.endpoint.clone(),
+            id,
+            dialed: None,
+        });
+        let shown = self.banner_generation.load(Ordering::SeqCst);
+        self.show_connecting_later(shown, row.host.clone());
+        self.refresh_faces();
+        self.dial_bg(&pending.endpoint, &row, token, id);
+        true
+    }
+
+    /// The live connection's polls keep failing: `Connecting` past the delay,
+    /// or `Failed` (kept, no timeout) once the trouble is `persistent`. Never
+    /// touches the connection and needs no credential. Ignored while a
+    /// background dial owns the banner, a reconnect is pending, or nothing is
+    /// connected.
+    pub fn report_trouble(self: &Arc<Self>, persistent: bool) {
+        self.release_bg_if_stale();
+        if self.bg().is_some()
+            || self.pending().is_some()
+            || !self.connection.connected.get_untracked()
+        {
+            return;
+        }
+        let Some(endpoint) = self
+            .connection
+            .server_info
+            .get_untracked()
+            .map(|info| info.endpoint)
+        else {
+            return;
+        };
+        let host = self.saved_row(&endpoint).map_or_else(
+            || {
+                endpoint
+                    .rsplit_once(':')
+                    .map_or(endpoint.clone(), |(host, _)| host.to_string())
+            },
+            |row| row.host,
+        );
+        self.trouble.store(true, Ordering::SeqCst);
+        if persistent {
+            self.set_banner(Some(ReconnectBanner::Failed { host }));
+        } else {
+            let generation = self.set_banner(None);
+            self.show_connecting_later(generation, host);
+        }
+    }
+
+    /// The live connection's polls succeed again after a trouble report:
+    /// flash `Connected` if `Connecting` or `Failed` was shown, then clear.
+    /// Nothing reported, or a background dial owning the banner, does nothing.
+    pub fn report_recovered(self: &Arc<Self>) {
+        if !self.trouble.swap(false, Ordering::SeqCst) || self.bg().is_some() {
+            return;
+        }
+        self.flash_connected();
+    }
+
+    /// The connection a trouble report was about went down: close its banner
+    /// (a background dial or a pending reconnect owns it otherwise).
+    pub fn end_trouble(&self) {
+        if self.trouble.swap(false, Ordering::SeqCst)
+            && self.bg().is_none()
+            && self.pending().is_none()
+        {
+            self.set_banner(None);
+        }
+    }
+
+    /// End the pending reconnect and any trouble report, closing the banner
+    /// they held: a user switch, or the Sessions screen leaving.
+    fn drop_reports(&self) {
+        let held = self.cancel_pending() | self.trouble.swap(false, Ordering::SeqCst);
+        let shown = self.banner.try_get_untracked().is_some_and(|banner| {
+            matches!(
+                banner,
+                Some(ReconnectBanner::Connecting { .. } | ReconnectBanner::Failed { .. })
+            )
+        });
+        if held && shown && self.bg().is_none() {
+            self.set_banner(None);
+        }
+    }
+
+    /// The Sessions screen unmounted: nothing is left to retry for.
+    pub fn sessions_left(&self) {
+        self.drop_reports();
     }
 
     /// The saved row for `endpoint`, read fresh.
@@ -923,6 +1168,8 @@ impl ServersSwitcherController {
         self.failures.set(BTreeMap::new());
         self.last_seen.clear();
         *self.bg() = None;
+        self.cancel_pending();
+        self.trouble.store(false, Ordering::SeqCst);
         self.set_banner(None);
         self.seed.set(None);
         self.connection
@@ -1695,6 +1942,43 @@ mod tests {
         rig.controller
             .close_with(|to| *dialing.borrow_mut() = Some(to.to_string()));
         assert_eq!(*dialing.borrow(), None, "a dial in flight stays put");
+    }
+
+    #[test]
+    fn the_retry_backoff_doubles_from_five_seconds_then_holds_at_a_minute() {
+        let secs: Vec<u64> = (0..6)
+            .map(|attempt| retry_backoff(attempt).as_secs())
+            .collect();
+        assert_eq!(secs, [5, 10, 20, 40, 60, 60]);
+    }
+
+    #[test]
+    fn trouble_reports_never_touch_the_connection_and_yield_to_a_background_dial() {
+        let rig = rig(vec![server("a", 20, false)], true);
+        connect_to(&rig, "a");
+        let generation = rig.connection.dial_generation();
+
+        rig.controller.report_trouble(true);
+        assert_eq!(
+            rig.controller.banner.get_untracked(),
+            Some(ReconnectBanner::Failed {
+                host: "a".to_string()
+            }),
+            "no credential needed"
+        );
+        assert_eq!(rig.connection.dial_generation(), generation);
+        assert!(rig.connection.connected.get_untracked());
+
+        // A background dial owns the banner: a report changes nothing.
+        *rig.controller.bg() = Some(BackgroundDial {
+            endpoint: "a:7777".to_string(),
+            id: 1,
+            dialed: None,
+        });
+        rig.controller.set_banner(None);
+        rig.controller.report_trouble(true);
+        rig.controller.report_recovered();
+        assert_eq!(rig.controller.banner.get_untracked(), None);
     }
 
     #[test]
