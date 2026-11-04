@@ -1110,7 +1110,7 @@ fn unlocking_pro_from_the_add_chips_paywall_closes_the_stage_and_opens_the_add_p
 }
 
 #[test]
-fn a_settle_close_builds_no_peers_and_the_faces_name_the_new_live_server() {
+fn a_settle_close_keeps_its_peer_tail_and_the_faces_name_the_new_live_server() {
     let _g = serial();
     let _ambient = setup();
     let _t0 = pin_stage_clock();
@@ -1123,10 +1123,10 @@ fn a_settle_close_builds_no_peers_and_the_faces_name_the_new_live_server() {
         "settle refreshed the faces: B is live"
     );
     assert_ne!(face_kind(A_ENDPOINT), FaceKind::Live);
-    // The clock is still at the close instant, deep inside what would be the
-    // tail: a settle-close keeps no peers.
-    assert!(!keep_peers(false), "no tail after a settle-close");
-    // A plain close of the next stage keeps its tail.
+    // The clock is still at the close instant: a settle-close keeps its tail,
+    // so the live card holds its strip slot while the neighbours ramp out.
+    assert!(keep_peers(false), "a settle-close keeps the tail");
+    // So does a plain close of the next stage.
     h.open_stage();
     h.park();
     close_stage(&mut h);
@@ -1498,7 +1498,7 @@ fn a_second_switch_during_a_background_dial_supersedes_it() {
 }
 
 #[test]
-fn a_commit_close_builds_no_peers() {
+fn a_commit_close_keeps_its_peer_tail() {
     let _g = serial();
     let _ambient = setup();
     let _t0 = pin_stage_clock();
@@ -1507,10 +1507,12 @@ fn a_commit_close_builds_no_peers() {
     let held = tap_cached_b_held(&mut h);
     h.park();
 
-    assert!(!keep_peers(false), "a commit-close keeps no tail of peers");
+    assert!(keep_peers(false), "a commit-close keeps its tail of peers");
     held.release(true);
     h.pump_until(|_| connected_endpoint().as_deref() == Some(B_ENDPOINT));
-    assert!(!keep_peers(false));
+    // The clock is pinned at the close: the background dial landing inside the
+    // tail does not cut it short.
+    assert!(keep_peers(false));
     set_stage_clock_for_tests(None);
     reset_reconnect_rig();
 }
