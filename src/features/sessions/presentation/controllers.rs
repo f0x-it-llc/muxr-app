@@ -29,6 +29,15 @@ const NOT_PAUSED: usize = usize::MAX;
 
 pub const POLL_PERIOD_SECS: u32 = 3;
 
+/// Consecutive failed poll or wake refreshes (while connected) after which the
+/// screen asks for one background renewal of the live session.
+pub const RENEW_AFTER_FAILURES: u32 = 2;
+
+/// Whether `failure` is the connection's to show (the banner), not a toast's.
+fn is_connection_class(failure: &AppFailure) -> bool {
+    matches!(failure, AppFailure::Network(_) | AppFailure::Auth(_))
+}
+
 /// One session as a non-live switcher face remembers it.
 fn glimpse_of(session: &Session) -> SessionGlimpse {
     SessionGlimpse {
@@ -102,6 +111,11 @@ pub struct SessionsController {
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
     generation: AtomicU64,
+    /// Consecutive failed poll or wake refreshes; reset by a success.
+    failure_streak: AtomicU32,
+    /// Set once per failure streak when it reaches [`RENEW_AFTER_FAILURES`];
+    /// taken by [`take_renewal`](Self::take_renewal).
+    renewal_due: AtomicBool,
 }
 
 impl SessionsController {
@@ -128,6 +142,8 @@ impl SessionsController {
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            failure_streak: AtomicU32::new(0),
+            renewal_due: AtomicBool::new(false),
         }
     }
 
@@ -135,17 +151,47 @@ impl SessionsController {
         &self.core
     }
 
+    /// A refresh run on the user's behalf (after create, rename or kill):
+    /// every failure reaches the failure sink.
     pub async fn refresh(&self) {
+        self.refresh_with(false).await;
+    }
+
+    /// A refresh nobody asked for (first load, poll, wake, restart): a
+    /// connection-class failure (Network, Auth, not connected) is the banner's
+    /// to show and raises no toast; any other class still reaches the sink.
+    pub async fn refresh_background(&self) {
+        self.refresh_with(true).await;
+    }
+
+    /// Runs the list. `Some(failed)` once its reply is current; `None` when a
+    /// newer refresh superseded it (neither a success nor a failure to count).
+    async fn refresh_with(&self, background: bool) -> Option<bool> {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         // Named before the await (see `glimpse_source`).
         let source = self.glimpse_source();
         let result = self
             .core
-            .run(&self.list, NoParams, RunOptions::default())
+            .run(
+                &self.list,
+                NoParams,
+                RunOptions {
+                    emit_failure: !background,
+                    ..RunOptions::default()
+                },
+            )
             .await;
         if self.generation.load(Ordering::SeqCst) != my_generation {
-            return;
+            return None;
         }
+        if let Err(failure) = &result
+            && background
+            && !is_connection_class(failure)
+            && !self.core.is_disposed()
+        {
+            self.core.failures().emit(failure);
+        }
+        let failed = result.is_err();
         if let Ok(sessions) = result {
             self.forget_vanished_selection(&sessions);
             self.publish_glimpse(source, &sessions);
@@ -154,6 +200,7 @@ impl SessionsController {
             self.retarget_agents();
         }
         self.first_load_settled.set(true);
+        Some(failed)
     }
 
     /// Remember `sessions` as what the connected server last showed, for the
@@ -196,6 +243,7 @@ impl SessionsController {
     /// snapshot does not carry is forgotten.
     pub fn seed_from(&self, page: &PageSnapshot) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.reset_streak();
         self.poll_in_flight.store(false, Ordering::SeqCst);
         self.agents_in_flight.store(false, Ordering::SeqCst);
         self.forget_vanished_selection(&page.sessions);
@@ -221,7 +269,7 @@ impl SessionsController {
     pub fn refresh_in_place(self: &Arc<Self>) {
         self.set_offline(false);
         let controller = Arc::clone(self);
-        frust::spawn_local(async move { controller.refresh().await });
+        frust::spawn_local(async move { controller.refresh_background().await });
     }
 
     /// Starts this mount over for a new connection: the generation bump drops
@@ -232,6 +280,7 @@ impl SessionsController {
     pub fn restart(self: &Arc<Self>) {
         self.set_offline(false);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.reset_streak();
         self.sessions.set(Vec::new());
         self.loaded.set(false);
         self.first_load_settled.set(false);
@@ -240,16 +289,51 @@ impl SessionsController {
         self.agents_in_flight.store(false, Ordering::SeqCst);
         self.retarget_agents();
         let controller = Arc::clone(self);
-        frust::spawn_local(async move { controller.refresh().await });
+        frust::spawn_local(async move { controller.refresh_background().await });
     }
 
     pub async fn refresh_from_poll(&self) {
         {
             let _release = ReleaseClaim(&self.poll_in_flight);
-            self.refresh().await;
+            let outcome = self.refresh_with(true).await;
+            self.count_outcome(outcome);
         }
         // Past the list poll's claim: the next tick's list refresh does not wait on this read.
         self.refresh_agents_from_poll().await;
+    }
+
+    fn reset_streak(&self) {
+        self.failure_streak.store(0, Ordering::SeqCst);
+        self.renewal_due.store(false, Ordering::SeqCst);
+    }
+
+    /// Folds one background refresh into the failure streak: the failure that
+    /// makes it [`RENEW_AFTER_FAILURES`] long arms one renewal (and only that
+    /// one: later failures of the same streak arm nothing); a success resets it.
+    fn count_outcome(&self, outcome: Option<bool>) {
+        match outcome {
+            Some(true) => {
+                if self.failure_streak.fetch_add(1, Ordering::SeqCst) + 1 == RENEW_AFTER_FAILURES {
+                    self.renewal_due.store(true, Ordering::SeqCst);
+                }
+            }
+            Some(false) => self.reset_streak(),
+            None => {}
+        }
+    }
+
+    /// Whether a renewal of the live session is due, clearing the flag: the
+    /// caller runs it (the servers controller's `reconnect_live`).
+    pub fn take_renewal(&self) -> bool {
+        self.renewal_due.swap(false, Ordering::SeqCst)
+    }
+
+    /// Whether a connection is up behind this page. A controller built with no
+    /// connection to consult (headless suites) counts as connected.
+    fn is_connected(&self) -> bool {
+        self.glimpse_sink
+            .as_ref()
+            .is_none_or(|(_, connection)| connection.connected.get_untracked())
     }
 
     /// The poll tick's agent fetch under its own single-flight claim: a tick finding the
@@ -372,6 +456,7 @@ impl SessionsController {
     fn take_retry(&self) -> bool {
         self.is_polling()
             && !self.is_offline()
+            && self.is_connected()
             && self.first_load_settled.get_untracked()
             && !self.loaded.get_untracked()
             && !self.poll_in_flight.swap(true, Ordering::SeqCst)
@@ -381,7 +466,7 @@ impl SessionsController {
     /// [`take_poll_tick`](Self::take_poll_tick) reads, so the poll re-arms.
     pub async fn retry_first_load(&self) {
         if !self.loaded.get_untracked() {
-            self.refresh().await;
+            self.refresh_background().await;
         }
     }
 
@@ -475,6 +560,7 @@ impl SessionsController {
     pub fn take_poll_tick(&self) -> bool {
         let poll = self.is_polling()
             && !self.is_offline()
+            && self.is_connected()
             && self.loaded.get_untracked()
             && !self.poll_in_flight.swap(true, Ordering::SeqCst);
         if poll {
