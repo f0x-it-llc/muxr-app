@@ -60,7 +60,7 @@ use crate::ui::spacing;
 use crate::ui::splash::loading::loading_sequence;
 use crate::ui::toasts::app_toasts;
 
-use super::controllers::{POLL_PERIOD_SECS, SessionsController, each_wake};
+use super::controllers::{ConnectionTrouble, POLL_PERIOD_SECS, SessionsController, each_wake};
 use super::heartbeat::{self, HeartbeatState};
 use super::widgets::{self, CardMode, LoadPhase};
 
@@ -430,14 +430,41 @@ fn beat(
     });
 }
 
-/// Starts the one background renewal a persistent failure streak armed: the
-/// servers controller's `reconnect_live` shows it under the banner. Without a
-/// servers controller (no shell) there is nobody to renew.
-fn renew_if_due(controller: &SessionsController, servers: Option<&Arc<ServersSwitcherController>>) {
-    if controller.take_renewal()
-        && let Some(servers) = servers
-    {
-        servers.reconnect_live();
+/// How many channel rebuilds a failure streak has asked for in this process (a test seam).
+static TROUBLE_RECONNECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of channel rebuilds failure streaks asked for so far; tests compare deltas.
+pub fn trouble_reconnects_for_tests() -> usize {
+    TROUBLE_RECONNECTS.load(Ordering::SeqCst)
+}
+
+/// Reports the failure streak's latest edge: trouble rebuilds the channel
+/// (single-flight, the session kept) and goes under the servers controller's
+/// banner; recovery flashes it away. Never tears the connection down. Without a
+/// servers controller (no shell) only the channel rebuild runs.
+fn report_streak(
+    controller: &SessionsController,
+    connection: &Arc<ConnectionController>,
+    servers: Option<&Arc<ServersSwitcherController>>,
+) {
+    let Some(edge) = controller.take_trouble() else {
+        return;
+    };
+    if edge == ConnectionTrouble::Recovered {
+        if let Some(servers) = servers {
+            servers.report_recovered();
+        }
+        return;
+    }
+    TROUBLE_RECONNECTS.fetch_add(1, Ordering::SeqCst);
+    let rebuilding = Arc::clone(connection);
+    spawn_local(async move {
+        if let Err(failure) = rebuilding.reconnect().await {
+            log::debug!("sessions: reconnect on a failure streak failed: {failure:?}");
+        }
+    });
+    if let Some(servers) = servers {
+        servers.report_trouble(edge == ConnectionTrouble::Persistent);
     }
 }
 
@@ -454,7 +481,9 @@ fn renew_if_due(controller: &SessionsController, servers: Option<&Arc<ServersSwi
 /// the ping do not ride a half-open one (a suspended app's channel is dead on
 /// return) until keepalive notices; a failed rebuild is logged and the refresh
 /// still runs, whose own error handling then applies. A wake while the poll is
-/// covered does nothing at all.
+/// covered does nothing more. With nothing connected a wake first redials a
+/// failed background dial's pending reconnect (the servers controller's
+/// `retry_pending`), covered or not.
 ///
 /// Must run where a reactive `Owner` is ambient, as `on_cleanup` no-ops
 /// otherwise.
@@ -471,6 +500,12 @@ fn spawn_wake_loop(
 
     spawn_local(async move {
         each_wake(wakes, &cancel, move |_reason| {
+            if !connection.connected.get_untracked()
+                && let Some(servers) = &servers
+            {
+                servers.end_trouble();
+                servers.retry_pending();
+            }
             if !controller.is_polling() {
                 return;
             }
@@ -482,9 +517,10 @@ fn spawn_wake_loop(
                     log::debug!("sessions: reconnect on a wake failed: {failure:?}");
                 }
                 let refresh = Arc::clone(&controller);
+                let reporting = Arc::clone(&connection);
                 spawn_local(async move {
                     refresh.refresh_on_wake().await;
-                    renew_if_due(&refresh, servers.as_ref());
+                    report_streak(&refresh, &reporting, servers.as_ref());
                 });
                 beat(&controller, &connection, heartbeat);
             });
@@ -518,22 +554,31 @@ impl Component for SessionsScreen {
         let preferences = expect_preferences_repository();
 
         let servers = use_servers_controller();
+        let connection = expect_connection_controller();
+        // A pending reconnect or trouble report is this screen's: it ends with it.
+        if let Some(servers) = servers.clone() {
+            on_cleanup(move || servers.sessions_left());
+        }
 
         // Session-list poll: re-resolves `layout_refresh_secs` live, not
         // just at mount.
         let polling = Arc::clone(&controller);
+        let polled = Arc::clone(&connection);
         spawn_cadence_loop(Arc::clone(&preferences), move || {
             if polling.take_poll_tick() {
                 let handle = Arc::clone(&polling);
+                let connection = Arc::clone(&polled);
                 let servers = servers.clone();
                 spawn_local(async move {
                     handle.refresh_from_poll().await;
-                    renew_if_due(&handle, servers.as_ref());
+                    report_streak(&handle, &connection, servers.as_ref());
                 });
+            } else if !polled.connected.get_untracked()
+                && let Some(servers) = &servers
+            {
+                servers.end_trouble();
             }
         });
-
-        let connection = expect_connection_controller();
 
         // Connection heartbeat: one real timed `GetVersion`, same cadence as
         // the list poll (the roll `HeartbeatState::settle` animates over is

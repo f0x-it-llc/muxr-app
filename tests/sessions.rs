@@ -35,7 +35,6 @@ use frust_text::TextContext;
 use kurbo::{Point, Size};
 
 use muxr::agents::{AgentStatus, AgentSummary};
-use muxr::connection::hold_next_mock_dials_for_tests;
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
 use muxr::features::connect::di::{expect_keyring, expect_saved_servers};
@@ -45,6 +44,7 @@ use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
     BANNER_CONNECTING_DELAY_MS, expect_servers_controller, set_banner_connecting_delay_for_tests,
+    set_banner_timings_for_tests,
 };
 use muxr::features::servers::di::{
     PEER_TAIL, keep_peers, set_stage_clock_for_tests, stage_settled,
@@ -59,10 +59,12 @@ use muxr::features::sessions::domain::entities::{
     SessionStatus, ThirdMetric,
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
-use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
+use muxr::features::sessions::presentation::controllers::{
+    ConnectionTrouble, POLL_PERIOD_SECS, SessionsController,
+};
 use muxr::features::sessions::presentation::pages::{
     deferred_rain_arms_for_tests, rain_overlay_builds_for_tests, resolve_poll_interval,
-    sessions_page, set_loading_rain_for_tests,
+    sessions_page, set_loading_rain_for_tests, trouble_reconnects_for_tests,
 };
 use muxr::features::settings::data::repositories::MockPreferencesRepository;
 use muxr::features::settings::di::SharedPreferencesRepository;
@@ -3456,30 +3458,98 @@ async fn a_user_action_failure_still_reaches_the_sink() {
     );
 }
 
+fn network(message: &str) -> Option<AppFailure> {
+    Some(AppFailure::Network(message.to_string()))
+}
+
 #[tokio::test]
-async fn two_consecutive_failed_polls_arm_exactly_one_renewal_per_streak() {
+async fn a_network_streak_raises_trouble_then_persistence_then_recovery_once_each() {
     let repo = ScriptedRepo::new();
-    let (controller, _) = counting_controller(&repo);
+    let (controller, emitted) = counting_controller(&repo);
     controller.refresh_background().await;
-    repo.fail_list(Some(AppFailure::Network("down".to_string())));
+    repo.fail_list(network("down"));
 
     controller.refresh_from_poll().await;
-    assert!(!controller.take_renewal(), "one failure is not a streak");
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "one failure is not a streak"
+    );
     controller.refresh_from_poll().await;
-    assert!(controller.take_renewal(), "the second one arms the renewal");
-    assert!(!controller.take_renewal(), "taken once");
+    assert_eq!(controller.take_trouble(), Some(ConnectionTrouble::Started));
+    assert_eq!(controller.take_trouble(), None, "taken once");
     controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), None);
     controller.refresh_from_poll().await;
-    assert!(!controller.take_renewal(), "never again within the streak");
+    assert_eq!(
+        controller.take_trouble(),
+        Some(ConnectionTrouble::Persistent)
+    );
+    controller.refresh_from_poll().await;
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "never again within the streak"
+    );
 
-    // A success resets the streak; a fresh streak arms one more.
     repo.fail_list(None);
     controller.refresh_from_poll().await;
-    repo.fail_list(Some(AppFailure::Network("down".to_string())));
+    assert_eq!(
+        controller.take_trouble(),
+        Some(ConnectionTrouble::Recovered)
+    );
     controller.refresh_from_poll().await;
-    assert!(!controller.take_renewal());
+    assert_eq!(controller.take_trouble(), None);
+
+    // A lone failure ended by a success reports nothing either way.
+    repo.fail_list(network("blip"));
     controller.refresh_from_poll().await;
-    assert!(controller.take_renewal());
+    repo.fail_list(None);
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), None);
+    assert_eq!(emitted.load(Ordering::SeqCst), 0, "no toast-bound failure");
+}
+
+#[tokio::test]
+async fn internal_and_auth_failures_never_count_and_internal_still_reaches_the_sink() {
+    let repo = ScriptedRepo::new();
+    let (controller, emitted) = counting_controller(&repo);
+    controller.refresh_background().await;
+
+    repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
+    for _ in 0..4 {
+        controller.refresh_from_poll().await;
+    }
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "Internal is not connection trouble"
+    );
+    assert_eq!(
+        emitted.load(Ordering::SeqCst),
+        4,
+        "each still emits, as before"
+    );
+
+    repo.fail_list(Some(AppFailure::Auth("expired".to_string())));
+    for _ in 0..4 {
+        controller.refresh_from_poll().await;
+    }
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "Auth is the renewal's, not the streak's"
+    );
+    assert_eq!(emitted.load(Ordering::SeqCst), 4, "and raises no toast");
+
+    // Neither resets a streak either: two Network failures around them still make one.
+    repo.fail_list(network("down"));
+    controller.refresh_from_poll().await;
+    repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
+    controller.refresh_from_poll().await;
+    repo.fail_list(network("down"));
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), Some(ConnectionTrouble::Started));
 }
 
 /// Poll every second, so a wall-clock test sees ticks quickly.
@@ -3488,7 +3558,7 @@ fn poll_fast() -> Option<SharedPreferencesRepository> {
 }
 
 #[test]
-fn persistent_poll_failures_renew_once_under_the_banner_and_toast_nothing() {
+fn a_network_streak_reports_trouble_under_the_banner_and_never_tears_the_connection_down() {
     use muxr::features::servers::presentation::controller::ReconnectBanner;
 
     let _g = serial();
@@ -3499,53 +3569,62 @@ fn persistent_poll_failures_renew_once_under_the_banner_and_toast_nothing() {
         poll_fast(),
         support::surface(),
     );
-    expect_saved_servers()
-        .save(SavedServer {
-            host: "mock.example".to_string(),
-            port: 7777,
-            trust_mode: TrustMode::NoVerification,
-            label: "Mock rig".to_string(),
-            last_used_ms: epoch_millis(),
-            read_only: false,
-            has_credential: true,
-            token_name: None,
-            fingerprint: None,
-        })
-        .expect("the mock store never fails");
-    let mut keyring = Keyring::new();
-    keyring.insert(
-        "mock.example:7777",
-        zeroize::Zeroizing::new("s3cr3t".to_string()),
-    );
-    expect_keyring().publish(keyring);
+    // No saved credential and a locked keyring: the report needs neither.
+    assert!(!expect_keyring().is_unlocked());
+    assert!(expect_keyring().token_for("mock.example:7777").is_none());
     expect_connection_controller().connect(mock_target(false));
     h.pump_until("the first load", |_| repo.list_calls() >= 1);
     let toasts = muxr::ui::toasts::app_toasts();
     toasts.clear();
     let connection = expect_connection_controller();
     let dials = connection.dial_generation();
-    // Hold the renewal's dial open past a short delay so the banner shows.
+    let rebuilds = trouble_reconnects_for_tests();
     set_banner_connecting_delay_for_tests(50);
-    let held = hold_next_mock_dials_for_tests(1).remove(0);
+    set_banner_timings_for_tests(60, 100);
 
-    repo.fail_list(Some(AppFailure::Network(
-        "not connected to a server".to_string(),
-    )));
+    repo.fail_list(network("deadline exceeded"));
     let banner = || expect_servers_controller().banner.get_untracked();
-    h.pump_until("the renewal's Connecting banner", |_| {
+    h.pump_until("the trouble's Connecting banner", |_| {
         matches!(banner(), Some(ReconnectBanner::Connecting { .. }))
     });
-    assert_eq!(connection.dial_generation(), dials + 1, "one renewal dial");
+    assert_eq!(
+        banner(),
+        Some(ReconnectBanner::Connecting {
+            host: "mock.example".to_string()
+        })
+    );
     assert!(
         repo.list_calls() >= 3,
-        "the first load plus the two failed ticks"
+        "the first load plus two failed ticks"
     );
-    held.release(true);
-    h.pump_until("the renewal to land", |_| {
+    assert!(
+        trouble_reconnects_for_tests() > rebuilds,
+        "the channel rebuild was asked for"
+    );
+    assert_eq!(connection.dial_generation(), dials, "no teardown, no dial");
+    assert!(connection.connected.get_untracked(), "still connected");
+
+    // Two more failures: `Failed`, kept well past its own timeout.
+    h.pump_until("the persistent trouble's Failed banner", |_| {
+        matches!(banner(), Some(ReconnectBanner::Failed { .. }))
+    });
+    let until = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        assert!(matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+    }
+    assert_eq!(connection.dial_generation(), dials, "still no dial");
+    assert!(connection.connected.get_untracked());
+
+    // The next successful poll flashes `Connected`, then clears.
+    repo.fail_list(None);
+    h.pump_until("the recovery's Connected flash", |_| {
         banner() == Some(ReconnectBanner::Connected)
     });
+    h.pump_until("the banner to clear", |_| banner().is_none());
+    assert_eq!(connection.dial_generation(), dials);
     set_banner_connecting_delay_for_tests(BANNER_CONNECTING_DELAY_MS);
-    hold_next_mock_dials_for_tests(0);
+    set_banner_timings_for_tests(1_500, 6_000);
     assert!(
         toasts.pending_untracked().is_empty(),
         "no toast: {:?}",
