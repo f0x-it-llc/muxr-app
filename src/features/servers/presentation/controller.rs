@@ -33,8 +33,7 @@
 //! **A cached switch** (the target has a [`PageSnapshot`] in the last-seen map)
 //! commits instead of waiting: once the select path has vetted the row it
 //! publishes a [`ReconnectSeed`] (the Sessions page seeds itself from it and
-//! stays on screen, actions off), closes the stage at once with the settle-close
-//! semantics (no peers), dials in the
+//! stays on screen, actions off), closes the stage at once, dials in the
 //! background. The target counts as live while that dial is in flight, so the
 //! strip names it. `Connecting` shows only if the dial is still pending after
 //! `banner_connecting_delay_ms`; landing then flips it to `Connected` for
@@ -626,10 +625,8 @@ impl ServersSwitcherController {
             page,
         })));
         self.release_claim();
-        // Faces first, so the target is the live card; the close then builds
-        // no peers (freeze fix v3).
+        // Faces first, so the target is the live card when the stage closes.
         self.refresh_faces();
-        crate::features::servers::di::skip_close_tail();
         self.close_stage();
         let controller = Arc::clone(self);
         let dialed = endpoint.to_string();
@@ -787,10 +784,9 @@ impl ServersSwitcherController {
         *self.claim() = None;
         self.busy.set(None);
         if current {
-            // Faces first, so `live_index` names the new live server; the close
-            // then builds no peers (a settle has no tail), so nothing can jump.
+            // Faces first, so `live_index` names the new live server as the
+            // stage closes.
             self.refresh_faces();
-            crate::features::servers::di::skip_close_tail();
             self.expanding.set(None);
             self.open.set(false);
         } else {
