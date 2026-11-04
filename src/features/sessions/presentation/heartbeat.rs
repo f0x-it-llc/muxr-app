@@ -10,6 +10,10 @@
 //! [`FrameTicker`] keeps `build` re-invoked mid-animation (a signal write
 //! otherwise wakes exactly one rebuild); the screen mounts it only while
 //! [`HeartbeatVisual::animating`], so a settled strip requests no frames.
+//! It requests a *paced* frame ([`PaintCtx::request_frame_paced`]), so the
+//! ring's decorative loop runs at the theme's cosmetic rate rather than every
+//! vsync. The ring's pose is computed from the wall clock, so a lower frame
+//! rate only smooths the motion; it never changes the ring's timing.
 //!
 //! **Clip note:** [`AnimatedOpacity`] records its own *unscaled* layout rect
 //! as its child layer's clip, captured before the nested [`AnimatedScale`]
@@ -253,9 +257,10 @@ fn ring_layer(pose: Option<RingPose>, ink: Color) -> impl View<SessionsState> {
     )
 }
 
-/// A zero-size sentinel [`View`]/[`Widget`] whose only job is an
-/// unconditional [`PaintCtx::request_frame`] in `paint`. Mount only while
-/// the animation needing it is still running.
+/// A zero-size sentinel [`View`]/[`Widget`] whose only job is a paced
+/// [`PaintCtx::request_frame_paced`] in `paint` (a `CosmeticLoop` frame,
+/// capped at the theme's cosmetic rate rather than produced every vsync).
+/// Mount only while the animation needing it is still running.
 struct FrameTicker;
 
 impl<State: 'static> View<State> for FrameTicker {
@@ -283,7 +288,7 @@ impl Widget for FrameTickerWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
-        ctx.request_frame();
+        ctx.request_frame_paced();
     }
 }
 
@@ -354,6 +359,44 @@ mod tests {
             RING_SLOT >= widest,
             "a {RING_SLOT}px slot clips a ring drawn out to {widest}px"
         );
+    }
+
+    /// Regression for the heartbeat burning a full-scene frame every vsync
+    /// while idle: the ticker must request a paced `CosmeticLoop` frame, not
+    /// an unpaced `Transition` one. Asserted on the frame class the paint
+    /// itself produces, through [`PaintCtx::for_test`].
+    #[test]
+    fn the_frame_ticker_requests_a_paced_cosmetic_frame_not_an_unpaced_transition() {
+        use frust::authoring::Point;
+        use frust_core::{FrameTime, TickClass};
+
+        struct NullScene;
+
+        impl PaintScene for NullScene {
+            fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+            fn draw_text(&mut self, _origin: Point, _text: &str) {}
+            fn draw_shadow(
+                &mut self,
+                _origin: Point,
+                _size: Size,
+                _radius: f64,
+                _std_dev: f64,
+                _color: Color,
+            ) {
+            }
+        }
+
+        let mut ticker = FrameTickerWidget;
+        let mut ctx = PaintCtx::for_test(Point::ZERO, Size::ZERO, FrameTime::ZERO);
+        ticker.paint(&mut ctx, &mut NullScene);
+
+        assert!(ctx.needs_frame(), "the ticker must keep a frame coming");
+        assert_eq!(
+            ctx.frame_class(),
+            Some(TickClass::CosmeticLoop),
+            "the ticker must request a paced frame, not an unpaced Transition"
+        );
+        assert!(ctx.needs_frame_paced_only());
     }
 
     mod dot_glow_regression {
