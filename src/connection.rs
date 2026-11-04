@@ -204,6 +204,27 @@ pub trait CredentialSaver: Send + Sync {
     fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>);
 }
 
+/// What a live session's expiry is handed to before the controller logs out —
+/// installed by the feature that can log back in, called by
+/// [`ConnectionController::on_session_expired_for`].
+pub trait SessionRenewer: Send + Sync {
+    /// Renew the expired session at `endpoint` (`host:port`). `true` means the
+    /// renewer took it over and now owns every outcome the user sees — the
+    /// controller neither disconnects nor reports the expiry, and ignores further
+    /// expiries until the next dial settles or the connection is torn down, so a
+    /// renewal must end in one of those. `false` means it cannot (nothing saved
+    /// for `endpoint`), and the controller logs out as it would without one.
+    fn renew(&self, endpoint: &str) -> bool;
+}
+
+/// Whether a dial's failure is reported on [`ConnectionController::core`]'s
+/// sink or only handed to the caller's `on_done`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Report {
+    Emit,
+    Quiet,
+}
+
 /// What [`ConnectionController::lock_and_disconnect`] locks — the `connect`
 /// feature's keyring, named here by contract rather than by type.
 pub trait KeyringLock {
@@ -239,6 +260,36 @@ impl ConnectionBackend for MockConnectionBackend {
     }
 
     fn disconnect(&self) {}
+}
+
+/// The mock backend's dial, reporting one real client as live from a settled
+/// successful dial until the next teardown — see
+/// [`ConnectionController::with_live_client_for_tests`].
+#[cfg(test)]
+struct LiveClientBackend {
+    client: MuxrClient,
+    live: AtomicBool,
+}
+
+#[cfg(test)]
+impl ConnectionBackend for LiveClientBackend {
+    fn begin_connect(&self, target: ConnectTarget) -> ConnectRun {
+        let run = MockConnectionBackend.begin_connect(target);
+        if matches!(run, ConnectRun::Ready(Ok(_))) {
+            self.live.store(true, Ordering::SeqCst);
+        }
+        run
+    }
+
+    fn disconnect(&self) {
+        self.live.store(false, Ordering::SeqCst);
+    }
+
+    fn client(&self) -> Option<MuxrClient> {
+        self.live
+            .load(Ordering::SeqCst)
+            .then(|| self.client.clone())
+    }
 }
 
 /// The facts the mock backend reports for a successful dial of `target`.
@@ -495,6 +546,13 @@ pub struct ConnectionController {
     /// What an accepted offer actually saves through, or `None` while nothing
     /// has installed one — see [`CredentialSaver`].
     credential_saver: Mutex<Option<Arc<dyn CredentialSaver>>>,
+    /// What a live session's expiry is offered to first, or `None` while
+    /// nothing has installed one — see [`SessionRenewer`].
+    session_renewer: Mutex<Option<Arc<dyn SessionRenewer>>>,
+    /// Set while an installed renewer owns an expiry, so a burst of calls
+    /// failing at once asks it once. Cleared by the next settled dial and by
+    /// every teardown.
+    renewing: AtomicBool,
 }
 
 impl ConnectionController {
@@ -511,6 +569,8 @@ impl ConnectionController {
             pinging: AtomicBool::new(false),
             credential_offer: RwSignal::new(None),
             credential_saver: Mutex::new(None),
+            session_renewer: Mutex::new(None),
+            renewing: AtomicBool::new(false),
         }
     }
 
@@ -528,6 +588,29 @@ impl ConnectionController {
     #[cfg(test)]
     pub(crate) fn with_backend(backend: Arc<dyn ConnectionBackend>) -> Self {
         Self::new(backend)
+    }
+
+    /// A fresh, unpublished controller already connected (through the mock's
+    /// facts) to `client`'s target, reporting `client` as its live client — the
+    /// seam for a repository test of the session-expiry fence.
+    #[cfg(test)]
+    pub(crate) fn with_live_client_for_tests(client: MuxrClient) -> Arc<Self> {
+        let target = ConnectTarget {
+            host: client.host().to_string(),
+            port: client.port(),
+            trust_mode: TrustMode::NoVerification,
+            label: client.host().to_string(),
+            offer_credential: false,
+            token: Zeroizing::new(String::new()),
+            remember: false,
+            fingerprint: None,
+        };
+        let controller = Arc::new(Self::new(Arc::new(LiveClientBackend {
+            client,
+            live: AtomicBool::new(false),
+        })));
+        controller.connect(target);
+        controller
     }
 
     /// This controller's [`ControllerCore`] — the failure sink `MuxrApp::init`
@@ -590,7 +673,7 @@ impl ConnectionController {
             return;
         }
         let generation = self.next_generation();
-        self.dial(generation, target, on_done);
+        self.dial(generation, target, Report::Emit, on_done);
     }
 
     /// Move to `target`: tear the live connection down first, then dial under
@@ -602,6 +685,26 @@ impl ConnectionController {
         target: ConnectTarget,
         on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
     ) {
+        self.switch(target, Report::Emit, on_done);
+    }
+
+    /// [`Self::switch_to`], but a failure is only handed to `on_done`, never
+    /// emitted on [`Self::core`]'s sink — for a caller that reports the dial
+    /// itself, such as a banner-owned background dial or a session renewal.
+    pub fn switch_to_quiet(
+        self: &Arc<Self>,
+        target: ConnectTarget,
+        on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
+        self.switch(target, Report::Quiet, on_done);
+    }
+
+    fn switch(
+        self: &Arc<Self>,
+        target: ConnectTarget,
+        report: Report,
+        on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
         if self.connecting.get_untracked() {
             log::warn!("switch ignored: a connect is already in flight");
             return;
@@ -610,7 +713,7 @@ impl ConnectionController {
         if self.connected.get_untracked() {
             self.tear_down();
         }
-        self.dial(generation, target, on_done);
+        self.dial(generation, target, report, on_done);
     }
 
     /// The dial generation: bumped by every accepted connect or switch and by
@@ -633,6 +736,7 @@ impl ConnectionController {
         self: &Arc<Self>,
         generation: u64,
         target: ConnectTarget,
+        report: Report,
         on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
     ) {
         // The caller's half of the credential-offer decision, taken before the
@@ -641,7 +745,7 @@ impl ConnectionController {
         self.connecting.set(true);
 
         match self.backend.begin_connect(target) {
-            ConnectRun::Ready(outcome) => self.settle(generation, outcome, offer, on_done),
+            ConnectRun::Ready(outcome) => self.settle(generation, outcome, offer, report, on_done),
             ConnectRun::Pending(work) => {
                 // The dial runs on the background runtime; the UI-thread
                 // coordinator below is the only thing that writes a signal.
@@ -654,7 +758,7 @@ impl ConnectionController {
                     let outcome = rx
                         .await
                         .unwrap_or_else(|_| Err(AppFailure::Internal(DIAL_ABANDONED.to_string())));
-                    controller.settle(generation, outcome, offer, on_done);
+                    controller.settle(generation, outcome, offer, report, on_done);
                 });
             }
         }
@@ -666,6 +770,7 @@ impl ConnectionController {
         generation: u64,
         outcome: ConnectOutcome,
         offer: Option<String>,
+        report: Report,
         on_done: impl FnOnce(Result<(), AppFailure>),
     ) {
         if self.generation.load(Ordering::SeqCst) != generation {
@@ -676,6 +781,7 @@ impl ConnectionController {
             return;
         }
         self.connecting.set(false);
+        self.renewing.store(false, Ordering::SeqCst);
 
         match outcome {
             Ok(info) => {
@@ -693,7 +799,9 @@ impl ConnectionController {
                 on_done(Ok(()));
             }
             Err(failure) => {
-                self.core.failures().emit(&failure);
+                if report == Report::Emit {
+                    self.core.failures().emit(&failure);
+                }
                 on_done(Err(failure));
             }
         }
@@ -761,6 +869,7 @@ impl ConnectionController {
 
     /// Clear the server-scoped signals and move the epoch.
     fn clear_server_state(&self) {
+        self.renewing.store(false, Ordering::SeqCst);
         self.server_info.set(None);
         self.is_read_only.set(false);
         self.credential_offer.set(None);
@@ -772,20 +881,72 @@ impl ConnectionController {
         self.connection_epoch.update(|epoch| *epoch += 1);
     }
 
-    /// The server rejected this session's credential — every
-    /// [`AppFailure::Auth`] a repository raises funnels here.
+    /// The server rejected the credential `client` carried — every
+    /// [`AppFailure::Auth`] a repository raises funnels here, with the client
+    /// the failing call used.
+    ///
+    /// Fenced to the live connection: a `client` that is not the live one (a
+    /// call that outlived a switch or a renewal) is ignored, since the expiry
+    /// was its session's, not the current one's. A live expiry goes to the
+    /// installed [`SessionRenewer`] first; when it takes the renewal over,
+    /// nothing else happens here. Otherwise — declined, or none installed — the
+    /// connection is dropped and the expiry reported once.
     ///
     /// Idempotent: several in-flight calls failing at once is the normal shape
-    /// of an expiry, and the user gets one teardown and one toast, not one per
-    /// call.
+    /// of an expiry, and they cost one renewal request or one teardown and one
+    /// toast, not one per call.
+    pub fn on_session_expired_for(&self, client: &MuxrClient) {
+        if !self.connected.get_untracked()
+            || !self.client().is_some_and(|live| live.is_same(client))
+        {
+            return;
+        }
+        if self.renewing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let renewer = self
+            .session_renewer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let endpoint = self.server_info.get_untracked().map(|info| info.endpoint);
+        // The flag is raised before the renewer runs: one that settles a dial
+        // synchronously clears it again, and that clear must win.
+        if let (Some(renewer), Some(endpoint)) = (renewer, endpoint)
+            && renewer.renew(&endpoint)
+        {
+            return;
+        }
+        self.renewing.store(false, Ordering::SeqCst);
+        self.expire();
+    }
+
+    /// The unfenced legacy entry point, for a caller holding no client handle:
+    /// drops whatever connection is live and reports the expiry once, never
+    /// consulting a [`SessionRenewer`]. Prefer [`Self::on_session_expired_for`].
     pub fn on_session_expired(&self) {
         if !self.connected.get_untracked() {
             return;
         }
+        self.expire();
+    }
+
+    /// Log out of an expired session: disconnect, then one
+    /// [`AppFailure::Auth`] on [`Self::core`]'s sink.
+    fn expire(&self) {
         self.disconnect();
         self.core
             .failures()
             .emit(&AppFailure::Auth(SESSION_EXPIRED.to_string()));
+    }
+
+    /// Install what a live session's expiry is offered to, replacing any
+    /// previous one — see [`SessionRenewer`].
+    pub fn set_session_renewer(&self, renewer: Arc<dyn SessionRenewer>) {
+        *self
+            .session_renewer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(renewer);
     }
 
     /// Install what an accepted offer saves through, replacing any previous
@@ -1360,6 +1521,207 @@ mod tests {
         );
     }
 
+    /// Count every failure `controller` emits, for as long as the returned
+    /// subscription is held.
+    fn emitted(
+        controller: &ConnectionController,
+    ) -> (Arc<AtomicUsize>, clean_signals::Subscription) {
+        let raised = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&raised);
+        let subscription = controller
+            .core()
+            .failures()
+            .subscribe(move |_failure: &AppFailure| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+        (raised, subscription)
+    }
+
+    /// A [`SessionRenewer`] answering one scripted verdict and recording every
+    /// endpoint it was asked to renew.
+    struct ScriptedRenewer {
+        accept: bool,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedRenewer {
+        fn installed(controller: &ConnectionController, accept: bool) -> Arc<Self> {
+            let renewer = Arc::new(Self {
+                accept,
+                asked: Mutex::new(Vec::new()),
+            });
+            controller.set_session_renewer(Arc::clone(&renewer) as Arc<dyn SessionRenewer>);
+            renewer
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl SessionRenewer for ScriptedRenewer {
+        fn renew(&self, endpoint: &str) -> bool {
+            self.asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(endpoint.to_string());
+            self.accept
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expiry_reported_by_a_superseded_client_is_a_no_op() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let controller =
+            ConnectionController::with_live_client_for_tests(fixture.connect_pinned().await);
+        let stale = fixture.connect_pinned().await;
+        let renewer = ScriptedRenewer::installed(&controller, true);
+        let (raised, _subscription) = emitted(&controller);
+
+        controller.on_session_expired_for(&stale);
+
+        assert!(controller.connected.get_untracked());
+        assert_eq!(raised.load(Ordering::SeqCst), 0);
+        assert!(renewer.asked().is_empty(), "a stale expiry renews nothing");
+    }
+
+    #[tokio::test]
+    async fn a_live_expiry_a_renewer_takes_over_stays_connected_and_reports_nothing() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let live = fixture.connect_pinned().await;
+        let controller = ConnectionController::with_live_client_for_tests(live.clone());
+        let renewer = ScriptedRenewer::installed(&controller, true);
+        let (raised, _subscription) = emitted(&controller);
+
+        for _ in 0..3 {
+            controller.on_session_expired_for(&live);
+        }
+
+        assert!(controller.connected.get_untracked());
+        assert_eq!(raised.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            renewer.asked(),
+            [format!("127.0.0.1:{}", fixture.port())],
+            "a burst of failing calls asks for one renewal, of the live endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_expiry_the_renewer_declines_logs_out_once() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let live = fixture.connect_pinned().await;
+        let controller = ConnectionController::with_live_client_for_tests(live.clone());
+        let renewer = ScriptedRenewer::installed(&controller, false);
+        let (raised, _subscription) = emitted(&controller);
+
+        for _ in 0..3 {
+            controller.on_session_expired_for(&live);
+        }
+
+        assert!(!controller.connected.get_untracked());
+        assert_eq!(raised.load(Ordering::SeqCst), 1);
+        assert_eq!(renewer.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_live_expiry_with_no_renewer_installed_logs_out_once() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let live = fixture.connect_pinned().await;
+        let controller = ConnectionController::with_live_client_for_tests(live.clone());
+        let (raised, _subscription) = emitted(&controller);
+
+        for _ in 0..3 {
+            controller.on_session_expired_for(&live.clone());
+        }
+
+        assert!(!controller.connected.get_untracked());
+        assert!(controller.client().is_none());
+        assert_eq!(
+            raised.load(Ordering::SeqCst),
+            1,
+            "several calls failing at once must not raise several toasts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_dial_ends_the_renewal_so_a_later_expiry_is_offered_again() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let live = fixture.connect_pinned().await;
+        let controller = ConnectionController::with_live_client_for_tests(live.clone());
+        let renewer = ScriptedRenewer::installed(&controller, true);
+
+        controller.on_session_expired_for(&live);
+        controller.switch_to(target_at("127.0.0.1"), |_| {});
+        controller.on_session_expired_for(&live);
+
+        assert_eq!(renewer.asked().len(), 2);
+        assert!(controller.connected.get_untracked());
+    }
+
+    /// A controller whose one dial fails with a network failure.
+    fn failing_dial() -> Arc<ConnectionController> {
+        Arc::new(ConnectionController::new(Arc::new(CannedBackend {
+            outcome: Mutex::new(Some(Err(AppFailure::Network("down".to_string())))),
+        })))
+    }
+
+    /// Where [`outcome_slot`]'s `on_done` records the outcome it was handed.
+    type OutcomeSlot = Arc<Mutex<Option<Result<(), AppFailure>>>>;
+
+    /// An `on_done` recording the outcome it was handed.
+    fn outcome_slot() -> (OutcomeSlot, impl FnOnce(Result<(), AppFailure>) + 'static) {
+        let slot = Arc::new(Mutex::new(None));
+        let write = Arc::clone(&slot);
+        (slot, move |outcome| {
+            *write.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+        })
+    }
+
+    #[test]
+    fn a_quiet_dial_hands_its_failure_to_on_done_and_emits_nothing() {
+        let controller = failing_dial();
+        let (raised, _subscription) = emitted(&controller);
+        let (outcome, on_done) = outcome_slot();
+
+        controller.switch_to_quiet(target(false), on_done);
+
+        assert!(matches!(
+            *outcome.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(Err(AppFailure::Network(_)))
+        ));
+        assert_eq!(raised.load(Ordering::SeqCst), 0);
+        assert!(!controller.connected.get_untracked());
+        assert!(!controller.connecting.get_untracked());
+    }
+
+    #[test]
+    fn a_failed_switch_to_still_emits_its_failure() {
+        let controller = failing_dial();
+        let (raised, _subscription) = emitted(&controller);
+        let (outcome, on_done) = outcome_slot();
+
+        controller.switch_to(target(false), on_done);
+
+        assert!(matches!(
+            *outcome.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(Err(AppFailure::Network(_)))
+        ));
+        assert_eq!(raised.load(Ordering::SeqCst), 1);
+    }
+
     // -----------------------------------------------------------------------
     // Switching servers, the epoch, and locking
     // -----------------------------------------------------------------------
@@ -1444,7 +1806,7 @@ mod tests {
         let ConnectRun::Ready(outcome) = late else {
             unreachable!("the mock always answers on the spot");
         };
-        controller.settle(stale, outcome, Some("X".to_string()), on_done);
+        controller.settle(stale, outcome, Some("X".to_string()), Report::Emit, on_done);
 
         assert_eq!(
             connected_endpoint(&controller).as_deref(),

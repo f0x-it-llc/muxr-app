@@ -14,7 +14,7 @@
 //! file's `Arc<ConnectionController>` field is the one exception.
 //! [`ConnectionController`] is resolved exactly once, in `di::provide`, and
 //! held from then on as a plain handle — every call against it (`client()`,
-//! `on_session_expired()`) is a plain method call, never a fresh
+//! `on_session_expired_for()`) is a plain method call, never a fresh
 //! `use_context` lookup.
 //!
 //! # Id-routed mutations
@@ -62,8 +62,9 @@
 //!
 //! Every RPC failure funnels through [`crate::net::error::from_status`]; an
 //! `UNAUTHENTICATED` additionally invokes
-//! [`ConnectionController::on_session_expired`] (its own idempotent contract
-//! absorbs a burst of calls failing at once). Every `ActionAck`-returning
+//! [`ConnectionController::on_session_expired_for`] with the client the call
+//! used (its own idempotent contract absorbs a burst of calls failing at once,
+//! and its fence ignores a client a switch already replaced). Every `ActionAck`-returning
 //! call maps through [`crate::net::error::ack_result`] instead of trusting
 //! the outer `Status` alone.
 
@@ -139,10 +140,10 @@ impl GrpcSessionsRepository {
     /// for `UNAUTHENTICATED` specifically — additionally invoke the shared
     /// session-expired hook (see the [module docs](self)' failure-mapping
     /// section).
-    fn map_status(&self, status: Status) -> AppFailure {
+    fn map_status(&self, client: &MuxrClient, status: Status) -> AppFailure {
         let failure = error::from_status(&status);
         if matches!(failure, AppFailure::Auth(_)) {
-            self.connection.on_session_expired();
+            self.connection.on_session_expired_for(client);
         }
         failure
     }
@@ -162,7 +163,7 @@ impl GrpcSessionsRepository {
         match client.authed().get_layout(request).await {
             Ok(response) => Some(layout_derived_from(response.into_inner())),
             Err(status) => {
-                self.map_status(status);
+                self.map_status(client, status);
                 None
             }
         }
@@ -178,7 +179,7 @@ impl SessionsRepository for GrpcSessionsRepository {
             .authed()
             .list_sessions(Empty {})
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
 
         let mut sessions = Vec::with_capacity(response.sessions.len());
@@ -207,7 +208,7 @@ impl SessionsRepository for GrpcSessionsRepository {
             .authed()
             .create_session(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)?;
         Ok(optimistic_session(
@@ -231,7 +232,7 @@ impl SessionsRepository for GrpcSessionsRepository {
             .authed()
             .rename_session(wire)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)?;
         // The reconcile: the old id's own backend prefix, kept, paired with
@@ -257,7 +258,7 @@ impl SessionsRepository for GrpcSessionsRepository {
             .authed()
             .kill_session(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -279,11 +280,11 @@ impl SessionsRepository for GrpcSessionsRepository {
             .authed()
             .list_agents(request.clone())
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         let layouts = fetch_agent_layouts(&client, &request, agent_spaces(&list.agents)).await;
         if let Some(first) = layouts.failed.first() {
-            let failure = self.map_status(first.status.clone());
+            let failure = self.map_status(&client, first.status.clone());
             log::warn!(
                 "list_agents: {} space layout(s) unread, their agents list unplaced: {failure}",
                 layouts.failed.len()
@@ -531,10 +532,9 @@ fn optimistic_session(id: String, name: String, backend: SessionBackend) -> Sess
 #[cfg(test)]
 mod tests {
     use frust::GetUntracked;
-    use zeroize::Zeroizing;
 
-    use crate::connection::{ConnectTarget, TrustMode};
     use crate::net::proto::{ActionAck, PaneMsg, TabMsg};
+    use crate::net::testing::MuxrdFixture;
 
     use super::*;
 
@@ -695,22 +695,15 @@ mod tests {
         }
     }
 
-    /// A connected mock-backed controller —
-    /// [`ConnectionController::detached`] is the same `#[cfg(test)]` seam
-    /// `crate::connection`'s own tests use.
-    fn connected_controller() -> Arc<ConnectionController> {
-        let connection = Arc::new(ConnectionController::detached());
-        connection.connect(ConnectTarget {
-            host: "mock.example".to_string(),
-            port: 1,
-            trust_mode: TrustMode::NoVerification,
-            label: "Mock".to_string(),
-            offer_credential: false,
-            token: Zeroizing::new(String::new()),
-            remember: false,
-            fingerprint: None,
-        });
-        connection
+    /// A fixture client and a connected controller reporting it as the live
+    /// client — the same `#[cfg(test)]` seam `crate::connection`'s own tests
+    /// use.
+    async fn connected_controller(
+        fixture: &MuxrdFixture,
+    ) -> (Arc<ConnectionController>, MuxrClient) {
+        let client = fixture.connect_pinned().await;
+        let connection = ConnectionController::with_live_client_for_tests(client.clone());
+        (connection, client)
     }
 
     // -- proto → entity mapping ----------------------------------------------
@@ -1063,13 +1056,14 @@ mod tests {
         assert!(matches!(failure, AppFailure::Internal(_)));
     }
 
-    #[test]
-    fn an_unauthenticated_status_logs_the_session_out_through_the_shared_hook() {
-        let connection = connected_controller();
+    #[tokio::test]
+    async fn an_unauthenticated_status_logs_the_session_out_through_the_shared_hook() {
+        let fixture = MuxrdFixture::start().await;
+        let (connection, client) = connected_controller(&fixture).await;
         assert!(connection.connected.get_untracked());
 
         let repo = GrpcSessionsRepository::new(Arc::clone(&connection));
-        let failure = repo.map_status(Status::unauthenticated("session token expired"));
+        let failure = repo.map_status(&client, Status::unauthenticated("session token expired"));
 
         assert!(matches!(failure, AppFailure::Auth(_)));
         assert!(
@@ -1078,12 +1072,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_non_auth_status_never_touches_the_connection() {
-        let connection = connected_controller();
+    #[tokio::test]
+    async fn an_unauthenticated_status_from_a_replaced_client_leaves_the_connection_alone() {
+        let fixture = MuxrdFixture::start().await;
+        let (connection, _live) = connected_controller(&fixture).await;
+        let stale = fixture.connect_pinned().await;
+
+        let repo = GrpcSessionsRepository::new(Arc::clone(&connection));
+        let failure = repo.map_status(&stale, Status::unauthenticated("session token expired"));
+
+        assert!(matches!(failure, AppFailure::Auth(_)));
+        assert!(connection.connected.get_untracked());
+    }
+
+    #[tokio::test]
+    async fn a_non_auth_status_never_touches_the_connection() {
+        let fixture = MuxrdFixture::start().await;
+        let (connection, client) = connected_controller(&fixture).await;
         let repo = GrpcSessionsRepository::new(Arc::clone(&connection));
 
-        let failure = repo.map_status(Status::unavailable("connection refused"));
+        let failure = repo.map_status(&client, Status::unavailable("connection refused"));
 
         assert!(matches!(failure, AppFailure::Network(_)));
         assert!(
