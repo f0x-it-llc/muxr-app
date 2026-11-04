@@ -42,6 +42,15 @@
 //! bumps a generation that fences the clearing timers. A second select while a
 //! background dial is in flight supersedes it (the connection is torn down and
 //! the new switch dials). A target with no cached page keeps the stage-held path.
+//! The background dial is quiet: its failure is the banner's and the face's to
+//! show, never also a toast.
+//!
+//! **A renewal** ([`reconnect_live`](ServersSwitcherController::reconnect_live))
+//! is the same background dial aimed at the live server itself, with the stage
+//! left as it is — what `di` installs as the connection's
+//! [`SessionRenewer`](crate::connection::SessionRenewer), so an expired session
+//! logs back in under the banner instead of dropping to Connect. It is
+//! single-flight against any background dial in flight and never retries.
 //!
 //! No `Nav`, overlay or other `Rc` handle is stored: the caller lends them per
 //! call ([`SwitchGate`], [`lock`](ServersSwitcherController::lock)), which
@@ -54,17 +63,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use frust::{Get, GetUntracked, NavigatorController, RwSignal, Set, spawn_local};
+use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
-use crate::features::connect::domain::entities::SavedServer;
+use crate::features::connect::domain::entities::{SavedServer, epoch_millis};
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::pro::presentation::{UpgradeContext, show_upgrade_sheet};
 use crate::features::servers::di::LastSeenHandle;
-use crate::features::servers::domain::entities::{FaceKind, PageSnapshot, ServerFace, faces_for};
+use crate::features::servers::domain::entities::{
+    FaceKind, PageSnapshot, SeenServer, ServerFace, faces_for,
+};
 use crate::routes::{ADD_SERVER_LOCATION, Nav, add_server_location};
 use crate::ui::toasts::app_toasts;
 
@@ -598,17 +610,105 @@ impl ServersSwitcherController {
     /// The cached switch: seed the page, close the stage at once (no peers) and
     /// dial in the background. `busy` is held by the caller and released here.
     fn commit_cached(self: &Arc<Self>, endpoint: &str, page: Arc<PageSnapshot>) {
-        let found = self
-            .saved_row(endpoint)
-            .filter(|row| row.has_credential)
-            .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)));
         let epoch = self.stage_epoch.load(Ordering::SeqCst);
-        let Some((token, row)) = found else {
+        let Some((token, row)) = self.credential_for(endpoint) else {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
+        let id = self.arm_bg(endpoint, row.host.clone(), page);
+        self.release_claim();
+        // Faces first, so the target is the live card when the stage closes.
+        self.refresh_faces();
+        self.close_stage();
+        self.dial_bg(endpoint, &row, token, id);
+    }
+
+    /// Renew the **live** server's session in place, in the background — what
+    /// an expired session or a run of failed polls asks for. Answers `false`
+    /// (the caller falls back: logs out, reports) when there is no live
+    /// server, its saved row claims no credential, or the keyring holds no
+    /// token for it (locked included). `true` means the renewal is this
+    /// controller's to report: it is underway, or a background dial for the
+    /// live server already is (single-flight — nothing more is started).
+    ///
+    /// The same machinery as a cached switch, with the stage left exactly as
+    /// it is: the Sessions page is seeded with the live server's own page (the
+    /// last-seen one, or one filed now from the connection's facts when none
+    /// was), so it stays on screen with its actions off while the connection
+    /// is down; `Connecting` shows only past the delay; landing flashes
+    /// `Connected`, a failure shows `Failed` and marks the face — never a toast
+    /// (the dial is quiet), and nothing retries on its own.
+    ///
+    /// Runs on the UI thread, like every other entry point here.
+    pub fn reconnect_live(self: &Arc<Self>) -> bool {
+        self.release_bg_if_stale();
+        if self.bg().is_some() {
+            // A background dial is in flight, and its target counts as live.
+            return true;
+        }
+        if self.connection.connecting.get_untracked() || !self.connection.connected.get_untracked()
+        {
+            return false;
+        }
+        let Some(endpoint) = self.active_endpoint() else {
+            return false;
+        };
+        let Some((token, row)) = self.credential_for(&endpoint) else {
+            return false;
+        };
+        let page = self.live_page(&endpoint);
+        let id = self.arm_bg(&endpoint, row.host.clone(), page);
+        self.refresh_faces();
+        self.dial_bg(&endpoint, &row, token, id);
+        true
+    }
+
+    /// The live server's endpoint (a background dial's target counts), if any —
+    /// what a renewal request is checked against.
+    pub fn live_endpoint(&self) -> Option<String> {
+        self.active_endpoint()
+    }
+
+    /// The fresh saved row for `endpoint` and the keyring's token for it, only
+    /// while the row still claims a credential the keyring holds.
+    fn credential_for(&self, endpoint: &str) -> Option<(Zeroizing<String>, SavedServer)> {
+        self.saved_row(endpoint)
+            .filter(|row| row.has_credential)
+            .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)))
+    }
+
+    /// The page the live `endpoint` is showing, as the last-seen map filed it.
+    /// When nothing was filed yet (no list has landed on this connection) one
+    /// is filed now from the connection's facts, with no rows: there is no
+    /// list to keep, and the header must not drop to the disconnected one.
+    fn live_page(&self, endpoint: &str) -> Arc<PageSnapshot> {
+        if let Some(page) = self.cached_page(endpoint) {
+            return page;
+        }
+        let page = Arc::new(PageSnapshot {
+            sessions: Vec::new(),
+            info: self.connection.server_info.get_untracked(),
+            read_only: self.connection.is_read_only.get_untracked(),
+        });
+        let seen = self.last_seen.snapshot().remove(endpoint);
+        self.last_seen.record_seen(
+            endpoint,
+            SeenServer {
+                glimpses: seen
+                    .as_ref()
+                    .map(|s| s.glimpses.clone())
+                    .unwrap_or_default(),
+                seen_at_ms: seen.map_or_else(epoch_millis, |s| s.seen_at_ms),
+                page: Some(Arc::clone(&page)),
+            },
+        );
+        page
+    }
+
+    /// Start background dial bookkeeping for `endpoint`: claim the in-flight
+    /// slot, arm the delayed `Connecting`, publish the seed. Answers its id.
+    fn arm_bg(self: &Arc<Self>, endpoint: &str, host: String, page: Arc<PageSnapshot>) -> u64 {
         let id = self.seed_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let host = row.host.clone();
         *self.bg() = Some(BackgroundDial {
             endpoint: endpoint.to_string(),
             id,
@@ -624,14 +724,22 @@ impl ServersSwitcherController {
             host,
             page,
         })));
-        self.release_claim();
-        // Faces first, so the target is the live card when the stage closes.
-        self.refresh_faces();
-        self.close_stage();
+        id
+    }
+
+    /// Dial background dial `id` through the quiet saved-row switch: its
+    /// outcome is the banner's and the face's to show, never a toast.
+    fn dial_bg(
+        self: &Arc<Self>,
+        endpoint: &str,
+        row: &SavedServer,
+        token: Zeroizing<String>,
+        id: u64,
+    ) {
         let controller = Arc::clone(self);
         let dialed = endpoint.to_string();
         self.keyring_unlock
-            .switch_to_saved(&row, token, move |outcome| match outcome {
+            .switch_to_saved_quiet(row, token, move |outcome| match outcome {
                 Ok(()) => controller.settle_bg(&dialed, id),
                 Err(failure) => {
                     use clean_signals::Failure;
@@ -714,11 +822,7 @@ impl ServersSwitcherController {
     /// Dial `endpoint` with the keyring's token, the row read fresh and only
     /// while it still claims a credential the keyring holds. `busy` is held.
     fn dial(self: &Arc<Self>, endpoint: &str, epoch: u64) {
-        let found = self
-            .saved_row(endpoint)
-            .filter(|row| row.has_credential)
-            .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)));
-        let Some((token, row)) = found else {
+        let Some((token, row)) = self.credential_for(endpoint) else {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
