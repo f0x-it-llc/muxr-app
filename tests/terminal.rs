@@ -45,6 +45,7 @@ use muxr::features::terminal::data::repositories::mock_terminal_repository::{
     fail_next_list_agents_for_tests, seed_agents, verb_log_for_tests,
 };
 use muxr::features::terminal::domain::entities::{AgentEntry, AgentStatus};
+use muxr::features::terminal::presentation::controller::fail_next_tab_list_for_tests;
 use muxr::features::terminal::presentation::pages::{
     debug_controller, open_terminal_menu, terminal_page,
 };
@@ -3955,4 +3956,29 @@ fn a_failed_agents_read_mutes_the_attention_claims_until_the_next_good_one() {
     assert!(!c.agents_stale.get_untracked());
     assert!(c.has_blocked_agent());
     assert!(node_labels(&h.root).iter().any(|l| l == "needs you"));
+}
+
+#[test]
+fn a_failed_tab_reload_on_attach_settle_raises_no_toast_but_a_user_reload_does() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    let c = debug_controller().expect("mounted");
+    let rt = current_thread();
+    h.pump_for(Duration::from_millis(100));
+    app_toasts().clear();
+
+    fail_next_tab_list_for_tests();
+    rt.block_on(c.reload_tabs_quiet());
+    h.pump_for(Duration::from_millis(100));
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "the settle-driven reload is quiet: {:?}",
+        app_toasts().pending_untracked()
+    );
+
+    fail_next_tab_list_for_tests();
+    rt.block_on(c.reload_tabs());
+    h.await_toast("Connection problem \u{2014} please try again.");
+    app_toasts().clear();
 }
