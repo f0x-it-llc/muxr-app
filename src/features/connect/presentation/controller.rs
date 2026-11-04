@@ -1457,6 +1457,29 @@ impl KeyringUnlock {
         token: Zeroizing<String>,
         on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
     ) {
+        self.switch_saved(server, token, false, on_done);
+    }
+
+    /// [`Self::switch_to_saved`] over [`ConnectionController::switch_to_quiet`]:
+    /// a failure is only handed to `on_done`, never toasted — for a caller that
+    /// reports the dial itself (the switcher's banner-owned background dials).
+    /// The login write-back on success is the same.
+    pub fn switch_to_saved_quiet(
+        &self,
+        server: &SavedServer,
+        token: Zeroizing<String>,
+        on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
+        self.switch_saved(server, token, true, on_done);
+    }
+
+    fn switch_saved(
+        &self,
+        server: &SavedServer,
+        token: Zeroizing<String>,
+        quiet: bool,
+        on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
+    ) {
         let target = saved_target(server, token);
         let upsert = LoginUpsert::new(
             &self.repository,
@@ -1465,12 +1488,17 @@ impl KeyringUnlock {
             None,
             &target,
         );
-        self.connection.switch_to(target, move |outcome| {
+        let on_done = move |outcome: Result<(), AppFailure>| {
             if outcome.is_ok() {
                 upsert.run();
             }
             on_done(outcome);
-        });
+        };
+        if quiet {
+            self.connection.switch_to_quiet(target, on_done);
+        } else {
+            self.connection.switch_to(target, on_done);
+        }
     }
 }
 

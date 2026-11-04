@@ -16,11 +16,14 @@
 //!   handle, closing the stage through that controller). In the shell it is
 //!   wired but not the live back path: the shell's dismiss page outranks it
 //!   and Sessions' dismiss consumer closes the stage.
+//! - It also installs a [`SwitcherRenewer`] as the connection's [`SessionRenewer`]
+//!   ([`ServersSwitcherController::reconnect_live`]). Cycle-free: switcher ->
+//!   connection -> renewer are `Arc`s, the renewer holds the switcher as a [`Weak`].
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use frust::{provide_context, use_context};
@@ -28,7 +31,7 @@ use frust_glyph::SwitcherBack;
 
 use super::domain::entities::{LastSeen, SeenServer, SessionGlimpse};
 use super::presentation::controller::{ServersSwitcherController, install_landing};
-use crate::connection::expect_connection_controller;
+use crate::connection::{SessionRenewer, expect_connection_controller};
 use crate::features::connect::di::{
     expect_credential_service, expect_keyring, expect_saved_servers,
 };
@@ -77,6 +80,8 @@ pub fn set_banner_timings_for_tests(success_ms: u64, failure_ms: u64) {
 
 thread_local! {
     static SWITCHER_BACK: RefCell<Option<SwitcherBack>> = const { RefCell::new(None) };
+    /// What [`installed_session_renewer_for_tests`] answers.
+    static INSTALLED_RENEWER: RefCell<Option<Arc<dyn SessionRenewer>>> = const { RefCell::new(None) };
     static STAGE_WAS_OPEN: Cell<bool> = const { Cell::new(false) };
     static STAGE_CLOSED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
     static CLOCK_OVERRIDE: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -204,15 +209,19 @@ pub fn use_last_seen() -> Option<LastSeenHandle> {
 /// published first.
 pub fn provide_controller() -> Arc<ServersSwitcherController> {
     let last_seen = use_last_seen().unwrap_or_else(provide_last_seen);
+    let connection = expect_connection_controller();
     let controller = Arc::new(ServersSwitcherController::new(
         expect_saved_servers(),
         expect_credential_service(),
-        expect_connection_controller(),
+        Arc::clone(&connection),
         expect_pro_controller(),
         expect_keyring(),
         last_seen,
     ));
     provide_context(Arc::clone(&controller));
+    let renewer: Arc<dyn SessionRenewer> = Arc::new(SwitcherRenewer::new(&controller));
+    connection.set_session_renewer(Arc::clone(&renewer));
+    INSTALLED_RENEWER.with(|cell| *cell.borrow_mut() = Some(renewer));
     install_landing(Rc::new(|location| app_nav().go(location)));
     // One per app, created under the reactive runtime (`MuxrApp::init`). The
     // handle is `Rc`-based, so it cannot go through `provide_context` (which
@@ -221,6 +230,36 @@ pub fn provide_controller() -> Arc<ServersSwitcherController> {
     SWITCHER_BACK
         .with(|cell| *cell.borrow_mut() = Some(SwitcherBack::new(move || closing.close())));
     controller
+}
+
+/// The connection's [`SessionRenewer`]: renews the live endpoint through
+/// [`ServersSwitcherController::reconnect_live`], over a [`Weak`].
+pub struct SwitcherRenewer {
+    switcher: Weak<ServersSwitcherController>,
+}
+
+impl SwitcherRenewer {
+    pub fn new(switcher: &Arc<ServersSwitcherController>) -> Self {
+        Self {
+            switcher: Arc::downgrade(switcher),
+        }
+    }
+}
+
+impl SessionRenewer for SwitcherRenewer {
+    /// `false` for any endpoint but the live one, or a switcher gone.
+    fn renew(&self, endpoint: &str) -> bool {
+        let Some(switcher) = self.switcher.upgrade() else {
+            return false;
+        };
+        switcher.live_endpoint().as_deref() == Some(endpoint) && switcher.reconnect_live()
+    }
+}
+
+/// The renewer [`provide_controller`] last installed: a whole-app test's seam,
+/// since the mock backend's missing client keeps `on_session_expired_for` off it.
+pub fn installed_session_renewer_for_tests() -> Option<Arc<dyn SessionRenewer>> {
+    INSTALLED_RENEWER.with(|cell| cell.borrow().clone())
 }
 
 /// The app's one [`SwitcherBack`], passed to the stage on every build.
