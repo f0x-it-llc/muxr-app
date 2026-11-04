@@ -44,6 +44,7 @@ use muxr::features::servers::di::{
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
     ReconnectBanner, ServersSwitcherController, SwitchGate, peer_endpoints,
+    set_retry_backoff_for_tests,
 };
 use muxr::features::sessions::presentation::controllers::snapshots_built_for_tests;
 use muxr::routes::app_nav;
@@ -1168,6 +1169,7 @@ fn reset_reconnect_rig() {
     fail_next_mock_dials_for_tests(0);
     set_banner_timings_for_tests(1_500, 6_000);
     set_banner_connecting_delay_for_tests(BANNER_CONNECTING_DELAY_MS);
+    set_retry_backoff_for_tests(None);
 }
 
 /// Pump frames for `ms` of wall time, running `each` after every frame.
@@ -1410,7 +1412,8 @@ fn a_failed_background_dial_keeps_the_cached_page_and_marks_the_face_failed() {
     let _g = serial();
     let _ambient = setup();
     let mut h = cached_b();
-    set_banner_timings_for_tests(60, 600);
+    set_banner_timings_for_tests(60, 60);
+    set_retry_backoff_for_tests(Some(60_000));
     h.open_stage();
     fail_next_mock_dials_for_tests(1);
     app_toasts().clear();
@@ -1436,10 +1439,15 @@ fn a_failed_background_dial_keeps_the_cached_page_and_marks_the_face_failed() {
     assert_banner_text(&h, "Couldn't reach bravo.example");
     assert!(matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
 
-    // The failure banner clears on its own; a tap on the failed face retries.
-    h.pump_until(|_| banner().is_none());
+    // B stays pending and the banner stays past its own timeout; a select of
+    // the failed face cancels the pending reconnect and dials it itself.
+    assert_eq!(switcher().pending_reconnect().as_deref(), Some(B_ENDPOINT));
+    pump_for(&mut h, 200, || {
+        assert!(matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+    });
     switch_via_controller(&mut h, B_ENDPOINT);
     h.pump_until(|_| switcher().failures.get_untracked().is_empty());
+    assert_eq!(switcher().pending_reconnect(), None);
     reset_reconnect_rig();
 }
 
@@ -1657,16 +1665,29 @@ fn a_live_expiry_with_the_keyring_locked_falls_back_to_one_auth_toast() {
     reset_reconnect_rig();
 }
 
-#[test]
-fn a_failed_renewal_shows_the_failed_banner_never_toasts_and_never_retries() {
-    let _g = serial();
-    let _ambient = setup();
+/// [`listed_on_a`] (unlocked), then a renewal whose dial fails with a network failure: the
+/// `Failed` banner up and A pending. `backoff_ms` pins the retry timer. Also answers the dial
+/// generation from before the renewal. `pro` unlocks Pro first, so a switch can follow.
+fn failed_renewal_on_a(backoff_ms: u64, pro: bool) -> (Harness, u64) {
     let mut h = listed_on_a(true);
+    if pro {
+        set_entitlement(&mut h, Entitlement::Pro);
+    }
+    set_banner_timings_for_tests(60, 60);
+    set_retry_backoff_for_tests(Some(backoff_ms));
     let before = dial_generation();
     fail_next_mock_dials_for_tests(1);
-
     assert!(expire_live_session());
     h.pump_until(|_| matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+    assert_eq!(switcher().pending_reconnect().as_deref(), Some(A_ENDPOINT));
+    (h, before)
+}
+
+#[test]
+fn a_failed_renewal_keeps_a_pending_reconnect_that_the_backoff_redials() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, before) = failed_renewal_on_a(400, false);
 
     assert_eq!(
         banner(),
@@ -1682,17 +1703,98 @@ fn a_failed_renewal_shows_the_failed_banner_never_toasts_and_never_retries() {
     assert!(app_nav().on_sessions(), "still on Sessions");
     assert_banner_text(&h, "Couldn't reach mock.example");
 
-    // Nothing dials again on its own, and with nothing live a renewal is refused.
-    pump_for(&mut h, 300, || {});
-    assert_eq!(dial_generation(), before + 1, "one dial, no retry");
-    assert!(!expect_connection_controller().connected.get_untracked());
-    assert!(!switcher().reconnect_live(), "nothing live to renew");
-    assert_eq!(dial_generation(), before + 1);
+    // Kept past its own 60 ms timeout while pending; nothing redials before the backoff.
+    pump_for(&mut h, 200, || {
+        assert!(matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+    });
+    assert_eq!(dial_generation(), before + 1, "only the failed renewal");
+    let filed = use_last_seen()
+        .and_then(|seen| seen.snapshot().remove(A_ENDPOINT)?.page)
+        .expect("A's page was filed");
+
+    // The backoff redials A: `Connected` flashes over `Failed`, then clears; the page is live.
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(A_ENDPOINT));
+    assert_eq!(dial_generation(), before + 2, "one retry dial");
+    assert_eq!(banner(), Some(ReconnectBanner::Connected));
+    h.pump_until(|h| {
+        assert_page_shown(h, &[SESSION_NAME]);
+        banner().is_none()
+    });
+    assert_eq!(switcher().pending_reconnect(), None);
+    assert_eq!(face_kind(A_ENDPOINT), FaceKind::Live);
+    // The page went live again: it refreshed in place, filing a fresh list.
+    let last_seen = use_last_seen().expect("the app provides the last-seen handle");
+    h.pump_until(|_| {
+        last_seen
+            .snapshot()
+            .get(A_ENDPOINT)
+            .and_then(|seen| seen.page.clone())
+            .is_some_and(|page| !Arc::ptr_eq(&page, &filed))
+    });
     assert!(
         app_toasts().pending_untracked().is_empty(),
         "{:?}",
         app_toasts().pending_untracked()
     );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_retry_request_redials_the_pending_reconnect_at_once_one_dial_at_a_time() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _) = failed_renewal_on_a(60_000, false);
+    let before = dial_generation();
+    let held = hold_next_mock_dials_for_tests(1).remove(0);
+
+    // What the Sessions wake loop calls with nothing connected.
+    assert!(switcher().retry_pending());
+    assert!(!switcher().retry_pending(), "one dial in flight");
+    assert_eq!(dial_generation(), before + 1);
+    h.pump_until(|_| banner() == connecting_to(A_HOST));
+    held.release(true);
+    h.pump_until(|_| connected_endpoint().as_deref() == Some(A_ENDPOINT));
+    assert_eq!(banner(), Some(ReconnectBanner::Connected));
+    h.pump_until(|_| banner().is_none());
+    assert_eq!(switcher().pending_reconnect(), None);
+    assert!(!switcher().retry_pending(), "nothing pending any more");
+    assert_eq!(dial_generation(), before + 1);
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_user_switch_cancels_the_pending_reconnect() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _) = failed_renewal_on_a(300, true);
+
+    switch_via_controller(&mut h, C_ENDPOINT);
+    assert_eq!(switcher().pending_reconnect(), None);
+    assert_eq!(banner(), None, "the switch took the banner down");
+    let after = dial_generation();
+    pump_for(&mut h, 600, || {});
+    assert_eq!(connected_endpoint().as_deref(), Some(C_ENDPOINT));
+    assert_eq!(
+        dial_generation(),
+        after,
+        "the cancelled retry never dials A"
+    );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_keyring_locked_meanwhile_drops_the_pending_reconnect() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _) = failed_renewal_on_a(200, false);
+    let after = dial_generation();
+
+    expect_keyring().lock();
+    h.pump_until(|_| switcher().pending_reconnect().is_none());
+    assert_eq!(dial_generation(), after, "no token, no dial");
+    // Back to the plain failure: the banner clears after its own timeout.
+    h.pump_until(|_| banner().is_none());
+    assert!(!expect_connection_controller().connected.get_untracked());
     reset_reconnect_rig();
 }
 

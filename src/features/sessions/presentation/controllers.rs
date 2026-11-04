@@ -29,13 +29,27 @@ const NOT_PAUSED: usize = usize::MAX;
 
 pub const POLL_PERIOD_SECS: u32 = 3;
 
-/// Consecutive failed poll or wake refreshes (while connected) after which the
-/// screen asks for one background renewal of the live session.
+/// Consecutive `Network` failures of the poll and wake refreshes (both feed
+/// the streak; they run only while connected) after which the screen reports
+/// connection trouble; twice as many make it persistent.
 pub const RENEW_AFTER_FAILURES: u32 = 2;
 
 /// Whether `failure` is the connection's to show (the banner), not a toast's.
 fn is_connection_class(failure: &AppFailure) -> bool {
     matches!(failure, AppFailure::Network(_) | AppFailure::Auth(_))
+}
+
+/// What the failure streak says about the live connection, once per edge
+/// ([`SessionsController::take_trouble`]). `Auth` never counts: it reaches the
+/// connection's session renewal from the repositories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionTrouble {
+    /// The streak reached [`RENEW_AFTER_FAILURES`].
+    Started,
+    /// The streak reached twice [`RENEW_AFTER_FAILURES`].
+    Persistent,
+    /// A success ended a streak that had reported trouble.
+    Recovered,
 }
 
 /// One session as a non-live switcher face remembers it.
@@ -111,11 +125,10 @@ pub struct SessionsController {
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
     generation: AtomicU64,
-    /// Consecutive failed poll or wake refreshes; reset by a success.
+    /// Consecutive `Network` failures of the poll and wake refreshes; reset by a success.
     failure_streak: AtomicU32,
-    /// Set once per failure streak when it reaches [`RENEW_AFTER_FAILURES`];
-    /// taken by [`take_renewal`](Self::take_renewal).
-    renewal_due: AtomicBool,
+    /// The streak's latest unreported edge, taken by [`take_trouble`](Self::take_trouble).
+    trouble: Mutex<Option<ConnectionTrouble>>,
 }
 
 impl SessionsController {
@@ -143,7 +156,7 @@ impl SessionsController {
             poll_in_flight: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             failure_streak: AtomicU32::new(0),
-            renewal_due: AtomicBool::new(false),
+            trouble: Mutex::new(None),
         }
     }
 
@@ -164,9 +177,9 @@ impl SessionsController {
         self.refresh_with(true).await;
     }
 
-    /// Runs the list. `Some(failed)` once its reply is current; `None` when a
+    /// Runs the list. `Some(outcome)` once its reply is current; `None` when a
     /// newer refresh superseded it (neither a success nor a failure to count).
-    async fn refresh_with(&self, background: bool) -> Option<bool> {
+    async fn refresh_with(&self, background: bool) -> Option<Result<(), AppFailure>> {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         // Named before the await (see `glimpse_source`).
         let source = self.glimpse_source();
@@ -191,16 +204,19 @@ impl SessionsController {
         {
             self.core.failures().emit(failure);
         }
-        let failed = result.is_err();
-        if let Ok(sessions) = result {
-            self.forget_vanished_selection(&sessions);
-            self.publish_glimpse(source, &sessions);
-            self.sessions.set(sessions);
-            self.loaded.set(true);
-            self.retarget_agents();
-        }
+        let outcome = match result {
+            Ok(sessions) => {
+                self.forget_vanished_selection(&sessions);
+                self.publish_glimpse(source, &sessions);
+                self.sessions.set(sessions);
+                self.loaded.set(true);
+                self.retarget_agents();
+                Ok(())
+            }
+            Err(failure) => Err(failure),
+        };
         self.first_load_settled.set(true);
-        Some(failed)
+        Some(outcome)
     }
 
     /// Remember `sessions` as what the connected server last showed, for the
@@ -304,28 +320,40 @@ impl SessionsController {
 
     fn reset_streak(&self) {
         self.failure_streak.store(0, Ordering::SeqCst);
-        self.renewal_due.store(false, Ordering::SeqCst);
+        *self.trouble_slot() = None;
     }
 
-    /// Folds one background refresh into the failure streak: the failure that
-    /// makes it [`RENEW_AFTER_FAILURES`] long arms one renewal (and only that
-    /// one: later failures of the same streak arm nothing); a success resets it.
-    fn count_outcome(&self, outcome: Option<bool>) {
-        match outcome {
-            Some(true) => {
-                if self.failure_streak.fetch_add(1, Ordering::SeqCst) + 1 == RENEW_AFTER_FAILURES {
-                    self.renewal_due.store(true, Ordering::SeqCst);
+    fn trouble_slot(&self) -> std::sync::MutexGuard<'_, Option<ConnectionTrouble>> {
+        self.trouble.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Folds one poll or wake refresh into the failure streak. Only a `Network`
+    /// failure counts: the one making the streak [`RENEW_AFTER_FAILURES`] long
+    /// raises [`ConnectionTrouble::Started`], twice that `Persistent`; a
+    /// success resets it, raising `Recovered` if trouble was raised. Any other
+    /// failure leaves the streak as it is.
+    fn count_outcome(&self, outcome: Option<Result<(), AppFailure>>) {
+        let edge = match outcome {
+            Some(Err(AppFailure::Network(_))) => {
+                match self.failure_streak.fetch_add(1, Ordering::SeqCst) + 1 {
+                    n if n == RENEW_AFTER_FAILURES => Some(ConnectionTrouble::Started),
+                    n if n == 2 * RENEW_AFTER_FAILURES => Some(ConnectionTrouble::Persistent),
+                    _ => None,
                 }
             }
-            Some(false) => self.reset_streak(),
-            None => {}
+            Some(Ok(())) => (self.failure_streak.swap(0, Ordering::SeqCst) >= RENEW_AFTER_FAILURES)
+                .then_some(ConnectionTrouble::Recovered),
+            Some(Err(_)) | None => None,
+        };
+        if edge.is_some() {
+            *self.trouble_slot() = edge;
         }
     }
 
-    /// Whether a renewal of the live session is due, clearing the flag: the
-    /// caller runs it (the servers controller's `reconnect_live`).
-    pub fn take_renewal(&self) -> bool {
-        self.renewal_due.swap(false, Ordering::SeqCst)
+    /// The streak's latest edge not yet reported, clearing it: the page shows
+    /// it through the servers controller's banner.
+    pub fn take_trouble(&self) -> Option<ConnectionTrouble> {
+        self.trouble_slot().take()
     }
 
     /// Whether a connection is up behind this page. A controller built with no
