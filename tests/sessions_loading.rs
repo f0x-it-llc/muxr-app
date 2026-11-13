@@ -1,18 +1,6 @@
-//! Clock-driven proof of the sessions loading rain: `ui::splash::loading`'s
-//! orchestrator mounted alone, then the real `/sessions` band under it. Every
-//! assertion is a function of real frame time, so each test drives rebuild →
-//! layout → paint itself, as `tests/sequence.rs` does.
-//!
-//! The release edge is the observed settle, floored at [`MIN_DENSE_MS`]. The
-//! mounted half settles the mock repository's first load with the frame clock
-//! **pinned at zero** ([`Band::pinned`]) — a `FrameTime` delta is the only
-//! thing that moves the overlay's clock — so the rain holds its dense beat
-//! over the whole wait, and the advancing run that follows starts from an
-//! untouched clock with the release landing exactly on that floor.
-//!
-//! A painted `GlyphRun` carries glyph ids, not a string, so [`glyph_ids`]
-//! shapes the expected text through the same [`TextContext`] the widgets lay
-//! out against and [`occurrences`] counts copies of it.
+//! Clock-driven tests for the sessions loading rain: the orchestrator mounted alone, then the
+//! real `/sessions` band under it. Each test drives rebuild, layout and paint itself.
+//! The release edge is the observed settle, floored at `MIN_DENSE_MS`.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -46,28 +34,18 @@ use support::{
     char_key, node_centers_by_value, node_values, pointer, pump_frames, serial, setup, surface, tap,
 };
 
-/// The design reference's phone screen, as `tests/sequence.rs` drives it.
 const SURFACE: Size = Size::new(340.0, 650.0);
 const FRAME_NS: u64 = 16_666_667;
 /// One 120Hz frame — the cadence the rain's `frame_factor` exists for.
 const FRAME_NS_120: u64 = 8_333_333;
 
-/// Floor on the dense beat before a release takes effect
-/// (`spec::LOADING_MIN_DENSE_MS`; every constant below is transcribed because
-/// that module is `pub(crate)`).
 const MIN_DENSE_MS: f64 = 600.0;
 /// Hold ceiling, releasing a load that never settles (`spec::LOADING_MAX_HOLD_MS`).
 const MAX_HOLD_MS: f64 = 8_000.0;
-/// Release to first landing (`spec::LOADING_ASSEMBLY_OFFSET_MS`).
 const ASSEMBLY_OFFSET_MS: f64 = 100.0;
-/// A piece's entrance duration (`spec::PIECE_IN_MS`).
 const PIECE_IN_MS: f64 = 500.0;
-/// Per-piece stagger in source order (`spec::PIECE_DELAYS_MS`).
 const PIECE_DELAYS_MS: [f64; 8] = [0.0, 130.0, 260.0, 390.0, 480.0, 580.0, 720.0, 860.0];
-/// Release to the end of the whole sequence (`loading::sequence_end_ms`).
 const SEQUENCE_END_MS: f64 = 1_800.0;
-/// When the standalone rig's last piece has landed and the overlay stops
-/// swallowing input (`loading::assembly_landed_ms` over [`PIECES`] pieces).
 const LANDED_MS: f64 =
     MIN_DENSE_MS + ASSEMBLY_OFFSET_MS + PIECE_DELAYS_MS[PIECES - 1] + PIECE_IN_MS;
 
@@ -75,11 +53,8 @@ const LANDED_MS: f64 =
 /// paints one run per glyph, where the band's own text is a few dozen.
 const DENSE_RUNS: usize = 100;
 const PIECES: usize = 3;
-/// Fixes the standalone rain's field, so a run replays exactly.
 const SEED: u64 = 0x6C6F_6164;
 
-/// A recording paint target: the glyph-id stream, its run count, and the boxes
-/// it filled and clipped to.
 #[derive(Default)]
 struct Recorder {
     glyph_ids: Vec<u32>,
@@ -90,7 +65,6 @@ struct Recorder {
     /// Every `fill_rect`, paint order — the overlay's tone is the only fill the
     /// standalone rig paints at all.
     fills: Vec<(Point, Size)>,
-    /// Every `push_clip`, paint order.
     clips: Vec<(Point, Size)>,
 }
 
@@ -130,7 +104,6 @@ fn tone() -> Color {
     frust_glyph::baseline().scheme().surface
 }
 
-/// A wheel notch at `at` — hit-tested by position, exactly like a pointer.
 fn wheel(at: Point) -> InputEvent {
     InputEvent::Scroll {
         position: at,
@@ -156,8 +129,6 @@ fn frame_at(ms: f64) -> usize {
     frame_at_cadence(ms, FRAME_NS)
 }
 
-/// The glyph ids `text` shapes to at `style` — the fingerprint a painted run of
-/// the same string leaves in [`Recorder::glyph_ids`].
 fn glyph_ids(text: &str, style: &TextStyle) -> Vec<u32> {
     let mut ctx = TextContext::new();
     ctx.layout(text, style, None)
@@ -188,8 +159,6 @@ fn first_frame(
         .unwrap_or_else(|| panic!("{what} never happened across {} frames", frames.len()))
 }
 
-/// When the completion cue fired: the last frame that asked for another one.
-/// The overlay requests one every paint until it fires, and one on that frame.
 fn fired_at(frames: &[(Recorder, bool)], cadence_ns: u64) -> f64 {
     let quiet = first_frame(frames, "the sequence settling", |(_, needs_frame)| {
         !needs_frame
@@ -197,7 +166,6 @@ fn fired_at(frames: &[(Recorder, bool)], cadence_ns: u64) -> f64 {
     frame_ms(quiet - 1, cadence_ns)
 }
 
-/// Assert `fired` landed inside the frame after its `expected` mark.
 fn lands_on(what: &str, fired: f64, expected: f64, cadence_ns: u64) {
     let frame = cadence_ms(cadence_ns);
     assert!(
@@ -206,12 +174,6 @@ fn lands_on(what: &str, fired: f64, expected: f64, cadence_ns: u64) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Part A — the orchestrator mounted alone
-// ---------------------------------------------------------------------------
-
-/// The `index`th piece's text — a plain leaf, so what the assembly proves is
-/// the stagger rather than any one screen's widgets.
 fn piece_name(index: usize) -> String {
     format!("card-{index}")
 }
@@ -222,9 +184,6 @@ fn pieces_for(count: usize) -> Vec<AnyView<AppState>> {
 
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
-/// The orchestrator alone on its own root, driven a frame at a time through the
-/// real shell loop — rebuild, lay out shaping real text, paint. Nothing else is
-/// mounted, so an event's `handled` is the overlay's own answer.
 struct Rig {
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
@@ -240,9 +199,6 @@ struct Rig {
 }
 
 impl Rig {
-    /// `count` is how many pieces a rebuild mounts, asked with the release flag
-    /// it is rebuilding under — a band settling inside the tail mounts more of
-    /// them than the one that was there when the ceiling fired.
     fn mount(
         cadence_ns: u64,
         reduce_motion: bool,
@@ -297,20 +253,15 @@ impl Rig {
         (0..frames).map(|_| self.step()).collect()
     }
 
-    /// Whether the overlay consumed `event`, dispatched between two frames.
     fn swallows(&mut self, event: &InputEvent) -> bool {
         self.root.event(&mut self.state, event).handled
     }
 }
 
-/// The glyph ids the `index`th piece paints — a plain `text` shapes at
-/// `TextStyle::default()`, and the theme's recolor doesn't shape.
 fn piece_ids(index: usize) -> Vec<u32> {
     glyph_ids(&piece_name(index), &TextStyle::default())
 }
 
-/// Mount the loading rain alone over [`PIECES`] pieces at `cadence_ns`, so
-/// every draw recorded belongs to it, and drive `frames` frames of it.
 fn mount_loading_at(
     cadence_ns: u64,
     reduce_motion: bool,
@@ -322,21 +273,16 @@ fn mount_loading_at(
     (recorded, rig.done)
 }
 
-/// The overlay's own answer to `event`, asked one frame past `ms` into a run
-/// released at the floor.
 fn swallowed_at(ms: f64, reduce_motion: bool, event: &InputEvent) -> bool {
     let mut rig = Rig::mount(FRAME_NS, reduce_motion, Some(0), |_| PIECES);
     rig.drive(frame_at(ms) + 1);
     rig.swallows(event)
 }
 
-/// The middle of the surface — over a piece, wherever the assembly put it.
 fn mid_surface() -> Point {
     Point::new(SURFACE.width / 2.0, SURFACE.height / 2.0)
 }
 
-/// Release mid-hold at `cadence_ns`: when the cue fired, and the release
-/// instant the widget observed.
 fn observed_release(cadence_ns: u64) -> (f64, f64) {
     const RELEASE_MS: f64 = 2_500.0;
     let release_frame = frame_at_cadence(RELEASE_MS, cadence_ns);
@@ -361,8 +307,6 @@ fn the_held_rain_stays_dense_and_assembles_nothing_while_the_band_loads() {
     let (frames, done) = mount_loading_at(FRAME_NS, false, frame_at(held) + 2, None);
     let card = piece_ids(0);
 
-    // The clock holds at the dense boundary, so a wait outlasting the whole
-    // cold-start timeline still paints the same full field.
     for at in [200.0, 3_000.0, held] {
         let (scene, needs_frame) = &frames[frame_at(at)];
         assert!(
@@ -445,8 +389,6 @@ fn a_settling_band_releases_the_rain_and_staggers_its_pieces_in() {
         "and then drops the first piece in"
     );
 
-    // Each piece self-clocks from the assembly's first paint, so the stagger is
-    // the gap between two pieces' first frames.
     let first = first_frame(&frames, "the first piece", |(scene, _)| {
         occurrences(&scene.glyph_ids, &card) > 0
     });
@@ -582,8 +524,6 @@ fn the_overlay_swallows_the_pointer_until_it_lands_and_scroll_for_its_whole_life
          it are two different pictures, whatever their content"
     );
 
-    // Right up to the unmount, too — the landing lifts the pointer's block
-    // alone.
     let last = MIN_DENSE_MS + SEQUENCE_END_MS - 100.0;
     assert!(
         swallowed_at(last, false, &wheel(mid_surface())),
@@ -651,9 +591,6 @@ fn a_settle_inside_the_offset_window_measures_the_landing_from_the_gate() {
     let _g = serial();
     let _ambient = setup();
 
-    // The ceiling has fired, but the assembly it opened is still behind the
-    // offset: the pieces this settle mounts cannot paint before the gate, so
-    // that is where their landing is measured from.
     let release_frame = frame_at(MAX_HOLD_MS + 20.0);
     let settled = frame_ms(release_frame, FRAME_NS);
     let gate = MAX_HOLD_MS + ASSEMBLY_OFFSET_MS;
@@ -688,26 +625,13 @@ fn a_settle_inside_the_offset_window_measures_the_landing_from_the_gate() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Part B — the real /sessions band under the overlay
-// ---------------------------------------------------------------------------
-
-/// The seeded session names the mock repository draws (`tests/sessions.rs`).
 const SEEDED: [&str; 3] = ["dev", "jumping-peach", "herdr"];
-/// Runs of each [`SEEDED`] name **one** rendering of the band paints: the third
-/// rig is named after the backend it runs, so its card prints that string twice
-/// — as the card's own title, and again in the backend badge beside it.
 const BAND_COPIES: [usize; 3] = [1, 1, 2];
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
-/// The band's pieces: a card per seeded session, closed by the trailing row.
 const BAND_PIECES: usize = SEEDED.len() + 1;
-/// When the mounted band's last card has landed (see [`LANDED_MS`]).
 const BAND_LANDED_MS: f64 =
     MIN_DENSE_MS + ASSEMBLY_OFFSET_MS + PIECE_DELAYS_MS[BAND_PIECES - 1] + PIECE_IN_MS;
-/// [`seed_extra_session`]'s name — distinct from every [`SEEDED`] name and
-/// backend/status text, so [`occurrences`] counts it cleanly.
 const FOURTH_NAME: &str = "late-arrival";
-/// The pane label [`churn_session`] gives the seeded "dev" card (9 panes -> 10).
 const CHURNED_PANES: &str = "\u{25a3} 10 panes";
 
 /// The glyph ids a card's name paints — `session_card` inks the theme's
@@ -716,7 +640,6 @@ fn name_ids(name: &str) -> Vec<u32> {
     glyph_ids(name, &frust_glyph::baseline().type_scale.label_large)
 }
 
-/// A mock connect target, so the route guard passes on a card tap.
 fn mock_target() -> ConnectTarget {
     ConnectTarget {
         host: "mock.example".to_string(),
@@ -754,9 +677,6 @@ fn speed_up_the_poll() {
     }
 }
 
-/// Adds `name` straight to the shared mock repository — never through the
-/// mounted screen's own controller, so the overlay's frozen snapshot (taken
-/// at settle) cannot see it yet.
 fn seed_extra_session(name: &str) {
     let repository = expect_sessions_repository();
     let done = Rc::new(Cell::new(false));
@@ -781,30 +701,20 @@ fn seed_extra_session(name: &str) {
     }
 }
 
-/// Churns the session called `name` straight in the shared mock repository,
-/// like [`seed_extra_session`] and for the same reason. The id ladder is
-/// untouched: the live band's list differs from the frozen one in a field the
-/// overlay is not keyed on, which is what telemetry churn looks like here.
 fn churn_session(name: &str) {
     expect_mock_sessions_repository().churn(name);
 }
 
-/// The `/sessions` screen mounted the way `tests/sessions.rs`' harness mounts
-/// it — bottom layer of a `Stack`, an otherwise-empty navigator over it
-/// carrying the real router — but driven off an advancing frame clock.
 struct Band {
     nav: NavigatorController<AppState>,
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
     state: AppState,
     tcx: TextContext,
-    /// The next advancing frame's index; also this band's own clock.
     frame: usize,
 }
 
 impl Band {
-    /// Mount with the loading rain on (`support::setup` opts every other suite
-    /// out of it) and the mock connection dialled.
     fn mount() -> Band {
         Band::mount_at(false)
     }
@@ -869,7 +779,6 @@ impl Band {
         scene
     }
 
-    /// Advance to `ms` on this band's clock, returning that frame's recording.
     fn drive_to(&mut self, ms: f64) -> Recorder {
         let until = frame_at(ms);
         let mut scene = self.step();
@@ -899,16 +808,11 @@ impl Band {
         }
     }
 
-    /// Whether the live band is rendering every seeded name. The overlay
-    /// forwards no semantics, so this reads the band underneath alone.
     fn showing_seeded_names(&self) -> bool {
         let values = node_values(&self.root);
         SEEDED.iter().all(|name| values.iter().any(|v| v == name))
     }
 
-    /// Pumps toward real time — rebuild and layout only, never paint, so
-    /// this band's own clock holds still — until the live band prints
-    /// `name`: how a poll's real `sleep` is given the wall time it needs.
     fn wait_for_poll(&mut self, name: &str) {
         let runtime = ReactiveRuntime::get().expect("ReactiveRuntime::init must have run");
         let deadline = Instant::now() + PUMP_DEADLINE;

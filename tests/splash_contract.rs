@@ -1,13 +1,10 @@
-//! Tripwire for the transcribe-once rule: every constant `ui::splash::spec` quotes
-//! from `docs/splash.html` is re-read out of that file here and compared.
+//! Tripwire for the transcribe-once rule: every constant `ui::splash::spec` quotes from
+//! `docs/splash.html` is re-read from that file and compared.
 
 use muxr::ui::splash::contract;
 
 const HTML: &str = include_str!("../docs/splash.html");
 
-/// The number at the front of `text`, parsed whole — digits and at most one
-/// decimal point, so a fractional literal is never read as its integer part.
-/// `what` names it in the failure.
 fn leading_number(text: &str, what: &str) -> f64 {
     let mut point_seen = false;
     let literal: String = text
@@ -25,7 +22,6 @@ fn leading_number(text: &str, what: &str) -> f64 {
         .unwrap_or_else(|e| panic!("`{literal}` after `{what}` is not an f64: {e}"))
 }
 
-/// The number following `needle`'s first occurrence in `hay`.
 fn number_after(hay: &str, needle: &str) -> f64 {
     let at = hay
         .find(needle)
@@ -33,7 +29,6 @@ fn number_after(hay: &str, needle: &str) -> f64 {
     leading_number(&hay[at + needle.len()..], needle)
 }
 
-/// Asserts the number the mock writes after `needle` still equals `transcribed`.
 fn same(needle: &str, transcribed: f64) {
     assert_eq!(
         number_after(HTML, needle),
