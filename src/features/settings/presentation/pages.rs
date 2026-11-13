@@ -1,38 +1,6 @@
-//! The `/settings` route: muxr's server-settings screen — six groups
-//! (`connection`, `auth tokens`, `saved servers`, `muxr pro`, `terminal
-//! appearance`, `session poll`) plus Disconnect, following `docs/ARCHITECTURE.md`'s
-//! canonical screen shape (a per-screen [`Component`] hosting
-//! [`SettingsController`] via `use_controller`, `build` a pure arrangement
-//! over [`widgets`]).
-//!
-//! **Component boundary.** This screen's own gestures take `&mut
-//! SettingsState`; a dialog/picker sheet it pushes is a page on the *app's*
-//! root overlay host instead, so its callback sees `&mut AppState`, never
-//! `SettingsState`. [`Actions`] is the clonable bundle that lets one method
-//! body serve both sides of that boundary — every mutation and every opened
-//! overlay lives on it.
-//!
-//! **Minting a token**: [`Actions::open_create_token_dialog`] is gated by
-//! [`Actions::tokens_blocked`] (`ConnectionController::is_read_only`'s
-//! primary defence); a landed mint opens [`open_secret_reveal`], shown
-//! exactly once per [`SettingsController::pending_token_secret`]'s contract.
-//!
-//! **Revoking**: a confirmed revoke starts the row's scramble-then-collapse
-//! ([`super::scramble`]) and fires the RPC on the same tap
-//! ([`Actions::revoke`]); [`widgets::token_rows`] renders a group whose
-//! animating rows may no longer be in `tokens` at all.
-//!
-//! **Lock & disconnect** locks the keyring and clears [`ConnectionController`]
-//! (`lock_and_disconnect`) then `go`es to `/` — both halves deliberate, since
-//! the router's session guard only fires at navigation time, never
-//! reactively.
-//!
-//! **Saved servers**: a row other than the connected one switches to it —
-//! the free-tier verdict first (a block raises the paywall), then
-//! [`SettingsController::switch_server`], then a pop back to Sessions, which
-//! restarts on the new connection. A row with no stored credential opens the
-//! add-server page prefilled instead, as does the `+ add server` row blank.
-
+//! The `/settings` route. Its own gestures take `&mut SettingsState`; a dialog or sheet it
+//! pushes is a page on the app's overlay host and sees `&mut AppState`, so [`Actions`] is a
+//! clonable bundle serving both sides.
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -72,88 +40,49 @@ use super::widgets::{
     self, DISCONNECT_COPY, DISCONNECT_LABEL, FontPicker, FontRow, Picker, PickerKind, RowAction,
 };
 
-/// Where Disconnect lands — the same location `crate::routes`' guard bounces
-/// an unauthenticated push to.
 const CONNECT_ROUTE: &str = "/";
 
-/// What tapping a mutating token control says while the connected session is
-/// itself read-only.
 const READ_ONLY_TOKEN_TOAST: &str =
     "Read-only session \u{2014} reconnect with a read-write token to change this";
 
-/// What tapping `restore` says when a purchase or another restore already
-/// holds the store.
 const STORE_BUSY_TOAST: &str = "A store operation is already running";
 
-/// The font sheet's scroll-region reserve: the window's own height minus this
-/// estimate of everything outside the scrollable band. Generous and
-/// community-approximate rather than imported from `ui/sheet.rs`'s private
-/// geometry (`features::terminal`'s own "panes & tabs" sheet makes the same
-/// trade) — the cost of overestimating is a slightly shorter scroll band, not
-/// a broken one.
+/// An estimate of everything outside the scroll band, not imported from `ui::sheet`'s private
+/// geometry; overestimating only shortens the band.
 const SHEET_SCROLL_RESERVE_PX: f64 = 220.0;
 const SHEET_SCROLL_FLOOR_PX: f64 = 240.0;
-/// A generous per-row estimate for sizing an option list that fits: the band
-/// never exceeds the rows' own height, so short lists do not gain blank space.
-/// 48 px is the Glyph list-row estimate. The band is a one-time snapshot of
-/// `WindowMetrics` taken when the sheet opens (the sheet host offers no
-/// reactive metrics), so a resize while it is open does not re-size it.
+/// The Glyph list-row estimate. The band is a snapshot of `WindowMetrics` when the sheet opens,
+/// so a resize while it is open does not re-size it.
 const PICK_ROW_ESTIMATE_PX: f64 = 48.0;
 
-/// The scroll band's height for a sheet holding `rows_height` of rows: the
-/// window's height less [`SHEET_SCROLL_RESERVE_PX`], never below
-/// [`SHEET_SCROLL_FLOOR_PX`], and never taller than the rows themselves.
 fn sheet_band_height(metrics: &WindowMetrics, rows_height: f64) -> f64 {
     (metrics.size.height - SHEET_SCROLL_RESERVE_PX)
         .max(SHEET_SCROLL_FLOOR_PX)
         .min(rows_height)
 }
 
-/// The groups column's max width on a phone-landscape window
-/// (`Responsive::wide_clamp` without Tablet) — the flat group list centres
-/// rather than stretching edge to edge.
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
-/// The Settings screen's route entry point.
 pub fn settings_page(overlays: NavigatorController<AppState>) -> impl View<AppState> {
     component(SettingsScreen { overlays })
 }
 
-/// The Settings screen `Component`. Stateless configuration — everything
-/// mutable lives in [`SettingsState`] and the controller it hosts.
 pub struct SettingsScreen {
     overlays: NavigatorController<AppState>,
 }
 
-/// The Settings screen's retained state: the action bundle, and nothing else.
 pub struct SettingsState {
     pub actions: Actions,
 }
 
-/// Every overlay this screen opens and every mutation it performs, plus the
-/// handles they need. Cloneable: a row's gesture reaches these through `&mut
-/// SettingsState`, while a picker row or dialog action — a page on the app's
-/// navigator, seeing only `&mut AppState` — captures a clone and calls the
-/// very same method.
 #[derive(Clone)]
 pub struct Actions {
-    /// The root overlay host's navigator — every dialog/sheet this screen
-    /// pushes goes through it, landing above the shell's floating bar.
     pub overlays: NavigatorController<AppState>,
-    /// The app's one path-pushing handle — how Disconnect reaches `/`.
     pub app_nav: Nav,
-    /// The hosted view model (created in `init`, disposed on unmount).
     pub controller: Arc<SettingsController>,
-    /// The app-scoped connection handle: the `connection` group reads it,
-    /// and Lock & disconnect clears it.
     pub connection: Arc<ConnectionController>,
-    /// `connect`'s app-scoped keyring, which Lock & disconnect locks.
     pub keyring: KeyringHandle,
-    /// The app-scoped entitlement handle: the `muxr pro` group reads its
-    /// `entitlement`, and both of that group's actions run through it.
     pub pro: Arc<ProController>,
-    /// The revoke animations in flight — screen-scoped presentation state,
-    /// not the controller's (see [`RevokeAnimations`]).
     pub(super) scrambles: RevokeAnimations,
 }
 
@@ -170,10 +99,6 @@ impl Component for SettingsScreen {
                 SettingsController::new(
                     expect_auth_tokens_repository(),
                     expect_preferences_repository(),
-                    // `connect`'s two stores and its keyring — the
-                    // cross-feature reach the terminal screen already makes
-                    // (see `SettingsController`'s module docs for why the
-                    // credential rows live here).
                     expect_saved_servers(),
                     expect_credential_service(),
                     keyring,
@@ -189,9 +114,7 @@ impl Component for SettingsScreen {
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
-        // Refresh the entitlement on every Settings mount, beside the
-        // screen's own first load — two paywalls (this row and `connect`'s
-        // gate) must not be able to disagree with a stale cached answer.
+        // Refreshed on every mount, so this row and `connect`'s gate never disagree.
         let pro = expect_pro_controller();
         let pro_refresh = Arc::clone(&pro);
         spawn_local(async move { pro_refresh.refresh().await });
@@ -221,10 +144,6 @@ impl Component for SettingsScreen {
         let theme = active_theme();
         let colors = Palette::from_theme(&theme);
 
-        // Responsive width-clamp pass: read metrics once, branch on one page
-        // constant, never touch layout again. `None` (no shell has
-        // published metrics yet, or a bare test harness) takes the same
-        // branch as a genuinely narrow window.
         let responsive = Responsive::of(use_context::<WindowMetrics>());
         let restoring = state.actions.controller.restoring.get();
 
@@ -234,10 +153,7 @@ impl Component for SettingsScreen {
             widgets::connection_rows(info.as_ref(), &colors),
         ));
 
-        // The revoke timelines in flight, and what each renders this frame.
-        // Tracked: starting one — and its RPC answering — is what wakes this
-        // rebuild; every frame in between comes from the ticker the row
-        // mounts.
+        // Tracked: a start or an RPC answer wakes this rebuild; the row's ticker drives the frames.
         let reduce_motion = theme.motion.reduce_motion;
         let scrambles = state.actions.scrambles;
         let timelines = scrambles.live();
@@ -247,8 +163,7 @@ impl Component for SettingsScreen {
             .filter(|(entry, pose)| pose.running || !entry.answered)
             .collect();
         if showing.len() != timelines.len() {
-            // Something finished: drop it off the build that noticed rather
-            // than out of the middle of it (`RevokeAnimations::sweep`).
+            // Swept off this build rather than from inside it.
             spawn_local(async move { scrambles.sweep(reduce_motion) });
         }
 
@@ -296,9 +211,7 @@ impl Component for SettingsScreen {
         }
         body.push(any(widgets::disconnect_button()));
 
-        // The *shell's* bar consumes the top window inset on this screen's
-        // behalf, so the body's safe area disables its top edge to avoid
-        // double-padding it.
+        // The shell's bar consumes the top inset, so the body's safe area skips its top edge.
         let scroller = safe_area(scroll_view(Padding(
             EdgeInsets {
                 left: 0.0,
@@ -318,26 +231,12 @@ impl Component for SettingsScreen {
         } else {
             Either::Right(scroller)
         };
-        // The shell scaffold's app-bar slot already reserves the bar's own
-        // band above this screen's body — no clearance to add here (a
-        // one-time double-inset bug: the scaffold owns the band, this page
-        // used to as well).
         widgets::page_tone(Either::Right(scroller), &colors)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
-
 impl Actions {
-    /// Open `kind`'s picker sheet. The body closure re-runs on every
-    /// navigator rebuild, so it re-resolves the picker each time and the
-    /// check mark tracks the stored value rather than a snapshot taken when
-    /// the sheet opened. The font family has no list here — it has its own
-    /// sheet ([`open_font_picker`](Self::open_font_picker)), since its
-    /// choices are the faces this device has installed plus a downloadable
-    /// catalog, not a domain-declared list.
+    /// The body re-runs on every navigator rebuild, so the check mark tracks the stored value.
     fn open_picker(&self, kind: PickerKind) {
         if kind == PickerKind::FontFamily {
             self.open_font_picker();
@@ -351,18 +250,14 @@ impl Actions {
             let picking = actions.clone();
             let sheet = sheet.clone();
             widgets::picker_sheet(&picker, &colors, move |_app: &mut AppState, index| {
-                // Close first, then persist — a sheet pop only *lands* at
-                // the next rebuild, so a second row tap inside that one
-                // frame would otherwise pop `/settings` out from under the
-                // picker (`crate::ui::sheet`'s "One sheet, one dismissal").
+                // Close first: a sheet pop lands at the next rebuild, so a second tap inside
+                // that frame would pop `/settings` out from under the picker.
                 sheet.close();
                 picking.pick(kind, index);
             })
         });
     }
 
-    /// Resolve `kind` against the controller's current values — the option
-    /// list the domain declares, and which of them is stored.
     fn picker(&self, kind: PickerKind) -> Picker {
         let appearance = self.controller.appearance_untracked();
         let poll = self.controller.poll_untracked();
@@ -407,15 +302,11 @@ impl Actions {
         }
     }
 
-    /// Persist option `index` of `kind`'s list. An index the domain's own
-    /// list no longer holds is dropped rather than clamped — it can only
-    /// come from a sheet built against a different list, and guessing would
-    /// write a value the user never chose.
+    /// An index outside the current list is dropped, never clamped, since a guess is unchosen.
     fn pick(&self, kind: PickerKind, index: usize) {
         let controller = Arc::clone(&self.controller);
         match kind {
-            // Unreachable: the font family persists through
-            // `pick_font_family` rather than by option index.
+            // Unreachable: the font family persists through `pick_font_family`.
             PickerKind::FontFamily => {}
             PickerKind::FontSize => {
                 let Some(px) = AppearancePrefs::FONT_SIZES_PX.get(index) else {
@@ -450,10 +341,7 @@ impl Actions {
         }
     }
 
-    /// Open the font-family sheet: the installed faces, then the
-    /// downloadable catalog. The catalog is fetched **here**, when the sheet
-    /// opens — never at app startup, which has no use for one (`load` is
-    /// single-flight and a no-op once a catalog has landed).
+    /// The catalog loads here, never at startup; `load` is single-flight.
     fn open_font_picker(&self) {
         let catalog = crate::fonts::catalog::font_catalog();
         spawn_local(async move { catalog.load().await });
@@ -473,17 +361,12 @@ impl Actions {
                     sheet.close();
                     selecting.pick_font_family(family);
                 },
-                // A download leaves the sheet up: it makes the row
-                // selectable, it does not select it.
                 move |_app: &mut AppState, family: String| downloading.download_font(&family),
             )
         });
     }
 
-    /// Assemble the font sheet's two sections from the installed faces, the
-    /// catalog's signals and the stored preference. Every read here is
-    /// **tracked** — this runs inside the sheet's body builder, so a catalog
-    /// landing or a download flipping state is what re-renders the rows.
+    /// Every read is tracked: a catalog landing or a download state change re-renders the rows.
     fn font_picker(&self) -> FontPicker {
         let catalog = crate::fonts::catalog::font_catalog();
         let status = catalog.status();
@@ -495,8 +378,7 @@ impl Actions {
             .into_iter()
             .map(|family| {
                 let display = crate::fonts::display_name(&family);
-                // Where the face came from, not what it is called: a
-                // downloaded family whose display name already matches its
+                // Provenance, not name: a downloaded face whose display name matches its
                 // family would otherwise read as "built-in".
                 let meta = if crate::fonts::store::is_downloaded(&family) {
                     widgets::FONT_META_DOWNLOADED
@@ -537,7 +419,6 @@ impl Actions {
             })
             .collect();
 
-        // `None` in every headless suite, which leaves the region unbounded.
         let max_height = use_context::<WindowMetrics>()
             .map(|metrics| sheet_band_height(&metrics, f64::INFINITY));
 
@@ -551,7 +432,6 @@ impl Actions {
         }
     }
 
-    /// Persist `family` as the terminal's face — the installed-row tap.
     fn pick_font_family(&self, family: String) {
         let controller = Arc::clone(&self.controller);
         let next = AppearancePrefs {
@@ -561,9 +441,6 @@ impl Actions {
         spawn_local(async move { controller.set_appearance(next).await });
     }
 
-    /// Download the catalog entry whose family is `family`. Single-flight
-    /// and state-tracking live in the catalog itself; this owns only the
-    /// presentation half: a failed install raises the app's failure toast.
     fn download_font(&self, family: &str) {
         let catalog = crate::fonts::catalog::font_catalog();
         let Some(entry) = catalog
@@ -581,7 +458,6 @@ impl Actions {
         });
     }
 
-    /// Flip the bell preference — a tap anywhere on that row.
     pub fn toggle_bell(&self) {
         let controller = Arc::clone(&self.controller);
         let current = controller.poll_untracked();
@@ -592,9 +468,6 @@ impl Actions {
         spawn_local(async move { controller.set_poll_prefs(next).await });
     }
 
-    /// Whether a mutating token control is blocked because the connected
-    /// session is itself read-only. Raises [`READ_ONLY_TOKEN_TOAST`] when it
-    /// is — the one guard both token mutations open with.
     fn tokens_blocked(&self) -> bool {
         if self.connection.is_read_only.get_untracked() {
             app_toasts().show(READ_ONLY_TOKEN_TOAST);
@@ -604,11 +477,7 @@ impl Actions {
         }
     }
 
-    /// Open the mint-a-token dialog (the dashed row): a name and its
-    /// read-only toggle, then — on a landed mint — the one-time secret
-    /// reveal. The confirmation toast is raised **only if the mint landed**:
-    /// a failure already surfaces through the screen's own failure→toast
-    /// bridge, and a "Created …" beside it would contradict it.
+    /// The confirmation toasts only on a landed mint; a failure already toasts through the bridge.
     pub fn open_create_token_dialog(&self) {
         if self.tokens_blocked() {
             return;
@@ -631,7 +500,6 @@ impl Actions {
         );
     }
 
-    /// Open the revoke confirmation for the token called `name`.
     pub fn open_revoke_dialog(&self, name: &str) {
         if self.tokens_blocked() {
             return;
@@ -647,12 +515,8 @@ impl Actions {
         );
     }
 
-    /// Revoke the token called `name`: the row's scramble-then-collapse and
-    /// the RPC start on the same tap, concurrently — a revoke that lands in
-    /// 20ms must not make the row vanish before the eye has seen it go. The
-    /// row's snapshot is taken here, ahead of the refresh the call ends
-    /// with, since that refresh is what takes the token out of `tokens`
-    /// mid-animation.
+    /// The scramble and the RPC start on the same tap, so a fast revoke still shows the row go;
+    /// the snapshot precedes the refresh that removes the token mid-animation.
     fn revoke(&self, name: &str) {
         let controller = Arc::clone(&self.controller);
         let scrambles = self.scrambles;
@@ -671,19 +535,12 @@ impl Actions {
             if controller.revoke_token(name.clone()).await {
                 app_toasts().show(confirmation);
             }
-            // Either way the row may now finish: a refusal leaves the token
-            // in `tokens`, so dropping the timeline restores the row it was
-            // collapsing, and the failure toast the controller emitted
-            // stands.
+            // A refusal leaves the token in `tokens`, so dropping the timeline restores the row.
             scrambles.answered(&name);
         });
     }
 
-    /// Open the delete-credential confirmation for the saved server at
-    /// `endpoint`. **No read-only guard**, unlike the two token controls:
-    /// deleting a device-local credential is not a server mutation, and the
-    /// token revoke that rides along is best-effort by design (see
-    /// `SettingsController::delete_credential`).
+    /// No read-only guard: deleting a device-local credential is not a server mutation.
     pub fn open_delete_credential_dialog(&self, endpoint: &str) {
         let controller = Arc::clone(&self.controller);
         let endpoint = endpoint.to_string();
@@ -708,9 +565,6 @@ impl Actions {
         );
     }
 
-    /// Open the forget-server confirmation for the saved server at
-    /// `endpoint`. The message names the stored credential only when there
-    /// is one to lose.
     pub fn open_forget_server_dialog(&self, endpoint: &str) {
         let controller = Arc::clone(&self.controller);
         let endpoint = endpoint.to_string();
@@ -745,12 +599,8 @@ impl Actions {
         );
     }
 
-    /// Open the Lock & disconnect confirmation. Confirming locks the keyring,
-    /// clears the connection *and* navigates: the router's session guard only
-    /// runs at navigation time, so it is the backstop that keeps a later deep
-    /// link out — not the mechanism that gets the user to Connect. `go`
-    /// rather than `push`, since a disconnected session is a new stack, not a
-    /// deeper one.
+    /// The router's session guard runs only at navigation time, so confirming both clears the
+    /// connection and navigates; `go`, since a disconnected session is a new stack.
     pub fn open_disconnect_dialog(&self) {
         let connection = Arc::clone(&self.connection);
         let keyring = self.keyring.clone();
@@ -767,15 +617,8 @@ impl Actions {
         );
     }
 
-    /// A saved row other than the connected one was tapped: switch to it —
-    /// see the [module docs](self). The verdict comes first, so a blocked
-    /// row raises the paywall (whose unlock retries this tap) and no unlock
-    /// prompt; then the switch, landing back on Sessions.
-    ///
-    /// Single-flight: ignored while a switch's unlock or any dial is in
-    /// flight, and once `endpoint` is already the connected one (a double tap
-    /// on a backend that settles at once). The settle-time pop is marked, so
-    /// it never fires once the user has left Settings on their own.
+    /// The verdict comes first, so a blocked row raises the paywall and no unlock prompt. The
+    /// settle-time pop is marked, so it never fires once the user has left Settings.
     pub fn switch_server(&self, endpoint: &str) {
         let active = self
             .connection
@@ -813,29 +656,21 @@ impl Actions {
         let mark = nav.mark_top();
         self.controller.switch_server(
             endpoint.to_string(),
-            // Settings is only ever pushed from Sessions, so a pop is the way
-            // back to it.
+            // Settings is only pushed from Sessions, so a pop returns there.
             Box::new(move || nav.pop_marked(&mark)),
         );
     }
 
-    /// Push the add-server page over the shell, prefilled from the saved
-    /// row at `endpoint` when one is named.
     pub fn open_add_server(&self, endpoint: Option<&str>) {
         self.app_nav.push(&add_server_location(endpoint));
     }
 
-    /// Restore prior purchases from the `muxr pro` group's `restore` row —
-    /// the sheet's own restore, sharing the controller's single-flight guard,
-    /// and its toasts for the exits that leave the sheet-less screen with
-    /// nothing else to say (a restored Pro just flips the plan row).
     pub fn restore_purchases(&self) {
         let pro = Arc::clone(&self.pro);
         let restoring = self.controller.restoring;
         spawn_local(async move {
-            // Only a restore the controller accepts owns the flag: a refused
-            // tap must not clear the one still in flight. The check and
-            // `restore`'s own guard read run in the same poll.
+            // Only a restore the controller accepts owns the flag, so a refused tap never clears
+            // the one in flight. This check and `restore`'s own guard run in the same poll.
             let accepted = !pro.busy.get_untracked();
             if accepted {
                 restoring.set(true);
@@ -848,10 +683,7 @@ impl Actions {
                 RestoreOutcome::Pending => app_toasts().show(PENDING_TOAST),
                 RestoreOutcome::NothingToRestore => app_toasts().show(NOTHING_TO_RESTORE_TOAST),
                 RestoreOutcome::Unavailable => app_toasts().show(UNAVAILABLE_COPY),
-                // A failure is announced once already: the app bridges the
-                // pro controller's failure sink to a toast (`MuxrApp::init`);
-                // `a_failed_restore_from_the_row_toasts_the_failure_message_once`
-                // in `tests/settings.rs` pins that, so a bridge change trips it.
+                // The app already bridges the pro controller's failure sink to a toast.
                 RestoreOutcome::Failed(_) => {}
                 RestoreOutcome::Busy => app_toasts().show(STORE_BUSY_TOAST),
                 RestoreOutcome::Restored => {}
@@ -859,12 +691,7 @@ impl Actions {
         });
     }
 
-    /// Open the same paywall `connect`'s server-limit gate raises, from the
-    /// `muxr pro` group's plan row tap. Nothing to unlock and no forget-and-
-    /// connect retry — Settings has neither a follow-on nor a blocked dial to
-    /// resume, unlike the gate. `on_unlocked` is a state-free `Rc<dyn Fn()>`
-    /// because the sheet's follow-on runs after the staged close with no
-    /// `AppState` in hand, so a no-op is all Settings needs to pass.
+    /// `on_unlocked` is a no-op: Settings has no blocked dial to resume.
     pub fn open_upgrade_sheet(&self) {
         show_upgrade_sheet(
             &self.overlays,
@@ -877,9 +704,6 @@ impl Actions {
     }
 }
 
-/// Open the one-time secret reveal for `controller`'s currently pending
-/// secret — [`Actions::open_create_token_dialog`]'s own follow-up once a
-/// mint lands.
 fn open_secret_reveal(
     overlays: &NavigatorController<AppState>,
     controller: &Arc<SettingsController>,
@@ -888,8 +712,7 @@ fn open_secret_reveal(
     show_sheet(overlays, move |sheet| {
         let theme = active_theme();
         let colors = Palette::from_theme(&theme);
-        // Tracked: re-resolved on every navigator rebuild, like the picker
-        // sheet's own body.
+        // Tracked, so the body re-resolves on every navigator rebuild.
         let minted = controller.pending_token_secret.get();
         let sheet = sheet.clone();
         let controller = Arc::clone(&controller);
@@ -900,58 +723,43 @@ fn open_secret_reveal(
     });
 }
 
-// ---------------------------------------------------------------------------
-// The screen-state shims `widgets`' own callbacks call back into
-// ---------------------------------------------------------------------------
-
-/// A `.set-row` was tapped — dispatch on what that row is for.
 pub(super) fn row_tapped(state: &mut SettingsState, action: RowAction) {
     match action {
-        // Inert rows carry no gesture at all, so this arm is unreachable;
-        // matching it exhaustively is what keeps a new `RowAction` from
-        // silently doing nothing.
+        // Unreachable, as inert rows carry no gesture; matched so a new `RowAction` never no-ops.
         RowAction::Static => {}
         RowAction::Picker(kind) => state.actions.open_picker(kind),
         RowAction::UpgradeSheet => state.actions.open_upgrade_sheet(),
     }
 }
 
-/// The dashed `+ create new token` row.
 pub(super) fn open_create_token_dialog(state: &mut SettingsState) {
     state.actions.open_create_token_dialog();
 }
 
-/// A token's `revoke` button.
 pub(super) fn open_revoke_dialog(state: &mut SettingsState, name: &str) {
     state.actions.open_revoke_dialog(name);
 }
 
-/// A saved server's `delete credential` button.
 pub(super) fn open_delete_credential_dialog(state: &mut SettingsState, endpoint: &str) {
     state.actions.open_delete_credential_dialog(endpoint);
 }
 
-/// A saved server's `forget` button.
 pub(super) fn open_forget_server_dialog(state: &mut SettingsState, endpoint: &str) {
     state.actions.open_forget_server_dialog(endpoint);
 }
 
-/// A saved server row other than the connected one.
 pub(super) fn switch_server(state: &mut SettingsState, endpoint: &str) {
     state.actions.switch_server(endpoint);
 }
 
-/// The `+ add server` row.
 pub(super) fn open_add_server(state: &mut SettingsState) {
     state.actions.open_add_server(None);
 }
 
-/// The `restore` button on the `muxr pro` group's restore row.
 pub(super) fn restore_purchases(state: &mut SettingsState) {
     state.actions.restore_purchases();
 }
 
-/// The `Lock & disconnect` button.
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
 }

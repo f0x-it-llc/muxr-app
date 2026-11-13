@@ -1,9 +1,5 @@
-//! The font-family picker: [`super::pickers`]' row idiom, widened for a
-//! catalog that is 30-odd entries long — two sections (installed faces, then
-//! the downloadable catalog) over one scrolling body, title and caption
-//! pinned above it. `on_select` fires for an installed row (persist and
-//! close); `on_download` for an available one — **a download never selects**,
-//! it only makes the row selectable, so the sheet stays open under it.
+//! The font-family sheet: installed faces, then the downloadable catalog. A download never
+//! selects; it only makes the row selectable, so the sheet stays open under it.
 
 use std::rc::Rc;
 
@@ -25,69 +21,40 @@ use super::rows::{
     stretch_column,
 };
 
-/// The sheet's caption, under its title.
 const FONT_SHEET_CAPTION: &str = "Downloads are kept on this device.";
 const FONT_SECTION_INSTALLED: &str = "installed";
 const FONT_SECTION_AVAILABLE: &str = "available";
-/// A bundled face's meta line.
 pub(in super::super) const FONT_META_BUILT_IN: &str = "built-in";
-/// …and a downloaded one's, once installed.
 pub(in super::super) const FONT_META_DOWNLOADED: &str = "downloaded";
-/// The trailing affordance an available row carries, per state — Downloading
-/// swaps this text for [`font_row_progress`]'s bar/dots loader instead.
 pub(super) const FONT_ACTION_DOWNLOAD: &str = "download";
 pub(super) const FONT_ACTION_RETRY: &str = "retry";
-/// The Downloading row's determinate progress bar width. An original,
-/// hand-picked value, not on the shared spacing scale.
 const FONT_ROW_PROGRESS_WIDTH: f64 = 56.0;
-/// What the `available` section says with no catalog behind it. Never a
-/// toast: a catalog nobody can reach is not something the user did.
 pub(super) const FONT_CATALOG_LOADING: &str = "loading\u{2026}";
 pub(super) const FONT_CATALOG_UNAVAILABLE: &str = "Catalog unavailable offline.";
 pub(super) const FONT_CATALOG_STALE: &str = "Showing the saved catalog.";
 
 const FONT_CAPTION_GAP: f64 = spacing::BASE;
 
-/// One row of [`font_picker_sheet`]: a font, under whatever name the catalog
-/// calls it.
 pub(in super::super) struct FontRow {
-    /// The **family** — what a tap persists, and what a download installs.
-    /// Never printed (see [`Self::display`]).
+    /// The family a tap persists and a download installs; never printed.
     pub(in super::super) family: String,
-    /// What the row prints: the catalog's `displayName`, which differs from
-    /// the family for most Nerd Fonts.
     pub(in super::super) display: String,
-    /// The dim second line — `built-in`, or `OFL-1.1 · 2.4 MB`.
     pub(in super::super) meta: String,
-    /// Where this font stands on the device. Every installed-section row is
-    /// [`FontState::Installed`]; an available-section row carries its own
-    /// download state.
     pub(in super::super) state: FontState,
-    /// While [`Self::state`] is [`FontState::Downloading`]: the live
-    /// received-fraction when the entry's total size is known, `None` for an
-    /// indeterminate download. Unused otherwise.
+    /// The received fraction while downloading; `None` when the total size is unknown.
     pub(in super::super) download_progress: Option<f64>,
 }
 
-/// Everything the font sheet renders — assembled by `pages` from the
-/// installed faces, the catalog's signals and the stored preference.
 pub(in super::super) struct FontPicker {
-    /// The faces this device can already shape with, bundled first.
     pub(in super::super) installed: Vec<FontRow>,
-    /// The catalog's remaining entries, in manifest order.
     pub(in super::super) available: Vec<FontRow>,
-    /// The persisted family, so exactly one installed row reads as chosen.
     pub(in super::super) selected: String,
-    /// Where the catalog itself stands.
     pub(in super::super) status: CatalogStatus,
-    /// Whether the catalog on screen came from the offline cache.
     pub(in super::super) stale: bool,
-    /// The scroll region's height cap, from the window's own metrics. `None`
-    /// (every headless suite) leaves the region unbounded.
+    /// `None` leaves the scroll region unbounded.
     pub(in super::super) max_height: Option<f64>,
 }
 
-/// The tap handler shared by every row of one font sheet.
 type OnFont = Rc<dyn Fn(&mut AppState, String)>;
 
 pub(in super::super) fn font_picker_sheet<S, D>(
@@ -141,10 +108,8 @@ where
 
     let scroller = bleeding_scroll(body);
     let scroll_body = match picker.max_height {
-        // A fixed height rather than a flex share: the sheet body's own
-        // constraint is unbounded in height, and a `flexible` child under an
-        // unbounded main axis divides zero free space — the tight-constraint
-        // trap `examples/glyph-catalog`'s device gate documents.
+        // A fixed height, not a flex share: the sheet body is unbounded in height, so a
+        // `flexible` child there divides zero free space.
         Some(height) => Either::Left(SizedBox::<AppState>(None, Some(height)).child(scroller)),
         None => Either::Right(scroller),
     };
@@ -159,7 +124,6 @@ where
     ))
 }
 
-/// The one-line note the `available` section leads with, if any.
 fn catalog_note(picker: &FontPicker) -> Option<&'static str> {
     match picker.status {
         CatalogStatus::Idle | CatalogStatus::Loading => Some(FONT_CATALOG_LOADING),
@@ -169,9 +133,6 @@ fn catalog_note(picker: &FontPicker) -> Option<&'static str> {
     }
 }
 
-/// A section heading inside the sheet — the screen's own `.set-group-lbl`
-/// treatment, over `AppState` and without the row gutter (the sheet supplies
-/// its own).
 fn font_section_label(label: &str, colors: &Palette) -> impl View<AppState> {
     let theme = active_theme();
     Padding(
@@ -185,10 +146,6 @@ fn font_section_label(label: &str, colors: &Palette) -> impl View<AppState> {
     )
 }
 
-/// One font row: the display name over its meta line, a trailing `✓` when
-/// chosen, and otherwise the row's own download affordance. The selected row
-/// fills `--amber-faint` past the sheet's gutter exactly as
-/// `super::pickers::pick_row` does, so the two sheets stay one pattern.
 fn font_pick_row(
     entry: &FontRow,
     selected: bool,
@@ -239,12 +196,7 @@ fn font_pick_row(
     GestureDetector(box_).on_tap(on_tap)
 }
 
-/// The trailing affordance a non-selected row carries, and its ink — `None`
-/// for an installed row simply not chosen (its own name is the whole
-/// affordance) and for a downloading one, rendered through
-/// [`font_row_progress`] instead. Deliberately **text**, not a vector: the
-/// app has no download glyph in `frust::icons`, and a font glyph is never
-/// chrome here.
+/// Text, not a vector: `frust::icons` has no download glyph.
 fn font_row_action(state: FontState, colors: &Palette) -> Option<(&'static str, Color)> {
     match state {
         FontState::Installed | FontState::Downloading => None,
@@ -253,11 +205,6 @@ fn font_row_action(state: FontState, colors: &Palette) -> Option<(&'static str, 
     }
 }
 
-/// The Downloading row's trailing affordance: a determinate `progress` bar
-/// when the entry's total size is known, else the indeterminate
-/// `dots_loader` — real Glyph components in place of plain text, per Ed's
-/// standing directive. Either way the row's height is unchanged: both are
-/// shorter than the two-line body beside them.
 fn font_row_progress(fraction: Option<f64>) -> frust::FlexChild<AppState> {
     match fraction {
         Some(fraction) => inflexible(

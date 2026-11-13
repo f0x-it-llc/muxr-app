@@ -1,12 +1,4 @@
-//! Screen 6's picker sheet: one title over one `.pick-row` per option, the
-//! selected one filled amber full-bleed with a `✓`. Reused by four rows
-//! (`layout refresh`, `font size`, `cursor style`, and — through
-//! `widgets::font_picker`'s own two-section variant — `font family`), which
-//! is the whole point of the redesign's own note that this pattern is shared.
-//!
-//! Built over `AppState`, not `SettingsState`: a sheet is a pushed navigator
-//! page on the *app's* overlay host, the same component boundary the dialogs
-//! cross.
+//! The picker sheet, over `AppState` because a sheet is a pushed page on the app's overlay host.
 
 use std::rc::Rc;
 
@@ -30,30 +22,21 @@ use super::rows::{ROW_GAP, centered_row, h_gap, rounded_fill, stretch_column};
 /// `.pick-row{padding:13px 4px}`.
 pub(super) const PICK_PAD_X: f64 = spacing::TIGHT;
 pub(super) const PICK_PAD_Y: f64 = 13.0;
-/// `.pick-row.sel{margin:0 -20px}` — how far the selected row's fill escapes
-/// the sheet's own content gutter (`crate::ui::sheet`'s private `PANEL_PAD`,
-/// which this must equal for the fill to reach the panel's edges).
+/// `.pick-row.sel{margin:0 -20px}`; must equal `crate::ui::sheet`'s private `PANEL_PAD`.
 pub(super) const PICK_BLEED: f64 = spacing::XXL;
 /// `.sheet-toprow{margin-bottom:18px}` — the picker title to its first row.
 pub(super) const PICK_TITLE_GAP: f64 = 18.0;
-/// The `✓` on the selected picker row.
 pub(super) const CHECK_SIZE: f64 = 13.0;
 
-/// Which picker sheet a row opens. One enum, four sheets, **one** builder.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in super::super) enum PickerKind {
-    /// `terminal appearance` → font family.
     FontFamily,
-    /// `terminal appearance` → font size.
     FontSize,
-    /// `terminal appearance` → cursor style.
     CursorStyle,
-    /// `session poll` → layout refresh.
     LayoutRefresh,
 }
 
 impl PickerKind {
-    /// The sheet's own title — the row's label, verbatim.
     pub(in super::super) fn title(self) -> &'static str {
         match self {
             PickerKind::FontFamily => "font family",
@@ -64,21 +47,14 @@ impl PickerKind {
     }
 }
 
-/// One picker sheet's content: a title, and the options it offers with at
-/// most one already chosen. Built by `pages` from the controller's signals;
-/// [`picker_sheet`] is the pure render.
 pub(in super::super) struct Picker {
     pub(in super::super) title: &'static str,
-    /// Every option, in the order the domain declares them.
     pub(in super::super) options: Vec<String>,
-    /// Which one is current, if the stored value is still an offered choice.
     pub(in super::super) selected: Option<usize>,
-    /// The option list's scroll-band height cap, from the window's own
-    /// metrics. `None` (every headless suite) leaves the list unbounded.
+    /// `None` leaves the list unbounded.
     pub(in super::super) max_height: Option<f64>,
 }
 
-/// The pick handler, shared by every row of one sheet.
 type OnPick = Rc<dyn Fn(&mut AppState, usize)>;
 
 pub(in super::super) fn picker_sheet<P>(
@@ -107,8 +83,7 @@ where
     }
     let scroller = bleeding_scroll(children);
     let list = match picker.max_height {
-        // A fixed height, not a flex share: the sheet body is unbounded in
-        // height, so a `flexible` child would divide zero free space.
+        // A fixed height, not a flex share: the sheet body is unbounded in height.
         Some(height) => Either::Left(SizedBox::<AppState>(None, Some(height)).child(scroller)),
         None => Either::Right(scroller),
     };
@@ -119,10 +94,8 @@ where
     ))
 }
 
-/// `children` in a vertical scroll region whose *viewport* is [`PICK_BLEED`]
-/// wider than the sheet's content gutter on each side, with the content padded
-/// back in by the same amount: rows lay out exactly as before, but the
-/// selected row's painted bleed now lies inside the viewport's clip.
+/// The viewport is [`PICK_BLEED`] wider on each side and the content padded back in, so the
+/// selected row's bleed lies inside the scroll clip.
 pub(super) fn bleeding_scroll<M>(children: impl ViewSeq<AppState, M>) -> impl View<AppState> {
     WidenedView {
         child: scroll_view(Padding(
@@ -133,9 +106,8 @@ pub(super) fn bleeding_scroll<M>(children: impl ViewSeq<AppState, M>) -> impl Vi
     }
 }
 
-/// Lays its child out `by` wider than itself on each side — frust's `Padding`
-/// clamps a negative inset, so this is the one way to give a clipping child
-/// the sheet gutter back. Reports its own (unwidened) width to the parent.
+/// Lays its child out `by` wider on each side, since frust's `Padding` clamps a negative
+/// inset; reports its own unwidened width.
 struct WidenedView<V> {
     child: V,
     by: f64,
@@ -199,10 +171,6 @@ impl Widget for WidenedWidget {
     }
 }
 
-/// One `.pick-row`. The selected one fills `--amber-faint` past the sheet's
-/// own gutter (reproduced via [`super::rows::rounded_fill`]'s bleed, since
-/// frust has no negative padding), inks its label amber, and carries the
-/// `CHECK` vector; every row but the last closes with a hairline.
 fn pick_row(
     option: &str,
     selected: bool,
@@ -256,10 +224,7 @@ mod tests {
 
     #[test]
     fn the_selected_rows_bleed_is_the_sheets_own_gutter() {
-        // Transcribed rather than asserted equal to `ui::sheet`'s private
-        // `PANEL_PAD`: if the two ever diverge the amber fill stops short of
-        // (or runs past) the sheet's edges — `tests/settings.rs` asserts the
-        // measured geometry end to end, which is what actually catches it.
+        // Must equal `ui::sheet`'s private `PANEL_PAD`; `tests/settings.rs` checks the geometry.
         assert_eq!(PICK_BLEED, 20.0);
     }
 }
