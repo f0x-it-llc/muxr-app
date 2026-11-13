@@ -1,20 +1,6 @@
-//! `.conn-row` — the server-info strip under the top bar: the heartbeat's
-//! glowing success dot and ping ring, the dim `zellij 0.44.3 · herdr 0.3.1`
-//! version meta, the live `36ms` latency, and — only for the posture that
-//! actually skips certificate validation — the `insecure` warning chip, then
-//! the cyan `read-only` chip for a read-only credential. Closed by a hairline
-//! rule.
-//!
-//! **No endpoint here.** The shell's floating bar already titles the
-//! connected host, so the meta text takes the flexible slot instead and
-//! nothing in the row can overlap at any width. Latency lives here only:
-//! Settings renders the endpoint/TLS/versions again, but a live round-trip
-//! time belongs next to the session list it gates (see
-//! [`super::super::heartbeat`] for what keeps it live).
-//!
-//! `None` renders a muted "not connected" line rather than nothing: the
-//! session guard makes it unreachable in practice, but a silent gap would be
-//! the worse failure if it ever were.
+//! `.conn-row`: the heartbeat dot and ring, the version meta, the live latency, the `insecure` chip
+//! for the one posture that skips certificate validation, and the `read-only` chip.
+//! The endpoint is left to the shell's bar; `None` renders a muted "not connected" line.
 
 use frust::{
     CrossAxisAlignment, EdgeInsets, Padding, View, column, divider, flexible, inflexible, text,
@@ -29,26 +15,15 @@ use super::super::heartbeat::{self, HeartbeatVisual};
 use super::super::pages::SessionsState;
 use super::{active_theme, centered_row, h_gap};
 
-/// `.conn-row{padding:13px 16px}` — the Y value has no on-scale
-/// `ui::spacing` match and stays a local one-off.
 const STRIP_PAD_X: f64 = spacing::XL;
 const STRIP_PAD_Y: f64 = 13.0;
-/// `.conn-row{gap:10px}`.
 const STRIP_GAP: f64 = spacing::MD;
-/// `.dot-ok{width:7px;height:7px}` — and, through
-/// [`super::super::heartbeat`], the unscaled diameter of the ping ring that
-/// expands around it, so the two cannot drift apart.
+/// The unscaled diameter of the ping ring around the dot, so the two cannot drift apart.
 pub(in crate::features::sessions::presentation) const DOT: f64 = 7.0;
-/// The label the strip prints for the one TLS posture that skips
-/// certificate validation — the source's `.warn-badge`.
 const INSECURE_CHIP: &str = "insecure";
-/// The chip a read-only credential adds after it.
 const READ_ONLY_CHIP: &str = "read-only";
-/// The separator between the strip's per-backend versions
-/// (`zellij 0.44.3 · herdr 0.3.1`).
 const META_SEPARATOR: &str = " \u{b7} ";
 
-/// See the [module docs](self).
 pub(in crate::features::sessions::presentation) fn server_strip(
     info: Option<&ServerInfo>,
     beat: HeartbeatVisual,
@@ -69,10 +44,7 @@ pub(in crate::features::sessions::presentation) fn server_strip(
                     text(meta_line(info)).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
                 ),
                 h_gap(STRIP_GAP),
-                // Amber while the reading rolls, dim once it settles — the one
-                // place this screen inks with the brand hue for something
-                // other than a call to action, and a *transition* cue rather
-                // than a health one (see the module docs' colour rule).
+                // Amber while the reading rolls, dim once it settles: a transition cue, not a health one.
                 inflexible(text(format!("{}ms", beat.latency_ms)).style(inked(
                     &theme.type_scale.body_small,
                     if beat.rolling {
@@ -93,11 +65,7 @@ pub(in crate::features::sessions::presentation) fn server_strip(
             centered_row(children)
         }
     };
-    // `.conn-row`'s bottom hairline is a plain `divider` stacked under the
-    // padded row rather than a knob on the container — `Container` carries no
-    // bottom-rule option by design (see `frust-widgets::container`'s module
-    // docs), so the rule composes as an ordinary second child instead of a
-    // paint-time overlay.
+    // The bottom hairline is a `divider` stacked under the padded row: `Container` has no bottom-rule option.
     column()
         .child(Padding(
             EdgeInsets::symmetric(STRIP_PAD_X, STRIP_PAD_Y),
@@ -106,10 +74,8 @@ pub(in crate::features::sessions::presentation) fn server_strip(
         .child(divider(colors.rule))
 }
 
-/// The strip's dim meta text: every backend the handshake detected, as
-/// `"zellij 0.44.3 · herdr 0.3.1"`. A server that reported no backends at
-/// all (an older daemon) falls back to [`ServerInfo::version`], already
-/// spelled in exactly this `<label> <version>` shape.
+/// Every backend the handshake detected, as `"zellij 0.44.3 · herdr 0.3.1"`; a server that reported
+/// none falls back to [`ServerInfo::version`].
 fn meta_line(info: &ServerInfo) -> String {
     if info.backend_versions.is_empty() {
         return info.version.clone();
@@ -121,13 +87,8 @@ fn meta_line(info: &ServerInfo) -> String {
         .join(META_SEPARATOR)
 }
 
-/// The `.warn-badge` the strip prints for a TLS posture — `Some` only for
-/// the one posture that actually skips certificate validation, since the
-/// redesign flags a risk rather than narrating every posture (Settings
-/// prints the full [`ServerInfo::tls_label`] instead). Branches on the
-/// [`TrustMode`] variant, never the label: the Connect screen's own trust
-/// selector marks the same posture with the same `BadgeVariant::Warning`
-/// chip, from the same enum.
+/// Some only for the posture that skips certificate validation. Branches on the [`TrustMode`]
+/// variant, never the label.
 fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
     match mode {
         TrustMode::NoVerification => Some(INSECURE_CHIP),
@@ -135,10 +96,7 @@ fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
     }
 }
 
-/// The host half of a `host:port` endpoint — what the top bar's centered
-/// title shows (`100.71.31.57`). `pub(crate)` because `crate::routes`'
-/// `BarTitle::ConnectedHost` resolves `/sessions`' bar title through this
-/// one function rather than minting a second copy of the split.
+/// The host half of a `host:port` endpoint; `pub(crate)` because the route table's bar title resolves through it.
 pub(crate) fn host_of(endpoint: &str) -> &str {
     endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host)
 }
@@ -150,7 +108,7 @@ mod tests {
 
     fn info(mode: TrustMode, backends: Vec<BackendVersion>) -> ServerInfo {
         ServerInfo {
-            endpoint: "100.71.31.57:50051".to_string(),
+            endpoint: "100.64.0.7:50051".to_string(),
             trust_mode: mode,
             tls_label: "No verification".to_string(),
             version: "zellij 0.44.3".to_string(),
@@ -208,7 +166,7 @@ mod tests {
 
     #[test]
     fn the_top_bars_title_is_the_host_without_its_port() {
-        assert_eq!(host_of("100.71.31.57:50051"), "100.71.31.57");
+        assert_eq!(host_of("100.64.0.7:50051"), "100.64.0.7");
         assert_eq!(host_of("mock.example:7777"), "mock.example");
         assert_eq!(host_of("mock.example"), "mock.example", "no port at all");
     }

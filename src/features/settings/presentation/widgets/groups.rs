@@ -1,8 +1,3 @@
-//! The `connection`, `auth tokens`, `terminal appearance` and `session poll`
-//! groups' row lists — pure arrangement over [`super::rows`]/[`super::tokens`]
-//! (each read off the connection controller or the settings controller by
-//! `pages::SettingsScreen::build`, never resolving anything itself).
-
 use frust::AnyView;
 
 use crate::connection::{ServerBackend, ServerInfo, TrustMode};
@@ -16,20 +11,11 @@ use super::pickers::PickerKind;
 use super::rows::{self, RowAction, RowMark, ValueTone, settings_row};
 use super::tokens::{scrambling_token_item, token_item};
 
-/// The `connection` group's value while nothing is connected. `/settings` is
-/// deliberately not route-guarded, so this is reachable — a deep link, or a
-/// disconnect racing a rebuild — and a blank row would be the worse failure.
+/// `/settings` is not route-guarded, so a deep link or a disconnect racing a rebuild shows this.
 const DISCONNECTED_VALUE: &str = "not connected";
 
-/// The `auth tokens` group's rows.
-///
-/// One `token_item` per token with no revoke in flight; this frame's scramble
-/// view for every token that has one; and — for a revoke whose own refresh
-/// already took its token out of `tokens` — the same scramble view
-/// re-inserted at the position that row is vanishing from (clamped, since the
-/// list it was snapshotted against may have shrunk), so nothing under it
-/// jumps while the collapse plays out. Orphans go back in ascending order, so
-/// two at once keep their original order between them.
+/// A token whose refresh already removed it keeps its scramble row at its old index (clamped),
+/// orphans in ascending index, so nothing under it jumps while the collapse plays out.
 pub(in super::super) fn token_rows(
     tokens: &[AuthToken],
     showing: &[(RevokeScramble, ScramblePose)],
@@ -61,9 +47,6 @@ pub(in super::super) fn token_rows(
     rows
 }
 
-/// The `connection` group: the endpoint, the TLS posture, the latency, and one version row
-/// per backend the server reports. Every value is read off `info`; `None`
-/// prints [`DISCONNECTED_VALUE`] rather than nothing.
 pub(in super::super) fn connection_rows(
     info: Option<&ServerInfo>,
     colors: &Palette,
@@ -110,10 +93,6 @@ pub(in super::super) fn connection_rows(
     rows
 }
 
-/// One row per backend `info` actually reported, or the legacy
-/// single-version fallback for an older server that reported none — always
-/// at least one row, so this group never goes silent about the multiplexer
-/// it's attached to (or, while disconnected, the one it *was*).
 fn backend_version_rows(
     info: Option<&ServerInfo>,
     colors: &Palette,
@@ -152,8 +131,6 @@ fn backend_version_rows(
     }
 }
 
-/// The `.set-ic` mark for `backend`'s version row — the backend's own
-/// initial.
 fn backend_mark(backend: ServerBackend) -> RowMark {
     match backend {
         ServerBackend::Zellij => rows::MARK_ZELLIJ,
@@ -161,7 +138,6 @@ fn backend_mark(backend: ServerBackend) -> RowMark {
     }
 }
 
-/// …and its row label.
 fn backend_version_label(backend: ServerBackend) -> &'static str {
     match backend {
         ServerBackend::Zellij => "zellij version",
@@ -169,12 +145,7 @@ fn backend_version_label(backend: ServerBackend) -> &'static str {
     }
 }
 
-/// What the `tls certificate` row prints for a posture, and in which hue.
-///
-/// Branches on the [`TrustMode`] **variant**, never on `ServerInfo::tls_label`
-/// (that field is display text, per `crate::connection`'s own rule). The
-/// words are the redesign's rather than that label's — its "No verification"
-/// names the *posture*, where screen 5 names the *consequence*.
+/// Branches on the [`TrustMode`] variant, never on `ServerInfo::tls_label` (display text).
 pub(super) fn tls_posture(mode: TrustMode) -> (&'static str, ValueTone) {
     match mode {
         TrustMode::NoVerification => ("insecure (plaintext)", ValueTone::Warn),
@@ -183,15 +154,10 @@ pub(super) fn tls_posture(mode: TrustMode) -> (&'static str, ValueTone) {
     }
 }
 
-/// The version number out of a `"<product> <version>"` string —
-/// `"zellij 0.44.3"` → `"0.44.3"`, which is what the row prints (its *label*
-/// already says `zellij version`). A string with no space is its own
-/// version.
 pub(super) fn version_number(version: &str) -> &str {
     version.rsplit_once(' ').map_or(version, |(_, tail)| tail)
 }
 
-/// The `terminal appearance` group: three picker rows.
 pub(in super::super) fn appearance_rows(
     prefs: &AppearancePrefs,
     colors: &Palette,
@@ -200,9 +166,7 @@ pub(in super::super) fn appearance_rows(
         settings_row(
             rows::MARK_FONT_FAMILY,
             "font family",
-            // The *display* name, not the persisted family: a downloaded
-            // Nerd Font stores as `BlexMono Nerd Font Mono` and is called
-            // `IBM Plex Mono Nerd Font Mono` everywhere a person reads it.
+            // The display name, not the persisted family.
             crate::fonts::display_name(&prefs.font_family),
             ValueTone::Plain,
             RowAction::Picker(PickerKind::FontFamily),
@@ -227,7 +191,6 @@ pub(in super::super) fn appearance_rows(
     ]
 }
 
-/// The `session poll` group: one picker row and the bell switch.
 pub(in super::super) fn poll_rows(
     prefs: &PollPrefs,
     colors: &Palette,
@@ -255,9 +218,6 @@ mod tests {
 
     #[test]
     fn only_the_validation_skipping_posture_warns() {
-        // The redesign's own correction, as a tripwire: `insecure
-        // (plaintext)` must never read as a success state, and a validated
-        // posture must never read as a warning.
         assert!(matches!(
             tls_posture(TrustMode::NoVerification),
             ("insecure (plaintext)", ValueTone::Warn)
@@ -274,9 +234,6 @@ mod tests {
 
     #[test]
     fn the_version_row_prints_the_number_without_the_product_name() {
-        // The row's *label* already says `zellij version`; `ServerInfo`
-        // carries the joined `"zellij 0.44.3"` because the sessions strip
-        // prints it that way.
         assert_eq!(version_number("zellij 0.44.3"), "0.44.3");
         assert_eq!(version_number("herdr 1.2"), "1.2");
         assert_eq!(version_number("0.44.3"), "0.44.3");

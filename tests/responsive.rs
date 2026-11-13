@@ -1,11 +1,6 @@
-//! Proves a re-provided `WindowMetrics` flips a build-time structure without a probe: a bare
-//! `Component` reads `Responsive::of(use_context::<WindowMetrics>())` in `build` and renders
-//! "tablet" or "compact". The seam is `support::{metrics_at, mount_with_metrics,
-//! reprovide_metrics}`; the frust facts it rests on are in `support`'s module doc.
-//!
-//! Each frame the harness runs rebuilds the component exactly once, so a resize is visible on
-//! the very next frame (the shell's warmup window allows three) and a same-size re-provide adds
-//! only the builds of the frames pumped after it.
+//! A re-provided `WindowMetrics` flips a build-time structure without a probe: a bare `Component`
+//! reads `Responsive::of(use_context::<WindowMetrics>())` in `build`.
+//! A resize shows on the next frame; the shell's warmup window allows three.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -20,10 +15,9 @@ use support::{
     frame, metrics_at, mount_with_metrics, node_values, reprovide_metrics, serial, setup,
 };
 
-/// Frames a resize may take to show, the frame gate's `WARMUP_FRAMES`.
+/// Frames a resize may take to show (the frame gate's warmup window).
 const WARMUP_FRAMES: usize = 3;
 
-/// Renders which structure the current metrics select and counts its own builds.
 struct Probe {
     builds: Rc<Cell<usize>>,
 }
@@ -44,10 +38,8 @@ impl Component for Probe {
     }
 }
 
-/// The boxed app-logic closure a frame drives.
 type Logic = Box<dyn FnMut(&mut ()) -> ComponentView<Probe>>;
 
-/// The mounted probe, its frame plumbing and its build counter.
 struct Fixture {
     root: RenderRoot<(), ComponentView<Probe>>,
     logic: Logic,
@@ -80,8 +72,6 @@ impl Fixture {
         node_values(&self.root).iter().any(|v| v == word)
     }
 
-    /// Re-provide `width`×`height`, then pump frames until `word` shows, at most
-    /// [`WARMUP_FRAMES`]; returns how many it took.
     fn resize_to(&mut self, width: f64, height: f64, word: &str) -> usize {
         reprovide_metrics(metrics_at(width, height));
         for taken in 1..=WARMUP_FRAMES {

@@ -1,7 +1,3 @@
-//! [`LoadWorkspace`] — one round trip for everything the terminal screen
-//! shows: the sheet's spaces and tabs, the active tab's lines, and the
-//! attached session's current name.
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;
@@ -11,28 +7,16 @@ use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::terminal::domain::entities::Workspace;
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
-/// What one load addresses — [`LoadWorkspace`]'s params. Two facts because the two reads this
-/// use case makes are addressed differently: the session *name* needs an id, and the space list
-/// needs to know whether this backend has spaces at all (only herdr does — zellij answers an
-/// always-empty list, so its load skips that round trip). The caller decides the flag;
-/// resolving a backend off a session id is `presentation`'s own job.
+/// Only herdr has spaces; zellij's space list is always empty, so `with_spaces: false` skips
+/// that round trip.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceQuery {
-    /// The attached session's id (`/terminal?session=<id>`), or `None` for a
-    /// bare `/terminal` — what the session *name* is looked up by.
+    /// The session name is looked up by this id; `None` for a bare `/terminal`.
     pub session_id: Option<String>,
-    /// Whether to read the space list at all — see the [type docs](Self).
     pub with_spaces: bool,
 }
 
-/// Loads the whole screen. `Params` is a [`WorkspaceQuery`]: which session to name, and
-/// whether this backend has spaces to list.
-///
-/// **Two injected repositories, on purpose.** Spaces/tabs/lines come from this feature's own
-/// [`TerminalRepository`]; the session *name* comes from `sessions`' [`SessionsRepository`],
-/// because that is where a session's name lives and this screen's rename writes back to the
-/// same store — a deliberate widening of `docs/ARCHITECTURE.md`'s slice table, strictly better
-/// than a second name store that could drift out of step with the sessions list.
+/// The session name comes from [`SessionsRepository`], the same store a rename writes to.
 pub struct LoadWorkspace {
     terminal: Arc<dyn TerminalRepository + Send + Sync>,
     sessions: Arc<dyn SessionsRepository + Send + Sync>,
@@ -46,9 +30,7 @@ impl LoadWorkspace {
         Self { terminal, sessions }
     }
 
-    /// The name of the session with `id`, or `None` when there is no id (a bare
-    /// `/terminal`) or the session has since been killed. A *missing* session is not
-    /// a failure: only the rename dialog's seed depends on it.
+    /// A missing or killed session answers `Ok(None)`, not a failure.
     async fn session_name(&self, id: Option<String>) -> Result<Option<String>, AppFailure> {
         let Some(id) = id else {
             return Ok(None);

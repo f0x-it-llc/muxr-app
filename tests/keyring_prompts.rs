@@ -1,14 +1,5 @@
-//! Biometric prompt accounting across "add a server, then cold-restart", replaying the device
-//! sequence that cost two prompts at the next unlock and a third opening the new server.
-//!
-//! Android prompts once per gated read and once per gated write (`MockCredentialService`'s
-//! `prompts()` counts the reads, `writes()` the writes). The contract: an unlock over an intact
-//! vault is exactly one prompt and writes nothing; a switch with the keyring unlocked is none.
-//!
-//! The suite stands up the composition root (`MuxrApp::init`: the real router, controllers and
-//! the mock stores) and drives the same controllers the add page, Connect's `/` form and
-//! Settings' "+ add server" row drive. Settings' row only pushes the add page, so its flow is the
-//! add-page case.
+//! Biometric prompt accounting across add-a-server and cold restart, over the mock credential service.
+//! An unlock over an intact vault is one prompt and no writes; a switch with the keyring unlocked is none.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -138,8 +129,6 @@ fn connect_controller(keyring: &KeyringHandle, add_mode: bool) -> Arc<ConnectCon
     })
 }
 
-/// Fill B's form (trust anyway + a pasted token), dial it, and accept its credential offer, as
-/// the add page does; returns once the credential is recorded on B's row.
 fn add_b(controller: &Arc<ConnectController>) {
     let connection = expect_connection_controller();
     connection.set_credential_saver(controller.credential_saver());
@@ -156,7 +145,6 @@ fn add_b(controller: &Arc<ConnectController>) {
     pump_until("B's credential", || row(B_ENDPOINT).has_credential);
 }
 
-/// A cold restart over the same stores, then the unlock, then a switch to B: the whole contract.
 fn assert_restart_costs_one_prompt_and_b_opens_free() {
     let creds = creds();
     assert!(
@@ -252,10 +240,6 @@ fn muxr_target_a() -> muxr::connection::ConnectTarget {
     }
 }
 
-/// The one way an unlock legitimately costs a second prompt: the vault holds a token for an
-/// endpoint no credentialed row claims any more (a row removed or stripped of its credential
-/// without a vault rewrite), so the unlock prunes it with one write. It heals: the next unlock
-/// is back to one prompt. This matches the device's "two at unlock, then normal" shape.
 #[test]
 fn a_stale_vault_entry_costs_exactly_one_extra_write_at_one_unlock_then_heals() {
     let _g = serial();

@@ -23,14 +23,12 @@ use crate::features::sessions::domain::use_cases::{
 };
 use crate::net::wake::WakeReason;
 
-/// The sentinel [`SessionsController::resume_at`] holds while polling is
-/// running — no real navigator depth ever reaches it.
+/// Sentinel `SessionsController::resume_at` holds while polling runs; no real navigator depth reaches it.
 const NOT_PAUSED: usize = usize::MAX;
 
 pub const POLL_PERIOD_SECS: u32 = 3;
 
-/// Consecutive `Network` failures of the poll and wake refreshes (both feed
-/// the streak; they run only while connected) after which the screen reports
+/// Consecutive `Network` failures of the poll and wake refreshes after which the screen reports
 /// connection trouble; twice as many make it persistent.
 pub const RENEW_AFTER_FAILURES: u32 = 2;
 
@@ -39,20 +37,15 @@ fn is_connection_class(failure: &AppFailure) -> bool {
     matches!(failure, AppFailure::Network(_) | AppFailure::Auth(_))
 }
 
-/// What the failure streak says about the live connection, once per edge
-/// ([`SessionsController::take_trouble`]). `Auth` never counts: it reaches the
-/// connection's session renewal from the repositories.
+/// The failure streak's edge, reported once ([`SessionsController::take_trouble`]).
+/// `Auth` never counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionTrouble {
-    /// The streak reached [`RENEW_AFTER_FAILURES`].
     Started,
-    /// The streak reached twice [`RENEW_AFTER_FAILURES`].
     Persistent,
-    /// A success ended a streak that had reported trouble.
     Recovered,
 }
 
-/// One session as a non-live switcher face remembers it.
 fn glimpse_of(session: &Session) -> SessionGlimpse {
     SessionGlimpse {
         name: session.name.clone(),
@@ -67,8 +60,7 @@ fn glimpse_of(session: &Session) -> SessionGlimpse {
     }
 }
 
-/// How many inert Sessions snapshots (the switcher's cached peer cards) this
-/// process has built: what a suite reads to prove a closed stage builds none.
+/// Inert Sessions snapshots built in this process; a suite reads it to prove a closed stage builds none.
 pub fn snapshots_built_for_tests() -> usize {
     super::widgets::snapshots_built()
 }
@@ -90,44 +82,26 @@ pub struct SessionsController {
     kill: KillSession,
     pub sessions: RwSignal<Vec<Session>>,
     pub loaded: RwSignal<bool>,
-    /// Signals when the first `refresh()` has settled (completed, whether
-    /// success or failure), releasing the overlay that holds the loading rain.
+    /// Signals when the first `refresh()` has settled, success or failure; releases the loading-rain overlay.
     pub first_load_settled: RwSignal<bool>,
-    /// The Tablet detail's selection, keyed by [`Session::id`] — cleared by a
-    /// load whose set no longer carries that id.
+    /// The Tablet detail's selection, keyed by [`Session::id`]; cleared by a load whose set lacks that id.
     pub selected: RwSignal<Option<String>>,
-    /// The Tablet detail's agent list: the selected session's agents, most
-    /// urgent first. Fetched by [`refresh_agents`](Self::refresh_agents) on a
-    /// selection change and every poll tick while the detail shows them.
     pub agents: RwSignal<Vec<SessionAgent>>,
     repository: Arc<dyn SessionsRepository + Send + Sync>,
-    /// Where a successful list is remembered for the server switcher's
-    /// non-live faces: the app's last-seen handle and the connection naming
-    /// the endpoint it belongs to. Both resolved once, here; `None` (no
-    /// handle provided, as in every headless suite) makes
-    /// [`publish_glimpse`](Self::publish_glimpse) a no-op.
     glimpse_sink: Option<(LastSeenHandle, Arc<ConnectionController>)>,
-    /// Whether the detail pane is on screen — the page sets it from its size
-    /// class each build, so a Compact window never pays for the agent reads.
     detail_visible: AtomicBool,
-    /// The session [`agents`](Self::agents) belongs to, if any.
     agents_for: Mutex<Option<String>>,
-    /// Bumped by every agents fetch and every retarget: only the newest fetch
-    /// for the current target publishes.
+    /// Bumped by every agents fetch and retarget: only the newest fetch for the current target publishes.
     agents_generation: AtomicU64,
-    /// The poll tick's own single-flight claim on the agents fetch, apart from
-    /// [`poll_in_flight`](Self::poll_in_flight): a hung agents read never stalls the list.
+    /// The poll tick's own single-flight claim on the agents fetch: a hung agents read never stalls the list.
     agents_in_flight: AtomicBool,
-    /// Whether the page shows a cached snapshot with no live connection behind
-    /// it: no poll, wake refresh or retry runs, and the page's actions are off.
+    /// A cached snapshot with no live connection behind it: no poll, wake refresh or retry runs.
     offline: AtomicBool,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
     generation: AtomicU64,
-    /// Consecutive `Network` failures of the poll and wake refreshes; reset by a success.
     failure_streak: AtomicU32,
-    /// The streak's latest unreported edge, taken by [`take_trouble`](Self::take_trouble).
     trouble: Mutex<Option<ConnectionTrouble>>,
 }
 
@@ -164,24 +138,19 @@ impl SessionsController {
         &self.core
     }
 
-    /// A refresh run on the user's behalf (after create, rename or kill):
-    /// every failure reaches the failure sink.
     pub async fn refresh(&self) {
         self.refresh_with(false).await;
     }
 
-    /// A refresh nobody asked for (first load, poll, wake, restart): a
-    /// connection-class failure (Network, Auth, not connected) is the banner's
-    /// to show and raises no toast; any other class still reaches the sink.
+    /// A refresh nobody asked for (first load, poll, wake, restart): connection-class failures
+    /// (Network, Auth, not connected) are the banner's and raise no toast.
     pub async fn refresh_background(&self) {
         self.refresh_with(true).await;
     }
 
-    /// Runs the list. `Some(outcome)` once its reply is current; `None` when a
-    /// newer refresh superseded it (neither a success nor a failure to count).
+    /// `Some(outcome)` once the reply is current; `None` when a newer refresh superseded it.
     async fn refresh_with(&self, background: bool) -> Option<Result<(), AppFailure>> {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        // Named before the await (see `glimpse_source`).
         let source = self.glimpse_source();
         let result = self
             .core
@@ -219,12 +188,6 @@ impl SessionsController {
         Some(outcome)
     }
 
-    /// Remember `sessions` as what the connected server last showed, for the
-    /// server switcher's non-live faces: the glimpse list and the whole page
-    /// state (list items as rendered plus the header facts) its snapshot card
-    /// re-renders. Plain data through the servers slice's last-seen handle;
-    /// does nothing without one, or with no connected server to file it under.
-    /// `source` is the handshake facts captured before the list awaited.
     fn publish_glimpse(&self, source: Option<ServerInfo>, sessions: &[Session]) {
         let (Some((handle, connection)), Some(info)) = (&self.glimpse_sink, source) else {
             return;
@@ -245,18 +208,15 @@ impl SessionsController {
         );
     }
 
-    /// The connected server's handshake facts, when a glimpse sink exists to
-    /// file them. Named before the list's await: a switch landing mid-list
-    /// must not file the old server's rows under the new endpoint.
+    /// Captured before the list awaits: a switch landing mid-list must not file the old server's
+    /// rows under the new endpoint.
     fn glimpse_source(&self) -> Option<ServerInfo> {
         let (_, connection) = self.glimpse_sink.as_ref()?;
         connection.server_info.get_untracked()
     }
 
-    /// Replace the list with a cached snapshot, without ever emptying it: the
-    /// rows swap in one write, the first load counts as settled, a reply still
-    /// in flight from the previous server is dropped, and a selection the
-    /// snapshot does not carry is forgotten.
+    /// Replaces the list with a cached snapshot without ever emptying it; a reply in flight from the
+    /// previous server is dropped and a selection the snapshot lacks is forgotten.
     pub fn seed_from(&self, page: &PageSnapshot) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.reset_streak();
@@ -269,30 +229,22 @@ impl SessionsController {
         self.retarget_agents();
     }
 
-    /// Mark whether the page is showing a snapshot with no live connection.
     pub fn set_offline(&self, offline: bool) {
         self.offline.store(offline, Ordering::Relaxed);
     }
 
-    /// Whether the page is showing a snapshot with no live connection.
     pub fn is_offline(&self) -> bool {
         self.offline.load(Ordering::Relaxed)
     }
 
-    /// The seeded connection landed: refresh in place (no clear, no restart,
-    /// no first-load flags reset) and let the poll run again. The rows are
-    /// replaced where the new list says so; a failed read keeps the snapshot.
     pub fn refresh_in_place(self: &Arc<Self>) {
         self.set_offline(false);
         let controller = Arc::clone(self);
         frust::spawn_local(async move { controller.refresh_background().await });
     }
 
-    /// Starts this mount over for a new connection: the generation bump drops
-    /// any in-flight refresh's reply (a stale poll, wake or mutation refresh
-    /// from the old server lands nowhere), the old server's list, selection and
-    /// agents go, the first-load flags reset so the loading rain can replay, the
-    /// poll gate is released, and the first load is kicked as `init` does.
+    /// Starts this mount over for a new connection: the generation bump drops any in-flight reply,
+    /// the old list, selection and agents go, and the first-load flags reset so the loading rain replays.
     pub fn restart(self: &Arc<Self>) {
         self.set_offline(false);
         self.generation.fetch_add(1, Ordering::SeqCst);
@@ -327,11 +279,8 @@ impl SessionsController {
         self.trouble.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Folds one poll or wake refresh into the failure streak. Only a `Network`
-    /// failure counts: the one making the streak [`RENEW_AFTER_FAILURES`] long
-    /// raises [`ConnectionTrouble::Started`], twice that `Persistent`; a
-    /// success resets it, raising `Recovered` if trouble was raised. Any other
-    /// failure leaves the streak as it is.
+    /// Folds one poll or wake refresh into the failure streak. Only `Network` failures count; a
+    /// success resets it, raising `Recovered` if trouble was raised.
     fn count_outcome(&self, outcome: Option<Result<(), AppFailure>>) {
         let edge = match outcome {
             Some(Err(AppFailure::Network(_))) => {
@@ -350,22 +299,17 @@ impl SessionsController {
         }
     }
 
-    /// The streak's latest edge not yet reported, clearing it: the page shows
-    /// it through the servers controller's banner.
     pub fn take_trouble(&self) -> Option<ConnectionTrouble> {
         self.trouble_slot().take()
     }
 
-    /// Whether a connection is up behind this page. A controller built with no
-    /// connection to consult (headless suites) counts as connected.
     fn is_connected(&self) -> bool {
         self.glimpse_sink
             .as_ref()
             .is_none_or(|(_, connection)| connection.connected.get_untracked())
     }
 
-    /// The poll tick's agent fetch under its own single-flight claim: a tick finding the
-    /// previous tick's read still outstanding skips it.
+    /// A tick finding the previous tick's agents read still outstanding skips it.
     async fn refresh_agents_from_poll(&self) {
         if self.agents_in_flight.swap(true, Ordering::SeqCst) {
             return;
@@ -374,11 +318,8 @@ impl SessionsController {
         self.refresh_agents().await;
     }
 
-    /// Record whether the detail pane is on screen — the page's size class,
-    /// forwarded each build. On a hidden-to-visible edge with a selected live session
-    /// the controller fetches its agents at once (its own task, so the page does no I/O);
-    /// on a visible-to-hidden edge the list is cleared. A repeat of the same value is a
-    /// plain no-op.
+    /// On a hidden-to-visible edge with a selected live session the agents are fetched at once; on
+    /// visible-to-hidden the list is cleared. A repeat of the same value is a no-op.
     pub fn set_detail_visible(self: &Arc<Self>, visible: bool) {
         let was = self.detail_visible.swap(visible, Ordering::Relaxed);
         if was == visible {
@@ -390,8 +331,6 @@ impl SessionsController {
         }
     }
 
-    /// The session whose agents the detail shows now: the selected one, while
-    /// the detail is visible, the session is live and its roll-up names agents.
     fn agents_target(&self) -> Option<String> {
         if !self.detail_visible.load(Ordering::Relaxed) {
             return None;
@@ -407,9 +346,6 @@ impl SessionsController {
         wanted.then_some(selected)
     }
 
-    /// Point [`agents`](Self::agents) at [`agents_target`](Self::agents_target):
-    /// on a change the list empties at once and any fetch in flight for the old
-    /// target lands nowhere. Answers the current target.
     fn retarget_agents(&self) -> Option<String> {
         let target = self.agents_target();
         let mut current = self
@@ -425,11 +361,8 @@ impl SessionsController {
         target
     }
 
-    /// Fetch the detail's agents for the current target — on a selection change
-    /// and on every poll tick, so a status swap that leaves the roll-up's counts
-    /// alone still reaches the rows. Generation-guarded (an older fetch never
-    /// overwrites a newer one), never written after dispose, and a failure keeps
-    /// the last list for the next tick to retry.
+    /// Generation-guarded (an older fetch never overwrites a newer one) and never written after
+    /// dispose; a failure keeps the last list for the next tick to retry.
     pub async fn refresh_agents(&self) {
         let Some(target) = self.retarget_agents() else {
             return;
@@ -450,7 +383,6 @@ impl SessionsController {
         }
     }
 
-    /// Whether the hosted state is still mounted — `false` once disposed.
     fn alive(&self) -> bool {
         !self.core.is_disposed() && self.agents.try_with_untracked(|_| ()).is_some()
     }
@@ -462,14 +394,10 @@ impl SessionsController {
         }
     }
 
-    /// The wake reaction: one refresh through the poll's own single-flight
-    /// gate ([`take_poll_tick`](Self::take_poll_tick)), so a wake that lands
-    /// while a poll (or an earlier wake) is in flight starts nothing. Returns
-    /// whether it started a refresh.
+    /// The wake reaction: one refresh through the poll's single-flight gate, so a wake during a poll
+    /// starts nothing. Returns whether it started one.
     ///
-    /// A wake on a first load that settled *failed* (the Retry state, where
-    /// no poll runs) re-runs that load instead, through the same claim; a
-    /// wake before the first load settles still starts nothing.
+    /// A wake on a first load that settled failed (no poll runs) re-runs that load instead.
     pub async fn refresh_on_wake(&self) -> bool {
         if !self.take_poll_tick() && !self.take_retry() {
             return false;
@@ -478,9 +406,6 @@ impl SessionsController {
         true
     }
 
-    /// Claims the poll gate for a re-run of a settled-but-failed first load.
-    /// Honours the same covered-screen pause as
-    /// [`take_poll_tick`](Self::take_poll_tick).
     fn take_retry(&self) -> bool {
         self.is_polling()
             && !self.is_offline()
@@ -490,17 +415,13 @@ impl SessionsController {
             && !self.poll_in_flight.swap(true, Ordering::SeqCst)
     }
 
-    /// Re-runs a failed first load; its success sets `loaded`, the gate
-    /// [`take_poll_tick`](Self::take_poll_tick) reads, so the poll re-arms.
     pub async fn retry_first_load(&self) {
         if !self.loaded.get_untracked() {
             self.refresh_background().await;
         }
     }
 
-    /// Points the Tablet detail at `id`. **Unchecked**: an id that is not in
-    /// the loaded set is stored as given (the detail pane tolerates an unknown
-    /// id and shows its empty state), and the next refresh forgets it.
+    /// **Unchecked**: an id outside the loaded set is stored as given and the next refresh forgets it.
     pub fn select(&self, id: &str) {
         if self.selected.get_untracked().as_deref() != Some(id) {
             self.selected.set(Some(id.to_string()));
@@ -508,9 +429,6 @@ impl SessionsController {
         self.retarget_agents();
     }
 
-    /// A Tablet card tap: [`select`](Self::select), then fetch the detail's agents
-    /// without waiting for the next poll tick. The fetch is the controller's own
-    /// task, so the page only forwards the tap.
     pub fn select_and_refresh_agents(self: &Arc<Self>, id: &str) {
         self.select(id);
         let controller = Arc::clone(self);
@@ -551,11 +469,8 @@ impl SessionsController {
             )
             .await;
         if let Ok(renamed) = renamed {
-            // The repository mints the id from the name (`<backend>:<name>`),
-            // so a rename moves it: follow it, or the refresh would find the
-            // old id gone and clear the selection. Only while the selection
-            // still holds the old id (or a refresh in flight cleared it as
-            // vanished): one the user moved elsewhere stays put.
+            // The repository mints the id from the name, so a rename moves it: follow it while the selection
+            // still holds the old id (or a refresh cleared it); one the user moved elsewhere stays put.
             let current = self.selected.get_untracked();
             if was_selected && (current.is_none() || current.as_deref() == Some(old_id.as_str())) {
                 self.selected.set(Some(renamed.id));
@@ -575,9 +490,6 @@ impl SessionsController {
         }
     }
 
-    /// The session with `id` in the last loaded set, if it is still there —
-    /// how an action closure (which captured only an id) recovers the current
-    /// name to seed the rename dialog with.
     pub fn session(&self, id: &str) -> Option<Session> {
         self.sessions
             .get_untracked()
@@ -597,29 +509,20 @@ impl SessionsController {
         poll
     }
 
-    /// Whether the mock poll is currently running (i.e. nothing this screen
-    /// pushed is still on top of it).
     pub fn is_polling(&self) -> bool {
         self.resume_at.load(Ordering::Relaxed) == NOT_PAUSED
     }
 
-    /// Poll ticks actually taken so far — observability for the pause's tests,
-    /// never read by the UI.
     pub fn polls_taken(&self) -> u32 {
         self.polls.load(Ordering::Relaxed)
     }
 
-    /// Pause the poll until the navigator stack is back at `depth` — called by
-    /// the screen with `nav.depth()` *before* it pushes anything. Repeated
-    /// calls keep the shallowest mark, so a dialog opened over an already
-    /// paused screen doesn't shorten the pause.
+    /// Pause the poll until the navigator stack is back at `depth`. Repeated calls keep the
+    /// shallowest mark.
     pub fn pause_until_depth(&self, depth: usize) {
         self.resume_at.fetch_min(depth, Ordering::Relaxed);
     }
 
-    /// Observe the live navigator depth (called from the screen's `build`) and
-    /// resume the poll once the stack is back at — or below — the mark
-    /// [`pause_until_depth`](Self::pause_until_depth) set.
     pub fn observe_depth(&self, depth: usize) {
         let mark = self.resume_at.load(Ordering::Relaxed);
         if mark != NOT_PAUSED && depth <= mark {
@@ -634,17 +537,13 @@ impl AsRef<ControllerCore<AppFailure>> for SessionsController {
     }
 }
 
-/// Calls `on_wake` once per burst of wakes on `wakes`, until `cancel` is
-/// notified or the bus closes. The burst reports its strongest reason:
-/// [`WakeReason::NetworkChanged`] if any wake in it was one. A lagged receiver
-/// means wakes were dropped, which still means "a wake happened": it is
-/// treated as a wake, never an error, and (its reasons being lost) as a
-/// network change, the side that errs towards a redial. The already-queued
-/// wakes are coalesced into the same single call.
+/// Calls `on_wake` once per burst of wakes on `wakes`, until `cancel` is notified or the bus
+/// closes. The burst reports its strongest reason: [`WakeReason::NetworkChanged`] if any wake was
+/// one. A lagged receiver counts as a wake, never an error, and as a network change (errs towards
+/// a redial).
 ///
-/// `cancel` is raced against the wait itself, so a stopped screen's loop ends
-/// at once rather than at its next wake. `Notify` keeps a permit when nobody
-/// is waiting, so a cancel that lands between waits is not lost.
+/// `cancel` is raced against the wait itself, so a stopped screen's loop ends at once; `Notify`
+/// keeps a permit, so a cancel between waits is not lost.
 pub async fn each_wake(
     mut wakes: broadcast::Receiver<WakeReason>,
     cancel: &Notify,
@@ -669,8 +568,7 @@ pub async fn each_wake(
     }
 }
 
-/// One wait on `wakes`, or `None` the moment `cancel` fires. `cancel` is
-/// polled first, so a pending cancel beats a ready wake.
+/// One wait on `wakes`, or `None` the moment `cancel` fires; a pending cancel beats a ready wake.
 async fn recv_or_cancel(
     wakes: &mut broadcast::Receiver<WakeReason>,
     cancel: &Notify,
@@ -695,20 +593,15 @@ mod tests {
         CreateSessionParams, LayoutSummary, SessionStatus, ThirdMetric,
     };
 
-    /// How many sessions the mock repository seeds (the redesign's three
-    /// cards) — named here so a reseed moves one constant, not six literals.
     const SEEDED_COUNT: usize = 3;
 
-    /// The test-wiring composition root: the mock repository behind the domain
-    /// trait object. `#[cfg(test)]`-only wiring, so `di.rs` stays the only
-    /// production site where presentation meets `data` (huddle's convention).
+    /// Test wiring: the mock repository behind the domain trait object; `di.rs` stays the only
+    /// production site where presentation meets `data`.
     fn controller() -> SessionsController {
         SessionsController::new(Arc::new(MockSessionsRepository::seeded()))
     }
 
-    /// Drive a controller call to completion on a current-thread runtime.
-    /// These tests exercise the controller's own logic, with no frust
-    /// executor/owner in play (`RwSignal`s work fine outside one).
+    /// Drive a controller call to completion on a current-thread runtime, with no frust executor.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -845,7 +738,6 @@ mod tests {
         block_on(c.refresh());
         let before = c.sessions.get_untracked();
 
-        // No such session — the mock maps an unknown id to `Internal`.
         block_on(c.kill("nope".to_string()));
 
         assert_eq!(c.sessions.get_untracked(), before);
@@ -868,17 +760,14 @@ mod tests {
         block_on(c.refresh());
         assert!(c.is_polling());
 
-        // The screen sits at depth 1 and pushes something over itself.
         c.pause_until_depth(1);
         assert!(!c.is_polling(), "the poll pauses for the pushed page");
         assert!(!c.take_poll_tick());
         assert_eq!(c.polls_taken(), 0, "a skipped tick is not counted");
 
-        // Still covered: a build at depth 2 must not resume it.
         c.observe_depth(2);
         assert!(!c.is_polling());
 
-        // Popped back: the next build resumes it.
         c.observe_depth(1);
         assert!(c.is_polling());
         assert!(c.take_poll_tick());
@@ -890,7 +779,6 @@ mod tests {
         block_on(c.refresh());
 
         c.pause_until_depth(1);
-        // A dialog opened *over* the pushed page must not shorten the pause.
         c.pause_until_depth(2);
         c.observe_depth(2);
         assert!(!c.is_polling(), "still covered by the first push");
@@ -985,7 +873,6 @@ mod tests {
         assert!(c.take_poll_tick(), "the successful retry re-arms the poll");
     }
 
-    /// Fails its first `list_sessions`, then answers like the seeded mock.
     #[derive(Default)]
     struct FailOnceSessionsRepository {
         calls: AtomicUsize,
@@ -1015,7 +902,6 @@ mod tests {
         }
     }
 
-    /// A test repository whose list_sessions returns an error.
     struct FailingSessionsRepository;
 
     #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -1084,8 +970,6 @@ mod tests {
         );
     }
 
-    /// [`block_on`] under a `LocalSet`, so a test can `spawn_local` the
-    /// refreshes a wake starts and await them.
     fn local_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -1141,8 +1025,7 @@ mod tests {
         use crate::net::wake::WakeBus;
 
         let repo = Arc::new(GatedSessionsRepository::new(2));
-        // The first load goes straight through; the poll's refresh parks on
-        // call 1.
+        // The first load goes straight through; the poll's refresh parks on call 1.
         repo.release_call(0);
         let c = Arc::new(SessionsController::new(
             Arc::clone(&repo) as Arc<dyn SessionsRepository + Send + Sync>
@@ -1236,9 +1119,7 @@ mod tests {
     fn a_stopped_screen_ends_its_wake_loop_without_waiting_for_a_wake() {
         use crate::net::wake::WakeBus;
 
-        // The bus stays open and nothing is published: only the cancel can
-        // end the loop. (Retargeted from "on the next wake": the loop used to
-        // outlive its screen until one arrived.)
+        // The bus stays open and nothing is published: only the cancel can end the loop.
         let bus = WakeBus::new();
         let wakes = bus.subscribe();
         let cancel = Notify::new();

@@ -1,9 +1,5 @@
-//! `pro` domain — entities, the store contract, and use cases.
-//! Framework-free: never imports `frust::` or a `data`/`presentation` path
-//! segment.
-//!
-//! Deviation: [`entities`] reads `connect`'s own `SavedServer` rather than
-//! minting a second saved-server type — see that module's docs.
+//! `pro` domain: framework-free; never imports `frust::` or a `data`/`presentation` path.
+//! `entities` reads `connect`'s `SavedServer` instead of minting a second saved-server type.
 
 pub mod entities;
 pub mod repositories;

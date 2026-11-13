@@ -1,17 +1,5 @@
-//! The session guard at the **shell boundary**: what happens to the scaffold
-//! page when a navigation resolves out of the connected subtree.
-//!
-//! `tests/routes.rs` owns the guard as a pure redirect (which path resolves to
-//! which) and `tests/navigation_motion.rs` owns the bar; this suite owns the
-//! outer page stack across that boundary — placement, unwind, re-placement —
-//! because the defect it pins shut is a *stack shape*: a bounce that pushed
-//! Connect over a live shell page left the authenticated inner navigator
-//! retained underneath it, reachable again by the next in-shell navigation and
-//! by a platform back press, neither of which re-runs the guard.
-//!
-//! Depth here is the **outer** navigator's: `1` is Connect alone, `2` is the
-//! shell page over it. In-shell navigation never moves it (`navigation_motion`'s
-//! own note), so a depth of 2 is exactly "the scaffold is on the stack".
+//! The session guard at the shell boundary: placement, unwind and re-placement of the scaffold page.
+//! Depth is the outer navigator's: 1 is Connect alone, 2 is the shell page over it.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -31,8 +19,6 @@ use support::{node_labels, node_roles, node_values, serial, settle, setup};
 
 const HOST: &str = "mock.example";
 const PORT: u16 = 7777;
-/// The bar's brand wordmark and its back affordance's accessible name —
-/// transcribed rather than imported, like `tests/navigation_motion.rs` does.
 const BRAND: &str = "muxr";
 const BACK: &str = "Back";
 
@@ -49,7 +35,6 @@ fn mock_target() -> ConnectTarget {
     }
 }
 
-/// Burn this process's one cold-start splash claim, so no test mounts under it.
 fn spend_cold_start() {
     static SPENT: OnceLock<()> = OnceLock::new();
     SPENT.get_or_init(|| {
@@ -60,7 +45,6 @@ fn spend_cold_start() {
 
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
-/// The whole app, warm-started under the Glyph theme.
 struct Harness {
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
@@ -83,7 +67,6 @@ impl Harness {
         harness
     }
 
-    /// Mount, connect (mock), and land on `/sessions` the way Connect does.
     fn connected() -> Self {
         let mut harness = Harness::mount();
         harness.connect();
@@ -142,7 +125,6 @@ fn press_back(h: &mut Harness) {
     h.settle();
 }
 
-/// Assert the app is on Connect with nothing of the shell left on the stack.
 fn assert_unwound(h: &Harness) {
     assert_eq!(
         h.depth(),
@@ -156,9 +138,6 @@ fn assert_unwound(h: &Harness) {
     );
 }
 
-/// Assert the shell is placed and showing its landing route's face — the brand,
-/// the connected host, and no back affordance (a fresh inner navigator, one
-/// page deep).
 fn assert_landed_fresh(h: &Harness) {
     assert_eq!(h.depth(), 2, "the shell page is on the outer stack");
     assert!(h.has_bar(), "…with its bar: {:?}", node_roles(&h.root));
@@ -187,9 +166,6 @@ fn a_navigation_after_the_session_expires_unwinds_the_shell_instead_of_covering_
     h.push("/terminal?session=s-1");
     assert_eq!(h.depth(), 2, "an in-shell push moves no outer page");
 
-    // The server revoked the token (or restarted): the controller tears the
-    // connection down where it stands, and nothing navigates — the guard fires
-    // at navigation time, so the stale screen is still up.
     expect_connection_controller().on_session_expired();
     h.settle();
     assert!(!connected());
@@ -268,9 +244,6 @@ fn a_go_into_the_shell_carries_the_dismiss_cell_a_push_would() {
     h.connect();
     let before = sessions_back_signal();
 
-    // The latent cold-link case: a `go` straight into the connected subtree
-    // places the scaffold itself, so it has to carry the back contract a push
-    // places it with.
     h.go("/sessions");
 
     assert_landed_fresh(&h);

@@ -1,73 +1,6 @@
-//! [`ServersSwitcherController`] — the server switcher's view model.
-//!
-//! **App-scoped**, built once by [`crate::features::servers::di`]: the stage
-//! is raised over the shell by the shell host, and this controller owns what
-//! that host reads — whether the stage is [`open`](Self::open), the strip's
-//! [`faces`](Self::faces), which peer card is [`expanding`](Self::expanding)
-//! into the live page, and which endpoint a switch is [`busy`](Self::busy)
-//! dialing.
-//!
-//! **Strip order.** `faces` keeps one stable per-process order (the saved
-//! list's stored order on first build, new rows appended, removed rows
-//! dropped; a connect, switch or keyring lock never reorders it). The live
-//! card is the switcher component's real page at its own slot, so the
-//! component's *peers* are the faces that are not [`FaceKind::Live`], in
-//! order. [`peer_endpoints`] is that
-//! mapping and [`select`](ServersSwitcherController::select) takes the
-//! component's peer index through it.
-//!
-//! **A switch** ([`select`](ServersSwitcherController::select)) sets
-//! `expanding` first, so the skin grows the card while the work runs, then:
-//! the free-tier verdict (blocked raises the paywall through the caller's
-//! [`SwitchGate`], clears `expanding`, dials nothing); a row that claims no
-//! credential is handed to the add-server page instead of being dialed; a
-//! locked keyring gets `connect`'s page-agnostic [`KeyringUnlock`] — one
-//! prompt — and the dial then goes through
-//! [`KeyringUnlock::switch_to_saved`] with the keyring's token. When the
-//! connection settles, `open` and `expanding` are cleared together (two
-//! writes with nothing between them and the next frame), so the shell host
-//! rebuilds around the new server. A failure clears `expanding` (the ramp
-//! reverses, the stage stays open) and marks that face
-//! [`FaceKind::Failed`]; a second tap retries.
-//!
-//! **A cached switch** (the target has a [`PageSnapshot`] in the last-seen map)
-//! commits instead of waiting: once the select path has vetted the row it
-//! publishes a [`ReconnectSeed`] (the Sessions page seeds itself from it and
-//! stays on screen, actions off), closes the stage at once, dials in the
-//! background. The target counts as live while that dial is in flight, so the
-//! strip names it. `Connecting` shows only if the dial is still pending after
-//! `banner_connecting_delay_ms`; landing then flips it to `Connected` for
-//! `banner_success_ms` (a dial that lands first shows no banner), then clears it; a failure shows `Failed` until the next
-//! switch or `banner_failure_ms` and marks the face failed. Every banner change
-//! bumps a generation that fences the clearing timers. A second select while a
-//! background dial is in flight supersedes it (the connection is torn down and
-//! the new switch dials). A target with no cached page keeps the stage-held path.
-//! The background dial is quiet: its failure is the banner's and the face's to
-//! show, never also a toast.
-//!
-//! **A renewal** ([`reconnect_live`](ServersSwitcherController::reconnect_live))
-//! is the same background dial aimed at the live server itself, with the stage
-//! left as it is — what `di` installs as the connection's
-//! [`SessionRenewer`](crate::connection::SessionRenewer), so an expired session
-//! logs back in under the banner instead of dropping to Connect. It is
-//! single-flight against any background dial in flight.
-//!
-//! **A pending reconnect.** A background dial (cached switch or renewal) that
-//! fails with a network failure while nothing else connected keeps its target
-//! pending: the seeded page and the `Failed` banner stay (no auto-clear), and
-//! the target is redialed on every [`retry_pending`](ServersSwitcherController::retry_pending)
-//! (the Sessions wake loop) and on a backoff timer ([`retry_backoff`]). A user
-//! switch, a lock, a successful connect or the Sessions screen leaving cancels
-//! it; a keyring that no longer holds the token drops it.
-//!
-//! **Connection trouble.** [`report_trouble`](ServersSwitcherController::report_trouble)
-//! and [`report_recovered`](ServersSwitcherController::report_recovered) put a
-//! live connection's failing polls under the same banner without touching the
-//! connection; a background dial in flight owns the banner and they yield.
-//!
-//! No `Nav`, overlay or other `Rc` handle is stored: the caller lends them per
-//! call ([`SwitchGate`], [`lock`](ServersSwitcherController::lock)), which
-//! keeps this controller `Send + Sync`.
+//! [`ServersSwitcherController`]: the app-scoped server switcher view model, built once by [`crate::features::servers::di`].
+//! The strip keeps a stable per-process order; the component's peers are the faces that are not [`FaceKind::Live`], in order ([`peer_endpoints`]).
+//! No `Nav`, overlay or other `Rc` handle is stored: callers lend them per call, which keeps the controller `Send + Sync`.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -95,12 +28,9 @@ use crate::features::servers::domain::entities::{
 use crate::routes::{ADD_SERVER_LOCATION, Nav, add_server_location};
 use crate::ui::toasts::app_toasts;
 
-/// Shown on a face whose credential could not be found once unlocked.
 const NO_CREDENTIAL_MESSAGE: &str = "No saved credential found.";
-/// Where a lock sends the app: Connect.
 const LOCKED_LOCATION: &str = "/";
 
-/// The pending reconnect's backoff: the first delays, then [`RETRY_BACKOFF_CAP`].
 const RETRY_BACKOFF: [Duration; 4] = [
     Duration::from_secs(5),
     Duration::from_secs(10),
@@ -108,10 +38,8 @@ const RETRY_BACKOFF: [Duration; 4] = [
     Duration::from_secs(40),
 ];
 const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(60);
-/// A uniform backoff a suite pinned, ms; `0` is the real schedule.
 static RETRY_BACKOFF_OVERRIDE_MS: AtomicU64 = AtomicU64::new(0);
 
-/// The delay before retry `attempt` (0-based) of a pending reconnect.
 pub fn retry_backoff(attempt: u32) -> Duration {
     match RETRY_BACKOFF_OVERRIDE_MS.load(Ordering::Relaxed) {
         0 => RETRY_BACKOFF
@@ -122,42 +50,30 @@ pub fn retry_backoff(attempt: u32) -> Duration {
     }
 }
 
-/// Pins every backoff delay to `ms` (process-wide); `None` restores the schedule.
 pub fn set_retry_backoff_for_tests(ms: Option<u64>) {
     RETRY_BACKOFF_OVERRIDE_MS.store(ms.unwrap_or(0), Ordering::Relaxed);
 }
 
-/// Navigation lent to a close that leaves the app disconnected.
 type Landing = Rc<dyn Fn(&str)>;
 
 thread_local! {
-    /// How a close that leaves the app disconnected navigates (installed by
-    /// `di::provide_controller`; unset in a process without the shell, where
-    /// a close simply closes).
+    /// Installed by `di::provide_controller`; unset without the shell, where a close simply closes.
     static LANDING: RefCell<Option<Landing>> = const { RefCell::new(None) };
 }
 
-/// Install how [`ServersSwitcherController::close`] reaches Connect.
 pub fn install_landing(go: Landing) {
     LANDING.with(|cell| *cell.borrow_mut() = Some(go));
 }
 
-/// A follow-on the paywall runs once Pro is unlocked.
 pub type Retry = Rc<dyn Fn()>;
 
-/// The two pieces of UI a switch can need, lent by the caller per
-/// [`select`](ServersSwitcherController::select).
 #[derive(Clone)]
 pub struct SwitchGate {
-    /// Raise the paywall; run the given retry once Pro is unlocked.
     pub paywall: Rc<dyn Fn(Retry)>,
-    /// Open the add-server page prefilled with this endpoint.
     pub add_server: Rc<dyn Fn(String)>,
 }
 
 impl SwitchGate {
-    /// The gate wired to the real paywall sheet over `overlays` and the
-    /// add-server page behind `nav`.
     pub fn standard(
         overlays: &NavigatorController<AppState>,
         pro: &Arc<ProController>,
@@ -182,8 +98,6 @@ impl SwitchGate {
     }
 }
 
-/// The endpoints of the component's peer cards, in peer order: every face but
-/// the live one.
 pub fn peer_endpoints(faces: &[ServerFace]) -> Vec<String> {
     faces
         .iter()
@@ -192,7 +106,6 @@ pub fn peer_endpoints(faces: &[ServerFace]) -> Vec<String> {
         .collect()
 }
 
-/// What the Sessions page seeds itself from when a cached switch commits.
 /// `generation` is unique per commit, so the page applies each seed once.
 #[derive(Clone, Debug)]
 pub struct ReconnectSeed {
@@ -202,7 +115,6 @@ pub struct ReconnectSeed {
     pub page: Arc<PageSnapshot>,
 }
 
-/// The app bar banner's state for a background reconnect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReconnectBanner {
     Connecting { host: String },
@@ -211,7 +123,6 @@ pub enum ReconnectBanner {
 }
 
 impl ReconnectBanner {
-    /// The strip's text for this state.
     pub fn text(&self) -> String {
         match self {
             Self::Connecting { host } => format!("Connecting to {host}\u{2026}"),
@@ -221,8 +132,7 @@ impl ReconnectBanner {
     }
 }
 
-/// The background dial in flight: its target and the seed generation that
-/// started it. `dialed` is the connection's dial generation once it is known.
+/// `dialed` is the connection's dial generation once it is known.
 #[derive(Clone, Debug)]
 struct BackgroundDial {
     endpoint: String,
@@ -230,62 +140,39 @@ struct BackgroundDial {
     dialed: Option<u64>,
 }
 
-/// A failed background dial's target, redialed until something supersedes it.
-/// `attempt` indexes [`retry_backoff`].
 #[derive(Clone, Debug)]
 struct PendingReconnect {
     endpoint: String,
     attempt: u32,
 }
 
-/// The server switcher's view model. See the [module docs](self).
 pub struct ServersSwitcherController {
     saved_servers: SavedServers,
     connection: Arc<ConnectionController>,
     pro: Arc<ProController>,
     keyring_unlock: KeyringUnlock,
     last_seen: LastSeenHandle,
-    /// Whether the stage is up.
     pub open: RwSignal<bool>,
-    /// The strip in its stable order (see the [module docs](self)).
     pub faces: RwSignal<Vec<ServerFace>>,
-    /// The peer index growing into the live page, while a switch runs.
     pub expanding: RwSignal<Option<usize>>,
-    /// The endpoint a switch is working on — its single-flight claim.
     pub busy: RwSignal<Option<String>>,
-    /// Endpoint to the message of its last failed switch.
     pub failures: RwSignal<BTreeMap<String, String>>,
-    /// Bumped by every [`close`](Self::close) and lock: a switch captures it
-    /// and abandons silently when it moved while an unlock or confirm was
-    /// pending, so a dismissed stage never dials.
+    /// Bumped by every close and lock: a switch captures it and abandons silently when it moved, so a dismissed stage never dials.
     stage_epoch: AtomicU64,
-    /// The connection's dial generation under which the in-flight claim's dial
-    /// was started, once it is dialing (`None` while it is still unlocking or
-    /// confirming). The connection drops a dial's `on_done` when a teardown or
-    /// a newer dial supersedes it, so a claim whose generation moved can never
-    /// be released by its dial: [`Self::release_if_stale`] does it.
+    /// The dial generation the in-flight claim started under. The connection drops a superseded dial's `on_done`, so [`Self::release_if_stale`] releases such a claim.
     dial_claim: Mutex<Option<u64>>,
-    /// The keyring's `lock_epoch` the last-seen map and recorded failures
-    /// were last reconciled with; a move means a lock happened somewhere.
+    /// Keyring `lock_epoch` last reconciled; a move means a lock happened somewhere.
     seen_lock_epoch: AtomicU64,
-    /// The strip's endpoint order for this process.
     strip_order: Mutex<Vec<String>>,
-    /// The cached page the latest committed switch seeded (see the
-    /// [module docs](self)); kept until the next commit or a lock.
     pub seed: RwSignal<Option<Arc<ReconnectSeed>>>,
-    /// The app bar's connection banner, `None` when closed.
     pub banner: RwSignal<Option<ReconnectBanner>>,
     /// Bumped by every banner change: a clearing timer fires only if it still holds.
     banner_generation: AtomicU64,
-    /// Source of [`ReconnectSeed::generation`].
     seed_generation: AtomicU64,
-    /// The background dial in flight, if any.
     bg: Mutex<Option<BackgroundDial>>,
-    /// The failed background dial waiting for a retry, if any.
     pending: Mutex<Option<PendingReconnect>>,
     /// Bumped by every retry and cancel: a backoff timer fires only if it still holds.
     retry_generation: AtomicU64,
-    /// Whether the banner is showing a live connection's trouble report.
     trouble: AtomicBool,
 }
 
@@ -331,9 +218,7 @@ impl ServersSwitcherController {
         }
     }
 
-    /// Re-read the strip from the saved list, the live connection, the
-    /// keyring, the last-seen map and the recorded failures. A saved list that
-    /// cannot be read leaves the previous strip in place.
+    /// A saved list that cannot be read leaves the previous strip in place.
     pub fn refresh_faces(&self) {
         self.release_if_stale();
         self.release_bg_if_stale();
@@ -365,8 +250,7 @@ impl ServersSwitcherController {
         self.faces.set(faces);
     }
 
-    /// A pending reconnect whose server was forgotten has nothing to redial:
-    /// invalidate its backoff and close the `Failed` banner it held.
+    /// A forgotten server's pending reconnect is cancelled and its `Failed` banner closed.
     fn drop_pending_if_forgotten(&self, saved: &[SavedServer]) {
         let forgotten = self
             .pending()
@@ -377,14 +261,11 @@ impl ServersSwitcherController {
         }
     }
 
-    /// How many times the retry backoff was invalidated or re-armed. For tests.
     #[doc(hidden)]
     pub fn retry_generation_for_tests(&self) -> u64 {
         self.retry_generation.load(Ordering::SeqCst)
     }
 
-    /// Forget what a keyring lock (from any page) invalidated, and any failure
-    /// of the endpoint now connected.
     fn reconcile_memory(&self, active: Option<&str>) {
         let lock_epoch = self.keyring_unlock.keyring().lock_epoch();
         if self.seen_lock_epoch.swap(lock_epoch, Ordering::SeqCst) != lock_epoch {
@@ -405,15 +286,13 @@ impl ServersSwitcherController {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Give up the in-flight claim: `busy` and `expanding` together.
     fn release_claim(&self) {
         *self.claim() = None;
         self.busy.set(None);
         self.expanding.set(None);
     }
 
-    /// Release a claim whose dial can no longer report: it dialed under a
-    /// connection generation that a teardown or a newer dial has moved past.
+    /// Releases a claim whose dial cannot report because a teardown or newer dial moved the generation.
     fn release_if_stale(&self) {
         if self.busy.get_untracked().is_none() {
             return;
@@ -428,8 +307,6 @@ impl ServersSwitcherController {
         self.bg.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Drop a background dial the connection can no longer report on (a
-    /// teardown or a newer dial moved its generation), closing its banner.
     fn release_bg_if_stale(&self) {
         let stale = self.bg().as_ref().is_some_and(|bg| {
             bg.dialed
@@ -441,8 +318,7 @@ impl ServersSwitcherController {
         }
     }
 
-    /// Show `banner` (or close the strip), fencing every earlier timer.
-    /// Answers the new banner generation.
+    /// Fences every earlier timer; answers the new banner generation.
     fn set_banner(&self, banner: Option<ReconnectBanner>) -> u64 {
         let generation = self.banner_generation.fetch_add(1, Ordering::SeqCst) + 1;
         if self.banner.get_untracked() != banner {
@@ -451,7 +327,6 @@ impl ServersSwitcherController {
         generation
     }
 
-    /// Close the banner after `after_ms`, unless another change came first.
     fn clear_banner_later(self: &Arc<Self>, generation: u64, after_ms: u64) {
         let controller = Arc::clone(self);
         spawn_local(async move {
@@ -462,7 +337,6 @@ impl ServersSwitcherController {
         });
     }
 
-    /// Show `Connecting` for `host` after the delay, unless the banner changed first.
     fn show_connecting_later(self: &Arc<Self>, generation: u64, host: String) {
         let controller = Arc::clone(self);
         spawn_local(async move {
@@ -474,16 +348,12 @@ impl ServersSwitcherController {
         });
     }
 
-    /// The host the Sessions page is still showing from a cached switch while
-    /// the connection is down: what the bar's title reads in place of the
-    /// disconnected name. Tracked.
+    /// The host the Sessions page still shows from a cached switch while the connection is down.
     pub fn offline_host(&self) -> Option<String> {
         let seed = self.seed.get()?;
         (!self.connection.connected.get()).then(|| seed.host.clone())
     }
 
-    /// The connected server's endpoint, if any; a background dial in flight
-    /// counts as its target being live.
     fn active_endpoint(&self) -> Option<String> {
         if let Some(bg) = self.bg().as_ref() {
             return Some(bg.endpoint.clone());
@@ -497,16 +367,12 @@ impl ServersSwitcherController {
             .map(|info| info.endpoint)
     }
 
-    /// Raise the stage over a fresh strip.
     pub fn open(&self) {
         self.refresh_faces();
         self.open.set(true);
     }
 
-    /// Dismiss the stage; a half-grown card shrinks back with it. With no
-    /// connection live or dialing (a failed switch tore the old one down) it
-    /// lands on Connect, as the lock chip does, rather than leave a
-    /// disconnected Sessions.
+    /// With no connection live or dialing (a failed switch tore the old one down) lands on Connect rather than a disconnected Sessions.
     pub fn close(&self) {
         self.close_with(|location| {
             if let Some(go) = LANDING.with(|cell| cell.borrow().clone()) {
@@ -515,7 +381,6 @@ impl ServersSwitcherController {
         });
     }
 
-    /// [`Self::close`] with the navigation lent as a closure.
     pub fn close_with(&self, go: impl FnOnce(&str)) {
         let was_open = self.open.get_untracked();
         self.close_stage();
@@ -527,15 +392,13 @@ impl ServersSwitcherController {
         }
     }
 
-    /// Take the stage down without any navigation.
     pub(crate) fn close_stage(&self) {
         self.stage_epoch.fetch_add(1, Ordering::SeqCst);
         self.expanding.set(None);
         self.open.set(false);
     }
 
-    /// Switch to the peer card at `peer_index` (resolved to its endpoint now,
-    /// at the tap). Ignored while a switch is in flight.
+    /// Ignored while a switch is in flight.
     pub fn select(self: &Arc<Self>, peer_index: usize, gate: &SwitchGate) {
         self.release_if_stale();
         if self.busy.get_untracked().is_some() {
@@ -546,9 +409,7 @@ impl ServersSwitcherController {
         }
     }
 
-    /// [`Self::select`] by endpoint — what the paywall's retry carries. Marks
-    /// the card `expanding` at once; the rest runs on the UI executor (an
-    /// unlock prompt may be pending). See the [module docs](self).
+    /// Marks the card `expanding` at once; the rest runs on the UI executor since an unlock prompt may be pending.
     pub fn select_endpoint(self: &Arc<Self>, endpoint: String, gate: &SwitchGate) {
         self.release_if_stale();
         if self.busy.get_untracked().is_some() {
@@ -574,7 +435,6 @@ impl ServersSwitcherController {
             .position(|peer| peer == endpoint)
     }
 
-    /// [`Self::select`]'s work for peer `peer_index`, awaitable.
     #[cfg(test)]
     pub async fn run_select(self: &Arc<Self>, peer_index: usize, gate: SwitchGate) {
         if let Some(endpoint) = self.endpoint_of_peer(peer_index) {
@@ -583,8 +443,7 @@ impl ServersSwitcherController {
         }
     }
 
-    /// The switch itself, awaitable. `epoch` is the stage epoch captured at
-    /// the tap: a stage dismissed since abandons the switch.
+    /// A stage dismissed since the tap's `epoch` abandons the switch.
     pub async fn run_select_endpoint(
         self: &Arc<Self>,
         endpoint: String,
@@ -641,10 +500,7 @@ impl ServersSwitcherController {
         self.vet_and_dial(endpoint, gate, epoch);
     }
 
-    /// Decide everything on a **fresh** row (the unlock may have taken a
-    /// while): gone -> abandon; no credential -> the add page; another
-    /// connect underway -> abandon; else dial (a saved trust-anyway row too).
-    /// `busy` is held by the caller.
+    /// Decides on a fresh row: gone or another connect underway abandons; no credential goes to the add page; else dial.
     fn vet_and_dial(self: &Arc<Self>, endpoint: String, gate: SwitchGate, epoch: u64) {
         let Some(row) = self.saved_row(&endpoint) else {
             self.abandon();
@@ -669,9 +525,7 @@ impl ServersSwitcherController {
         self.dial(&endpoint, epoch);
     }
 
-    /// Cancel the background dial in flight, if there is one: the connection is
-    /// torn down (its dial's outcome is dropped) so the next switch can dial.
-    /// `false` when the dial in flight is not a background one.
+    /// Tears the connection down so the next switch can dial; `false` when the dial in flight is not a background one.
     fn supersede_bg(&self) -> bool {
         if self.bg().take().is_none() {
             return false;
@@ -681,13 +535,11 @@ impl ServersSwitcherController {
         true
     }
 
-    /// The page `endpoint` last showed, if the last-seen map filed one.
     fn cached_page(&self, endpoint: &str) -> Option<Arc<PageSnapshot>> {
         self.last_seen.snapshot().get(endpoint)?.page.clone()
     }
 
-    /// The cached switch: seed the page, close the stage at once (no peers) and
-    /// dial in the background. `busy` is held by the caller and released here.
+    /// Seeds the page, closes the stage at once and dials in the background; `busy` is released here.
     fn commit_cached(self: &Arc<Self>, endpoint: &str, page: Arc<PageSnapshot>) {
         let epoch = self.stage_epoch.load(Ordering::SeqCst);
         let Some((token, row)) = self.credential_for(endpoint) else {
@@ -702,23 +554,7 @@ impl ServersSwitcherController {
         self.dial_bg(endpoint, &row, token, id);
     }
 
-    /// Renew the **live** server's session in place, in the background — what
-    /// an expired session asks for. Answers `false`
-    /// (the caller falls back: logs out, reports) when there is no live
-    /// server, its saved row claims no credential, or the keyring holds no
-    /// token for it (locked included). `true` means the renewal is this
-    /// controller's to report: it is underway, or a background dial for the
-    /// live server already is (single-flight — nothing more is started).
-    ///
-    /// The same machinery as a cached switch, with the stage left exactly as
-    /// it is: the Sessions page is seeded with the live server's own page (the
-    /// last-seen one, or one filed now from the connection's facts when none
-    /// was), so it stays on screen with its actions off while the connection
-    /// is down; `Connecting` shows only past the delay; landing flashes
-    /// `Connected`, a failure shows `Failed` and marks the face — never a toast
-    /// (the dial is quiet); a network failure leaves a pending reconnect.
-    ///
-    /// Runs on the UI thread, like every other entry point here.
+    /// Renews the live server's session in place, in the background. `false` means the caller falls back (no live server, no credential or no token); `true` means the renewal is this controller's to report, single-flight.
     pub fn reconnect_live(self: &Arc<Self>) -> bool {
         self.release_bg_if_stale();
         if self.bg().is_some() {
@@ -742,24 +578,17 @@ impl ServersSwitcherController {
         true
     }
 
-    /// The live server's endpoint (a background dial's target counts), if any —
-    /// what a renewal request is checked against.
     pub fn live_endpoint(&self) -> Option<String> {
         self.active_endpoint()
     }
 
-    /// The fresh saved row for `endpoint` and the keyring's token for it, only
-    /// while the row still claims a credential the keyring holds.
     fn credential_for(&self, endpoint: &str) -> Option<(Zeroizing<String>, SavedServer)> {
         self.saved_row(endpoint)
             .filter(|row| row.has_credential)
             .and_then(|row| Some((self.keyring_unlock.keyring().token_for(endpoint)?, row)))
     }
 
-    /// The page the live `endpoint` is showing, as the last-seen map filed it.
-    /// When nothing was filed yet (no list has landed on this connection) one
-    /// is filed now from the connection's facts, with no rows: there is no
-    /// list to keep, and the header must not drop to the disconnected one.
+    /// When nothing was filed yet, one is filed from the connection's facts with no rows, so the header does not drop to the disconnected one.
     fn live_page(&self, endpoint: &str) -> Arc<PageSnapshot> {
         if let Some(page) = self.cached_page(endpoint) {
             return page;
@@ -784,8 +613,6 @@ impl ServersSwitcherController {
         page
     }
 
-    /// Start background dial bookkeeping for `endpoint`: claim the in-flight
-    /// slot, arm the delayed `Connecting`, publish the seed. Answers its id.
     fn arm_bg(self: &Arc<Self>, endpoint: &str, host: String, page: Arc<PageSnapshot>) -> u64 {
         let id = self.seed_generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.bg() = Some(BackgroundDial {
@@ -794,8 +621,7 @@ impl ServersSwitcherController {
             dialed: None,
         });
         self.trouble.store(false, Ordering::SeqCst);
-        // `Connecting` shows only if the dial is still pending after the delay;
-        // any later banner change (landing, failure, a newer switch) fences it.
+        // `Connecting` shows only if the dial is still pending after the delay; any later banner change fences it.
         let pending = self.set_banner(None);
         self.show_connecting_later(pending, host.clone());
         self.seed.set(Some(Arc::new(ReconnectSeed {
@@ -807,8 +633,7 @@ impl ServersSwitcherController {
         id
     }
 
-    /// Dial background dial `id` through the quiet saved-row switch: its
-    /// outcome is the banner's and the face's to show, never a toast.
+    /// The outcome is the banner's and the face's to show, never a toast.
     fn dial_bg(
         self: &Arc<Self>,
         endpoint: &str,
@@ -834,7 +659,6 @@ impl ServersSwitcherController {
         }
     }
 
-    /// Takes background dial `id` if it is still the one in flight.
     fn finish_bg(&self, id: u64) -> bool {
         let mut bg = self.bg();
         if bg.as_ref().is_some_and(|dial| dial.id == id) {
@@ -844,7 +668,6 @@ impl ServersSwitcherController {
         false
     }
 
-    /// The background dial landed: flash `Connected`, then clear.
     fn settle_bg(self: &Arc<Self>, endpoint: &str, id: u64) {
         if !self.finish_bg(id) {
             return;
@@ -857,8 +680,7 @@ impl ServersSwitcherController {
         self.flash_connected();
     }
 
-    /// Flash `Connected` only if `Connecting` or `Failed` was shown (a retry
-    /// lands over `Failed`); else close the banner silently.
+    /// Flash `Connected` only if `Connecting` or `Failed` was shown (a retry lands over `Failed`); else close the banner silently.
     fn flash_connected(self: &Arc<Self>) {
         let shown = matches!(
             self.banner.get_untracked(),
@@ -875,10 +697,7 @@ impl ServersSwitcherController {
         );
     }
 
-    /// The background dial failed: the cached page stays, the face is marked,
-    /// the banner reads `Failed`. A `retryable` failure with nothing else
-    /// connected keeps the target pending (banner kept, backoff armed); any
-    /// other clears the banner after its timeout.
+    /// A `retryable` failure with nothing else connected keeps the target pending (banner kept, backoff armed); any other clears the banner after its timeout.
     fn fail_bg(self: &Arc<Self>, endpoint: &str, id: u64, message: String, retryable: bool) {
         if !self.finish_bg(id) {
             return;
@@ -919,21 +738,18 @@ impl ServersSwitcherController {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The endpoint a failed background dial left pending, if any.
     pub fn pending_reconnect(&self) -> Option<String> {
         self.pending()
             .as_ref()
             .map(|pending| pending.endpoint.clone())
     }
 
-    /// Forget the pending reconnect and fence its timer; answers whether one was pending.
     fn cancel_pending(&self) -> bool {
         self.retry_generation.fetch_add(1, Ordering::SeqCst);
         self.pending().take().is_some()
     }
 
-    /// Redial the pending target after `retry_backoff(attempt)`, unless a
-    /// retry or cancel came first.
+    /// Redials after `retry_backoff(attempt)` unless a retry or cancel came first.
     fn schedule_retry(self: &Arc<Self>, attempt: u32) {
         let generation = self.retry_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let controller = Arc::clone(self);
@@ -945,12 +761,7 @@ impl ServersSwitcherController {
         });
     }
 
-    /// Redial the pending reconnect's target now — what a wake and the backoff
-    /// timer call — through the same quiet background dial; `Failed` stays
-    /// until `Connecting` shows past the delay. Answers whether a dial started.
-    /// A dial in flight starts nothing; a connection up cancels it; an open
-    /// stage or a connect underway defers it one backoff step; a keyring no
-    /// longer holding the token drops it, the banner clearing after its timeout.
+    /// A dial in flight starts nothing; a connection up cancels; an open stage or a connect underway defers one backoff step; a keyring without the token drops it.
     pub fn retry_pending(self: &Arc<Self>) -> bool {
         self.release_bg_if_stale();
         let Some(pending) = self.pending().clone() else {
@@ -995,11 +806,7 @@ impl ServersSwitcherController {
         true
     }
 
-    /// The live connection's polls keep failing: `Connecting` past the delay,
-    /// or `Failed` (kept, no timeout) once the trouble is `persistent`. Never
-    /// touches the connection and needs no credential. Ignored while a
-    /// background dial owns the banner, a reconnect is pending, or nothing is
-    /// connected.
+    /// Ignored while a background dial owns the banner, a reconnect is pending, or nothing is connected.
     pub fn report_trouble(self: &Arc<Self>, persistent: bool) {
         self.release_bg_if_stale();
         if self.bg().is_some()
@@ -1033,8 +840,6 @@ impl ServersSwitcherController {
         }
     }
 
-    /// The live connection's polls succeed again after a trouble report:
-    /// flash `Connected` if `Connecting` or `Failed` was shown, then clear.
     /// Nothing reported, or a background dial owning the banner, does nothing.
     pub fn report_recovered(self: &Arc<Self>) {
         if !self.trouble.swap(false, Ordering::SeqCst) || self.bg().is_some() {
@@ -1043,8 +848,6 @@ impl ServersSwitcherController {
         self.flash_connected();
     }
 
-    /// The connection a trouble report was about went down: close its banner
-    /// (a background dial or a pending reconnect owns it otherwise).
     pub fn end_trouble(&self) {
         if self.trouble.swap(false, Ordering::SeqCst)
             && self.bg().is_none()
@@ -1054,8 +857,6 @@ impl ServersSwitcherController {
         }
     }
 
-    /// End the pending reconnect and any trouble report, closing the banner
-    /// they held: a user switch, or the Sessions screen leaving.
     fn drop_reports(&self) {
         let held = self.cancel_pending() | self.trouble.swap(false, Ordering::SeqCst);
         let shown = self.banner.try_get_untracked().is_some_and(|banner| {
@@ -1069,12 +870,10 @@ impl ServersSwitcherController {
         }
     }
 
-    /// The Sessions screen unmounted: nothing is left to retry for.
     pub fn sessions_left(&self) {
         self.drop_reports();
     }
 
-    /// The saved row for `endpoint`, read fresh.
     fn saved_row(&self, endpoint: &str) -> Option<SavedServer> {
         self.saved_servers
             .list()
@@ -1083,8 +882,6 @@ impl ServersSwitcherController {
             .find(|row| row.endpoint() == endpoint)
     }
 
-    /// Dial `endpoint` with the keyring's token, the row read fresh and only
-    /// while it still claims a credential the keyring holds. `busy` is held.
     fn dial(self: &Arc<Self>, endpoint: &str, epoch: u64) {
         let Some((token, row)) = self.credential_for(endpoint) else {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
@@ -1100,15 +897,13 @@ impl ServersSwitcherController {
                     controller.fail(&dialed, epoch, failure.user_message());
                 }
             });
-        // A dial that settled in place already released the claim; one still
-        // pending is tied to the generation it started under.
+        // A dial that settled in place already released the claim; one still pending is tied to the generation it started under.
         if self.busy.get_untracked().is_some() {
             *self.claim() = Some(self.connection.dial_generation());
         }
     }
 
-    /// One `unlock_all` prompt; `false` (state already reset) when the dial
-    /// must not go on. A cancel or a superseding lock is silent.
+    /// A cancel or a superseding lock is silent.
     async fn unlock(&self, endpoint: &str) -> bool {
         match self.keyring_unlock.unlock().await {
             KeyringUnlockOutcome::Unlocked { .. } => true,
@@ -1134,16 +929,12 @@ impl ServersSwitcherController {
         }
     }
 
-    /// Give up a switch with nothing marked failed.
     fn abandon(&self) {
         self.release_claim();
         self.refresh_faces();
     }
 
-    /// The connection settled on `endpoint`: stage down, card grown, together
-    /// (both writes are synchronous, so no frame sits between them). A dial
-    /// from a stage since dismissed only releases its claim: the stage a
-    /// later open raised is not its to take down.
+    /// Stage down and card grown together (both writes synchronous, so no frame sits between). A dial from a stage since dismissed only releases its claim.
     fn settle(&self, endpoint: &str, epoch: u64) {
         let mut failures = self.failures.get_untracked();
         failures.remove(endpoint);
@@ -1152,8 +943,7 @@ impl ServersSwitcherController {
         *self.claim() = None;
         self.busy.set(None);
         if current {
-            // Faces first, so `live_index` names the new live server as the
-            // stage closes.
+            // Faces first, so `live_index` names the new live server as the stage closes.
             self.refresh_faces();
             self.expanding.set(None);
             self.open.set(false);
@@ -1162,8 +952,7 @@ impl ServersSwitcherController {
         }
     }
 
-    /// The dial to `endpoint` failed: reverse the ramp, mark the face. A dial
-    /// from a stage since dismissed leaves the current stage's ramp alone.
+    /// A dial from a stage since dismissed leaves the current stage's ramp alone.
     fn fail(&self, endpoint: &str, epoch: u64, message: String) {
         let mut failures = self.failures.get_untracked();
         failures.insert(endpoint.to_string(), message);
@@ -1176,12 +965,10 @@ impl ServersSwitcherController {
         self.refresh_faces();
     }
 
-    /// Lock the keyring, drop the connection and return to Connect.
     pub fn lock(&self, nav: &Nav) {
         self.lock_with(|location| nav.go(location));
     }
 
-    /// [`Self::lock`] with the navigation lent as a closure.
     pub fn lock_with(&self, go: impl FnOnce(&str)) {
         self.stage_epoch.fetch_add(1, Ordering::SeqCst);
         self.failures.set(BTreeMap::new());
@@ -1198,15 +985,12 @@ impl ServersSwitcherController {
         go(LOCKED_LOCATION);
     }
 
-    /// Open the add-server page, mirroring Connect's QR scan on the free
-    /// tier: a blocked add raises the paywall in place and leaves the stage
-    /// open; an allowed (or just-unlocked) add closes the stage and pushes.
+    /// A blocked add raises the paywall in place and leaves the stage open; otherwise closes the stage and pushes.
     pub fn add(self: &Arc<Self>, gate: &SwitchGate, nav: &Nav) {
         let nav = nav.clone();
         self.add_with(&gate.paywall, Rc::new(move |location| nav.push(location)));
     }
 
-    /// [`Self::add`] with the paywall and the navigation lent as closures.
     pub fn add_with(self: &Arc<Self>, paywall: &Rc<dyn Fn(Retry)>, push: Rc<dyn Fn(&str)>) {
         let saved = self.saved_servers.list().unwrap_or_default();
         if let ServerLimitVerdict::Blocked { .. } = self.pro.new_server_verdict(&saved) {
@@ -1227,8 +1011,7 @@ impl ServersSwitcherController {
     }
 
     fn open_add_page(&self, push: &dyn Fn(&str)) {
-        // The stage must not outlive the push (its open flag, poll pause and
-        // strip would persist under the add page and reappear on pop).
+        // The stage must not outlive the push (its open flag, poll pause and strip would persist under the add page and reappear on pop).
         self.close_stage();
         push(ADD_SERVER_LOCATION);
     }
@@ -1251,7 +1034,6 @@ mod tests {
     use crate::features::pro::data::repositories::MockEntitlementRepository;
     use crate::features::servers::domain::entities::SessionGlimpse;
 
-    /// A backend whose every dial fails, until told to succeed.
     struct FlakyBackend {
         fail: Mutex<bool>,
     }
@@ -1294,8 +1076,7 @@ mod tests {
         rig_over(backend, rows, pro, |mock| mock as Credentials)
     }
 
-    /// A credential store whose `unlock_all` waits for the test to release it,
-    /// so a prompt can be pending while the stage is dismissed.
+    /// A credential store whose `unlock_all` waits for the test, so a prompt can be pending while the stage is dismissed.
     struct GatedCredentials {
         inner: Arc<MockCredentialService>,
         release: Arc<tokio::sync::Notify>,
@@ -1389,7 +1170,6 @@ mod tests {
         rig_with(Arc::new(MockConnectionBackend), rows, pro)
     }
 
-    /// Connect to `host` first, so the strip has a live card.
     fn connect_to(rig: &Rig, host: &str) {
         rig.connection.connect(ConnectTarget {
             host: host.to_string(),
@@ -1411,7 +1191,6 @@ mod tests {
         rig.keyring.publish(keyring);
     }
 
-    /// A gate recording what it was asked, raising nothing.
     struct Probe {
         gate: SwitchGate,
         paywalls: Rc<Cell<usize>>,
@@ -1529,8 +1308,7 @@ mod tests {
             Some(FaceKind::Failed { .. })
         ));
 
-        // `switch_to` tears the old connection down before it dials, so after
-        // the failure no face is live and the strip's peers are every row.
+        // `switch_to` tears the old connection down before it dials, so after the failure no face is live and the strip's peers are every row.
         assert!(!rig.connection.connected.get_untracked());
         let peers = peer_endpoints(&rig.controller.faces.get_untracked());
         let again = peers
@@ -1617,7 +1395,6 @@ mod tests {
         ));
     }
 
-    /// A `NoVerification` credentialed peer `b` under a live `a`, keyring open.
     fn unverified_rig() -> Rig {
         let mut b = server("b", 10, true);
         b.trust_mode = TrustMode::NoVerification;
@@ -1704,8 +1481,6 @@ mod tests {
         assert!(rig.controller.failures.get_untracked().is_empty());
     }
 
-    /// A locked rig over `a` (live) and `b`, whose `unlock_all` waits on the
-    /// returned notify.
     fn gated_rig(rows: Vec<SavedServer>) -> (Rig, Arc<tokio::sync::Notify>) {
         let release = Arc::new(tokio::sync::Notify::new());
         let gate_release = Arc::clone(&release);
@@ -1721,8 +1496,6 @@ mod tests {
         (rig, release)
     }
 
-    /// Pretend a dial started under the connection's current generation is
-    /// still pending for `b`.
     fn claim_pending_dial(rig: &Rig) {
         rig.controller.busy.set(Some("b:7777".to_string()));
         *rig.controller.claim() = Some(rig.connection.dial_generation());
@@ -1739,8 +1512,7 @@ mod tests {
         rig.controller.select(0, &probe().gate);
         assert!(rig.controller.busy.get_untracked().is_some());
 
-        // A teardown drops the dial's `on_done`; the connection is then
-        // re-established elsewhere.
+        // A teardown drops the dial's `on_done`; the connection is then re-established elsewhere.
         rig.connection.disconnect();
         connect_to(&rig, "a");
         rig.controller.expanding.set(Some(0));

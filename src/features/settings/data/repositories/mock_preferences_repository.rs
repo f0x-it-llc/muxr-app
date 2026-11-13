@@ -1,15 +1,4 @@
-//! [`MockPreferencesRepository`] — the in-memory [`PreferencesRepository`]
-//! behind `di.rs`'s headless-test seam. Seeds [`Preferences::defaults`] (not
-//! transcribed a second time here, so the screen, the mock and the shipped
-//! defaults cannot drift apart). Nothing survives a process restart, but the
-//! round trip is real — a picker's choice is written and read back here,
-//! exactly the shape [`PrefsRepository`](super::PrefsRepository) preserves.
-//!
-//! Framework-free, a plain `Mutex<Preferences>` (`Send + Sync` for the
-//! controller's `Arc`). The feature's second failure-mapping site into
-//! [`AppFailure`]: a value outside its own domain-declared choice set maps to
-//! [`AppFailure::Internal`] — a bug, since every write comes from a picker
-//! built out of that same set.
+//! In-memory [`PreferencesRepository`] for headless tests, seeded from [`Preferences::defaults`].
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -20,31 +9,24 @@ use crate::features::settings::domain::entities::{
 };
 use crate::features::settings::domain::repositories::PreferencesRepository;
 
-/// Simulated round-trip latency on every call — see
-/// [`MockAuthTokensRepository`](super::MockAuthTokensRepository)'s own note.
+/// Keeps the async path real instead of accidentally synchronous.
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
 
-/// An in-memory [`PreferencesRepository`]. See the [module docs](self).
 pub struct MockPreferencesRepository {
-    /// The live preference record. Replaced in place by each save.
     prefs: Mutex<Preferences>,
 }
 
 impl MockPreferencesRepository {
-    /// A repository seeded with [`Preferences::defaults`].
     pub fn seeded() -> Self {
         Self {
             prefs: Mutex::new(Preferences::defaults()),
         }
     }
 
-    /// The live record, cloned — a **synchronous** peek for this module's own
-    /// unit tests, never part of the [`PreferencesRepository`] contract.
     pub fn snapshot(&self) -> Preferences {
         self.lock().clone()
     }
 
-    /// The store, with a poisoned lock recovered rather than propagated.
     fn lock(&self) -> std::sync::MutexGuard<'_, Preferences> {
         self.prefs
             .lock()
@@ -58,10 +40,7 @@ impl Default for MockPreferencesRepository {
     }
 }
 
-/// Reject an appearance record carrying a value no picker could have
-/// produced. The font family is deliberately **not** checked against a list
-/// (the same call [`PrefsRepository`](super::PrefsRepository) makes) — only
-/// an empty name is refused, since that could never name a face.
+/// Only an empty font family is refused; faces are a runtime fact.
 fn validate_appearance(prefs: &AppearancePrefs) -> Result<(), AppFailure> {
     if prefs.font_family.trim().is_empty() {
         return Err(AppFailure::Internal(
@@ -74,15 +53,12 @@ fn validate_appearance(prefs: &AppearancePrefs) -> Result<(), AppFailure> {
             prefs.font_size_px
         )));
     }
-    // `CursorStyle` is a closed enum whose every variant is offered, so there
-    // is nothing to reject — the exhaustive match is the tripwire for a
-    // variant added without adding it to `ALL`.
+    // Exhaustive so a variant added without being offered fails to compile.
     match prefs.cursor_style {
         CursorStyle::Block | CursorStyle::Underline | CursorStyle::Bar => Ok(()),
     }
 }
 
-/// Reject a poll record carrying an interval no picker could have produced.
 fn validate_poll(prefs: &PollPrefs) -> Result<(), AppFailure> {
     if !PollPrefs::REFRESH_CHOICES_SECS.contains(&prefs.layout_refresh_secs) {
         return Err(AppFailure::Internal(format!(
@@ -171,10 +147,6 @@ mod tests {
 
     #[test]
     fn a_downloaded_font_family_survives_a_save_and_load_round_trip() {
-        // The defect this pins: the family was clamped against a four-name
-        // const, so a downloaded font's name — which appears in no
-        // compile-time list — was rejected here and silently reset to the
-        // bundled default on the next load, losing the user's choice.
         let repo = MockPreferencesRepository::seeded();
         let downloaded = AppearancePrefs {
             font_family: "FiraCode Nerd Font Mono".to_string(),

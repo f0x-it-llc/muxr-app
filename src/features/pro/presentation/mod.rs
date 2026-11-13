@@ -1,13 +1,4 @@
-//! `pro` presentation — the only layer in this feature that touches `frust`'s
-//! reactive vocabulary.
-//!
-//! - [`controller`] — the app-scoped view model: the entitlement, the store's
-//!   offer, and the buy/restore flows.
-//! - [`widgets`] — the paywall sheet, page-agnostic because two screens raise
-//!   it and this slice owns no route of its own.
-//!
-//! No `pages` here: there is no `/pro` route. The sheet is pushed onto the
-//! root overlay host by whichever screen needs it.
+//! The only layer touching `frust`; no pages, the paywall sheet is pushed by whichever screen needs it.
 
 pub mod controller;
 pub mod widgets;

@@ -1,44 +1,24 @@
-//! `sessions` domain entities — the feature's plain-data types: one
-//! aggregate ([`Session`]) plus the value objects the `/sessions` screen
-//! renders from it. Real repository and mock alike map a session proto onto
-//! these field by field, with no presentation-layer change.
-
 use std::time::Duration;
 
 use crate::ui::recency;
 
-/// One remote multiplexer session, as the sessions list renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
-    /// Stable daemon key, distinct from [`name`](Self::name) — every
-    /// mutation on [`SessionsRepository`](super::repositories::SessionsRepository)
-    /// addresses a session by this, not the name.
+    /// Stable daemon key; every mutation addresses a session by this, not the name.
     pub id: String,
-    /// User-facing name (`.sess-name`); what a rename edits.
     pub name: String,
-    /// Live or merely resurrectible (`.sess-card.running` vs `.idle`).
     pub status: SessionStatus,
-    /// Which multiplexer is behind it (the `.chip-neutral` "zellij"/"herdr").
     pub backend: SessionBackend,
-    /// Seconds since the session started, as the daemon reports it.
     pub age_secs: u64,
-    /// Whether any tab of the session has rung the bell.
     pub has_bell: bool,
-    /// Whether this is the session the daemon considers current (the one
-    /// this device is attached to).
     pub is_current: bool,
-    /// The tab/pane/client counts and pane previews the card's lower half
-    /// renders.
     pub layout: LayoutSummary,
-    /// Agent roll-up for the session; `None` when the server reports nothing
-    /// (no capability, zellij), `Some` otherwise.
+    /// `None` when the server reports no agents (no capability, zellij).
     pub agents: Option<crate::agents::AgentSummary>,
 }
 
 impl Session {
-    /// Uppercased first character of [`name`](Self::name) for the avatar
-    /// tile; `"?"` for empty (defence in depth — the repository rejects
-    /// blank names).
+    /// `"?"` for an empty name.
     pub fn initial(&self) -> String {
         self.name
             .chars()
@@ -47,18 +27,14 @@ impl Session {
             .unwrap_or_else(|| "?".to_string())
     }
 
-    /// Coarse age wording — the app-wide bands of [`crate::ui::recency`].
     pub fn age_label(&self) -> String {
         recency::age_label(Duration::from_secs(self.age_secs))
     }
 }
 
-/// A session's liveness — exactly the two states the daemon distinguishes here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
-    /// Live: the multiplexer process is up (`.chip-run` "running").
     Running,
-    /// Saved but not running — attachable by resurrecting it.
     Resurrectible,
 }
 
@@ -70,14 +46,11 @@ impl SessionStatus {
         }
     }
 
-    /// Whether this is the live state — call sites key off this instead of
-    /// re-matching the variant.
     pub fn is_live(self) -> bool {
         matches!(self, SessionStatus::Running)
     }
 }
 
-/// Which multiplexer fronts a session — `muxrd` speaks to both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionBackend {
     Zellij,
@@ -93,48 +66,31 @@ impl SessionBackend {
     }
 }
 
-/// A session's layout, summarized — not the layout itself: the live
-/// tab/pane tree belongs to the terminal feature; this keeps only the
-/// read-only names and flags the sessions screen shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutSummary {
-    /// Open tabs (`◧ N tabs`).
     pub tabs: u32,
-    /// Open panes across every tab (`▣ N panes`).
     pub panes: u32,
-    /// The row's third, backend-dependent span — see [`ThirdMetric`].
     pub third: ThirdMetric,
-    /// Up to two pane titles previewed as `.pane-pill`s; empty for an idle
-    /// session (no pills row drawn).
     pub preview: Vec<String>,
-    /// Every tab with its terminal panes, in wire order; empty for a
-    /// resurrectible session or one whose layout could not be read.
+    /// Wire order; empty for a resurrectible session or an unreadable layout.
     pub tabs_detail: Vec<TabSummary>,
-    /// The layout's space name, when the wire carries one (`Layout` has no
-    /// such field today, so real repositories leave this `None`).
+    /// `None` today: `Layout` carries no space name on the wire.
     pub space: Option<String>,
 }
 
-/// One tab of a [`LayoutSummary`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabSummary {
-    /// The tab's position in the session.
     pub index: u32,
     pub name: String,
-    /// Whether this is the session's active tab.
     pub focused: bool,
     pub has_bell: bool,
-    /// Terminal panes only; plugin panes are omitted.
     pub panes: Vec<PaneSummary>,
 }
 
-/// One terminal pane of a [`TabSummary`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneSummary {
-    /// The wire pane id, unique within a tab's terminal panes.
     pub id: u32,
     pub title: String,
-    /// Working directory, `None` when the backend reports none.
     pub cwd: Option<String>,
     pub focused: bool,
     pub floating: bool,
@@ -142,7 +98,6 @@ pub struct PaneSummary {
 }
 
 impl LayoutSummary {
-    /// The active tab, if the layout lists one.
     pub fn focused_tab(&self) -> Option<&TabSummary> {
         self.tabs_detail.iter().find(|tab| tab.focused)
     }
@@ -156,17 +111,12 @@ impl LayoutSummary {
     }
 }
 
-/// The `.sess-meta` row's third span: which fact it carries varies by session
-/// kind — attached clients (running zellij), spaces (herdr), or saved tabs
-/// (idle/resurrectible).
+/// Which fact the third span carries depends on session kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThirdMetric {
-    /// `◎ N clients` — attached to a running zellij session.
     Clients(u32),
-    /// `◆ N spaces` — a running herdr session's spaces.
     Spaces(u32),
-    /// `N tabs saved` — an idle session's stored count; deliberately
-    /// glyphless (not a live metric).
+    /// An idle session's stored count; glyphless because it is not a live metric.
     TabsSaved(u32),
 }
 
@@ -180,56 +130,36 @@ impl ThirdMetric {
     }
 }
 
-/// [`SessionsRepository::create_session`](super::repositories::SessionsRepository::create_session)'s
-/// request — a named struct since a use case's `Params` is one associated type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateSessionParams {
-    /// The new session's name (already trimmed by the dialog).
     pub name: String,
-    /// Which multiplexer should host it.
     pub backend: SessionBackend,
 }
 
-/// [`SessionsRepository::rename_session`](super::repositories::SessionsRepository::rename_session)'s
-/// request — a named struct, not a tuple, since a use case's `Params` is
-/// one associated type (see [`RenameSession`](super::use_cases::RenameSession)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenameRequest {
-    /// The session to rename, by [`Session::id`].
     pub id: String,
-    /// Its new name (already trimmed by the dialog that collected it).
     pub name: String,
 }
 
-/// One AI agent in a session, as the Tablet detail's agent list shows it —
-/// this slice's own flattening of the wire's `AgentMsg`, so a row can aim a
-/// deep link at its pane without importing the terminal slice.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionAgent {
-    /// `PaneMsg.id` of the pane the agent runs in.
     pub pane_id: u32,
-    /// `TabMsg.position` (0-based) of the containing tab in its space's
-    /// layout — what the terminal's attach target addresses. `None` when the
-    /// layout could not place it (its space's read failed, or the tab is not in
-    /// it): the row still lists, but has nowhere to deep link to.
+    /// 0-based `TabMsg.position` in its space's layout; `None` when the layout cannot place the tab.
     pub tab_position: Option<u32>,
-    /// Opaque space id; `None` on a backend without spaces.
     pub space_id: Option<String>,
     pub space_name: Option<String>,
     pub tab_name: String,
-    /// The CLI's canonical label as the backend reports it.
     pub kind: String,
     pub name: Option<String>,
     pub display_kind: Option<String>,
     pub status: crate::agents::AgentStatus,
     pub title: Option<String>,
     pub summary: Option<String>,
-    /// Advances whenever the agent's state changes; larger is more recent.
     pub change_seq: u64,
 }
 
 impl SessionAgent {
-    /// The row's headline: the agent's name, else its human kind, else the raw kind.
     pub fn display_name(&self) -> &str {
         self.name
             .as_deref()
@@ -237,7 +167,6 @@ impl SessionAgent {
             .unwrap_or(&self.kind)
     }
 
-    /// The row's second line: the activity summary, else the title.
     pub fn subtitle(&self) -> Option<&str> {
         self.summary.as_deref().or(self.title.as_deref())
     }

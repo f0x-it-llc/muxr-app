@@ -1,42 +1,6 @@
-//! [`SecureCredentialStore`] — the real
-//! [`CredentialService`]: every server's auth token in one vault entry of a
-//! `frust-secure-storage` store opened behind the device's biometric gate.
-//!
-//! # THE THREAD RULE
-//!
-//! Every gated call here blocks the calling thread until the user answers the
-//! system prompt, and `frust-secure-storage` has no UI-thread guard: called on
-//! the frame loop it simply parks, freezing the app with nothing in any log to
-//! say why. So no gated call is made anywhere but inside the
-//! [`frust::spawn_blocking`] closures below — [`gated`] is the single
-//! chokepoint — and the store handle is opened *inside* that closure too,
-//! since a gated `open_with` can itself block or prompt.
-//!
-//! # The store, the vault, and the legacy keys
-//!
-//! One named store ([`STORE_NAME`]) holds one vault entry ([`VAULT_KEY`]): the
-//! [`KeyringVault`] JSON of every saved server's token, so unlocking them all
-//! costs one gated read (Android prompts per gated `get` and per `set`; Apple
-//! never prompts on `set`). Earlier builds kept one entry per server, keyed
-//! `zelli_cred_<host>_<port>` ([`storage_key`]); [`CredentialService::unlock_all`]
-//! folds those into the vault and removes them, and every vault write removes
-//! the written endpoint's superseded legacy entry. Opened with
-//! [`AuthPolicy::Required`] and [`AuthOptions::allow_device_credential`] and
-//! the plugin's safe `invalidate_on_enrollment` default, so a re-enrollment
-//! surfaces as [`CredentialStatus::KeyInvalidated`].
-//!
-//! [`CredentialService::delete`] and [`CredentialService::reset_vault`] are the
-//! ungated calls. `delete` removes the legacy entry only, since the vault
-//! cannot be rewritten without a gate: a vault entry for a still-saved
-//! endpoint stays until `delete_from_vault` removes it, or until the saved row
-//! is removed and the next `unlock_all` prunes it. `reset_vault` removes the
-//! whole vault — the only way out of one that answers `KeyInvalidated` after a
-//! re-enrollment or no longer decodes. On desktop a gated open answers
-//! [`Unavailability::UnsupportedPlatform`], mapped to
-//! [`CredentialStatus::Unavailable`] — nothing degrades to plain storage.
-//!
-//! The vault algorithms run over [`VaultStore`], so the in-memory mock walks
-//! exactly the same steps.
+//! Every server's auth token in one vault entry of a `frust-secure-storage` store opened behind the biometric gate.
+//! Thread rule: a gated call blocks until the user answers, so it runs only inside [`gated`]'s `spawn_blocking`, store open included.
+//! Legacy per-server entries (`zelli_cred_<host>_<port>`) fold into the vault on `unlock_all`; nothing falls back to plain storage.
 
 use frust::spawn_blocking;
 use frust_secure_storage::{
@@ -53,34 +17,24 @@ use crate::features::connect::domain::entities::{
 use crate::features::connect::domain::keyring::{Keyring, KeyringVault};
 use crate::features::connect::domain::repositories::CredentialService;
 
-/// The secure store this app's credentials live in. The plugin namespaces per
-/// store name, so this one name is the whole isolation boundary.
+/// The plugin namespaces per store name, so this name is the whole isolation boundary.
 const STORE_NAME: &str = "muxr.credentials";
 
-/// The single entry holding every saved server's token.
 pub(super) const VAULT_KEY: &str = "muxr_keyring";
 
-/// The legacy per-server key's prefix — the Flutter client's own.
+/// Legacy per-server key prefix, shared with the Flutter client.
 const KEY_PREFIX: &str = "zelli_cred_";
 
-/// The prompt's negative-button label. Android shows it only when the
-/// device-credential fallback is unavailable; iOS ignores it.
+/// Android shows it only when the device-credential fallback is unavailable; iOS ignores it.
 const NEGATIVE_BUTTON: &str = "Cancel";
 
-/// The prompt's subtitle — Android renders it under the title; iOS ignores it.
+/// Android renders it under the title; iOS ignores it.
 const PROMPT_SUBTITLE: &str = "muxr";
 
-/// The prompt title of the vault rewrite an unlocked delete needs.
 pub(super) const FORGET_REASON: &str = "Forget the saved credential";
 
-/// What a failed delete reports.
 pub(super) const DELETE_FAILED: &str = "the saved credential could not be removed";
 
-/// The real [`CredentialService`]. See the [module docs](self).
-///
-/// Stateless: every call opens its own store handle inside its own blocking
-/// task, so there is no handle here for a gated call to be made from the
-/// wrong thread.
 pub struct SecureCredentialStore;
 
 impl SecureCredentialStore {
@@ -104,7 +58,6 @@ impl CredentialService for SecureCredentialStore {
             token,
             reason,
         } = request;
-        // `token` is dropped (and scrubbed) at the end of this closure regardless.
         let stored = gated(move || {
             let store = open_gated(&reason)?;
             Ok(store_locked(&store, server_key, token))
@@ -156,7 +109,6 @@ impl CredentialService for SecureCredentialStore {
         let encoded = next_vault(keyring, &server_key, &token);
         let legacy = storage_key(&server_key);
         let logged = server_key.clone();
-        // Only the encoded blob crosses into the blocking task.
         let written = gated(move || {
             let store = open_gated(&reason)?;
             Ok(write_vault(
@@ -207,8 +159,7 @@ impl CredentialService for SecureCredentialStore {
     }
 }
 
-/// Removes `key` without a gate — still off the UI thread, since a
-/// Keychain/Keystore write is I/O either way. An absent key succeeds.
+/// Ungated, but still off the UI thread: a Keychain/Keystore write is I/O.
 async fn remove_ungated(key: String) -> Result<(), AppFailure> {
     let removed = gated(move || {
         let store = SecureStorage::open(STORE_NAME)?;
@@ -221,9 +172,7 @@ async fn remove_ungated(key: String) -> Result<(), AppFailure> {
     })
 }
 
-/// The four store operations the vault algorithms use. `get`/`set` are the
-/// gated ones (each may prompt); `contains`/`remove` never prompt. A failure
-/// arrives already mapped onto its non-success [`CredentialStatus`].
+/// `get`/`set` are gated (each may prompt); `contains`/`remove` never prompt.
 pub(super) trait VaultStore {
     fn get(&self, key: &str) -> Result<Option<Zeroizing<String>>, CredentialStatus>;
     fn set(&self, key: &str, value: &str) -> Result<(), CredentialStatus>;
@@ -233,7 +182,6 @@ pub(super) trait VaultStore {
 
 impl VaultStore for SecureStorage {
     fn get(&self, key: &str) -> Result<Option<Zeroizing<String>>, CredentialStatus> {
-        // Wrapped the moment it arrives; the plugin's own buffer is not addressable from here.
         SecureStorage::get(self, key)
             .map(|value| value.map(Zeroizing::new))
             .map_err(|err| status_of(&err))
@@ -252,7 +200,6 @@ impl VaultStore for SecureStorage {
     }
 }
 
-/// What [`unlock_vault`] recovered.
 pub(super) struct UnlockedVault {
     pub keyring: Keyring,
     pub migrated: Vec<String>,
@@ -270,8 +217,6 @@ impl UnlockedVault {
     }
 }
 
-/// Reads and strictly decodes the vault (one gated `get`): no vault is an
-/// empty keyring, an undecodable one [`CredentialStatus::Failed`].
 pub(super) fn read_vault(store: &impl VaultStore) -> Result<Keyring, CredentialStatus> {
     log::info!("credentials: gated read of the vault");
     match store.get(VAULT_KEY)? {
@@ -283,12 +228,9 @@ pub(super) fn read_vault(store: &impl VaultStore) -> Result<Keyring, CredentialS
     }
 }
 
-/// The `unlock_all` algorithm: the vault, then one gated read per saved
-/// endpoint still holding a legacy entry. A legacy entry beside a vault entry
-/// is stale (every vault write supersedes it) and is removed unread. Any
-/// refusal but an invalidated legacy key aborts with nothing written or
-/// removed; otherwise the vault is written once when anything was migrated or
-/// pruned, and only then are legacy entries removed.
+/// Vault first, then one gated read per endpoint still holding a legacy entry. A legacy entry
+/// beside a vault entry is stale and removed unread. Any refusal but an invalidated legacy key
+/// aborts with nothing written; otherwise the vault is written once, and only then are legacy entries removed.
 pub(super) fn unlock_vault(
     store: &impl VaultStore,
     endpoints: &[String],
@@ -344,7 +286,6 @@ pub(super) fn unlock_vault(
     })
 }
 
-/// The locked save: a read-modify-write of the vault, never a legacy entry.
 pub(super) fn store_locked(
     store: &impl VaultStore,
     server_key: String,
@@ -361,18 +302,12 @@ pub(super) fn store_locked(
     )
 }
 
-/// Why a gated vault `set` happened, for the info log: the vault writes are
-/// the only source of Android's per-write prompt.
 #[derive(Clone, Copy)]
 pub(super) enum VaultWrite<'a> {
-    /// A credential for this endpoint was saved.
     Store(&'a str),
-    /// A credential for this endpoint was evicted.
     Evict(&'a str),
 }
 
-/// One gated `set` of an encoded vault, then the quiet removal of the legacy
-/// entry it supersedes. Logs the endpoint and the reason, never a token.
 pub(super) fn write_vault(
     store: &impl VaultStore,
     encoded: &str,
@@ -394,8 +329,6 @@ pub(super) fn write_vault(
     Ok(())
 }
 
-/// One endpoint's token: its not-yet-migrated legacy entry when present
-/// (`contains` is ungated), otherwise the vault's — one gated read either way.
 pub(super) fn read_one(
     store: &impl VaultStore,
     server_key: &str,
@@ -409,22 +342,19 @@ pub(super) fn read_one(
     Ok(read_vault(store)?.token_for(server_key))
 }
 
-/// A legacy entry left behind is harmless: it is stale, and the next
-/// `unlock_all` removes it unread.
+/// A legacy entry left behind is stale; the next `unlock_all` removes it unread.
 fn remove_quietly(store: &impl VaultStore, key: &str) {
     if let Err(status) = store.remove(key) {
         log::warn!("credentials: a legacy entry was not removed: {status:?}");
     }
 }
 
-/// The vault blob for `keyring`, every entry stamped now.
 pub(super) fn encode_vault(keyring: &Keyring) -> Zeroizing<String> {
     let now = epoch_millis();
     Zeroizing::new(KeyringVault::encode(keyring, |_| now))
 }
 
-/// The vault blob for `keyring` plus `token` under `server_key`, leaving
-/// `keyring` itself untouched (a [`Keyring`] is deliberately not `Clone`).
+/// Leaves `keyring` untouched (a [`Keyring`] is deliberately not `Clone`).
 pub(super) fn next_vault(
     keyring: &Keyring,
     server_key: &str,
@@ -435,8 +365,7 @@ pub(super) fn next_vault(
     encode_vault(&next)
 }
 
-/// The vault blob for `keyring` without `server_key`, leaving `keyring`
-/// itself untouched until the write succeeds.
+/// Leaves `keyring` untouched until the write succeeds.
 pub(super) fn vault_without(keyring: &Keyring, server_key: &str) -> Zeroizing<String> {
     let mut next = copy_keyring(keyring);
     next.remove(server_key);
@@ -453,7 +382,6 @@ fn copy_keyring(keyring: &Keyring) -> Keyring {
     copy
 }
 
-/// An unlocked delete's refused vault rewrite, as the failure it reports.
 pub(super) fn refused_rewrite(status: CredentialStatus) -> Result<(), AppFailure> {
     match status {
         CredentialStatus::Success => Ok(()),
@@ -464,7 +392,6 @@ pub(super) fn refused_rewrite(status: CredentialStatus) -> Result<(), AppFailure
     }
 }
 
-/// Folds a gated closure's two failure layers into one status.
 fn status_from(
     result: Result<Result<(), CredentialStatus>, SecureStorageError>,
 ) -> CredentialStatus {
@@ -475,12 +402,7 @@ fn status_from(
     }
 }
 
-/// Runs `work` on the blocking pool and awaits the answer.
-///
-/// The one chokepoint: a gated `get`/`set`, and the `open_with` preceding it,
-/// may only be reached through here (the [module docs](self)' thread rule). A
-/// join failure is reported as a storage error, mapped to
-/// [`CredentialStatus::Failed`] — never as a success.
+/// A join failure maps to [`CredentialStatus::Failed`], never a success.
 async fn gated<T>(
     work: impl FnOnce() -> Result<T, SecureStorageError> + Send + 'static,
 ) -> Result<T, SecureStorageError>
@@ -493,12 +415,9 @@ where
     }
 }
 
-/// Opens the credential store behind the gate, with `reason` as the prompt's
-/// rationale. Callable only from inside a [`gated`] closure, since opening a
-/// gated store is itself a platform call that can block.
+/// Callable only from inside a [`gated`] closure: opening a gated store can block.
 fn open_gated(reason: &str) -> Result<SecureStorage, SecureStorageError> {
-    // `AuthOptions` and friends are `#[non_exhaustive]`, so each is built from
-    // its own `Default` with only the fields this app cares about set.
+    // `AuthOptions` is `#[non_exhaustive]`: build from `Default` and set only what this app needs.
     let mut prompt = PromptSpec::default();
     prompt.title = reason.to_string();
     prompt.subtitle = PROMPT_SUBTITLE.to_string();
@@ -508,16 +427,13 @@ fn open_gated(reason: &str) -> Result<SecureStorage, SecureStorageError> {
     // Lets a user with a working passcode but a broken sensor still reach their own credential.
     auth.allow_device_credential = true;
     auth.prompt = prompt;
-    // `invalidate_on_enrollment`/`validity` keep the plugin's safe defaults.
 
     let mut options = StoreOptions::default();
     options.auth = AuthPolicy::Required(auth);
     SecureStorage::open_with(STORE_NAME, options)
 }
 
-/// The legacy per-server key, `zelli_cred_<server_key with [:/] → _>`. Sanitizing is not cosmetic — a raw
-/// `:` or `/` crosses into a platform store's own namespace syntax, and an
-/// IPv6 literal is full of colons.
+/// `:` and `/` are sanitized to `_`: raw they cross into a platform store's namespace syntax.
 pub(super) fn storage_key(server_key: &str) -> String {
     let sanitized: String = server_key
         .chars()
@@ -526,9 +442,7 @@ pub(super) fn storage_key(server_key: &str) -> String {
     format!("{KEY_PREFIX}{sanitized}")
 }
 
-/// The whole gate→UX mapping, in one place. `SecureStorageError` is
-/// `#[non_exhaustive]`, so an unknown variant reads as
-/// [`CredentialStatus::Failed`] rather than a compile break or a guess.
+/// `SecureStorageError` is `#[non_exhaustive]`: an unknown variant reads as `Failed`.
 fn status_of(error: &SecureStorageError) -> CredentialStatus {
     match error {
         SecureStorageError::UserCanceled | SecureStorageError::SystemCanceled => {
@@ -544,7 +458,6 @@ fn status_of(error: &SecureStorageError) -> CredentialStatus {
         SecureStorageError::NotAvailable(Unavailability::PasscodeNotSet) => {
             CredentialStatus::NoDeviceCredential
         }
-        // Every other unavailability is one fact to the user: this device can't do it.
         SecureStorageError::NotAvailable(_) => CredentialStatus::Unavailable,
         // Platform handles never installed — an availability fact, not an authentication one.
         SecureStorageError::PlatformNotInitialized => CredentialStatus::Unavailable,
@@ -562,8 +475,8 @@ mod tests {
     #[test]
     fn a_key_is_the_flutter_prefix_over_a_sanitized_endpoint() {
         assert_eq!(
-            storage_key("100.71.31.57:50051"),
-            "zelli_cred_100.71.31.57_50051"
+            storage_key("100.64.0.7:50051"),
+            "zelli_cred_100.64.0.7_50051"
         );
     }
 

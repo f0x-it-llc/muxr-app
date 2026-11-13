@@ -1,7 +1,3 @@
-//! [`LoadPreferences`] — reads both preference groups in one call (see
-//! [`Preferences`]), which is what keeps `terminal appearance` and
-//! `session poll` from ever rendering out of step with each other.
-
 use std::sync::Arc;
 
 use clean_signals::{NoParams, UseCase};

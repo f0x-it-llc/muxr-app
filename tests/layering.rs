@@ -1,32 +1,14 @@
-//! Layering conformance scan for context/owner lookups. The bug: `GrpcAuthTokensRepository` used
-//! to resolve `ConnectionController` via a fresh `use_context` lookup on every RPC, which
-//! panicked the instant a real call ran inside a `frust::spawn_local` future (its poller installs
-//! no ambient reactive owner). The fix resolves the controller once, at DI time.
-//!
-//! Two scans enforce it. [`is_sanctioned_lookup_site`] trusts a file's *directory*:
-//! `expect_connection_controller`/`expect_controller`/`use_context` may only appear in a `di.rs`,
-//! `connection.rs`, or a `presentation`/`ui` file — every other directory fails. Blind spot: a
-//! `presentation/` file can still smuggle a lookup into a spawned future's *body*, since
-//! `spawn_local`'s poller installs no ambient owner regardless of directory.
-//! [`banned_lookups_in_spawn_blocks`] closes that gap directly: a line-based `{`/`}` brace
-//! tracker flags `use_context`/any `expect_*` accessor inside a tracked
-//! `spawn_local(async`/`spawn(async` span, wherever it lives — its own named-future blind spot is
-//! pinned separately by [`the_named_future_spawned_by_the_terminal_pump_stays_lookup_free`].
-//!
-//! Plain `std::fs` scan; comment-only lines are stripped before matching, so a module doc naming
-//! these functions in prose never trips either scan.
+//! Scans `src/` for context/owner lookups outside sanctioned directories and inside spawned async
+//! blocks, where `spawn_local`'s poller installs no ambient reactive owner.
+//! Comment-only lines are stripped before matching, so prose naming these functions never trips a scan.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// This crate's `src/`, resolved from the manifest dir so the scan is
-/// working-directory-independent.
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// `path` relative to `src/`, forward-slashed, for stable failure messages
-/// and allowlist checks independent of host path separators.
 fn rel(path: &Path) -> String {
     path.strip_prefix(src_dir())
         .unwrap_or(path)
@@ -52,23 +34,17 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The three ways a reactive owner is looked up at call time (see module doc).
 const BANNED_NEEDLES: &[&str] = &[
     "expect_connection_controller",
     "expect_controller",
     "use_context",
 ];
 
-/// True if `line` contains any [`BANNED_NEEDLES`] token.
 fn has_banned_lookup(line: &str) -> bool {
     BANNED_NEEDLES.iter().any(|needle| line.contains(needle))
 }
 
-/// True if `relp` is one of the three sanctioned homes for a context/owner lookup: any `di.rs`
-/// (resolves singletons once from `MuxrApp::init`'s ambient owner), `connection.rs` itself
-/// (defines `expect_connection_controller`), or a `presentation`/`ui` file (every call site there
-/// runs from `Component::init`/`build`, guaranteed a live owner). A `data`/`domain` file (or
-/// anywhere else) is not on this list.
+/// True if `relp` is a `di.rs`, `connection.rs`, or a `presentation`/`ui` file.
 fn is_sanctioned_lookup_site(relp: &str) -> bool {
     if relp == "connection.rs" {
         return true;
@@ -123,9 +99,6 @@ fn a_context_owner_lookup_only_appears_at_a_sanctioned_di_time_or_presentation_s
     );
 }
 
-/// Guards the scanner's allowlist itself: every category it recognizes must
-/// actually accept the shapes this codebase uses today, and reject the shape
-/// the original bug had (a `data/repositories/*.rs` file).
 #[test]
 fn scanner_allowlist_recognizes_this_codebases_sanctioned_shapes() {
     assert!(is_sanctioned_lookup_site("connection.rs"));
@@ -145,32 +118,18 @@ fn scanner_allowlist_recognizes_this_codebases_sanctioned_shapes() {
     assert!(!is_sanctioned_lookup_site("failure.rs"));
 }
 
-// ---------------------------------------------------------------------------
-// Spawned-async-block scan — independent of the directory allowlist above (module doc).
-// ---------------------------------------------------------------------------
-
-/// Lines that open a spawned-async-block span this scan tracks to its close. Covers bare and
-/// `frust::`-qualified calls, and `async {}`/`async move {}` — all four just need the substring
-/// to appear somewhere on the line.
 const SPAWN_OPENERS: &[&str] = &["spawn_local(async", "spawn(async"];
 
-/// True if `line` opens a tracked span — see [`SPAWN_OPENERS`].
 fn opens_spawn_block(line: &str) -> bool {
     SPAWN_OPENERS.iter().any(|needle| line.contains(needle))
 }
 
-/// Net `{`/`}` on `line`, a plain character count (module doc covers what this does/doesn't get
-/// right).
 fn brace_delta(line: &str) -> i32 {
     line.chars().filter(|&c| c == '{').count() as i32
         - line.chars().filter(|&c| c == '}').count() as i32
 }
 
-/// The spawn-block scan's wider matcher: `use_context` directly, plus **any** `expect_*`
-/// DI-accessor call. Unlike [`BANNED_NEEDLES`]'s enumerated three, a lookup deferred into a
-/// spawned future body is the same bug regardless of which feature's `di.rs` minted the
-/// accessor, so matching the shared `expect_` prefix catches the whole family without
-/// enumerating it. Exclusion: `expect_err(` is a `Result`/`Option` assertion, not a lookup.
+/// Matches `use_context` and any `expect_*` accessor; `expect_err(` is a Result assertion, not a lookup.
 fn is_owner_dependent_lookup(line: &str) -> bool {
     if line.contains("use_context") {
         return true;
@@ -186,10 +145,6 @@ fn is_owner_dependent_lookup(line: &str) -> bool {
     false
 }
 
-/// 1-based line numbers where an [`is_owner_dependent_lookup`] token appears inside a tracked
-/// spawned-async-block span (see [`opens_spawn_block`]/[`brace_delta`]). Independent of
-/// [`is_sanctioned_lookup_site`]: a spawn body is flagged wherever it lives, allowlisted
-/// directory or not.
 fn banned_lookups_in_spawn_blocks(contents: &str) -> Vec<usize> {
     let mut hits = Vec::new();
     let mut depth = 0i32;
@@ -251,43 +206,33 @@ fn a_context_owner_lookup_never_appears_inside_a_spawned_async_block() {
     );
 }
 
-/// Guards the spawned-async-block scan's own detection logic against synthetic input,
-/// independent of the real source tree.
 #[test]
 fn spawn_block_scanner_flags_only_lookups_actually_inside_the_tracked_span() {
-    // Inside a single-line-opened block: flagged.
     let inside =
         "fn f() {\n    spawn_local(async move {\n        expect_controller();\n    });\n}\n";
     assert_eq!(banned_lookups_in_spawn_blocks(inside), vec![3]);
 
-    // Same token before/after the block: not flagged, only a deferred in-body lookup is the bug.
     let outside = "fn f() {\n    let c = expect_controller();\n    spawn_local(async move {\n        c.refresh();\n    });\n}\n";
     assert!(banned_lookups_in_spawn_blocks(outside).is_empty());
 
-    // On the block's own closing line: still in span.
     let on_close_line = "spawn_local(async move {\n    do_work();\n}).and(use_context::<X>());\n";
     assert_eq!(banned_lookups_in_spawn_blocks(on_close_line), vec![3]);
 
-    // Comment-only line inside the block: never trips it.
     let commented = "spawn_local(async move {\n    // use_context here is just prose\n});\n";
     assert!(banned_lookups_in_spawn_blocks(commented).is_empty());
 
-    // Nested spawn body: still "inside" the outer span.
     let nested = "spawn_local(async move {\n    spawn_local(async move {\n        expect_controller();\n    });\n});\n";
     assert_eq!(banned_lookups_in_spawn_blocks(nested), vec![3]);
 
-    // `frust::`-qualified and bare `spawn` (not `spawn_local`): both tracked.
     let qualified = "frust::spawn_local(async move {\n    use_context::<X>();\n});\n";
     assert_eq!(banned_lookups_in_spawn_blocks(qualified), vec![2]);
     let bare_spawn = "spawn(async move {\n    use_context::<X>();\n});\n";
     assert_eq!(banned_lookups_in_spawn_blocks(bare_spawn), vec![2]);
 
-    // A named future (no literal `async` on the opening line): documented blind spot, not tracked.
+    // A named future (no literal `async` on the opening line) is a documented blind spot.
     let named_future = "spawn_local(run_feed_watched(handle))\n    .then(|| use_context::<X>());\n";
     assert!(banned_lookups_in_spawn_blocks(named_future).is_empty());
 
-    // Any `expect_*` accessor is flagged, not just the enumerated three — every feature mints its
-    // own `expect_<name>` under `di.rs`.
     let other_feature_accessor =
         "spawn_local(async move {\n    expect_saved_servers().refresh().await;\n});\n";
     assert_eq!(
@@ -295,17 +240,12 @@ fn spawn_block_scanner_flags_only_lookups_actually_inside_the_tracked_span() {
         vec![2]
     );
 
-    // `expect_err(` is a Result/Option assertion, not a lookup — never flagged despite the prefix.
     let result_assertion =
         "spawn_local(async move {\n    let e = call().await.expect_err(\"boom\");\n});\n";
     assert!(banned_lookups_in_spawn_blocks(result_assertion).is_empty());
 }
 
-/// The one spawn call in the tree with a named-future argument rather than an inline `async`
-/// block — `term/mod.rs`'s `spawn_local(run_feed_watched(..))` — sits in the spawn-block scan's
-/// documented blind spot. This pin closes that gap directly: locates `run_feed_watched`'s body by
-/// the same brace tracking and asserts no owner-dependent lookup appears inside it. Fix on
-/// failure: resolve the handle before the future is built, move only the resolved `Arc` in.
+/// `term/mod.rs`'s `spawn_local(run_feed_watched(..))` takes a named future, so it is pinned separately.
 #[test]
 fn the_named_future_spawned_by_the_terminal_pump_stays_lookup_free() {
     let path = src_dir().join("features/terminal/presentation/term/mod.rs");
@@ -330,7 +270,6 @@ fn the_named_future_spawned_by_the_terminal_pump_stays_lookup_free() {
             if is_owner_dependent_lookup(raw) {
                 offenders.push(idx + 1);
             }
-            // Signature spans lines before its `{`; stop only once opened and closed to zero.
             if depth == 0 && raw.contains('}') {
                 in_body = false;
             }

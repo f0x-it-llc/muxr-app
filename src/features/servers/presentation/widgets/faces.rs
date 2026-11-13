@@ -1,13 +1,5 @@
-//! The non-live card faces, as the Penpot "Components" frame draws them:
-//!
-//! - cached — when the listing filed no page state (the shell otherwise
-//!   composes the Sessions snapshot instead), a dimmed list of the sessions the server last showed, a hollow
-//!   heartbeat and `last seen …`;
-//! - never / locked / failed — a centred vector glyph over two lines.
-//!
-//! The live face is **not** drawn here: the switcher component scales the
-//! real shell page into that card, so [`server_face`] answers an empty box for
-//! it. Vectors only; colours from the [`Palette`].
+//! The non-live card faces: cached (dimmed session list, hollow heartbeat, `last seen …`) and never / locked / failed (glyph over two lines).
+//! The live face is not drawn here: [`server_face`] answers an empty box for it.
 
 use std::time::Duration;
 
@@ -23,32 +15,23 @@ use crate::ui::palette::{Palette, inked};
 use crate::ui::recency;
 use crate::ui::spacing;
 
-/// The centred glyph's size.
 const GLYPH: f64 = 40.0;
-/// A list row's status dot.
 const ROW_DOT: f64 = 8.0;
-/// The heartbeat's hollow ring.
 const HEARTBEAT: f64 = 10.0;
 /// The ring's stroke, a touch over the hairline so it reads when scaled down.
 const RING_STROKE: f64 = 1.5;
-/// Rows a cached face lists before it stops.
 const MAX_ROWS: usize = 5;
 
-/// A vertical stack of flex children.
 fn vcolumn<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Vertical, children)
 }
 
-/// `Never`'s two lines.
 pub const NEVER_TITLE: &str = "not connected yet";
 pub const NEVER_HINT: &str = "tap to connect";
-/// `Locked`'s two lines.
 pub const LOCKED_TITLE: &str = "locked";
 pub const LOCKED_HINT: &str = "tap to unlock";
-/// `Failed`'s second line (the first is the failure message).
 pub const FAILED_HINT: &str = "tap to retry";
 
-/// `last seen …`, `now_ms` being the clock read once for the strip.
 pub fn last_seen_label(last_seen_ms: i64, now_ms: i64) -> String {
     let elapsed = (now_ms - last_seen_ms).max(0);
     let age = recency::age_label(Duration::from_millis(elapsed.unsigned_abs()));
@@ -59,8 +42,6 @@ pub fn last_seen_label(last_seen_ms: i64, now_ms: i64) -> String {
     }
 }
 
-/// `face`'s card content. [`FaceKind::Live`] is an empty box (see the
-/// [module docs](self)).
 pub fn server_face<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -101,7 +82,6 @@ pub fn server_face<S: 'static>(
     }
 }
 
-/// A centred glyph over a title and a hint.
 fn glyph_face<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -134,7 +114,6 @@ fn glyph_face<S: 'static>(
     )
 }
 
-/// The dimmed session list closed by the hollow heartbeat and `last seen`.
 fn cached_face<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -160,7 +139,6 @@ fn cached_face<S: 'static>(
     )
 }
 
-/// `dot  name` over the dim meta line, both dimmed — the server is not live.
 fn glimpse_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -205,7 +183,6 @@ fn glimpse_row<S: 'static>(
     )
 }
 
-/// The hollow heartbeat ring and the `last seen …` line.
 fn heartbeat_footer<S: 'static>(
     theme: &Theme,
     colors: &Palette,

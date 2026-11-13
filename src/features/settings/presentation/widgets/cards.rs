@@ -1,6 +1,5 @@
-//! The Tablet card grid: each settings group as a Glyph card, packed into two
-//! independent columns on a full-width window (a short card never holds its
-//! neighbour's row open), closed by the Lock & disconnect card.
+//! The Tablet card grid: two independent columns, so a short card never holds its
+//! neighbour's row open.
 
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
@@ -16,12 +15,9 @@ use crate::ui::spacing;
 use super::misc::{DISCONNECT_COPY, DISCONNECT_LABEL};
 use super::rows::{SCROLL_PAD_BOTTOM, SCROLL_PAD_TOP, group_label};
 
-/// The card grid's content max width on Tablet, centred in the window.
 const CARD_GRID_MAX_WIDTH: f64 = 920.0;
-/// The gap between cards, horizontally and vertically.
 const CARD_GAP: f64 = spacing::LG;
 
-/// One group as a Glyph card: the group label is the title, the rows the body.
 fn group_card(
     label: &str,
     rows: Vec<AnyView<SettingsState>>,
@@ -35,8 +31,6 @@ fn group_card(
         )
 }
 
-/// The closing full-width card: the label, the confirmation copy as the value
-/// and the danger button trailing.
 fn disconnect_card(colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
     let row = row()
@@ -57,8 +51,6 @@ fn disconnect_card(colors: &Palette) -> impl View<SettingsState> {
         .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row))
 }
 
-/// `children` as flex children; `flex` is each child's flex factor
-/// (`None` = inflexible). The caller sets the [`CARD_GAP`] between them.
 fn card_children<V: View<SettingsState>>(
     children: Vec<V>,
     flex: Option<u32>,
@@ -72,10 +64,6 @@ fn card_children<V: View<SettingsState>>(
         .collect()
 }
 
-/// The Tablet body: the cards packed into two equal columns when `full` —
-/// even indices left, odd right, each column stacking its own cards at
-/// [`CARD_GAP`] — one column otherwise, then the Disconnect card, centred at
-/// [`CARD_GRID_MAX_WIDTH`].
 pub(in super::super) fn tablet_scroller(
     groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)>,
     full: bool,

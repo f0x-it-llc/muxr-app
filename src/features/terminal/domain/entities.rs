@@ -1,82 +1,52 @@
-//! `terminal` domain entities — plain-data types mirroring `docs/terminal.html` v2 and the mock's
-//! `TABS` map: [`Space`] (the `spaces` pill row), [`TabEntry`]/[`PaneEntry`] (one `TABS` entry),
-//! [`TermLine`]/[`TermLineKind`] (one `.term-line`) and [`Workspace`] (one load).
-//!
-//! The mock world is session-agnostic: content is fixed regardless of the attached session id,
-//! except [`Workspace::session_name`] (the rename dialog's seed).
-//!
-//! [`RenameRequest`] and [`SettingsCursorStyle`] are re-exported from `sessions`/`settings` rather
-//! than re-minted — a session's name and a cursor shape each have exactly one owner.
-//! `SettingsCursorStyle` carries the qualified name to stay unambiguous beside
-//! `presentation::term::CursorStyle`, the grid's own type the two map between.
+//! Re-exports rather than re-mints `RenameRequest` and the settings cursor style: a session's
+//! name and a cursor shape each have one owner.
 
 pub use crate::agents::AgentStatus;
 pub use crate::features::sessions::domain::entities::RenameRequest;
 pub use crate::features::settings::domain::entities::CursorStyle as SettingsCursorStyle;
 
-/// One zellij *space* — the sheet's `spaces` pill row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Space {
-    /// The opaque backend id a switch addresses this space by (the wire's `Space.id`), never
-    /// shown to the user and separate from [`name`](Self::name): a space can be renamed without
-    /// its id moving. The in-memory mock has no backend, so its ids are its names.
+    /// Opaque backend id, stable across renames; the in-memory mock uses names as ids.
     pub id: String,
-    /// The pill's label (`forgekit`).
     pub name: String,
-    /// Whether this is the selected pill (`.pill.sel`). Exactly one space is
-    /// selected in the mock.
     pub selected: bool,
 }
 
-/// One pane inside a [`TabEntry`] — mirrors the wire's `PaneMsg`, carrying only what the app
-/// consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneEntry {
-    /// The wire's `PaneMsg.id` — unique within its own [`is_plugin`](Self::is_plugin) namespace,
-    /// never across the two.
+    /// Unique only within its own [`is_plugin`](Self::is_plugin) namespace.
     pub id: u32,
     pub title: String,
-    /// The pane's current working directory, when the backend reports one.
     pub cwd: String,
-    /// Whether this pane is focused within its layer (tiled/floating).
     pub focused: bool,
     pub floating: bool,
-    /// Whether the pane's command has exited (command panes only).
     pub exited: bool,
-    /// Whether this is a plugin pane rather than a terminal one — picks the wire's
-    /// `PaneId::Plugin` vs `PaneId::Terminal` namespace for pane-targeted verbs.
+    /// Picks the wire's `PaneId::Plugin` or `PaneId::Terminal` for pane-targeted verbs.
     pub is_plugin: bool,
     /// zellij flags EVERY client-active pane while the tab is fullscreen (union `is_focused`); the
     /// tab truth is [`TabEntry::fullscreen_active`], the fullscreened pane is the focused one.
     pub is_fullscreen: bool,
-    /// Geometry, in cells: left edge, top edge, height, width.
+    /// Geometry in cells: left edge, top edge, height, width.
     pub x: u32,
     pub y: u32,
     pub rows: u32,
     pub cols: u32,
-    /// The AI agent running in this pane, when the backend reports one (the wire's
-    /// `PaneMsg.agent`). `None` on a backend without an agent concept.
     pub agent: Option<AgentMark>,
 }
 
-/// The agent riding on a [`PaneEntry`] — the wire's `AgentMark`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentMark {
-    /// The agent's CLI label as the backend reports it.
     pub kind: String,
-    /// The user-facing agent name, when the backend has one.
     pub name: Option<String>,
     pub status: AgentStatus,
 }
 
-/// One agent in the session-wide inventory (the wire's `AgentMsg`), flattened so a row can
-/// jump to its pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentEntry {
     pub pane_id: u32,
     pub tab_id: u64,
-    /// The same key [`TabEntry::key`] carries for this tab, so a row can address
-    /// `commit_pane_in_space`. Empty when the tab is not in its space's layout.
+    /// Empty when the tab is not in its space's layout.
     pub tab_key: String,
     pub space_id: Option<String>,
     pub space_name: Option<String>,
@@ -94,7 +64,6 @@ pub struct AgentEntry {
 }
 
 impl AgentEntry {
-    /// The row's headline: the agent's name, else its human kind, else the raw kind.
     pub fn display_name(&self) -> &str {
         self.name
             .as_deref()
@@ -102,7 +71,6 @@ impl AgentEntry {
             .unwrap_or(&self.kind)
     }
 
-    /// The row's second line: the activity summary, else the title, else the cwd.
     pub fn subtitle(&self) -> Option<&str> {
         self.summary
             .as_deref()
@@ -111,94 +79,60 @@ impl AgentEntry {
     }
 }
 
-/// One message of a live agents subscription (the wire's `AgentEvent`), mapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEventEntry {
-    /// The whole inventory, replacing everything the client holds.
+    /// Replaces everything the client holds.
     Snapshot(Vec<AgentEntry>),
-    /// One agent's complete current state: insert it, or replace the row with its pane id.
-    /// Boxed, so the enum stays the size of its small variants.
+    /// Inserts the agent, or replaces the row with its pane id.
     Changed(Box<AgentEntry>),
-    /// The agent in this pane is gone.
     Removed(u32),
 }
 
-/// One tab in the attached session — a `TABS` entry, whole. Three identifiers ride on it and
-/// none derives from another: [`index`](Self::index) is a display position that shifts when an
-/// earlier tab closes, [`key`](Self::key) is this screen's own lookup handle, and
-/// [`tab_id`](Self::tab_id) is the routing key the backend knows.
+/// [`index`](Self::index) is a display position that shifts when an earlier tab closes,
+/// [`key`](Self::key) is this screen's lookup handle, [`tab_id`](Self::tab_id) the backend's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabEntry {
-    /// The tab's 1-based position, as the pill prints it.
     pub index: u32,
-    /// The mock's `TABS` key — the sheet's `panes — <key>` section label, and what
-    /// [`SwitchTab`](super::use_cases::SwitchTab) addresses by.
     pub key: String,
-    /// The tab's stable backend id (the wire's `TabMsg.tab_id`) — what a *switch* addresses it
-    /// by; see the struct docs above for why it's distinct from `index`/`key`.
     pub tab_id: u64,
-    /// The pill's human label (`minefit-api`).
     pub label: String,
-    /// The card status row's pane title (`ed@devbox: ~`).
     pub pane_title: String,
-    /// The focused pane's name (`ed@devbox`) — mock-era convenience, carried by every
-    /// repository; nothing on screen reads it today.
     pub pane_name: String,
-    /// The focused pane's path (`/home/ed`) — same standing as [`pane_name`](Self::pane_name).
     pub pane_path: String,
-    /// Every pane in this tab, in wire order — the "panes & tabs" sheet's pane list. Separate
-    /// from the `pane_*` fields, which stay the focused-pane convenience every existing caller
-    /// still reads.
     pub panes: Vec<PaneEntry>,
-    /// Whether this is the tab the card shows on arrival (`devbox`).
     pub active: bool,
-    /// Whether the tab carries an unacknowledged bell — drawn only by the docked rail.
     pub has_bell: bool,
-    /// The wire's `TabMsg.floating_panes_visible`; floating panes are hit-testable only while true.
+    /// Floating panes are hit-testable only while true.
     pub floating_panes_visible: bool,
-    /// The wire's `TabMsg.fullscreen_active`: tab-global and client-independent.
+    /// Tab-global and client-independent.
     pub fullscreen_active: bool,
 }
 
 impl TabEntry {
-    /// The sheet pill's label: `"4 devbox"`.
     pub fn pill_label(&self) -> String {
         format!("{} {}", self.index, self.label)
     }
 }
 
-/// Wheel-scroll granularity
-/// [`TerminalRepository::scroll_pane`](super::repositories::TerminalRepository::scroll_pane)
-/// sends. The wire's `ScrollDirection` also carries page/half-page/top/bottom, but nothing on
-/// this screen drives more than a mouse-wheel notch yet (`docs/ARCHITECTURE.md`'s Planned
-/// section), so this enum names only the two.
+/// The wire's `ScrollDirection` has more steps; this screen sends only wheel notches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollStep {
     Up,
     Down,
 }
 
-/// Which kind of line a [`TermLine`] is — each has its own ink (the mock's
-/// `.p`/`.out`/`.cm` spans).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TermLineKind {
-    /// A command line, amber (`GlyphInk::terminal_prompt`).
     Prompt,
-    /// Command output, dimmer (`GlyphInk::terminal_out`).
     Output,
-    /// A comment/annotation, dimmest and *italic* (`GlyphInk::terminal_comment`).
     Comment,
 }
 
-/// One line of the terminal card's body. The mock writes each line's prompt marker into the
-/// text itself (`ed@devbox:~$ systemctl status muxrd`) — no separate marker field, unlike
-/// `frust_glyph::term_block`, which prepends `$ `.
+/// The prompt marker is part of the text; there is no separate marker field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermLine {
     pub kind: TermLineKind,
     pub text: String,
-    /// Whether the blinking block caret sits at the end of this line — the mock's
-    /// `<span class="cur">`, which only follows the trailing empty prompt.
     pub cursor: bool,
 }
 
@@ -211,7 +145,6 @@ impl TermLine {
         }
     }
 
-    /// A command line ending in the blinking caret.
     pub fn caret(text: impl Into<String>) -> Self {
         Self {
             kind: TermLineKind::Prompt,
@@ -237,24 +170,15 @@ impl TermLine {
     }
 }
 
-/// Everything one load of the terminal screen needs: the sheet's two pill rows, the card's
-/// current lines, and the attached session's name. One aggregate rather than four calls because
-/// the screen has one loading state — and the active tab (which decides which lines come back)
-/// is the repository's answer.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Workspace {
     pub spaces: Vec<Space>,
     pub tabs: Vec<TabEntry>,
-    /// The [active](TabEntry::active) tab's lines.
     pub lines: Vec<TermLine>,
-    /// The attached session's current name, when `/terminal` was reached with a `?session=<id>`
-    /// that still resolves — see the [module docs](self).
     pub session_name: Option<String>,
 }
 
 impl Workspace {
-    /// The key of the tab marked [active](TabEntry::active), or the first tab's —
-    /// the card has to show *something* even if a repository forgets to mark one.
     pub fn active_key(&self) -> Option<String> {
         self.tabs
             .iter()

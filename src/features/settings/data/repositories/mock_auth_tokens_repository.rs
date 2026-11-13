@@ -1,23 +1,4 @@
-//! [`MockAuthTokensRepository`] — the in-memory [`AuthTokensRepository`]
-//! behind `di.rs`'s headless-test seam.
-//!
-//! Seeds **exactly** the two tokens `docs/redesign.html`'s `auth tokens`
-//! group draws — `zelli-mobile-100-71-31-57-mr3g6w5g` (read-write) and
-//! `token_2` (read-only) — so the screen and the mock are the same picture,
-//! and both scope chips are reachable from the seed. Mutates that set in
-//! place on create/revoke, so a test proves a real round trip rather than a
-//! patched signal.
-//!
-//! Framework-free like the rest of `data`: the store is a plain
-//! `Mutex<Vec<AuthToken>>` (`Send + Sync`, which the controller needs to hold
-//! it behind an `Arc`). One of the feature's two failure-mapping sites into
-//! [`AppFailure`]: an unknown/blank/duplicate name each map to
-//! [`AppFailure::Internal`] (a bug — the screen never submits one).
-//!
-//! A runtime-minted token is stamped [`MOCK_TODAY`] and a deterministic
-//! secret ([`MOCK_MINTED_SECRET_PREFIX`] + name), not a real clock/random
-//! value — a suite exercising the reveal sheet needs an exact string to
-//! assert on.
+//! In-memory [`AuthTokensRepository`] for headless tests, seeded with the two tokens the design mock draws.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -30,45 +11,30 @@ use crate::features::settings::domain::entities::{
 };
 use crate::features::settings::domain::repositories::AuthTokensRepository;
 
-/// Simulated round-trip latency on every call — the same short, deliberate
-/// `sleep` the `sessions` mock uses, so the screen's async path
-/// (spawn → await → signal write → rebuild) is the one the real client will
-/// take rather than an accidentally-synchronous shortcut.
+/// Keeps the async path real instead of accidentally synchronous.
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
 
-/// The creation date stamped on a token minted at runtime — see the
-/// [module docs](self). `pub` so a test asserts on the constant rather than on
-/// a copy of the literal.
+/// A fixed stamp and secret prefix let suites assert exact strings.
 pub const MOCK_TODAY: &str = "2026-07-31";
 
-/// The one-time secret stamped on a token minted at runtime — see the
-/// [module docs](self). `pub` for the same reason as [`MOCK_TODAY`].
 pub const MOCK_MINTED_SECRET_PREFIX: &str = "mock-secret-";
 
-/// An in-memory [`AuthTokensRepository`]. See the [module docs](self).
 pub struct MockAuthTokensRepository {
-    /// The live token set. Mutated in place by create/revoke.
     tokens: Mutex<Vec<AuthToken>>,
 }
 
 impl MockAuthTokensRepository {
-    /// A repository seeded with [`seed`]'s two tokens.
     pub fn seeded() -> Self {
         Self {
             tokens: Mutex::new(seed()),
         }
     }
 
-    /// The live token set, cloned — a **synchronous** peek for this module's
-    /// own unit tests, never part of the [`AuthTokensRepository`] contract
-    /// (which is what production code speaks).
     pub fn snapshot(&self) -> Vec<AuthToken> {
         self.lock().clone()
     }
 
-    /// The store, with a poisoned lock recovered rather than propagated: a
-    /// panicking test must not cascade into every later call on this
-    /// repository (the `sessions` mock's own recovery).
+    /// Recovers a poisoned lock so one panicking test does not cascade.
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<AuthToken>> {
         self.tokens
             .lock()
@@ -82,8 +48,6 @@ impl Default for MockAuthTokensRepository {
     }
 }
 
-/// The seeded token set — `docs/redesign.html`'s two `.token-item`s,
-/// transcribed 1:1 (names, scopes and dates), in the order it draws them.
 fn seed() -> Vec<AuthToken> {
     vec![
         AuthToken {
@@ -109,6 +73,7 @@ impl AuthTokensRepository for MockAuthTokensRepository {
 
     async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
+        // A blank or duplicate name is a bug: the screen never submits one.
         let name = request.name.trim().to_string();
         if name.is_empty() {
             return Err(AppFailure::Internal(
@@ -158,11 +123,8 @@ impl AuthTokensRepository for MockAuthTokensRepository {
 mod tests {
     use super::*;
 
-    /// How many tokens [`seed`] ships — the redesign's two rows.
     const SEEDED_COUNT: usize = 2;
 
-    /// Drive one repository call to completion on a current-thread runtime —
-    /// these are pure data-layer tests, with no frust runtime in play.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -171,7 +133,6 @@ mod tests {
             .block_on(fut)
     }
 
-    /// A read-write mint request for `name`.
     fn mint(name: &str) -> CreateTokenRequest {
         CreateTokenRequest {
             name: name.to_string(),

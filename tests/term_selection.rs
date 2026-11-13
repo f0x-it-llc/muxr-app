@@ -1,13 +1,6 @@
-//! Headless end-to-end coverage for the terminal's **selection, loupe and copy** — no GPU, no
-//! window, no device, and no touching the developer's real clipboard.
-//!
-//! Every test drives the real assembly (`term::terminal_surface`): a `RenderRoot` over the grid,
-//! its `GestureDetector`, and the Copy chip above it. The pure halves are unit-tested next to
-//! their code, so what's left to prove is the wiring — a **perfectly stationary** hold selects at
-//! the threshold (no `Move`, no `Up`, just paints past the threshold and the rebuild that drains
-//! the `Housekeeping` flush); the selection-click haptic fires **exactly once per gesture**; a
-//! clearing tap is checked *before* the focus claim, so it can't also summon the keyboard; and
-//! `Copy` hands the exact expected string to the clipboard seam, read through an **injected sink**.
+//! Headless end-to-end coverage for the terminal's selection, loupe and copy: a stationary hold
+//! selects at the threshold, the haptic fires once per gesture, a clearing tap precedes the focus
+//! claim, and `Copy` reaches an injected clipboard sink.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,48 +32,27 @@ use muxr::ui::toasts::app_toasts;
 mod support;
 use support::{ms, node_center_by_label, node_labels, pointer, serial, setup};
 
-/// The font size every test lays out at — the app's terminal default.
 const FONT_SIZE: f32 = 13.0;
 
-/// A phone-shaped surface, in logical px.
 const PHONE: Size = Size::new(392.7, 872.7);
 
-/// The grid's accessible name.
 const LABEL: &str = "dev \u{b7} zsh";
 
-/// Comfortably past `frust_widgets::gesture`'s 500ms long-press threshold.
+/// Comfortably past the 500ms long-press threshold.
 const HELD_MS: f64 = 600.0;
 
-/// The screen every test selects out of. Three lines, chosen so the fixture
-/// exercises the whole model: words separated by every kind of separator, a
-/// second line to drag onto, and a `/`-separated path whose components are
-/// distinct words.
+/// Words split by every kind of separator, a second line to drag onto, and a `/`-separated path.
 const FIXTURE: &[u8] = b"cargo build release\r\nusr local bin\r\nalpha beta gamma";
 
-// ---------------------------------------------------------------------------
-// A recording paint target
-// ---------------------------------------------------------------------------
-
-/// A GPU-free paint target recording what this feature draws: the selection
-/// wash and the chip's pill (colour-bearing fills), the loupe's rounded clip and
-/// transform, its border, and the chip's vector marks.
 #[derive(Default)]
 struct SelScene {
-    /// `(origin, size, colour)` per plain filled rect, in paint order.
     fills: Vec<(Point, Size, Color)>,
-    /// `(origin, size, radius)` per rounded fill.
     rounded: Vec<(Point, Size, f64)>,
-    /// `(origin, size, radius)` per **rounded clip** — the loupe pushes exactly
-    /// one, and nothing else in this tree does.
+    /// The loupe pushes exactly one rounded clip, and nothing else in this tree does.
     rounded_clips: Vec<(Point, Size, f64)>,
-    /// Every transform pushed — the loupe's magnification.
     transforms: Vec<Affine>,
-    /// `(origin, size)` per shadow.
     shadows: Vec<(Point, Size)>,
-    /// `(origin, bounding box)` per stroked path — the unfocused caret and the
-    /// loupe's border.
     strokes: Vec<(Point, Size)>,
-    /// `(origin, bounding box)` per filled path — the chip's two vector marks.
     paths: Vec<(Point, Size)>,
     glyph_runs: usize,
 }
@@ -129,7 +101,6 @@ impl PaintScene for SelScene {
 }
 
 impl SelScene {
-    /// Every fill painted in exactly `color`, in paint order.
     fn fills_in(&self, color: Color) -> Vec<(Point, Size)> {
         self.fills
             .iter()
@@ -138,8 +109,6 @@ impl SelScene {
             .collect()
     }
 
-    /// The rounded fills whose box is exactly the Copy pill's — how a test
-    /// locates the chip without knowing this screen's private token palette.
     fn pill(&self) -> Option<(Point, Size, f64)> {
         self.rounded
             .iter()
@@ -148,18 +117,12 @@ impl SelScene {
     }
 }
 
-/// Whether two logical-pixel values are the same one.
 fn near(a: f64, b: f64) -> bool {
     (a - b).abs() < 0.01
 }
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
 type Logic = Box<dyn FnMut(&mut ()) -> AnyView<()>>;
 
-/// The mounted surface plus every handle a test pokes it through.
 struct Mounted {
     root: RenderRoot<(), AnyView<()>>,
     logic: Logic,
@@ -167,19 +130,9 @@ struct Mounted {
     tcx: TextContext,
     emulator: SharedEmulator,
     selection: SelectionSeam,
-    /// The grid's keystroke source — kept around (a `Mounted` handle, not
-    /// just the `Logic` closure's own clone) so a test can type into the grid
-    /// and inspect what the source is still holding
-    /// (see [`Mounted::buffered_units`]).
     input: InputSeam,
-    /// The demo feed the seam emits into — a test drains it to read back the
-    /// bytes typing actually sent (see [`Mounted::drain`]).
     feed: Rc<RefCell<DemoFeed>>,
-    /// The feed pump's own generation counter — a test bumps it directly to
-    /// simulate new output arriving (see [`Mounted::advance_generation`]).
     generation: RwSignal<u64>,
-    /// What `Copy` handed the clipboard, in order — the injected sink (see the
-    /// [module docs](self)).
     copied: Rc<RefCell<Vec<String>>>,
 }
 
@@ -237,25 +190,16 @@ impl Mounted {
             generation,
             copied,
         };
-        // The manual demo feed's chunk 0 is due at t=0 regardless of any frame
-        // — drain it once here (`tests/term_input.rs`'s own precedent) so a
-        // later `drain`/`drain_hex` reflects only what a test actually typed,
-        // never the scripted replay's own canned output.
+        // `DemoFeed`'s chunk 0 is due at t=0; drain it so later drains hold only typed bytes.
         mounted.drain();
         mounted
     }
 
-    /// Simulate the feed pump publishing a new generation — i.e. new output
-    /// arrived on the underlying session (see
-    /// [`pump_wake`](muxr::features::terminal::presentation::term::pump_wake),
-    /// which this mirrors at the one-signal-write granularity that matters).
     fn advance_generation(&mut self) {
         let next = self.generation.get_untracked() + 1;
         self.generation.set(next);
     }
 
-    /// One frame at `at_ms` on the paint clock: rebuild, lay out at [`PHONE`],
-    /// paint.
     fn frame(&mut self, at_ms: f64) -> SelScene {
         self.root.rebuild(&mut self.logic, &mut self.state);
         let tcx: &mut dyn std::any::Any = &mut self.tcx;
@@ -269,9 +213,7 @@ impl Mounted {
         self.root.event(&mut self.state, &pointer(phase, at));
     }
 
-    /// The centre of cell `(row, col)`, in surface coordinates. Requires at
-    /// least one [`frame`](Self::frame) first — the cell box is solved in
-    /// `layout`, and this is the accessor the grid publishes it through.
+    /// Requires at least one frame first: the cell box is solved in `layout`.
     fn cell(&self, row: u16, col: u16) -> Point {
         let geo = self
             .selection
@@ -283,12 +225,8 @@ impl Mounted {
         )
     }
 
-    /// Press at `at` and hold, perfectly still, past the long-press threshold —
-    /// **no pointer event other than the `Down`**. The three frames are the whole
-    /// mechanism: the first records the press epoch, the second crosses the
-    /// threshold (marking `elapsed` and latching a `Housekeeping` flush), and the
-    /// third's *rebuild* drains that flush and fires `on_long_press` — which is
-    /// what every shipping shell does, rebuild before paint on every frame.
+    /// No pointer event but the `Down`. The first frame records the press epoch, the second crosses
+    /// the threshold, and the third's rebuild drains the flush and fires `on_long_press`.
     fn hold(&mut self, at: Point) {
         self.event(PointerPhase::Down, at);
         self.frame(0.0);
@@ -296,14 +234,10 @@ impl Mounted {
         self.frame(HELD_MS + 20.0);
     }
 
-    /// The selected text, as the clipboard would receive it.
     fn text(&self) -> String {
         self.selection.text()
     }
 
-    /// Deliver one mobile snapshot down the focus path, exactly as
-    /// `nativeImeApply`/`imeRoundTrip` do (`tests/term_input.rs`'s own
-    /// `apply`, mirrored here so a selection test can also drive typing).
     fn apply(&mut self, text: &str) {
         let end = text.encode_utf16().count() as i32;
         let state = EditingState {
@@ -319,8 +253,6 @@ impl Mounted {
         );
     }
 
-    /// Type `text` the way a soft keyboard does: one snapshot per character,
-    /// each built on the mirror the widget currently publishes.
     fn type_text(&mut self, text: &str) {
         for ch in text.chars() {
             let mut buffer = self.mirror();
@@ -329,7 +261,6 @@ impl Mounted {
         }
     }
 
-    /// The editing state the widget currently publishes to the platform.
     fn published(&self) -> EditingState {
         self.input.published()
     }
@@ -338,14 +269,10 @@ impl Mounted {
         self.published().text
     }
 
-    /// How many UTF-16 units of the user's own typing the shared source is
-    /// still holding — the content-free scrub assertion (see
-    /// `KeystrokeSource::buffered_units`).
     fn buffered_units(&self) -> usize {
         self.input.source.borrow().buffered_units()
     }
 
-    /// Everything the session has been sent since the last drain.
     fn drain(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         self.feed
@@ -354,14 +281,11 @@ impl Mounted {
         out
     }
 
-    /// [`drain`](Self::drain) as lowercase hex.
     fn drain_hex(&mut self) -> String {
         self.drain().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
-/// The word `word_at` resolves at a cell of the fixture — the expectation half
-/// of a selection assertion, derived from the same emulator the widget reads.
 fn word(mounted: &Mounted, row: u16, col: u16) -> GridRange {
     let emulator = mounted.emulator.borrow();
     muxr::features::terminal::presentation::term::selection::word_at(
@@ -371,10 +295,6 @@ fn word(mounted: &Mounted, row: u16, col: u16) -> GridRange {
     .expect("the fixture cell is word material")
 }
 
-// ---------------------------------------------------------------------------
-// Threshold-fire: the long-press consumer
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_stationary_hold_selects_the_word_under_the_finger_and_ticks_once() {
     let _serial = serial();
@@ -382,8 +302,7 @@ fn a_stationary_hold_selects_the_word_under_the_finger_and_ticks_once() {
     let mut mounted = Mounted::new();
     mounted.frame(0.0);
 
-    // `build` is at row 0, cols 6..=10 — press in the middle of it and never
-    // move again.
+    // `build` is at row 0, cols 6..=10.
     mounted.hold(mounted.cell(0, 8));
 
     assert_eq!(
@@ -418,7 +337,6 @@ fn the_haptic_stays_at_one_across_the_whole_gesture() {
     mounted.hold(mounted.cell(0, 8));
     assert_eq!(mounted.selection.haptic_count(), 1);
 
-    // Dragging, more frames, and the release must not add a second tick.
     mounted.event(PointerPhase::Move, mounted.cell(0, 14));
     mounted.frame(700.0);
     mounted.event(PointerPhase::Move, mounted.cell(1, 2));
@@ -455,14 +373,9 @@ fn a_hold_on_a_separator_still_ticks_but_selects_nothing() {
          fires it before it resolves a word, and so do we"
     );
 
-    // …and releasing raises no chip, because there is nothing to copy.
     mounted.event(PointerPhase::Up, mounted.cell(0, 5));
     assert!(mounted.selection.chip_anchor().is_none());
 }
-
-// ---------------------------------------------------------------------------
-// Drag
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_drag_extends_word_wise_across_lines_and_the_release_raises_the_chip() {
@@ -487,7 +400,6 @@ fn a_drag_extends_word_wise_across_lines_and_the_release_raises_the_chip() {
          with a newline"
     );
 
-    // Reversing past the anchor keeps the anchor word in, symmetrically.
     mounted.event(PointerPhase::Move, mounted.cell(0, 1)); // `cargo`
     assert_eq!(
         mounted.selection.range(),
@@ -518,10 +430,6 @@ fn a_drag_that_never_leaves_one_word_still_selects_exactly_that_word() {
     assert_eq!(mounted.text(), "build");
 }
 
-// ---------------------------------------------------------------------------
-// Paint: the wash and the loupe
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_selection_paints_one_line_wise_stripe_per_row_in_the_palettes_wash() {
     let _serial = serial();
@@ -540,8 +448,7 @@ fn the_selection_paints_one_line_wise_stripe_per_row_in_the_palettes_wash() {
 
     let wash = TerminalPalette::fallback().selection;
     let painted = scene.fills_in(wash);
-    // The grid paints the wash once and the loupe re-paints it under its own
-    // transform, so the *first* `expected.len()` are the grid's own.
+    // The loupe re-paints the wash under its transform: the first `expected.len()` are the grid's.
     assert!(
         painted.len() >= expected.len(),
         "{} stripes painted for {} segments",
@@ -567,7 +474,6 @@ fn the_loupe_is_a_magnified_re_render_visible_only_while_the_drag_is_live() {
     let _owner = setup();
     let mut mounted = Mounted::new();
 
-    // Nothing selected: no loupe.
     let idle = mounted.frame(0.0);
     assert!(idle.rounded_clips.is_empty());
     assert!(idle.transforms.is_empty());
@@ -596,8 +502,7 @@ fn the_loupe_is_a_magnified_re_render_visible_only_while_the_drag_is_live() {
         1,
         "…and re-paints the cells under exactly one transform"
     );
-    // A re-render, not a bitmap blow-up: the same runs are shaped once and
-    // submitted a second time inside the window.
+    // A re-render, not a bitmap blow-up: the same runs are submitted again inside the window.
     assert!(
         dragging.glyph_runs > 0,
         "the magnified window submits real glyph runs"
@@ -607,7 +512,6 @@ fn the_loupe_is_a_magnified_re_render_visible_only_while_the_drag_is_live() {
         "the window floats over the grid"
     );
 
-    // Release: the loupe is a *gesture* affordance and goes with the gesture.
     mounted.event(PointerPhase::Up, at);
     let released = mounted.frame(800.0);
     assert!(released.rounded_clips.is_empty(), "no loupe after the lift");
@@ -616,18 +520,14 @@ fn the_loupe_is_a_magnified_re_render_visible_only_while_the_drag_is_live() {
 
 #[test]
 fn the_loupe_re_centres_on_the_finger_when_its_box_is_clamped_to_an_edge() {
-    // Away from every edge the window follows the finger horizontally, so the
-    // offset's x is zero; its y is the constant float height (the window is
-    // deliberately *above* the finger, so the content is always shifted down).
+    // The window floats above the finger, so away from every edge the offset is (0, float height).
     let float_y = 28.0 + LOUPE_H / 2.0;
     let free = Point::new(200.0, 400.0);
     let window = loupe_box(free, PHONE);
     assert_eq!(loupe_content_offset(free, window), Vec2::new(0.0, float_y));
     assert!(near(window.center().x, free.x));
 
-    // In the top-left corner the window cannot follow: it pins to the margin,
-    // and the recomputed offset is what keeps the cell under the finger in view
-    // instead of freezing on the last cell the window could centre on.
+    // In the corner the window pins to the margin and the offset keeps the finger's cell in view.
     let corner = Point::new(2.0, 2.0);
     let pinned = loupe_box(corner, PHONE);
     assert_eq!((pinned.x0, pinned.y0), (LOUPE_MARGIN, LOUPE_MARGIN));
@@ -647,10 +547,7 @@ fn the_loupe_re_centres_on_the_finger_when_its_box_is_clamped_to_an_edge() {
          point of the rule"
     );
 
-    // At the right edge the horizontal clamp bites the other way. The *bottom*
-    // edge deliberately does not: the window floats above the finger, so a
-    // finger on the last row still has room — which is the whole reason the
-    // lift exists.
+    // The bottom edge does not clamp: the window floats above the finger.
     let far = Point::new(PHONE.width - 2.0, PHONE.height - 2.0);
     let pinned = loupe_box(far, PHONE);
     assert_eq!(pinned.x1, PHONE.width - LOUPE_MARGIN, "pinned right");
@@ -659,8 +556,6 @@ fn the_loupe_re_centres_on_the_finger_when_its_box_is_clamped_to_an_edge() {
     assert!(offset.x > 0.0, "…recentred left-of-finger: {offset:?}");
     assert_eq!(offset.y, float_y, "the vertical float is untouched");
 
-    // A drag that ran off the bottom of a short rect *does* clamp vertically:
-    // the finger is below the box, and the window pins to the bottom margin.
     let short = Size::new(300.0, 200.0);
     let below = Point::new(150.0, 300.0);
     let pinned = loupe_box(below, short);
@@ -670,15 +565,10 @@ fn the_loupe_re_centres_on_the_finger_when_its_box_is_clamped_to_an_edge() {
         "the finger is further below the pinned window than the float height"
     );
 
-    // The constants themselves, pinned against drift.
     assert_eq!((LOUPE_W, LOUPE_H), (116.0, 46.0));
     assert_eq!(LOUPE_SCALE, 1.75);
     assert_eq!(LOUPE_MARGIN, 4.0);
 }
-
-// ---------------------------------------------------------------------------
-// The clearing tap
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
@@ -691,11 +581,7 @@ fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
     mounted.event(PointerPhase::Up, mounted.cell(0, 8));
     mounted.frame(700.0);
     assert!(mounted.selection.range().is_some(), "something to clear");
-    // The press that *started* the gesture found no selection to clear, so it
-    // fell through and claimed the focus session exactly as any other press does
-    // — the claim is invariant across all three outcomes of the touch machine,
-    // which is what makes the next assertion about *ordering*. It raised no
-    // keyboard: a hold is not a tap, and only the tap branch publishes a surface.
+    // The hold claimed focus without raising a keyboard, so the next assertion is about ordering.
     assert!(mounted.root.is_focus_active());
     assert!(
         mounted.root.ime_state().is_none(),
@@ -703,7 +589,6 @@ fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
          thing it just selected"
     );
 
-    // The clearing tap — deliberately somewhere the chip is not.
     let elsewhere = mounted.cell(2, 2);
     mounted.event(PointerPhase::Down, elsewhere);
     mounted.event(PointerPhase::Up, elsewhere);
@@ -722,9 +607,6 @@ fn a_tap_that_clears_a_selection_does_not_also_focus_the_grid() {
         "…and must NOT summon the keyboard"
     );
 
-    // The very next tap, with nothing to clear, is an ordinary one and does
-    // both — which is what makes the assertion above about *ordering* rather
-    // than about the grid being inert.
     mounted.event(PointerPhase::Down, elsewhere);
     mounted.event(PointerPhase::Up, elsewhere);
     assert!(mounted.root.is_focus_active(), "an ordinary tap focuses");
@@ -741,8 +623,6 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
     let mut mounted = Mounted::new();
     mounted.frame(0.0);
 
-    // Focus the grid and type an IN-PROGRESS command line — not a submitted
-    // one, and not empty.
     let focus_at = mounted.cell(4, 0);
     mounted.event(PointerPhase::Down, focus_at);
     mounted.event(PointerPhase::Up, focus_at);
@@ -759,7 +639,6 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
     );
     mounted.drain(); // discard the typing's own echo before the byte assertion below
 
-    // Long-press elsewhere to select a word, then release.
     mounted.hold(mounted.cell(0, 8)); // "build"
     mounted.event(PointerPhase::Up, mounted.cell(0, 8));
     mounted.frame(HELD_MS + 40.0);
@@ -768,13 +647,8 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
         "sanity: something to clear"
     );
 
-    // The clearing tap. Deliberately far from the floating Copy chip's own pill —
-    // a tap landing on the chip's own Dismiss half clears the selection through
-    // `ChipTarget::Dismiss` instead, never reaching the grid's own selection Down
-    // arm. Consumed entirely by *this grid's* Down arm — `Handled`, and
-    // frust-core still forces a focus-path blur on it (any pointer `Down` that
-    // claims no focus is a blur, `Handled` or not) — the exact edge case
-    // `note_focus_edge` has to tell apart from a real departure.
+    // Far from the chip: a Down on its Dismiss half clears through `ChipTarget::Dismiss` instead.
+    // The grid consumes this Down, yet the framework still blurs the focus path on it.
     let elsewhere = Point::new(PHONE.width - 20.0, PHONE.height - 20.0);
     assert!(
         !chip_rect(mounted.cell(0, 8), PHONE).contains(elsewhere),
@@ -799,9 +673,7 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
         "…and still does not summon the keyboard"
     );
 
-    // THE FIX: unlike a real departure, this Down was consumed by the grid
-    // itself — a hand-off, not a blur — so the diff baseline for the
-    // in-progress line must survive it.
+    // A Down the grid consumed is a hand-off, not a blur, so the in-progress baseline survives.
     assert!(
         mounted.buffered_units() > 0,
         "a dismissing tap the grid itself consumed must NOT scrub the \
@@ -810,11 +682,7 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
     );
     assert_eq!(mounted.mirror(), "ls -l", "the whole line, untouched");
 
-    // And the diff engine still has a live baseline to shorten. frust routes
-    // `Ime` along the focus path, so an unfocused grid is unreachable by a
-    // snapshot: an ordinary tap re-focuses it first, and only then does the
-    // next snapshot (a real Backspace) emit, rather than the silent no-op an
-    // actually-scrubbed baseline would produce.
+    // `Ime` routes along the focus path, so the grid is re-focused before the Backspace snapshot.
     mounted.event(PointerPhase::Down, focus_at);
     mounted.event(PointerPhase::Up, focus_at);
     mounted.frame(HELD_MS + 200.0);
@@ -833,12 +701,6 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
     );
 }
 
-// ---------------------------------------------------------------------------
-// The chip: geometry, copy, dismiss
-// ---------------------------------------------------------------------------
-
-/// Select `build release` on row 0, release at a known point, and settle a
-/// frame so the chip is up. Returns the release point.
 fn select_and_release(mounted: &mut Mounted) -> Point {
     mounted.frame(0.0);
     mounted.hold(mounted.cell(0, 8));
@@ -864,13 +726,12 @@ fn the_chip_paints_exactly_where_the_incumbent_puts_it() {
         "{origin:?} vs {expected:?}"
     );
     assert!(near(size.width, CHIP_W) && near(size.height, CHIP_H));
-    // Two vector marks, never font glyphs (the app's chrome-icons rule).
+    // Two vector marks, never font glyphs.
     assert!(
         scene.paths.len() >= 2,
         "a copy mark and a dismiss mark: {:?}",
         scene.paths
     );
-    // Both halves are announced.
     let labels = node_labels(&mounted.root);
     assert!(labels.contains(&"Copy".to_string()), "{labels:?}");
     assert!(
@@ -913,7 +774,6 @@ fn copy_hands_the_exact_selected_text_to_the_sensitive_clipboard_seam() {
         app_toasts().pending_untracked()
     );
 
-    // The chip is gone from the next frame's paint and from the a11y tree.
     let after = mounted.frame(800.0);
     assert!(after.pill().is_none());
     assert!(!node_labels(&mounted.root).contains(&"Copy".to_string()));
@@ -951,8 +811,7 @@ fn pressing_the_chip_never_reaches_the_grid_underneath() {
     let mut mounted = Mounted::new();
     select_and_release(&mut mounted);
 
-    // The chip sits above the gesture detector, so its own `Down` must not be
-    // the grid's clearing tap — otherwise `Copy` would copy nothing.
+    // The chip sits above the gesture detector, so its `Down` must not be the grid's clearing tap.
     let copy = node_center_by_label(&mounted.root, "Copy").expect("announced");
     mounted.event(PointerPhase::Down, copy);
     assert!(
@@ -962,10 +821,6 @@ fn pressing_the_chip_never_reaches_the_grid_underneath() {
     mounted.event(PointerPhase::Up, copy);
     assert_eq!(mounted.copied.borrow().len(), 1);
 }
-
-// ---------------------------------------------------------------------------
-// read_only
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_read_only_grid_still_selects_and_still_copies() {
@@ -985,10 +840,6 @@ fn a_read_only_grid_still_selects_and_still_copies() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Grid shrink: a held selection is clamped, never carried stale into Copy
-// ---------------------------------------------------------------------------
-
 #[test]
 fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
     let _serial = serial();
@@ -996,9 +847,7 @@ fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
     let mut mounted = Mounted::new();
     mounted.frame(0.0);
 
-    // `build` (row 0, cols 6..=10) dragged onto `local` (row 1) — a genuine
-    // multi-row selection whose BEGIN column (6) is about to outlive the grid
-    // it was resolved against.
+    // A multi-row selection whose begin column (6) is about to outlive the grid.
     mounted.hold(mounted.cell(0, 8));
     mounted.event(PointerPhase::Move, mounted.cell(1, 5));
     assert_eq!(
@@ -1007,10 +856,7 @@ fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
         "sanity: selected"
     );
 
-    // The grid shrinks under the held selection — a rotation, a font-size bump, a
-    // fullscreen collapse. `TerminalGridWidget::layout` resizes the emulator and
-    // then calls `SelectionSeam::set_metrics`, in that order; this simulates that
-    // pair directly, at a width narrower than the selection's own begin column.
+    // `layout` resizes the emulator, then calls `set_metrics`; this replays that pair, narrower.
     let geo = mounted.selection.metrics().expect("laid out once already");
     let narrow = CellGeometry { cols: 5, ..geo };
     mounted
@@ -1019,10 +865,7 @@ fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
         .resize(narrow.cols, narrow.rows);
     mounted.selection.set_metrics(narrow);
 
-    // Before this fix, this call reached `vt100::Screen::contents_between`
-    // with a stale `begin.col` (6) past the new 5-col screen and panicked — a
-    // `u16` underflow in its multi-row branch (`cols - start_col`), under the
-    // dev profile's `overflow-checks` (the profile `cargo test` runs under).
+    // A stale `begin.col` past the 5-col screen would underflow a `u16` in vt100 (overflow-checks).
     let text = mounted.text();
     assert!(
         !text.is_empty(),
@@ -1034,10 +877,6 @@ fn copy_after_a_grid_shrink_returns_clamped_text_never_panics() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Streaming output: a held selection is cleared, not silently retargeted
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_generation_bump_clears_a_held_selection_and_its_chip() {
     let _serial = serial();
@@ -1047,9 +886,7 @@ fn a_generation_bump_clears_a_held_selection_and_its_chip() {
     assert!(mounted.selection.range().is_some(), "sanity: selected");
     assert_eq!(mounted.selection.chip_anchor(), Some(release));
 
-    // The feed pump publishes a new generation — new output arrived, and the
-    // rendered screen the selection's `GridPoint`s address may have scrolled
-    // underneath it.
+    // New output arrived, so the screen the selection addresses may have scrolled.
     mounted.advance_generation();
     let scene = mounted.frame(900.0);
 
@@ -1079,9 +916,6 @@ fn a_generation_bump_with_nothing_selected_is_a_no_op() {
 
     mounted.advance_generation();
     mounted.frame(20.0);
-    // Nothing to assert going wrong here except that a hold still works
-    // exactly as it does with no generation bump in the picture at all — the
-    // bump had nothing to clear and touched nothing else.
     mounted.hold(mounted.cell(0, 8));
     assert_eq!(mounted.text(), "build");
 }
@@ -1094,20 +928,13 @@ fn a_rebuild_that_repeats_the_same_generation_does_not_clear_a_selection() {
     select_and_release(&mut mounted);
     assert!(mounted.selection.range().is_some(), "sanity: selected");
 
-    // Further frames with no `advance_generation` call are ordinary
-    // repaints/rebuilds of the same content — not new output — and must not
-    // touch the selection (the chip-paint tests above already rely on this,
-    // but it is the direct claim the M3 fix makes).
+    // Frames without a generation bump repaint the same content and keep the selection.
     mounted.frame(720.0);
     mounted.frame(740.0);
 
     assert!(mounted.selection.range().is_some());
     assert!(mounted.selection.chip_anchor().is_some());
 }
-
-// ---------------------------------------------------------------------------
-// Scope: nothing the incumbent does not have
-// ---------------------------------------------------------------------------
 
 #[test]
 fn there_are_no_handles_no_double_tap_select_and_no_select_all() {
@@ -1116,7 +943,6 @@ fn there_are_no_handles_no_double_tap_select_and_no_select_all() {
     let mut mounted = Mounted::new();
     mounted.frame(0.0);
 
-    // Two quick taps in a row are two taps, not a word selection.
     let at = mounted.cell(0, 8);
     for _ in 0..2 {
         mounted.event(PointerPhase::Down, at);
@@ -1128,8 +954,6 @@ fn there_are_no_handles_no_double_tap_select_and_no_select_all() {
         "double-tap-to-select is deliberately not implemented"
     );
 
-    // A selection announces exactly two controls — the chip's two halves. No
-    // drag handles, no `Select all`.
     select_and_release(&mut mounted);
     let labels = node_labels(&mounted.root);
     let controls: Vec<_> = labels

@@ -153,12 +153,12 @@ h1{ font-family:var(--font-display); font-weight:700; font-size:clamp(26px,5vw,3
         <div class="sheet-handle"></div>
         <div class="sheet-toprow"><span class="lbl">panes &amp; tabs</span><div class="sheet-close" id="sheetClose">×</div></div>
         <div class="sheet-section-lbl">spaces</div>
-        <div class="pill-row"><span class="pill">cupline</span><span class="pill">zelli_mobile</span><span class="pill sel">forgekit</span><span class="pill add">+ space</span></div>
+        <div class="pill-row"><span class="pill">quill</span><span class="pill">zelli_mobile</span><span class="pill sel">forgekit</span><span class="pill add">+ space</span></div>
         <div class="sheet-section-lbl">tabs</div>
         <div class="pill-row" id="sheetTabRow">
           <span class="pill" data-tab="btop">1 btop</span>
-          <span class="pill" data-tab="minefit">2 minefit-api</span>
-          <span class="pill" data-tab="gohora">3 gohora</span>
+          <span class="pill" data-tab="lumen">2 lumen-api</span>
+          <span class="pill" data-tab="harbor">3 harbor</span>
           <span class="pill sel" data-tab="devbox">4 devbox</span>
           <span class="pill add">+</span>
         </div>
@@ -182,23 +182,23 @@ h1{ font-family:var(--font-display); font-weight:700; font-size:clamp(26px,5vw,3
 
 <script>
 var TABS = {
-  btop: { title:'ed@precision: ~', name:'ed@precision', path:'/home/ed', lines:[
-    {t:'p', v:'ed@precision:~$ btop'},
+  btop: { title:'ed@workbench: ~', name:'ed@workbench', path:'/home/ed', lines:[
+    {t:'p', v:'ed@workbench:~$ btop'},
     {t:'out', v:'cpu 12% · mem 4.1/16gb · net 1.2mb/s'},
     {t:'cm', v:'# live system monitor, refreshes every 2s'},
-    {t:'p', v:'ed@precision:~$ ', cursor:true}
+    {t:'p', v:'ed@workbench:~$ ', cursor:true}
   ]},
-  minefit: { title:'ed@minefit: ~/api', name:'ed@minefit', path:'~/api', lines:[
-    {t:'p', v:'ed@minefit:~/api$ cargo run --release'},
-    {t:'out', v:'Compiling minefit-api v0.3.2'},
+  lumen: { title:'ed@lumen: ~/api', name:'ed@lumen', path:'~/api', lines:[
+    {t:'p', v:'ed@lumen:~/api$ cargo run --release'},
+    {t:'out', v:'Compiling lumen-api v0.3.2'},
     {t:'out', v:'Finished release [optimized] in 12.4s'},
-    {t:'p', v:'ed@minefit:~/api$ ', cursor:true}
+    {t:'p', v:'ed@lumen:~/api$ ', cursor:true}
   ]},
-  gohora: { title:'ed@gohora: ~/src', name:'ed@gohora', path:'~/src', lines:[
-    {t:'p', v:'ed@gohora:~/src$ go build ./...'},
-    {t:'out', v:'ok  gohora/cmd/server  0.842s'},
+  harbor: { title:'ed@harbor: ~/src', name:'ed@harbor', path:'~/src', lines:[
+    {t:'p', v:'ed@harbor:~/src$ go build ./...'},
+    {t:'out', v:'ok  harbor/cmd/server  0.842s'},
     {t:'cm', v:'# no errors, 3 packages rebuilt'},
-    {t:'p', v:'ed@gohora:~/src$ ', cursor:true}
+    {t:'p', v:'ed@harbor:~/src$ ', cursor:true}
   ]},
   devbox: { title:'ed@devbox: ~', name:'ed@devbox', path:'/home/ed', lines:[
     {t:'p', v:'ed@devbox:~$ systemctl status muxrd'},

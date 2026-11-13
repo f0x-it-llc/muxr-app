@@ -1,10 +1,6 @@
-//! Never hand-edit this file: `frust::app!` (in `lib.rs`) generates the
-//! hidden `__frust_main` this one line calls — add screens/state to
-//! `lib.rs` instead.
+//! Entry point only: `frust::app!` in `lib.rs` generates `__frust_main`.
 
-// On Android the app is driven by the JNI bridge (`frust::app!` in
-// `lib.rs`), not this desktop preview binary — and `__frust_main` is
-// compiled out for the Android target.
+// Android runs through the JNI bridge; `__frust_main` is compiled out there.
 #[cfg(not(target_os = "android"))]
 fn main() {
     muxr::__frust_main();

@@ -1,10 +1,4 @@
-//! The one coarse age wording, shared by every feature that says how long ago
-//! something happened. Plain functions over a [`Duration`] — framework-free,
-//! so a `domain` entity may call it.
-//!
-//! Bands: "just now" under a minute, "N minutes ago", "N hours ago",
-//! "yesterday" (one day), "N days ago", "last week" (one week), then
-//! "N weeks ago". A count of one reads in the singular.
+//! Coarse age wording, framework-free so a `domain` entity may call it.
 
 use std::time::Duration;
 
@@ -13,7 +7,6 @@ const MINUTES_PER_HOUR: u64 = 60;
 const HOURS_PER_DAY: u64 = 24;
 const DAYS_PER_WEEK: u64 = 7;
 
-/// The age wording for `elapsed`.
 pub fn age_label(elapsed: Duration) -> String {
     let minutes = elapsed.as_secs() / SECS_PER_MINUTE;
     if minutes < 1 {
@@ -40,7 +33,6 @@ pub fn age_label(elapsed: Duration) -> String {
     plural(weeks, "week")
 }
 
-/// `"1 hour ago"` / `"3 hours ago"` — the one place the plural `s` is decided.
 fn plural(count: u64, unit: &str) -> String {
     if count == 1 {
         format!("1 {unit} ago")

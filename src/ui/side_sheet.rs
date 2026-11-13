@@ -1,16 +1,5 @@
-//! The modal side-sheet adapter over `frust_glyph`'s own side sheet — the
-//! x-axis sibling of [`crate::ui::sheet::show_sheet`], minting the identical
-//! one-shot [`SheetHandle`] dismissal gate (`close`/`close_after`/
-//! `close_then` fire at most once) over
-//! [`frust_glyph::show_glyph_side_sheet`]'s own staged exit.
-//!
-//! Unlike the bottom sheet, a side sheet also owes its caller a way to react
-//! to *any* dismissal (scrim tap, the close affordance, `Escape`, back, or a
-//! programmatic close) rather than only the ones the caller itself drove —
-//! `on_dismiss` is that seam, a bare `Fn()` like
-//! [`frust_glyph::GlyphSideSheetView::on_close`] itself, so it stays state-free
-//! like every other callback this module and [`crate::ui::sheet`] cross the
-//! overlay-host boundary with.
+//! The modal side-sheet adapter: the x-axis sibling of `sheet::show_sheet`, over the same
+//! one-shot [`SheetHandle`].
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,13 +9,8 @@ use frust_glyph::{GlyphSideSheetHandle, glyph_side_sheet, show_glyph_side_sheet}
 
 use super::SheetHandle;
 
-/// Push `title`'s side sheet over `build_body` (the scrolling containment
-/// tree) and `build_footer` (the sticky footer pinned to the panel's bottom
-/// edge), minting a [`SheetHandle`] both builders are handed so any row/action
-/// inside either can close the sheet through the same one-shot gate
-/// [`crate::ui::sheet::show_sheet`]'s own callers use. `on_dismiss` runs once,
-/// after the exit animation completes, on *every* dismissal — whichever of
-/// the sheet's own gestures or a programmatic [`SheetHandle::close`] drove it.
+/// `on_dismiss` runs once, after the exit animation completes, on every dismissal, whether a
+/// sheet gesture or a programmatic [`SheetHandle::close`] drove it.
 pub fn show_side_sheet<State: 'static, V: View<State>, F: View<State>>(
     nav: &NavigatorController<State>,
     title: impl Into<String>,

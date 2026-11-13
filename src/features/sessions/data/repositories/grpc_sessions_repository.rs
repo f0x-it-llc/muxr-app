@@ -1,72 +1,6 @@
-//! [`GrpcSessionsRepository`] — the real, `muxrd`-backed [`SessionsRepository`],
-//! and `sessions::di::provide`'s production choice.
-//!
-//! # The live client
-//!
-//! Every call resolves [`ConnectionController::client`] fresh rather than
-//! dialing a channel of its own. `None` (disconnected) maps to
-//! [`AppFailure::Network`] rather than panicking: a repository call outliving
-//! its connection (a poll tick racing a teardown) is reachable, not a bug.
-//!
-//! # The one sanctioned reach into `crate::connection`
-//!
-//! `data` stays framework-free everywhere else in this feature — this
-//! file's `Arc<ConnectionController>` field is the one exception.
-//! [`ConnectionController`] is resolved exactly once, in `di::provide`, and
-//! held from then on as a plain handle — every call against it (`client()`,
-//! `on_session_expired_for()`) is a plain method call, never a fresh
-//! `use_context` lookup.
-//!
-//! # Id-routed mutations
-//!
-//! Every mutation addresses a session by [`Session::id`] — the opaque
-//! backend-qualified routing key the wire calls `SessionInfo.id`
-//! (`"zellij:dev"`) — never by display name. `RenameSessionReq`/`SessionRef`'s
-//! own `session` field takes that key despite its name.
-//!
-//! # Optimistic create/rename, no follow-up round trip
-//!
-//! `CreateSession`/`RenameSession` answer with a plain `ActionAck` — no
-//! session snapshot — and the controller already discards the [`Session`]
-//! these two hand back and re-lists immediately after, so nothing
-//! production-facing ever renders their return value. Rather than pay a
-//! second `ListSessions` round trip just to populate one, both construct
-//! their [`Session`] optimistically from what the request already
-//! establishes: a created session carries the backend the request asked for
-//! (`params.backend`, which [`MockSessionsRepository`](super::MockSessionsRepository)'s
-//! own `new_session` honours too), and a renamed session's id is
-//! *reconciled* — the `<backend>:<name>` convention lets this file recompute
-//! the id from the old id's own backend prefix plus the new name, no round
-//! trip needed. Every other field on the optimistic [`Session`] is a
-//! placeholder the following refresh overwrites within one rebuild.
-//!
-//! # Pane preview: one `GetLayout` per session, doing double duty
-//!
-//! `ListSessions` ships `tab_count`/`pane_count` at zero for a *running*
-//! session (a per-session layout query of its own could briefly resize the
-//! live session), so a client wanting real numbers falls back to
-//! `GetLayout`. [`list_sessions`](SessionsRepository::list_sessions) already
-//! dials that per-session `GetLayout` to get pane titles for
-//! [`LayoutSummary::preview`], so this file derives the counts from that
-//! same response rather than discarding it: [`layout_derived_from`] turns
-//! one `Layout` into a tab count, a summed pane count, and the first tab's
-//! first two pane titles, filtering empty/whitespace-only titles first (a
-//! blank pill is worse than no pill row). [`map_session`] prefers these
-//! layout-derived counts whenever the call succeeded and the layout has at
-//! least one tab, and otherwise falls back to `SessionInfo`'s own wire
-//! counts — for a failed `GetLayout` or a zero-tab layout. A resurrectible
-//! session skips the call entirely and passes its saved wire counts through
-//! unmodified.
-//!
-//! # Failure mapping
-//!
-//! Every RPC failure funnels through [`crate::net::error::from_status`]; an
-//! `UNAUTHENTICATED` additionally invokes
-//! [`ConnectionController::on_session_expired_for`] with the client the call
-//! used (its own idempotent contract absorbs a burst of calls failing at once,
-//! and its fence ignores a client a switch already replaced). Every `ActionAck`-returning
-//! call maps through [`crate::net::error::ack_result`] instead of trusting
-//! the outer `Status` alone.
+//! `muxrd`-backed `SessionsRepository`. Each call resolves the live client fresh; a disconnect maps to `AppFailure::Network`.
+//! Mutations address a session by `Session::id` (`SessionInfo.id`, e.g. `"zellij:dev"`), never by name.
+//! `ListSessions` reports zero tab/pane counts for running sessions, so counts and preview come from `GetLayout`.
 
 use std::sync::Arc;
 
@@ -87,27 +21,12 @@ use crate::net::proto::{
 };
 use crate::net::{MuxrClient, error};
 
-/// How many of a session's first tab's pane titles [`LayoutSummary::preview`]
-/// carries — that entity's own doc: "Up to two pane titles the card
-/// previews". A local constant rather than shared with
-/// `presentation::widgets::session_card`'s own rendering constant (this
-/// data-layer file may not import a presentation one): each layer names the
-/// same fact from its own source of truth.
 const MAX_PREVIEW_PANES: usize = 2;
 
-/// [`GrpcSessionsRepository::client`]'s failure detail when nothing is
-/// connected.
 const NOT_CONNECTED: &str = "not connected to a server";
 
-/// The failure detail for a blank create/rename name — this repository's own
-/// enforcement point (the dialog that collects a name cannot submit a blank
-/// one, so this is defence in depth, not a reachable UI state).
 const BLANK_NAME: &str = "a session name cannot be blank";
 
-/// One running session's `GetLayout`-derived facts — see the module docs'
-/// "Pane preview" section. [`GrpcSessionsRepository::layout_for`] produces
-/// this; [`map_session`] prefers it over `SessionInfo`'s own wire counts
-/// whenever `tabs` is nonzero.
 struct LayoutDerived {
     tabs: u32,
     panes: u32,
@@ -115,31 +34,22 @@ struct LayoutDerived {
     tabs_detail: Vec<TabSummary>,
 }
 
-/// The real [`SessionsRepository`], over a live `muxrd` connection. See the
-/// [module docs](self).
 pub struct GrpcSessionsRepository {
     connection: Arc<ConnectionController>,
 }
 
 impl GrpcSessionsRepository {
-    /// A repository over the app's one [`ConnectionController`] — resolved
-    /// once by the caller (`di::provide`) and held from then on.
     pub fn new(connection: Arc<ConnectionController>) -> Self {
         Self { connection }
     }
 
-    /// The live client, or [`AppFailure::Network`] if nothing is connected.
-    /// See the [module docs](self)' "The live client" section.
     fn client(&self) -> Result<MuxrClient, AppFailure> {
         self.connection
             .client()
             .ok_or_else(|| AppFailure::Network(NOT_CONNECTED.to_string()))
     }
 
-    /// Map a gRPC status through [`crate::net::error::from_status`], and —
-    /// for `UNAUTHENTICATED` specifically — additionally invoke the shared
-    /// session-expired hook (see the [module docs](self)' failure-mapping
-    /// section).
+    /// `UNAUTHENTICATED` additionally fires the session-expired hook.
     fn map_status(&self, client: &MuxrClient, status: Status) -> AppFailure {
         let failure = error::from_status(&status);
         if matches!(failure, AppFailure::Auth(_)) {
@@ -148,12 +58,7 @@ impl GrpcSessionsRepository {
         failure
     }
 
-    /// One running session's layout-derived facts: a `GetLayout` call plus
-    /// [`layout_derived_from`]. A `GetLayout` failure returns `None` and
-    /// never fails the whole list — [`map_session`] falls back to
-    /// `ListSessions`'s own wire counts — but an `UNAUTHENTICATED` status
-    /// still runs [`Self::map_status`]'s side effect, the same as every
-    /// other call.
+    /// A `GetLayout` failure yields `None`; the caller falls back to the wire counts.
     async fn layout_for(&self, client: &MuxrClient, id: &str) -> Option<LayoutDerived> {
         let request = SessionRef {
             session: id.to_string(),
@@ -184,9 +89,6 @@ impl SessionsRepository for GrpcSessionsRepository {
 
         let mut sessions = Vec::with_capacity(response.sessions.len());
         for info in response.sessions {
-            // An idle/resurrectible session has nothing running to derive
-            // counts or a preview from — see the module docs' "Pane
-            // preview" section.
             let derived = if info.resurrectable {
                 None
             } else {
@@ -235,10 +137,7 @@ impl SessionsRepository for GrpcSessionsRepository {
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)?;
-        // The reconcile: the old id's own backend prefix, kept, paired with
-        // the new name — see the module docs' "Optimistic create/rename"
-        // section. An id this app never minted (no `:`) falls back to
-        // `zellij`, same as an unrecognized wire `Backend`.
+        // An id without `:` falls back to zellij.
         let (prefix, _) = backend_prefix(&request.id).unwrap_or(("zellij", ""));
         Ok(optimistic_session(
             format!("{prefix}:{name}"),
@@ -263,12 +162,7 @@ impl SessionsRepository for GrpcSessionsRepository {
         error::ack_result(&ack)
     }
 
-    /// `ListAgents`, then one `GetLayout` per distinct space the agents live
-    /// in (the shared [`crate::net::agent_layouts`] join): the wire names an
-    /// agent's tab by id, and the terminal's attach target wants its position.
-    /// An agent the layouts cannot place keeps its row with no position rather
-    /// than being dropped or aimed at a guessed tab, and a failed space read is
-    /// reported once.
+    /// An agent the layouts cannot place keeps its row with no tab position; a failed space read is reported once.
     async fn list_agents(&self, session_id: String) -> Result<Vec<SessionAgent>, AppFailure> {
         let client = self.client()?;
         let request = SessionRef {
@@ -294,17 +188,7 @@ impl SessionsRepository for GrpcSessionsRepository {
     }
 }
 
-// ---------------------------------------------------------------------------
-// proto → entity mapping (pure; unit-tested against directly constructed
-// messages, no server fixture — see the module docs)
-// ---------------------------------------------------------------------------
-
-/// A `ListSessions` entry, plus its already-resolved [`LayoutDerived`] (`None`
-/// for a resurrectible session, or a running session whose `GetLayout`
-/// failed), as the `/sessions` card renders it. Layout-derived counts win
-/// whenever the layout reports at least one tab; otherwise the wire's own
-/// `tab_count`/`pane_count` — the fallback of record — carry through with an
-/// empty preview. See the module docs' "Pane preview" section.
+/// Layout-derived counts win when the layout has a tab; otherwise the wire counts carry through with an empty preview.
 fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
     let backend = map_backend(info.backend);
     let status = if info.resurrectable {
@@ -344,8 +228,6 @@ fn map_session(info: SessionInfo, derived: Option<LayoutDerived>) -> Session {
     }
 }
 
-/// A `ListAgents` answer as [`SessionAgent`] rows, most urgent first, each
-/// placed at its tab's position in `layouts` — `None` when they cannot place it.
 fn map_agents(list: AgentList, layouts: &AgentLayouts) -> Vec<SessionAgent> {
     let mut rows: Vec<SessionAgent> = list
         .agents
@@ -384,7 +266,6 @@ fn map_agent(agent: AgentMsg, tab_position: Option<u32>) -> SessionAgent {
     }
 }
 
-/// The wire's `CreateSessionReq` for `name` on `backend`.
 fn create_request(name: &str, backend: SessionBackend) -> CreateSessionReq {
     let wire = match backend {
         SessionBackend::Zellij => Backend::Zellij,
@@ -397,12 +278,7 @@ fn create_request(name: &str, backend: SessionBackend) -> CreateSessionReq {
     }
 }
 
-/// The wire's `Backend` enum onto the domain's own [`SessionBackend`].
-/// `BACKEND_UNSPECIFIED`, or a value this build doesn't recognize, falls back
-/// to [`SessionBackend::Zellij`] — the domain's closed enum has no third
-/// "unknown" variant to fall back to instead, and zellij is this app's
-/// default backend everywhere else a choice has to be made (see
-/// [`GrpcSessionsRepository::create_session`]).
+/// Unspecified or unrecognized values fall back to `Zellij`, the app's default backend.
 fn map_backend(value: i32) -> SessionBackend {
     match Backend::try_from(value) {
         Ok(Backend::Herdr) => SessionBackend::Herdr,
@@ -410,12 +286,7 @@ fn map_backend(value: i32) -> SessionBackend {
     }
 }
 
-/// The `.sess-meta` row's varying third span, chosen the same way
-/// [`MockSessionsRepository`](super::MockSessionsRepository)'s seed encodes
-/// it: a resurrectible session always reports its saved tab count (nothing
-/// else about it is live); a running session reports its backend's own
-/// per-session fact — spaces for herdr, connected clients for zellij (zellij
-/// has no space layer, so its own `space_count` is always the wire's `0`).
+/// Zellij has no space layer: its wire `space_count` is always 0.
 fn third_metric(status: SessionStatus, backend: SessionBackend, info: &SessionInfo) -> ThirdMetric {
     if !status.is_live() {
         return ThirdMetric::TabsSaved(info.tab_count);
@@ -426,13 +297,7 @@ fn third_metric(status: SessionStatus, backend: SessionBackend, info: &SessionIn
     }
 }
 
-/// One `Layout` response, boiled down to a tab count, a pane count summed
-/// across every tab, and a preview: [`Layout::tabs`]'s first tab's first
-/// [`MAX_PREVIEW_PANES`] pane titles, skipping any title that is empty or
-/// all whitespace (a blank pill is worse than no pill row) — filtered panes
-/// still count toward `panes`. The pure half of
-/// [`GrpcSessionsRepository::layout_for`]. `preview` is empty for a session
-/// with no tabs, or a first tab with no non-blank-titled panes.
+/// Panes with blank titles still count toward `panes` but are never previewed.
 fn layout_derived_from(layout: Layout) -> LayoutDerived {
     let panes = layout.tabs.iter().map(|tab| tab.panes.len() as u32).sum();
     let preview = layout
@@ -479,17 +344,10 @@ fn layout_derived_from(layout: Layout) -> LayoutDerived {
     }
 }
 
-/// Split `id` (the `<backend>:<name>` convention `SessionInfo.id` documents)
-/// into its backend-label prefix and the remainder, or `None` for an id this
-/// app never minted (no `:` at all).
 fn backend_prefix(id: &str) -> Option<(&str, &str)> {
     id.split_once(':')
 }
 
-/// The [`SessionBackend`] a `<backend>:<name>` id's own prefix names — the
-/// same labels [`SessionBackend::label`] prints. Anything else (including an
-/// id this app never minted) falls back to zellij, mirroring
-/// [`map_backend`]'s own fallback.
 fn backend_from_prefix(prefix: &str) -> SessionBackend {
     match prefix {
         "herdr" => SessionBackend::Herdr,
@@ -497,13 +355,6 @@ fn backend_from_prefix(prefix: &str) -> SessionBackend {
     }
 }
 
-/// A freshly created/renamed session's stand-in [`Session`]: every field this
-/// caller can state with confidence (id, name, backend) plus the same
-/// "new session" defaults
-/// [`MockSessionsRepository`](super::MockSessionsRepository)'s own
-/// `new_session` ships (one tab, one pane, running, no clients/spaces yet) —
-/// see the module docs' "Optimistic create/rename" section for why nothing
-/// more accurate is worth a second round trip.
 fn optimistic_session(id: String, name: String, backend: SessionBackend) -> Session {
     let third = match backend {
         SessionBackend::Herdr => ThirdMetric::Spaces(0),
@@ -538,10 +389,6 @@ mod tests {
 
     use super::*;
 
-    /// Drive one repository call to completion on a current-thread runtime —
-    /// no frust runtime in play, mirroring
-    /// [`MockSessionsRepository`](super::super::MockSessionsRepository)'s own
-    /// tests.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -695,9 +542,6 @@ mod tests {
         }
     }
 
-    /// A fixture client and a connected controller reporting it as the live
-    /// client — the same `#[cfg(test)]` seam `crate::connection`'s own tests
-    /// use.
     async fn connected_controller(
         fixture: &MuxrdFixture,
     ) -> (Arc<ConnectionController>, MuxrClient) {
@@ -705,8 +549,6 @@ mod tests {
         let connection = ConnectionController::with_live_client_for_tests(client.clone());
         (connection, client)
     }
-
-    // -- proto → entity mapping ----------------------------------------------
 
     #[test]
     fn a_running_zellij_session_maps_its_client_count_as_the_third_metric() {
@@ -785,10 +627,7 @@ mod tests {
 
     #[test]
     fn an_empty_getlayout_response_falls_back_to_the_wire_counts_end_to_end() {
-        // The whole chain a failed-to-derive running session actually goes
-        // through: an empty `Layout` (what `GetLayout` reports for a session
-        // whose layout query raced something) still yields `tabs: 0`, which
-        // `map_session` treats the same as a call failure.
+        // An empty `Layout` yields `tabs: 0`, which `map_session` treats like a failed call.
         let derived = layout_derived_from(Layout { tabs: Vec::new() });
         let session = map_session(
             info("zellij:dev", "dev", Backend::Zellij as i32, false),
@@ -802,7 +641,7 @@ mod tests {
     #[test]
     fn a_two_pane_one_tab_layout_renders_its_own_counts_not_the_wires() {
         let layout = Layout {
-            tabs: vec![tab(vec![pane("btop"), pane("ed@precision:~")])],
+            tabs: vec![tab(vec![pane("btop"), pane("ed@workbench:~")])],
         };
         let session = map_session(
             info("zellij:dev", "dev", Backend::Zellij as i32, false),
@@ -885,8 +724,7 @@ mod tests {
 
     #[test]
     fn zero_wire_counts_with_a_three_tab_layout_yield_three_tabs() {
-        // Regression for act_000001a0876d5ad36zYz7IOo: ListSessions ships
-        // zeros for live sessions, so the GetLayout counts must win.
+        // ListSessions ships zeros for live sessions, so the GetLayout counts must win.
         let mut source = info("zellij:dev", "dev", Backend::Zellij as i32, false);
         source.tab_count = 0;
         source.pane_count = 0;
@@ -913,13 +751,11 @@ mod tests {
         assert_eq!(session.layout.space, None);
     }
 
-    // -- GetLayout's pure half ------------------------------------------------
-
     #[test]
     fn layout_derived_from_sums_panes_across_every_tab_and_counts_tabs() {
         let layout = Layout {
             tabs: vec![
-                tab(vec![pane("btop"), pane("ed@precision:~")]),
+                tab(vec![pane("btop"), pane("ed@workbench:~")]),
                 tab(vec![pane("logs")]),
             ],
         };
@@ -933,13 +769,13 @@ mod tests {
         let layout = Layout {
             tabs: vec![tab(vec![
                 pane("btop"),
-                pane("ed@precision:~"),
+                pane("ed@workbench:~"),
                 pane("a third pane, dropped"),
             ])],
         };
         assert_eq!(
             layout_derived_from(layout).preview,
-            vec!["btop".to_string(), "ed@precision:~".to_string()]
+            vec!["btop".to_string(), "ed@workbench:~".to_string()]
         );
     }
 
@@ -967,8 +803,6 @@ mod tests {
         assert_eq!(paneless.panes, 0);
         assert!(paneless.preview.is_empty());
     }
-
-    // -- the rename reconcile --------------------------------------------------
 
     #[test]
     fn backend_prefix_splits_the_wires_own_id_convention() {
@@ -1000,8 +834,6 @@ mod tests {
         assert!(session.layout.preview.is_empty());
     }
 
-    // -- ack failure mapping ---------------------------------------------------
-
     #[test]
     fn a_refused_ack_fails_through_the_same_net_error_path_every_mutation_uses() {
         let refused = ActionAck {
@@ -1013,8 +845,6 @@ mod tests {
         assert!(matches!(failure, AppFailure::Network(_)));
         assert!(failure.to_string().contains("read-only session"));
     }
-
-    // -- disconnected + blank-name paths, and the session-expired hook --------
 
     #[test]
     fn every_method_fails_cleanly_and_never_dials_when_disconnected() {

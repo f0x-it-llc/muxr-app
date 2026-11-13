@@ -1,6 +1,3 @@
-//! [`KillSession`] — kills a session (a card's destructive "kill" action,
-//! behind `ui::dialogs`'s confirm dialog).
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;

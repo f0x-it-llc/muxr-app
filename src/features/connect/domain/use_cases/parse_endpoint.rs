@@ -1,17 +1,7 @@
-//! [`parse_endpoint`] — the `host:port` validation behind the connect CTA.
-//!
-//! A plain function rather than a `clean_signals::UseCase`: this is a pure
-//! synchronous parse with no I/O, nothing to cancel — wrapping it would buy an
-//! `await` and a pump-poll in every test, and no behavior.
-//!
-//! Mock-grade: no DNS, no IDN, no IPv6 bracket syntax, no scheme stripping —
-//! just a non-empty host, an optional `:port` (a bare host dials the caller's
-//! `default_port` instead), and — whenever a port is written — one in
-//! `1..=65535`.
+//! The `host:port` validation behind the connect CTA. No DNS, IDN, IPv6 brackets or scheme stripping.
 
 use crate::failure::AppFailure;
 
-/// The lowest legal TCP port — `0` is "any port" to the OS, never a dial target.
 const MIN_PORT: u16 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,17 +10,8 @@ pub struct Endpoint {
     pub port: u16,
 }
 
-/// Parse `raw` as `host:port`, or as a bare `host` dialing `default_port`.
-///
-/// A trimmed `raw` with no `:` at all is a bare host: `default_port` becomes
-/// its port with no further validation (the caller already chose it). Every
-/// other input keeps today's rules unchanged — `rsplit_once(':')`, a
-/// non-empty host, and a port in `1..=65535`.
-///
-/// Documented gap: every rejection maps to [`AppFailure::Network`], since
-/// `AppFailure` has no validation variant and `Internal` means a bug, not a
-/// typo. The internal detail (never shown to the user) names the offending
-/// input so a log tells the whole story.
+/// A trimmed `raw` with no `:` is a bare host dialing `default_port`; otherwise the port must be in `1..=65535`.
+/// Every rejection maps to [`AppFailure::Network`]; the internal detail names the input.
 pub fn parse_endpoint(raw: &str, default_port: u16) -> Result<Endpoint, AppFailure> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -42,8 +23,7 @@ pub fn parse_endpoint(raw: &str, default_port: u16) -> Result<Endpoint, AppFailu
             port: default_port,
         });
     }
-    // `rsplit_once`, not `split_once`: a future IPv6 literal has colons of its
-    // own, and the port is always the last one.
+    // `rsplit_once`: an IPv6 literal has colons of its own; the port is the last one.
     let Some((host, port)) = raw.rsplit_once(':') else {
         unreachable!("the `contains(':')` check above guarantees a match");
     };
@@ -72,8 +52,6 @@ pub fn parse_endpoint(raw: &str, default_port: u16) -> Result<Endpoint, AppFailu
 mod tests {
     use super::*;
 
-    /// An arbitrary default port for cases where a `:port` is always written
-    /// (so the default never applies) — any value would do.
     const UNUSED_DEFAULT: u16 = 50051;
 
     #[test]
@@ -90,9 +68,9 @@ mod tests {
     #[test]
     fn surrounding_whitespace_is_trimmed() {
         assert_eq!(
-            parse_endpoint("  100.71.31.57 : 50051  ", UNUSED_DEFAULT),
+            parse_endpoint("  100.64.0.7 : 50051  ", UNUSED_DEFAULT),
             Ok(Endpoint {
-                host: "100.71.31.57".to_string(),
+                host: "100.64.0.7".to_string(),
                 port: 50051,
             })
         );
@@ -145,7 +123,6 @@ mod tests {
         let failure = parse_endpoint("nope:oops", UNUSED_DEFAULT)
             .expect_err("an unparseable port is rejected");
         assert!(!failure.user_message().contains("nope"));
-        // The log-facing Display does carry it.
         assert!(failure.to_string().contains("nope"));
     }
 }

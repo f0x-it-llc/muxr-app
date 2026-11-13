@@ -1,10 +1,5 @@
-//! `connect` use cases — one file per `<verb><noun>` action.
-//!
-//! The two parses are plain functions, not `clean_signals::UseCase`s: that
-//! trait is async and both are pure synchronous parses. The two credential use
-//! cases are `UseCase`s (a gated call blocks by construction) — never call
-//! [`UseCase::execute`](clean_signals::UseCase::execute) directly; always drive
-//! it through `ControllerCore::run`.
+//! The two parses are plain functions, not `UseCase`s: both are pure and synchronous.
+//! Drive the credential use cases through `ControllerCore::run`, never `execute` directly.
 
 pub mod parse_endpoint;
 pub mod parse_pairing;

@@ -1,9 +1,3 @@
-//! [`UpdatePollPrefs`] — persists the `session poll` group after the layout
-//! refresh picker lands, or the bell switch flips.
-//!
-//! Whole-group `Params`, for the same reason
-//! [`UpdateAppearance`](super::UpdateAppearance) takes one.
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;

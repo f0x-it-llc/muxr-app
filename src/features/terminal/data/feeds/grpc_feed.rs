@@ -1,30 +1,6 @@
-//! [`GrpcTerminalFeed`] — the live `muxrd` byte source: one `AttachTerminal` bidirectional
-//! stream behind this feature's own
-//! [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed) port, with a bounded
-//! reconnect schedule. `LiveSession::enter` builds one for a real attached session;
-//! [`DemoFeed`](super::demo_feed::DemoFeed) is the fixture replayed for anything else.
-//!
-//! **Wire contract** (`proto/muxr.proto`): `attach: AttachReq{session, rows, cols}` — plus the
-//! [`ResumeTarget`] hints, when set, and the feed's `client_instance_id` (minted once per feed,
-//! so every re-attach names the same client view) — is the mandatory first frame of every
-//! stream, reconnects included, then `input`/`resize`/`mouse` out and `render`/`control` back. Input goes on the
-//! stream, never through `WriteToPane`, so a keystroke keeps its order relative to the resizes
-//! around it; the attach frame replays the current grid, since [`TerminalFeed::resize`] caches
-//! `cols`/`rows`. Two control kinds are understood ([`CONTROL_CONNECTION_ID`],
-//! [`CONTROL_EXIT`]); every other is ignored, never an error, so a newer `muxrd` can add one.
-//! `exit` is a clean close, with no reconnect.
-//!
-//! Four contracts, stated where enforced: the fixed, jitter-free reconnect schedule
-//! ([`RECONNECT_BACKOFF`]), the re-attach on the app's wake signal ([`WAKE_DEBOUNCE`]), the
-//! inbound flow control that pauses the reader rather than dropping anything
-//! ([`INBOUND_HIGH_WATER`], [`await_capacity`]), and the threading split
-//! ([`Shared`] — the UI thread drains, a background task that writes no signal reads). The loop
-//! is spelled by hand because production `tokio` carries the `sync` feature only: the backoff
-//! nap goes through [`frust::spawn_blocking`] and the two-way race is [`race`]; those plus
-//! [`frust::spawn`] are this file's only reaches for `frust::` in an otherwise framework-free
-//! data layer. **Test seam**: the schedule, the nap, the wake receiver and its debounce are
-//! arguments of a `#[cfg(test)]`-only `detached` constructor, which also hands the pump future
-//! back rather than spawning it.
+//! One `AttachTerminal` stream behind the `TerminalFeed` port. `AttachReq` is the mandatory first
+//! frame of every stream, reconnects included; input rides the stream, never `WriteToPane`, so a
+//! keystroke keeps its order against resizes. Unknown control kinds are ignored; `exit` is final.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -46,17 +22,9 @@ use crate::net::proto::{
 };
 use crate::net::wake::{self, WakeReason};
 
-/// The reconnect schedule: 1, 2, 4, 8, 16 seconds, no jitter, matching the Flutter client this
-/// replaces. Nothing overrides it.
-///
-/// A stream that errors or ends takes the next step; the counter resets on the first render
-/// frame after a (re)connect (a stream that opens and delivers nothing has proved nothing) and
-/// on [`reset_backoff`](GrpcTerminalFeed::reset_backoff), the manual retry. Running off the end
-/// parks the loop at [`LinkStatus::Disconnected`]. A drop reports [`LinkStatus::Reconnecting`]
-/// for the whole step, nap included, since the link strip renders nothing for `Connected` and
-/// would otherwise leave a frozen grid with no banner for up to 16 seconds. `UNAUTHENTICATED`
-/// short-circuits all of it: the loop stops at once and invokes the injected auth-expired
-/// callback.
+/// No jitter. Resets on the first render frame after a (re)connect and on
+/// [`reset_backoff`](GrpcTerminalFeed::reset_backoff); running off the end parks at
+/// [`LinkStatus::Disconnected`]. `UNAUTHENTICATED` stops the loop and fires the auth callback.
 pub const RECONNECT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -65,84 +33,43 @@ pub const RECONNECT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(16),
 ];
 
-/// How long the feed holds further wakes back after one it acted on. The first wake of a burst
-/// acts at once, so the debounce never delays a re-attach; a wake inside the window is not
-/// lost but remembered, and acted on exactly once more when the window closes, so the last
-/// network change of a burst is always honoured and a burst costs at most one extra redial.
-///
-/// A wake ([`crate::net::wake`]: a network change, a return to the foreground) means the
-/// connection may be half-open, which only the HTTP/2 keepalive would otherwise notice, tens of
-/// seconds later. So whatever the feed is doing short of `Closed` — streaming, opening, napping
-/// or parked at `Disconnected` — it drops the attempt in flight without waiting for it,
-/// rebuilds the client's channel ([`MuxrClient::reconnect`], single-flight across feeds), resets
-/// the schedule and attaches again at once, as the same client view. A failed rebuild is a
-/// dropped attempt: the normal backoff follows and the next attempt dials again. The schedule
-/// reset is skipped when the previous wake-driven attempt failed within the last two windows, so
-/// a flapping network cannot force a fresh climb of the schedule every window.
+/// The first wake of a burst acts at once; a later one inside the window acts once when it
+/// closes. A wake drops the attempt in flight, rebuilds the channel, resets the schedule and
+/// re-attaches, skipping the reset when the last wake-driven attempt failed within two windows.
 pub const WAKE_DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Frames the outbound channel buffers before a send is dropped. Generous: outbound is
-/// keystrokes and resizes at human rate, so filling it means a wedged transport, where the only
-/// alternatives are dropping a frame or blocking the UI thread on a dead socket. Drops are
-/// counted.
+/// Filling it means a wedged transport: a send past it is dropped and counted, never blocking.
 const OUTBOUND_CAPACITY: usize = 256;
 
-/// Queued inbound bytes at which the pump stops reading the stream. 2 MiB is generous for
-/// interactive use and still bounded: the UI drains every ~33 ms, so reaching it means a burst
-/// faster than ~60 MB/s or a UI that stopped draining. A pause threshold, not an admission filter.
+/// The pump stops reading here, a pause threshold rather than an admission filter: the server is
+/// held off by HTTP/2 backpressure and nothing is dropped.
 pub const INBOUND_HIGH_WATER: usize = 2 * 1024 * 1024;
 
-/// Queued inbound bytes the drain side must bring the queue back under before the pump resumes
-/// reading — a quarter of [`INBOUND_HIGH_WATER`], so a queue hovering at the mark cannot
-/// stop/start the read on every frame.
+/// A quarter of the high-water mark, so a queue hovering at it cannot stop/start every frame.
 pub const INBOUND_LOW_WATER: usize = INBOUND_HIGH_WATER / 4;
 
-/// Queued inbound frames at which the pump stops reading — the frame-count half of the flow
-/// control, since a flood of tiny frames stays under the byte cap while each still costs a
-/// queue slot and an allocation.
+/// Bounds a flood of tiny frames that stays under the byte cap.
 pub const INBOUND_HIGH_WATER_FRAMES: usize = 4096;
 
-/// Queued inbound frames the drain side must bring the queue back under before the pump resumes
-/// — a quarter of [`INBOUND_HIGH_WATER_FRAMES`], for the reason [`INBOUND_LOW_WATER`] records.
 pub const INBOUND_LOW_WATER_FRAMES: usize = INBOUND_HIGH_WATER_FRAMES / 4;
 
-/// Where a fresh attach should land, as far as this client knows: the space/tab/pane the user
-/// last moved to themselves.
-///
-/// Sent on every `AttachReq` — see [`ResumeSlot`] for why only user-driven moves write it. Every
-/// field is best-effort and independent: the server resolves them pane → tab → space and falls
-/// through on anything stale, so an unset field (`None`, the wire's proto3 default) is simply no
-/// hint, and a hint the server cannot resolve is not an error. herdr sessions only; a zellij
-/// attach is the whole composited session and follows the server's own focus.
+/// Best-effort hints the server resolves pane → tab → space, falling through on anything stale;
+/// `None` is no hint. herdr only: a zellij attach follows the server's own focus.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResumeTarget {
-    /// The opaque herdr workspace id (`Space::id`).
     pub space_id: Option<String>,
-    /// The tab id `GetLayout` emits (`TabEntry::tab_id`).
     pub tab_id: Option<u64>,
-    /// The pane id `GetLayout` emits (`PaneEntry::id`).
     pub pane_id: Option<u32>,
 }
 
-/// The shared, updatable [`ResumeTarget`] a feed attaches with: the screen writes it, the pump
-/// reads it on every attach — the first one and each backoff reconnect alike, since both go
-/// through one code path.
-///
-/// Held behind an `Arc` rather than reached through the feed handle, because the two ends live
-/// on different sides of the screen's `Rc`/`Arc` split: the feed is owned by the live session
-/// (`Rc`, UI thread), the writer is the controller (`Arc`, `Send + Sync`).
-///
-/// **Only user-driven moves write it** (the controller's own contract): a layout poll answers
-/// with whatever focus the server currently reports, which after a reconnect is the
-/// daemon-global one — recording that would overwrite the very intent this slot replays.
+/// Read on every attach, reconnects included. Only user-driven moves write it: after a reconnect
+/// a layout poll reports the daemon-global focus, which would overwrite the intent.
 #[derive(Debug, Default)]
 pub struct ResumeSlot {
     target: Mutex<ResumeTarget>,
 }
 
 impl ResumeSlot {
-    /// The hint as it stands. Poisoning is recovered from rather than propagated:
-    /// a panic elsewhere must not wedge every later attach.
     pub fn target(&self) -> ResumeTarget {
         self.target
             .lock()
@@ -150,18 +77,13 @@ impl ResumeSlot {
             .clone()
     }
 
-    /// Remember the pane a user just committed to, in the tab it lives in
-    /// (`None` when the tab is no longer listed — the pane rung of the server's
-    /// ladder still resolves on its own). The space is **kept**: it is the axis
-    /// that survives a restart the numeric ids do not.
+    /// Keeps the space: it survives a restart the numeric ids do not.
     pub fn remember_pane(&self, tab_id: Option<u64>, pane_id: u32) {
         let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
         target.tab_id = tab_id;
         target.pane_id = Some(pane_id);
     }
 
-    /// Remember the space a user just switched to, clearing the tab and pane
-    /// hints — those named a tab and a pane of the space being left.
     pub fn remember_space(&self, space_id: String) {
         let mut target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
         *target = ResumeTarget {
@@ -172,28 +94,17 @@ impl ResumeSlot {
     }
 }
 
-/// A live `muxrd` terminal session behind the
-/// [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed) port.
-/// See the [module docs](self). Dropping it stops the pump and closes the request
-/// stream, so the server sees the attach end rather than waiting out a keepalive.
+/// Dropping it closes the request stream, so the server sees the attach end at once.
 pub struct GrpcTerminalFeed {
     shared: Arc<Shared>,
-    /// The deque [`TerminalFeed::drain_output`] swaps the shared inbound queue
-    /// into, so the sink runs with no lock held and the pump never waits on an
-    /// emulator parse. Always empty between drains — what makes the swap correct —
-    /// and it keeps its capacity, so a wake allocates nothing.
+    /// Swapped with the shared queue so the sink runs with no lock held; always empty between
+    /// drains.
     scratch: VecDeque<Vec<u8>>,
 }
 
 impl GrpcTerminalFeed {
-    /// Attach to `session` at a `cols` x `rows` grid and start pumping.
-    ///
-    /// `on_auth_expired` fires at most once, on the first `UNAUTHENTICATED` this
-    /// session sees; the caller wires it to whatever owns the app's credential.
-    /// `resume` is the shared hint every attach this feed makes carries — see
-    /// [`ResumeSlot`]; a caller with nothing to resume hands over a default one.
-    /// The pump runs on the background reactive runtime, so this must be called
-    /// with that runtime up — i.e. from app code, never a bare `#[tokio::test]`.
+    /// `on_auth_expired` fires at most once. Needs the background reactive runtime up, so never
+    /// call it from a bare `#[tokio::test]`.
     pub fn attach(
         client: MuxrClient,
         session: impl Into<String>,
@@ -215,84 +126,59 @@ impl GrpcTerminalFeed {
         feed
     }
 
-    /// Where this session stands right now.
     pub fn status(&self) -> LinkStatus {
         self.shared.state().status
     }
 
-    /// The server-minted connection id from this stream's
-    /// [`CONTROL_CONNECTION_ID`] event, once one has arrived. The *newest* id wins:
-    /// a re-attached stream mints its own, so a caller routing by it must re-read
-    /// rather than cache it across a drop.
+    /// The newest id wins: a re-attach mints its own, so re-read rather than cache it.
     pub fn connection_id(&self) -> Option<String> {
         self.shared.state().connection_id.clone()
     }
 
-    /// Reset the backoff to its first step and, if the loop has parked on an
-    /// exhausted schedule, re-arm it — the manual "retry" the screen offers on
-    /// [`LinkStatus::Disconnected`]. A no-op once the session has ended for good.
+    /// Re-arms a loop parked on an exhausted schedule; a no-op once the session has ended.
     pub fn reset_backoff(&self) {
         self.shared.retry.store(true, Ordering::Release);
         self.shared.wake.notify_one();
     }
 
-    /// Stop the pump and close the request stream. Idempotent; [`Drop`] calls it.
-    /// Forceful: the outbound sender is dropped immediately rather than drained,
-    /// since a graceful variant would have to wait on a stream that, by
-    /// construction, never completes on its own.
+    /// Idempotent and forceful: the outbound sender drops at once rather than draining.
     pub fn shutdown(&self) {
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.set_outbound(None);
         self.shared.wake.notify_one();
     }
 
-    /// The backoff step the next drop would wait out — a diagnostic/test accessor
-    /// for the schedule the [module docs](self) pin.
     pub fn backoff_step(&self) -> usize {
         self.shared.state().backoff_step
     }
 
-    /// Outbound frames dropped because the session was down or its channel full
-    /// (see [`OUTBOUND_CAPACITY`]) — a diagnostic counter.
     pub fn dropped_frames(&self) -> u64 {
         self.shared.state().dropped_frames
     }
 
-    /// Render frames received but not yet drained — what
-    /// [`INBOUND_HIGH_WATER_FRAMES`] bounds. A diagnostic/test accessor.
     pub fn pending_writes(&self) -> usize {
         self.shared.state().inbound.len()
     }
 
-    /// Bytes those frames hold — what [`INBOUND_HIGH_WATER`] bounds. Diagnostic.
     pub fn pending_bytes(&self) -> usize {
         self.shared.state().inbound_bytes
     }
 
-    /// Times the pump stopped reading because the queue reached a high-water mark
-    /// — a diagnostic counter. A non-zero count means a producer outran this
-    /// session's drain; nothing was lost, the server was simply held off.
     pub fn read_pauses(&self) -> u64 {
         self.shared.state().read_pauses
     }
 
-    /// The hint the **next** attach this feed makes will carry — the slot's
-    /// current value, read *through* the feed rather than off the caller's own
-    /// handle, which is what pins that the pump holds the live slot and not a
-    /// copy taken at attach. Test-only: production reads the slot it owns.
+    /// Read through the feed, which pins that the pump holds the live slot, not a copy.
     #[cfg(test)]
     fn resume_target(&self) -> ResumeTarget {
         self.shared.resume.target()
     }
 
-    /// The `client_instance_id` this feed attaches with, on every attempt. Test-only: the
-    /// value is never logged, and production never reads it back.
     #[cfg(test)]
     fn client_instance_id(&self) -> String {
         self.shared.client_instance_id.clone()
     }
 
-    /// The feed and its pump future, unspawned. The one construction path.
     fn build(pump: Pump) -> (Self, impl Future<Output = ()> + Send + use<>) {
         let feed = Self {
             shared: Arc::clone(&pump.shared),
@@ -301,8 +187,6 @@ impl GrpcTerminalFeed {
         (feed, run_pump(pump))
     }
 
-    /// [`attach`](Self::attach) with the schedule and the nap opened up, and the
-    /// pump handed back rather than spawned — the [module docs](self)' test seam.
     #[cfg(test)]
     fn detached(
         client: MuxrClient,
@@ -326,11 +210,8 @@ impl GrpcTerminalFeed {
 }
 
 impl TerminalFeed for GrpcTerminalFeed {
-    /// Hand over every render frame received since the last call, in arrival order,
-    /// exactly once. One write per received frame: this feed coalesces nothing,
-    /// since the pump above it already does and splitting or merging ANSI here
-    /// would hide what the server actually sent. Also the **resume** half of the
-    /// inbound flow control: the swap empties the queue, waking a paused pump.
+    /// Exactly once, in arrival order, one write per frame: coalescing here would hide what the
+    /// server sent. The swap is also the resume half of the inbound flow control.
     fn drain_output(&mut self, sink: &mut dyn FnMut(&[u8])) -> usize {
         {
             let mut state = self.shared.state();
@@ -340,9 +221,7 @@ impl TerminalFeed for GrpcTerminalFeed {
             std::mem::swap(&mut state.inbound, &mut self.scratch);
             state.inbound_bytes = 0;
         }
-        // Unconditional rather than only on a high-to-low crossing: a stored permit
-        // costs one extra re-check on the pump's next pause, whereas a missed wake
-        // would hold the reader off until the drain after this one.
+        // Unconditional: a stored permit costs one re-check, a missed wake stalls the reader.
         self.shared.drained.notify_one();
         let writes = self.scratch.len();
         for chunk in &self.scratch {
@@ -352,10 +231,7 @@ impl TerminalFeed for GrpcTerminalFeed {
         writes
     }
 
-    /// Queue `bytes` as one `input` frame. Returns immediately — the echo comes
-    /// back through the render stream, not from here. Bytes typed while the session
-    /// is down are dropped and counted ([`GrpcTerminalFeed::dropped_frames`]): a
-    /// reconnect replays the grid, never a keystroke the server never saw.
+    /// Bytes typed while down are dropped and counted: a reconnect replays the grid, never input.
     fn send_input(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -365,10 +241,7 @@ impl TerminalFeed for GrpcTerminalFeed {
         });
     }
 
-    /// Cache the new grid and, if a stream is up, tell the server about it. The
-    /// cache is the load-bearing half: it is what the *next* attach frame carries,
-    /// so a resize made while disconnected still lands. An unchanged pair sends
-    /// nothing — the widget calls this on every layout.
+    /// The cache is what the next attach frame carries, so a resize while disconnected lands.
     fn resize(&mut self, cols: u16, rows: u16) {
         {
             let mut state = self.shared.state();
@@ -386,18 +259,13 @@ impl TerminalFeed for GrpcTerminalFeed {
         });
     }
 
-    /// Whether the pump can still deliver anything. `false` only once the session
-    /// ended for good — a server [`CONTROL_EXIT`], an expired credential, or a
-    /// [`shutdown`](GrpcTerminalFeed::shutdown) — **and** the last frames have
-    /// drained. A [`LinkStatus::Disconnected`] feed is still open: its pump is
-    /// parked, not gone, and `reset_backoff` re-arms the same session.
+    /// `false` only once the session ended for good and the last frames drained; a
+    /// [`LinkStatus::Disconnected`] feed is parked, not gone.
     fn is_open(&self) -> bool {
         let state = self.shared.state();
         !state.finished || !state.inbound.is_empty()
     }
 
-    /// Queue `kind` at `(col, row)` as one `mouse` frame — the same
-    /// try-send-or-drop path [`send_input`](Self::send_input) takes.
     fn send_mouse(&self, kind: WheelKind, col: u32, row: u32) {
         self.shared.send(ClientFrame {
             kind: Some(client_frame::Kind::Mouse(MouseInput {
@@ -409,7 +277,6 @@ impl TerminalFeed for GrpcTerminalFeed {
     }
 }
 
-/// [`WheelKind`] onto the wire's `MouseKind`.
 fn wire_wheel_kind(kind: WheelKind) -> MouseKind {
     match kind {
         WheelKind::Up => MouseKind::WheelUp,
@@ -423,7 +290,6 @@ impl Drop for GrpcTerminalFeed {
     }
 }
 
-/// Everything the pump owns for the life of a session.
 struct Pump {
     client: MuxrClient,
     session: String,
@@ -434,30 +300,19 @@ struct Pump {
     shared: Arc<Shared>,
 }
 
-/// The pump's subscription to the app's wake signal, with the [`WAKE_DEBOUNCE`] it applies.
-/// Injected rather than subscribed here, so a test drives a bus of its own instead of the
-/// process-global one every other test shares.
+/// Injected so a test drives a bus of its own, not the process-global one.
 struct Wakes {
     rx: broadcast::Receiver<WakeReason>,
     debounce: Duration,
-    /// When the last wake was acted on: the moment [`next`](Self::next) resolved, so for a
-    /// trailing act the close of the window, not the arrival of the wake.
+    /// For a trailing act, the close of the window rather than the wake's arrival.
     last: Option<Instant>,
-    /// A wake arrived inside the window and is owed one more act when the window closes. Lives
-    /// here, not in a local of [`next`](Self::next), so a wait dropped mid-way by the race it
-    /// sits in loses nothing.
+    /// Struct state, so a wait dropped by the race it sits in loses nothing.
     pending: bool,
-    /// Starts the timer that reports a window closing.
     waiter: Waiter,
-    /// The signal of the timer armed for the wake owed now. Replaced by a fresh `Notify` each
-    /// time a timer is armed, so a timer that fires late (after the clock already released its
-    /// wake, or while no wait is live) lands on a `Notify` nobody listens to any more instead of
-    /// leaving a stale permit that cuts the next owed wake's wait short and starts a second
-    /// timer. A `Notify` keeps a permit, so a dropped [`next`](Self::next) loses no signal.
+    /// A fresh `Notify` per armed timer, so a timer firing late cannot leave a stale permit that
+    /// cuts the next owed wake's wait short.
     closed: Arc<Notify>,
-    /// Whether a timer is already running for the wake owed now.
     armed: bool,
-    /// Timers started so far — what the one-timer bound is checked against.
     #[cfg(test)]
     timers: usize,
 }
@@ -477,19 +332,14 @@ impl Wakes {
         }
     }
 
-    /// Time left of the window opened by the last wake acted on.
     fn remaining(&self) -> Duration {
         self.last.map_or(Duration::ZERO, |at| {
             self.debounce.saturating_sub(at.elapsed())
         })
     }
 
-    /// Resolve on the next wake worth acting on. A lagged receiver lost wakes, which still
-    /// means a wake happened: it counts as one, never an error. Wakes already queued fold into
-    /// the one taken. A wake inside the debounce window is remembered and resolves once, when
-    /// the window closes (trailing edge); further wakes inside it fold into that one. A closed
-    /// bus never wakes again. Cancel-safe: the receive and the timer are the only awaits, and
-    /// the owed wake is struct state, so a dropped wait resumes with it intact.
+    /// A lagged receiver counts as one wake and queued wakes fold into it; a wake inside the
+    /// window resolves once when it closes. Cancel-safe: the owed wake is struct state.
     async fn next(&mut self) {
         loop {
             if self.pending {
@@ -500,8 +350,7 @@ impl Wakes {
                     self.last = Some(Instant::now());
                     return;
                 }
-                // One timer per owed wake, however many times this wait is dropped and
-                // rebuilt: each of those would otherwise cost a sleeping pool thread.
+                // One timer per owed wake, however often this wait is dropped and rebuilt.
                 if !self.armed {
                     self.armed = true;
                     self.closed = Arc::new(Notify::new());
@@ -535,49 +384,31 @@ impl Wakes {
     }
 }
 
-/// The state the UI thread and the pump task share. Everything mutable is behind
-/// the one `Mutex`; the two flags beside it are what a `notify_one` wake means.
+/// The UI thread drains; a background task that writes no signal reads.
 struct Shared {
     state: Mutex<State>,
-    /// The pump's one wake source: a backoff nap, a parked-on-exhaustion wait and a
-    /// live stream read all race against it. `notify_one` stores a permit when the
-    /// pump is between waits, so a retry or shutdown raised then is never lost.
+    /// `notify_one` stores a permit between waits, so a retry or shutdown raised then is kept.
     wake: Notify,
-    /// The drain side's own wake, raised by
-    /// [`drain_output`](TerminalFeed::drain_output) and awaited only by a pump
-    /// paused on [`INBOUND_HIGH_WATER`]. Separate from [`Shared::wake`] because a
-    /// `wake` can consume a retry, while a drain is pure capacity news.
+    /// Separate from `wake`: a wake can consume a retry, while a drain is pure capacity news.
     drained: Notify,
     shutdown: AtomicBool,
     retry: AtomicBool,
-    /// Whether the current attempt got its stream open: cleared by the loop before each
-    /// attempt, set by [`attach`] once the server accepted the stream. What tells a failed
-    /// wake-driven dial from a stream that was up and later dropped.
+    /// What tells a failed wake-driven dial from a stream that was up and later dropped.
     opened: AtomicBool,
-    /// Where the next attach should land — its own lock, not a [`State`] field,
-    /// since the screen writes it from the UI thread while the pump holds `state`
-    /// across a whole attempt's bookkeeping.
+    /// Its own lock: the screen writes it while the pump holds `state` across an attempt.
     resume: Arc<ResumeSlot>,
-    /// The `client_instance_id` every attach this feed makes carries. Minted once in
-    /// [`Shared::new`], so a backoff re-attach and a manual retry reuse it while a new mount
-    /// (a new feed) gets a new one. Never logged in full.
+    /// Minted once per feed and reused by every re-attach; never logged in full.
     client_instance_id: String,
 }
 
 struct State {
-    /// Render payloads awaiting the next drain, in arrival order.
     inbound: VecDeque<Vec<u8>>,
-    /// Bytes held across every entry of [`State::inbound`] — the quantity the flow
-    /// control bounds, kept alongside rather than recomputed, since the pump
-    /// consults it before every read.
     inbound_bytes: usize,
     status: LinkStatus,
     connection_id: Option<String>,
     cols: u16,
     rows: u16,
-    /// The current stream's request half, replaced on every attach.
     outbound: Option<mpsc::Sender<ClientFrame>>,
-    /// Set when the pump returns for good — the input to [`TerminalFeed::is_open`].
     finished: bool,
     backoff_step: usize,
     dropped_frames: u64,
@@ -587,44 +418,32 @@ struct State {
 /// What a `wake` notification turned out to mean.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wake {
-    /// Nothing to act on — a stale permit, or the nap simply ran out.
+    /// A stale permit, or the nap ran out.
     Elapsed,
-    /// A manual retry: attempt now, from the first backoff step.
     Retry,
-    /// The app's wake signal: rebuild the channel and attach now (see [`WAKE_DEBOUNCE`]).
     Network,
-    /// Tear down.
     Shutdown,
 }
 
 /// How one attach attempt ended.
 enum Attempt {
-    /// The stream errored or ended: take the next backoff step.
     Dropped,
-    /// The server sent [`CONTROL_EXIT`].
     Closed,
-    /// `UNAUTHENTICATED`, on open or mid-stream.
     AuthExpired,
-    /// [`GrpcTerminalFeed::shutdown`] fired.
     Shutdown,
-    /// A wake abandoned the attempt: rebuild the channel and attach again at once.
     Rewake,
 }
 
-/// How the pump waits out a backoff step. Two arms rather than an injected
-/// closure: production must not carry a boxed-future indirection for a test seam.
+/// Two arms, not a closure: production carries no boxed-future indirection for a test seam.
 enum Waiter {
-    /// The app: a nap on the blocking pool, the same shape `presentation::term`'s
-    /// own pump takes, since production `tokio` has no `time` feature.
+    /// Production `tokio` has no `time` feature, so the app naps on the blocking pool.
     Frust,
-    /// A `#[tokio::test]`, whose runtime has a timer and whose process has no
-    /// `ReactiveRuntime` for `frust::spawn_blocking` to find.
+    /// A test process has no `ReactiveRuntime` for `frust::spawn_blocking` to find.
     #[cfg(test)]
     Tokio,
 }
 
 impl Waiter {
-    /// Raise `closed` once `delay` has run out, without anything having to wait on the timer.
     fn start_timer(&self, delay: Duration, closed: Arc<Notify>) {
         match self {
             // Detached on purpose: a dropped join handle leaves the nap running.
@@ -646,8 +465,7 @@ impl Waiter {
 
     async fn sleep(&self, delay: Duration) {
         match self {
-            // A raced-away nap leaves its pool thread sleeping out the remainder;
-            // harmless, and slicing it into polls would be a 16-second poll loop.
+            // A raced-away nap leaves its pool thread sleeping out the remainder; harmless.
             Waiter::Frust => {
                 let _ = frust::spawn_blocking(move || std::thread::sleep(delay)).await;
             }
@@ -683,8 +501,6 @@ impl Shared {
         }
     }
 
-    /// The shared state. Poisoning is recovered from rather than propagated — a
-    /// panic elsewhere must not make a live terminal permanently unreadable.
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -702,13 +518,10 @@ impl Shared {
         self.state().outbound = outbound;
     }
 
-    /// Queue one frame for the current stream, dropping (and counting) it if
-    /// there is no stream or its channel is full.
     fn send(&self, frame: ClientFrame) {
         let mut state = self.state();
         let queued = match state.outbound.as_ref() {
-            // `try_send`, never `send`: this runs on the UI thread, where an
-            // await on a wedged socket would freeze the app.
+            // `try_send`: this runs on the UI thread, where awaiting a wedged socket would freeze.
             Some(outbound) => outbound.try_send(frame).is_ok(),
             None => false,
         };
@@ -717,27 +530,21 @@ impl Shared {
         }
     }
 
-    /// Queue one render payload for the next drain, accounting its bytes. Always
-    /// accepts: a frame the pump has already read has nowhere else to go, and the
-    /// bound is enforced by *not reading the next one*.
+    /// Always accepts; the bound is enforced by not reading the next frame.
     fn push_render(&self, bytes: Vec<u8>) {
         let mut state = self.state();
         state.inbound_bytes += bytes.len();
         state.inbound.push_back(bytes);
     }
 
-    /// Whether the queue has reached [`INBOUND_HIGH_WATER`] or
-    /// [`INBOUND_HIGH_WATER_FRAMES`] — the pump asks before every read. Either cap
-    /// alone is enough to pause.
+    /// Either cap alone pauses.
     fn inbound_saturated(&self) -> bool {
         let state = self.state();
         state.inbound_bytes >= INBOUND_HIGH_WATER
             || state.inbound.len() >= INBOUND_HIGH_WATER_FRAMES
     }
 
-    /// Whether a drain has brought the queue back under **both**
-    /// [`INBOUND_LOW_WATER`] and [`INBOUND_LOW_WATER_FRAMES`], which is what lets a
-    /// paused pump start reading again.
+    /// Resuming needs both low-water marks.
     fn inbound_has_room(&self) -> bool {
         let state = self.state();
         state.inbound_bytes <= INBOUND_LOW_WATER && state.inbound.len() <= INBOUND_LOW_WATER_FRAMES
@@ -755,7 +562,6 @@ impl Shared {
         self.state().backoff_step = 0;
     }
 
-    /// Read what a wake meant, clearing the retry flag it consumed.
     fn take_wake(&self) -> Wake {
         if self.shutdown.load(Ordering::Acquire) {
             Wake::Shutdown
@@ -767,10 +573,7 @@ impl Shared {
         }
     }
 
-    /// The pump's last act: release the request stream and mark the session over,
-    /// so [`TerminalFeed::is_open`] stops the UI pump too. A torn-down feed stops
-    /// claiming to be connected — but a `Closed` one keeps its own, more specific
-    /// answer, since the server said why.
+    /// A `Closed` feed keeps its status, since the server said why.
     fn retire(&self) {
         let mut state = self.state();
         if self.shutdown.load(Ordering::Acquire) && state.status != LinkStatus::Closed {
@@ -781,9 +584,6 @@ impl Shared {
     }
 }
 
-/// The session loop: attach, pump the stream, and — unless the session ended
-/// for good — wait out a backoff step and attach again. A wake skips the nap
-/// and dials a fresh channel first ([`WAKE_DEBOUNCE`]).
 async fn run_pump(pump: Pump) {
     let Pump {
         client,
@@ -795,9 +595,7 @@ async fn run_pump(pump: Pump) {
         shared,
     } = pump;
     let mut redial = false;
-    // Whether the attempts under way were set off by a wake, and when the last of those failed
-    // to open a stream: a wake right behind a failed wake-driven dial must not reset the
-    // schedule again, or a flapping network would force a fresh dial every window.
+    // A wake right behind a failed wake-driven dial must not reset the schedule again.
     let mut wake_driven = false;
     let mut wake_failed_at: Option<Instant> = None;
 
@@ -832,10 +630,7 @@ async fn run_pump(pump: Pump) {
                 redial = true;
                 continue;
             }
-            // Back to `Reconnecting` before the nap below, not after it: a stream
-            // that dropped once `attach` had published `Connected` would otherwise
-            // keep claiming to be connected for the whole backoff step, and the link
-            // strip renders nothing at all for a connected feed.
+            // Before the nap: the link strip renders nothing for a connected feed.
             Attempt::Dropped => shared.set_status(LinkStatus::Reconnecting),
             Attempt::Closed | Attempt::Shutdown => break,
             Attempt::AuthExpired => {
@@ -853,8 +648,7 @@ async fn run_pump(pump: Pump) {
                 wait_backoff(&shared, &mut wakes, &waiter, *delay).await
             }
             None => {
-                // Out of schedule: stop attempting, and wait for the screen's retry
-                // (or a wake) rather than hammering a server that is plainly down.
+                // Out of schedule: wait for the screen's retry or a wake.
                 shared.set_status(LinkStatus::Disconnected);
                 park(&shared, &mut wakes).await
             }
@@ -873,18 +667,14 @@ async fn run_pump(pump: Pump) {
     shared.retire();
 }
 
-/// A wake restarts the schedule, unless the wake-driven attempt before it failed within the
-/// last `window`: then the normal schedule keeps backing off. Callers pass two debounce windows:
-/// the debounce already spaces acted-on wakes a full window apart, so a failure that came back
-/// quickly would otherwise always be a window old by the time the next wake is acted on.
+/// Callers pass two debounce windows: the debounce already spaces acted-on wakes a full window
+/// apart.
 fn wake_reset(shared: &Shared, failed_at: Option<Instant>, window: Duration) {
     if !failed_at.is_some_and(|at| at.elapsed() < window) {
         shared.reset_step();
     }
 }
 
-/// The mandatory first frame's payload: the session, the grid, the resume hints and the feed's
-/// client instance id. Pure, so the frame's shape is checkable without a stream.
 fn attach_request(
     session: &str,
     cols: u16,
@@ -896,8 +686,7 @@ fn attach_request(
         session: session.to_string(),
         rows: u32::from(rows),
         cols: u32::from(cols),
-        // Unset spells itself as the wire's proto3 default, which is the
-        // hint-less shape the server reads as "today's behavior".
+        // Unset is the proto3 default, the hint-less shape.
         resume_space_id: resume.space_id.unwrap_or_default(),
         resume_tab_id: resume.tab_id.unwrap_or_default(),
         resume_pane_id: resume.pane_id.unwrap_or_default(),
@@ -905,21 +694,13 @@ fn attach_request(
     }
 }
 
-/// A fresh `client_instance_id`: a random 128-bit value as 32 lowercase hex characters (a
-/// UUID v4, simple form). The server only compares it for equality, so it needs to be unique
-/// per client view, not secret; it is never logged.
+/// A UUID v4, simple form. The server only compares it for equality, so it need not be secret.
 fn mint_client_instance_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-/// One attach attempt: open the stream with its mandatory first frame, then pump it until it
-/// ends.
-///
-/// The one place an `AttachReq` is built, so the resume hint rides the backoff reconnect as
-/// well as the first attach — the loop above calls this for both. The hint is read here rather
-/// than captured with the pump, so every attempt carries the last move the screen recorded
-/// before the drop (a move made while the link is down never lands: its RPC fails and records
-/// nothing).
+/// Reads the resume hint per attempt, so a reconnect carries the last move recorded before the
+/// drop.
 async fn attach(client: &MuxrClient, session: &str, shared: &Shared, wakes: &mut Wakes) -> Attempt {
     let (outbound, requests) = mpsc::channel(OUTBOUND_CAPACITY);
     let (cols, rows) = shared.dims();
@@ -936,17 +717,13 @@ async fn attach(client: &MuxrClient, session: &str, shared: &Shared, wakes: &mut
         })
         .is_err()
     {
-        // A channel this code just built with room for hundreds; unreachable in
-        // practice, and a dropped attach frame is a stream muxrd would reject
-        // anyway, so treat it as a failed attempt rather than panic.
+        // Unreachable in practice; a failed attempt rather than a panic.
         return Attempt::Dropped;
     }
-    // Published only after the attach frame is queued, so a keystroke racing the
-    // handshake can never overtake it into the stream.
+    // Published only after the attach frame is queued, so a keystroke cannot overtake it.
     shared.set_outbound(Some(outbound));
 
-    // A fresh stub per attempt: the client's channel may have been rebuilt since
-    // the last one, and a stub holds whichever channel it was minted from.
+    // A fresh stub per attempt: the client's channel may have been rebuilt.
     let mut stub = client.authed();
     let opened = unless_signalled(
         shared,
@@ -973,9 +750,7 @@ async fn attach(client: &MuxrClient, session: &str, shared: &Shared, wakes: &mut
     outcome
 }
 
-/// Read server frames until the stream ends, the server says [`CONTROL_EXIT`], or
-/// a shutdown or a wake races in. Reads only while the drain side keeps up: see
-/// [`await_capacity`], the pause that turns a UI that has stopped draining into
+/// Reads only while the drain keeps up ([`await_capacity`]), so a UI that stops draining becomes
 /// HTTP/2 backpressure on the server rather than unbounded growth here.
 async fn pump_stream(
     mut stream: tonic::Streaming<ServerFrame>,
@@ -998,7 +773,6 @@ async fn pump_stream(
 
         let frame = match message {
             Ok(Some(frame)) => frame,
-            // A server that ended the stream is a drop like any other.
             Ok(None) => return Attempt::Dropped,
             Err(status) => return classify(&status),
         };
@@ -1027,7 +801,6 @@ async fn pump_stream(
     }
 }
 
-/// What one wait on the live stream turned out to be.
 enum Event<T> {
     Shutdown,
     Rewake,
@@ -1035,11 +808,8 @@ enum Event<T> {
     Message(T),
 }
 
-/// Await the stream's next read against the two wake sources, in priority order: the feed's own
-/// [`Shared::wake`] (shutdown, retry), then the read, then the app's wake signal. A frame the
-/// stream already holds therefore beats a wake that is ready alongside it, so an `exit` the
-/// server has delivered stays terminal instead of turning into a rebuild and a re-attach to an
-/// ended session.
+/// Priority: [`Shared::wake`], then the read, then the app's wake, so an `exit` the server
+/// delivered stays terminal instead of becoming a re-attach to an ended session.
 async fn read_or_signal<T>(
     shared: &Shared,
     wakes: &mut Wakes,
@@ -1055,7 +825,6 @@ async fn read_or_signal<T>(
     }
 }
 
-/// Which end an error `Status` is: an expired credential, or one more drop.
 fn classify(status: &tonic::Status) -> Attempt {
     if status.code() == Code::Unauthenticated {
         Attempt::AuthExpired
@@ -1064,36 +833,27 @@ fn classify(status: &tonic::Status) -> Attempt {
     }
 }
 
-/// Hold the reader off the stream while the queue sits at [`INBOUND_HIGH_WATER`] or
-/// [`INBOUND_HIGH_WATER_FRAMES`], returning once a drain has brought it back under both
-/// low-water marks — the pause half of the inbound flow control.
-///
-/// `Some` when the wait ended the attempt instead of resuming it: a shutdown or a wake are the
-/// only things besides a drain that reach a paused reader, keeping teardown from waiting on a
-/// drain that will never come. A no-op (one lock, no await) on every frame below the mark, which
-/// is every frame of a real session.
+/// `Some` when a shutdown or a wake ended the attempt instead, so teardown never waits on a drain.
+/// Below the mark this is one lock and no await.
 async fn await_capacity(shared: &Shared, wakes: &mut Wakes) -> Option<Attempt> {
     if !shared.inbound_saturated() {
         return None;
     }
     shared.count_read_pause();
     loop {
-        // The drain's permit is stored rather than lost if it lands between the
-        // check above and this wait, so the pause cannot miss its own wake.
+        // The drain's permit is stored, so the pause cannot miss its own wake.
         match race(signal(shared, wakes), shared.drained.notified()).await {
             Winner::First(Wake::Shutdown) => return Some(Attempt::Shutdown),
             Winner::First(Wake::Network) => return Some(Attempt::Rewake),
             Winner::First(Wake::Retry | Wake::Elapsed) | Winner::Second(()) => {}
         }
-        // Re-read the level rather than trust the wake: a retry, a stale permit or
-        // a drain that left the queue still full all land here.
+        // Re-read the level: a retry, a stale permit or a still-full queue all land here.
         if shared.inbound_has_room() {
             return None;
         }
     }
 }
 
-/// Wait out one backoff step, cut short by a manual retry, a wake or a shutdown.
 async fn wait_backoff(
     shared: &Shared,
     wakes: &mut Wakes,
@@ -1106,7 +866,6 @@ async fn wait_backoff(
     }
 }
 
-/// Park an exhausted schedule until a retry or a wake re-arms it or a shutdown ends it.
 async fn park(shared: &Shared, wakes: &mut Wakes) -> Wake {
     loop {
         match signal(shared, wakes).await {
@@ -1117,8 +876,7 @@ async fn park(shared: &Shared, wakes: &mut Wakes) -> Wake {
     }
 }
 
-/// The pump's two wake sources as one: the feed's own [`Shared::wake`] (retry, shutdown) and
-/// the app's wake signal. The feed's is polled first, so a pending shutdown wins a tie.
+/// [`Shared::wake`] is polled first, so a pending shutdown wins a tie.
 async fn signal(shared: &Shared, wakes: &mut Wakes) -> Wake {
     match race(shared.wake.notified(), wakes.next()).await {
         Winner::First(()) => shared.take_wake(),
@@ -1126,8 +884,7 @@ async fn signal(shared: &Shared, wakes: &mut Wakes) -> Wake {
     }
 }
 
-/// Drive `work` to its end unless a shutdown or a wake ends the attempt first, in which case
-/// `work` is dropped where it stands. A retry or a stale permit leaves it running.
+/// A retry or a stale permit leaves `work` running.
 async fn unless_signalled<F: Future>(
     shared: &Shared,
     wakes: &mut Wakes,
@@ -1144,16 +901,12 @@ async fn unless_signalled<F: Future>(
     }
 }
 
-/// Which of [`race`]'s two futures finished first.
 enum Winner<A, B> {
     First(A),
     Second(B),
 }
 
-/// Poll `first`, then `second`, on every wake, and finish with whichever completes
-/// first — the two-future `tokio::select!` this crate cannot spell, since
-/// `select!` lives behind a feature production does not carry. `first` is polled
-/// first, so a pending shutdown always wins a tie.
+/// Production `tokio` carries no `select!`; `first` wins a tie.
 async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B::Output> {
     let mut first = std::pin::pin!(first);
     let mut second = std::pin::pin!(second);
@@ -1177,39 +930,27 @@ mod tests {
     use crate::net::testing::{self, MuxrdFixture, TerminalScript, wait_until};
     use crate::net::wake::WakeBus;
 
-    /// The injected schedule every reconnect test runs on: two steps, both short
-    /// enough that a whole exhaust-and-re-arm cycle costs milliseconds.
     const TEST_BACKOFF: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
 
-    /// One step long enough that "still waiting out the nap" is observable rather
-    /// than a millisecond to win a race against. Never waited out: the feed is
-    /// dropped mid-nap, which wakes it.
+    /// Never waited out: the feed is dropped mid-nap.
     const LONG_BACKOFF: [Duration; 1] = [Duration::from_secs(2)];
 
-    /// The debounce every rig feed runs on: shorter than [`WAKE_DEBOUNCE`] so a test that
-    /// waits a window out stays quick, still far longer than a burst published in one go.
+    /// Still far longer than a burst published in one go.
     const TEST_DEBOUNCE: Duration = Duration::from_millis(150);
 
-    /// Wakes published in one go to overflow the bus's per-subscriber buffer.
+    /// Overflows the bus's per-subscriber buffer.
     const WAKE_FLOOD: usize = 64;
 
-    /// The session name every test attaches to.
     const SESSION: &str = "alpha";
 
-    /// One flooded render frame. Large enough that a handful crosses
-    /// [`INBOUND_HIGH_WATER`], small enough to stay under tonic's 4 MiB ceiling.
+    /// A handful crosses [`INBOUND_HIGH_WATER`]; one stays under tonic's 4 MiB ceiling.
     const FLOOD_FRAME: usize = 256 * 1024;
 
-    /// Frames a flood pushes: twice what the high-water mark holds, so the pump
-    /// parks with roughly half the flood still behind it on the wire.
+    /// Twice the high-water mark, so the pump parks with half the flood still on the wire.
     const FLOOD_FRAMES: usize = 2 * INBOUND_HIGH_WATER / FLOOD_FRAME;
 
-    /// Bytes one flood pushes in total.
     const FLOOD_TOTAL: usize = FLOOD_FRAME * FLOOD_FRAMES;
 
-    /// A fixture, a token-bearing client, the script that drives the
-    /// server side of the attach stream, and the wake bus every rig feed
-    /// listens on — the rig's own, never the process-global one.
     struct Rig {
         fixture: MuxrdFixture,
         client: MuxrClient,
@@ -1236,13 +977,10 @@ mod tests {
             self.bus.publish(reason);
         }
 
-        /// Dials the fixture has accepted: the rig's own, plus one per rebuild.
         fn connections(&self) -> usize {
             self.fixture.connections()
         }
 
-        /// A feed on [`TEST_BACKOFF`], its pump spawned on the test runtime,
-        /// plus the counter its auth-expired callback bumps.
         fn feed(&self, cols: u16, rows: u16) -> (GrpcTerminalFeed, Arc<AtomicU64>) {
             self.feed_with(cols, rows, &TEST_BACKOFF)
         }
@@ -1256,9 +994,6 @@ mod tests {
             self.feed_resuming(cols, rows, backoff, Arc::new(ResumeSlot::default()))
         }
 
-        /// [`feed_with`](Self::feed_with) over a caller-held [`ResumeSlot`] — the
-        /// screen's own handle onto the hint, which a test writes *between* two
-        /// attaches the way a user's move does.
         fn feed_resuming(
             &self,
             cols: u16,
@@ -1284,8 +1019,6 @@ mod tests {
         }
     }
 
-    /// Drain into a `Vec` of owned writes, checking the reported count against what
-    /// the sink saw.
     fn drain(feed: &mut GrpcTerminalFeed) -> Vec<Vec<u8>> {
         let mut writes = Vec::new();
         let reported = feed.drain_output(&mut |bytes| writes.push(bytes.to_vec()));
@@ -1297,13 +1030,10 @@ mod tests {
         writes
     }
 
-    /// Bytes one drain handed over.
     fn drained_bytes(feed: &mut GrpcTerminalFeed) -> usize {
         drain(feed).iter().map(Vec::len).sum()
     }
 
-    /// Push [`FLOOD_TOTAL`] at a feed nothing is draining, and wait for its pump
-    /// to park on the high-water mark.
     async fn flood_until_paused(script: &TerminalScript, feed: &GrpcTerminalFeed) {
         for _ in 0..FLOOD_FRAMES {
             script.push_render(vec![b'x'; FLOOD_FRAME]);
@@ -1314,13 +1044,8 @@ mod tests {
         .await;
     }
 
-    /// Push empty render frames at a feed nothing is draining, until its pump parks
-    /// on [`INBOUND_HIGH_WATER_FRAMES`] — the frame-count counterpart of
-    /// [`flood_until_paused`]. Crossing 4096 frames takes far more pushes than the
-    /// fixture's own 64-deep local command channel can hold at once, so this pushes
-    /// a small batch from inside [`wait_until`]'s own probe, repeating on every
-    /// failed check; each batch drains through the real stream during the probe's
-    /// poll delay before the next is pushed.
+    /// Pushes small batches from inside the probe: 4096 frames overflow the fixture's 64-deep
+    /// command channel.
     async fn flood_tiny_frames_until_paused(script: &TerminalScript, feed: &GrpcTerminalFeed) {
         const BATCH: usize = 16;
         wait_until("the pump parks on the frame-count high-water mark", || {
@@ -1332,8 +1057,6 @@ mod tests {
         .await;
     }
 
-    /// The mandatory first frame carries the session and the grid the feed was
-    /// built at — and, with nothing to resume, nothing else.
     #[tokio::test]
     async fn attach_carries_the_session_and_the_grid() {
         let rig = Rig::start().await;
@@ -1365,9 +1088,6 @@ mod tests {
         assert!(feed.is_open());
     }
 
-    /// The hint the screen recorded rides the **reconnect's** own attach frame —
-    /// the whole point of the slot: the first stream carried nothing, the move
-    /// happened while it was up, and the fresh attach asks for it back.
     #[tokio::test]
     async fn a_reconnect_attaches_with_the_resume_target_the_screen_recorded() {
         let rig = Rig::start().await;
@@ -1384,8 +1104,6 @@ mod tests {
             "the first attach had nothing to resume"
         );
 
-        // What the sheet's two user-driven moves write, in the order a user makes
-        // them: a space switch, then a pane commit inside it.
         resume.remember_space("ws-7".to_string());
         resume.remember_pane(Some(42), 7);
         script.kill();
@@ -1417,8 +1135,6 @@ mod tests {
         );
     }
 
-    /// One feed keeps one `client_instance_id` across a drop: the kill-driven re-attach runs
-    /// under the id the mount was built with, and a second mount mints a different one.
     #[tokio::test]
     async fn a_feed_reuses_its_client_instance_id_across_a_reattach() {
         let rig = Rig::start().await;
@@ -1457,8 +1173,6 @@ mod tests {
         );
     }
 
-    /// The attach frame carries the instance id beside the session, the grid and the resume
-    /// hints, and passes it through unchanged.
     #[test]
     fn attach_request_carries_the_instance_id_beside_the_resume_hints() {
         let resume = ResumeTarget {
@@ -1482,7 +1196,6 @@ mod tests {
         );
     }
 
-    /// Minted ids are 32 lowercase hex characters, and two mints never collide.
     #[test]
     fn minted_instance_ids_are_32_lowercase_hex_and_distinct() {
         let (a, b) = (mint_client_instance_id(), mint_client_instance_id());
@@ -1497,10 +1210,6 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// The slot's own rules, the ones the controller's two user-driven paths lean
-    /// on: a pane move keeps the space (the rung that survives a muxrd restart),
-    /// a space move drops the tab/pane that belonged to the space being left, and
-    /// a pane move with no known tab clears the stale tab rather than keeping it.
     #[test]
     fn a_pane_move_keeps_the_space_and_a_space_move_clears_the_tab_and_pane() {
         let slot = ResumeSlot::default();
@@ -1551,9 +1260,6 @@ mod tests {
         );
     }
 
-    /// Keystrokes reach the server as `input` frames, and what the server sends back
-    /// comes out of `drain_output` once, in order — but never inside the same
-    /// dispatch, which is the whole difference from `DemoFeed`.
     #[tokio::test]
     async fn input_reaches_the_server_and_render_bytes_drain_once_in_order() {
         let rig = Rig::start().await;
@@ -1589,8 +1295,6 @@ mod tests {
         );
     }
 
-    /// A resize reaches the server, and the cached pair is what the next
-    /// attach replays.
     #[tokio::test]
     async fn resize_reaches_the_server_and_is_replayed_on_reconnect() {
         let rig = Rig::start().await;
@@ -1623,8 +1327,6 @@ mod tests {
         );
     }
 
-    /// A wheel-scroll event reaches the server as one `mouse` frame, carrying
-    /// its kind and zero-based cell coordinates verbatim.
     #[tokio::test]
     async fn mouse_events_reach_the_server_as_mouse_frames() {
         let rig = Rig::start().await;
@@ -1658,8 +1360,6 @@ mod tests {
         );
     }
 
-    /// The connection id is captured off the control stream and exposed, and
-    /// never reaches the emulator as output.
     #[tokio::test]
     async fn connection_id_is_captured_and_never_drained_as_output() {
         let rig = Rig::start().await;
@@ -1677,8 +1377,6 @@ mod tests {
         );
     }
 
-    /// A server `exit` closes the feed for good: no reconnect, and the pump is
-    /// gone.
     #[tokio::test]
     async fn an_exit_control_closes_the_feed_without_reconnecting() {
         let rig = Rig::start().await;
@@ -1702,8 +1400,6 @@ mod tests {
         );
     }
 
-    /// A dropped stream walks the schedule, and the first render frame after a
-    /// reconnect puts the step back to zero.
     #[tokio::test]
     async fn a_dropped_stream_advances_the_schedule_and_a_render_resets_it() {
         let rig = Rig::start().await;
@@ -1714,8 +1410,7 @@ mod tests {
         })
         .await;
 
-        // A stream that delivered nothing before dropping proves nothing, so
-        // each drop takes the next step.
+        // A stream that delivered nothing proves nothing, so each drop takes the next step.
         script.kill();
         wait_until("the first reconnect lands", || script.attach_count() == 2).await;
         assert_eq!(feed.backoff_step(), 1);
@@ -1724,7 +1419,6 @@ mod tests {
         wait_until("the second reconnect lands", || script.attach_count() == 3).await;
         assert_eq!(feed.backoff_step(), 2);
 
-        // …and one render frame is all it takes to earn a fresh schedule.
         wait_until("the third stream is up", || {
             feed.status() == LinkStatus::Connected
         })
@@ -1734,9 +1428,6 @@ mod tests {
         assert_eq!(feed.backoff_step(), 0);
     }
 
-    /// A drop reports `Reconnecting` for the *whole* step — the backoff nap
-    /// included, not just the attach attempts at either end of it. The status is
-    /// what the link strip renders, and it renders nothing for a connected feed.
     #[tokio::test]
     async fn a_drop_reports_reconnecting_while_the_backoff_nap_runs() {
         let rig = Rig::start().await;
@@ -1761,8 +1452,6 @@ mod tests {
         );
     }
 
-    /// A producer outrunning the drain parks the pump on the high-water mark
-    /// rather than growing the queue, and a drain starts it reading again.
     #[tokio::test]
     async fn a_flood_pauses_the_reader_until_a_drain_makes_room() {
         let rig = Rig::start().await;
@@ -1784,8 +1473,6 @@ mod tests {
             "the rest of the flood is still on the server, held off by a reader that stopped reading"
         );
 
-        // Draining empties the queue and wakes the pump, and the whole flood
-        // arrives — nothing was dropped to make room.
         let mut received = drained_bytes(&mut feed);
         wait_until("the rest of the flood arrives once reading resumes", || {
             received += drained_bytes(&mut feed);
@@ -1799,10 +1486,6 @@ mod tests {
         );
     }
 
-    /// A flood of many *tiny* (here, empty) render frames stays nowhere near
-    /// [`INBOUND_HIGH_WATER`]'s byte accounting, yet each still costs a `VecDeque`
-    /// slot and a `Vec` allocation — [`INBOUND_HIGH_WATER_FRAMES`] catches that
-    /// shape and pauses the reader on frame count alone.
     #[tokio::test]
     async fn a_flood_of_tiny_frames_pauses_the_reader_via_the_frame_count_cap() {
         let rig = Rig::start().await;
@@ -1827,8 +1510,6 @@ mod tests {
             feed.pending_writes()
         );
 
-        // Draining resumes the reader, and the session keeps delivering rather than
-        // staying parked forever — nothing was dropped to make room.
         drain(&mut feed);
         script.push_render(b"after\r\n".to_vec());
         wait_until("the session keeps delivering once reading resumes", || {
@@ -1842,8 +1523,6 @@ mod tests {
         );
     }
 
-    /// The mark is a pause threshold, not an admission filter: a single frame
-    /// bigger than the whole cap is queued whole, and the session carries on.
     #[tokio::test]
     async fn a_frame_larger_than_the_cap_is_accepted_whole() {
         let rig = Rig::start().await;
@@ -1875,8 +1554,6 @@ mod tests {
         assert_eq!(drain(&mut feed), vec![b"after\r\n".to_vec()]);
     }
 
-    /// A shutdown reaches a paused reader — `Drop` takes this same path, so
-    /// teardown never waits on a drain that will never come.
     #[tokio::test]
     async fn a_shutdown_wakes_a_reader_paused_on_the_high_water_mark() {
         let rig = Rig::start().await;
@@ -1896,9 +1573,7 @@ mod tests {
         assert_eq!(script.attach_count(), 1, "a shutdown never reconnects");
     }
 
-    /// A `ServerFrame` stream is one sequence, so a pause holds back a server
-    /// `exit` too — and the first drain both resumes the reader and delivers
-    /// the close.
+    /// A `ServerFrame` stream is one sequence, so a pause holds back an `exit` too.
     #[tokio::test]
     async fn an_exit_behind_a_flood_closes_once_the_drain_resumes_the_reader() {
         let rig = Rig::start().await;
@@ -1931,8 +1606,6 @@ mod tests {
         wait_until("the pump returns", || !feed.is_open()).await;
     }
 
-    /// Running off the end of the schedule stops the loop and offers the
-    /// screen a retry; `reset_backoff` takes it.
     #[tokio::test]
     async fn an_exhausted_schedule_disconnects_until_reset_backoff_re_arms_it() {
         let rig = Rig::start().await;
@@ -1965,8 +1638,6 @@ mod tests {
         assert_eq!(feed.backoff_step(), 0, "a manual retry starts over");
     }
 
-    /// An `UNAUTHENTICATED` open short-circuits the whole backoff loop: one
-    /// callback, no retry, and a feed that is done.
     #[tokio::test]
     async fn unauthenticated_fires_the_callback_once_and_never_retries() {
         let rig = Rig::start().await;
@@ -1990,15 +1661,11 @@ mod tests {
             "the credential never got past the bearer check"
         );
 
-        // Nothing re-arms an expired credential: the retry affordance is a
-        // no-op once the pump has returned.
         feed.reset_backoff();
         assert_eq!(expiries.load(Ordering::Relaxed), 1);
         assert_eq!(script.attach_count(), 0);
     }
 
-    /// A shutdown ends the request stream, which is how the server learns the
-    /// client is gone.
     #[tokio::test]
     async fn shutdown_ends_the_stream_and_finishes_the_pump() {
         let rig = Rig::start().await;
@@ -2018,15 +1685,11 @@ mod tests {
             "a torn-down feed stops claiming to be connected"
         );
 
-        // The outbound half is gone with it, so a late keystroke is dropped
-        // rather than queued against a dead stream.
         let mut feed = feed;
         feed.send_input(b"x");
         assert_eq!(feed.dropped_frames(), 1);
     }
 
-    /// The first attach and a kill-driven re-attach of one feed carry the same id on the
-    /// wire, as the fixture saw it — a 32-hex value, never empty.
     #[tokio::test]
     async fn the_fixture_sees_one_instance_id_across_a_feeds_reattach() {
         let rig = Rig::start().await;
@@ -2046,7 +1709,6 @@ mod tests {
         );
     }
 
-    /// Two feeds name two client views on the wire.
     #[tokio::test]
     async fn the_fixture_sees_different_instance_ids_from_two_feeds() {
         let rig = Rig::start().await;
@@ -2064,9 +1726,6 @@ mod tests {
         );
     }
 
-    /// A stalled stream — open, silent, its connection alive — is left the moment a wake
-    /// lands: the re-attach reaches the server well inside the debounce window, over a
-    /// freshly dialled channel, as the same client view.
     #[tokio::test]
     async fn a_wake_on_a_stalled_stream_re_attaches_at_once_on_a_fresh_channel() {
         let rig = Rig::start().await;
@@ -2105,9 +1764,8 @@ mod tests {
         .await;
     }
 
-    /// Echo one keystroke and wait for it back. The pump polls its wake receiver ahead of
-    /// every stream read, so once this returns, any wake published before it has been
-    /// either acted on or dropped by the debounce.
+    /// The pump polls its wakes ahead of every read, so once this returns any earlier wake was
+    /// acted on or debounced.
     async fn round_trip(script: &TerminalScript, feed: &mut GrpcTerminalFeed) {
         let seen = script.inputs().len();
         feed.send_input(b"!");
@@ -2116,8 +1774,6 @@ mod tests {
         drain(feed);
     }
 
-    /// Five wakes inside the debounce window — some queued together, some spread across
-    /// the redial they set off — cost the leading rebuild and one trailing one, never five.
     #[tokio::test]
     async fn a_burst_of_wakes_inside_the_debounce_rebuilds_twice_at_most() {
         let rig = Rig::start().await;
@@ -2147,8 +1803,6 @@ mod tests {
         assert_eq!(rig.connections(), 3, "two rebuilds for the burst, not five");
     }
 
-    /// A wake a third of the way into the window is not lost: nothing happens before the
-    /// window ends, then exactly one more rebuild and re-attach.
     #[tokio::test]
     async fn a_wake_inside_the_window_acts_once_more_when_it_closes() {
         let rig = Rig::start().await;
@@ -2189,7 +1843,6 @@ mod tests {
         assert_eq!(rig.connections(), 3);
     }
 
-    /// The debounce is a window, not a latch: a wake after it has run out acts again.
     #[tokio::test]
     async fn a_wake_after_the_debounce_window_acts_again() {
         let rig = Rig::start().await;
@@ -2211,7 +1864,6 @@ mod tests {
         assert_eq!(rig.connections(), 3);
     }
 
-    /// A wake cuts a backoff nap short, and the re-attach starts the schedule over.
     #[tokio::test]
     async fn a_wake_during_a_backoff_nap_cuts_the_nap_short() {
         let rig = Rig::start().await;
@@ -2236,7 +1888,6 @@ mod tests {
         assert_eq!(rig.connections(), 2, "on a freshly dialled channel");
     }
 
-    /// A feed parked on an exhausted schedule re-attaches on a wake, with no manual retry.
     #[tokio::test]
     async fn a_wake_re_attaches_a_disconnected_feed_without_a_retry() {
         let rig = Rig::start().await;
@@ -2263,8 +1914,6 @@ mod tests {
         assert_eq!(rig.connections(), 2);
     }
 
-    /// Wakes after a server `exit` do nothing: the feed stays closed, nothing dials or
-    /// re-attaches.
     #[tokio::test]
     async fn wakes_after_an_exit_do_nothing() {
         let rig = Rig::start().await;
@@ -2285,8 +1934,6 @@ mod tests {
         assert_eq!(rig.connections(), 1);
     }
 
-    /// A wake held back by the debounce when the server exits does not outlive the session:
-    /// the exit lands first, the feed closes, and the trailing wake never dials.
     #[tokio::test]
     async fn an_exit_published_with_a_suppressed_wake_leaves_the_feed_closed() {
         let rig = Rig::start().await;
@@ -2312,8 +1959,6 @@ mod tests {
         assert_eq!(rig.connections(), 2);
     }
 
-    /// A frame the stream already holds beats a wake that is ready beside it, and the feed's
-    /// own shutdown beats both.
     #[tokio::test]
     async fn a_buffered_frame_wins_over_a_ready_wake_and_a_shutdown_over_both() {
         let bus = WakeBus::new();
@@ -2340,7 +1985,6 @@ mod tests {
         assert!(matches!(event, Event::Shutdown), "shutdown beats both");
     }
 
-    /// Wakes after an expired credential do nothing either: the callback has fired, once.
     #[tokio::test]
     async fn wakes_after_an_auth_expiry_do_nothing() {
         let rig = Rig::start().await;
@@ -2355,8 +1999,6 @@ mod tests {
         assert_eq!(rig.connections(), 1);
     }
 
-    /// More wakes than the bus buffers, all published while the pump could not run, reach
-    /// it as a lagged receiver — still one wake: one rebuild, one re-attach.
     #[tokio::test]
     async fn a_lagged_wake_receiver_re_attaches_exactly_once() {
         let rig = Rig::start().await;
@@ -2379,9 +2021,6 @@ mod tests {
         assert_eq!(rig.connections(), 2);
     }
 
-    /// The pure debounce: a lagged receiver is one wake, queued wakes fold into it, a wake
-    /// inside the window is held and resolves once the window closes (even across a dropped
-    /// wait), and one after the window is taken at once.
     #[tokio::test]
     async fn wakes_fold_a_lagged_burst_and_hold_one_inside_the_window_until_it_closes() {
         let bus = WakeBus::new();
@@ -2419,9 +2058,6 @@ mod tests {
         );
     }
 
-    /// Repeated wakes against a server that refuses every attach: only the first restarts the
-    /// schedule. A wake right behind a failed wake-driven dial leaves the step where the
-    /// normal schedule had it, so each costs one attempt, not a fresh climb.
     #[tokio::test]
     async fn wakes_behind_a_failed_wake_driven_dial_do_not_restart_the_schedule() {
         const NAP: [Duration; 2] = [Duration::from_millis(40), Duration::from_millis(40)];
@@ -2441,7 +2077,6 @@ mod tests {
         assert_eq!(feed.backoff_step(), 2);
         assert_eq!(rig.connections(), 1);
 
-        // The first wake restarts the schedule: the redial and both naps' attempts.
         rig.wake(WakeReason::NetworkChanged);
         wait_until("the first wake climbs the schedule again", || {
             feed.status() == LinkStatus::Disconnected && script.refused() == 5
@@ -2450,8 +2085,6 @@ mod tests {
         assert_eq!(feed.backoff_step(), 2);
         assert_eq!(rig.connections(), 2);
 
-        // Each later wake lands within a window of the failure before it: one dial, one
-        // refused attempt, no climb.
         for wake in 1..=3 {
             tokio::time::sleep(TEST_DEBOUNCE + Duration::from_millis(10)).await;
             rig.wake(WakeReason::Foregrounded);
@@ -2471,8 +2104,6 @@ mod tests {
         );
     }
 
-    /// A failed wake-driven dial, then a successful one: the success clears the failure, so a
-    /// wake still inside the failure's two windows restarts the schedule.
     #[tokio::test]
     async fn a_success_clears_a_failed_wake_driven_dial_before_the_next_wake() {
         const NAP: [Duration; 2] = [Duration::from_millis(40), Duration::from_millis(40)];
@@ -2490,7 +2121,6 @@ mod tests {
         })
         .await;
 
-        // The failed wake-driven dial.
         rig.wake(WakeReason::NetworkChanged);
         wait_until("the wake-driven attempts fail", || {
             feed.status() == LinkStatus::Disconnected && script.refused() == 5
@@ -2498,8 +2128,6 @@ mod tests {
         .await;
         script.refuse_attaches(false);
 
-        // Held to the window's close, so it lands within two windows of the failure and
-        // finds the step unreset: the one attempt succeeds.
         rig.wake(WakeReason::Foregrounded);
         wait_until("the second wake attaches", || {
             script.attach_count() == 2 && feed.status() == LinkStatus::Connected
@@ -2512,7 +2140,6 @@ mod tests {
         .await;
         assert_eq!(feed.backoff_step(), 2);
 
-        // Again held to the window's close, still within two windows of the old failure.
         rig.wake(WakeReason::NetworkChanged);
         wait_until("the third wake attaches", || {
             script.attach_count() == 3 && feed.status() == LinkStatus::Connected
@@ -2521,8 +2148,6 @@ mod tests {
         assert_eq!(feed.backoff_step(), 0, "the success cleared the failure");
     }
 
-    /// However often the wait for an owed wake is dropped and rebuilt inside one window, one
-    /// timer serves it, and the wake still acts exactly once when the window closes.
     #[tokio::test]
     async fn an_owed_wake_costs_one_timer_however_often_its_wait_is_rebuilt() {
         let bus = WakeBus::new();
@@ -2545,8 +2170,6 @@ mod tests {
         assert_eq!(wakes.timers, 1);
     }
 
-    /// A timer that fires after its wake already acted through the clock leaves no permit
-    /// behind for the next owed wake: each owed wake costs exactly one timer.
     #[tokio::test]
     async fn a_late_timer_signal_does_not_cost_the_next_owed_wake_a_second_timer() {
         let bus = WakeBus::new();
@@ -2554,8 +2177,7 @@ mod tests {
         bus.publish(WakeReason::Foregrounded);
         wakes.next().await;
 
-        // First owed wake: arm its timer, drop the wait, let the window run out with nobody
-        // listening, and act through the clock before ever awaiting the signal.
+        // Act through the clock before ever awaiting the signal.
         bus.publish(WakeReason::NetworkChanged);
         let inside = race(wakes.next(), tokio::task::yield_now()).await;
         assert!(matches!(inside, Winner::Second(())));
@@ -2566,7 +2188,6 @@ mod tests {
         // The timer fired meanwhile; its signal must not outlive the wake it served.
         tokio::task::yield_now().await;
 
-        // Second owed wake: one more timer, and its own window close wakes the wait.
         bus.publish(WakeReason::NetworkChanged);
         let inside = race(wakes.next(), tokio::task::yield_now()).await;
         assert!(matches!(inside, Winner::Second(())));
@@ -2582,7 +2203,6 @@ mod tests {
         assert_eq!(wakes.timers, 2);
     }
 
-    /// A wake after a successful wake-driven attach restarts the schedule as ever.
     #[tokio::test]
     async fn a_wake_after_a_successful_attach_still_restarts_the_schedule() {
         let rig = Rig::start().await;
@@ -2607,8 +2227,6 @@ mod tests {
         assert_eq!(rig.connections(), 3);
     }
 
-    /// The shipped schedule is the documented one — the constant callers
-    /// depend on, not a test-injected stand-in.
     #[test]
     fn the_shipped_schedule_is_one_two_four_eight_sixteen_seconds_with_no_jitter() {
         assert_eq!(
@@ -2617,18 +2235,12 @@ mod tests {
         );
     }
 
-    /// The shipped inbound bound is the documented one: 2 MiB of queued render bytes
-    /// pauses the reader, and a quarter of that resumes it — a low-water mark at the
-    /// high-water one would resume the instant it paused.
     #[test]
     fn the_shipped_inbound_bound_is_two_mib_resuming_at_a_quarter_of_it() {
         assert_eq!(INBOUND_HIGH_WATER, 2 * 1024 * 1024);
         assert_eq!(INBOUND_LOW_WATER, 512 * 1024);
     }
 
-    /// The shipped frame-count bound is the documented one: 4096 queued render
-    /// frames pauses the reader, and a quarter of that resumes it — the same shape
-    /// as the byte bound, alongside rather than instead of it.
     #[test]
     fn the_shipped_inbound_frame_bound_is_4096_resuming_at_a_quarter_of_it() {
         assert_eq!(INBOUND_HIGH_WATER_FRAMES, 4096);

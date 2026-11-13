@@ -1,15 +1,6 @@
-//! The in-memory keyring and its vault codec — framework-free.
-//!
-//! [`Keyring`] maps a server endpoint (`host:port`) to its auth token, held in
-//! [`Zeroizing`] strings so every copy scrubs on drop. It has one owner (no
-//! `Clone`) and a redacting `Debug`. [`KeyringVault`] is the codec for the
-//! single persisted blob: JSON `{"version":1,"entries":{"host:port":
-//! {"token":"…","savedAtMs":<i64>}}}`.
-//!
-//! Codec placement: it lives here in `domain` because `serde_json` is a plain
-//! crate dependency (no `frust::`), keeping the strict parse next to its tests.
-//! Decoding is strict — a corrupted vault is a [`VaultError`], never an empty
-//! keyring, so a storage failure cannot masquerade as "no credentials".
+//! In-memory keyring (endpoint -> token in [`Zeroizing`] strings, no `Clone`, redacting `Debug`) and its vault codec.
+//! Vault JSON: `{"version":1,"entries":{"host:port":{"token":"…","savedAtMs":<i64>}}}`. Decoding is strict:
+//! a corrupt vault is a [`VaultError`], never an empty keyring.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +10,6 @@ use zeroize::Zeroizing;
 /// The only vault schema version this build reads or writes.
 const VAULT_VERSION: i64 = 1;
 
-/// Endpoint -> token, in memory. See the [module docs](self).
 #[derive(Default)]
 pub struct Keyring {
     entries: BTreeMap<String, Zeroizing<String>>,
@@ -30,7 +20,6 @@ impl Keyring {
         Self::default()
     }
 
-    /// Inserts `token` for `endpoint`, replacing (and scrubbing) any previous one.
     pub fn insert(&mut self, endpoint: impl Into<String>, token: Zeroizing<String>) {
         self.entries.insert(endpoint.into(), token);
     }
@@ -40,7 +29,6 @@ impl Keyring {
         self.entries.remove(endpoint).is_some()
     }
 
-    /// A clone of the secret for `endpoint`.
     pub fn token_for(&self, endpoint: &str) -> Option<Zeroizing<String>> {
         self.entries.get(endpoint).cloned()
     }
@@ -57,9 +45,7 @@ impl Keyring {
         self.entries.len()
     }
 
-    /// Zeroizes every token and clears the map.
     pub fn lock(&mut self) {
-        // Dropping a `Zeroizing` scrubs it.
         self.entries.clear();
     }
 }
@@ -72,7 +58,6 @@ impl std::fmt::Debug for Keyring {
     }
 }
 
-/// A vault blob that could not be read as a version-1 keyring.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultError(pub String);
 
@@ -88,7 +73,6 @@ fn bad(reason: &str) -> VaultError {
     VaultError(reason.to_string())
 }
 
-/// Encoder/decoder for the persisted vault blob.
 pub struct KeyringVault;
 
 impl KeyringVault {

@@ -1,11 +1,6 @@
-//! `settings` domain — entities, repository contracts, use cases.
-//! Framework-free: never `frust::`, never a `data`/`presentation` path
-//! segment.
+//! Framework-free entities, repository contracts and use cases.
 //!
-//! The `connection` group's facts (endpoint, TLS posture, version) live on
-//! [`crate::connection`] instead, deliberately — more than one feature reads
-//! them, and a settings-owned copy would give the app two answers to "which
-//! server am I on".
+//! Connection facts (endpoint, TLS, version) live on [`crate::connection`] because several features read them.
 
 pub mod entities;
 pub mod repositories;

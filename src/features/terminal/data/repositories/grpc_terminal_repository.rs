@@ -1,40 +1,6 @@
-//! [`GrpcTerminalRepository`] — the real, `muxrd`-backed [`TerminalRepository`], and
-//! `terminal::di::provide`'s production choice.
-//!
-//! Every call resolves [`ConnectionController::client`] fresh — the sanctioned path to the live
-//! [`MuxrClient`] — rather than dialing a channel of its own; `None` (disconnected) maps to
-//! [`AppFailure::Network`] rather than panicking. The `Arc<ConnectionController>` field is this
-//! feature's one `data` → `crate::connection` edge, resolved once in `di::provide`.
-//!
-//! **What it addresses, and how it learns it.** The read/detach methods take no session id, so
-//! this repository is [`bind`](TerminalRepository::bind)-ed: the screen hands it the attached
-//! session on mount and the connection id the `AttachTerminal` stream minted as soon as one
-//! exists (and again on every re-attach). Both ride on every request, which is what makes a
-//! space/tab switch land on this client's view; an unbound session is not an error, and a bare
-//! `/terminal` answers empty. Two calls never reach the wire: `tab_lines` (on a live session a
-//! tab's content is the emulator's) and `detach_session` (detaching *is* dropping the stream,
-//! which `GrpcTerminalFeed`'s own [`Drop`] does on unmount).
-//!
-//! **Tab keys are derived, not carried**, and uniqueness is load-bearing —
-//! [`map_tabs`] and [`crate::net::agent_layouts::unique_tab_key`] state that contract. Failure mapping funnels through
-//! [`crate::net::error::from_status`], with `UNAUTHENTICATED` additionally invoking
-//! [`ConnectionController::on_session_expired_for`] with the client the call used; every
-//! `ActionAck`-returning call maps through [`crate::net::error::ack_result`] rather than
-//! trusting the outer `Status`.
-//!
-//! **The agents stream.** `watch_agents` runs `WatchAgents` on a background [`frust::spawn`]
-//! task that writes no signal: events reach the caller's sink, a transport failure reconnects on
-//! the terminal feed's [`RECONNECT_BACKOFF`] (reset by a stream that delivered), and a clean end,
-//! an `UNAUTHENTICATED` answer or a spent schedule ends the subscription for good. That answer
-//! does not fire the session-expired hook from here — it writes signals, and the attached feed
-//! reports the same expiry itself. [`WatchHandle::end`] reports which of those it was.
-//!
-//! **Agent tab keys are validated, not assumed.** Both `list_agents` and the stream join the
-//! agents with one `GetLayout` per space ([`crate::net::agent_layouts`]). The stream caches each
-//! space's layout, and a changed agent reuses it only while it is younger than the layout poll
-//! ([`LAYOUT_FRESH`]) and still names the agent's tab as the event does; otherwise that space is
-//! re-read first. A space whose read fails keeps its rows at their last known key (empty only
-//! if never known) — the poll path reports that failure once, the stream logs it.
+//! Every call resolves [`ConnectionController::client`] fresh (`None` maps to Network) and carries
+//! the session and connection id [`bind`](TerminalRepository::bind) recorded, so a switch lands on
+//! this client's view. `ActionAck` answers map through [`crate::net::error::ack_result`].
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -67,53 +33,33 @@ use crate::net::proto::{
 };
 use crate::net::{MuxrClient, error};
 
-/// [`GrpcTerminalRepository::client`]'s failure detail when nothing is
-/// connected.
 const NOT_CONNECTED: &str = "not connected to a server";
 
-/// The failure detail for a switch attempted with no session bound — a bug (the
-/// sheet only switches on a screen that carries a session), so
-/// [`AppFailure::Internal`] rather than a retryable network one.
+/// A bug rather than a retryable failure: the sheet only switches on a screen with a session.
 const NO_SESSION: &str = "no session is bound to this terminal repository";
 
-/// The failure detail for a blank detach id — defence in depth, matching the
-/// mock's own enforcement point.
 const BLANK_SESSION: &str = "detach_session called with a blank id";
 
-/// How long a cached space layout may key a streamed change: the layout poll's own interval,
-/// the staleness the tab list itself already accepts.
+/// The layout poll's own interval: the staleness the tab list already accepts.
 const LAYOUT_FRESH: Duration = Duration::from_secs(3);
 
-/// Every agent tab key this repository has resolved, by `(space id, tab id)` — what a row
-/// keeps while its space's layout cannot be read.
+/// What a row keeps, by `(space id, tab id)`, while its space's layout cannot be read.
 type KnownKeys = HashMap<(String, u64), String>;
 
-/// The real [`TerminalRepository`], over a live `muxrd` connection. See the
-/// [module docs](self).
 pub struct GrpcTerminalRepository {
     connection: Arc<ConnectionController>,
-    /// What every request addresses. A `Mutex` (not a `RefCell`) because this
-    /// travels behind an `Arc<dyn TerminalRepository + Send + Sync>`.
     binding: Mutex<Binding>,
-    /// Shared by `list_agents` and every stream this repository opens.
     known_keys: Arc<Mutex<KnownKeys>>,
 }
 
-/// The session and per-connection routing token
-/// [`TerminalRepository::bind`] records.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Binding {
-    /// The attached session's backend-qualified id, or `None` on a bare
-    /// `/terminal`.
     session: Option<String>,
-    /// The `AttachTerminal` stream's minted id, echoed back for per-connection
-    /// routing. Empty is the wire's own "legacy/fallback routing".
+    /// Empty is the wire's legacy/fallback routing.
     connection_id: String,
 }
 
 impl GrpcTerminalRepository {
-    /// A repository over the app's one [`ConnectionController`] — resolved once by
-    /// `di::provide`. Unbound until the screen calls [`TerminalRepository::bind`].
     pub fn new(connection: Arc<ConnectionController>) -> Self {
         Self {
             connection,
@@ -122,22 +68,18 @@ impl GrpcTerminalRepository {
         }
     }
 
-    /// The live client, or [`AppFailure::Network`] if nothing is connected.
     fn client(&self) -> Result<MuxrClient, AppFailure> {
         self.connection
             .client()
             .ok_or_else(|| AppFailure::Network(NOT_CONNECTED.to_string()))
     }
 
-    /// The current binding. Poisoning is recovered from rather than propagated — a
-    /// panic elsewhere must not make a live terminal permanently unaddressable.
+    /// Poison is recovered, so a panic elsewhere cannot leave the terminal unaddressable.
     fn binding(&self) -> MutexGuard<'_, Binding> {
         self.binding.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The bound session id and routing token, or [`AppFailure::Internal`] when no
-    /// session is bound — the shape every *switch* needs, as opposed to the reads,
-    /// which answer empty instead.
+    /// Switches need a bound session ([`AppFailure::Internal`] otherwise); reads answer empty.
     fn addressed(&self) -> Result<(String, String), AppFailure> {
         let binding = self.binding();
         match &binding.session {
@@ -146,9 +88,7 @@ impl GrpcTerminalRepository {
         }
     }
 
-    /// A [`SessionRef`] for the bound session, or `None` when nothing is bound. `space_id` is
-    /// always empty here — [`list_tabs_in_space`](TerminalRepository::list_tabs_in_space) is the
-    /// one caller that overwrites it before sending.
+    /// `space_id` is empty; only `list_tabs_in_space` overwrites it before sending.
     fn session_ref(&self) -> Option<SessionRef> {
         let binding = self.binding();
         binding.session.as_ref().map(|session| SessionRef {
@@ -158,9 +98,7 @@ impl GrpcTerminalRepository {
         })
     }
 
-    /// Map a gRPC status through [`crate::net::error::from_status`], and — for
-    /// `UNAUTHENTICATED` specifically — additionally invoke the shared
-    /// session-expired hook.
+    /// `UNAUTHENTICATED` also fires the shared session-expired hook.
     fn map_status(&self, client: &MuxrClient, status: Status) -> AppFailure {
         let failure = error::from_status(&status);
         if matches!(failure, AppFailure::Auth(_)) {
@@ -169,9 +107,6 @@ impl GrpcTerminalRepository {
         failure
     }
 
-    /// The handle and the unspawned pump of one agents subscription, napping through `nap` on
-    /// `schedule` and reading layouts from `source` — `watch_agents` spawns it; a test drives
-    /// it on its own runtime.
     fn agent_watch(
         &self,
         sink: AgentSink,
@@ -208,7 +143,6 @@ impl GrpcTerminalRepository {
     }
 }
 
-/// Where the stream reads a space's layout from: the wire, or a test's script.
 enum LayoutSource {
     Wire,
     #[cfg(test)]
@@ -229,7 +163,6 @@ impl LayoutSource {
         }
     }
 
-    /// The clock layout freshness is judged on; a script may run it ahead.
     fn now(&self) -> Instant {
         match self {
             LayoutSource::Wire => Instant::now(),
@@ -239,14 +172,11 @@ impl LayoutSource {
     }
 }
 
-/// One space's layout as the stream last read it.
 struct CachedSpace {
     slots: HashMap<u64, TabSlot>,
     read_at: Instant,
 }
 
-/// The stream's tab-key state: its per-space layout cache, the repository's known keys, and
-/// where layouts come from.
 struct StreamKeys {
     spaces: HashMap<String, CachedSpace>,
     known: Arc<Mutex<KnownKeys>>,
@@ -254,7 +184,7 @@ struct StreamKeys {
 }
 
 impl StreamKeys {
-    /// Read `spaces` and cache every one that answered; a failed one keeps its old entry.
+    /// A space that fails to answer keeps its old cache entry.
     async fn reread(&mut self, client: &MuxrClient, request: &SessionRef, spaces: Vec<String>) {
         let layouts = self.source.read(client, request, spaces.clone()).await;
         let read_at = self.source.now();
@@ -281,8 +211,7 @@ impl StreamKeys {
         }
     }
 
-    /// Whether `agent`'s space layout may key it as it stands: young enough, and naming the
-    /// agent's tab as the event does.
+    /// Young enough, and naming the agent's tab as the event does.
     fn usable_for(&self, agent: &AgentMsg) -> bool {
         let now = self.source.now();
         self.spaces.get(&agent.space_id).is_some_and(|cached| {
@@ -294,8 +223,8 @@ impl StreamKeys {
         })
     }
 
-    /// `agent`'s tab key: its space's cached layout's (none when that layout lacks the tab),
-    /// else — a space never read — the last one known, else empty.
+    /// The cached layout's key (none when it lacks the tab), else for a space never read the
+    /// last known key, else empty.
     fn key_for(&self, agent: &AgentMsg) -> String {
         let mut known = lock_keys(&self.known);
         let place = (agent.space_id.clone(), agent.tab_id);
@@ -318,7 +247,6 @@ fn lock_keys(known: &Mutex<KnownKeys>) -> MutexGuard<'_, KnownKeys> {
     known.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The state an agents subscription's pump shares with its [`WatchHandle`].
 #[derive(Default)]
 struct AgentWatch {
     stop: AtomicBool,
@@ -333,8 +261,7 @@ impl AgentWatch {
         self.wake.notify_one();
     }
 
-    /// Resolves once [`stop`](Self::stop) has run; the stored permit makes a stop raised
-    /// between the check and the wait unmissable.
+    /// The stored permit makes a stop raised between the check and the wait unmissable.
     async fn stopped(&self) {
         while !self.stop.load(Ordering::Acquire) {
             self.wake.notified().await;
@@ -342,18 +269,16 @@ impl AgentWatch {
     }
 }
 
-/// How one `WatchAgents` stream ended.
 enum StreamEnd {
-    /// A transport failure: reconnect, from the first step if this stream delivered.
-    Dropped { delivered: bool },
-    /// The server ended the stream: the subscription is over.
+    /// Reconnect, from the first step if this stream delivered.
+    Dropped {
+        delivered: bool,
+    },
     Clean,
-    /// The server refused the credential: the subscription is over.
     Unauthenticated,
 }
 
-/// How the pump naps between reconnects: production `tokio` has no timer, so the app naps on
-/// frust's blocking pool, as the terminal feed does.
+/// Production `tokio` has no timer, so the app naps on frust's blocking pool.
 enum Nap {
     Frust,
     #[cfg(test)]
@@ -372,8 +297,9 @@ impl Nap {
     }
 }
 
-/// The subscription's whole life: stream, reconnect on `schedule`, until stopped or over.
-/// The sink sits behind a `Mutex` only so a borrow of it may cross an `await`.
+/// Writes no signal. Reconnects on [`RECONNECT_BACKOFF`] (reset by a stream that delivered); a
+/// clean end, `UNAUTHENTICATED` or a spent schedule ends it without firing the session-expired
+/// hook, which the attached feed reports itself. The sink's `Mutex` lets a borrow cross an `await`.
 async fn run_agent_watch(
     connection: Arc<ConnectionController>,
     request: SessionRef,
@@ -416,7 +342,6 @@ async fn run_agent_watch(
     watch.live.store(false, Ordering::Release);
 }
 
-/// One `WatchAgents` stream, from open to end, each event mapped into `sink`.
 async fn watch_once(
     connection: &ConnectionController,
     request: &SessionRef,
@@ -448,8 +373,7 @@ async fn watch_once(
     }
 }
 
-/// An error `status` as the end of a stream: an expired credential is over, anything else one
-/// more drop.
+/// An expired credential ends the subscription; any other error is one more drop.
 fn stream_end(status: &Status, delivered: bool) -> StreamEnd {
     if status.code() == Code::Unauthenticated {
         StreamEnd::Unauthenticated
@@ -458,11 +382,8 @@ fn stream_end(status: &Status, delivered: bool) -> StreamEnd {
     }
 }
 
-/// One wire event as an [`AgentEventEntry`], keyed through `keys` (see the [module
-/// docs](self)): a snapshot re-reads every space it names, a change re-reads its own space
-/// unless the cached layout is still usable for it. Events are mapped one at a time, so a
-/// later event for the same space waits on, then reuses, the read an earlier one started.
-/// `None` for an event kind this client does not know.
+/// Events map one at a time, so a later event for the same space waits on, then reuses, the
+/// layout read an earlier one started.
 async fn map_agent_event(
     client: &MuxrClient,
     request: &SessionRef,
@@ -497,14 +418,12 @@ async fn map_agent_event(
     }
 }
 
-/// Which of [`race`]'s two futures finished first.
 enum Winner<A, B> {
     First(A),
     Second(B),
 }
 
-/// Poll `first`, then `second`, finishing with whichever completes first — production `tokio`
-/// carries no `select!`. `first` wins a tie.
+/// Production `tokio` has no `select!`; `first` wins a tie.
 async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B::Output> {
     let mut first = std::pin::pin!(first);
     let mut second = std::pin::pin!(second);
@@ -534,8 +453,7 @@ impl TerminalRepository for GrpcTerminalRepository {
     }
 
     async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
-        // Nothing bound, nothing to list — a bare `/terminal` is a reachable
-        // screen, not a failure (see the module docs).
+        // A bare `/terminal` is a reachable screen, not a failure.
         let Some(request) = self.session_ref() else {
             return Ok(Vec::new());
         };
@@ -589,11 +507,9 @@ impl TerminalRepository for GrpcTerminalRepository {
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        // `AgentMsg` carries a tab id and a tab *name*, but `TabEntry::key` is derived from the
-        // tab's name and position within its space's layout, so the key needs that layout: one
-        // `GetLayout` per distinct space (the empty space id, a backend without spaces, reads
-        // the focused space). A failed space keeps its rows at their last known key, and the
-        // failure is reported once rather than failing the inventory.
+        // `TabEntry::key` derives from a tab's name and position, so keying needs one `GetLayout`
+        // per space; an empty space id (a backend without spaces) reads the focused space. A
+        // failed space keeps its rows at their last known key and is reported once.
         let layouts = fetch_agent_layouts(&client, &request, agent_spaces(&list.agents)).await;
         if let Some(first) = layouts.failed.first() {
             let failure = self.map_status(&client, first.status.clone());
@@ -617,8 +533,7 @@ impl TerminalRepository for GrpcTerminalRepository {
     }
 
     async fn tab_lines(&self, _key: String) -> Result<Vec<TermLine>, AppFailure> {
-        // The emulator owns a live session's content — see the module docs'
-        // "Two calls that never reach the wire".
+        // The emulator owns a live session's content.
         Ok(Vec::new())
     }
 
@@ -660,8 +575,7 @@ impl TerminalRepository for GrpcTerminalRepository {
         if id.trim().is_empty() {
             return Err(AppFailure::Internal(BLANK_SESSION.to_string()));
         }
-        // No RPC: the stream's teardown *is* the detach — see the module docs'
-        // "Two calls that never reach the wire".
+        // No RPC: dropping the attach stream is the detach.
         Ok(())
     }
 
@@ -692,8 +606,7 @@ impl TerminalRepository for GrpcTerminalRepository {
     }
 
     async fn new_tab(&self, name: String) -> Result<(), AppFailure> {
-        // `NewTabReq` carries no `connection_id` — see the module docs'
-        // "What it addresses".
+        // `NewTabReq` carries no `connection_id`.
         let (session, _connection_id) = self.addressed()?;
         let client = self.client()?;
         let request = new_tab_request(session, name);
@@ -770,8 +683,7 @@ impl TerminalRepository for GrpcTerminalRepository {
     ) -> Result<(), AppFailure> {
         let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
-        // No floating hint: the relay runs its own live floating-state query, since the app
-        // does not model floating visibility.
+        // No floating hint: the relay queries floating state live.
         let request = ToggleFullscreenReq {
             target: Some(pane_target(session, connection_id, pane_id, is_plugin)),
             target_is_floating: false,
@@ -807,12 +719,7 @@ impl TerminalRepository for GrpcTerminalRepository {
     }
 }
 
-// proto → entity mapping (pure; unit-tested against directly constructed
-// messages, no server fixture).
-
-/// A `GetSpaces` answer as the sheet's `spaces` pill row. The wire's `active` is
-/// the *per-connection* answer (the relay overrides it for the connection that
-/// last switched), which is why the sheet shows one selection per client.
+/// The wire's `active` is per-connection, so each client shows its own selection.
 fn map_spaces(list: SpaceList) -> Vec<Space> {
     list.spaces
         .into_iter()
@@ -824,11 +731,8 @@ fn map_spaces(list: SpaceList) -> Vec<Space> {
         .collect()
 }
 
-/// A `GetLayout` answer as the sheet's `tabs` pill row and the card's status row:
-/// one [`TabEntry`] per tab, in wire order. `position` is 0-indexed on the wire and
-/// 1-based on the pill, and every pane fact comes from the tab's *focused* pane
-/// (falling back to its first) — the one the status row describes and the attached
-/// stream is carrying.
+/// `position` is 0-indexed on the wire and 1-based on the pill; pane facts come from the focused
+/// pane, else the first. Keys must stay unique within the layout.
 fn map_tabs(layout: Layout) -> Vec<TabEntry> {
     let mut taken: Vec<String> = Vec::with_capacity(layout.tabs.len());
     layout
@@ -843,9 +747,7 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
                 tab_id: u64::from(tab.tab_id),
                 key,
                 label: tab_label(&tab.name, index),
-                // A live pane carries a title and a working directory, and nothing
-                // that corresponds to the mock's separate "name": the title *is*
-                // the name a real session shows.
+                // A live pane's title is its name; the wire has no separate name.
                 pane_title: pane.map(|pane| pane.title.clone()).unwrap_or_default(),
                 pane_name: pane.map(|pane| pane.title.clone()).unwrap_or_default(),
                 pane_path: pane.map(|pane| pane.cwd.clone()).unwrap_or_default(),
@@ -859,9 +761,6 @@ fn map_tabs(layout: Layout) -> Vec<TabEntry> {
         .collect()
 }
 
-/// One `PaneMsg` as [`PaneEntry`] — a field-for-field carry, in wire order. The
-/// tab around it derives extra identifiers but a pane does not need to: the wire's
-/// own `PaneMsg.id` is already what the pane-targeted verbs address by.
 fn map_pane(pane: &PaneMsg) -> PaneEntry {
     PaneEntry {
         id: pane.id,
@@ -880,7 +779,6 @@ fn map_pane(pane: &PaneMsg) -> PaneEntry {
     }
 }
 
-/// The wire's `AgentMark` as [`AgentMark`]; an empty name is "no name".
 fn map_agent_mark(mark: &WireAgentMark) -> AgentMark {
     AgentMark {
         kind: mark.kind.clone(),
@@ -894,13 +792,10 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-/// A `ListAgents` answer as [`AgentEntry`] rows, sorted by [`agent_sort_key`]. An agent's
-/// `tab_key` is its tab's slot in `layouts` (so it equals the [`TabEntry::key`] a tab list
-/// yields for the same tab), recorded in `known` (which a successful read of a space prunes of
-/// tabs the read no longer lists); a row whose space failed to read keeps the
-/// key `known` last held, and one whose space read fine but lacks its tab carries none.
+/// `tab_key` equals the [`TabEntry::key`] a tab list yields for the same tab. A row whose space
+/// failed to read keeps the key `known` last held; one whose space lacks its tab carries none.
 fn map_agents(list: AgentList, layouts: &AgentLayouts, known: &mut KnownKeys) -> Vec<AgentEntry> {
-    // A space whose layout read fine is authoritative: known keys of tabs it no longer lists go.
+    // A space whose layout read fine is authoritative: known keys of tabs it omits go.
     let read_spaces: Vec<String> = agent_spaces(&list.agents)
         .into_iter()
         .filter(|space| !layouts.space_failed(space))
@@ -950,9 +845,6 @@ fn map_agent(agent: AgentMsg, tab_key: String) -> AgentEntry {
     }
 }
 
-/// [`ScrollStep`] onto the wire's `ScrollDirection` — only the two notch values
-/// this screen sends; `domain::entities::ScrollStep` records why the wire's other
-/// five directions are not reachable yet.
 fn map_scroll_step(step: ScrollStep) -> ScrollDirection {
     match step {
         ScrollStep::Up => ScrollDirection::Up,
@@ -960,10 +852,6 @@ fn map_scroll_step(step: ScrollStep) -> ScrollDirection {
     }
 }
 
-// Workspace-verb request construction (pure; unit-tested directly against the
-// values they carry).
-
-/// A [`PaneTarget`] addressing `pane_id` over `session`/`connection_id`.
 fn pane_target(
     session: String,
     connection_id: String,
@@ -978,7 +866,6 @@ fn pane_target(
     }
 }
 
-/// `CreateSpace`'s request.
 fn create_space_request(session: String, connection_id: String, label: String) -> CreateSpaceReq {
     CreateSpaceReq {
         session,
@@ -987,7 +874,6 @@ fn create_space_request(session: String, connection_id: String, label: String) -
     }
 }
 
-/// `RenameSpace`'s request.
 fn rename_space_request(
     session: String,
     connection_id: String,
@@ -1002,13 +888,11 @@ fn rename_space_request(
     }
 }
 
-/// `NewTab`'s request; `NewTabReq` carries no `connection_id`, unlike
-/// [`create_space_request`]'s own `label` field.
+/// `NewTabReq`, `RenameTabReq` and `NewPaneReq` carry no `connection_id`.
 fn new_tab_request(session: String, tab_name: String) -> NewTabReq {
     NewTabReq { session, tab_name }
 }
 
-/// `RenameTab`'s request — `RenameTabReq` carries no `connection_id`.
 fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabReq {
     RenameTabReq {
         session,
@@ -1017,8 +901,7 @@ fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabRe
     }
 }
 
-/// `NewPane`'s request — always unnamed (the sheet's new-pane row has no naming
-/// dialog, unlike [`new_tab_request`]'s); `NewPaneReq` carries no `connection_id`.
+/// Always unnamed: the new-pane row has no naming dialog.
 fn new_pane_request(session: String, floating: bool) -> NewPaneReq {
     NewPaneReq {
         session,
@@ -1027,7 +910,6 @@ fn new_pane_request(session: String, floating: bool) -> NewPaneReq {
     }
 }
 
-/// `RenamePane`'s request.
 fn rename_pane_request(
     session: String,
     connection_id: String,
@@ -1041,7 +923,6 @@ fn rename_pane_request(
     }
 }
 
-/// `ScrollPane`'s request.
 fn scroll_pane_request(
     session: String,
     connection_id: String,
@@ -1055,8 +936,6 @@ fn scroll_pane_request(
     }
 }
 
-/// The pane a tab's status row describes: the focused one, or — for a tab the
-/// backend reports with nothing focused — its first.
 fn focused_pane(panes: &[PaneMsg]) -> Option<&PaneMsg> {
     panes
         .iter()
@@ -1077,8 +956,6 @@ mod tests {
 
     use super::*;
 
-    /// Drive one repository call to completion on a current-thread runtime —
-    /// no frust runtime in play, mirroring the mock repository's own tests.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -1087,8 +964,6 @@ mod tests {
             .block_on(fut)
     }
 
-    /// A disconnected repository, bound to `session` — the shape every
-    /// no-wire test below needs.
     fn repo(session: Option<&str>) -> GrpcTerminalRepository {
         let repo = GrpcTerminalRepository::new(Arc::new(ConnectionController::detached()));
         repo.bind(session.map(str::to_string), None);
@@ -1135,8 +1010,6 @@ mod tests {
             floating_panes_visible: false,
         }
     }
-
-    // -- proto → entity mapping ----------------------------------------------
 
     #[test]
     fn a_panes_agent_mark_maps_and_an_unknown_status_reads_unknown() {
@@ -1225,14 +1098,9 @@ mod tests {
         assert_eq!(rows[0].display_name(), "claude");
     }
 
-    // -- the agents stream, against the in-process fixture ----------------------
-
-    /// Two short steps, so a reconnect costs milliseconds.
     const TEST_BACKOFF: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
 
-    /// A repository bound to the fixture's `alpha` session over a real pinned, logged-in dial —
-    /// driven here rather than through `connect`, whose `frust::spawn` has no runtime under a
-    /// plain `#[tokio::test]`.
+    /// Dialed directly: `connect`'s `frust::spawn` has no runtime under a plain `#[tokio::test]`.
     async fn fixture_repo(fixture: &MuxrdFixture) -> GrpcTerminalRepository {
         let backend = Arc::new(NetConnectionBackend::new());
         let target = ConnectTarget {
@@ -1257,7 +1125,6 @@ mod tests {
 
     type Seen = Arc<Mutex<Vec<AgentEventEntry>>>;
 
-    /// A sink that records every event it is handed.
     fn recorder() -> (AgentSink, Seen) {
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let sink_seen = Arc::clone(&seen);
@@ -1391,8 +1258,6 @@ mod tests {
         assert_eq!(handle.end(), WatchEnd::Exhausted);
     }
 
-    /// Per-space layouts a test scripts for the stream's [`LayoutSource`], with a clock it can
-    /// run ahead and a count of the reads it answered.
     #[derive(Default)]
     pub(super) struct ScriptedLayouts {
         layouts: Mutex<HashMap<String, Option<Layout>>>,
@@ -1401,7 +1266,6 @@ mod tests {
     }
 
     impl ScriptedLayouts {
-        /// Answer `space`'s reads with `tabs`, or fail them when `None`.
         fn set(&self, space: &str, tabs: Option<Vec<TabMsg>>) {
             self.layouts
                 .lock()
@@ -1436,7 +1300,6 @@ mod tests {
         }
     }
 
-    /// Poll a future every part of which is already ready.
     fn block_on_ready<T>(fut: impl Future<Output = T>) -> T {
         let mut fut = std::pin::pin!(fut);
         let waker = std::task::Waker::noop();
@@ -1449,7 +1312,6 @@ mod tests {
         }
     }
 
-    /// A stream over the fixture whose layouts come from a fresh script, opened and live.
     async fn scripted_watch(
         fixture: &MuxrdFixture,
     ) -> (
@@ -1478,7 +1340,6 @@ mod tests {
         (handle, seen, layouts, pump)
     }
 
-    /// An agent in pane `pane_id` of tab `tab_id`, named `tab_name` on the wire, in space `ws`.
     fn agent_in(pane_id: u32, tab_id: u64, tab_name: &str, change_seq: u64) -> AgentMsg {
         AgentMsg {
             space_id: "ws".to_string(),
@@ -1487,7 +1348,6 @@ mod tests {
         }
     }
 
-    /// The tab key the newest recorded `Changed` carries, once `count` events have landed.
     async fn nth_changed_key(seen: &Seen, count: usize) -> String {
         wait_until("the event lands", || {
             seen.lock().expect("ok").len() == count
@@ -1788,14 +1648,14 @@ mod tests {
     fn a_space_list_maps_its_id_name_and_per_connection_active_flag() {
         let spaces = map_spaces(SpaceList {
             spaces: vec![
-                wire_space("ws-1", "cupline", false),
+                wire_space("ws-1", "quill", false),
                 wire_space("ws-2", "forgekit", true),
             ],
         });
 
         assert_eq!(spaces.len(), 2);
         assert_eq!(spaces[0].id, "ws-1");
-        assert_eq!(spaces[0].name, "cupline");
+        assert_eq!(spaces[0].name, "quill");
         assert!(!spaces[0].selected);
         assert!(
             spaces[1].selected,
@@ -1942,7 +1802,6 @@ mod tests {
         );
     }
 
-    /// The fixture tab id [`tab`] marks as ringing.
     const BELL_TAB_ID: u32 = 7;
 
     #[test]
@@ -1964,8 +1823,6 @@ mod tests {
         });
         assert!(tabs[0].panes.is_empty());
     }
-
-    // -- what the binding puts on the wire ------------------------------------
 
     #[test]
     fn binding_rides_on_every_request_that_has_a_field_for_it() {
@@ -2006,13 +1863,9 @@ mod tests {
         assert_eq!(repo.addressed().map(|(_, id)| id), Ok("conn-2".to_string()));
     }
 
-    // -- the two calls that never reach the wire ------------------------------
-
     #[test]
     fn tab_lines_answers_empty_because_the_emulator_owns_a_live_sessions_content() {
-        // Disconnected on purpose: this must not dial at all, so the "not
-        // connected" failure every wire-bound call answers is exactly what it
-        // must *not* produce.
+        // Disconnected on purpose: a dial would answer the "not connected" failure.
         let repo = repo(Some("zellij:dev"));
         assert_eq!(
             block_on(repo.tab_lines("devbox".to_string())),
@@ -2029,8 +1882,6 @@ mod tests {
             Err(AppFailure::Internal(_))
         ));
     }
-
-    // -- the unbound and disconnected paths -----------------------------------
 
     #[test]
     fn an_unbound_repository_lists_nothing_rather_than_failing_a_bare_terminal_route() {
@@ -2124,8 +1975,6 @@ mod tests {
             Err(AppFailure::Internal(_))
         ));
     }
-
-    // -- request construction --------------------------------------------------
 
     #[test]
     fn create_space_request_carries_session_label_and_connection_id() {
@@ -2290,8 +2139,6 @@ mod tests {
         assert!(failure.to_string().contains("read-only session"));
         assert_eq!(fixture.actions().toggle_pane_fullscreen_calls().len(), 1);
     }
-
-    // -- ack + status mapping -------------------------------------------------
 
     #[test]
     fn a_refused_ack_fails_through_the_same_net_error_path_every_switch_uses() {
