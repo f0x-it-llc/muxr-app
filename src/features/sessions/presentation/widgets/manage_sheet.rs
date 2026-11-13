@@ -1,19 +1,8 @@
-//! The per-session management sheet a long-press opens: Attach / Rename… /
-//! Kill…, over `AppState` like the dialogs (a sheet is a page of the root
-//! overlay host, not this screen's own component tree).
+//! The per-session management sheet a long-press opens: Attach / Rename… / Kill….
 //!
-//! Rename/Kill close through [`SheetHandle::close_then`] rather than a bare
-//! `close`: both push a dialog onto the sheet's own overlay host, and an
-//! unchained push would land several frames *ahead* of the sheet's own
-//! staged exit, so the eventual pop would take the dialog it opened instead
-//! of the sheet. `close_then` chains the push to the exit's completion frame
-//! instead. Attach carries no such hazard — it pushes the `/terminal`
-//! **route**, a different navigator than this sheet's overlay host — and
-//! stays on a plain `close`.
-//!
-//! `disabled` is always `false` for [`ManageAction::Attach`] — only
-//! create/rename/kill are read-only-gated (see
-//! [`super::super::pages::Actions::open_manage_sheet`]).
+//! Rename/Kill close through [`SheetHandle::close_then`]: an unchained push would land ahead of the
+//! sheet's own staged exit and the eventual pop would take the dialog. Attach pushes a route on a
+//! different navigator and stays on a plain `close`. `disabled` is never set for Attach.
 
 use frust::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, SizedBox, View, button, inflexible, text,
@@ -27,14 +16,9 @@ use crate::ui::spacing;
 use super::super::pages::Actions;
 use super::active_theme;
 
-/// The gap between the sheet's heading and its rows, and between the rows
-/// themselves.
 const SHEET_GAP: f64 = spacing::LG;
 const SHEET_ROW_GAP: f64 = spacing::TIGHT;
 
-/// The whole sheet body: heading plus the three action rows. `id`/`name`
-/// name the long-pressed session; `read_only` gates Rename/Kill, never
-/// Attach.
 pub(in crate::features::sessions::presentation) fn sheet_body(
     actions: &Actions,
     sheet: &SheetHandle,
@@ -61,17 +45,12 @@ pub(in crate::features::sessions::presentation) fn sheet_body(
     FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// The sheet's header: the session's own name, so a sheet opened from a
-/// long-press says *which* session it is about.
 fn sheet_heading(title: impl Into<String>) -> impl View<AppState> {
     let theme = active_theme();
     let colors = Palette::from_theme(&theme);
     text(title.into()).style(inked(&theme.type_scale.label_large, colors.fg))
 }
 
-/// One row: a full-width, labelled action. Ordinary rows are `Secondary`;
-/// `destructive` swaps in the danger style; `disabled` overrides either with
-/// `Ghost` — the row stays on screen, a tap on it does nothing.
 fn sheet_row(
     label: impl Into<String>,
     destructive: bool,
@@ -93,7 +72,6 @@ fn sheet_row(
     .style(style)
 }
 
-/// The three things the management sheet can do to a session.
 #[derive(Clone, Copy)]
 enum ManageAction {
     Attach,
@@ -102,8 +80,6 @@ enum ManageAction {
 }
 
 impl ManageAction {
-    /// The row's label — the two that push a dialog carry the platform
-    /// ellipsis convention; Attach acts immediately.
     fn label(self) -> &'static str {
         match self {
             ManageAction::Attach => "Attach",
@@ -117,9 +93,6 @@ impl ManageAction {
     }
 }
 
-/// One row, wired to `action` for session `id`. See the [module docs](self)
-/// for why Rename/Kill chain through [`SheetHandle::close_then`] while
-/// Attach stays a plain `close`.
 fn sheet_action(
     actions: &Actions,
     sheet: &SheetHandle,
@@ -136,9 +109,8 @@ fn sheet_action(
         disabled,
         move |_app: &mut AppState| match action {
             ManageAction::Attach => {
-                // Through the sheet's own handle rather than a bare `pop`, so
-                // a second row tap inside the one-rebuild window a queued pop
-                // leaves open cannot pop whatever is under it.
+                // Through the sheet's handle, so a second tap inside the one-rebuild window of a queued pop
+                // cannot pop whatever is under it.
                 sheet.close();
                 actions.attach(&id);
             }
