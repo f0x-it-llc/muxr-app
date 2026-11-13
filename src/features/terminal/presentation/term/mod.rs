@@ -45,7 +45,6 @@ use frust::{
     pinch_detector, stack,
 };
 use frust::{on_cleanup, spawn_blocking, spawn_local};
-use frust_haptics::{HapticEffect, Haptics};
 
 use crate::features::terminal::domain::feed::TerminalFeed;
 
@@ -416,7 +415,7 @@ impl SelectionSeam {
         if self.pinching.get() {
             return;
         }
-        let _ = Haptics::perform(HapticEffect::SelectionClick);
+        frust::perform_haptic(frust::HapticFeedback::Selection);
         let mut state = self.state.borrow_mut();
         state.haptics += 1;
         let Some(metrics) = state.metrics else {
@@ -1045,5 +1044,31 @@ mod tests {
              clear the re-armed selection — regardless of which writer \
              produced it"
         );
+    }
+
+    /// Selection feedback delivered to the test sink below.
+    static SINK_SELECTIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn count_selection(feedback: frust::HapticFeedback) {
+        if feedback == frust::HapticFeedback::Selection {
+            SINK_SELECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The haptic reaches the framework sink exactly once per gesture start
+    /// (the sink is process state, so this is the only unit test touching it).
+    #[test]
+    fn a_selection_begin_fires_exactly_one_framework_haptic() {
+        use std::sync::atomic::Ordering;
+        SINK_SELECTIONS.store(0, Ordering::SeqCst);
+        frust::set_haptic_sink(Some(count_selection));
+
+        let emulator = Rc::new(RefCell::new(TerminalEmulator::new(20, 4, 0)));
+        let selection = SelectionSeam::new(emulator);
+        selection.begin();
+
+        frust::set_haptic_sink(None);
+        assert_eq!(SINK_SELECTIONS.load(Ordering::SeqCst), 1);
+        assert_eq!(selection.haptic_count(), 1);
     }
 }

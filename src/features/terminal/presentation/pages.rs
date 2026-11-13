@@ -29,7 +29,6 @@ use frust::{
     spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
-use frust_haptics::{HapticEffect, Haptics};
 
 use crate::AppState;
 use crate::connection::{CAP_MOUSE_INPUT, ConnectionController, expect_connection_controller};
@@ -501,7 +500,7 @@ impl Component for TerminalScreen {
                         else {
                             return;
                         };
-                        let _ = Haptics::perform(HapticEffect::SelectionClick);
+                        frust::perform_haptic(frust::HapticFeedback::Selection);
                         let controller = Arc::clone(&controller);
                         spawn_local(async move {
                             controller
