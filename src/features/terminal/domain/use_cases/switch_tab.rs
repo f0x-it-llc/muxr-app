@@ -1,7 +1,3 @@
-//! [`SwitchTab`] — makes another tab the card's active one, returning the
-//! lines it should now print (which is what replays the card's staggered
-//! reveal).
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;
@@ -10,8 +6,6 @@ use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::TermLine;
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
-/// Reads one tab's lines via the injected repository. `Params` is the tab key
-/// (`devbox`), `Output` its scrollback.
 pub struct SwitchTab {
     repo: Arc<dyn TerminalRepository + Send + Sync>,
 }
