@@ -7,10 +7,6 @@ use frust::{
 };
 use frust_glyph::{GlyphSheetHandle, glyph_sheet, show_glyph_sheet};
 
-// Re-exported so `ui::sheet::SheetHandle` keeps resolving for every existing
-// caller/test — the type itself now lives in `crate::ui`, shared with
-// `crate::ui::side_sheet`, since both adapters mint the identical one-shot
-// dismissal gate.
 pub use super::SheetHandle;
 
 pub const SCRIM_ALPHA: f32 = 0.6;
