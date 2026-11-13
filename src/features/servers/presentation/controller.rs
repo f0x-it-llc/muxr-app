@@ -340,6 +340,7 @@ impl ServersSwitcherController {
         let Ok(saved) = self.saved_servers.list() else {
             return;
         };
+        self.drop_pending_if_forgotten(&saved);
         let active = self.active_endpoint();
         self.reconcile_memory(active.as_deref());
         let order = {
@@ -362,6 +363,24 @@ impl ServersSwitcherController {
             &self.failures.get_untracked(),
         );
         self.faces.set(faces);
+    }
+
+    /// A pending reconnect whose server was forgotten has nothing to redial:
+    /// invalidate its backoff and close the `Failed` banner it held.
+    fn drop_pending_if_forgotten(&self, saved: &[SavedServer]) {
+        let forgotten = self
+            .pending()
+            .as_ref()
+            .is_some_and(|pending| !saved.iter().any(|row| row.endpoint() == pending.endpoint));
+        if forgotten {
+            self.drop_reports();
+        }
+    }
+
+    /// How many times the retry backoff was invalidated or re-armed. For tests.
+    #[doc(hidden)]
+    pub fn retry_generation_for_tests(&self) -> u64 {
+        self.retry_generation.load(Ordering::SeqCst)
     }
 
     /// Forget what a keyring lock (from any page) invalidated, and any failure

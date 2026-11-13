@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use frust::{AnyView, Component, GetUntracked, spawn_local};
 use frust_core::{InputEvent, PointerPhase, RenderRoot};
-use frust_reactive::{ReactiveRuntime, TrackedScope};
+use frust_reactive::{Owner, ReactiveRuntime, TrackedScope};
 use frust_text::TextContext;
 use kurbo::{Point, Size};
 
@@ -1736,6 +1736,72 @@ fn a_failed_renewal_keeps_a_pending_reconnect_that_the_backoff_redials() {
         "{:?}",
         app_toasts().pending_untracked()
     );
+    reset_reconnect_rig();
+}
+
+#[test]
+fn forgetting_the_pending_reconnects_server_invalidates_its_retry() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, before) = failed_renewal_on_a(300, false);
+    let generation = switcher().retry_generation_for_tests();
+
+    expect_saved_servers()
+        .remove(A_ENDPOINT)
+        .expect("the mock store never fails");
+    switcher().refresh_faces();
+
+    assert!(
+        switcher().retry_generation_for_tests() > generation,
+        "the refresh invalidated the armed backoff itself"
+    );
+    assert_eq!(
+        switcher().pending_reconnect(),
+        None,
+        "the forget dropped it"
+    );
+    assert!(
+        !matches!(banner(), Some(ReconnectBanner::Failed { .. })),
+        "and the banner it held"
+    );
+    pump_for(&mut h, 500, || {});
+    assert_eq!(dial_generation(), before + 1, "only the failed renewal");
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_retry_armed_under_a_disposed_owner_still_fires() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, before) = failed_renewal_on_a(300, false);
+
+    // With the stage open the retry defers one backoff step: it re-arms the
+    // timer from inside a child owner, which is then disposed before it fires.
+    h.open_stage();
+    let child = Owner::new();
+    child.with(|| assert!(!switcher().retry_pending(), "deferred, not dialed"));
+    switcher().close();
+    child.cleanup();
+    drop(child);
+
+    h.pump_until(|_| dial_generation() > before + 1);
+    reset_reconnect_rig();
+}
+
+#[test]
+fn a_banner_timer_armed_under_a_disposed_owner_still_fires() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = listed_on_a(true);
+    set_banner_connecting_delay_for_tests(100);
+
+    let child = Owner::new();
+    child.with(|| switcher().report_trouble(false));
+    child.cleanup();
+    drop(child);
+
+    assert_eq!(banner(), None, "not before the delay");
+    h.pump_until(|_| banner() == connecting_to(A_HOST));
     reset_reconnect_rig();
 }
 

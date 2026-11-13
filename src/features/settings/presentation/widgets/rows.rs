@@ -322,17 +322,12 @@ pub(super) fn settings_row(
     };
     let body = stretch_column((
         text(label).style(inked(&theme.type_scale.label_large, colors.fg)),
-        SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP)),
         text(value.into()).style(inked(&theme.type_scale.body_small, value_ink)),
-    ));
+    ))
+    .gap(ROW_LINE_GAP);
 
-    let mut children = vec![
-        inflexible(mark_tile(mark, colors)),
-        h_gap(ROW_GAP),
-        flexible(1, body),
-    ];
+    let mut children = vec![inflexible(mark_tile(mark, colors)), flexible(1, body)];
     if let Some(trailing) = trailing_slot(action, colors) {
-        children.push(h_gap(ROW_GAP));
         children.push(inflexible(trailing));
     }
 
@@ -342,7 +337,7 @@ pub(super) fn settings_row(
     let box_ = stretch_column((
         Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            centered_row(children),
+            centered_row(children).gap(ROW_GAP),
         ),
         divider(colors.rule),
     ));
@@ -369,20 +364,18 @@ pub(super) fn button_row(
     let theme = active_theme();
     let body = stretch_column((
         text(label).style(inked(&theme.type_scale.label_large, colors.fg)),
-        SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP)),
         text(subtitle).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
-    ));
+    ))
+    .gap(ROW_LINE_GAP);
     let children = vec![
         inflexible(mark_tile(mark, colors)),
-        h_gap(ROW_GAP),
         flexible(1, body),
-        h_gap(ROW_GAP),
         inflexible(button(action_label, on_tap).style(ButtonStyle::Ghost)),
     ];
     any(stretch_column((
         Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            centered_row(children),
+            centered_row(children).gap(ROW_GAP),
         ),
         divider(colors.rule),
     )))
