@@ -1,8 +1,4 @@
-//! The Tablet's action glue, kept out of `pages.rs` so that file stays scaffold-only:
-//! [`rail_view`] (the docked or mini rail beside the card), [`AfterCommit`] (what a
-//! landed tree commit does next), and the rail rows' overflow-menu dispatch
-//! ([`Actions::open_row_menu`]). Everything here runs over [`pages`](super::pages)'
-//! [`Actions`] bundle; nothing holds state of its own.
+//! The Tablet's action glue over the `pages` [`Actions`] bundle; it holds no state of its own.
 
 use frust::authoring::{Rect, WindowInsets};
 use frust::{Either, Get, PopResult, View, With, use_context};
@@ -20,8 +16,6 @@ use super::widgets::side_sheet_tree::{
 };
 
 impl Actions {
-    /// Open the docked rail's overflow menu for `target`, anchored at `anchor`,
-    /// and run whichever [`RowMenuChoice`] it answers with.
     pub(super) fn open_row_menu(&self, anchor: Rect, target: &RowTarget) {
         let (entries, target) = (target.clone(), target.clone());
         let actions = self.clone();
@@ -63,8 +57,7 @@ impl Actions {
     }
 }
 
-/// The Tablet's rail beside the card: the full rail, or the mini rail in the
-/// collapsed band and in immersive (`mini`), so the tree is never out of reach.
+/// The full rail, or the mini rail in the collapsed band and in immersive, so the tree stays in reach.
 pub(super) fn rail_view(
     actions: &Actions,
     mini: bool,
@@ -115,8 +108,7 @@ pub(super) fn rail_view(
     ))
 }
 
-/// What a landed tree commit does next: the sheet closes a beat later, the
-/// docked rail stays and re-rests on where the session now is.
+/// After a landed tree commit the sheet closes a beat later and the docked rail re-rests on the session.
 #[derive(Clone)]
 pub(super) enum AfterCommit {
     Close(SheetHandle),
