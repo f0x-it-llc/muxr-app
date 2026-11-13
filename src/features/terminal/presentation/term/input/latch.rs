@@ -1,58 +1,31 @@
-//! The one-shot Ctrl/Alt/Shift latch, and the transform every outgoing emission
-//! passes through. The latch transforms **soft-keyboard characters too** — the
-//! incumbent's semantic, and the reason it is applied at the emission choke point
-//! (`KeystrokeSource::emit`) rather than in the key bar: arming `Ctrl` on the bar
-//! and then typing `c` on the OS keyboard must send `0x03`.
+//! The one-shot Ctrl/Alt/Shift latch, applied at the emission choke point rather than the key bar,
+//! so armed `Ctrl` plus an OS-keyboard `c` sends `0x03`.
 
 use frust::authoring::Modifiers;
 
 use super::bytes::ESC;
 
-/// The armed one-shot modifiers, as toggled from the key bar (and as carried by a
-/// desktop hardware key event). **The three flags are not symmetric, and the
-/// asymmetry is the design**:
-///
-/// | Flag | On a **character** | On a **sequence key** (arrow, `PgUp`, `Tab`, …) |
-/// |---|---|---|
-/// | `ctrl`/`alt` | transforms it ([`apply_latch`]) and is consumed | **nothing at all**, and stays armed |
-/// | `shift` | never touches it, but is consumed | selects the shifted sequence ([`shifted_sequence`](super::bytes::shifted_sequence)) and is consumed by that |
-///
-/// `shift` leaves characters alone because the IME's own Shift has **already**
-/// delivered the case: the app is handed `"A"`, and rewriting a byte it was
-/// handed is precisely what this module does not do. What a terminal is
-/// missing without it is the *sequences* — back-tab, a shifted arrow.
-///
-/// `ctrl`/`alt` staying armed across a sequence key is pinned behaviour
-/// (`Ctrl` then `↑` then `c` still sends `0x03`), so **there is no
-/// combination arithmetic**: xterm encodes a chord as one parameter (a real
-/// Ctrl+Shift+`↑` is `\x1b[1;6A`), but this module sends `\x1b[1;2A` and
-/// leaves `Ctrl` armed for the next character.
+/// `ctrl`/`alt` transform a single-unit character and stay armed across a sequence key.
+/// `shift` never touches a character (the IME already cased it); it selects a shifted sequence.
+/// No chord arithmetic: armed Ctrl then Shift+Up sends `\x1b[1;2A` and leaves Ctrl armed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModifierLatch {
-    /// `Ctrl` is armed for the next single-code-unit emission.
     pub ctrl: bool,
-    /// `Alt` is armed for the next single-code-unit emission.
     pub alt: bool,
-    /// `Shift` is armed for the next emission — a sequence key it has a variant
-    /// for, or (spending it, changing nothing) one code unit.
     pub shift: bool,
 }
 
 impl ModifierLatch {
-    /// Nothing armed.
     pub const NONE: Self = Self {
         ctrl: false,
         alt: false,
         shift: false,
     };
 
-    /// Whether any flag is armed.
     pub fn armed(self) -> bool {
         self.ctrl || self.alt || self.shift
     }
 
-    /// Every flag of either side (used to fold a hardware key event's own
-    /// modifiers into the latch for that one emission).
     pub fn union(self, other: Self) -> Self {
         Self {
             ctrl: self.ctrl || other.ctrl,
@@ -61,8 +34,7 @@ impl ModifierLatch {
         }
     }
 
-    /// The latch a desktop hardware key event carries — `Modifiers`'
-    /// ctrl/alt/shift, applied once to that event and never retained.
+    /// Applied once to that event and never retained.
     pub fn from_modifiers(mods: Modifiers) -> Self {
         Self {
             ctrl: mods.ctrl,
@@ -72,9 +44,7 @@ impl ModifierLatch {
     }
 }
 
-/// Whether `data` is exactly **one UTF-16 code unit**, and if so its value — the
-/// latch's eligibility test: `'a'` and `'é'` are both one unit and transformable; an
-/// emoji (2 units) and `\x1b[A` (3 units) are not. Invalid UTF-8 is never eligible.
+/// The latch's eligibility test: exactly one UTF-16 unit. Invalid UTF-8 is never eligible.
 pub fn single_unit(data: &[u8]) -> Option<u32> {
     let text = std::str::from_utf8(data).ok()?;
     let mut chars = text.chars();
@@ -85,17 +55,8 @@ pub fn single_unit(data: &[u8]) -> Option<u32> {
     Some(ch as u32)
 }
 
-/// Apply `latch` to one outgoing emission:
-///
-/// 1. **Only a single-code-unit emission is transformed.** Anything longer (an
-///    arrow sequence, a swipe-typed word, a backspace run) passes through
-///    **unmodified**, and leaves the latch armed at the call site.
-/// 2. **Ctrl** uppercases a lowercase ASCII letter, then masks `& 0x1f`
-///    **only if** the uppercased code lands in `0x40..=0x5f` — outside that
-///    window, `Ctrl+2` sends `'2'`, though Alt may still apply.
-/// 3. **Alt** prefixes [`ESC`], the convention every mainstream terminal uses.
-/// 4. **Shift is not in this transform at all** — see [`ModifierLatch`]. It
-///    selects a different *sequence* upstream.
+/// Only a single-unit emission is transformed; a longer one passes and leaves the latch armed.
+/// Ctrl masks `& 0x1f` only when the uppercased code lands in `0x40..=0x5f`; Alt prefixes [`ESC`].
 pub fn apply_latch(latch: ModifierLatch, data: &[u8]) -> Vec<u8> {
     let Some(unit) = single_unit(data) else {
         return data.to_vec();
@@ -213,12 +174,11 @@ mod tests {
             }
         );
 
-        // An arrow is three units: passes through AND leaves the latch armed.
+        // An arrow is three units: it passes through and leaves the latch armed.
         let arrow = source.on_bar_key(BarKey::Up);
         assert_eq!(hex(&arrow.bytes), "1b5b41");
         assert!(source.latch().armed(), "arrows leave the latch armed");
 
-        // …so the next single-unit emission still sees both flags.
         let typed = type_text(&mut source, "a");
         assert_eq!(hex(&typed), "1b01", "Ctrl+Alt+a");
         assert_eq!(
@@ -238,8 +198,6 @@ mod tests {
 
     #[test]
     fn the_latch_transforms_a_soft_keyboard_character_too() {
-        // The whole reason the latch lives on the emission path: `Ctrl` armed
-        // from the bar, `c` typed on the OS keyboard.
         let mut source = KeystrokeSource::new();
         source.on_bar_key(BarKey::Ctrl);
         assert_eq!(hex(&type_text(&mut source, "c")), "03");
@@ -247,8 +205,7 @@ mod tests {
 
     #[test]
     fn a_sequence_key_consumes_the_shift_it_used() {
-        // Shift's one shot is spent by the emission that actually selected a
-        // variant with it — the arrow, not the character after it.
+        // Shift is spent by the arrow that selected a variant, not the character after it.
         let mut source = KeystrokeSource::new();
         source.on_bar_key(BarKey::Shift);
         assert!(source.latch().shift, "armed by its own tap");
@@ -257,14 +214,12 @@ mod tests {
         assert_eq!(hex(&arrow.bytes), "1b5b313b3241", "Shift+↑");
         assert_eq!(source.latch(), ModifierLatch::NONE, "…and it is spent");
 
-        // …so the next arrow is the plain one again.
         assert_eq!(hex(&source.on_bar_key(BarKey::Up).bytes), "1b5b41");
     }
 
     #[test]
     fn a_shift_that_selected_nothing_survives_a_multi_unit_emission() {
-        // `Esc` is one code unit, so it spends the latch the ordinary way; a
-        // key with no shifted variant AND more than one unit spends nothing.
+        // `Esc` is one unit and spends the latch; a longer key with no shifted variant does not.
         let mut source = KeystrokeSource::new();
         source.on_bar_key(BarKey::Shift);
         source.on_bar_key(BarKey::Esc);
@@ -291,8 +246,6 @@ mod tests {
 
     #[test]
     fn an_arrow_consumes_shift_and_leaves_ctrl_armed_for_the_next_character() {
-        // The documented asymmetry, end to end: Shift belongs to the sequence
-        // key, Ctrl belongs to the character after it (see `ModifierLatch`).
         let mut source = KeystrokeSource::new();
         source.on_bar_key(BarKey::Ctrl);
         source.on_bar_key(BarKey::Shift);

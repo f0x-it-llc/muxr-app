@@ -1,7 +1,3 @@
-//! The row/column/gap/[`TextStyle`] helpers every widget module in this
-//! directory builds from — the smallest shared vocabulary, kept in one place
-//! so no two modules grow their own spelling of "a vertically-centred row".
-
 use frust::authoring::Color;
 use frust::authoring::text::{FontStyle, LineHeight, TextStyle};
 use frust::{
@@ -15,41 +11,32 @@ use crate::ui::palette::inked;
 use super::super::chrome::LineStyles;
 use super::card::{BODY_LINE_HEIGHT, BODY_SIZE, CardInk};
 
-/// `style` re-inked with `color` and resized — every run picks a Glyph type
-/// role for family/weight and overrides only what the mock's own CSS does, so
-/// nothing falls back to `TextStyle::default()`'s 16px black. The size-carrying
-/// sibling of [`crate::ui::palette::inked`], which it builds on.
+/// Every run picks a Glyph type role so nothing falls back to `TextStyle::default()`'s 16px black.
 pub(crate) fn sized(style: &TextStyle, size: f32, color: Color) -> TextStyle {
     let mut style = inked(style, color);
     style.size = size;
     style
 }
 
-/// The read-only chip — the one place its word and variant live, so the status
-/// row and the rail cannot drift apart.
+/// The one place the chip's word and variant live, so the status row and rail cannot drift apart.
 pub(crate) fn read_only_badge<State: 'static>() -> impl View<State> {
     badge(READ_ONLY_CHIP, BadgeVariant::Info)
 }
 
-/// The read-only chip's word.
 const READ_ONLY_CHIP: &str = "read-only";
 
-/// A `gap`-wide horizontal spacer.
 pub(crate) fn h_gap<State: 'static>(gap: f64) -> FlexChild<State> {
     inflexible(SizedBox::<State>(Some(gap), None))
 }
 
-/// A `gap`-tall vertical spacer, as a view.
 pub(crate) fn v_gap<State: 'static>(gap: f64) -> impl View<State> {
     SizedBox::<State>(None, Some(gap))
 }
 
-/// A vertically-centred row.
 pub(crate) fn centered_row<State: 'static>(children: Vec<FlexChild<State>>) -> FlexView<State> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-/// A column whose children each fill the available width.
 pub(crate) fn stretch_column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
     FlexView::new(
         Axis::Vertical,
@@ -58,11 +45,7 @@ pub(crate) fn stretch_column<State: 'static>(children: Vec<AnyView<State>>) -> F
     .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// The three inks the card's transcript prints in — `.term-body`'s 12.5px/2.0
-/// monospace, tinted per line kind, with `.cm` italic.
-///
-/// Scoped to `presentation` rather than the crate, since [`LineStyles`] — the
-/// `super::super::chrome` type it hands back — is.
+/// `.term-body`'s 12.5px/2.0 monospace, tinted per line kind, with `.cm` italic.
 pub(in crate::features::terminal::presentation) fn line_styles(
     theme: &Theme,
     ink: &CardInk,
@@ -90,7 +73,6 @@ mod tests {
         assert_eq!(styles.comment.style, FontStyle::Italic);
         assert_eq!(styles.prompt.style, FontStyle::Normal);
         assert_eq!(styles.output.style, FontStyle::Normal);
-        // …and all three carry the mock's own size and doubled line box.
         for style in [&styles.prompt, &styles.output, &styles.comment] {
             assert_eq!(style.size, BODY_SIZE);
             assert_eq!(
