@@ -1,14 +1,6 @@
-//! `connect` repository implementations — one file per concrete
-//! `domain::repositories` trait implementation, each owning its own
-//! failure-mapping site into [`crate::failure::AppFailure`]. No `frust::`
-//! signals/widgets here, with one exception: the two real stores reach
-//! `frust::spawn_blocking` to keep their platform calls off the UI thread — for
-//! the credential store that is a hard safety rule, not a nicety.
-//! [`MockCredentialService`] runs that store's own vault algorithms over an
-//! in-memory map, so both walk the same migration and write steps.
-//!
-//! [`json`] is not a repository: it's the hand-rolled encoder/parser the
-//! saved-server store's payload needs, scoped to this module.
+//! Repository implementations. The two real stores use `frust::spawn_blocking`
+//! to keep platform calls off the UI thread; the credential store requires it.
+//! [`MockCredentialService`] runs the real vault algorithms over an in-memory map.
 
 mod json;
 pub mod mock_credential_service;
