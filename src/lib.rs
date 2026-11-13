@@ -85,29 +85,21 @@ fn splash_overlay(cue: &SplashCue) -> Option<AnyView<AppState>> {
     }
 }
 
-/// The full sequence over the screen the route will paint: Connect's own
-/// [`splash_assembly`] picks the phone column or the Tablet arrangement for
-/// the window's size class, so the overlay's last frame is the route's first.
+/// Connect's [`splash_assembly`] matches the route's layout, so the overlay's last frame is
+/// the route's first.
 fn full_splash(cue: &SplashCue) -> impl View<AppState> {
     let (pieces, assemble) = splash_assembly(&active_theme(), &cue.saved);
     splash_sequence(cue.art.clone(), SPLASH_SEED, pieces, assemble, cue.done)
 }
 
-/// The production wake source: the app lifecycle's return-from-background and
-/// the platform's default-network changes, both mapped in `net::wake`.
-///
-/// The listener and the connectivity handle unregister on drop, so this value
-/// owns them for the process lifetime (the installed source is never dropped).
-/// Both callbacks only do one non-blocking publish: the lifecycle one runs
-/// synchronously on the UI thread, the connectivity one on the plugin's
-/// `frust-connectivity-events` thread.
+/// Owns both registrations for the process lifetime; they unregister on drop. Each callback
+/// only publishes: lifecycle on the UI thread, connectivity on the plugin's own thread.
 #[derive(Default)]
 struct FrustWakeSource {
     registrations: std::sync::Mutex<Option<WakeRegistrations>>,
 }
 
 struct WakeRegistrations {
-    // Held only so they stay registered.
     _lifecycle: frust::AppLifecycleListener,
     _connectivity: frust_connectivity::ListenerHandle,
 }
@@ -135,9 +127,7 @@ impl net::wake::WakeSource for FrustWakeSource {
 #[derive(Default)]
 pub struct MuxrApp;
 
-/// Map the framework's haptic vocabulary onto the `frust-haptics` plugin. The
-/// plugin does not depend on `frust`, so the app owns this mapping. Desktop
-/// reports `NotAvailable` by design; the result is cosmetic and ignored.
+/// Desktop reports `NotAvailable`; the result is cosmetic and ignored.
 fn perform_plugin_haptic(feedback: HapticFeedback) {
     use frust_haptics::{HapticEffect, Haptics};
     let effect = match feedback {
@@ -157,14 +147,11 @@ impl Component for MuxrApp {
     type State = AppState;
 
     fn init(&self) -> AppState {
-        // The one process-wide haptic sink; every `frust::perform_haptic`
-        // call in the app routes through it.
         set_haptic_sink(Some(perform_plugin_haptic));
 
         let connection = connection::provide_connection_controller();
 
-        // Once for the process: a second `init` finds the source installed and
-        // leaves it running.
+        // Once per process: a second `init` leaves the installed source running.
         net::wake::install_wake_source(std::sync::Arc::new(FrustWakeSource::default()));
 
         connection
@@ -175,21 +162,15 @@ impl Component for MuxrApp {
 
         features::connect::di::provide();
         features::pro::di::provide();
-        // The last-seen handle before any sessions controller (it resolves the
-        // handle once); the controller needs connect and pro published.
+        // Before any sessions controller, which resolves the last-seen handle once.
         features::servers::di::provide_last_seen();
         features::servers::di::provide_controller();
         features::sessions::di::provide();
         features::terminal::di::provide();
         features::settings::di::provide();
 
-        // Resolved here, not inside the future: the poller driving it installs
-        // no ambient reactive owner, so a lookup deferred into the body would
-        // panic on its first poll. The store's failures that no caller owns
-        // bridge to toasts off this same instance — a restore's, which its
-        // callers never re-announce. A purchase reports through its outcome
-        // (the sheet announces it once), and the background refreshes and the
-        // offer lookup fail quietly, so the bridge never doubles a message.
+        // Resolved outside the future: its poller has no reactive owner, so a deferred lookup
+        // panics. Only restore failures need this bridge; purchases report through their outcome.
         let pro = features::pro::di::expect_pro_controller();
 
         pro.core()
@@ -204,9 +185,7 @@ impl Component for MuxrApp {
         let controller = NavigatorController::new();
         let overlays = NavigatorController::new();
         let router = routes::install_app_router(&controller, &overlays, connection);
-        // Through the handle rather than `Router::handle_location`: a start
-        // location inside the shell has to place the scaffold the way every
-        // other navigation does (see `routes::Nav::go`).
+        // Through the handle so a start location inside the shell places the scaffold.
         routes::app_nav().go(START_LOCATION);
 
         AppState {
@@ -219,9 +198,7 @@ impl Component for MuxrApp {
         }
     }
 
-    /// The overlay host, and the toast layer stacked above it. Sheets, side
-    /// sheets and dialogs are pages the host paints over its root page, so a
-    /// toast mounted inside that page would sit behind every one of them.
+    /// Toasts stack above the overlay host because sheets and dialogs paint over its root page.
     /// Both children keep their index: `Stack` reconciles positionally.
     fn build(&self, state: &mut AppState) -> impl View<AppState> {
         let controller = state.nav.controller().clone();
@@ -240,9 +217,7 @@ impl Component for MuxrApp {
     }
 }
 
-// Muxr's sole entry point: binds `MuxrApp` to all three platforms (Android
-// JNI, iOS C-ABI, desktop's `main.rs`). Never edit this line or `main.rs` —
-// add screens/state to `routes.rs`/`features` above instead.
+// The sole entry point for Android JNI, iOS C-ABI and desktop `main.rs`; never edit it.
 frust::app!(
     MuxrApp,
     setup = {
@@ -253,6 +228,6 @@ frust::app!(
     }
 );
 
-// Keeps frust-camera's Swift-called C export alive through release LTO (see frust_camera::ios_exports).
+// Keeps frust-camera's Swift-called C export alive through release LTO.
 #[cfg(target_vendor = "apple")]
 frust_camera::ios_exports!();

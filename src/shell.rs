@@ -1,5 +1,4 @@
-//! The overlay host's root page, and the shell page the route table hangs the
-//! three bar-bearing routes off.
+//! The overlay host's root page, and the shell page the bar-bearing routes hang off.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -36,22 +35,14 @@ use crate::ui::palette::{Palette, active_theme};
 use crate::ui::topbar::{BACK_LABEL, bar_icon, brand_leading};
 
 const SETTINGS_LABEL: &str = "Settings";
-/// The card's scale at full open on a phone (the tablet card sets 0.58).
 const PHONE_CARD_SCALE: f64 = 0.62;
-/// The card's scale at full open on the Tablet class (the design's value).
+/// The design's value.
 const TABLET_CARD_SCALE: f64 = 0.58;
-/// The FAB's inset from the window's edges on the Tablet class; the
-/// scaffold's default (16 px) is the Compact parity.
+/// The scaffold's default (16 px) is the Compact parity.
 const TABLET_FAB_MARGIN: f64 = 24.0;
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 
-/// The overlay host's root page: the outer navigator, and `overlay` (the
-/// cold-start splash) stacked over it. The toast layer is not here: the app
-/// root mounts it above the host, so a toast also paints over the splash.
-///
-/// The bar belongs to [`shell_page`]'s scaffold, one page down, which keeps it
-/// off every in-shell navigation. `Stack` reconciles positionally, so the
-/// navigator keeps index 0 and only the overlay's pod is created and destroyed.
+/// Toasts mount above this host; `Stack` reconciles positionally, so the navigator keeps index 0.
 pub fn root_view(
     controller: &NavigatorController<AppState>,
     initial: impl Fn() -> AnyView<AppState> + 'static,
@@ -65,15 +56,8 @@ pub fn root_view(
     any(Stack(children))
 }
 
-/// The shell route's own page: the app bar over the inner navigator the three
-/// bar-bearing routes land on.
-///
-/// Placed once and then **retained** (an in-shell navigation issues no outer
-/// op at all), so everything route-dependent is derived here per rebuild from
-/// the inner navigator's own published state. That navigator's **root** is the
-/// landing route of the navigation that placed this page: a back press there
-/// finds nothing to pop and falls through to the outer navigator, leaving the
-/// shell rather than popping to a placeholder under the landing screen.
+/// Placed once and retained, so everything route-dependent derives here per rebuild. A back
+/// press on the inner root falls through to the outer navigator, leaving the shell.
 pub(crate) fn shell_page(
     inner: &NavigatorController<AppState>,
     overlays: &NavigatorController<AppState>,
@@ -83,8 +67,7 @@ pub(crate) fn shell_page(
     let rule = shell_responsive();
     let nav = app_nav();
     let switcher = expect_servers_controller();
-    // The stage never outlives `/sessions`: the FAB is the only way up, and
-    // a stage left open on another inner route would swallow its back press.
+    // A stage left open on another inner route would swallow its back press.
     if !nav.on_sessions() && switcher.open.get_untracked() {
         switcher.close_stage();
     }
@@ -96,8 +79,6 @@ pub(crate) fn shell_page(
     }
     let mut scaffold = frust::scaffold(nav.route_observer().observe(pages)).app_bar_opt(bar);
     if nav.on_sessions() {
-        // The detail pane is the right-hand pane, so the window's bottom-right
-        // corner (the scaffold's own placement) is the detail pane's.
         scaffold = scaffold.fab(switcher_fab(&switcher));
         if rule.is_tablet() {
             scaffold = scaffold.fab_margin(TABLET_FAB_MARGIN);
@@ -113,16 +94,8 @@ pub(crate) fn shell_page(
     ))
 }
 
-/// The whole shell page (bar included) as the live card of the server
-/// switcher stage. The host sits under the overlay host and the toast layer,
-/// so dialogs (the paywall, the unverified confirm) and toasts outrank it.
-///
-/// Strip order is the controller's: the live card is the scaled shell page at
-/// `live_index`, the peers are every other face. Peers are rebuilt from the
-/// current faces on every build while the stage is open and through its close
-/// ramp (after a failed switch no face is live); a cached peer is its Sessions
-/// snapshot throughout. A stage closed longer builds none, so the real Sessions
-/// widgets of a cached peer are never constructed for a screen nobody sees.
+/// Sits under the overlay host and toast layer, so dialogs and toasts outrank it. Peers are
+/// built only while the stage is open or ramping closed.
 fn switcher_host(
     switcher: &Arc<ServersSwitcherController>,
     overlays: &NavigatorController<AppState>,
@@ -140,10 +113,8 @@ fn switcher_host(
         .position(|face| face.kind == FaceKind::Live)
         .unwrap_or(0);
     let open = switcher.open.get();
-    // Kept through the close ramp too (see `keep_peers`).
     let peers: Vec<_> = if keep_peers(open) {
-        // A forgotten row's remembered page goes with it. A plain map edit, not
-        // a signal write, so it can never re-trigger this build.
+        // A plain map edit, not a signal write, so it never re-triggers this build.
         if let Some(last_seen) = use_last_seen() {
             last_seen.retain(|endpoint| faces_now.iter().any(|face| face.endpoint == endpoint));
         }
@@ -177,8 +148,6 @@ fn switcher_host(
         };
         let add = {
             let (switcher, nav) = (Arc::clone(switcher), nav.clone());
-            // A blocked add raises the paywall over the open stage; an
-            // allowed one closes the stage itself before it pushes.
             Rc::new(move || switcher.add(&add_gate, &nav)) as Rc<dyn Fn()>
         };
         let close = {
@@ -196,10 +165,8 @@ fn switcher_host(
         .action_bar(bar)
         .expanding(switcher.expanding.get())
         .card_scale(card_scale)
-        // Wired per the component contract. It is NOT the back path in this
-        // shell: the shell's `DismissAnimated` page outranks a `BackFallback`,
-        // so the press reaches Sessions' dismiss consumer, which closes the
-        // stage (see `SessionsScreen::build`).
+        // Not the back path: the shell's `DismissAnimated` page outranks a `BackFallback`, so
+        // Sessions' dismiss consumer closes the stage.
         .back(&expect_switcher_back());
     if let Some(live) = faces_now
         .get(live_index)
@@ -210,10 +177,7 @@ fn switcher_host(
     stage
 }
 
-/// A peer card's face: a cached server that filed its page is the inert
-/// Sessions screen re-rendered from that state (composed here, at app level, so
-/// `servers` never imports `sessions`' presentation); every other face is
-/// `servers`' own.
+/// Composed here so `servers` never imports `sessions`' presentation.
 fn peer_face(
     theme: &frust::Theme,
     colors: &Palette,
@@ -230,14 +194,7 @@ fn peer_face(
     }
 }
 
-/// The Glyph app bar for whatever route the inner navigator has on top.
-/// Titles [`TitlePosition::Center`] — this app's own design.
-///
-/// Two things resolve to the same absent slot: a route with no
-/// [`crate::routes::RouteMeta`], and the terminal screen's **fullscreen**
-/// request. Suppressing rather than hiding is the scaffold's own idiom —
-/// `app_bar_opt(None)` hands the body the bar's band, which is exactly what a
-/// fullscreen terminal is asking for.
+/// A fullscreen terminal gets no bar: `app_bar_opt(None)` hands the body the bar's band.
 fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<AppState>> {
     let state = nav.bar();
     let meta = state.meta?;
@@ -249,8 +206,7 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
         BarDirection::Forward => TitleDirection::Forward,
         BarDirection::Back => TitleDirection::Back,
     };
-    // A cached switch keeps its page on screen while the connection is down:
-    // the title names that server, and the banner reports the dial.
+    // A cached switch keeps its page on screen while offline: the title names that server.
     let switcher = expect_servers_controller();
     let mut title = meta.resolve_title(connection);
     if meta.title == BarTitle::ConnectedHost
@@ -291,8 +247,6 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
                 move |_state: &mut AppState| nav.push(SETTINGS_ROUTE),
             )]
         }
-        // Forward only: the terminal feature owns its own menu — its entries,
-        // its anchor rect and every action they run.
         Some(BarAction::TerminalMenu) => vec![bar_icon(
             icons::MORE_VERT,
             TERMINAL_MENU_LABEL,
