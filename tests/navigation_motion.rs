@@ -1,29 +1,6 @@
-//! Headless coverage for muxr's **navigation motion**: the shell's app bar
-//! adapter (`src/routes.rs`'s `route_meta`/`Nav::bar`, consumed by
-//! `src/shell.rs::shell_page`'s `frust::scaffold`), and the GlyphSlide page
-//! transition every path navigation carries.
-//!
-//! This suite mounts the *whole* app (only the real `MuxrApp` puts the
-//! scaffold, and so the bar, in the tree). The bar itself is
-//! `frust_glyph::AppBarView`; its paint/crossfade/reveal are Glyph's to test.
-//! This suite owns the **adapter** — which route gets a bar and what it shows
-//! (`routes::route_meta`), shell behavior (bar-less Connect, a titled route,
-//! direction on back, fullscreen suppression), and overlay-host arbitration
-//! (R44-back, a modal's bar dimming) — read off the accessibility tree
-//! (`Harness::has_bar`/`values`/`labels`), what a screen reader actually sees.
-//!
-//! **Three navigators, one depth reads only one of them.**
-//! [`Harness::depth`] reads the **outer** navigator (`AppState::nav`) — `/`
-//! plus, once placed, the one shell page. `/sessions`, `/terminal`,
-//! `/settings` are children of that same `shell_route`, so navigating between
-//! them lands on the shell's **inner** navigator and never moves `h.depth()`
-//! — only crossing the shell boundary does. Tests over an in-shell push
-//! assert the retitle instead (`round_trip_through`'s doc). The third
-//! navigator is the **overlay host** ([`Harness::overlay_depth`]): every
-//! menu/sheet/dialog is a page there, and an open one makes the app
-//! underneath, bar included, inert.
-//!
-//! [`spend_cold_start`] burns the one-per-process splash claim first.
+//! Headless coverage of the shell's app-bar adapter (`routes::route_meta`) and the page
+//! transition on navigation, driven through the whole app and read off the accessibility tree.
+//! `Harness::depth` reads only the outer navigator; in-shell pushes land on the inner one.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -64,34 +41,14 @@ use support::{
 const HOST: &str = "mock.example";
 const PORT: u16 = 7777;
 
-/// The bar's brand wordmark, and its two slot affordances' **accessible
-/// names** — transcribed rather than imported: `ui::topbar`'s constants are
-/// the implementation's, and a test that imported them could not catch one of
-/// them changing. See [`BANNED_GLYPHS`] for why they're words, not marks.
 const BRAND: &str = "muxr";
 const BACK: &str = "Back";
 const GEAR: &str = "Settings";
 
-/// The two glyphs that used to label [`BACK`]/[`GEAR`] as text. **Nothing in
-/// the bar may carry either again**: neither is in the bundled Glyph faces, so
-/// each platform's font-fallback chain answered differently (the `⚙` was
-/// simply absent on iPhone) — a device-verified regression this suite pins shut.
 const BANNED_GLYPHS: [&str; 2] = ["\u{2039}", "\u{2699}"];
 
-/// Where the pre-split probe samples the Glyph push, inside the leaving
-/// page's fade-out (`resolve_layers`'s `Glyph` arm,
-/// `frust-widgets`'s `src/nav/transition.rs`). Progress is eased —
-/// `p = curve.transform(t / 340)` on `Cubic(0.34, 1.35, 0.64, 1.0)`
-/// (`GLYPH_ENTER`/`GLYPH_SPATIAL_CURVE`, matching
-/// `frust_glyph::baseline()`'s `MotionScheme`) — and `GLYPH_FADE_SPLIT`
-/// (0.44) crosses at `t ≈ 44ms`. At `t = 24ms`, `p ≈ 0.258`: leaving
-/// `alpha ≈ 0.41` (painted, `dx ≈ -4.1px`), entering `alpha == 0` (discarded).
 const PRE_SPLIT_MS: f64 = 24.0;
 
-/// Where the post-split probe samples, past the ≈44ms crossing above. At
-/// `t = 60ms` (the old single-sample `MID_TRANSITION_MS`'s value, unchanged),
-/// `p ≈ 0.566`: leaving `alpha == 0` — into `DiscardScene` since frust
-/// `5fc1513a` — entering `alpha ≈ 0.226` (painted, `dx ≈ 6.9px`).
 const POST_SPLIT_MS: f64 = 60.0;
 
 /// A mock connect target — only `connected` flipping and the `host:port`
@@ -109,16 +66,12 @@ fn mock_target() -> ConnectTarget {
     }
 }
 
-/// A Glyph theme with `reduce_motion` forced on/off — what
-/// `nav::transition::resolve_spec` reads to decide whether to collapse the
-/// route transition.
 fn theme(reduce_motion: bool) -> Theme {
     let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = reduce_motion;
     theme
 }
 
-/// Burn this process's one cold-start splash claim (see the [module docs](self)).
 fn spend_cold_start() {
     static SPENT: OnceLock<()> = OnceLock::new();
     SPENT.get_or_init(|| {
@@ -127,30 +80,22 @@ fn spend_cold_start() {
     });
 }
 
-/// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
-/// The whole app, themed, warm-started.
 struct Harness {
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
     state: AppState,
     tcx: TextContext,
-    /// A strictly-increasing clock for [`Harness::park`] — see there.
     clock: f64,
-    /// The scope every [`Harness::park`] frame rebuilds inside, so a signal
-    /// written after that rebuild is observable exactly as
-    /// `frust-shell-desktop` observes it. See [`Harness::requested_frame`].
     scope: TrackedScope,
 }
 
 impl Harness {
-    /// Mount at `/` with motion enabled.
     fn mount() -> Self {
         Self::themed(theme(false))
     }
 
-    /// Mount at `/` under `theme`.
     fn themed(theme: Theme) -> Self {
         spend_cold_start();
         let mut root: RenderRoot<AppState, AnyView<AppState>> = RenderRoot::new();
@@ -167,8 +112,6 @@ impl Harness {
         harness
     }
 
-    /// Mount, connect (mock), and land on `/sessions` — the app's first titled
-    /// route, reached the way the Connect screen reaches it.
     fn on_sessions() -> Self {
         let mut harness = Harness::mount();
         expect_connection_controller().connect(mock_target());
@@ -195,8 +138,6 @@ impl Harness {
         )
     }
 
-    /// Drive whatever was just pushed/popped past its transition and the
-    /// bar's own crossfades.
     fn settle(&mut self) -> RecScene {
         settle(
             &mut self.root,
@@ -213,18 +154,6 @@ impl Harness {
         self.settle();
     }
 
-    /// One frame, run the way `frust-shell-desktop`'s loop runs one: rebuild
-    /// inside a [`TrackedScope`], then layout, then paint. Returns the painted
-    /// frame and whether the app asked for another — an animation still in
-    /// flight (`PaintOutcome::needs_frame`) or a tracked write since the
-    /// rebuild (`TrackedScope::is_dirty`), the two conditions shell turns into
-    /// a `request_redraw`.
-    ///
-    /// A frame whose every request was `TickClass::CosmeticLoop` (a loop that
-    /// never settles by design, e.g. `/terminal`'s caret blink) reports `false`
-    /// here instead: counting it would make [`Harness::park`] unusable on the
-    /// menu → sheet chain, and costs nothing, since such a frame by
-    /// construction has no transition, reveal or staging in flight.
     fn requested_frame(&mut self) -> (RecScene, bool) {
         self.clock += FRAME_MS;
         let root = &mut self.root;
@@ -241,13 +170,6 @@ impl Harness {
         (scene, more)
     }
 
-    /// Run frames for exactly as long as the app asks for them, and stop where
-    /// the desktop loop parks on `Wait`; returns the last frame painted.
-    ///
-    /// **The honest half of section 3c.** Every other helper here paints
-    /// frames unconditionally — a courtesy no shell pays: nothing renders
-    /// between one `request_redraw` and the next input. So whatever the bar
-    /// looks like at *this* point is what a user is looking at.
     fn park(&mut self) -> RecScene {
         for _ in 0..PARK_FRAME_CAP {
             let (scene, more) = self.requested_frame();
@@ -258,18 +180,12 @@ impl Harness {
         panic!("the app never stopped asking for frames ({PARK_FRAME_CAP} of them)");
     }
 
-    /// Deliver `event` and run the loop to its parking point — the two halves
-    /// of `ShellHandler::dispatch` (route the event, schedule a frame if it
-    /// dirtied anything) and nothing else.
     fn dispatch(&mut self, event: &InputEvent) {
         if self.root.event(&mut self.state, event).needs_redraw {
             self.park();
         }
     }
 
-    /// A full tap at `point`, each half dispatched through the production
-    /// loop above (rather than [`support::tap`], which paints no frames at
-    /// all — an overlay's staged exit needs them).
     fn tap_parked(&mut self, point: Point) {
         self.dispatch(&pointer(PointerPhase::Down, point));
         self.dispatch(&pointer(PointerPhase::Up, point));
@@ -283,12 +199,10 @@ impl Harness {
         node_labels(&self.root)
     }
 
-    /// Whether the shell's bar is on screen at all.
     fn has_bar(&self) -> bool {
         node_roles(&self.root).contains(&Role::TitleBar)
     }
 
-    /// Tap the first node labelled `label` (the bar's `‹` or `⚙`).
     fn tap_label(&mut self, label: &str) {
         let point = node_centers_by_label(&self.root, label)
             .first()
@@ -308,22 +222,15 @@ impl Harness {
         self.state.nav.controller().depth()
     }
 
-    /// The **root overlay host**'s page-stack depth: [`REST_DEPTH`] with
-    /// nothing open (its one page being the whole app), one more per overlay.
     fn overlay_depth(&self) -> usize {
         self.state.overlays.depth()
     }
 }
 
-/// The overlay host's depth with nothing open: its root page is the entire app
-/// (chrome, route navigator and all).
 const REST_DEPTH: usize = 1;
 
-/// Assert the bar is showing `title`, and nothing else is.
 fn assert_titled(h: &Harness, title: &str) {
     assert!(h.has_bar(), "the shell bar is mounted");
-    // The title is `Role::TitleBar`'s own **label** (`support::node_labels`'s
-    // doc), not a separate text-run `value` child.
     assert!(
         h.labels().iter().any(|l| l == title),
         "the bar titles {title:?}: {:?}",
@@ -331,18 +238,12 @@ fn assert_titled(h: &Harness, title: &str) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 1 — the bar's presence is route-driven
-// ---------------------------------------------------------------------------
-
 #[test]
 fn connect_carries_no_bar_at_all() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::mount();
 
-    // `/` is the full-bleed Connect design (and the route the splash overlays),
-    // so the bar is not merely blank — it contributes no node and no height.
     assert!(!h.has_bar(), "roles on screen: {:?}", node_roles(&h.root));
     assert!(
         !h.values().iter().any(|v| v == BRAND),
@@ -375,19 +276,6 @@ fn sessions_wears_the_brand_the_connected_host_and_the_gear() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 2 — a pushed route retitles the bar and grows a back button
-// ---------------------------------------------------------------------------
-
-/// Push `route`, assert the bar became `title` + `‹`, then take the `‹` back
-/// and assert the bar returned to `/sessions`' face. Both pushed routes run
-/// this identically, which is the point: the bar is route metadata, not
-/// per-screen chrome.
-///
-/// **No `h.depth()` here**: `/sessions`/`/terminal`/`/settings` share one
-/// `shell_route`, so a push between them lands on the shell's *inner*
-/// navigator and never moves the outer one `h.depth()` reads — the retitle is
-/// the observable instead.
 fn round_trip_through(route: &str, title: &str) {
     let mut h = Harness::on_sessions();
 
@@ -436,9 +324,6 @@ fn settings_is_titled_and_backed_and_pops_home() {
 fn the_terminal_route_is_titled_and_backed_and_pops_home() {
     let _g = serial();
     let _ambient = setup();
-    // The design deviation, asserted: the mock's terminal bar shows the brand
-    // and a ⋮; muxr gives every pushed route the ‹ instead (see
-    // `routes::BarLeading::Back`).
     round_trip_through("/terminal?session=s-1", "terminal");
 }
 
@@ -451,19 +336,9 @@ fn the_bars_gear_reaches_settings() {
     h.tap_label(GEAR);
     h.settle();
 
-    // In-shell push (`round_trip_through`'s doc): the retitle is the
-    // observable, not `h.depth()`.
     assert_titled(&h, "server settings");
 }
 
-// ---------------------------------------------------------------------------
-// 3 — the bar ignores overlays, and follows a pop it never saw
-// ---------------------------------------------------------------------------
-
-/// Push an inert transparent page onto the **overlay host** — a stand-in for a
-/// sheet or a dialog: it adds a page above every piece of chrome, paints
-/// nothing worth recording, and swallows nothing, so whatever the bar does is
-/// the bar's own doing.
 fn open_overlay(h: &mut Harness) {
     h.state
         .overlays
@@ -471,8 +346,6 @@ fn open_overlay(h: &mut Harness) {
     h.settle();
 }
 
-/// Dismiss whatever [`open_overlay`] put up — the host's own pop, standing in
-/// for a scrim tap on a real overlay.
 fn close_overlay(h: &mut Harness) {
     h.state.overlays.pop();
     h.settle();
@@ -485,12 +358,6 @@ fn a_transparent_overlay_over_sessions_never_retitles_the_bar() {
     let mut h = Harness::on_sessions();
     let covered_depth = h.depth();
 
-    // A sheet/dialog is pushed as a page *builder* straight through a
-    // controller, never through `Nav` — so it carries no route metadata, and
-    // the route the bar is *for* does not change. Since the host landed it does
-    // not even land on the same stack: the route depth is untouched, and only
-    // the host's grows. The bar goes modal while it is up (below); what must
-    // not happen is a retitle.
     open_overlay(&mut h);
     assert_eq!(
         h.overlay_depth(),
@@ -518,18 +385,6 @@ fn a_transparent_overlay_over_sessions_never_retitles_the_bar() {
         h.values()
     );
 }
-
-// ---------------------------------------------------------------------------
-// 3b — an open overlay dims the bar and takes its input, from the host
-// ---------------------------------------------------------------------------
-//
-// Both halves are the root overlay host's doing, not the bar's own: it routes
-// input and publishes accessibility nodes for its **top page only**, and an
-// overlay always paints over everything underneath (outermost in the
-// composition) — a compositing fact this suite no longer pixel-verifies
-// (`frust_glyph::AppBarView`'s own paint order is Glyph's to test). What it
-// still owns: the bar goes modal the instant an overlay opens, asserted below
-// through the accessibility tree.
 
 #[test]
 fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
@@ -563,16 +418,12 @@ fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
         REST_DEPTH + 1,
         "the overlay is still the only thing up"
     );
-    // The strong check: `h.depth()` reads the same either way (in-shell
-    // push, `round_trip_through`'s doc) — the retitle is what a fired push
-    // would show.
     assert!(
         !h.values().iter().any(|v| v == "server settings"),
         "…and nothing retitled: {:?}",
         h.values()
     );
 
-    // Dismiss, and the very same press works again.
     close_overlay(&mut h);
     assert!(h.has_bar(), "the bar is live again");
     h.tap_label(GEAR);
@@ -580,40 +431,13 @@ fn the_gear_does_nothing_under_an_open_overlay_and_works_again_after() {
     assert_titled(&h, "server settings");
 }
 
-// ---------------------------------------------------------------------------
-// 3c — a closed modal gives the bar back, on the frames production actually runs
-// ---------------------------------------------------------------------------
-//
-// Section 3b asserts *what* the bar does under a modal; this one asserts
-// **when** — the only section here that refuses the harness's courtesy frames
-// (see [`Harness::park`]).
-//
-// The defect it pins shut: a bar deriving modality from
-// `NavigatorController::depth` would still see the stale dimmed state on the
-// frame right after a modal's pop (`RenderRoot::rebuild` runs before the
-// navigator drains its queued ops), leaving it dark and inert until unrelated
-// input woke it. The host reconciles before the page under it rebuilds, so
-// this is asserted with no frames in between, against a **real** overlay
-// (`show_sheet`/`confirm_dialog`).
-
-/// The sheet body these tests open — big enough to place the panel, small
-/// enough to leave most of the surface scrim.
 const SHEET_BODY: f64 = 100.0;
-/// A point comfortably above any of those panels, and so on the scrim: the
-/// dismissal gesture (a press that both starts and ends outside the panel).
 const SHEET_SCRIM_POINT: Point = Point::new(4.0, 200.0);
 /// How far [`Harness::requested_frame`] advances the clock — one 60Hz frame,
 /// the cadence a desktop `request_redraw` actually produces.
 const FRAME_MS: f64 = 16.0;
-/// The frame budget [`Harness::park`] gives the app to stop asking. Ten
-/// seconds of frames: every animation in this app is a few hundred
-/// milliseconds, so hitting it means something is looping forever.
 const PARK_FRAME_CAP: usize = 600;
 
-/// Open the app's **real** bottom sheet over `h` (the same helper every screen
-/// calls), run to the parking point, and report where its panel is painting —
-/// the biggest *path* the sheet added to the covered screen's own chrome, a
-/// Glyph sheet's panel being top-rounded only and so painted as a path.
 fn open_real_sheet(h: &mut Harness) -> (Point, Size) {
     let before = h.park();
     show_sheet(&h.state.overlays, |_sheet| {
@@ -644,9 +468,6 @@ fn a_sheet_dismissed_by_its_scrim_gives_the_bar_back_before_the_loop_parks() {
     );
     assert_eq!(h.depth(), covered_depth, "…over an untouched route stack");
 
-    // The dismissal, and then *nothing*: the sheet's staged exit plays out
-    // inside this dispatch, the pop lands, and the loop stops exactly where
-    // the shell would park on `Wait`.
     h.tap_parked(SHEET_SCRIM_POINT);
 
     assert_eq!(
@@ -660,7 +481,6 @@ fn a_sheet_dismissed_by_its_scrim_gives_the_bar_back_before_the_loop_parks() {
         "…and the bar is lit and addressable again with no further input: {:?}",
         node_roles(&h.root)
     );
-    // Lit is half of it; live is the other half — the retitle is the observable.
     h.tap_label(GEAR);
     h.settle();
     assert_titled(&h, "server settings");
@@ -674,9 +494,6 @@ fn escape_on_a_sheet_gives_the_bar_back_before_the_loop_parks() {
     h.park();
     let covered_depth = h.depth();
 
-    // A press on the panel itself claims focus (and does not dismiss), which
-    // is what gives the key event a chain to travel — the same thing a real
-    // interaction with the sheet's own body does.
     let panel = open_real_sheet(&mut h);
     h.tap_parked(center(panel));
     assert_eq!(
@@ -704,9 +521,6 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
     let before = h.park();
     let covered_depth = h.depth();
 
-    // The path with no staged frame at all: a dialog action pops immediately,
-    // so nothing app-side schedules the frame the lit bar is painted on — the
-    // host's own reconcile is what has to be early enough.
     confirm_dialog(
         &h.state.overlays,
         "Kill session?",
@@ -723,9 +537,6 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
     assert_eq!(h.depth(), covered_depth, "…over an untouched route stack");
     assert!(!h.has_bar(), "…and the bar is inert under it");
 
-    // The danger action is the smallest thing the dialog added to the frame's
-    // stroked outlines (its panel's own border being the other one) — the
-    // `tests/ui_substrate.rs` idiom, diffed against the covered screen.
     let action = smallest(&added(&before.strokes, &open.strokes))
         .expect("the danger action strokes its border");
     h.tap_parked(center(action));
@@ -743,14 +554,6 @@ fn a_dialog_action_gives_the_bar_back_before_the_loop_parks() {
     );
 }
 
-/// **R44-back, end to end** — and the reason the root host had to be a `host`
-/// rather than one more navigator. The press is delivered through
-/// `frust::push_back_press`, the process-wide source the facade arbitrates
-/// behind (a root overlay host outranks every plain navigator); nothing here
-/// names a controller to pop — that choice **is** what is under test. It
-/// doubles as the original defect's guard: the sheet dismisses itself
-/// (`BackPolicy::DismissAnimated`), so the bar has to come back live with no
-/// app code ever having known about the overlay.
 #[test]
 fn an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone() {
     let _g = serial();
@@ -785,22 +588,6 @@ fn an_android_back_press_dismisses_the_overlay_and_leaves_the_route_alone() {
     assert_titled(&h, "server settings");
 }
 
-// ---------------------------------------------------------------------------
-// 3d — an overlay's whole life leaves the route mirror untouched
-// ---------------------------------------------------------------------------
-//
-// Section 3c asserts that a *closed* modal gives the bar back. This one covers
-// two handler shapes that used to corrupt the route-meta mirror by reading a
-// one-rebuild-stale depth as fact: a handler that closes an overlay *and*
-// pushes a route in the same rebuild (Sessions' Attach row), and an overlay
-// opened out of the overlay before it (the terminal's menu → sheet chain).
-// Both are structurally impossible now — an overlay is a page of the host, so
-// the route depth never moves — and both are still asserted end to end, at the
-// parking point, with no courtesy frames.
-
-/// Open the app's real sheet over `h` and hand back the [`SheetHandle`] its
-/// body's rows close it through — captured out of the body builder exactly as
-/// a row captures one (`features::sessions`' `sheet_action`).
 fn open_sheet_with_handle(h: &mut Harness) -> SheetHandle {
     let captured: Rc<RefCell<Option<SheetHandle>>> = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&captured);
@@ -813,11 +600,6 @@ fn open_sheet_with_handle(h: &mut Harness) -> SheetHandle {
     handle.expect("the sheet's body builder ran and minted a handle")
 }
 
-/// A harmless pointer move — the input pass that hands a pushed page's
-/// **pop-completion callback** over (`NavigatorWidget::event` flushes the
-/// results queued at the previous rebuild). Production gets one from the
-/// user's next touch; a test that drives the navigator from outside a handler
-/// has to supply it.
 const IDLE_MOVE: Point = Point::new(4.0, 400.0);
 
 #[test]
@@ -834,9 +616,6 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
         "the sheet is its own page on the host"
     );
 
-    // The Attach row's own two calls (`sheet.close(); actions.attach(&id)`),
-    // back to back with no frame between them. In-shell push
-    // (`round_trip_through`'s doc): the retitle is the observable.
     sheet.close();
     app_nav().push("/settings");
     h.park();
@@ -844,11 +623,9 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     assert_eq!(h.overlay_depth(), REST_DEPTH, "the sheet's page went");
     assert_titled(&h, "server settings");
 
-    // The next input pass — the user's next touch — delivers the sheet's
-    // pop-completion callback, which is what latches its handle.
     h.dispatch(&pointer(PointerPhase::Move, IDLE_MOVE));
 
-    // THE Concern-4 stale-bar scenario, still asserted end to end: an overlay
+    // Stale-bar scenario, asserted end to end: an overlay
     // opening and closing over `/settings` must not evict its bar entry.
     let overlay = open_sheet_with_handle(&mut h);
     assert_eq!(
@@ -879,8 +656,6 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
     );
 }
 
-/// The terminal route's menu affordance, by its accessible name —
-/// transcribed from `crate::shell`, like [`BACK`]/[`GEAR`] above.
 const TERMINAL_MENU: &str = "Terminal menu";
 
 #[test]
@@ -913,8 +688,6 @@ fn the_terminal_menu_button_opens_its_side_sheet_directly_and_gives_the_bar_back
     h.park();
     assert_titled(&h, "terminal");
 
-    // The real menu button, opening the "panes & tabs" side sheet directly —
-    // no intervening dropdown.
     h.tap_label(TERMINAL_MENU);
     h.park();
     assert_eq!(
@@ -930,10 +703,6 @@ fn the_terminal_menu_button_opens_its_side_sheet_directly_and_gives_the_bar_back
         node_roles(&h.root)
     );
 
-    // THE assertion: the overlay gives the bar back on the frames production
-    // actually runs, with no unrelated input to save it — the host owes no
-    // bookkeeping across the dismissal; it pops, and the app under it is live
-    // again.
     h.tap_parked(SHEET_SCRIM_POINT);
 
     assert_eq!(
@@ -948,7 +717,6 @@ fn the_terminal_menu_button_opens_its_side_sheet_directly_and_gives_the_bar_back
         node_roles(&h.root)
     );
     assert_titled(&h, "terminal");
-    // In-shell pop too — the retitle shows the ‹ actually popped it.
     h.tap_label(BACK);
     h.settle();
     assert_titled(&h, HOST);
@@ -960,8 +728,6 @@ fn the_bar_carries_no_font_fallback_glyph_any_more() {
     let _ambient = setup();
     let mut h = Harness::on_sessions();
 
-    // Both slots are vectors now; nothing in the accessibility tree may name
-    // itself with the marks they used to set as text (see `BANNED_GLYPHS`).
     for glyph in BANNED_GLYPHS {
         assert!(
             !h.labels().iter().any(|l| l.contains(glyph)),
@@ -975,7 +741,6 @@ fn the_bar_carries_no_font_fallback_glyph_any_more() {
         );
     }
 
-    // …and the same on a back-led route, whose leading slot is the other one.
     h.push("/settings");
     for glyph in BANNED_GLYPHS {
         assert!(
@@ -991,14 +756,6 @@ fn the_bar_carries_no_font_fallback_glyph_any_more() {
     );
 }
 
-/// **THE Concern-4 stale-bar scenario, made explicit end to end.** Pre-`d1`,
-/// `Nav` mirrored `RouteMeta`/`BarState` behind the bar, corrected only "on
-/// the next depth-fall reconcile" — the seam a mis-recorded depth used to
-/// desync, evicting or stranding a route's bar entry. That mirror is deleted:
-/// [`crate::routes::Nav::bar`] now derives every frame off the inner
-/// navigator's live [`frust::RouteObserver`], nothing left to go stale. Walks
-/// the full settings → sessions → connect round trip, asserting bar state at
-/// every step off the accessibility tree.
 #[test]
 fn settings_back_sessions_back_connect_retitles_the_bar_at_every_step() {
     let _g = serial();
@@ -1010,7 +767,6 @@ fn settings_back_sessions_back_connect_retitles_the_bar_at_every_step() {
         "/sessions wears the brand"
     );
 
-    // settings — an in-shell push, off the same live observer.
     h.push("/settings");
     assert_titled(&h, "server settings");
     assert!(h.labels().iter().any(|l| l == BACK));
@@ -1024,10 +780,6 @@ fn settings_back_sessions_back_connect_retitles_the_bar_at_every_step() {
         "the brand is back too"
     );
 
-    // back → connect — `/sessions` carries no ‹ (the shell's landing route),
-    // so this is the platform back gesture: its own disconnect confirmation
-    // (`back_on_sessions_asks_instead…`'s own test), confirmed here to
-    // actually leave the shell.
     press_back(&mut h);
     assert!(
         showing_confirmation(&h),
@@ -1045,45 +797,20 @@ fn settings_back_sessions_back_connect_retitles_the_bar_at_every_step() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3e — back on /sessions is a question, not a pop
-// ---------------------------------------------------------------------------
-//
-// `/sessions` is the one route pushed with `BackPolicy::DismissAnimated`, so a
-// back press there **bumps the page's dismiss cell instead of popping it** and
-// the screen raises its own disconnect confirmation. This belongs here, not
-// `sessions.rs`, which mounts the screen beside a navigator rather than as a
-// page pushed through `Nav`, so nothing there carries the policy read here.
-//
-// What the *bar* contributes is the negative half: neither stack moves, so the
-// mirror never hears of the press — `/sessions` is still titled once the
-// question is answered "no", and while it is up the bar is not addressable at
-// all (the host forwards its top page only).
-
-/// The confirmation's title, as the user reads it — transcribed rather than
-/// imported, like [`BRAND`]/[`BACK`]/[`GEAR`] above (`features::sessions`'
-/// constants are the implementation's; a test that imported them could not
-/// catch one of them changing).
 const DISCONNECT_TITLE: &str = "Disconnect from server?";
-/// …its destructive action…
 const DISCONNECT_ACTION: &str = "Disconnect";
-/// …and the affordance that answers "no" (`ui::dialogs`' shared spelling).
 const CANCEL_ACTION: &str = "Cancel";
 
-/// Whether the app still holds its (mock) connection.
 fn connected() -> bool {
     expect_connection_controller().connected.get_untracked()
 }
 
-/// Whether the disconnect confirmation is the thing on screen — title, body
-/// naming the connected host, and destructive action.
 fn showing_confirmation(h: &Harness) -> bool {
     h.values().iter().any(|v| v == DISCONNECT_TITLE)
         && h.values().iter().any(|v| v.contains(HOST))
         && h.labels().iter().any(|l| l == DISCONNECT_ACTION)
 }
 
-/// One platform back press, driven to the app's parking point.
 fn press_back(h: &mut Harness) {
     frust::push_back_press();
     h.settle();
@@ -1153,10 +880,6 @@ fn a_bump_that_lands_while_the_confirmation_is_up_is_swallowed() {
     press_back(&mut h);
     assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the confirmation is up");
 
-    // A bump reaching the screen while its confirmation is already showing —
-    // what the navigator would do if a press ever got past the overlay host
-    // (it cannot: R44-back gives the host the press, which is the *next* test).
-    // The screen banks it and raises nothing.
     let signal = sessions_back_signal();
     signal.set(signal.get().wrapping_add(1));
     h.park();
@@ -1168,10 +891,6 @@ fn a_bump_that_lands_while_the_confirmation_is_up_is_swallowed() {
     );
     assert!(showing_confirmation(&h), "…and it is still the same one");
 
-    // The half that makes the assertion above mean something: a swallowed bump
-    // must be *spent*, not merely deferred. Dismiss the confirmation and the
-    // screen owes nothing — an unbanked bump would raise its dialog here, one
-    // press behind the user.
     press_back(&mut h);
     assert_eq!(
         h.overlay_depth(),
@@ -1193,9 +912,6 @@ fn a_second_back_press_cancels_the_confirmation_and_stays_connected() {
     press_back(&mut h);
     assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the confirmation is up");
 
-    // The overlay host outranks the route navigator (R44-back), so the second
-    // press dismisses the confirmation rather than reaching the page again —
-    // "back again" reads as a cancel with no code in the screen at all.
     press_back(&mut h);
 
     assert_eq!(
@@ -1207,7 +923,6 @@ fn a_second_back_press_cancels_the_confirmation_and_stays_connected() {
     assert!(connected(), "…leaving the connection alone");
     assert_titled(&h, HOST);
 
-    // The seam re-arms: a dismissed confirmation is not a spent one.
     press_back(&mut h);
     assert_eq!(
         h.overlay_depth(),
@@ -1216,7 +931,6 @@ fn a_second_back_press_cancels_the_confirmation_and_stays_connected() {
     );
     assert!(showing_confirmation(&h));
 
-    // …and the explicit "no" reads the same as the press did.
     let cancel = confirmation_action(&h, CANCEL_ACTION);
     h.tap_parked(cancel);
     h.settle();
@@ -1289,12 +1003,6 @@ fn back_on_the_terminal_route_still_pops_to_sessions_with_no_question_asked() {
     assert_titled(&h, HOST);
 }
 
-// ---------------------------------------------------------------------------
-// 3f — the add-server page covers the shell rather than leaving it
-// ---------------------------------------------------------------------------
-
-/// Unlock Pro and wait for the app's entitlement to say so — a free install
-/// with the seeded saved rows would meet the paywall on the add page first.
 fn unlock_pro(h: &mut Harness) {
     mock_entitlement()
         .expect("tests/support opted this process into the mock")
@@ -1313,7 +1021,6 @@ fn unlock_pro(h: &mut Harness) {
     );
 }
 
-/// On `/sessions` with Pro unlocked, the add-server page pushed over it.
 fn on_add_server_page() -> Harness {
     let mut h = Harness::on_sessions();
     unlock_pro(&mut h);
@@ -1421,19 +1128,12 @@ fn a_free_install_meets_the_paywall_first_and_not_now_pops_the_add_page() {
     assert!(connected());
 }
 
-// ---------------------------------------------------------------------------
-// 3g — a flow settling after its page is gone pops nothing
-// ---------------------------------------------------------------------------
-
-/// The saved server the switch cases move to.
 const SAVED_HOST: &str = "saved.example";
 const SAVED_ENDPOINT: &str = "saved.example:50051";
 const SAVED_LABEL: &str = "Saved rig";
 const SAVED_TOKEN: &str = "saved-s3cr3t";
-/// The connect form's remember switch, transcribed (private to its widget).
 const REMEMBER_LABEL: &str = "Remember for 4 weeks";
 
-/// The endpoint the app is connected to now.
 fn connected_endpoint() -> Option<String> {
     expect_connection_controller()
         .server_info
@@ -1441,7 +1141,6 @@ fn connected_endpoint() -> Option<String> {
         .map(|info| info.endpoint)
 }
 
-/// Pump the UI-thread task queue (and frames) until `done`.
 fn pump_until_true(h: &mut Harness, done: impl FnMut() -> bool) {
     let scene = h.frame();
     pump_until(
@@ -1454,9 +1153,6 @@ fn pump_until_true(h: &mut Harness, done: impl FnMut() -> bool) {
     );
 }
 
-/// On `/settings` over `/sessions`, Pro unlocked, with [`SAVED_ENDPOINT`]
-/// remembered and its token in the vault — the keyring published over it
-/// when `unlocked`.
 fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
     let mut h = Harness::on_sessions();
     unlock_pro(&mut h);
@@ -1482,7 +1178,6 @@ fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
         expect_keyring().publish(keyring);
     }
     h.push("/settings");
-    // Settings reads the saved list on its async first load.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !h.values().iter().any(|v| v == SAVED_LABEL) {
         assert!(
@@ -1497,8 +1192,6 @@ fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
     h
 }
 
-/// Where the saved row's label sits on screen, wheeling Settings until it
-/// is inside the default surface (the group sits below the first screenful).
 fn saved_row_point(h: &mut Harness) -> Point {
     let label_at = |h: &Harness| {
         node_centers_by_value(&h.root, SAVED_LABEL)
@@ -1528,13 +1221,11 @@ fn a_dial_settling_after_back_left_the_add_page_pops_nothing() {
     let _g = serial();
     let _ambient = setup();
     let mut h = on_add_server_page();
-    // What the add page's connect captures as it starts its dial.
     let mark = app_nav().mark_top();
 
     press_back(&mut h);
     assert_eq!(h.depth(), 2, "back took the add page off");
 
-    // The dial settles now, with its page already gone.
     app_nav().pop_marked(&mark);
     h.settle();
     h.park();
@@ -1566,8 +1257,6 @@ fn a_settings_switch_settling_after_back_lands_on_sessions_still_connected() {
     let _ambient = setup();
     let mut h = on_settings_with_a_saved_server(false);
 
-    // A locked keyring: the switch first runs its unlock off the UI thread's
-    // queue, so it is still in flight when the user backs out.
     let row = saved_row_point(&mut h);
     tap(&mut h.root, &mut h.state, row);
     assert_ne!(connected_endpoint().as_deref(), Some(SAVED_ENDPOINT));
@@ -1622,7 +1311,6 @@ fn a_double_tap_on_the_add_pages_connect_switches_and_pops_once() {
     let mut h = Harness::on_sessions();
     unlock_pro(&mut h);
     h.park();
-    // Prefilled from a seeded saved row, so the form needs no typing.
     h.push(&add_server_location(Some("100.64.0.7:50051")));
     h.park();
     h.tap_label(REMEMBER_LABEL);
@@ -1663,8 +1351,6 @@ fn an_unwind_with_the_add_page_covering_takes_it_and_the_shell_off() {
     let mut h = on_add_server_page();
     assert_eq!(h.depth(), 3);
 
-    // The connection drops under the covering page; the next navigation
-    // into the shell is bounced by the guard, which unwinds.
     expect_connection_controller().disconnect();
     app_nav().push("/settings");
     h.settle();
@@ -1685,14 +1371,6 @@ fn an_unwind_with_the_add_page_covering_takes_it_and_the_shell_off() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 4 — the GlyphSlide route transition, and its reduced-motion collapse
-// ---------------------------------------------------------------------------
-
-/// The x of the biggest rounded rect on screen — the Connect screen's own
-/// chrome, which dwarfs anything the bar paints (its brand cells are 7×7). A
-/// slide moves a page's pod origin, so this one number tracks the whole
-/// leaving page.
 fn leaving_page_x(scene: &RecScene) -> f64 {
     largest(&scene.rounded)
         .unwrap_or_else(|| panic!("the leaving page painted no chrome to track"))
@@ -1700,18 +1378,12 @@ fn leaving_page_x(scene: &RecScene) -> f64 {
         .x
 }
 
-/// The recorded rect in `rects` matching `size` within [`EPSILON`] on both
-/// dimensions — re-identifies a page's chrome by SHAPE once its position or
-/// presence changes. Local to this file (width-only `support::by_width`
-/// would be ambiguous here; `tests/support/mod.rs` is read-only for this card).
 fn rect_sized(rects: &[(Point, Size)], size: Size) -> Option<(Point, Size)> {
     rects.iter().copied().find(|(_, s)| {
         (s.width - size.width).abs() < EPSILON && (s.height - size.height).abs() < EPSILON
     })
 }
 
-/// The biggest rounded rect in `page` whose size nothing in `other` shares —
-/// chrome that names this page alone once both are on screen at once.
 fn distinctive_chrome(page: &[(Point, Size)], other: &[(Point, Size)]) -> Option<(Point, Size)> {
     let alone: Vec<(Point, Size)> = page
         .iter()
@@ -1721,15 +1393,10 @@ fn distinctive_chrome(page: &[(Point, Size)], other: &[(Point, Size)]) -> Option
     largest(&alone)
 }
 
-/// Push `/settings` off `/`; report the settled leaving-page frame plus
-/// frames at [`PRE_SPLIT_MS`]/[`POST_SPLIT_MS`] — either side of the split.
 fn probe_push_transition(reduce_motion: bool) -> (RecScene, RecScene, RecScene) {
     let mut h = Harness::themed(theme(reduce_motion));
     let settled = h.frame();
 
-    // Pushed off `/`, so the leaving page is Connect — the one screen that
-    // paints plenty of trackable chrome. The connection is what the session
-    // guard wants of every in-shell route.
     expect_connection_controller().connect(mock_target());
     app_nav().push("/settings");
     h.frame_at(0.0);
@@ -1745,25 +1412,17 @@ fn a_route_push_slides_the_leaving_page_then_reveals_the_entering_one() {
 
     let (settled, pre_split, post_split) = probe_push_transition(false);
 
-    // Settings' resting chrome — a fresh, un-transitioned push, not the
-    // transitioning harness above.
     let mut rest = Harness::mount();
     expect_connection_controller().connect(mock_target());
     rest.push("/settings");
     let entering_rest = rest.frame();
 
-    // Each page is re-identified by size once displaced, so its fingerprint
-    // must be chrome the OTHER page never paints: both screens carry the same
-    // 38×22 toggle track (Connect's trust switch, Settings' bell row), and the
-    // biggest rect alone would match it on the wrong side of the split.
     let (settled_pos, settled_size) = distinctive_chrome(&settled.rounded, &entering_rest.rounded)
         .expect("the settled leaving page painted chrome Settings does not");
     let (entering_pos, entering_size) =
         distinctive_chrome(&entering_rest.rounded, &settled.rounded)
             .expect("the settled entering page painted chrome Connect does not");
 
-    // Pre-split: Connect still paints, displaced by `-p * 16dp`; Settings'
-    // alpha is exactly `0` there, so it paints nothing yet.
     let (pre_pos, _) = rect_sized(&pre_split.rounded, settled_size).unwrap_or_else(|| {
         panic!(
             "Connect's {settled_size:?} chrome is gone before the fade split: {:?}",
@@ -1787,16 +1446,11 @@ fn a_route_push_slides_the_leaving_page_then_reveals_the_entering_one() {
         pre_split.rounded
     );
 
-    // Post-split: Glyph is a split cross-fade (`resolve_layers`'s `Glyph`
-    // arm) — one page paints per instant, the other goes to `DiscardScene`
-    // (frust `5fc1513a`), so "both pages paint" is only assertable ACROSS
-    // these two samples, never within one frame. Connect's chrome is gone…
     assert!(
         rect_sized(&post_split.rounded, settled_size).is_none(),
         "Connect's {settled_size:?} chrome still paints past the split: {:?}",
         post_split.rounded
     );
-    // …Settings has taken over instead, displaced by `(1 - p) * 16dp`.
     let (post_pos, _) = rect_sized(&post_split.rounded, entering_size).unwrap_or_else(|| {
         panic!(
             "Settings' {entering_size:?} chrome hasn't painted past the split: {:?}",
@@ -1825,10 +1479,6 @@ fn reduce_motion_collapses_the_route_slide_to_a_pure_crossfade() {
     let base_x = leaving_page_x(&settled);
     let mid_x = leaving_page_x(&post_split);
 
-    // The Glyph design system's hard accessibility rule, as geometry: a reduced
-    // transition is a ≤120ms linear cross-fade with **no** slide, so the
-    // leaving page never moves. It is still painting (the cross-fade needs it),
-    // which is what makes this an assertion rather than a vacuous read.
     assert!(
         (mid_x - base_x).abs() < EPSILON,
         "reduced motion must not slide the leaving page ({mid_x} vs {base_x})"
@@ -1842,9 +1492,6 @@ fn the_bar_still_retitles_under_reduce_motion() {
     let mut h = Harness::themed(theme(true));
     expect_connection_controller().connect(mock_target());
 
-    // The bar's own crossfades collapse to `PatternSwitcher`'s fast linear
-    // cross-fade under `reduce_motion`; what must survive the collapse is the
-    // content swap itself.
     h.push("/sessions");
     assert_titled(&h, HOST);
     h.push("/settings");
@@ -1856,19 +1503,6 @@ fn the_bar_still_retitles_under_reduce_motion() {
     );
 }
 
-// Section 5 (the title crossfade staging two runs) is gone: the bar is
-// `frust_glyph::AppBarView` now, and its crossfade is Glyph's to test —
-// `assert_titled` above already exercises a live title change end to end.
-
-// ---------------------------------------------------------------------------
-// 6 — the stable-container invariant, at the shell boundary
-// ---------------------------------------------------------------------------
-//
-// `a_hidden_bar_routes_no_events_and_reserves_no_box` (the old floating-bar
-// hit-test tripwire) is gone: `/` never places the shell, so there is no
-// scaffold and so no bar to be mounted-but-invisible — impossible by
-// construction now, covered by `connect_carries_no_bar_at_all`.
-
 #[test]
 fn the_navigator_survives_the_bar_appearing_and_disappearing() {
     let _g = serial();
@@ -1876,10 +1510,6 @@ fn the_navigator_survives_the_bar_appearing_and_disappearing() {
     let mut h = Harness::mount();
     expect_connection_controller().connect(mock_target());
 
-    // A torn-down outer navigator loses its whole page stack, so `h.depth()`
-    // reads "the shell page reconciled in place" across placement, an
-    // in-shell push, and removal (`tests/shell_handoff.rs`: the same
-    // container-identity mechanism, on widget identity).
     let start_depth = h.depth();
     h.push("/sessions");
     assert!(h.has_bar());
@@ -1889,12 +1519,9 @@ fn the_navigator_survives_the_bar_appearing_and_disappearing() {
         "placing the shell is the one outer op"
     );
 
-    // In-shell push (sibling route, same `shell_route`): zero further outer ops.
     h.push("/settings");
     assert_eq!(start_depth + 1, h.depth(), "still the one shell page");
 
-    // A bare pop, not a back press (`/sessions`' press is a *question* now,
-    // section 3e) — the stack mutation a confirmed answer makes.
     h.tap_label(BACK);
     h.settle();
     h.state.nav.controller().pop();
@@ -1908,29 +1535,7 @@ fn the_navigator_survives_the_bar_appearing_and_disappearing() {
     assert!(!h.has_bar(), "…and the bar collapsed with it");
 }
 
-// ---------------------------------------------------------------------------
-// 7 — gone: the bar no longer floats
-// ---------------------------------------------------------------------------
-//
-// This section used to pixel-track the floating bar's own entrance/exit
-// (brand-mark `y`, conn-row dot, Sessions' full-surface tone) since nothing
-// else observed it, and to pin "a page's box never reflows". The scaffold
-// inverts that premise on purpose — `frust::scaffold` *does* reflow the body
-// around a mounted `app_bar` (R-B4-inset), which is the fix for the
-// double-inset bug this arc kills — and the bar's own entrance/exit/paint
-// order are `frust_glyph::AppBarView`'s to test now. What survives, above,
-// through the accessibility tree: bar presence per route (section 1),
-// retitling (section 2), overlay modality (3/3b/3c/3d), and the full
-// settings → sessions → connect round trip
-// (`settings_back_sessions_back_connect_retitles_the_bar_at_every_step`).
-
-// ---------------------------------------------------------------------------
-// 4 — the server switcher host (shell page as the live card) and its FAB
-// ---------------------------------------------------------------------------
-
-/// The FAB's accessible name (its tooltip).
 const SERVERS_FAB: &str = "Servers";
-/// The stage bar's accessible names, transcribed.
 const LOCK_CHIP: &str = "Lock keyring";
 const ADD_CHIP: &str = "add server";
 const CLOSE_CHIP: &str = "Close";
@@ -1943,7 +1548,6 @@ fn stage_is_open() -> bool {
     switcher().open.get_untracked()
 }
 
-/// Raise the stage the way the FAB does and run the loop to its parking point.
 fn open_stage(h: &mut Harness) {
     switcher().open();
     h.park();
@@ -2126,8 +1730,6 @@ fn the_stage_bars_lock_chip_locks_the_keyring_and_lands_on_connect() {
     assert_eq!(h.depth(), 1, "…landing on Connect");
 }
 
-/// On `/sessions` with Pro unlocked and [`SAVED_ENDPOINT`] remembered, its
-/// token in the unlocked keyring, then the stage open.
 fn stage_over_a_saved_server() -> Harness {
     let mut h = Harness::on_sessions();
     unlock_pro(&mut h);
@@ -2194,9 +1796,6 @@ fn selecting_a_peer_switches_the_server_and_the_stage_comes_down_on_it() {
     );
 }
 
-/// The label-row of the card chrome moves with the first open frame under
-/// motion and not under reduce-motion: read the FAB's on-screen centre in the
-/// first frame after the stage rose and again once settled.
 fn first_frame_shift(reduce_motion: bool) -> f64 {
     let mut h = Harness::themed(theme(reduce_motion));
     expect_connection_controller().connect(mock_target());
