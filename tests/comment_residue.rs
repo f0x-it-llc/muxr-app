@@ -1,49 +1,19 @@
-//! Comment-residue ratchet: a source-scan test locking `docs/CODE_STANDARDS.md`'s (the frust
-//! checkout's) Comment Conventions § shut for this app. A slimmed port of frust's own
-//! `crates/frust/tests/comment_residue_conformance.rs` — same scanning mechanics, narrowed to
-//! this app's two source roots (`src/`, `tests/`; this file itself excluded, see [`self_path`])
-//! plus one muxr-specific family the frust ratchet doesn't need: gate/G-ledger citations
-//! (`gate-rN`, standalone `G##`) — the device-gate review-round shorthand this repo's own
-//! commits use (e.g. `(gate-r9, G53)`).
+//! Comment-residue ratchet: fails when a comment in `src/` or `tests/` carries workflow residue
+//! (plan, task, review, gate, action-item, PR and requirement citations, work-tracker ids), an
+//! owner's name, an out-of-repository doc path, or a framework source citation. This file is
+//! excluded from its own scan.
 //!
-//! Comment-only, substring scan — no parser: for each line, the text from its first `//`
-//! onward, unless that `//` sits after an odd `"` count (a string-literal heuristic — the whole
-//! line is then invisible to this scan). A citation wrapped across a `//` line break (`(review`
-//! / `finding M1)`) is caught by also scanning each comment joined, pairwise, to a comment-only
-//! continuation line ([`continued_comment`]) — reported once, at the line the citation starts
-//! on, only when the next line isn't already a per-line failure on its own
-//! ([`wrapped_violation`]). Banned-pattern detection ([`banned_hits`]) yields byte spans; the
-//! allowlist ([`sanctioned_spans`]) exempts only a match's own span, not the whole line.
-//!
-//! Muxr has no `docs/LIMITATIONS.md`, so the reference's LIMITATIONS-id allowlist class is
-//! dropped here. Its other two sanctioned forms stay, both with real citations already in this
-//! tree: named semantic rules (`` R44-back ``, cited from `src/lib.rs`) and external-repo rev
-//! pins (`clean-signals`' `` rev `910f626` ``, per `Cargo.toml`'s dependency comment).
-//!
-//! **Known limitation**: this scan is comment-only by design — it never inspects a line with no
-//! `//` at all — so a stale reference sitting inside a string literal with no comment on the same
-//! line (e.g. an `assert!`/`panic!` message) is invisible to it, not just the in-comment
-//! string-literal case the heuristic above already excludes.
-//!
-//! # Gate/G-ledger precision ([`gate_hits`])
-//!
-//! `gate-rN` is unambiguous — no legitimate word starts `gate-r` followed by digits — and is
-//! always banned. A bare `G` plus 1-3 digits is not: this app embeds the `vt100` crate, whose
-//! own escape-sequence vocabulary designates character-set slots `G0`-`G3` (`shift-in`/
-//! `shift-out` select between them) — a real "legitimate identifier" collision a naive `G\d+`
-//! pattern would flag on sight. A standalone `G##` is therefore a hit only with a supporting
-//! signal: the word `gate` within [`GATE_WINDOW`] bytes before or after it
-//! ([`window_has_gate`], word-bounded so `gateway`/`delegate` never count but the `gate-r9` in
-//! `(gate-r9, G53)` does), or direct adjacency to another `G##` via a hyphenated range/list
-//! ([`adjacent_g_range`], e.g. `G44-G54`). Neither signal fires on a bare `G0`/`G1` charset
-//! citation standing alone.
+//! The scan reads a line from its first `//`, unless an odd `"` count precedes it, and also joins
+//! a comment to a comment-only next line so a wrapped citation is reported where it starts. Hits
+//! are byte spans: a named rule (`R44-back`) or rev pin (`` rev `910f626` ``) exempts only its own
+//! span. A bare `G0`-`G3` is `vt100` charset vocabulary, so a `G##` counts only beside the word
+//! `gate` or in a `G44-G54` range. A string literal with no `//` on its line is never inspected.
 
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// This crate's own root — `tests/`/`src/` both hang directly off it (unlike the frust
-/// workspace reference, this app's manifest dir *is* its scan root).
+/// This crate's own root — `tests/`/`src/` both hang directly off it.
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -271,6 +241,14 @@ const REVIEW_ROUND_REASON: &str = "review-round reference (`review round N`)";
 const DEVICE_PARITY_REASON: &str = "device-parity-round reference";
 const REQ_REASON: &str = "plan requirement number (`req N`) alongside a phase reference";
 const GATE_REASON: &str = "gate/G-ledger reference (`gate-r9`/`G53`)";
+const ACTION_ITEM_REASON: &str = "action-item reference (`action item 7`/`(action item)`)";
+const PR_REASON: &str = "pull-request number (`PR #12`/`pull request 12`)";
+const FR_REASON: &str = "requirement id (`FR-12`)";
+const TRACKER_ID_REASON: &str = "work-tracker id (`tsk_0000…`/`fplan_0000…`)";
+const OWNER_REASON: &str = "owner reference (`Ed`/`Ed's`)";
+const DOC_PATH_REASON: &str = "out-of-repository document path (`docs/ARCHITECTURE.md`)";
+const FRAMEWORK_SOURCE_REASON: &str =
+    "framework source citation (`crates/frust`/`frust-ui/src/`/`.rs:42`)";
 
 /// Pushes every banned plan-phase reference (dotted, hyphenated, or parenthesized/
 /// article-labelled bare int). `Phase N of the frame` (bare), an un-parenthesized pure float
@@ -594,9 +572,9 @@ fn adjacent_g_range(comment: &str, idx: usize, end: usize) -> bool {
     before_range || after_range
 }
 
-/// Pushes every `gate-rN` (always banned) and every standalone `G##` carrying a supporting
-/// signal (see module doc's Gate/G-ledger precision §). A bare `G0`-`G3` (this app's `vt100`
-/// charset-slot vocabulary) with neither signal is never flagged.
+/// Pushes every `gate-rN` (always banned) and every standalone `G##` with the word `gate` within
+/// [`GATE_WINDOW`] bytes or a `G##` neighbour in a hyphenated range. A bare `G0`-`G3` (this app's
+/// `vt100` charset-slot vocabulary) with neither signal is never flagged.
 fn gate_hits(comment: &str, out: &mut Vec<Hit>) {
     let lower = comment.to_ascii_lowercase();
     for idx in find_all(&lower, "gate-r") {
@@ -635,6 +613,172 @@ fn gate_hits(comment: &str, out: &mut Vec<Hit>) {
     }
 }
 
+/// Pushes every `action item` (or `action items`) that is numbered or parenthesized; prose about
+/// action items with neither marker is kept.
+fn action_item_hits(comment: &str, out: &mut Vec<Hit>) {
+    let lower = comment.to_ascii_lowercase();
+    const NEEDLE: &str = "action item";
+    for idx in find_all(&lower, NEEDLE) {
+        if !word_boundary_before(comment, idx) {
+            continue;
+        }
+        let mut end = idx + NEEDLE.len();
+        if comment[end..].starts_with('s') {
+            end += 1;
+        }
+        let rest = comment[end..].trim_start_matches([' ', '#', '-']);
+        let numbered = rest.starts_with(|c: char| c.is_ascii_digit());
+        let parenthesized = idx > 0 && comment.as_bytes()[idx - 1] == b'(';
+        if numbered || parenthesized {
+            out.push(Hit {
+                range: idx..end,
+                reason: ACTION_ITEM_REASON,
+            });
+        }
+    }
+}
+
+/// Pushes every `PR`/`pull request` followed by ` `, `-` or `#` and a number (`PR #12`, `PR-9`).
+fn pr_hits(comment: &str, out: &mut Vec<Hit>) {
+    let lower = comment.to_ascii_lowercase();
+    for needle in ["pr", "pull request"] {
+        for idx in find_all(&lower, needle) {
+            if !word_boundary_before(comment, idx) {
+                continue;
+            }
+            let after = &comment[idx + needle.len()..];
+            if !after.starts_with([' ', '-', '#']) {
+                continue;
+            }
+            let rest = after.trim_start_matches([' ', '-', '#']);
+            let skipped = after.len() - rest.len();
+            let digits = leading_digit_run(rest);
+            if digits > 0 && word_boundary_after(&rest[digits..]) {
+                out.push(Hit {
+                    range: idx..idx + needle.len() + skipped + digits,
+                    reason: PR_REASON,
+                });
+            }
+        }
+    }
+}
+
+/// Pushes every word-bounded `FR-` requirement id (`FR-12`, `FR-net-3`).
+fn fr_hits(comment: &str, out: &mut Vec<Hit>) {
+    for idx in find_all(comment, "FR-") {
+        if !word_boundary_before(comment, idx) {
+            continue;
+        }
+        let tail = comment[idx + 3..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .count();
+        if tail > 0 {
+            out.push(Hit {
+                range: idx..idx + 3 + tail,
+                reason: FR_REASON,
+            });
+        }
+    }
+}
+
+/// The work-tracker id prefixes [`tracker_id_hits`] recognises.
+const TRACKER_ID_PREFIXES: &[&str] = &[
+    "act_", "tsk_", "wav_", "rvr_", "prj_", "fplan_", "rsa_", "brd_", "pph_", "pdoc_",
+];
+
+/// Alphanumerics a tracker id carries after its `0000` lead.
+const TRACKER_ID_MIN_TAIL: usize = 16;
+
+/// Pushes every word-bounded tracker id: a [`TRACKER_ID_PREFIXES`] prefix, `0000`, then at least
+/// [`TRACKER_ID_MIN_TAIL`] alphanumerics. A bare prefix (`the tsk_ module`) is kept.
+fn tracker_id_hits(comment: &str, out: &mut Vec<Hit>) {
+    for prefix in TRACKER_ID_PREFIXES {
+        for idx in find_all(comment, prefix) {
+            if !word_boundary_before(comment, idx) {
+                continue;
+            }
+            let Some(after) = comment[idx + prefix.len()..].strip_prefix("0000") else {
+                continue;
+            };
+            let tail = after
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .count();
+            if tail >= TRACKER_ID_MIN_TAIL {
+                out.push(Hit {
+                    range: idx..idx + prefix.len() + 4 + tail,
+                    reason: TRACKER_ID_REASON,
+                });
+            }
+        }
+    }
+}
+
+/// True if byte offset `idx` sits inside a `` ` `` code span (an odd backtick count before it).
+fn in_code_span(comment: &str, idx: usize) -> bool {
+    comment[..idx].matches('`').count() % 2 == 1
+}
+
+/// Pushes every standalone `Ed` outside a code span; `Ed's` matches through its apostrophe,
+/// while `Edge`, `edit` and `ed@devbox` never do.
+fn owner_hits(comment: &str, out: &mut Vec<Hit>) {
+    for idx in find_all(comment, "Ed") {
+        if !word_boundary_before(comment, idx)
+            || !word_boundary_after(&comment[idx + 2..])
+            || in_code_span(comment, idx)
+        {
+            continue;
+        }
+        let possessive = usize::from(comment[idx + 2..].starts_with("'s")) * 2;
+        out.push(Hit {
+            range: idx..idx + 2 + possessive,
+            reason: OWNER_REASON,
+        });
+    }
+}
+
+/// Pushes every `docs/` path naming an UPPERCASE `.md` document — the project documents live
+/// outside this repository, whose own `docs/` holds only design mocks and icon masters.
+fn doc_path_hits(comment: &str, out: &mut Vec<Hit>) {
+    for idx in find_all(comment, "docs/") {
+        let rest = &comment[idx + "docs/".len()..];
+        if !rest.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        let name = rest
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+            .count();
+        if rest[name..].starts_with(".md") {
+            out.push(Hit {
+                range: idx..idx + "docs/".len() + name + ".md".len(),
+                reason: DOC_PATH_REASON,
+            });
+        }
+    }
+}
+
+/// Pushes every framework source citation: a `crates/frust` path, a `frust-<name>/src/` path,
+/// or a `.rs:<digits>` line reference.
+fn framework_source_hits(comment: &str, out: &mut Vec<Hit>) {
+    literal_hits(comment, "crates/frust", FRAMEWORK_SOURCE_REASON, out);
+    for idx in find_all(comment, "frust-") {
+        let rest = &comment[idx + "frust-".len()..];
+        let name = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .count();
+        if name > 0 && rest[name..].starts_with("/src/") {
+            out.push(Hit {
+                range: idx..idx + "frust-".len() + name + "/src/".len(),
+                reason: FRAMEWORK_SOURCE_REASON,
+            });
+        }
+    }
+    digit_suffixed_hits(comment, ".rs:", FRAMEWORK_SOURCE_REASON, out);
+}
+
 /// Every banned-pattern match in `comment`, sorted by position.
 fn banned_hits(comment: &str) -> Vec<Hit> {
     let mut hits = Vec::new();
@@ -655,6 +799,13 @@ fn banned_hits(comment: &str) -> Vec<Hit> {
     );
     req_with_phase_hits(comment, &mut hits);
     gate_hits(comment, &mut hits);
+    action_item_hits(comment, &mut hits);
+    pr_hits(comment, &mut hits);
+    fr_hits(comment, &mut hits);
+    tracker_id_hits(comment, &mut hits);
+    owner_hits(comment, &mut hits);
+    doc_path_hits(comment, &mut hits);
+    framework_source_hits(comment, &mut hits);
     hits.sort_by_key(|hit| (hit.range.start, hit.range.end));
     hits
 }
@@ -700,9 +851,7 @@ fn external_rev_spans(comment: &str) -> Vec<Range<usize>> {
     spans
 }
 
-/// Every sanctioned-citation span in `comment` — the two KEEP classes muxr uses (see module
-/// doc's Mechanics §; the reference's third class, `docs/LIMITATIONS.md` ids, has no analog
-/// here — this app has no such register).
+/// Every sanctioned-citation span in `comment`: named rules and external rev pins.
 fn sanctioned_spans(comment: &str) -> Vec<Range<usize>> {
     let mut spans = named_rule_spans(comment);
     spans.extend(external_rev_spans(comment));
@@ -723,9 +872,8 @@ fn scan_comment(comment: &str) -> Option<&'static str> {
         .map(|hit| hit.reason)
 }
 
-/// All violations in `contents` (one file's full text), `path:line: <reason> — see
-/// docs/CODE_STANDARDS.md § Comment Conventions. Line: <text>`. A wrapped citation reports at
-/// the line it starts on and prints both lines.
+/// All violations in `contents` (one file's full text) as `path:line: <reason>` plus the line. A
+/// wrapped citation reports at the line it starts on and prints both lines.
 fn violations_in(path: &Path, contents: &str) -> Vec<String> {
     let lines: Vec<&str> = contents.lines().collect();
     let mut failures = Vec::new();
@@ -803,6 +951,23 @@ mod scan_behavior {
             "the G20 finance ministers' communique",
             "the gatehouse-r9 fixture",
             "the R23 focus rule, still honored",
+            "SS2 reads one glyph from G2 and SS3 one from G3",
+            "the vt100 charset slots `G0`-`G3`",
+            "action items are listed in the tracker",
+            "prompt and print",
+            "the pr branch of the match",
+            "FRAME budget, not a requirement",
+            "the tsk_ prefix alone",
+            "tsk_0000short is too short to be an id",
+            "Edge-to-edge insets",
+            "edit the row in place",
+            "ssh ed@devbox from the rig",
+            "the `Ed` variant of the fixture enum",
+            "the mock in docs/splash.html",
+            "docs/redesign.html carries the tablet frames",
+            "docs/notes.md is lowercase",
+            "the frust-ui crate's button",
+            "src/lib.rs: the composition root",
         ];
         for example in keep {
             assert_eq!(scan_comment(example), None, "expected KEEP {example:?}");
@@ -836,6 +1001,30 @@ mod scan_behavior {
             "device rounds closed G44-G54 after verification",
             "the R23 focus rule — re-created FINDINGS #43",
             "clean-signals rev `910f626` — the task-12 constants",
+            "action item 7",
+            "(action item) pending",
+            "action items #3 and #4",
+            "fixed in PR #123",
+            "pull request 45",
+            "PR-9 follow-up",
+            "implements FR-12",
+            "see tsk_0000aaaabbbbccccdddd",
+            "plan fplan_0000AbCdEfGh12345678",
+            "the act_0000aaaabbbbccccdddd finding",
+            "wav_0000aaaabbbbccccdddd dispatch",
+            "rvr_0000aaaabbbbccccdddd round",
+            "prj_0000AAAABBBBCCCCDDDD",
+            "rsa_0000aaaabbbbccccdddd ledger",
+            "brd_0000aaaabbbbccccdddd board",
+            "pph_0000aaaabbbbccccdddd phase",
+            "pdoc_0000aaaabbbbccccdddd doc",
+            "as Ed asked",
+            "Ed's call on the timeout",
+            "see docs/APP_ARCHITECTURE.md",
+            "per docs/CODE_STANDARDS.md § Comments",
+            "mirrors crates/frust/src/router.rs",
+            "copied from frust-ui/src/button.rs",
+            "the clamp in widget.rs:142",
         ];
         for example in strip {
             assert!(
