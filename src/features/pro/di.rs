@@ -1,21 +1,6 @@
-//! `pro`'s composition-root wiring seam (see `docs/FEATURES_ARCHITECTURE.md`'s
-//! DI pattern). [`provide`] is called exactly once, from `crate::MuxrApp::init`,
-//! and publishes two app-scoped singletons: the entitlement store and the one
-//! [`ProController`] every gate reads. Both go through
-//! [`frust::provide_context`], so a screen resolves them the same way it
-//! resolves any other feature's.
-//!
-//! The repository is the store-backed [`PlayEntitlementRepository`] in a real
-//! run, and the in-memory [`MockEntitlementRepository`] in the two cases that
-//! cannot reach a store: a headless suite that flipped
-//! [`use_mock_entitlement_for_tests`], and a `mock-iap` build — the desktop
-//! preview of the purchase flow, since no desktop platform can sell. An
-//! unopenable preferences store instead falls back to
-//! [`UnavailableEntitlementRepository`] — this launch sells nothing and grants
-//! nothing, rather than failing outright (`connect`'s saved-servers precedent
-//! covers the failure-doesn't-block-launch shape, not the answer this store
-//! gives). With the test switch on, the concrete mock is published beside its
-//! trait object so a suite can script it ([`mock_entitlement`]).
+//! Composition-root wiring: `provide` runs once from `MuxrApp::init` and publishes the entitlement store and the one `ProController`.
+//! Real runs use the store-backed repository; tests and `mock-iap` use the mock; an unopenable
+//! preferences store falls back to the unavailable repository.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,14 +14,12 @@ use super::data::repositories::{
 use super::domain::repositories::EntitlementRepository;
 use super::presentation::controller::ProController;
 
-/// Type alias so the provide/expect pair can never drift apart.
 pub type SharedEntitlementRepository = Arc<dyn EntitlementRepository + Send + Sync>;
 
-/// Whether this process publishes the scriptable mock handle beside the
-/// repository. Flipped once per test process, before [`provide`] runs.
+/// Whether this process publishes the scriptable mock handle beside the repository.
 static USE_MOCK_ENTITLEMENT_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Test-only; idempotent; must run before `MuxrApp::init` to have any effect.
+/// Test-only; must run before `MuxrApp::init` to have any effect.
 pub fn use_mock_entitlement_for_tests() {
     USE_MOCK_ENTITLEMENT_FOR_TESTS.store(true, Ordering::Relaxed);
 }
@@ -46,8 +29,7 @@ pub fn provide() {
     provide_context(Arc::new(ProController::new(repository)));
 }
 
-/// Publishes the entitlement store and hands it back, so the controller below
-/// is built over the very same instance rather than a second lookup's.
+/// Hands the store back so the controller is built over the same instance.
 fn provide_entitlement_repository() -> SharedEntitlementRepository {
     let scripted = USE_MOCK_ENTITLEMENT_FOR_TESTS.load(Ordering::Relaxed);
     let source = select_source(scripted, cfg!(feature = "mock-iap"), flavor_marker());
@@ -76,7 +58,6 @@ pub enum EntitlementSource {
     Platform,
 }
 
-/// Build-time `MUXR_FLAVOR` marker (develop builds only); cargo tracks it.
 fn flavor_marker() -> Option<&'static str> {
     option_env!("MUXR_FLAVOR")
 }
@@ -89,8 +70,7 @@ pub fn is_develop_build() -> bool {
     is_develop_marker(flavor_marker())
 }
 
-/// Pure selection: tests and `mock-iap` keep precedence over the develop
-/// marker, which in turn beats the real store.
+/// Tests and `mock-iap` take precedence over the develop marker, which beats the real store.
 pub fn select_source(scripted: bool, mock_iap: bool, marker: Option<&str>) -> EntitlementSource {
     if scripted || mock_iap {
         EntitlementSource::Mock
@@ -101,13 +81,11 @@ pub fn select_source(scripted: bool, mock_iap: bool, marker: Option<&str>) -> En
     }
 }
 
-/// The real store, over the platform's own billing service and preferences.
 fn platform_entitlement_repository() -> SharedEntitlementRepository {
     match PlayEntitlementRepository::standard() {
         Ok(repository) => Arc::new(repository),
         Err(err) => {
-            // Only the cache behind it failed to open; the store is
-            // unavailable for this launch, so nothing is sold or granted.
+            // Only the cache failed to open: nothing is sold or granted this launch.
             log::warn!("pro entitlement: store unavailable for this launch: {err}");
             Arc::new(UnavailableEntitlementRepository)
         }
@@ -128,8 +106,6 @@ pub fn expect_pro_controller() -> Arc<ProController> {
     )
 }
 
-/// The scriptable mock behind the repository, when this process opted onto it
-/// via [`use_mock_entitlement_for_tests`]. `None` in a real app run.
 pub fn mock_entitlement() -> Option<Arc<MockEntitlementRepository>> {
     use_context::<Arc<MockEntitlementRepository>>()
 }

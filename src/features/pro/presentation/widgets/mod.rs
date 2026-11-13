@@ -1,14 +1,4 @@
-//! `pro`'s widget clusters — one file per cluster, like every other feature's
-//! `widgets/`.
-//!
-//! | Module | What it owns |
-//! |---|---|
-//! | [`upgrade_sheet`] | The paywall sheet both the Connect server-limit gate and the Settings Upgrade row raise |
-//!
-//! Unlike `sessions`'/`settings`' page-coupled widgets, this one is
-//! page-agnostic by necessity: it has no page of its own to couple to, and two
-//! screens raise it. It takes a controller plus an `Rc`-callback context
-//! instead (`docs/FEATURES_ARCHITECTURE.md`'s page-agnostic shape).
+//! Page-agnostic: this slice has no page, and two screens raise the sheet.
 
 pub mod upgrade_sheet;
 
