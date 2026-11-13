@@ -1046,29 +1046,51 @@ mod tests {
         );
     }
 
-    /// Selection feedback delivered to the test sink below.
-    static SINK_SELECTIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    thread_local! {
+        /// Selection feedback this thread's sink saw. `perform_haptic` runs the
+        /// sink synchronously on the caller's thread and every test has its
+        /// own thread, so parallel tests that reach `SelectionSeam::begin`
+        /// while the sink is installed cannot disturb this count.
+        static THREAD_SELECTIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
 
     fn count_selection(feedback: frust::HapticFeedback) {
         if feedback == frust::HapticFeedback::Selection {
-            SINK_SELECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            THREAD_SELECTIONS.with(|n| n.set(n.get() + 1));
         }
     }
 
-    /// The haptic reaches the framework sink exactly once per gesture start
-    /// (the sink is process state, so this is the only unit test touching it).
+    /// Clears the process-wide sink on drop, so a panic cannot leave it installed.
+    struct SinkGuard;
+
+    impl Drop for SinkGuard {
+        fn drop(&mut self) {
+            frust::set_haptic_sink(None);
+        }
+    }
+
+    /// One gesture start delivers exactly one `Selection` to the framework
+    /// sink. The sink is process state and no other test installs or clears
+    /// it, but other tests' `begin()` calls may run while it is installed;
+    /// the thread-local count ignores them. Should a concurrent writer ever
+    /// replace the sink between install and `begin`, the attempt sees 0 and is
+    /// retried; it can never see more than 1.
     #[test]
     fn a_selection_begin_fires_exactly_one_framework_haptic() {
-        use std::sync::atomic::Ordering;
-        SINK_SELECTIONS.store(0, Ordering::SeqCst);
-        frust::set_haptic_sink(Some(count_selection));
-
-        let emulator = Rc::new(RefCell::new(TerminalEmulator::new(20, 4, 0)));
-        let selection = SelectionSeam::new(emulator);
-        selection.begin();
-
-        frust::set_haptic_sink(None);
-        assert_eq!(SINK_SELECTIONS.load(Ordering::SeqCst), 1);
-        assert_eq!(selection.haptic_count(), 1);
+        let _guard = SinkGuard;
+        let mut seen = 0;
+        for _ in 0..50 {
+            THREAD_SELECTIONS.with(|n| n.set(0));
+            frust::set_haptic_sink(Some(count_selection));
+            let emulator = Rc::new(RefCell::new(TerminalEmulator::new(20, 4, 0)));
+            let selection = SelectionSeam::new(emulator);
+            selection.begin();
+            assert_eq!(selection.haptic_count(), 1);
+            seen = THREAD_SELECTIONS.with(std::cell::Cell::get);
+            if seen != 0 {
+                break;
+            }
+        }
+        assert_eq!(seen, 1);
     }
 }
