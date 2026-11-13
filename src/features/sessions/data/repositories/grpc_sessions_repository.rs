@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn a_two_pane_one_tab_layout_renders_its_own_counts_not_the_wires() {
         let layout = Layout {
-            tabs: vec![tab(vec![pane("btop"), pane("ed@precision:~")])],
+            tabs: vec![tab(vec![pane("btop"), pane("ed@workbench:~")])],
         };
         let session = map_session(
             info("zellij:dev", "dev", Backend::Zellij as i32, false),
@@ -885,8 +885,7 @@ mod tests {
 
     #[test]
     fn zero_wire_counts_with_a_three_tab_layout_yield_three_tabs() {
-        // Regression for act_000001a0876d5ad36zYz7IOo: ListSessions ships
-        // zeros for live sessions, so the GetLayout counts must win.
+        // ListSessions ships zeros for live sessions, so the GetLayout counts must win.
         let mut source = info("zellij:dev", "dev", Backend::Zellij as i32, false);
         source.tab_count = 0;
         source.pane_count = 0;
@@ -919,7 +918,7 @@ mod tests {
     fn layout_derived_from_sums_panes_across_every_tab_and_counts_tabs() {
         let layout = Layout {
             tabs: vec![
-                tab(vec![pane("btop"), pane("ed@precision:~")]),
+                tab(vec![pane("btop"), pane("ed@workbench:~")]),
                 tab(vec![pane("logs")]),
             ],
         };
@@ -933,13 +932,13 @@ mod tests {
         let layout = Layout {
             tabs: vec![tab(vec![
                 pane("btop"),
-                pane("ed@precision:~"),
+                pane("ed@workbench:~"),
                 pane("a third pane, dropped"),
             ])],
         };
         assert_eq!(
             layout_derived_from(layout).preview,
-            vec!["btop".to_string(), "ed@precision:~".to_string()]
+            vec!["btop".to_string(), "ed@workbench:~".to_string()]
         );
     }
 

@@ -1788,14 +1788,14 @@ mod tests {
     fn a_space_list_maps_its_id_name_and_per_connection_active_flag() {
         let spaces = map_spaces(SpaceList {
             spaces: vec![
-                wire_space("ws-1", "cupline", false),
+                wire_space("ws-1", "quill", false),
                 wire_space("ws-2", "forgekit", true),
             ],
         });
 
         assert_eq!(spaces.len(), 2);
         assert_eq!(spaces[0].id, "ws-1");
-        assert_eq!(spaces[0].name, "cupline");
+        assert_eq!(spaces[0].name, "quill");
         assert!(!spaces[0].selected);
         assert!(
             spaces[1].selected,

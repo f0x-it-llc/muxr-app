@@ -181,7 +181,7 @@ fn seed() -> Vec<Session> {
                 tabs: 4,
                 panes: 9,
                 third: ThirdMetric::Clients(0),
-                preview: vec!["btop".to_string(), "ed@precision:~".to_string()],
+                preview: vec!["btop".to_string(), "ed@workbench:~".to_string()],
                 tabs_detail: vec![
                     tab(
                         0,
@@ -189,7 +189,7 @@ fn seed() -> Vec<Session> {
                         true,
                         vec![
                             pane("btop", Some("/home/ed"), true, false),
-                            pane("ed@precision:~", Some("/home/ed"), false, false),
+                            pane("ed@workbench:~", Some("/home/ed"), false, false),
                             pane("scratch", None, false, true),
                         ],
                     ),
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(sessions[0].layout.third, ThirdMetric::Clients(0));
         assert_eq!(
             sessions[0].layout.preview,
-            vec!["btop".to_string(), "ed@precision:~".to_string()]
+            vec!["btop".to_string(), "ed@workbench:~".to_string()]
         );
 
         // Card 2 — idle: no pills at all, and a saved-tab count instead.

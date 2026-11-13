@@ -496,7 +496,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
         <div class="t-shell">
           <div class="shellbar">
             <div class="brand"><div class="mk"><span></span><span></span><span></span><span></span></div>muxr</div>
-            <div class="title">100.71.31.57</div>
+            <div class="title">100.64.0.7</div>
             <div class="grow"></div>
             <button class="slot" title="Server settings"><svg class="ic"><use href="#i-gear"/></svg></button>
           </div>
@@ -608,7 +608,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
             <div class="set-wrap">
               <div class="set-grid">
                 <div class="card"><div class="card-title">connection</div>
-                  <div class="srow"><span class="sico"><svg class="ic"><use href="#i-link"/></svg></span><div class="sbody"><div class="slabel">server url</div><div class="sval ok">100.71.31.57:50051</div></div></div>
+                  <div class="srow"><span class="sico"><svg class="ic"><use href="#i-link"/></svg></span><div class="sbody"><div class="slabel">server url</div><div class="sval ok">100.64.0.7:50051</div></div></div>
                   <div class="srow"><span class="sico"><svg class="ic"><use href="#i-shield"/></svg></span><div class="sbody"><div class="slabel">tls certificate</div><div class="sval warn">insecure (plaintext)</div></div><span class="chip warn">insecure</span></div>
                   <div class="srow"><span class="sico"><svg class="ic"><use href="#i-latency"/></svg></span><div class="sbody"><div class="slabel">latency</div><div class="sval">36ms</div></div></div>
                   <div class="srow"><span class="sico">z</span><div class="sbody"><div class="slabel">zellij version</div><div class="sval">0.45.1</div></div></div>
@@ -622,7 +622,7 @@ table.rules td{ padding:9px 10px; border-bottom:1px solid var(--border); color:v
                   <button class="dashed gated" id="newTok"><b>+</b> create new token</button>
                 </div>
                 <div class="card"><div class="card-title">saved servers</div>
-                  <div class="sv"><div class="tn">devbox <span class="chip cyan">credential saved</span><small>100.71.31.57:50051 · just now</small></div><div class="acts"><button class="btn danger" data-confirm="delcred">delete credential</button><button class="btn ghost" data-confirm="forget">forget</button></div></div>
+                  <div class="sv"><div class="tn">devbox <span class="chip cyan">credential saved</span><small>100.64.0.7:50051 · just now</small></div><div class="acts"><button class="btn danger" data-confirm="delcred">delete credential</button><button class="btn ghost" data-confirm="forget">forget</button></div></div>
                   <div class="sv"><div class="tn">prod<small>prod.corp.internal:443 · last week</small></div><div class="acts"><button class="btn ghost" data-confirm="forget">forget</button></div></div>
                 </div>
                 <div class="card"><div class="card-title">muxr pro</div>
@@ -754,14 +754,14 @@ function paywallHtml(forget){
 /* ===== 02 sessions ===== */
 var SESS=[
   {id:'zellij:dev', name:'dev', backend:'zellij', status:'running', tabs:4, panes:9, third:['clients',0], age:'2h', bell:false, current:true, previews:['nvim main.rs','cargo test'],
-   layout:{tab:'devbox', shape:'g2', panes:[{t:'nvim main.rs',f:true},{t:'btop'},{t:'ed@precision: ~'}]},
-   tree:[{n:'btop',panes:[{n:'btop'}]},{n:'minefit-api',panes:[{n:'cargo run',p:'~/api'},{n:'ed@minefit',p:'~'}]},{n:'devbox',cur:true,panes:[{n:'ed@devbox',p:'~',f:true},{n:'cargo test',p:'~/api'},{n:'lazygit',p:'~',fl:true}]},{n:'logs',bell:true,panes:[{n:'tail -f',p:'/var/log'}]}]},
+   layout:{tab:'devbox', shape:'g2', panes:[{t:'nvim main.rs',f:true},{t:'btop'},{t:'ed@workbench: ~'}]},
+   tree:[{n:'btop',panes:[{n:'btop'}]},{n:'lumen-api',panes:[{n:'cargo run',p:'~/api'},{n:'ed@lumen',p:'~'}]},{n:'devbox',cur:true,panes:[{n:'ed@devbox',p:'~',f:true},{n:'cargo test',p:'~/api'},{n:'lazygit',p:'~',fl:true}]},{n:'logs',bell:true,panes:[{n:'tail -f',p:'/var/log'}]}]},
   {id:'zellij:logs-monitor', name:'logs-monitor', backend:'zellij', status:'running', tabs:1, panes:2, third:['clients',1], age:'3d', bell:true, current:false, previews:['tail -f nginx','htop'],
    layout:{tab:'main', shape:'g11', panes:[{t:'tail -f nginx',f:true},{t:'htop'}]},
    tree:[{n:'main',cur:true,bell:true,panes:[{n:'tail -f nginx',p:'/var/log',f:true},{n:'htop',p:'~'}]}]},
-  {id:'herdr:herdr', name:'herdr', backend:'herdr', status:'running', tabs:2, panes:3, third:['spaces',3], age:'6d', bell:false, current:false, previews:['ed@devbox','ed@gohora'], space:'forgekit',
+  {id:'herdr:herdr', name:'herdr', backend:'herdr', status:'running', tabs:2, panes:3, third:['spaces',3], age:'6d', bell:false, current:false, previews:['ed@devbox','ed@harbor'], space:'forgekit',
    layout:{tab:'devbox', shape:'g1', panes:[{t:'ed@devbox: ~',f:true}]},
-   tree:[{n:'gohora',panes:[{n:'ed@gohora',p:'~/src'}]},{n:'devbox',cur:true,panes:[{n:'ed@devbox',p:'~',f:true}]}]},
+   tree:[{n:'harbor',panes:[{n:'ed@harbor',p:'~/src'}]},{n:'devbox',cur:true,panes:[{n:'ed@devbox',p:'~',f:true}]}]},
   {id:'zellij:jumping-peach', name:'jumping-peach', backend:'zellij', status:'resurrectible', tabs:0, panes:0, third:['tabs saved',0], age:'12d', bell:false, current:false, previews:[]}
 ];
 var selId='zellij:dev';
@@ -831,19 +831,19 @@ renderSessions();
 
 /* ===== 03 terminal ===== */
 var PANES={
-  p1:{name:'ed@cupline',path:'~',title:'ed@cupline: ~',focused:false,lines:[['p','ed@cupline:~$ whoami'],['o','ed'],['p','ed@cupline:~$ ',1]]},
-  p2:{name:'tail',path:'/var/log',title:'tail: /var/log/syslog',focused:false,exited:true,lines:[['p','$ tail -f /var/log/syslog'],['o','Sep 29 07:41:02 cupline sshd: Accepted publickey for ed'],['c','# process exited']]},
-  p3:{name:'journalctl',path:'-u muxrd',title:'journalctl: -f -u muxrd',focused:false,lines:[['p','$ journalctl -f -u muxrd'],['o','Sep 29 07:41:10 cupline muxrd[812]: client attached'],['c','# unit logs, live tail']]},
-  p4:{name:'ed@precision',path:'~',title:'ed@precision: ~',focused:false,lines:[['p','ed@precision:~$ btop'],['o','cpu 12% · mem 4.1/16gb · net 1.2mb/s'],['c','# live system monitor, refreshes every 2s'],['p','ed@precision:~$ ',1]]},
-  p5:{name:'ed@minefit',path:'~/api',title:'ed@minefit: ~/api',focused:false,lines:[['p','ed@minefit:~/api$ cargo run --release'],['o','Compiling minefit-api v0.3.2'],['g','Finished release [optimized] in 12.4s'],['p','ed@minefit:~/api$ ',1]]},
-  p6:{name:'ed@gohora',path:'~/src',title:'ed@gohora: ~/src',focused:false,lines:[['p','ed@gohora:~/src$ go build ./...'],['g','ok  gohora/cmd/server  0.842s'],['c','# no errors, 3 packages rebuilt'],['p','ed@gohora:~/src$ ',1]]},
+  p1:{name:'ed@quill',path:'~',title:'ed@quill: ~',focused:false,lines:[['p','ed@quill:~$ whoami'],['o','ed'],['p','ed@quill:~$ ',1]]},
+  p2:{name:'tail',path:'/var/log',title:'tail: /var/log/syslog',focused:false,exited:true,lines:[['p','$ tail -f /var/log/syslog'],['o','Sep 29 07:41:02 quill sshd: Accepted publickey for ed'],['c','# process exited']]},
+  p3:{name:'journalctl',path:'-u muxrd',title:'journalctl: -f -u muxrd',focused:false,lines:[['p','$ journalctl -f -u muxrd'],['o','Sep 29 07:41:10 quill muxrd[812]: client attached'],['c','# unit logs, live tail']]},
+  p4:{name:'ed@workbench',path:'~',title:'ed@workbench: ~',focused:false,lines:[['p','ed@workbench:~$ btop'],['o','cpu 12% · mem 4.1/16gb · net 1.2mb/s'],['c','# live system monitor, refreshes every 2s'],['p','ed@workbench:~$ ',1]]},
+  p5:{name:'ed@lumen',path:'~/api',title:'ed@lumen: ~/api',focused:false,lines:[['p','ed@lumen:~/api$ cargo run --release'],['o','Compiling lumen-api v0.3.2'],['g','Finished release [optimized] in 12.4s'],['p','ed@lumen:~/api$ ',1]]},
+  p6:{name:'ed@harbor',path:'~/src',title:'ed@harbor: ~/src',focused:false,lines:[['p','ed@harbor:~/src$ go build ./...'],['g','ok  harbor/cmd/server  0.842s'],['c','# no errors, 3 packages rebuilt'],['p','ed@harbor:~/src$ ',1]]},
   p7:{name:'ed@devbox',path:'/home/ed',title:'ed@devbox: ~',focused:true,lines:[['p','ed@devbox:~$ systemctl status muxrd'],['o','● muxrd.service - muxr gRPC daemon'],['g','   Active: active (running) since Sat 2026-09-26 10:31:23'],['o','   Main PID: 318886 (muxrd)'],['o','   Listen: 0.0.0.0:50051 (TLS · bearer)'],['c','# the rail follows focus; the grid is the one attached pane on herdr'],['p','ed@devbox:~$ ',1]]},
   p8:{name:'lazygit',path:'~',title:'lazygit: ~',focused:false,floating:true,lines:[['p','$ lazygit'],['s','  feature/tablet-layout  ·  3 staged, 1 modified'],['o','  M docs/tablet.html'],['c','# floating pane']]}
 };
 var SPACES=[
-  {id:'cupline',name:'cupline',tabs:[{id:'main',name:'main',last:true,panes:['p1']},{id:'logs',name:'logs',last:false,bell:true,panes:['p2','p3']}]},
+  {id:'quill',name:'quill',tabs:[{id:'main',name:'main',last:true,panes:['p1']},{id:'logs',name:'logs',last:false,bell:true,panes:['p2','p3']}]},
   {id:'zelli_mobile',name:'zelli_mobile',tabs:[]},
-  {id:'forgekit',name:'forgekit',tabs:[{id:'btop',name:'btop',last:false,panes:['p4']},{id:'minefit',name:'minefit-api',last:false,panes:['p5']},{id:'gohora',name:'gohora',last:false,panes:['p6']},{id:'devbox',name:'devbox',last:true,panes:['p7','p8']}]}
+  {id:'forgekit',name:'forgekit',tabs:[{id:'btop',name:'btop',last:false,panes:['p4']},{id:'lumen',name:'lumen-api',last:false,panes:['p5']},{id:'harbor',name:'harbor',last:false,panes:['p6']},{id:'devbox',name:'devbox',last:true,panes:['p7','p8']}]}
 ];
 var ctx={space:'forgekit', tab:'devbox'};
 var tBody=$('#tBody'), tTitle=$('#tTitle'), tCrumb=$('#tCrumb'), railTree=$('#railTree'), railMini=$('#railMini'), termFrame=$('#termFrame');
@@ -964,7 +964,7 @@ $('#newTok').onclick=function(){ if(setFrame.classList.contains('ro')){ roToast(
   m.querySelector('#tokSave').onclick=function(){ var name=m.querySelector('input').value.trim()||'new-token'; closeModal(setFrame); toast(setFrame,'Created '+name);
     setTimeout(function(){ openModal(setFrame,'<h4>token secret</h4><p>'+esc(name)+'</p><div style="background:var(--bg-raised);border:1px solid var(--border-bright);border-radius:var(--radius-md);padding:12px;font-size:12.5px;margin-top:10px;word-break:break-all">mx1_8f3a…c72e9b41</div><div class="acts col"><button class="btn primary" data-close>Copy secret</button><p style="text-align:center">This is the only time this secret is shown. Copy it now — it can\'t be viewed again.</p><button class="btn ghost" data-close>Done</button></div>', {sheet:true}); }, 600); }; };
 $$('[data-confirm]', setFrame).forEach(function(b){ b.onclick=function(){ var k=b.getAttribute('data-confirm');
-  if(k==='delcred') confirmDialog(setFrame,'Delete credential?','The credential saved for 100.71.31.57:50051 is removed from this device and its token revoked on the server. The saved server itself is kept.','Delete');
+  if(k==='delcred') confirmDialog(setFrame,'Delete credential?','The credential saved for 100.64.0.7:50051 is removed from this device and its token revoked on the server. The saved server itself is kept.','Delete');
   else confirmDialog(setFrame,'Forget server?','The saved profile for this endpoint is deleted, along with its saved credential. You will need its address and a token to connect again.','Forget'); }; });
 $('#planRow').onclick=function(){ openModal(setFrame, paywallHtml(null), {sheet:true}); };
 $('#restoreBtn').onclick=function(){ toast(setFrame,'No Muxr Pro purchase found for this account.'); };
