@@ -5215,7 +5215,8 @@ impl Biometrics {
 
 impl Drop for Biometrics {
     fn drop(&mut self) {
-        set_biometrics_available_for_tests(None);
+        // Back to the rig's default (`support::setup` pins the probe off), never the real probe.
+        set_biometrics_available_for_tests(Some(false));
     }
 }
 

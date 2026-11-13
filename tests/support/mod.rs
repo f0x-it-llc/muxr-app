@@ -474,6 +474,10 @@ pub fn setup() -> Owner {
     muxr::features::terminal::di::use_mock_terminal_for_tests();
     muxr::features::connect::di::use_mock_saved_servers_for_tests();
     muxr::features::connect::di::use_mock_credentials_for_tests();
+    // Biometric probe off: a Touch ID Mac would otherwise hand saved rows to the dock.
+    muxr::features::connect::presentation::controller::set_biometrics_available_for_tests(Some(
+        false,
+    ));
     muxr::features::pro::di::use_mock_entitlement_for_tests();
     muxr::links::set_link_opener_for_tests(|_url| {});
     muxr::fonts::use_offline_font_source_for_tests();
