@@ -1,26 +1,6 @@
-//! Headless behavior coverage for the `/sessions` screen
-//! (`src/features/sessions/**`) — no GPU, no window: a `RenderRoot` over the
-//! real page builder, driven through `tests/support`.
-//!
-//! `NavigatorWidget` publishes no semantics for its pages, so [`Harness`] mounts
-//! the screen as the bottom layer of a `Stack`, with an otherwise-empty
-//! navigator (the *same* `NavigatorController` the screen is handed) over it:
-//! the chrome stays reachable by label/value, while dialog/sheet/route pushes
-//! are exercised end to end through a real navigator, located by painted
-//! geometry ([`support::added`]). [`Harness::mount`] also installs the real app
-//! router over that navigator, so a push carries the real route table and
-//! session guard.
-//!
-//! No top bar is mounted (that's shell chrome now, `tests/navigation_motion.rs`'
-//! job, mounted through the real shell scaffold that reserves the bar's own
-//! band); this suite only owes the negative, that the screen grew no bar of
-//! its own back — this screen reserves no clearance either any more (the
-//! scaffold's `app_bar` slot owns that in the real app), so every geometric
-//! probe here is relative rather than absolute.
-//!
-//! Cards carry no buttons: a tap attaches, a long-press opens the management
-//! sheet. Every repository call is real async work on the UI-thread queue, so
-//! [`Harness::pump_until_values`] deadline-waits for a mutation.
+//! Headless behavior coverage for the `/sessions` screen, mounted as the bottom layer of a
+//! `Stack` under a real navigator so dialog, sheet and route pushes run end to end.
+//! Repository calls are real async work; `Harness::pump_until_values` deadline-waits.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -80,49 +60,22 @@ use support::{
     pointer, pump_frames, serial, settle_sized, setup, smallest, tap,
 };
 
-/// A point in the top-left corner — scrim on every overlay this screen pushes
-/// (the dialog centers its panel, the sheet anchors its own to the bottom).
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
-/// The panel gutter `glyph::dialog` and `ui::sheet` share, transcribed — a
-/// full-bleed child of either is laid out at the panel width minus twice this.
 const PANEL_PADDING: f64 = 20.0;
-/// `.sessions-list{padding:…16px}`, transcribed: a card spans the viewport
-/// minus twice this, which is how a test tells card chrome from everything
-/// else painted around it.
 const LIST_PAD_X: f64 = 16.0;
-/// A hairline border's path is inset half a stroke width on each side, so a
-/// recorded border's bounding box is this much narrower than the box it
-/// outlines (`frust-widgets`' own `BORDER_WIDTH`, transcribed).
 const ROW_BORDER_INSET: f64 = 1.0;
-/// `.sess-card{border-left:2px}`, transcribed: a **running** card paints its
-/// surface fill inset by the accent's width, an idle one doesn't paint the
-/// accent at all — the cheapest honest read on "this card is accented".
 const ACCENT_WIDTH: f64 = 2.0;
 /// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
-/// The scrolling list column's max width past
-/// `crate::responsive::WIDE_BREAKPOINT_PX` — the responsive width-clamp pass
-/// — transcribed (the constant itself is private to `presentation::pages`).
 const SESSIONS_CLAMP_WIDTH: f64 = 640.0;
-/// A landscape phone's height: wide enough to clamp, still Compact.
 const PHONE_LANDSCAPE_H: f64 = 390.0;
-/// The Tablet windows the master-detail suite lays out at, and a phone's.
 const FULL_TABLET: Size = Size::new(1024.0, 720.0);
 const COLLAPSED_TABLET: Size = Size::new(720.0, 720.0);
 const PHONE: Size = Size::new(390.0, 844.0);
 
-/// The seeded session names `data`'s mock repository ships — the redesign's
-/// three cards, in order.
 const SEEDED: [&str; 3] = ["dev", "jumping-peach", "herdr"];
-/// How many of those are *running* (the third card is idle).
 const RUNNING: usize = 2;
 
-// ---------------------------------------------------------------------------
-// Local harness helpers
-// ---------------------------------------------------------------------------
-
-/// A mock connect target. `offer_credential` decides whether the credential
-/// banner is offered on this connection.
 fn mock_target(offer_credential: bool) -> ConnectTarget {
     ConnectTarget {
         host: "mock.example".to_string(),
@@ -136,36 +89,26 @@ fn mock_target(offer_credential: bool) -> ConnectTarget {
     }
 }
 
-/// [`Harness::mount`], first publishing `metrics` into context when `Some` —
-/// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
-/// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     support::mount_with_metrics(metrics, Harness::mount)
 }
 
-/// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
-/// The screen, an overlay navigator over it, and everything a frame needs.
 struct Harness {
     nav: NavigatorController<AppState>,
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
     state: AppState,
     tcx: TextContext,
-    /// The size every frame lays out at.
     surface: Size,
 }
 
 impl Harness {
-    /// Mount the screen (see the [module docs](self) for the shape), leaving
-    /// the connection **disconnected** and the first load un-awaited.
     fn mount() -> Self {
         Harness::mount_over(None, support::surface())
     }
 
-    /// [`mount`](Self::mount) laid out at `surface`, over `repository` in
-    /// place of the seeded mock when one is given.
     fn mount_over(repository: Option<SharedSessionsRepository>, surface: Size) -> Self {
         Harness::mount_with(repository, None, surface)
     }
@@ -187,21 +130,14 @@ impl Harness {
             provide_context(preferences);
         }
         let nav: NavigatorController<AppState> = NavigatorController::new();
-        // Re-points `routes::app_nav()` at this fixture's own navigator, real
-        // route table and session guard included.
         let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
             any(Stack(vec![
-                // One controller plays both of the screen's navigators here
-                // (route stack + overlay host, two in production —
-                // `AppState::nav`/`overlays`), keeping every overlay a page of
-                // the one mounted navigator, drivable and locatable here.
                 any(sessions_page(screen_nav, logic_nav.clone())),
                 any(navigator(&overlay_nav, || {
-                    // Full-bleed and childless — see the module docs.
                     any(SizedBox::<AppState>(
                         Some(f64::INFINITY),
                         Some(f64::INFINITY),
@@ -221,7 +157,6 @@ impl Harness {
         harness
     }
 
-    /// Mount, connect (mock), and wait for the first session load to land.
     fn connected() -> Self {
         let mut harness = Harness::mount();
         expect_connection_controller().connect(mock_target(false));
@@ -229,7 +164,6 @@ impl Harness {
         harness
     }
 
-    /// One frame at the zero clock.
     fn frame(&mut self) -> RecScene {
         frame_sized(
             &mut self.root,
@@ -240,8 +174,6 @@ impl Harness {
         )
     }
 
-    /// Drive a pushed/popped overlay past the navigator's input-blocking
-    /// transition, returning the last frame's paint record.
     fn settle(&mut self) -> RecScene {
         settle_sized(
             &mut self.root,
@@ -252,10 +184,6 @@ impl Harness {
         )
     }
 
-    /// Settle, then deliver a pop's result: the navigator flushes a pusher's
-    /// `on_result` at the start of the first event pass **after** the pop's
-    /// rebuild, so a harmless `Move` is what actually hands the answer over
-    /// (`ui_substrate.rs`'s idiom).
     fn flush(&mut self) {
         self.settle();
         self.settle();
@@ -263,8 +191,6 @@ impl Harness {
             .event(&mut self.state, &pointer(PointerPhase::Move, SCRIM_POINT));
     }
 
-    /// Pump the UI-thread task queue and rebuild until `done` accepts the
-    /// harness, or fail at [`PUMP_DEADLINE`] rather than hang.
     fn pump_until(&mut self, what: &str, done: impl Fn(&Harness) -> bool) {
         let deadline = Instant::now() + PUMP_DEADLINE;
         while !done(self) {
@@ -280,20 +206,16 @@ impl Harness {
                 &mut self.tcx,
                 1,
             );
-            // `pump_frames` lays out at the default surface.
             if self.surface != support::surface() {
                 self.frame();
             }
         }
     }
 
-    /// [`pump_until`](Self::pump_until) over the rendered semantics values.
     fn pump_until_values(&mut self, what: &str, done: impl Fn(&[String]) -> bool) {
         self.pump_until(what, move |h| done(&node_values(&h.root)));
     }
 
-    /// Wait for the async session load to land (the screen renders every
-    /// seeded name).
     fn await_sessions(&mut self) {
         self.pump_until_values("the seeded sessions", |values| {
             SEEDED.iter().all(|name| values.iter().any(|v| v == name))
@@ -304,16 +226,11 @@ impl Harness {
         tap(&mut self.root, &mut self.state, point);
     }
 
-    /// Tap the first node whose printed text is `value` — how a test presses a
-    /// card (its name run) or the dashed new-session row, neither of which is
-    /// a labelled control any more.
     fn tap_value(&mut self, value: &str) {
         let point = self.center_of(value);
         self.tap(point);
     }
 
-    /// Tap the first node *labelled* `label` (a badge, a button, the top bar's
-    /// icon).
     fn tap_label(&mut self, label: &str) {
         let point = node_centers_by_label(&self.root, label)
             .first()
@@ -327,7 +244,6 @@ impl Harness {
         self.tap(point);
     }
 
-    /// Where the first node printing `value` sits.
     fn center_of(&self, value: &str) -> Point {
         node_centers_by_value(&self.root, value)
             .first()
@@ -340,8 +256,6 @@ impl Harness {
             })
     }
 
-    /// Long-press the card named `name` — the management sheet's one entry
-    /// point.
     fn long_press_card(&mut self, name: &str) {
         let point = self.center_of(name);
         long_press(
@@ -353,22 +267,16 @@ impl Harness {
         );
     }
 
-    /// Type `text` into whatever holds focus, one already-resolved character
-    /// event at a time (the shape a platform delivers).
     fn type_text(&mut self, text: &str) {
         for c in text.chars() {
             self.root.event(&mut self.state, &char_key(&c.to_string()));
         }
     }
 
-    /// Press a named key against the focused chain.
     fn press(&mut self, key: NamedKey) {
         self.root.event(&mut self.state, &named_key(key));
     }
 
-    /// How many session cards are on screen — counted by the card-width
-    /// surface fill each one paints, so the count never depends on which
-    /// *names* a test happens to have created.
     fn card_count(&mut self) -> usize {
         let scene = self.frame();
         card_backs(&scene).len()
@@ -381,11 +289,6 @@ impl Harness {
     }
 }
 
-/// One `.sess-card` surface fill per card. Every card — running or idle —
-/// reserves its 2px `border-left`, so its surface starts exactly
-/// [`ACCENT_WIDTH`] inside the list's left padding and spans the rest: that
-/// pair of numbers is what identifies a card among everything else painted,
-/// with no colour read at all.
 fn card_backs(scene: &RecScene) -> Vec<(Point, Size)> {
     let width = support::W - 2.0 * LIST_PAD_X - ACCENT_WIDTH;
     scene
@@ -399,10 +302,6 @@ fn card_backs(scene: &RecScene) -> Vec<(Point, Size)> {
         .collect()
 }
 
-/// The **accent** rects in `scene` — the full-width fill a card paints *under*
-/// its surface, and only when it is running. Counting these against
-/// [`card_backs`] is the cheapest honest read on "this card is accented and
-/// that one isn't", without asserting on an exact colour or alpha.
 fn accent_bars(scene: &RecScene) -> Vec<(Point, Size)> {
     let width = support::W - 2.0 * LIST_PAD_X;
     scene
@@ -415,8 +314,6 @@ fn accent_bars(scene: &RecScene) -> Vec<(Point, Size)> {
         .collect()
 }
 
-/// Open a dialog by tapping the node labelled `label`, then return the rects
-/// the dialog itself added to the frame.
 fn open_dialog_by_label(h: &mut Harness, label: &str) -> Chrome {
     let before = h.frame();
     h.tap_label(label);
@@ -424,7 +321,6 @@ fn open_dialog_by_label(h: &mut Harness, label: &str) -> Chrome {
     Chrome::diff(&before, &after)
 }
 
-/// …and by tapping the node printing `value` (a card, the dashed row).
 fn open_dialog_by_value(h: &mut Harness, value: &str) -> Chrome {
     let before = h.frame();
     h.tap_value(value);
@@ -432,8 +328,6 @@ fn open_dialog_by_value(h: &mut Harness, value: &str) -> Chrome {
     Chrome::diff(&before, &after)
 }
 
-/// Long-press the card named `name` and return the management sheet's own
-/// chrome.
 fn open_manage_sheet(h: &mut Harness, name: &str) -> Chrome {
     let before = h.frame();
     h.long_press_card(name);
@@ -441,8 +335,6 @@ fn open_manage_sheet(h: &mut Harness, name: &str) -> Chrome {
     Chrome::diff(&before, &after)
 }
 
-/// The chrome a pushed overlay added to the frame — the screen underneath is
-/// diffed out (see [`added`]).
 struct Chrome {
     rounded: Vec<(Point, Size)>,
     strokes: Vec<(Point, Size)>,
@@ -458,28 +350,18 @@ impl Chrome {
         }
     }
 
-    /// The overlay's own panel — the biggest surface it filled.
-    ///
-    /// Both channels, because the two overlays paint their panel differently: a
-    /// dialog's is a plain rounded rect, while the Glyph sheet's is a *path*
-    /// (only its top corners are rounded, which `fill_rounded_rect` cannot
-    /// express).
     fn panel(&self) -> (Point, Size) {
         let mut candidates = self.rounded.clone();
         candidates.extend(self.paths.iter().copied());
         largest(&candidates).expect("an overlay always paints its own panel")
     }
 
-    /// The overlay's full-content-width child: a dialog's name field, or the
-    /// first of a sheet's rows (see [`PANEL_PADDING`]).
     fn content_child(&self) -> (Point, Size) {
         let content_w = self.panel().1.width - 2.0 * PANEL_PADDING;
         by_width(&self.rounded, content_w)
             .unwrap_or_else(|| panic!("no full-width child in {:?}", self.rounded))
     }
 
-    /// **Every** full-content-width filled child, top to bottom — the
-    /// management sheet's non-destructive rows (`Attach`, then `Rename…`).
     fn content_rows(&self) -> Vec<(Point, Size)> {
         let content_w = self.panel().1.width - 2.0 * PANEL_PADDING;
         let mut rows: Vec<(Point, Size)> = self
@@ -492,15 +374,6 @@ impl Chrome {
         rows
     }
 
-    /// The sheet's destructive row — the last one, and the only one that
-    /// paints **no** fill (a Glyph danger button is a transparent box with an
-    /// error border, where its two neighbours are filled `Secondary` rows).
-    ///
-    /// Located among the borders rather than the fills, and by a width one
-    /// [`ROW_BORDER_INSET`] under the content width: a stroke's recorded
-    /// bounding box is its path's, which a border inset by half its own
-    /// hairline on each side makes exactly that much narrower than the box it
-    /// outlines.
     fn destructive_row(&self) -> (Point, Size) {
         let content_w = self.panel().1.width - 2.0 * PANEL_PADDING;
         let mut borders: Vec<(Point, Size)> = self
@@ -526,10 +399,6 @@ impl Chrome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 1 — the fixed server strip
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_conn_row_prints_the_connections_facts() {
     let _g = serial();
@@ -545,36 +414,21 @@ fn the_conn_row_prints_the_connections_facts() {
         values.iter().any(|v| v == "36ms"),
         "…and the live latency as its own trailing run: {values:?}"
     );
-    // The endpoint is the *bar's* now: printing it here too ran the two runs
-    // into each other on a phone-width strip, and the bar above already
-    // titles the connected host.
     assert!(
         !values.iter().any(|v| v.contains("mock.example")),
         "no endpoint anywhere in the strip: {values:?}"
     );
-    // The bar that titles the host (and the brand beside it) is the *shell's*
-    // now, not this screen's — `tests/navigation_motion.rs` owns those
-    // assertions. What must stay true here is that this screen mounts no bar
-    // of its own: nothing on it prints the brand wordmark.
     assert!(
         !values.iter().any(|v| v == "muxr"),
         "the screen no longer mounts a top bar of its own: {values:?}"
     );
 
-    // The TLS posture is a *badge* (a `Role::Status` node, hence a label). The
-    // mock connects with no verification — the one posture that skips
-    // certificate validation — and the redesign's `.warn-badge` is what it
-    // earns; a validated posture would print no chip at all.
     let labels = node_labels(&h.root);
     assert!(
         labels.iter().any(|l| l == "insecure"),
         "…and the insecure warning chip: {labels:?}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 2 — the cards
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_seeded_sessions_render_as_cards_with_their_own_third_metric() {
@@ -589,9 +443,6 @@ fn the_seeded_sessions_render_as_cards_with_their_own_third_metric() {
             "the seeded session {name:?} renders: {values:?}"
         );
     }
-    // The `.sess-meta` row: two fixed spans plus one that varies by what the
-    // session *is* — clients for a running zellij session, spaces for herdr,
-    // saved tabs for an idle one.
     for span in [
         "\u{25a3} 9 panes",
         "\u{25e7} 4 tabs",
@@ -604,12 +455,10 @@ fn the_seeded_sessions_render_as_cards_with_their_own_third_metric() {
             "the meta row prints {span:?}: {values:?}"
         );
     }
-    // The redesigned card has no creation line at all.
     assert!(
         !values.iter().any(|v| v.contains("created")),
         "no `created` line survives the redesign: {values:?}"
     );
-    // …and no per-card buttons: attach/rename/kill are gesture-driven now.
     let labels = node_labels(&h.root);
     for gone in ["Attach", "Rename", "Kill", "Switch", "+"] {
         assert!(
@@ -642,8 +491,6 @@ fn an_idle_card_carries_no_accent_and_no_pane_pills() {
         accent_bars(&scene)
     );
 
-    // Pane pills: the two running cards preview two each, the idle one draws
-    // no `.sess-panes` row at all.
     let values = node_values(&h.root);
     for pill in ["btop", "ed@workbench:~"] {
         assert!(
@@ -658,11 +505,6 @@ fn an_idle_card_carries_no_accent_and_no_pane_pills() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 2b — the agent strip
-// ---------------------------------------------------------------------------
-
-/// Mount over the seeded mock after `seed` adjusted it, connected and loaded.
 fn connected_with(seed: impl FnOnce(&MockSessionsRepository)) -> Harness {
     let mock = Arc::new(MockSessionsRepository::seeded());
     seed(&mock);
@@ -700,7 +542,6 @@ fn a_herdr_card_with_agents_renders_the_strip_and_the_needs_you_rollup() {
 
     let labels = node_labels(&h.root);
     let values = node_values(&h.root);
-    // One tile per seeded kind, the count, and the group's spoken summary.
     for tile in ["C", "X", "G"] {
         assert!(
             labels.iter().any(|l| l == tile),
@@ -714,7 +555,6 @@ fn a_herdr_card_with_agents_renders_the_strip_and_the_needs_you_rollup() {
             .any(|l| l == "4 agents: 1 needs you, 1 done, 1 working, 1 idle"),
         "summary line: {labels:?}"
     );
-    // Pills in order blocked, done, working, idle.
     let order: Vec<usize> = ["\u{25c9} 1", "\u{2713} 1", "\u{25cf} 1", "\u{25cb} 1"]
         .iter()
         .map(|p| position(&labels, p))
@@ -754,16 +594,12 @@ fn zero_count_pills_are_absent_and_an_unblocked_card_stays_running() {
 fn a_zellij_card_and_an_idle_card_render_no_strip() {
     let _g = serial();
     let _ambient = setup();
-    // Even a summary seeded onto the idle card draws nothing: the strip is
-    // gated on liveness, like the pane pills.
     let mut h = connected_with(|repo| {
         let some = Some(summary(1, 0, 1, 0, &["claude", "codex"]));
         repo.seed_agents_for_tests("zellij:jumping-peach", some);
     });
     h.frame();
 
-    // The seed's running zellij card carries no agents, so the one strip on
-    // screen is the herdr card's.
     let values = node_values(&h.root);
     assert_eq!(values.iter().filter(|v| v.ends_with(" agents")).count(), 1);
     assert!(values.iter().any(|v| v == "4 agents"), "{values:?}");
@@ -787,8 +623,6 @@ fn a_session_without_agents_renders_as_it_always_did() {
             .any(|v| v.contains("agents")),
         "no count text"
     );
-    // Same cards, same accents, but the strip's line is gone from the herdr
-    // card, so it is shorter.
     assert_eq!(card_backs(&scene_without).len(), SEEDED.len());
     assert_eq!(accent_bars(&scene_without).len(), RUNNING);
     let tallest = |scene: &RecScene| {
@@ -800,12 +634,6 @@ fn a_session_without_agents_renders_as_it_always_did() {
     assert!(tallest(&scene_with) > tallest(&scene_without));
 }
 
-// ---------------------------------------------------------------------------
-// 3 — tap = attach
-// ---------------------------------------------------------------------------
-
-/// Tap the first card and report the resulting page-stack depth plus the rects
-/// the pushed page added to the frame.
 fn tap_outcome(connected: bool) -> (usize, usize) {
     let mut h = Harness::mount();
     expect_connection_controller().connect(mock_target(false));
@@ -826,30 +654,16 @@ fn a_card_tap_pushes_the_terminal_route_and_the_guard_still_applies() {
     let _g = serial();
     let _ambient = setup();
 
-    // Sequential, not interleaved: each harness re-provides the app-scoped
-    // connection controller, so only the most recently mounted one is the live
-    // handle the route guard reads.
     let (connected_depth, _) = tap_outcome(true);
     let (guarded_depth, guarded_rects) = tap_outcome(false);
 
-    // `/terminal` resolves through the shell page, and only a route inside the
-    // shell places that scaffold — so the outer op identifies which route the
-    // push resolved to as exactly as any pixel would.
     assert_eq!(connected_depth, 2, "a card tap places the shell");
-    // The bounce lands on the route the outer navigator's root already is, so
-    // it applies **no** op: pushing there would stack a second copy of that
-    // page over the live one. The whole observable is that the frame the tap
-    // started on is still the frame.
     assert_eq!(guarded_depth, 1, "…and a bounced one pushes nothing");
     assert_eq!(
         guarded_rects, 0,
         "…leaving the frame it was tapped on untouched"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 4 — long-press = the management sheet (and never an attach)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_long_press_opens_the_management_sheet_without_attaching() {
@@ -860,15 +674,11 @@ fn a_long_press_opens_the_management_sheet_without_attaching() {
     let sheet = open_manage_sheet(&mut h, SEEDED[0]);
     assert_eq!(h.depth(), 2, "the sheet is pushed as its own page");
 
-    // Bottom-anchored: the panel's own bottom edge is the viewport's, where a
-    // dialog's panel floats clear of it.
     let (origin, size) = sheet.panel();
     assert!(
         (origin.y + size.height - support::H).abs() < EPSILON,
         "a sheet, not a dialog: {origin:?}/{size:?}"
     );
-    // Two ordinary rows (Attach, Rename…) plus the destructive one, which
-    // paints a border rather than a fill.
     assert_eq!(
         sheet.content_rows().len(),
         2,
@@ -877,9 +687,6 @@ fn a_long_press_opens_the_management_sheet_without_attaching() {
     );
     sheet.destructive_row();
 
-    // Exactly **one** page was pushed: had the press also fired the tap,
-    // `/terminal` would be on the stack too and dismissing the sheet would
-    // leave the navigator at depth 2 rather than back at the list.
     h.tap(SCRIM_POINT);
     h.flush();
     assert_eq!(h.depth(), 1, "a scrim tap dismisses it, and nothing else");
@@ -896,7 +703,6 @@ fn the_sheets_rename_row_round_trips() {
     let mut h = Harness::connected();
 
     let sheet = open_manage_sheet(&mut h, SEEDED[0]);
-    // Row order is the sheet's own: Attach, then Rename….
     let rename = sheet.content_rows()[1];
     let before = h.frame();
     h.tap(center(rename));
@@ -909,7 +715,6 @@ fn the_sheets_rename_row_round_trips() {
     );
 
     let field = dialog.content_child();
-    // Tap past the seeded text so the caret lands at its end, then append.
     h.tap(Point::new(
         field.0.x + field.1.width - 4.0,
         field.0.y + field.1.height / 2.0,
@@ -935,17 +740,6 @@ fn the_sheets_rename_row_round_trips() {
 
 #[test]
 fn the_rename_row_leaves_the_sheet_mounted_until_its_exit_completes_before_the_dialog_lands() {
-    // The chain pin: `sheet_action`'s Rename/Kill rows close through
-    // `SheetHandle::close_then` precisely because an unchained close-then-push
-    // would land the dialog *before* the sheet's own staged exit completes —
-    // racing its pop. One frame after the tap is where that race would show
-    // up: an unchained push lands synchronously (before any frame at all), so
-    // depth would already read the sheet-plus-dialog's `3` here; chained, the
-    // sheet is still mid-exit and the dialog has not landed yet, so depth is
-    // still the sheet's own `2`. Fail-then-pass verified by reasoning:
-    // reverting `sheet_action`'s Rename arm to a bare
-    // `sheet.close(); actions.open_rename_dialog(&id);` would push the dialog
-    // in the same rebuild the tap fires in, failing the assertion below.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
@@ -964,9 +758,6 @@ fn the_rename_row_leaves_the_sheet_mounted_until_its_exit_completes_before_the_d
          exit, the dialog not yet pushed"
     );
 
-    // Settling carries the chain to completion: the sheet pops, then the
-    // dialog it chained lands on top of the popped page — one page traded
-    // for another, so the depth the sheet itself sat at is unchanged.
     let after = h.settle();
     assert_eq!(
         h.depth(),
@@ -983,12 +774,10 @@ fn the_sheets_kill_row_confirms_first_then_removes_the_card() {
     let _ambient = setup();
     let mut h = Harness::connected();
 
-    // A dismissed confirmation kills nothing.
     kill_through_the_sheet(&mut h, SEEDED[0], false);
     assert_eq!(h.depth(), 1, "the scrim tap closed the dialog");
     assert_eq!(h.card_count(), SEEDED.len(), "…and nothing was killed");
 
-    // Confirming does.
     kill_through_the_sheet(&mut h, SEEDED[0], true);
     h.pump_until_values("the killed card to disappear", |values| {
         !values.iter().any(|v| v == SEEDED[0])
@@ -997,8 +786,6 @@ fn the_sheets_kill_row_confirms_first_then_removes_the_card() {
     assert_eq!(h.card_count(), SEEDED.len() - 1);
 }
 
-/// Long-press `name`, take the sheet's Kill… row, and either confirm the
-/// dialog it raises or dismiss it by scrim.
 fn kill_through_the_sheet(h: &mut Harness, name: &str, confirm: bool) {
     let sheet = open_manage_sheet(h, name);
     let kill = sheet.destructive_row();
@@ -1008,8 +795,6 @@ fn kill_through_the_sheet(h: &mut Harness, name: &str, confirm: bool) {
     let dialog = Chrome::diff(&before, &after);
 
     if confirm {
-        // The danger action is the smallest border the dialog painted (the
-        // panel's own being the other one).
         let action = smallest(&dialog.strokes).expect("the danger action strokes its border");
         h.tap(center(action));
     } else {
@@ -1018,10 +803,6 @@ fn kill_through_the_sheet(h: &mut Harness, name: &str, confirm: bool) {
     h.flush();
     pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 4);
 }
-
-// ---------------------------------------------------------------------------
-// 5 — create: the dashed row, and the empty state
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_dashed_row_creates_a_session() {
@@ -1049,12 +830,6 @@ fn the_dashed_row_creates_a_session() {
     );
 }
 
-/// `ui::dialogs::name_input_dialog`'s field composes through `glyph_dialog`'s
-/// `.content()` slot, so it gets the framework's dead-space blur: a `Down` on
-/// the dialog's own dead panel space ends the field's IME session without
-/// closing the dialog, and a second tap re-engages it. The same pin as
-/// `tests/settings.rs`'s (New Token dialog); `panel.origin + (2, 2)` sits
-/// inside `PANEL_PADDING`, above every child.
 #[test]
 fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     let _g = serial();
@@ -1111,8 +886,6 @@ fn killing_every_session_shows_the_empty_state_and_creates_from_it() {
     );
     assert_eq!(h.card_count(), 0, "…and no cards");
 
-    // The empty state's own create action is the other of the screen's two
-    // create entry points (the dashed row is gone with the list).
     let dialog = open_dialog_by_label(&mut h, "+ new session");
     h.tap(center(dialog.content_child()));
     h.type_text("first");
@@ -1127,14 +900,6 @@ fn killing_every_session_shows_the_empty_state_and_creates_from_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 6 — the settings slot moved out (see `tests/navigation_motion.rs`)
-// ---------------------------------------------------------------------------
-
-/// The `⚙` that reaches `/settings` is the *shell bar*'s trailing action now
-/// (`muxr::routes::BarAction::Settings`), not this screen's — so it must not be
-/// reachable from anything this screen mounts. Its behavior is asserted in
-/// `tests/navigation_motion.rs`, where the bar actually lives.
 #[test]
 fn the_screen_carries_no_settings_affordance_of_its_own() {
     let _g = serial();
@@ -1148,15 +913,6 @@ fn the_screen_carries_no_settings_affordance_of_its_own() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 7 — the save-credential offer is NOT this screen's
-// ---------------------------------------------------------------------------
-
-/// The offer's title, as this screen's banner used to expose it (`glyph::alert`
-/// label = title). Kept as the thing this screen must *not* paint: the same
-/// words are the Connect dialog's title now (`tests/connect.rs`' own offer
-/// section), and this is the regression tripwire against a second copy of the
-/// question growing back here.
 const OFFER_TITLE: &str = "Save this server?";
 
 #[test]
@@ -1164,9 +920,6 @@ fn a_pending_credential_offer_paints_nothing_on_this_screen() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
-    // A connection that raised an offer, exactly as a first connect does — the
-    // signal is app-scoped and outlives the redirect, so it is still pending
-    // while this screen renders.
     expect_connection_controller().connect(mock_target(true));
     h.await_sessions();
 
@@ -1216,13 +969,6 @@ fn this_screen_never_touches_the_pending_offer() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 8 — responsive width-clamp pass
-// ---------------------------------------------------------------------------
-
-/// [`card_backs`]'s clamp-aware sibling: a card's surface fill, generalized
-/// over the box the list column is actually laid out at (`card_backs` bakes
-/// in `support::W`, which the clamp deliberately narrows).
 fn card_backs_in(scene: &RecScene, left: f64, width: f64) -> Vec<(Point, Size)> {
     let card_width = width - ACCENT_WIDTH;
     scene
@@ -1240,8 +986,6 @@ fn card_backs_in(scene: &RecScene, left: f64, width: f64) -> Vec<(Point, Size)> 
 fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
     let _g = serial();
     let _ambient = setup();
-    // A phone on its side: wide, but its short side keeps it Compact (the
-    // 800×600 default surface would be a Tablet window).
     let mut h = mount_with_metrics(Some(support::metrics_at(support::W, PHONE_LANDSCAPE_H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
@@ -1257,18 +1001,6 @@ fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
         "every seeded card still renders, just narrower and centered"
     );
 
-    // The conn-row strip is the module's deliberate exception: it stays
-    // full-bleed regardless of the list column's own clamp (see
-    // `SESSIONS_CLAMP_WIDTH`'s doc in `presentation::pages`). The strip's
-    // panel itself paints no fill (`Color::TRANSPARENT`, so nothing lands in
-    // `scene.rounded` for it directly), but its leading success dot
-    // (`widgets::server_strip::DOT`-sized, the one 7×7 rounded fill in this
-    // frame) is painted at the strip's own `STRIP_PAD_X` — unaffected by any
-    // centering
-    // margin — which is exactly the full-bleed proof. The dot sits centered
-    // in the heartbeat's own ring slot rather than flush against that
-    // padding, so the slot's half-inset comes into it; all three numbers are
-    // transcribed from the build, like every other constant here.
     const STRIP_PAD_X: f64 = 16.0;
     const DOT: f64 = 7.0;
     const RING_SLOT: f64 = 20.0;
@@ -1288,9 +1020,6 @@ fn wide_metrics_clamp_and_center_the_list_column_but_not_the_conn_row_strip() {
 fn narrow_metrics_leave_the_list_column_unclamped_like_no_metrics_at_all() {
     let _g = serial();
     let _ambient = setup();
-    // Explicit narrow metrics, even though the harness still paints at the
-    // full-width default surface — proving the branch keys on the
-    // *published* width, not the paint surface.
     let mut h = mount_with_metrics(Some(support::metrics_at(400.0, support::H)));
     expect_connection_controller().connect(mock_target(false));
     h.await_sessions();
@@ -1304,15 +1033,6 @@ fn narrow_metrics_leave_the_list_column_unclamped_like_no_metrics_at_all() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 9 — read-only gating (create/rename/kill disable; attach doesn't)
-// ---------------------------------------------------------------------------
-
-/// Flipping [`muxr::connection::ConnectionController::is_read_only`] directly
-/// is enough to drive this — the mock backend's own `connect` always answers
-/// `is_read_only: false` (`connection`'s module docs), so a suite that needs
-/// the read-only branch writes the signal itself, exactly the seam a real
-/// read-only credential's `Login` response would flip.
 #[test]
 fn read_only_disables_create_and_the_sheets_rename_and_kill_rows() {
     let _g = serial();
@@ -1321,8 +1041,6 @@ fn read_only_disables_create_and_the_sheets_rename_and_kill_rows() {
     expect_connection_controller().is_read_only.set(true);
     h.frame();
 
-    // The dashed row is still on screen (same label, just dimmed) — a tap
-    // opens nothing.
     let before = h.frame();
     h.tap_value("new session");
     let after = h.settle();
@@ -1332,12 +1050,6 @@ fn read_only_disables_create_and_the_sheets_rename_and_kill_rows() {
         "…and paints no new chrome"
     );
 
-    // The management sheet: Rename…/Kill… are still labelled rows — a
-    // `Ghost` button paints no fill at rest (`frust-widgets`' own
-    // `StylePaint`), so a disabled row vanishes from `content_rows`'s
-    // fill-based geometric scan; locate them by label instead, the same way
-    // `open_dialog_by_label` already does for the empty state's own action.
-    // Attach is untouched by read-only.
     open_manage_sheet(&mut h, SEEDED[0]);
     let labels = node_labels(&h.root);
     assert!(labels.iter().any(|l| l == "Attach"), "{labels:?}");
@@ -1389,12 +1101,6 @@ fn read_only_leaves_the_empty_states_own_create_action_disabled_too() {
     assert!(added(&before.rounded, &after.rounded).is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// 10 — poll pile-up and stale-overwrite: at the controller level, no widget
-// tree needed, since both hazards live entirely in `SessionsController`'s own
-// claim/generation bookkeeping.
-// ---------------------------------------------------------------------------
-
 /// A minimal [`Session`], distinguishable only by `name` — the one field
 /// either test below reads.
 fn stub_session(name: &str) -> Session {
@@ -1418,9 +1124,6 @@ fn stub_session(name: &str) -> Session {
     }
 }
 
-/// A [`SessionsRepository`] that only counts its own `list_sessions` calls —
-/// the observable [`a_tick_mid_flight_does_not_spawn_a_second_poll_refresh`]
-/// asserts on.
 struct CountingSessionsRepo {
     calls: AtomicU32,
 }
@@ -1458,11 +1161,6 @@ impl SessionsRepository for CountingSessionsRepo {
     }
 }
 
-/// A tick arriving while the previous one's poll-triggered refresh is still
-/// outstanding is skipped, not stacked on top — the confirmed pile-up defect:
-/// without the in-flight claim, an RPC round trip slower than the poll's own
-/// period lets every later tick add another full fan-out to the ones still
-/// running.
 #[tokio::test]
 async fn a_tick_mid_flight_does_not_spawn_a_second_poll_refresh() {
     let repo = Arc::new(CountingSessionsRepo::new());
@@ -1492,11 +1190,6 @@ async fn a_tick_mid_flight_does_not_spawn_a_second_poll_refresh() {
     );
 }
 
-/// A hand-rolled [`SessionsRepository`] whose two calls race deterministically
-/// — `MockSessionsRepository`'s own latency is one fixed constant with no seam
-/// to make one call outrun another, so the staleness-guard test below drives
-/// this instead. The first call ("older") sleeps long enough that the second
-/// ("newer") both starts and finishes first.
 struct RaceSessionsRepo {
     calls: AtomicU32,
 }
@@ -1535,22 +1228,10 @@ impl SessionsRepository for RaceSessionsRepo {
     }
 }
 
-/// An older, slower refresh that completes *after* a newer, faster one must
-/// not clobber it — the confirmed overwrite defect: `sessions` is
-/// last-writer-wins, so without the generation guard whichever round trip
-/// happens to land last wins regardless of which one was actually requested
-/// last.
 #[tokio::test]
 async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it() {
     let controller = SessionsController::new(Arc::new(RaceSessionsRepo::new()));
 
-    // `join!` polls its two arguments in the order written: the first
-    // `refresh` bumps the generation and immediately suspends on its own
-    // longer delay, then the second bumps past it and finishes first, on a
-    // shorter one — reproducing the race deterministically rather than
-    // depending on real network jitter (`src/net/client.rs`'s own
-    // `concurrent_reconnects_are_single_flight` test relies on the same
-    // left-to-right first-poll ordering).
     tokio::join!(controller.refresh(), controller.refresh());
 
     let names: Vec<String> = controller
@@ -1566,12 +1247,6 @@ async fn a_slow_stale_refresh_completing_after_a_newer_one_does_not_clobber_it()
     );
 }
 
-// ---------------------------------------------------------------------------
-// A new connection restarts the screen: the old server's list never lingers
-// ---------------------------------------------------------------------------
-
-/// `restart()` drops an in-flight refresh's late reply (the old server's), clears the
-/// selection, and the kicked first load is what lands.
 #[test]
 fn a_restart_ignores_the_old_generations_late_reply_and_clears_the_selection() {
     use frust_reactive::ReactiveRuntime;
@@ -1585,8 +1260,6 @@ fn a_restart_ignores_the_old_generations_late_reply_and_clears_the_selection() {
     let controller = Arc::new(SessionsController::new(Arc::new(RaceSessionsRepo::new())));
     controller.select("stale");
     runtime.block_on(async {
-        // The first read (call 0) is the slow "stale" one; the restart lands
-        // while it is parked, so its reply carries an older generation.
         let late = {
             let controller = Arc::clone(&controller);
             async move { controller.refresh().await }
@@ -1623,11 +1296,8 @@ fn a_restart_ignores_the_old_generations_late_reply_and_clears_the_selection() {
     assert_eq!(names, vec!["fresh".to_string()]);
 }
 
-/// A repository whose list is swapped between connections.
 struct SwitchableRepo {
     names: Mutex<Vec<String>>,
-    /// While set, a list read parks until [`open`](Self::open) — so a test can look at the
-    /// screen between a switch and its first load landing.
     gated: std::sync::atomic::AtomicBool,
     release: tokio::sync::Notify,
 }
@@ -1683,7 +1353,6 @@ impl Drop for RainOn {
     }
 }
 
-/// A harness over a [`SwitchableRepo`] listing `names`, connected and showing `wait_for`.
 fn switchable(names: &[&str], wait_for: &str) -> (Harness, Arc<SwitchableRepo>) {
     let repo = Arc::new(SwitchableRepo {
         names: Mutex::new(names.iter().map(|n| n.to_string()).collect()),
@@ -1726,7 +1395,6 @@ fn switching_servers_in_one_frame_replaces_the_old_hosts_cards() {
     assert_only_beta(&mut h);
 }
 
-/// The real `switch_to` shape: the teardown lands in one frame, the dial in a later one.
 #[test]
 fn switching_servers_across_frames_replaces_the_old_hosts_cards_and_selection() {
     let _g = serial();
@@ -1743,9 +1411,6 @@ fn switching_servers_across_frames_replaces_the_old_hosts_cards_and_selection() 
         "the screen is still mounted, showing host A's last list"
     );
 
-    // Host B's first load is held open, so the frames after the dial show only what the
-    // restart itself did (the poll cannot run: its cadence is seconds of wall time, and it
-    // is armed only by a loaded list).
     set_names(&repo, &["beta-one"]);
     repo.gated.store(true, Ordering::SeqCst);
     connection.connect(mock_target(false));
@@ -1823,7 +1488,6 @@ fn a_switch_replays_the_loading_rain_and_the_new_first_load_releases_it() {
 struct StageClock(Instant);
 
 impl StageClock {
-    /// Pins the clock and walks the stage through open then closed, so the close tail runs.
     fn closing() -> Self {
         let at = Instant::now();
         set_stage_clock_for_tests(Some(at));
@@ -1844,8 +1508,6 @@ impl Drop for StageClock {
     }
 }
 
-/// Pumps frames for `wall` of real time (the deferred arm polls on a real timer) and returns
-/// how many builds carried the rain overlay meanwhile.
 fn rain_builds_over(h: &mut Harness, wall: Duration) -> usize {
     let before = rain_overlay_builds_for_tests();
     let end = Instant::now() + wall;
@@ -1858,7 +1520,6 @@ fn rain_builds_over(h: &mut Harness, wall: Duration) -> usize {
     rain_overlay_builds_for_tests() - before
 }
 
-/// Lets the first rain run out on a synthetic clock, then holds host B's list open.
 fn rain_released_then_gated(h: &mut Harness, repo: &SwitchableRepo) {
     let mut clock = 0.0;
     let mut runs = h.frame().glyph_runs;
@@ -1986,25 +1647,15 @@ fn a_second_switch_cancels_the_pending_deferred_arm() {
     );
 }
 
-/// Glyph runs above which a frame is the dense rain (`sessions_loading`'s `DENSE_RUNS`).
 const RAIN_RUNS: usize = 100;
 
-// ---------------------------------------------------------------------------
-// The Tablet detail's agent list is controller state: fetched on a selection
-// change and on every poll tick while the detail shows it.
-// ---------------------------------------------------------------------------
-
-/// The one live herdr session [`AgentsRepo`] lists.
 const AGENTS_SESSION: &str = "herdr:agents";
 
-/// A repository with one live session whose roll-up names two agents, and a
-/// scriptable agent list behind it.
 struct AgentsRepo {
     agents: Mutex<Vec<SessionAgent>>,
     fail: std::sync::atomic::AtomicBool,
     calls: AtomicU32,
     lists: AtomicU32,
-    /// When set, the next agents read parks until [`release`](Self::release) is notified.
     stall: std::sync::atomic::AtomicBool,
     release: tokio::sync::Notify,
 }
@@ -2091,8 +1742,6 @@ fn agent_rows(controller: &SessionsController) -> Vec<(u32, AgentStatus)> {
         .collect()
 }
 
-/// A loaded controller over `repo`, its detail visible, with the agents
-/// session selected and its first agent read landed.
 async fn selected_with_agents(repo: &Arc<AgentsRepo>) -> Arc<SessionsController> {
     let controller = Arc::new(SessionsController::new(
         Arc::clone(repo) as SharedSessionsRepository
@@ -2104,7 +1753,6 @@ async fn selected_with_agents(repo: &Arc<AgentsRepo>) -> Arc<SessionsController>
     controller
 }
 
-/// One poll tick, run to completion.
 async fn tick(controller: &SessionsController) {
     assert!(controller.take_poll_tick(), "the poll is armed");
     controller.refresh_from_poll().await;
@@ -2263,17 +1911,6 @@ fn a_visible_edge_with_a_selected_session_fetches_the_agents_without_a_tick() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 11 — the session-poll cadence is read live, not loaded once per mount:
-// `resolve_poll_interval` is the one seam both `pages::spawn_cadence_loop`
-// instances (the session-list poll and the ping heartbeat) call before every
-// sleep, so proving *it* re-reads live proves both loops do — no widget tree
-// needed, same "controller level" shape section 10 uses.
-// ---------------------------------------------------------------------------
-
-/// A [`PreferencesRepository`] whose every method fails — what
-/// [`a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop`]
-/// drives [`resolve_poll_interval`] against.
 struct FailingPreferencesRepo;
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -2295,9 +1932,6 @@ impl PreferencesRepository for FailingPreferencesRepo {
     }
 }
 
-/// The shipped default (`layout_refresh_secs: 3`) resolves to the 3-second
-/// pin every existing device-gate expectation assumes — unchanged by the
-/// live-re-read rework.
 #[tokio::test]
 async fn the_default_pref_resolves_to_the_three_second_pin() {
     let preferences: SharedPreferencesRepository = Arc::new(MockPreferencesRepository::seeded());
@@ -2307,9 +1941,6 @@ async fn the_default_pref_resolves_to_the_three_second_pin() {
     assert_eq!(interval, Duration::from_secs(u64::from(POLL_PERIOD_SECS)));
 }
 
-/// Changing the pref mid-mount changes the *next* scheduled interval — for
-/// both loops, since both re-resolve through this exact seam before every
-/// sleep (see the section header).
 #[tokio::test]
 async fn changing_the_pref_mid_mount_changes_the_next_scheduled_interval_for_both_loops() {
     let preferences: SharedPreferencesRepository = Arc::new(MockPreferencesRepository::seeded());
@@ -2321,8 +1952,6 @@ async fn changing_the_pref_mid_mount_changes_the_next_scheduled_interval_for_bot
         "the shipped default, before any settings edit"
     );
 
-    // The settings screen's own picker write — a live edit landing while
-    // Sessions is already mounted underneath it.
     preferences
         .save_poll_prefs(PollPrefs {
             layout_refresh_secs: 10,
@@ -2339,9 +1968,6 @@ async fn changing_the_pref_mid_mount_changes_the_next_scheduled_interval_for_bot
     );
 }
 
-/// A preferences-repository read failure falls back to the fixed default
-/// rather than propagating — the loop that scheduled this tick keeps
-/// running on the next one instead of dying.
 #[tokio::test]
 async fn a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop() {
     let preferences: SharedPreferencesRepository = Arc::new(FailingPreferencesRepo);
@@ -2351,12 +1977,6 @@ async fn a_pref_read_failure_falls_back_to_the_default_without_killing_the_loop(
     assert_eq!(interval, Duration::from_secs(u64::from(POLL_PERIOD_SECS)));
 }
 
-// ---------------------------------------------------------------------------
-// 12 — Tablet master-detail: a card tap selects, the detail pane shows it
-// ---------------------------------------------------------------------------
-
-/// Mount at `size` (published as the window's metrics too) over `repository`,
-/// then connect.
 fn sized(size: Size, repository: Option<SharedSessionsRepository>) -> Harness {
     let metrics = support::metrics_at(size.width, size.height);
     let mut h =
@@ -2378,7 +1998,6 @@ fn has_value(h: &Harness, value: &str) -> bool {
     count_values(h, value) > 0
 }
 
-/// A stat card's printed value, read from its semantics description.
 fn stat_value(h: &Harness, label: &str) -> Option<String> {
     h.root
         .semantics()
@@ -2388,8 +2007,6 @@ fn stat_value(h: &Harness, label: &str) -> Option<String> {
         .and_then(|(_, node)| node.description().map(str::to_string))
 }
 
-/// Tap the **last** node printing `value` — the detail pane sits after the
-/// list column, so its copy of a repeated title is the later one.
 fn tap_last_value(h: &mut Harness, value: &str) {
     let point = *node_centers_by_value(&h.root, value)
         .last()
@@ -2421,7 +2038,6 @@ fn a_tablet_card_tap_selects_it_and_the_detail_header_names_it() {
         "the header's actions carry attach: {labels:?}"
     );
     assert!(!has_label(&h, "Select a session"));
-    // The second seeded card is the resurrectible one.
     assert!(has_label(&h, "\u{2192} attach to resurrect"), "{labels:?}");
     assert!(has_value(&h, "saved, not running"));
     let values = node_values(&h.root);
@@ -2456,13 +2072,11 @@ fn the_tabs_to_panes_card_opens_the_focused_tab_on_its_pane_pills() {
         !has_value(&h, "cargo watch") && !has_value(&h, "journalctl"),
         "only the focused tab is open"
     );
-    // The counts are the layout summary's, not a wire zero.
     assert_eq!(stat_value(&h, "tabs").as_deref(), Some("4"));
     assert_eq!(stat_value(&h, "panes").as_deref(), Some("9"));
     assert_eq!(stat_value(&h, "clients").as_deref(), Some("0"));
     assert_eq!(stat_value(&h, "age").as_deref(), Some("3 hours ago"));
 
-    // A pane pill pushes the terminal route carrying its tab and pane id.
     tap_last_value(&mut h, "scratch");
     h.settle();
     assert_eq!(h.depth(), 2, "a pane pill pushes the terminal route");
@@ -2574,7 +2188,6 @@ fn the_herdr_detail_names_its_space_on_the_collapsed_band() {
     assert_eq!(stat_value(&h, "spaces").as_deref(), Some("5"));
 }
 
-/// Fails its first `list_sessions`, then answers one session — and counts.
 struct FailFirstRepo {
     calls: AtomicU32,
 }
@@ -2636,10 +2249,6 @@ fn a_failed_first_load_offers_a_retry_that_reruns_it() {
     assert!(!has_label(&h, "Couldn't load sessions"));
 }
 
-/// Ed's iPad gate (2026-10-01): the selected card painted as a solid amber
-/// block because its translucent `amber_faint` fill sat straight over the
-/// accent-filled outer box. The fill is now the palette's opaque `amber_wash`,
-/// so the 2px strip is all the solid amber a selected card shows.
 #[test]
 fn a_selected_tablet_card_fills_with_the_opaque_amber_wash_not_a_translucent_tint() {
     let _g = serial();
@@ -2652,7 +2261,6 @@ fn a_selected_tablet_card_fills_with_the_opaque_amber_wash_not_a_translucent_tin
 
     let fills = &scene.rounded_fills;
     let area = |s: &Size| s.width * s.height;
-    // The accent box is the largest amber rounded rect (the attach button is amber too, but small).
     let (accent_idx, accent_origin, accent_size) = fills
         .iter()
         .enumerate()
@@ -2697,11 +2305,9 @@ fn read_only_on_tablet_chips_the_strip_and_leaves_only_attach_working() {
         h.settle();
         assert_eq!(h.depth(), 1, "a read-only {action} opens nothing");
     }
-    // The second identical refusal inside the dedupe window adds no toast.
     let raised = toasts.pending_untracked();
     assert_eq!(raised.len(), 1, "one refusal, deduped: {raised:?}");
     assert!(raised.iter().all(|t| t.starts_with("Read-only session")));
-    // Past the window the same refusal shows again.
     muxr::ui::toasts::advance_toast_clock_for_tests(
         muxr::ui::toasts::DEDUPE_WINDOW + Duration::from_millis(1),
     );
@@ -2799,11 +2405,6 @@ fn a_phone_card_tap_still_attaches_and_marks_this_device() {
     assert_eq!(h.depth(), 2, "a phone tap attaches");
 }
 
-// ---------------------------------------------------------------------------
-// 13 — the new-session dialog's backend choice
-// ---------------------------------------------------------------------------
-
-/// A repository that serves one card and records every create it is asked for.
 struct RecordingCreateRepo {
     created: Mutex<Vec<CreateSessionParams>>,
 }
@@ -2838,8 +2439,6 @@ impl SessionsRepository for RecordingCreateRepo {
     }
 }
 
-/// Mount over a recording repository, connect offering `backends`, and wait
-/// for the one card to land.
 fn offering(backends: Vec<ServerBackend>) -> (Harness, Arc<RecordingCreateRepo>) {
     let repo = Arc::new(RecordingCreateRepo {
         created: Mutex::new(Vec::new()),
@@ -2861,7 +2460,6 @@ fn offering(backends: Vec<ServerBackend>) -> (Harness, Arc<RecordingCreateRepo>)
     (h, repo)
 }
 
-/// Type `name` into the open dialog's field and submit with Enter.
 fn create_named(h: &mut Harness, dialog: &Chrome, name: &str) {
     h.tap(center(dialog.content_child()));
     h.type_text(name);
@@ -2884,9 +2482,6 @@ fn two_offered_backends_show_the_choice_and_herdr_reaches_the_repository() {
         "the segmented control is mounted"
     );
 
-    // The segment nodes carry no bounds of their own, and the control packs
-    // its segments to the left: the selected pill (the first segment) is
-    // painted as the panel's last rounded rect, so "herdr" sits just past it.
     let (pill_origin, pill_size) = *dialog.rounded.last().expect("the selected segment's pill");
     let y = node_centers_by_label(&h.root, "herdr")[0].y;
     h.tap(Point::new(pill_origin.x + pill_size.width + 20.0, y));
@@ -2966,13 +2561,6 @@ fn the_seeded_herdr_summary_is_the_rollup_of_the_terminal_mocks_default_agents()
     assert_eq!(herdr.agents.as_ref(), Some(&rollup));
 }
 
-// ---------------------------------------------------------------------------
-// 13 — the server switcher stage covers the screen without moving a
-// navigator, so the poll pauses on the stage itself
-// ---------------------------------------------------------------------------
-
-/// Preferences whose poll runs every second, so a pause is observable in a
-/// couple of real seconds.
 struct FastPollPreferences;
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -3012,8 +2600,6 @@ fn the_poll_pauses_while_the_switcher_stage_is_open_and_resumes_on_close() {
     let switcher = expect_servers_controller();
     switcher.open();
     h.frame();
-    // A poll already in flight when the stage rose may still land: wait for
-    // the count to hold still over several frames.
     let mut stable = 0;
     let mut last = repo.calls();
     while stable < 5 {
@@ -3039,24 +2625,16 @@ fn the_poll_pauses_while_the_switcher_stage_is_open_and_resumes_on_close() {
     h.pump_until("the poll to resume", |_| repo.calls() > held);
 }
 
-// ---------------------------------------------------------------------------
-// 13 — The server switcher on Tablet: the FAB's corner and the card scale
-// ---------------------------------------------------------------------------
-
-/// The Tablet FAB's inset from the window edge, and the Compact one.
 const TABLET_FAB_INSET: f64 = 24.0;
 const COMPACT_FAB_INSET: f64 = 16.0;
-/// The switcher card's scale at full open on a Tablet window / a phone.
 const TABLET_CARD_SCALE: f64 = 0.58;
 const PHONE_CARD_SCALE: f64 = 0.62;
-/// `.s-side{width:300px}` and the collapsed band's 240px, transcribed.
 const FULL_SIDE_WIDTH: f64 = 300.0;
 const COLLAPSED_SIDE_WIDTH: f64 = 240.0;
 const SERVERS_FAB: &str = "Servers";
 const SAVED_HOST: &str = "saved.example";
 const SAVED_ENDPOINT: &str = "saved.example:50051";
 
-/// The whole app (shell, bar, FAB, switcher host) at `size`, on `/sessions`.
 struct Shell {
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
@@ -3067,7 +2645,6 @@ struct Shell {
 
 impl Shell {
     fn mount(size: Size) -> Shell {
-        // The splash plays once per process: spend that claim on a throwaway.
         static SPENT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         SPENT.get_or_init(|| {
             let mut throwaway = MuxrApp.init();
@@ -3120,7 +2697,6 @@ impl Shell {
         }
     }
 
-    /// The first node labelled `label`'s on-screen bounds.
     fn bounds(&self, label: &str) -> frust::accesskit::Rect {
         self.root
             .semantics()
@@ -3131,7 +2707,6 @@ impl Shell {
             .unwrap_or_else(|| panic!("no bounds for {label:?}"))
     }
 
-    /// Raise the stage and run a real clock past its motion.
     fn open_stage(&mut self) -> RecScene {
         expect_servers_controller().open();
         let mut scene = RecScene::default();
@@ -3192,7 +2767,6 @@ fn the_phone_fab_keeps_the_compact_16px_corner() {
     assert_fab_corner(&shell, PHONE, COMPACT_FAB_INSET);
 }
 
-/// Every uniform scale the scene pushes a transform for.
 fn scales(scene: &RecScene) -> Vec<f64> {
     scene
         .transforms
@@ -3203,13 +2777,10 @@ fn scales(scene: &RecScene) -> Vec<f64> {
         .collect()
 }
 
-/// Whether `scene` pushed a uniform scale of `wanted` (the card's).
 fn paints_scale(scene: &RecScene, wanted: f64) -> bool {
     scales(scene).iter().any(|s| (s - wanted).abs() < 0.005)
 }
 
-/// Mount at `size`, raise the stage, and say which of the two card scales the
-/// settled open frame paints (and that the closed page painted neither).
 fn open_card_scales(size: Size) -> (bool, bool) {
     let mut shell = Shell::mount(size);
     let closed = shell.settle();
@@ -3331,7 +2902,6 @@ fn the_poll_stays_paused_through_the_close_tail_and_resumes_after_it() {
     switcher.open();
     h.frame();
     switcher.close();
-    // The shell's builds, played by hand: open seen, then closed, tail running.
     let clock = StageClock::closing();
     h.frame();
     let mut stable = 0;
@@ -3353,11 +2923,6 @@ fn the_poll_stays_paused_through_the_close_tail_and_resumes_after_it() {
     h.pump_until("the poll to resume after the tail", |_| repo.calls() > held);
 }
 
-// ---------------------------------------------------------------------------
-// Connection-class failures belong to the banner, never a toast
-// ---------------------------------------------------------------------------
-
-/// A repository whose list and kill fail on demand, counting each list call.
 struct ScriptedRepo {
     list_failure: Mutex<Option<AppFailure>>,
     kill_failure: Mutex<Option<AppFailure>>,
@@ -3409,7 +2974,6 @@ impl SessionsRepository for ScriptedRepo {
     }
 }
 
-/// A controller over `repo` plus a count of the failures it emitted.
 fn counting_controller(repo: &Arc<ScriptedRepo>) -> (SessionsController, Arc<AtomicU32>) {
     let controller = SessionsController::new(Arc::clone(repo) as SharedSessionsRepository);
     let emitted = Arc::new(AtomicU32::new(0));
@@ -3439,7 +3003,6 @@ async fn background_refreshes_raise_no_failure_for_connection_class_errors() {
     }
     assert_eq!(emitted.load(Ordering::SeqCst), 0, "no toast-bound failure");
 
-    // Any other class still reaches the sink.
     repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
     controller.refresh_background().await;
     assert_eq!(emitted.load(Ordering::SeqCst), 1);
@@ -3501,7 +3064,6 @@ async fn a_network_streak_raises_trouble_then_persistence_then_recovery_once_eac
     controller.refresh_from_poll().await;
     assert_eq!(controller.take_trouble(), None);
 
-    // A lone failure ended by a success reports nothing either way.
     repo.fail_list(network("blip"));
     controller.refresh_from_poll().await;
     repo.fail_list(None);
@@ -3542,7 +3104,6 @@ async fn internal_and_auth_failures_never_count_and_internal_still_reaches_the_s
     );
     assert_eq!(emitted.load(Ordering::SeqCst), 4, "and raises no toast");
 
-    // Neither resets a streak either: two Network failures around them still make one.
     repo.fail_list(network("down"));
     controller.refresh_from_poll().await;
     repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
@@ -3552,7 +3113,6 @@ async fn internal_and_auth_failures_never_count_and_internal_still_reaches_the_s
     assert_eq!(controller.take_trouble(), Some(ConnectionTrouble::Started));
 }
 
-/// Poll every second, so a wall-clock test sees ticks quickly.
 fn poll_fast() -> Option<SharedPreferencesRepository> {
     Some(Arc::new(FastPollPreferences))
 }
@@ -3569,7 +3129,6 @@ fn a_network_streak_reports_trouble_under_the_banner_and_never_tears_the_connect
         poll_fast(),
         support::surface(),
     );
-    // No saved credential and a locked keyring: the report needs neither.
     assert!(!expect_keyring().is_unlocked());
     assert!(expect_keyring().token_for("mock.example:7777").is_none());
     expect_connection_controller().connect(mock_target(false));
@@ -3604,7 +3163,6 @@ fn a_network_streak_reports_trouble_under_the_banner_and_never_tears_the_connect
     assert_eq!(connection.dial_generation(), dials, "no teardown, no dial");
     assert!(connection.connected.get_untracked(), "still connected");
 
-    // Two more failures: `Failed`, kept well past its own timeout.
     h.pump_until("the persistent trouble's Failed banner", |_| {
         matches!(banner(), Some(ReconnectBanner::Failed { .. }))
     });
@@ -3616,7 +3174,6 @@ fn a_network_streak_reports_trouble_under_the_banner_and_never_tears_the_connect
     assert_eq!(connection.dial_generation(), dials, "still no dial");
     assert!(connection.connected.get_untracked());
 
-    // The next successful poll flashes `Connected`, then clears.
     repo.fail_list(None);
     h.pump_until("the recovery's Connected flash", |_| {
         banner() == Some(ReconnectBanner::Connected)
