@@ -1,11 +1,5 @@
-//! [`provide`] is called once, from `crate::MuxrApp::init`, and publishes this
-//! feature's two app-scoped singletons —
-//! [`AuthTokensRepository`]/[`PreferencesRepository`] — so every mount of
-//! `/settings` resolves the same stores: a token revoked stays gone, a picked
-//! font size stays picked. Both back a production run with the real,
-//! `muxrd`/`frust-shared-preferences`-backed implementations; a test process
-//! opts onto the mocks below via `tests/support::setup()` before `provide`
-//! runs.
+//! [`provide`] runs once from `MuxrApp::init` and publishes the app-scoped repositories,
+//! so every mount of `/settings` shares one store.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,14 +16,14 @@ use crate::features::settings::domain::repositories::{
 
 static USE_MOCK_AUTH_TOKENS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Test-only; idempotent; must run before `MuxrApp::init` to have any effect.
+/// Test-only; must run before `MuxrApp::init`.
 pub fn use_mock_auth_tokens_for_tests() {
     USE_MOCK_AUTH_TOKENS_FOR_TESTS.store(true, Ordering::Relaxed);
 }
 
 static USE_MOCK_PREFERENCES_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Test-only; idempotent; must run before `MuxrApp::init` to have any effect.
+/// Test-only; must run before `MuxrApp::init`.
 pub fn use_mock_preferences_for_tests() {
     USE_MOCK_PREFERENCES_FOR_TESTS.store(true, Ordering::Relaxed);
 }
@@ -42,9 +36,6 @@ pub fn provide() {
     provide_context(platform_preferences_repository());
 }
 
-/// Resolves the app's one `ConnectionController` here — see
-/// [`GrpcAuthTokensRepository`]'s docs for why a per-call lookup elsewhere
-/// (e.g. from inside an owner-less `spawn_local` poller) would not be safe.
 fn platform_auth_tokens_repository() -> SharedAuthTokensRepository {
     if USE_MOCK_AUTH_TOKENS_FOR_TESTS.load(Ordering::Relaxed) {
         return Arc::new(MockAuthTokensRepository::seeded());
@@ -59,8 +50,7 @@ fn platform_preferences_repository() -> SharedPreferencesRepository {
     match PrefsRepository::standard() {
         Ok(repository) => Arc::new(repository),
         Err(err) => {
-            // A PrefsError falls back to MockPreferencesRepository::seeded() — in-memory,
-            // not persistence.
+            // Falls back to in-memory, so nothing persists.
             log::warn!("preferences: falling back to the in-memory store: {err}");
             Arc::new(MockPreferencesRepository::seeded())
         }

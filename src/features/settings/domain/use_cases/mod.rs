@@ -1,15 +1,4 @@
-//! `settings` use cases — one file per `<verb><noun>` action, one per
-//! repository method: [`ListTokens`]/[`CreateToken`]/[`RevokeToken`] over
-//! `AuthTokensRepository`, [`LoadPreferences`]/[`UpdateAppearance`]/
-//! [`UpdatePollPrefs`] over `PreferencesRepository`. Each is a thin,
-//! injected-repository [`UseCase`](clean_signals::UseCase) with no logic
-//! beyond delegation today — the value of the seam is that
-//! [`SettingsController`](crate::features::settings::presentation::controller::SettingsController)
-//! drives every call through `ControllerCore::run` (activity tracking, retry
-//! policy, one failure-emission site) rather than touching a repository
-//! directly; a future business rule lands in the matching file here without
-//! any call site moving. Never call `execute` directly from a controller —
-//! always through `ControllerCore::run`/`run_into`.
+//! One thin use case per repository method; controllers run them through `ControllerCore::run`, never `execute` directly.
 
 pub mod create_token;
 pub mod list_tokens;
