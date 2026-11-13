@@ -1,13 +1,5 @@
-//! Route smoke tests: each of the 4 routes' placeholder page renders text headlessly (no GPU, no
-//! window) — driven through the full `MuxrApp` shell via `tests/support/mod.rs`. The middle
-//! section proves the session guard's behavior directly against `Router::resolve` (pure — no
-//! navigator side effects), so no scene inspection is needed to tell Connect apart from a
-//! guarded route's own placeholder; the last section proves the same guard applies to the handle
-//! screens actually push through (`muxr::routes::app_nav`), and that the handle drives the app's
-//! own navigator rather than a copy of it.
-//!
-//! The shell's persistent top bar is deliberately **not** exercised here: these tests navigate
-//! through `app_nav()`, the production entry point. `tests/navigation_motion.rs` owns the bar.
+//! Route smoke tests: each route's page renders text headlessly through the full `MuxrApp` shell.
+//! The guard is checked against `Router::resolve` and the `app_nav` handle; the top bar is not exercised here.
 
 use frust::{AnyView, Component, Resolution};
 use frust_core::RenderRoot;
@@ -22,10 +14,6 @@ use support::{frame, serial, setup};
 
 type Root = RenderRoot<AppState, AnyView<AppState>>;
 
-/// Mounts `MuxrApp`, navigates to `route`, and renders one frame. `connected`
-/// mounts behind the mock connection first — every in-shell route needs it now
-/// that the session guard covers the shell's whole subtree, `/settings`
-/// included.
 fn render(route: &str, connected: bool) -> support::RecScene {
     let _g = serial();
     let _ambient = setup();
@@ -80,8 +68,6 @@ fn settings_route_renders_its_placeholder() {
     );
 }
 
-/// The shell builds at "/" without any explicit navigation — the same
-/// `Router::handle_location("/")` call `MuxrApp::init` makes.
 #[test]
 fn shell_builds_at_the_connect_route_by_default() {
     let _g = serial();
@@ -95,10 +81,6 @@ fn shell_builds_at_the_connect_route_by_default() {
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert!(scene.glyph_runs > 0, "the default \"/\" route renders text");
 }
-
-// ---------------------------------------------------------------------------
-// Session guard (`muxr::routes::session_guard_with`)
-// ---------------------------------------------------------------------------
 
 /// A mock connect target — plain data, none of its fields matter to the guard
 /// itself (only `ConnectionController::connected` flipping `true` does).
@@ -115,20 +97,14 @@ fn mock_target() -> ConnectTarget {
     }
 }
 
-/// The final resolved path for `raw`, post-redirect — panics on an error
-/// resolution (every location this suite resolves is a real route or a
-/// redirect to one).
 fn resolved_path(state: &AppState, raw: &str) -> String {
     matched_path(state.nav.resolve(raw))
 }
 
-/// [`resolved_path`] through the app's published [`Nav`] handle — the object
-/// every screen actually pushes with.
 fn resolved_path_through(nav: &Nav, raw: &str) -> String {
     matched_path(nav.resolve(raw))
 }
 
-/// The matched path out of a [`Resolution`], or a panic.
 fn matched_path(resolution: Resolution<AppState>) -> String {
     match resolution {
         Resolution::Matched { location, .. } => location.path,
@@ -138,7 +114,6 @@ fn matched_path(resolution: Resolution<AppState>) -> String {
     }
 }
 
-/// An unauthenticated push to `/sessions` bounces to Connect (`/`).
 #[test]
 fn unauthenticated_sessions_push_redirects_to_connect() {
     let _g = serial();
@@ -152,7 +127,6 @@ fn unauthenticated_sessions_push_redirects_to_connect() {
     );
 }
 
-/// An unauthenticated push to `/terminal` bounces to Connect (`/`).
 #[test]
 fn unauthenticated_terminal_push_redirects_to_connect() {
     let _g = serial();
@@ -218,13 +192,6 @@ fn root_is_never_redirected_and_settings_is_guarded_with_the_rest_of_the_shell()
     );
 }
 
-// ---------------------------------------------------------------------------
-// The published nav handle (`muxr::routes::app_nav`)
-// ---------------------------------------------------------------------------
-
-/// The handle every screen pushes through is the **same guarded router** the
-/// tests above resolve against — there is no second, unguarded path into
-/// `/sessions`/`/terminal` any more.
 #[test]
 fn a_push_through_the_app_nav_handle_is_guarded_too() {
     let _g = serial();
@@ -257,9 +224,6 @@ fn a_push_through_the_app_nav_handle_is_guarded_too() {
     );
 }
 
-/// …and pushing through it drives the app's **own** navigator: the handle
-/// wraps the router `AppState::nav` holds, not a second one over the same
-/// controller.
 #[test]
 fn a_push_through_the_app_nav_handle_lands_on_the_apps_own_navigator() {
     let _g = serial();
@@ -272,8 +236,6 @@ fn a_push_through_the_app_nav_handle_lands_on_the_apps_own_navigator() {
     frame(&mut root, &mut logic, &mut state, &mut tcx);
     assert_eq!(state.nav.controller().depth(), 1, "only the start location");
 
-    // Connected, so this asserts the plumbing rather than the redirect the test
-    // above covers; the outer op it lands is the shell placement.
     expect_connection_controller().connect(mock_target());
     app_nav().push("/settings");
     frame(&mut root, &mut logic, &mut state, &mut tcx);
