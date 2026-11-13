@@ -1,17 +1,5 @@
-//! The Tablet arrangement of the Connect screen: backdrop, the form column,
-//! and, on the full band, the left panel beside it.
-//!
-//! [`tablet_screen`] is the whole tree the page mounts for a Tablet window.
-//! The corner rule: the QR action always sits beside the CTA, and the info
-//! mark ([`info_affordance`]) is mounted only on the collapsed band. The full
-//! band carries the orientation paragraph inline in the panel, so the mark
-//! would repeat it.
-//!
-//! The cold-start splash assembles the same arrangement on a Tablet window:
-//! [`tablet_splash_pieces`] builds the pieces unwired, in stagger order, and
-//! [`tablet_splash_layout`] lays them out through the same [`tablet_layout`]
-//! the screen uses — the Tablet half of the parity contract
-//! (`connect_pieces`/`connect_layout` is the Compact half).
+//! The Tablet arrangement. The QR action always sits beside the CTA; the info mark mounts
+//! only on the collapsed band, since the full band carries its paragraph inline.
 
 use frust::{
     AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, Stack, Theme, View, WindowMetrics,
@@ -33,22 +21,15 @@ use crate::ui::spacing;
 /// The full band's left panel width (`docs/tablet.html`'s `.c-left`).
 const LEFT_PANEL_WIDTH: f64 = 420.0;
 
-/// Which column a full-band piece lands in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Column {
     Panel,
     Form,
 }
 
-/// The full band's nine pieces in **stagger order**: the order the splash
-/// drops them in, which [`tablet_splash_pieces`] builds and
-/// [`tablet_splash_layout`] un-interleaves by the same table. The two
-/// columns fill top-down together — brand row, then the form's heading, and
-/// so on down both — with the action row in the last of the eight stagger
-/// slots and the panel's saved list sharing it (`spec::piece_delay_ms`
-/// reuses the last slot for a ninth piece). Each column's entries are in
-/// that column's own top-to-bottom order, which is what makes the two
-/// functions inverses.
+/// Stagger order: the splash drops them in this order and [`tablet_splash_layout`]
+/// un-interleaves by the same table. Each column's entries keep its own top-to-bottom order,
+/// which makes the two functions inverses; the ninth piece reuses the last slot.
 const FULL_STAGGER: [Column; 9] = [
     Column::Panel, // brand row
     Column::Form,  // heading
@@ -61,8 +42,6 @@ const FULL_STAGGER: [Column; 9] = [
     Column::Panel, // saved list
 ];
 
-/// The Tablet screen over the page backdrop. `qr` is the action beside the
-/// CTA; `overlays` raises the info dialog on the collapsed band.
 pub fn tablet_screen<S: 'static, Q: View<S>>(
     theme: &Theme,
     live: &Live,
@@ -74,7 +53,6 @@ pub fn tablet_screen<S: 'static, Q: View<S>>(
     let folded = (!full).then_some(saved);
     let form = tablet_form_pieces(theme, Some(live), Prominence::for_saved(saved), folded, qr);
     let panel = full.then(|| tablet_panel_pieces(theme, Some(live), saved));
-    // erasure: keep accumulator into Vec<AnyView>
     let mut layers = vec![
         any(page_backdrop::<S>()),
         any(tablet_layout(theme, panel, form)),
@@ -85,10 +63,6 @@ pub fn tablet_screen<S: 'static, Q: View<S>>(
     Stack(layers)
 }
 
-/// The Tablet pieces with no live wiring, in stagger order — the splash's
-/// half of the seam. On the full band the panel's and the form's pieces
-/// interleave per [`FULL_STAGGER`]; collapsed, the form's alone, the saved
-/// list folded under its action row exactly as the screen folds it.
 pub fn tablet_splash_pieces<S: 'static>(
     theme: &Theme,
     saved: &[SavedServer],
@@ -116,9 +90,7 @@ pub fn tablet_splash_pieces<S: 'static>(
     pieces
 }
 
-/// Lay out `pieces` — [`tablet_splash_pieces`]' list, each wrapped by the
-/// splash — exactly as [`tablet_screen`] lays the live ones out, so the
-/// overlay's last frame and the route's first are one picture.
+/// Lays the splash's pieces out exactly as [`tablet_screen`] lays the live ones.
 pub fn tablet_splash_layout<S: 'static>(
     theme: &Theme,
     full: bool,
@@ -139,11 +111,6 @@ pub fn tablet_splash_layout<S: 'static>(
     any(tablet_layout(theme, Some(panel), form))
 }
 
-/// The safe-area-inset body: on the full band (`panel` is `Some`) a
-/// [`LEFT_PANEL_WIDTH`] panel beside the form column; collapsed, the form
-/// column alone. Each list is already in its own top-to-bottom order. The
-/// form clamps like Compact's wide window and scrolls from its top when
-/// taller than the frame.
 fn tablet_layout<S: 'static>(
     theme: &Theme,
     panel: Option<Vec<AnyView<S>>>,
@@ -157,8 +124,7 @@ fn tablet_layout<S: 'static>(
         return safe_area(form_column);
     };
     let colors = Palette::from_theme(theme);
-    // The iPadOS top-left window control sits over the brand tile; clear it.
-    // Zero corners (every other platform) leave the padding untouched.
+    // The iPadOS top-left window control sits over the brand tile; zero corners elsewhere.
     let corner = use_context::<WindowMetrics>()
         .map(|metrics| metrics.insets.corner_insets.top_left)
         .filter(|corner| corner.height > 0.0);

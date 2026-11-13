@@ -1,9 +1,5 @@
-//! Piece 8 — `.saved`: the saved-server list closed by the unlock dock, and
-//! the snapshot of it the splash renders.
-//!
-//! The rows are informational: the dock unlocks and dials, so a row tap does
-//! nothing — except where the device has no biometric gate, when the dock is
-//! disabled and each row keeps its own tap-to-unlock.
+//! Piece 8, `.saved`: the saved-server list closed by the unlock dock. A row tap does
+//! nothing unless the device has no biometric gate; then each row keeps its own tap-to-unlock.
 
 use std::rc::Rc;
 
@@ -28,26 +24,16 @@ use crate::ui::spacing;
 use crate::ui::topbar::icon_button;
 
 const SAVED_ROW_PAD_Y: f64 = 11.0;
-/// The rule's weight.
 const RULE_HEIGHT: f64 = 1.0;
-/// A saved row's delete affordance press target, at the platform minimum tap target.
 const DELETE_TARGET: f64 = 44.0;
-/// The mark inside it, smaller than the icon's own 24px design box: quiet
-/// chrome beside the row's content, not a second action button.
+/// Smaller than the icon's 24px design box: quiet chrome, not a second action button.
 const DELETE_MARK: f64 = 18.0;
 
-/// What the Tablet list says in place of rows when nothing is saved.
 pub const NO_SAVED_SERVERS: &str = "no saved servers";
-/// The tag a row past the free tier's limit carries.
 pub const PRO_TAG: &str = "pro";
-/// The lock mark leading every phone row: its credential sits in the keyring.
 const LOCK_MARK: f64 = 12.0;
-/// The Tablet row's leading initial box.
 const AVATAR: f64 = 26.0;
 
-/// Piece 8 — the saved-server list, then the dock when anything is saved.
-/// `servers` is handed down rather than read here (the parity contract); an
-/// empty list renders the header alone on both sides.
 pub fn saved_address<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -56,7 +42,6 @@ pub fn saved_address<S: 'static>(
 ) -> impl View<S> + use<S> {
     // One clock read for the whole list — every row's recency measured against it.
     let now = epoch_millis();
-    // erasure: keep accumulator into Vec<AnyView>
     let mut children = vec![
         any(saved_header::<S>(theme, colors)),
         any(v_gap::<S>(spacing::MICRO)),
@@ -72,7 +57,6 @@ pub fn saved_address<S: 'static>(
     backed(block_column::<S, _>(children), colors)
 }
 
-/// The dock as `live` wires it — idle and unwired for the splash.
 fn dock<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -87,7 +71,6 @@ fn dock<S: 'static>(
     keyring_dock(theme, colors, servers, &state, actions.as_ref())
 }
 
-/// An uppercase micro label followed by a hairline rule filling the rest of the row.
 fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> + use<S> {
     centered_row::<S>(vec![
         inflexible(
@@ -102,18 +85,15 @@ fn saved_header<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> + u
     ])
 }
 
-/// This mode's short form, for a saved row's meta line.
 fn trust_meta_label(mode: TrustMode) -> &'static str {
     match mode {
         TrustMode::System => "system TLS",
-        // Not "first-use TLS": that name claimed a mechanism this posture never implemented.
+        // Not "first-use TLS": this posture implements no such mechanism.
         TrustMode::NoVerification => "no-verification TLS",
         TrustMode::Pinned => "pinned TLS",
     }
 }
 
-/// `body` behind the row's own tap, wired only where the dock cannot unlock
-/// (see the [module docs](self)); the splash has none either.
 fn tappable<S: 'static, V: View<S>>(
     body: V,
     live: Option<&Live>,
@@ -130,13 +110,8 @@ fn tappable<S: 'static, V: View<S>>(
     }
 }
 
-/// The lock mark, `host:port` over `trust · recency`, the read-only chip and
-/// pro tag, and the trailing delete affordance.
-///
-/// The delete affordance sits beside the row's own (fallback) tap recognizer,
-/// not inside it: a nested press target would fire the row's tap regardless
-/// (that recognizer captures on `Down`, fires on its own `Up`). Siblings are
-/// disjoint by construction.
+/// The delete target sits beside the row's tap recognizer, not inside it: that recognizer
+/// captures on `Down` and would fire on its own `Up` regardless.
 fn saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -175,13 +150,11 @@ fn saved_row<S: 'static>(
     ])
 }
 
-/// Whether the row wears the pro tag. The splash has no controller, so no
-/// entitlement to judge by, and paints none.
+/// The splash has no entitlement to judge by, so it paints none.
 fn locked(server: &SavedServer, servers: &[SavedServer], live: Option<&Live>) -> bool {
     live.is_some_and(|live| row_is_locked(server, servers, live.controller.entitlement()))
 }
 
-/// The read-only chip, then the pro tag when `locked`, each led by its gap.
 fn chips<S: 'static>(server: &SavedServer, locked: bool) -> Vec<FlexChild<S>> {
     let mut items = Vec::new();
     for (shown, chip, variant) in [
@@ -196,10 +169,6 @@ fn chips<S: 'static>(server: &SavedServer, locked: bool) -> Vec<FlexChild<S>> {
     items
 }
 
-/// The Tablet variant of piece 8: the same header over card rows (or a muted
-/// line when nothing is saved), closed by the same dock. Chips, delete and the
-/// fallback tap wire exactly as the phone row's do, and `live` is `None` for
-/// the splash exactly as there.
 pub fn tablet_saved_list<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -207,7 +176,6 @@ pub fn tablet_saved_list<S: 'static>(
     live: Option<&Live>,
 ) -> impl View<S> + use<S> {
     let now = epoch_millis();
-    // erasure: keep accumulator into Vec<AnyView>
     let mut children = vec![
         any(saved_header::<S>(theme, colors)),
         any(v_gap::<S>(spacing::MD)),
@@ -231,8 +199,6 @@ pub fn tablet_saved_list<S: 'static>(
     block_column::<S, _>(children)
 }
 
-/// A bordered card row: the label's initial, the label over
-/// `host:port · trust · recency`, the chips, and the delete target.
 fn tablet_saved_row<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -286,10 +252,6 @@ fn tablet_saved_row<S: 'static>(
         .border(colors.outline, HAIRLINE)
 }
 
-/// A dim [`icons::DELETE`] mark in a [`DELETE_TARGET`]-square press target,
-/// dropping this device's copy of the server it sits on. `live` is `None`
-/// for the splash, which paints the same mark with no recognizer and no
-/// `Role::Button` node.
 fn delete_affordance<S: 'static>(
     colors: &Palette,
     server: &SavedServer,
@@ -319,19 +281,13 @@ fn delete_affordance<S: 'static>(
     )
 }
 
-/// The delete affordance's accessible name — a bare "Delete" would announce
-/// a list of identical controls.
+/// A bare "Delete" would announce a list of identical controls.
 fn delete_label(label: &str) -> String {
     format!("Delete {label}")
 }
 
-/// The saved-server rows the splash's copy of piece 8 renders.
-///
-/// Read once per launch by the composition root and carried through every
-/// rebuild, since the real store is a preferences read plus a JSON parse.
-/// Both ways this could fail — an unpublished repository, a failing
-/// `list()` — answer with no rows rather than a panic or a toast; the live
-/// screen re-reads the same store a moment later.
+/// Read once per launch: the store is a preferences read plus a JSON parse. A failure
+/// answers with no rows; the live screen re-reads the same store a moment later.
 pub fn splash_saved_servers() -> Vec<SavedServer> {
     let Some(repository) = saved_servers() else {
         log::warn!("splash: no saved-server repository published yet — assembling with no rows");

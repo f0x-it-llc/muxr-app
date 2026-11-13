@@ -1,15 +1,5 @@
-//! The unlock dock closing piece 8: one primary press target that unlocks the
-//! whole keyring behind a single prompt and dials the most recent row
-//! (`ConnectController::unlock_keyring_and_connect`).
-//!
-//! Page-agnostic: the rows and a [`DockState`] in, an optional
-//! [`DockActions`] bundle out — `None` is the splash's unwired copy, painting
-//! an idle dock. Four faces: idle (amber, trailing `→ host` of the most
-//! recent row), unlocking (dimmed and disabled over a shimmering band),
-//! failed (`Try again` over the status's message, plus the confirm-gated
-//! reset when it offers one) and unavailable (no biometric gate: dimmed and
-//! disabled, the rows keep their own tap). [`PressTarget`] is the face's
-//! labelled `Role::Button`, since `frust::button` paints a text label only.
+//! The unlock dock closing piece 8: one press unlocks the whole keyring behind a single
+//! prompt. [`PressTarget`] exists because `frust::button` paints a text label only.
 
 use std::rc::Rc;
 
@@ -37,29 +27,23 @@ pub const UNLOCKING_LABEL: &str = "Unlocking…";
 pub const TRY_AGAIN_LABEL: &str = "Try again";
 pub const RESET_LABEL: &str = "Reset saved credentials";
 
-/// The biometric mark: a ring around a dot, on the 24 px design box. A ring
-/// rather than a fingerprint or a face, since the gate is either per platform.
+/// A ring rather than a fingerprint or a face: the gate is either, per platform.
 const BIOMETRIC_MARK: IconSource = IconSource {
     d: "M 12 2 A 10 10 0 1 1 12 22 A 10 10 0 1 1 12 2 Z M 12 4 A 8 8 0 1 0 12 20 A 8 8 0 1 0 12 4 Z M 12 8 A 4 4 0 1 1 12 16 A 4 4 0 1 1 12 8 Z",
     design: 24.0,
 };
 const MARK: f64 = 20.0;
-/// How much of the unlocking band the shimmer fill covers.
 const BAND_FILL: f64 = 0.4;
 const BAND_HEIGHT: f64 = 3.0;
-/// The trailing target host, quieter than the label it follows.
 const TRAILING_ALPHA: f32 = 0.7;
 
 type PressHandler<S> = Rc<dyn Fn(&mut S)>;
 
-/// What the dock fires: the unlock, and the failed dock's reset (whose
-/// confirm dialog is the callback's own).
 pub struct DockActions {
     pub on_unlock: Rc<dyn Fn()>,
     pub on_reset: Rc<dyn Fn()>,
 }
 
-/// `Unlock` for one row, `Unlock N servers` for several.
 pub fn dock_label(rows: usize) -> String {
     if rows == 1 {
         "Unlock".to_string()
@@ -68,7 +52,7 @@ pub fn dock_label(rows: usize) -> String {
     }
 }
 
-/// The dock under `saved` (non-empty; the caller omits it otherwise).
+/// `saved` is non-empty; the caller omits the dock otherwise.
 pub fn keyring_dock<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -183,9 +167,7 @@ pub fn keyring_dock<S: 'static>(
     ))
 }
 
-/// A labelled `Role::Button` around arbitrary content: `child` sized by its
-/// constraints, a pressed wash in `wash` over it, and `on_press` fired on a
-/// release inside. `None` is disabled: no input, disabled semantics.
+/// `None` is disabled: no input, disabled semantics.
 struct PressTarget<S: 'static, V> {
     child: V,
     label: String,
