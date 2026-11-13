@@ -1,86 +1,41 @@
-//! The downloadable-font catalog's wire format: `muxr-core`'s
-//! `fonts/manifest.json`, parsed into [`FontEntry`] records.
-//!
-//! **The two names, and why they differ.** Every entry carries both a
-//! [`FontEntry::display_name`] (what the picker prints) and a
-//! [`FontEntry::family`] (the font's own `name`-table family, the string a
-//! `FontFamily` stack must name) — they differ for 27 of the catalog's 34
-//! entries, since the Nerd Font project renames the patched face.
-//! **The persisted preference is the `family`**; a stack naming the display
-//! name would resolve to nothing and silently shape with the fallback face.
-//! Even the manifest's own claim is not taken on faith: [`super::store`]
-//! records the family fontique *actually* resolved from the downloaded bytes,
-//! preferring that over this field when the two disagree.
-//!
-//! **Lenient by entry, strict by document.** A malformed *entry* (or file) is
-//! skipped rather than failing the catalog — one broken row must not take the
-//! whole picker offline. A document that isn't JSON at all, or carries no
-//! usable entry, is an [`AppFailure::Internal`]: the catalog's own contract
-//! broke, not the user's network.
+//! The downloadable-font catalog's wire format: `fonts/manifest.json`, parsed into [`FontEntry`].
+//! `family` (the font's own name-table family) is the persisted preference and the stack name; `display_name` is the picker label only.
+//! A malformed entry is skipped; a document with no usable entry is an [`AppFailure::Internal`].
 
 use crate::failure::AppFailure;
 
 use super::json::{self, Json};
 
-/// Where the catalog lives — served by muxr.app itself (`no-cache`, refreshed
-/// on every site deploy) so font discovery has no GitHub dependency: GitHub's
-/// edge blocking non-browser clients is what broke release-asset downloads and
-/// moved font hosting to muxr.app in the first place.
+/// Served by muxr.app itself (`no-cache`), so font discovery has no GitHub dependency.
 pub const MANIFEST_URL: &str = "https://muxr.app/fonts/manifest.json";
 
-/// The base a file's relative `path` is resolved against when its entry
-/// carries no absolute `url` of its own (every current entry does carry one;
-/// this is the schema's documented fallback, not dead weight). Same origin as
-/// the manifest — the binaries live right next to it.
 const RAW_BASE: &str = "https://muxr.app/fonts";
 
-/// One downloadable file inside a [`FontEntry`] — one weight/style of the
-/// family.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontFile {
-    /// The file's own name, with any directory part of the manifest `path`
-    /// stripped — what the cache stores it as.
     pub name: String,
-    /// Where to fetch it from.
     pub url: String,
-    /// Its SHA-256, lowercase hex. **Mandatory**: an entry whose file omits it
-    /// is skipped at parse time, so nothing downstream can install an
-    /// unverifiable font (see [`super::store`]'s integrity contract).
+    /// Lowercase hex SHA-256; mandatory, an entry whose file omits it is skipped.
     pub sha256: String,
-    /// The size the manifest advertises, in bytes — the picker's size hint,
-    /// and a sanity bound on the download. Never trusted as an integrity
-    /// control.
     pub bytes: u64,
 }
 
-/// One font family the catalog offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FontEntry {
-    /// The manifest's own slug (`ibm-plex-mono-nf`) — stable across renames,
-    /// and this entry's identity in the picker.
     pub id: String,
-    /// The picker's label. See the [module docs](self)' two-names section.
     pub display_name: String,
-    /// The family name a `FontFamily` stack must carry. See the same section.
     pub family: String,
-    /// The SPDX license id the row prints beside the size.
     pub license: String,
-    /// Whether the face ships Nerd Font icon glyphs (every current entry
-    /// does; the schema allows otherwise).
     pub nerd_font: bool,
-    /// Its files, in manifest order — all of them are downloaded, so a
-    /// family's bold and regular weights both resolve.
     pub files: Vec<FontFile>,
 }
 
 impl FontEntry {
-    /// The total download size of every file in this entry.
     pub fn total_bytes(&self) -> u64 {
         self.files.iter().map(|file| file.bytes).sum()
     }
 
-    /// The picker's size hint — `2.4 MB`, or `812 KB` under a megabyte.
-    /// Binary units, matching the Flutter client's own rounding.
+    /// Binary units: `2.4 MB`, or `812 KB` under a megabyte.
     pub fn size_label(&self) -> String {
         let bytes = self.total_bytes() as f64;
         let mb = bytes / (1024.0 * 1024.0);
@@ -92,12 +47,9 @@ impl FontEntry {
     }
 }
 
-/// Parse a fetched manifest document into its entries.
-///
 /// # Errors
 ///
-/// [`AppFailure::Internal`] when the bytes are not UTF-8, not JSON, or carry
-/// no usable entry — see the [module docs](self)' leniency contract.
+/// [`AppFailure::Internal`] when the bytes are not UTF-8, not JSON, or carry no usable entry.
 pub fn parse_manifest(bytes: &[u8]) -> Result<Vec<FontEntry>, AppFailure> {
     let text = std::str::from_utf8(bytes)
         .map_err(|err| AppFailure::Internal(format!("font manifest is not UTF-8: {err}")))?;
@@ -119,8 +71,6 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Vec<FontEntry>, AppFailure> {
     Ok(entries)
 }
 
-/// One entry, or `None` when a required field is missing/mistyped or every one
-/// of its files is unusable.
 fn parse_entry(value: &Json) -> Option<FontEntry> {
     let id = value.get("id").and_then(Json::as_str)?.to_string();
     let display_name = value.get("displayName").and_then(Json::as_str)?.to_string();
@@ -157,8 +107,6 @@ fn parse_entry(value: &Json) -> Option<FontEntry> {
     })
 }
 
-/// One file, or `None` when it has no path, no usable name, or — the strict
-/// one — no SHA-256 to verify it against.
 fn parse_file(value: &Json) -> Option<FontFile> {
     let path = value.get("path").and_then(Json::as_str)?;
     let name = leaf(path);
@@ -170,8 +118,7 @@ fn parse_file(value: &Json) -> Option<FontFile> {
         .and_then(Json::as_str)?
         .trim()
         .to_lowercase();
-    // Fail closed on a missing/short hash: the 4-byte sfnt magic the store
-    // also checks is a format probe, never an integrity control.
+    // Fail closed on a missing or short hash; the sfnt magic check is a format probe, not integrity.
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -180,9 +127,7 @@ fn parse_file(value: &Json) -> Option<FontFile> {
         .and_then(Json::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| format!("{RAW_BASE}/{path}"));
-    // Fail closed on a non-HTTPS url, same as the hash above: integrity is
-    // carried by the sha256 either way, but a plaintext fetch would leak the
-    // request and invite junk bytes we'd only reject after downloading them.
+    // Fail closed on a non-HTTPS url so a plaintext origin is never fetched.
     if !url.starts_with("https://") {
         return None;
     }
@@ -195,8 +140,6 @@ fn parse_file(value: &Json) -> Option<FontFile> {
     })
 }
 
-/// The trailing filename of a manifest `path` (which may carry directory
-/// segments).
 fn leaf(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -205,10 +148,7 @@ fn leaf(path: &str) -> &str {
 mod tests {
     use super::*;
 
-    /// Four real entries, transcribed from `muxr-core`'s own
-    /// `fonts/manifest.json` — including two whose `family` differs from their
-    /// `displayName` (the fact this whole module exists for) and one
-    /// single-file entry.
+    /// Four entries from the real manifest: two whose `family` differs from `displayName`, one single-file.
     pub(super) const FIXTURE: &str = r#"{
       "version": 1,
       "fonts": [
@@ -273,8 +213,7 @@ mod tests {
 
     #[test]
     fn a_family_that_differs_from_its_display_name_keeps_both() {
-        // Models two names because a picker row showing `BlexMono` would be unrecognizable,
-        // while a stack naming `IBM Plex Mono Nerd Font Mono` resolves to nothing.
+        // A picker row showing `BlexMono` would be unrecognizable; a stack naming `IBM Plex Mono Nerd Font Mono` resolves to nothing.
         let entries = parse_manifest(FIXTURE.as_bytes()).expect("parses");
         let plex = entries
             .iter()
@@ -306,8 +245,7 @@ mod tests {
 
     #[test]
     fn a_plaintext_http_url_is_refused() {
-        // Fail-closed like the hash: the sha256 still guards integrity, but a
-        // manifest must not be able to point a download at a plaintext origin.
+        // The sha256 guards integrity, but a manifest must not point a download at a plaintext origin.
         let doc = r#"{"fonts":[{"id":"a","displayName":"A","family":"A","license":"OFL-1.1",
             "files":[{"path":"A.ttf","bytes":1,"url":"http://example.com/A.ttf",
             "sha256":"aa8bbe93f5dfa90381a80ad90ee3118b36d34c1140575ee1fefca20de00c6689"}]}]}"#;
