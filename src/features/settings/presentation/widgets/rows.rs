@@ -1,26 +1,5 @@
-//! `.set-row`/`.set-group-lbl` — the row primitive every group is built from,
-//! plus the shared layout helpers ([`h_gap`]/[`spacer`]/[`centered_row`]/[`stretch_column`])
-//! and the screen's page tone ([`page_tone`]) every other `widgets` module
-//! draws with.
-//!
-//! Geometry transcribed from `docs/redesign.html`'s settings block (CSS lines
-//! 153–179). [`RowMark`]/[`MARK_*`] cover every group's tile: a vendored
-//! `frust::icons` vector, or a single-font-safe text mark (ASCII or Geometric
-//! Shapes only) for the two backend initials and the mock's literal glyphs —
-//! **never an emoji**, which resolves through platform font fallback (the
-//! tofu-on-iPhone defect this app has hit before).
-//!
-//! [`rounded_fill`] is this module's own primitive — the sliver of the
-//! former `chrome::panel` `frust::container` cannot reach: a paint-only
-//! bleed (`.pick-row.sel{margin:0 -20px}`, `widgets::pickers`' own row) and a
-//! zero-radius fill that stays classified as a plain rect rather than a
-//! rounded one, which [`page_tone`] below needs. Every other option that
-//! module used to carry — fill/border/radius, a dashed border, a fixed
-//! centered size — is `frust::container` directly at each call site now; a
-//! bottom hairline composes as a trailing `frust::divider` instead, except on
-//! `widgets::pickers`' own rows, whose uniform row-to-row pitch depends on
-//! the rule staying a paint overlay rather than added layout height (see
-//! [`rounded_fill`]'s own doc).
+//! The `.set-row` primitive, the shared layout helpers and the page tone. A text mark stays in
+//! ASCII or Geometric Shapes, never an emoji, which resolves through platform font fallback.
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
@@ -52,8 +31,7 @@ pub(super) const GROUP_PAD_BOTTOM: f64 = spacing::SM;
 pub(super) const ROW_PAD_X: f64 = spacing::XL;
 pub(super) const ROW_PAD_Y: f64 = 11.0;
 pub(super) const ROW_GAP: f64 = spacing::BASE;
-/// `.set-ic{width:28px;height:28px}`; the vector inside it (`font-size:12px`
-/// in the mock, sized up to match a Material Symbols vector's drawn weight).
+/// `.set-ic{width:28px;height:28px}`; the vector is sized above the mock's 12px to match weight.
 const MARK_BOX: f64 = 28.0;
 const MARK_ICON: f64 = spacing::LG;
 /// `.set-value{margin-top:2px}`.
@@ -61,32 +39,25 @@ pub(super) const ROW_LINE_GAP: f64 = spacing::MICRO;
 /// `.set-chev{font-size:13px}`.
 const CHEVRON: f64 = 13.0;
 
-/// A `gap`-wide horizontal spacer.
 pub(super) fn h_gap<S: 'static>(gap: f64) -> FlexChild<S> {
     inflexible(SizedBox::<S>(Some(gap), None))
 }
 
-/// A flexible spacer pushing what follows it to the trailing edge — Flex v1
-/// has no `space-between`.
 pub(super) fn spacer<S: 'static>() -> FlexChild<S> {
     flexible(1, SizedBox::<S>(None, None))
 }
 
-/// A vertically-centered row.
 pub(super) fn centered_row<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<S> {
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-/// A column whose children each fill the available width.
 pub(super) fn stretch_column<S: 'static, M>(children: impl ViewSeq<S, M>) -> FlexView<S> {
     column()
         .children(children)
         .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// The screen's page tone behind `body` — `--bg-base`, which the shell's own
-/// clear colour (`--bg-surface`) is not. Zero radius: [`rounded_fill`] keeps
-/// this out of every rounded-rect probe (see its own doc).
+/// `--bg-base`, which the shell's clear colour is not; zero radius keeps it a plain rect.
 pub(in super::super) fn page_tone<B: View<SettingsState>>(
     body: B,
     colors: &Palette,
@@ -94,35 +65,9 @@ pub(in super::super) fn page_tone<B: View<SettingsState>>(
     rounded_fill(body, colors.base, 0.0)
 }
 
-// ---------------------------------------------------------------------------
-// `rounded_fill` — the one primitive `frust::container` cannot quite reach
-// ---------------------------------------------------------------------------
-
-/// A rounded fill behind a child it hugs exactly (the container's own size is
-/// always the child's), with two options `frust::container` has no knob for:
-///
-/// - [`RoundedFillView::bleed`] widens the *painted* fill by `bleed` logical
-///   px on each side without moving layout — `.pick-row.sel{margin:0 -20px}`.
-///   `frust::Padding` clamps a negative inset, and `Container` carries no
-///   bleed knob; its own module doc names this the deferred v1 boundary and
-///   says to compose it as app-side layering over a plain `Container`
-///   instead, which is exactly what this is.
-/// - At `radius == 0.0`, paint goes through [`PaintScene::fill_rect`] rather
-///   than [`PaintScene::fill_rounded_rect`]. `Container` always emits the
-///   rounded call regardless of radius, so a zero-radius `Container` fill
-///   still reads as *rounded* to a paint-recording test scene — this
-///   screen's own [`page_tone`] must not, since `tests/navigation_motion.rs`'s
-///   `leaving_page_x` finds the *largest rounded rect* on screen to track a
-///   leaving page, and this screen's full-bleed tone would out-measure it.
-///
-/// [`RoundedFillView::bottom_rule`] is the third option: a hairline painted
-/// along the bottom edge, *overlapping* the last logical px rather than
-/// adding to the box's own height. `widgets::pickers`' rows need this
-/// distinction specifically — every `.pick-row` must stay exactly one line
-/// tall regardless of whether it rules, since `tests/settings.rs` locates an
-/// unopened row by that uniform pitch. Everywhere else a bottom hairline
-/// composes as a trailing `frust::divider` instead (see this module's own
-/// doc).
+/// `bleed` widens only the painted fill (frust's `Padding` clamps a negative inset). Radius 0
+/// paints a plain rect, since `tests/navigation_motion.rs` tracks the largest rounded rect.
+/// `bottom_rule` overlaps the last px instead of adding height, so picker rows keep one pitch.
 pub(super) struct RoundedFillView<V> {
     child: V,
     fill: Color,
@@ -131,8 +76,6 @@ pub(super) struct RoundedFillView<V> {
     bottom_rule: Option<Color>,
 }
 
-/// Wrap `child` in a `fill`-filled box with corner `radius`, no bleed and no
-/// bottom rule. See [`RoundedFillView`].
 pub(super) fn rounded_fill<V>(child: V, fill: Color, radius: f64) -> RoundedFillView<V> {
     RoundedFillView {
         child,
@@ -144,20 +87,17 @@ pub(super) fn rounded_fill<V>(child: V, fill: Color, radius: f64) -> RoundedFill
 }
 
 impl<V> RoundedFillView<V> {
-    /// See [`RoundedFillView`].
     pub(super) fn bleed(mut self, bleed: f64) -> Self {
         self.bleed = bleed;
         self
     }
 
-    /// See [`RoundedFillView`].
     pub(super) fn bottom_rule(mut self, color: Color) -> Self {
         self.bottom_rule = Some(color);
         self
     }
 }
 
-/// The retained half of a [`RoundedFillView`].
 pub(super) struct RoundedFillWidget {
     child: ChildPod,
     fill: Color,
@@ -216,9 +156,7 @@ impl Widget for RoundedFillWidget {
         let origin = ctx.origin();
         let size = ctx.size();
         if self.fill != Color::TRANSPARENT {
-            // The bleed widens only what is painted — this widget's own
-            // bounds (and its child's origin) are untouched, so nothing
-            // reflows when a selection moves (see [`RoundedFillView`]).
+            // The bleed widens only paint; layout is untouched, so nothing reflows on selection.
             let fill_origin = Point::new(origin.x - self.bleed, origin.y);
             let fill_size = Size::new(size.width + 2.0 * self.bleed, size.height);
             if self.radius == 0.0 {
@@ -240,20 +178,14 @@ impl Widget for RoundedFillWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A decorative single-child container still MUST route, or everything
-        // it backs is silently unreachable.
         route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // A transparent container still MUST forward, or the child's whole
-        // subtree drops out of the accessibility tree.
         self.child.semantics_child(ctx);
     }
 }
 
-/// The band above each group — 10px dim, letter-spaced, uppercased here since
-/// `text` carries no CSS `text-transform`.
 pub(in super::super) fn group_label(label: &str, colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
     Padding(
@@ -267,44 +199,27 @@ pub(in super::super) fn group_label(label: &str, colors: &Palette) -> impl View<
     )
 }
 
-/// What sits in a row's 28px `.set-ic` tile — a vendored vector, or a
-/// single-font-safe text mark (`abc`, `▮`, a backend initial).
 #[derive(Clone, Copy)]
 pub(super) enum RowMark {
     Vector(IconSource),
     Text(&'static str),
 }
 
-/// The semantic hue a `.set-value` prints in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ValueTone {
-    /// `--fg-dim` — every value that is merely a fact.
     Plain,
-    /// `.set-value.ok` — the live endpoint, and a validated TLS posture.
     Ok,
-    /// `.set-value.warn` — the posture that skips certificate validation.
     Warn,
 }
 
-/// What a row *does*, and so what sits in its trailing slot. The bell row is
-/// not a `RowAction` — the real switch owns its own tap target (see
-/// `widgets::misc::bell_notifications_row`).
 #[derive(Clone, Copy)]
 pub(in super::super) enum RowAction {
-    /// Inert: no chevron, no gesture (the version rows and connection info).
     Static,
-    /// A chevron row that opens a picker sheet.
     Picker(PickerKind),
-    /// A chevron row raising `features::pro`'s paywall — the `plan` row,
-    /// short of Pro.
     UpgradeSheet,
 }
 
-/// One `.set-row`: the mark tile, the label over its value, and a trailing
-/// chevron for anything that leads somewhere. For [`RowAction::Picker`] and
-/// [`RowAction::UpgradeSheet`] the **whole row** is the tap target — the mock
-/// draws no separate hit area, and a 28px chevron alone would be unreachable
-/// on a phone.
+/// The whole row is the tap target: a 28px chevron alone is unreachable on a phone.
 pub(super) fn settings_row(
     mark: RowMark,
     label: &'static str,
@@ -331,9 +246,6 @@ pub(super) fn settings_row(
         children.push(inflexible(trailing));
     }
 
-    // No fill, so this composes as plain content over a trailing
-    // `frust::divider` — the row's own `border-bottom` — rather than reaching
-    // for `rounded_fill` at all (see this module's own doc).
     let box_ = stretch_column((
         Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
@@ -349,9 +261,6 @@ pub(super) fn settings_row(
     }
 }
 
-/// A row whose trailing slot is a ghost button rather than a chevron: the
-/// mark tile, the label over its `subtitle`, and `action_label` running
-/// `on_tap`. Only the button is a tap target — the row itself is inert.
 pub(super) fn button_row(
     mark: RowMark,
     label: &'static str,
@@ -381,9 +290,6 @@ pub(super) fn button_row(
     )))
 }
 
-/// `.set-ic` — the 28px raised tile holding a row's mark. Shared with
-/// `widgets::misc::bell_notifications_row`, the one row outside this file
-/// that also uses it.
 pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
     let content = match mark {
@@ -400,8 +306,6 @@ pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> impl View<SettingsSt
         .size_centered(MARK_BOX, MARK_BOX)
 }
 
-/// A row's trailing slot: the faintest chevron for anything that leads
-/// somewhere, nothing for a static fact.
 fn trailing_slot(action: RowAction, colors: &Palette) -> Option<impl View<SettingsState>> {
     match action {
         RowAction::Static => None,
@@ -411,42 +315,23 @@ fn trailing_slot(action: RowAction, colors: &Palette) -> Option<impl View<Settin
     }
 }
 
-// ---------------------------------------------------------------------------
-// The mark set, named once
-// ---------------------------------------------------------------------------
-
-/// `.set-ic` for `server url` — a link, standing in for the mock's 🌐.
 pub(super) const MARK_SERVER_URL: RowMark = RowMark::Vector(LINK);
-/// …for `tls certificate` — the mock's 🔓 as a vector. Not state-dependent:
-/// the row's *value* carries the posture, so a second signal in the tile
-/// would say the same thing twice.
+/// The row's value carries the TLS posture, so the tile is not state-dependent.
 pub(super) const MARK_TLS: RowMark = RowMark::Vector(LOCK);
-/// …for `zellij version`/`herdr version` — the backend's initial, the same
-/// "initial in a tile" device `.sess-avatar` uses.
 pub(super) const MARK_ZELLIJ: RowMark = RowMark::Text("z");
 pub(super) const MARK_HERDR: RowMark = RowMark::Text("h");
-/// …for `font family` — the mock's literal `abc`, kept as text.
 pub(super) const MARK_FONT_FAMILY: RowMark = RowMark::Text("abc");
-/// …for `font size` — the vendored `format_size` vector rather than the
-/// mock's literal `12`, which would go stale the moment the picker changed
-/// it.
+/// Not the mock's literal `12`, which would go stale when the size changes.
 pub(super) const MARK_FONT_SIZE: RowMark = RowMark::Vector(FORMAT_SIZE);
-/// …for `cursor style` — `▮` (U+25AE), the mock's own mark, from the same
-/// Geometric Shapes block the sessions screen already ships on device.
 pub(super) const MARK_CURSOR: RowMark = RowMark::Text("\u{25ae}");
-/// …for `layout refresh` — the mock's `↻` as a vector.
 pub(super) const MARK_REFRESH: RowMark = RowMark::Vector(REFRESH);
-/// …for `latency` — a clock, the round trip the heartbeat measures.
 pub(super) const MARK_LATENCY: RowMark = RowMark::Vector(SCHEDULE);
-/// …for `bell notifications` — the mock's 🔔 as a vector.
 pub(super) const MARK_BELL: RowMark = RowMark::Vector(NOTIFICATIONS);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A recording scene distinguishing plain fills from rounded ones — the
-    /// distinction [`RoundedFillView`]'s zero-radius branch exists to control.
     #[derive(Default)]
     struct RecScene {
         rects: Vec<(Point, Size)>,
@@ -467,9 +352,6 @@ mod tests {
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
     }
 
-    /// The smallest possible leaf — lays out to `size`, paints nothing, so a
-    /// paint test measures the fill's own chrome rather than whatever it
-    /// wraps.
     struct StandIn(Size);
 
     impl Widget for StandIn {
@@ -491,9 +373,7 @@ mod tests {
 
     #[test]
     fn a_zero_radius_fill_paints_a_plain_rect_not_a_rounded_one() {
-        // The invariant `page_tone` depends on: `tests/navigation_motion.rs`'s
-        // `leaving_page_x` finds the *largest rounded rect* on screen, and
-        // this screen's own full-page tone must never be a candidate.
+        // `tests/navigation_motion.rs` tracks the largest rounded rect; the page tone is never one.
         let mut widget = empty_fill(Color::from_rgb8(0x10, 0x13, 0x1a), 0.0, 0.0);
         let mut scene = RecScene::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(800.0, 1700.0));
@@ -519,8 +399,6 @@ mod tests {
 
     #[test]
     fn a_bleeding_fill_paints_wider_than_it_measures() {
-        // `.pick-row.sel{margin:0 -20px}` — the fill escapes the sheet's
-        // content gutter on both sides while layout stays put.
         let mut widget = empty_fill(Color::from_rgb8(0xff, 0xb6, 0x27), 6.0, 20.0);
         let mut scene = RecScene::default();
         let mut ctx = PaintCtx::new(Point::new(20.0, 100.0), Size::new(300.0, 44.0));
@@ -544,9 +422,6 @@ mod tests {
 
     #[test]
     fn a_transparent_fill_paints_only_its_bottom_rule() {
-        // Every `.set-row` composing through `rounded_fill` directly (rather
-        // than a trailing `divider`) would be one of these: transparent, with
-        // only the rule. A fill would show as a seam over the page tone.
         let mut widget = empty_fill(Color::TRANSPARENT, 0.0, 0.0);
         widget.bottom_rule = Some(Color::WHITE);
         let mut scene = RecScene::default();
@@ -561,9 +436,6 @@ mod tests {
 
     #[test]
     fn no_mark_is_an_emoji() {
-        // A text mark must stay inside the BMP ranges the app's one bundled
-        // family actually covers — ASCII or Geometric Shapes — because
-        // anything else resolves through platform font fallback.
         for mark in [
             MARK_SERVER_URL,
             MARK_TLS,

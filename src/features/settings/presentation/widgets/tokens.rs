@@ -1,17 +1,6 @@
-//! The `auth tokens` group's rows ([`token_item`]/[`scrambling_token_item`]
-//! share one [`token_row`] box, so a resting row and a revoking one cannot
-//! drift a pixel apart), the dashed `+ create new token` row and its create
-//! dialog, and the one-time secret reveal sheet.
-//!
-//! **Contract:** a freshly minted token's secret is shown exactly once,
-//! through [`secret_reveal_sheet`], then gone for good — nothing here (or in
-//! the controller) persists it past that sheet's own dismissal.
-//! **Contract:** [`token_item`]'s `revoke_enabled` and [`create_token_row`]'s
-//! `enabled` both mirror `ConnectionController::is_read_only` — a read-only
-//! connected session cannot mint or revoke, though both controls stay
-//! reachable (styled down, not disabled) since frust's `Button` has no
-//! disabled state; the real gate is the caller's own guard, which raises the
-//! honest toast.
+//! A minted token's secret is shown once, through [`secret_reveal_sheet`], and never persisted.
+//! On a read-only session the mint and revoke controls stay reachable but styled down (frust's
+//! `Button` has no disabled state); the caller's own guard blocks the action and toasts.
 
 use frust::authoring::DashPattern;
 use frust::{
@@ -46,39 +35,25 @@ const CHIP_PAD_Y: f64 = spacing::MICRO;
 const ADD_MARGIN_TOP: f64 = spacing::BASE;
 const ADD_MARGIN_BOTTOM: f64 = spacing::TIGHT;
 const ADD_PAD: f64 = spacing::MD;
-/// The gap between the amber `+` and its label — the source's `<b>+</b>
-/// create` is one text node whose space is the gap; composed as two runs it
-/// needs a real one.
 const ADD_GAP: f64 = spacing::XS;
-/// Vertical gap inside the create dialog's `.content()` column, and between
-/// the secret-reveal sheet's own stacked rows.
 const DIALOG_FIELD_GAP: f64 = spacing::XL;
 
 pub(super) const CREATE_TOKEN_PLUS: &str = "+";
 pub(super) const CREATE_TOKEN_LABEL: &str = "create new token";
-/// Also how a test finds the button.
 pub(super) const REVOKE_LABEL: &str = "revoke";
 const CREATE_TOKEN_TITLE: &str = "New token";
-/// Mirrors `ui::dialogs::name_input_dialog`'s own spelling.
 const DIALOG_CANCEL_LABEL: &str = "Cancel";
 const DIALOG_SUBMIT_LABEL: &str = "Save";
 pub(super) const READ_ONLY_TOGGLE_LABEL: &str = "read-only";
 pub(super) const SECRET_REVEAL_TITLE: &str = "token secret";
 const COPY_SECRET_LABEL: &str = "Copy secret";
 const SECRET_DONE_LABEL: &str = "Done";
-/// Flutter parity's "you won't see this again" warning, spelled out.
 const SECRET_CAPTION: &str =
     "This is the only time this secret is shown. Copy it now — it can't be viewed again.";
-/// The unlikely race [`secret_reveal_sheet`] falls back to.
 const SECRET_ALREADY_DISMISSED: &str = "This secret has already been dismissed.";
-/// The terminal Copy chip's own wording, duplicated since a feature never
-/// imports a sibling's `presentation`.
+/// Duplicated, since a feature never imports a sibling's `presentation`.
 const COPIED_SECRET_TOAST: &str = "Copied to clipboard";
 const COPY_SECRET_FAILED_TOAST: &str = "Couldn't copy to clipboard";
-
-// ---------------------------------------------------------------------------
-// `.token-item`
-// ---------------------------------------------------------------------------
 
 pub(super) fn token_item(
     token: &AuthToken,
@@ -101,15 +76,8 @@ pub(super) fn token_item(
     any(token_row(name_line, token, revoke, None, colors))
 }
 
-/// A `.token-item` mid-revoke: the same row, with the name line replaced by
-/// this frame's scramble and the whole thing collapsing. `token` is the
-/// scramble's own snapshot, not a row out of the live list — the RPC's
-/// refresh routinely removes the token while this is still on screen (see
-/// `scramble`'s own module docs). The trailing button is a **geometric
-/// stand-in**: same widget, same style, same measured height, no handler —
-/// dropping it would jump the row the instant the animation started, and
-/// leaving it live would offer a second confirmation for a token already on
-/// its way out.
+/// `token` is the scramble's own snapshot. The revoke button stays as a handlerless stand-in,
+/// so the row neither jumps when the animation starts nor offers a second confirmation.
 pub(super) fn scrambling_token_item(
     token: &AuthToken,
     pose: &ScramblePose,
@@ -133,9 +101,6 @@ pub(super) fn scrambling_token_item(
     any(scramble::collapsing(pose.ratio, row))
 }
 
-/// The `.token-item` box both callers above share: `name_line` and `revoke`
-/// over the snapshot's scope chip and created line, plus an optional
-/// zero-height `tail`.
 fn token_row(
     name_line: impl View<SettingsState>,
     token: &AuthToken,
@@ -163,8 +128,6 @@ fn token_row(
         any(meta),
     ];
     lines.extend(tail);
-    // No fill, so this composes as plain content over a trailing
-    // `frust::divider` — see `widgets::rows`' own doc.
     stretch_column((
         Padding(
             EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
@@ -174,10 +137,7 @@ fn token_row(
     ))
 }
 
-/// `.token-scope` — the 9px pill naming what a token may do. Hand-composed
-/// for both scopes rather than half-reached through `glyph::badge`, which
-/// has no cyan/info variant for the read-only one (recorded as a framework
-/// gap, not a preference).
+/// Hand-composed: `glyph::badge` has no cyan/info variant for the read-only scope.
 fn scope_chip(scope: TokenScope, colors: &Palette) -> impl View<SettingsState> {
     let theme = active_theme();
     let (fill, ink, border) = match scope {
@@ -196,14 +156,6 @@ fn scope_chip(scope: TokenScope, colors: &Palette) -> impl View<SettingsState> {
     chip
 }
 
-// ---------------------------------------------------------------------------
-// `.add-token-btn` and the create dialog
-// ---------------------------------------------------------------------------
-
-/// The dashed, centre-aligned row that closes the token group — the screen's
-/// only way to mint one. While `enabled` is `false` the `+`/label both dim to
-/// [`Palette::fg_faintest`]; the row still opens the dialog on tap, whose own
-/// guard is what actually blocks the mint.
 pub(in super::super) fn create_token_row(
     colors: &Palette,
     enabled: bool,
@@ -239,15 +191,7 @@ pub(in super::super) fn create_token_row(
     )
 }
 
-/// Open the mint-a-token dialog: a name field and the read-only toggle,
-/// composed directly over `glyph_dialog`/`show_glyph_dialog` (rather than
-/// `ui::dialogs::name_input_dialog`, which has no toggle slot and cannot be
-/// widened from outside its own tree). The field and toggle are the dialog's
-/// real `.content()`; Cancel/Save are two real `.action(...)` buttons.
-///
-/// `on_submit` receives the **trimmed**, non-empty name and the toggle's
-/// value; every dismissal route (cancel, scrim, `Escape`, back) closes the
-/// dialog without calling back.
+/// `on_submit` gets the trimmed, non-empty name; every other dismissal closes without a callback.
 pub(in super::super) fn open_create_token_dialog(
     overlays: &NavigatorController<AppState>,
     on_submit: impl Fn(&mut AppState, String, bool) + 'static,
@@ -294,8 +238,6 @@ pub(in super::super) fn open_create_token_dialog(
                 )
                 .action(
                     button(DIALOG_SUBMIT_LABEL, move |_state: &mut AppState| {
-                        // "Disabled": the style below is the visual half,
-                        // this guard the behavioral one.
                         if can_submit {
                             submit_create_token(
                                 &submit_nav,
@@ -320,15 +262,10 @@ pub(in super::super) fn open_create_token_dialog(
     );
 }
 
-/// Whether `text` is a usable name (non-blank once trimmed) — mirrors
-/// `ui::dialogs::name_input_dialog`'s own `submittable`.
 fn create_token_submittable(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
-/// Pop the create dialog carrying the trimmed name and the toggle's value, or
-/// do nothing with no usable name — the one gate both the Enter key and the
-/// Save button route through.
 fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_only: bool) {
     let name = typed.trim();
     if name.is_empty() {
@@ -337,17 +274,7 @@ fn submit_create_token(nav: &NavigatorController<AppState>, typed: &str, read_on
     nav.pop_with_result(PopResult::of((name.to_string(), read_only)));
 }
 
-/// The create dialog's read-only toggle: a flexible label plus the real,
-/// themed `frust_glyph::toggle` (the same shape `features::connect`'s own
-/// `remember_row` draws) — **no outer `GestureDetector`**, since both
-/// `ToggleWidget` and `GestureDetectorWidget` capture the pointer on `Down`,
-/// and nesting the real toggle inside a row-wide detector would race the same
-/// gesture twice.
-///
-/// Built over `AppState` — a dialog is a page on the *app's* navigator — with
-/// a controlled-component callback: the toggle reports the *requested* value
-/// and the caller flips its own `read_only` signal, whose re-run reflects
-/// back into `on`.
+/// No outer `GestureDetector`: it and the toggle both capture the pointer on `Down`.
 fn dialog_read_only_row(
     on: bool,
     colors: &Palette,
@@ -367,15 +294,7 @@ fn dialog_read_only_row(
     ])
 }
 
-// ---------------------------------------------------------------------------
-// The one-time secret reveal sheet — over `AppState`, like the picker sheet
-// ---------------------------------------------------------------------------
-
-/// The reveal sheet's own content: title, the minted token's name, its
-/// secret, a Copy action and the "gone forever" caption. `minted` is `None`
-/// only in the vanishingly unlikely race where the pending secret was
-/// already cleared by the time this body re-ran; it renders a bare caption
-/// rather than panicking.
+/// `minted` is `None` only when the pending secret was cleared before this body re-ran.
 pub(in super::super) fn secret_reveal_sheet<D>(
     minted: Option<&MintedToken>,
     colors: &Palette,
@@ -391,10 +310,8 @@ where
                 .style(inked(&theme.type_scale.body_small, colors.fg_dim)),
         );
     };
-    // One residue `Zeroizing` cannot cover: rendering the secret needs a
-    // plain `String` this render pass owns (the shaped glyph run and the
-    // clipboard write both need one), so it lives outside the wrapper's
-    // scrub-on-drop for the rest of this build call.
+    // The rendered secret is a plain `String` outside `Zeroizing`'s scrub-on-drop for the rest
+    // of this build call: the shaped glyph run and the clipboard write both need one.
     let secret = minted.token.to_string();
     let copy_secret = secret.clone();
     Either::Right(stretch_column((
