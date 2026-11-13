@@ -1,24 +1,5 @@
-//! Cell style and colour resolution: the [`TerminalPalette`] the grid paints
-//! from (its own doc carries the theme-token → ANSI-16 mapping table), and
-//! [`CellStyle`], the whole of what makes two neighbouring cells batch into
-//! one run. [`terminal_palette`] resolves the palette once per
-//! `Component::build` and hands it to the widget as a plain value — no
-//! widget-side theme lookup per frame.
-//!
-//! **Every slot resolves against the theme's DARK side, whatever the platform
-//! brightness is.** The grid's surface is `GlyphInk::terminal_bg`, which is
-//! brightness-invariant by Glyph's own mandate — pulling, say,
-//! `StatusPalette`'s *light* warning (tuned for AA on paper) would paint
-//! dark-on-dark the moment the phone left dark mode (the trap
-//! `docs/CODE_STANDARDS.md` records as "`GlyphInk` is never brightness-swapped").
-//!
-//! **Two slots have no token at all.** Glyph is a single-accent system whose
-//! only hue-bearing tokens are amber, red, green and cyan — no blue, no
-//! magenta, and the nearest scheme role (`tertiary`) reuses the cyan hue,
-//! colliding slot 4 with slot 6. So [`ANSI_BLUE`]/[`ANSI_MAGENTA`] are
-//! hand-tuned constants in the same luminance band as the tokened hues rather
-//! than xterm's classic table, whose `#0000EE` blue is illegible on a
-//! `#1c1912` surface. The honest fix is a `GlyphInk` widening upstream.
+//! Cell style and colour resolution. Every slot resolves against the theme's dark side: the
+//! grid paints on `GlyphInk::terminal_bg`, which never follows the platform brightness.
 
 use frust::authoring::Color;
 use frust::authoring::text::{FontFamily, FontStyle, FontWeight, LineHeight, TextStyle};
@@ -26,94 +7,44 @@ use frust::{Brightness, StatusPalette, Theme, Tween};
 use frust_glyph::GlyphInk;
 
 /// Cell height as a multiple of the font size (CSS unitless `line-height`).
-/// 1.2 — kterm's `TerminalStyle.height` default and what the `s9_terminal`
-/// benchmark ran at, so row pitch derives from font size the same way. The
-/// *measured* line box still comes back from the shaper; this only sets what
-/// the shaper is asked for. See `geometry`.
 pub const LINE_HEIGHT: f32 = 1.2;
 
-/// Alpha applied to the foreground for SGR 2 (dim).
+/// Foreground alpha for SGR 2 (dim).
 pub const DIM_ALPHA: f32 = 0.66;
 
-/// How far a normal slot is mixed toward white to make its bright pair (slots
-/// 9-14). **Hand-tuned**: xterm's literals aren't derivable from Glyph's
-/// tokens, but "visibly lighter, same hue" is. 0.35 is where the pairs
-/// separate clearly on `terminal_bg` without washing out.
+/// Hand-tuned mix toward white for the bright slots 9-14.
 pub const BRIGHT_MIX: f64 = 0.35;
 
-/// Alpha of the selection wash over the runs it covers. **Hand-tuned, and
-/// deliberately not the mock's 0.12** (see the [module docs](self)): a CSS
-/// `::selection` background paints *behind* its text, and this one paints
-/// over it. High enough to be unmistakable over a coloured run, low enough
-/// that the glyphs under it stay readable.
+/// Hand-tuned above the mock's 0.12: this wash paints over its text, CSS `::selection` behind.
 pub const SELECTION_ALPHA: f32 = 0.28;
 
-/// ANSI slot 4 (blue). **Hand-tuned** — Glyph carries no blue token (see the
-/// [module docs](self)); this sits in the same luminance band as the tokened hues.
+/// Slots 4 and 5 are hand-tuned: Glyph has no blue or magenta token.
 pub const ANSI_BLUE: Color = Color::from_rgb8(0x6c, 0x8c, 0xff);
 
-/// ANSI slot 5 (magenta). **Hand-tuned**, for the same reason as
-/// [`ANSI_BLUE`].
 pub const ANSI_MAGENTA: Color = Color::from_rgb8(0xd9, 0x8a, 0xdf);
 
-/// Every colour the grid paints, resolved once per build from the active theme by
-/// [`terminal_palette`] — the mapping, and the two gaps the [module docs](self)
-/// explain:
-///
-/// | Slot | ANSI | Source |
-/// |---|---|---|
-/// | default bg | SGR 49 | `GlyphInk::terminal_bg` |
-/// | default fg | SGR 39 | `GlyphInk::terminal_fg` — the *untyped* body ink, which is what "no SGR colour set" means |
-/// | cursor | — | `GlyphInk::terminal_prompt` (the amber caret the mock blinks) |
-/// | selection | — | `Theme::dark.primary` at [`SELECTION_ALPHA`] |
-/// | 0 | black | `GlyphInk::terminal_bg` — `ESC[30m` vanishes into the surface, as in a real terminal |
-/// | 1 | red | `Theme::dark.error` |
-/// | 2 | green | `StatusPalette` dark `success` |
-/// | 3 | yellow | `StatusPalette` dark `warning` (**not** the accent amber, reserved for the cursor/prompt) |
-/// | 4 | blue | [`ANSI_BLUE`] |
-/// | 5 | magenta | [`ANSI_MAGENTA`] |
-/// | 6 | cyan | `StatusPalette` dark `info` (Glyph's one spare hue) |
-/// | 7 | white | `GlyphInk::terminal_out` — the dimmer output tier |
-/// | 8 | bright black | `GlyphInk::terminal_comment` — the dimmest ink, i.e. "grey" |
-/// | 9-14 | bright r/g/y/b/m/c | their normal slot mixed [`BRIGHT_MIX`] toward white |
-/// | 15 | bright white | `GlyphInk::terminal_fg` |
-/// | 16-231 / 232-255 | xterm cube / greyscale | computed, not tokened ([`indexed_color`]) |
+/// `ansi` holds `Color::Idx(0..=15)`: 0-7 normal, 8-15 bright.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalPalette {
-    /// SGR 49 / never-set: the whole-grid backdrop fill.
     pub background: Color,
-    /// SGR 39 / never-set.
     pub foreground: Color,
-    /// The cursor's ink (block fill, underline, bar, and the unfocused
-    /// outline).
     pub cursor: Color,
-    /// The wash a selected cell is painted over with: the same swatch as the
-    /// mock's `--amber`, painted **over** the runs rather than behind them, so
-    /// a cell with a non-default background still reads as selected. CSS
-    /// `::selection` sits *behind* its text (why the mock's 0.12 is enough
-    /// there, [`SELECTION_ALPHA`] higher here); text isn't recoloured, which
-    /// would re-shape every partly selected run on every pointer move.
+    /// Painted over the runs, so a cell with a non-default background still reads as selected.
     pub selection: Color,
-    /// `Color::Idx(0..=15)`: 0-7 normal, 8-15 bright.
     pub ansi: [Color; 16],
 }
 
 impl TerminalPalette {
-    /// The palette for an app with no theme installed at all — Glyph's own
-    /// baseline tokens, so the grid still paints its intended colours.
     pub fn fallback() -> Self {
         terminal_palette(&frust_glyph::baseline())
     }
 }
 
-/// Resolve [`TerminalPalette`] from `theme` (see the [module docs](self)).
 pub fn terminal_palette(theme: &Theme) -> TerminalPalette {
     let ink = theme
         .extension::<GlyphInk>()
         .copied()
         .unwrap_or_else(GlyphInk::default_ink);
-    // Explicitly the DARK status colours, whatever the platform brightness —
-    // see the module docs' brightness note.
     let status = theme
         .extension::<StatusPalette>()
         .copied()
@@ -132,7 +63,6 @@ pub fn terminal_palette(theme: &Theme) -> TerminalPalette {
     ];
     let mut ansi = [Color::BLACK; 16];
     ansi[..8].copy_from_slice(&normal);
-    // The two tokened bright slots, then the derived six between them.
     ansi[8] = ink.terminal_comment;
     ansi[15] = ink.terminal_fg;
     for slot in 9..15 {
@@ -143,27 +73,19 @@ pub fn terminal_palette(theme: &Theme) -> TerminalPalette {
         background: ink.terminal_bg,
         foreground: ink.terminal_fg,
         cursor: ink.terminal_prompt,
-        // Explicitly the DARK accent, for the same reason the status colours
-        // above are: this palette never follows the platform brightness.
         selection: theme.dark.primary.with_alpha(SELECTION_ALPHA),
         ansi,
     }
 }
 
-/// A normal slot's bright pair: [`BRIGHT_MIX`] of the way to white.
 fn brighten(color: Color) -> Color {
     Tween::new(color, Color::WHITE).lerp(BRIGHT_MIX)
 }
 
-/// Everything about a cell that affects how it paints. Two consecutive cells
-/// batch into one run iff their whole `CellStyle`s are equal — the same
-/// contract kterm and the `s9_terminal` benchmark batch on.
+/// Two consecutive cells batch into one run iff their whole `CellStyle`s are equal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CellStyle {
-    /// SGR foreground, unresolved (a `Color::Default` sentinel until
-    /// [`CellStyle::resolve`] runs).
     pub fg: vt100::Color,
-    /// SGR background, unresolved.
     pub bg: vt100::Color,
     pub bold: bool,
     pub italic: bool,
@@ -173,7 +95,6 @@ pub struct CellStyle {
 }
 
 impl CellStyle {
-    /// The style of one emulator cell.
     pub fn from_cell(cell: &vt100::Cell) -> Self {
         Self {
             fg: cell.fgcolor(),
@@ -186,14 +107,8 @@ impl CellStyle {
         }
     }
 
-    /// Resolved `(foreground, background)` against `palette`, applying
-    /// `inverse` (swap) and `dim` (foreground alpha). The background is
-    /// `None` when it resolves to the palette's own background, already
-    /// covered by the whole-grid backdrop — one fewer rect per run.
-    ///
-    /// **The two default sentinels resolve against their own fallbacks BEFORE
-    /// `inverse` swaps them** — swapping first would leave `ESC[7m` on an
-    /// otherwise-unstyled cell painting light-on-dark, i.e. not inverted at all.
+    /// The background is `None` when it equals the palette's backdrop. Default sentinels resolve
+    /// before `inverse` swaps, or `ESC[7m` on an unstyled cell would not invert.
     pub fn resolve(self, palette: &TerminalPalette) -> (Color, Option<Color>) {
         let fg = resolve_color(self.fg, palette.foreground, palette);
         let bg = resolve_color(self.bg, palette.background, palette);
@@ -204,10 +119,6 @@ impl CellStyle {
         (fg, (bg != palette.background).then_some(bg))
     }
 
-    /// The shaping style for this run's text at `font_size`, inked `color`, in
-    /// `family` — the resolved primary+fallback stack `TerminalGridWidget` holds
-    /// (a caller with no controller behind it passes
-    /// `crate::fonts::default_terminal_family()`).
     pub fn text_style(self, font_size: f32, color: Color, family: &FontFamily) -> TextStyle {
         TextStyle::new(font_size, color)
             .with_family(family.clone())
@@ -225,9 +136,6 @@ impl CellStyle {
     }
 }
 
-/// Map a `vt100::Color` onto a paint colour: the default sentinel onto
-/// `fallback`, `Idx` through the palette / xterm-256 tables, `Rgb` straight
-/// through (a program that asked for a literal colour gets it).
 pub fn resolve_color(color: vt100::Color, fallback: Color, palette: &TerminalPalette) -> Color {
     match color {
         vt100::Color::Default => fallback,
@@ -236,10 +144,8 @@ pub fn resolve_color(color: vt100::Color, fallback: Color, palette: &TerminalPal
     }
 }
 
-/// The xterm 256-colour table: 0-15 the themed palette, 16-231 the 6x6x6 cube,
-/// 232-255 the 24-step greyscale ramp. Only the first 16 are themed — the cube
-/// and ramp are *computed* coordinates in a colour space a program picked
-/// deliberately, so re-tinting them would corrupt gradients and heat maps.
+/// Only 0-15 are themed: the 6x6x6 cube and the greyscale ramp stay computed so a program's
+/// gradients are not re-tinted.
 pub fn indexed_color(i: u8, palette: &TerminalPalette) -> Color {
     match i {
         0..=15 => palette.ansi[i as usize],
@@ -292,8 +198,6 @@ mod tests {
 
     #[test]
     fn the_palette_is_brightness_invariant_like_the_ink_it_sits_on() {
-        // The same theme in both brightnesses must yield the identical grid
-        // palette: the grid's surface never follows the platform.
         let mut dark = frust_glyph::baseline();
         dark.brightness = Brightness::Dark;
         let mut light = frust_glyph::baseline();
@@ -335,8 +239,6 @@ mod tests {
         assert_eq!(fg, palette.foreground);
         assert_eq!(bg, None, "the default background is the whole-grid fill");
 
-        // `ESC[7m` on otherwise-unstyled text must actually invert: the two
-        // `Color::Default` sentinels resolve to their fallbacks first, then swap.
         let inverted = CellStyle {
             inverse: true,
             ..CellStyle::default()
@@ -368,13 +270,11 @@ mod tests {
         let palette = palette();
         assert_eq!(indexed_color(1, &palette), palette.ansi[1]);
         assert_eq!(indexed_color(15, &palette), palette.ansi[15]);
-        // 16 is the cube origin (black), 231 its far corner (white).
         assert_eq!(indexed_color(16, &palette), Color::from_rgb8(0, 0, 0));
         assert_eq!(
             indexed_color(231, &palette),
             Color::from_rgb8(0xFF, 0xFF, 0xFF)
         );
-        // 232 is the darkest grey step, 255 the lightest.
         assert_eq!(indexed_color(232, &palette), Color::from_rgb8(8, 8, 8));
         assert_eq!(
             indexed_color(255, &palette),
