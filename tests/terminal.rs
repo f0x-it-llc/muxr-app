@@ -152,7 +152,7 @@ const NEW_TAB_SUBMIT_LABEL: &str = "Create";
 
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
 /// card prints once a pane row inside it has been committed.
-const MINEFIT_TITLE: &str = "ed@lumen: ~/api";
+const LUMEN_TITLE: &str = "ed@lumen: ~/api";
 
 /// `presentation::pages`'s `FOOTER_RENAME_LABEL`/`FOOTER_DETACH_LABEL`
 /// (private there) — the side sheet's sticky footer's two icon-only
@@ -1551,7 +1551,7 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
         "no second close popped the route under the sheet"
     );
     assert!(
-        h.shows(BTOP_TITLE) && !h.shows(MINEFIT_TITLE),
+        h.shows(BTOP_TITLE) && !h.shows(LUMEN_TITLE),
         "the dropped row moved neither the card nor the session: {:?}",
         h.values()
     );
