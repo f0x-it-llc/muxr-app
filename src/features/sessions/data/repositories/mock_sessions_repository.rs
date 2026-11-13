@@ -1,41 +1,6 @@
-//! [`MockSessionsRepository`] — the in-memory
-//! [`SessionsRepository`] the mock era runs on.
-//!
-//! Seeds **exactly** the three sessions `docs/redesign.html`'s sessions block
-//! draws — `dev` (running zellij, two pane pills, `◎ 0 clients`),
-//! `jumping-peach` (idle resurrectible, no pills, `0 tabs saved`) and `herdr`
-//! (running herdr, `◆ 5 spaces`) — so the screen and the mock are the same
-//! picture, and every card shape the redesign shows is reachable. It mutates
-//! that set in place on create/rename/kill, so the screen proves a real round
-//! trip rather than patching its own signal.
-//!
-//! # Framework-free, and deliberately not `frust`-aware
-//!
-//! No `frust::` types here (the data-layer rule): the store is a plain
-//! [`Mutex<Vec<Session>>`]. The mutex — not a `RefCell` — is what makes this
-//! `Send + Sync`, which
-//! [`SessionsController`](crate::features::sessions::presentation::controllers::SessionsController)
-//! needs to hold it behind an `Arc` under `use_controller`'s bounds.
-//!
-//! # Failure mapping
-//!
-//! This is the feature's single failure-mapping site into
-//! [`AppFailure`]: an unknown id maps to [`AppFailure::Internal`] (a bug — the
-//! screen only ever addresses ids it just rendered) and a blank name to the
-//! same, since the dialog that collects one cannot submit blank text. A
-//! create or rename onto an id already in use maps to [`AppFailure::Network`],
-//! the shape the daemon's refusal of a duplicate name takes. A real
-//! gRPC client maps transport errors to [`AppFailure::Network`] and a rejected
-//! token to [`AppFailure::Auth`] in exactly this spot.
-//!
-//! # Latency
-//!
-//! [`MOCK_LATENCY`] is a short, deliberate `sleep` before every call so the
-//! screen's async path (spawn → await → signal write → rebuild) is the one the
-//! real client will take, rather than an accidentally-synchronous shortcut.
-//! Kept small enough not to be felt (huddle's own repositories use the same
-//! device with a 600ms value, because it wants its loading skeletons visible;
-//! this screen's rain is clocked by the settle edge, not by this delay).
+//! In-memory `SessionsRepository` seeded with `dev`, `jumping-peach` and `herdr`; create/rename/kill mutate that set in place.
+//! An unknown id or blank name maps to `AppFailure::Internal`; a duplicate name maps to `AppFailure::Network`.
+//! A `Mutex<Vec<Session>>` keeps it `Send + Sync`; `MOCK_LATENCY` keeps the async path realistic.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -48,40 +13,28 @@ use crate::features::sessions::domain::entities::{
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
-/// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
 
-/// The seeded `dev` session's id (`<backend>:<name>`).
 pub const SEEDED_DEV_ID: &str = "zellij:dev";
-/// The seeded idle `jumping-peach` session's id.
 pub const SEEDED_PEACH_ID: &str = "zellij:jumping-peach";
-/// The seeded herdr session's id.
 pub const SEEDED_HERDR_ID: &str = "herdr:herdr";
 
-/// An in-memory [`SessionsRepository`]. See the [module docs](self).
 pub struct MockSessionsRepository {
-    /// The live session set. Mutated in place by create/rename/kill.
     sessions: Mutex<Vec<Session>>,
 }
 
 impl MockSessionsRepository {
-    /// A repository seeded with [`seed`]'s three sessions.
     pub fn seeded() -> Self {
         Self {
             sessions: Mutex::new(seed()),
         }
     }
 
-    /// The live session set, cloned — a **synchronous** peek for tests and for
-    /// this module's own unit tests, never part of the
-    /// [`SessionsRepository`] contract (which is what production code speaks).
     pub fn snapshot(&self) -> Vec<Session> {
         self.lock().clone()
     }
 
-    /// Test seam: changes a field of the session called `name` that no id
-    /// depends on (one more pane), the way daemon telemetry churns between
-    /// polls. Panics when there is no such session.
+    /// Test seam: adds a pane to the session called `name`; panics when absent.
     pub fn churn(&self, name: &str) {
         let mut sessions = self.lock();
         let session = sessions
@@ -91,9 +44,7 @@ impl MockSessionsRepository {
         session.layout.panes += 1;
     }
 
-    /// Test seam: sets the agent roll-up of the session with id `id`, the way
-    /// the daemon's agent census changes between polls. Panics when there is
-    /// no such session.
+    /// Test seam: sets the agent roll-up of session `id`; panics when absent.
     pub fn seed_agents_for_tests(&self, id: &str, agents: Option<AgentSummary>) {
         let mut sessions = self.lock();
         let session = sessions
@@ -103,9 +54,7 @@ impl MockSessionsRepository {
         session.agents = agents;
     }
 
-    /// The store, with a poisoned lock recovered rather than propagated: a
-    /// panicking test must not cascade into every later call on this
-    /// repository (`ui::toasts`'s `serial()` uses the same recovery).
+    /// Recovers a poisoned lock so one panicking test does not cascade.
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Session>> {
         self.sessions
             .lock()
@@ -119,19 +68,15 @@ impl Default for MockSessionsRepository {
     }
 }
 
-/// The id production mints for a session: `<backend>:<name>` — the same
-/// convention `GrpcSessionsRepository` reconciles, so a rename changes the id
-/// here exactly as it does there.
+/// Mirrors the gRPC repository's `<backend>:<name>` id, so a rename changes the id.
 fn session_id(backend: SessionBackend, name: &str) -> String {
     format!("{}:{name}", backend.label())
 }
 
-/// The daemon's refusal of a name already in use on that backend.
 fn duplicate(name: &str) -> AppFailure {
     AppFailure::Network(format!("a session named {name:?} already exists"))
 }
 
-/// A terminal pane fixture.
 fn pane(title: &str, cwd: Option<&str>, focused: bool, floating: bool) -> PaneSummary {
     PaneSummary {
         id: 0,
@@ -143,7 +88,6 @@ fn pane(title: &str, cwd: Option<&str>, focused: bool, floating: bool) -> PaneSu
     }
 }
 
-/// A tab fixture; its panes are numbered in order, unique within the tab.
 fn tab(index: u32, name: &str, focused: bool, mut panes: Vec<PaneSummary>) -> TabSummary {
     for (id, pane) in (0..).zip(panes.iter_mut()) {
         pane.id = id;
@@ -157,7 +101,6 @@ fn tab(index: u32, name: &str, focused: bool, mut panes: Vec<PaneSummary>) -> Ta
     }
 }
 
-/// `tab` with its bell ringing.
 fn ringing(tab: TabSummary) -> TabSummary {
     TabSummary {
         has_bell: true,
@@ -165,8 +108,7 @@ fn ringing(tab: TabSummary) -> TabSummary {
     }
 }
 
-/// The seeded session set — `docs/redesign.html`'s three cards, transcribed
-/// 1:1 (counts, pane previews and all), in the order it draws them.
+/// Transcribed 1:1 from the design mock, in its order.
 fn seed() -> Vec<Session> {
     vec![
         Session {
@@ -285,9 +227,6 @@ fn seed() -> Vec<Session> {
     ]
 }
 
-/// The seeded herdr session's agents: [`PREVIEW_AGENT_MARKS`] given names, a
-/// pane and a line of activity each, so the detail list and the card's
-/// roll-up strip are the same four agents. Most urgent first.
 fn seed_herdr_agents() -> Vec<SessionAgent> {
     let places = [
         (
@@ -325,7 +264,6 @@ fn seed_herdr_agents() -> Vec<SessionAgent> {
     rows
 }
 
-/// A session created at runtime: one empty tab, running, no clients yet.
 fn new_session(name: String, backend: SessionBackend) -> Session {
     let third = match backend {
         SessionBackend::Zellij => ThirdMetric::Clients(0),
@@ -445,11 +383,8 @@ impl SessionsRepository for MockSessionsRepository {
 mod tests {
     use super::*;
 
-    /// How many sessions [`seed`] ships — the redesign's three cards.
     const SEEDED_COUNT: usize = 3;
 
-    /// Drive one repository call to completion on a current-thread runtime —
-    /// these are pure data-layer tests, with no frust runtime in play.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -484,7 +419,6 @@ mod tests {
         let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["dev", "jumping-peach", "herdr"]);
 
-        // Card 1 — running zellij, two pane pills, a client count.
         assert!(sessions[0].status.is_live());
         assert_eq!(sessions[0].backend, SessionBackend::Zellij);
         assert_eq!(sessions[0].layout.panes, 9);
@@ -495,18 +429,15 @@ mod tests {
             vec!["btop".to_string(), "ed@workbench:~".to_string()]
         );
 
-        // Card 2 — idle: no pills at all, and a saved-tab count instead.
         assert!(!sessions[1].status.is_live());
         assert!(sessions[1].layout.preview.is_empty());
         assert_eq!(sessions[1].layout.third, ThirdMetric::TabsSaved(0));
 
-        // Card 3 — herdr, which counts spaces rather than clients.
         assert_eq!(sessions[2].backend, SessionBackend::Herdr);
         assert_eq!(sessions[2].layout.third, ThirdMetric::Spaces(5));
         assert_eq!(sessions[2].layout.panes, 3);
         assert_eq!(sessions[2].layout.tabs, 2);
 
-        // Agents — only the herdr session carries a roll-up.
         assert_eq!(sessions[0].agents, None);
         assert_eq!(sessions[1].agents, None);
         let agents = sessions[2].agents.as_ref().expect("herdr agents");
