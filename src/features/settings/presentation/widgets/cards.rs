@@ -44,40 +44,32 @@ fn disconnect_card(colors: &Palette) -> impl View<SettingsState> {
             1,
             text(DISCONNECT_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
         )
-        .child(SizedBox::<SettingsState>(Some(CARD_GAP), None))
         .child(
             button(DISCONNECT_LABEL, |state: &mut SettingsState| {
                 open_disconnect_dialog(state)
             })
             .style(ButtonStyle::Danger),
         )
+        .gap(CARD_GAP)
         .cross_axis(CrossAxisAlignment::Center);
     glyph_card::<SettingsState>()
         .title(group_label("lock & disconnect", colors))
         .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row))
 }
 
-/// `children` with a [`CARD_GAP`] spacer between each neighbour, running
-/// along `axis`; `flex` is each child's flex factor (`None` = inflexible).
-fn interleave_gaps<V: View<SettingsState>>(
+/// `children` as flex children; `flex` is each child's flex factor
+/// (`None` = inflexible). The caller sets the [`CARD_GAP`] between them.
+fn card_children<V: View<SettingsState>>(
     children: Vec<V>,
-    axis: Axis,
     flex: Option<u32>,
 ) -> Vec<FlexChild<SettingsState>> {
-    let mut out = Vec::with_capacity(children.len() * 2);
-    for (index, child) in children.into_iter().enumerate() {
-        if index > 0 {
-            out.push(inflexible(match axis {
-                Axis::Horizontal => SizedBox::<SettingsState>(Some(CARD_GAP), None),
-                Axis::Vertical => SizedBox::<SettingsState>(None, Some(CARD_GAP)),
-            }));
-        }
-        out.push(match flex {
+    children
+        .into_iter()
+        .map(|child| match flex {
             Some(factor) => flexible(factor, child),
             None => inflexible(child),
-        });
-    }
-    out
+        })
+        .collect()
 }
 
 /// The Tablet body: the cards packed into two equal columns when `full` —
@@ -101,13 +93,15 @@ pub(in super::super) fn tablet_scroller(
             .partition(|(index, _)| index % 2 == 0);
         let column = |cards: Vec<(usize, AnyView<SettingsState>)>| {
             let cards = cards.into_iter().map(|(_, card)| card).collect();
-            FlexView::new(Axis::Vertical, interleave_gaps(cards, Axis::Vertical, None))
+            FlexView::new(Axis::Vertical, card_children(cards, None))
+                .gap(CARD_GAP)
                 .cross_axis(CrossAxisAlignment::Stretch)
         };
         vec![any(FlexView::new(
             Axis::Horizontal,
-            interleave_gaps(vec![column(left), column(right)], Axis::Horizontal, Some(1)),
+            card_children(vec![column(left), column(right)], Some(1)),
         )
+        .gap(CARD_GAP)
         .cross_axis(CrossAxisAlignment::Start))]
     } else {
         cards
@@ -121,7 +115,8 @@ pub(in super::super) fn tablet_scroller(
             right: spacing::XL,
             bottom: SCROLL_PAD_BOTTOM,
         },
-        FlexView::new(Axis::Vertical, interleave_gaps(lines, Axis::Vertical, None))
+        FlexView::new(Axis::Vertical, card_children(lines, None))
+            .gap(CARD_GAP)
             .cross_axis(CrossAxisAlignment::Stretch),
     );
     Align(
