@@ -1,26 +1,6 @@
-//! The **real** terminal grid: a VT emulator fed off a
-//! [`TerminalFeed`](crate::features::terminal::domain::feed::TerminalFeed), a
-//! same-style run batcher, cell geometry, and the `View`/`Widget` pair that
-//! paints it — mounted by `/terminal` for a **live** session (a bare
-//! `/terminal` and headless suites render [`super::widgets`]'s mock transcript
-//! instead). [`style`]: theme→ANSI-16; [`batch`]: run batching; [`geometry`]:
-//! the cell box; [`input`]/[`selection`]: pure keystroke/selection models;
-//! [`chip`]: the Copy chip; [`widget`]: the retained grid. This module owns the
-//! emulator wrapper, the pump, and the [`InputSeam`]/[`SelectionSeam`] +
-//! [`ContentTapSink`]/[`WheelSink`] hooks.
-//!
-//! **Coalescing is app-side at [`REPAINT_HZ`]**: the mobile frame gate only
-//! paces animation-only frames, so a signal write per byte-chunk would force an
-//! unpaced rebuild at feed rate. [`run_feed`] wakes every [`REPAINT_INTERVAL`]
-//! (an absolute grid point, immune to drift) and writes the generation signal
-//! once per wake — no byte dropped, only the repaint coalesced; an idle session
-//! costs zero frames. Exception: a PTY echoes before the program answers, so
-//! [`InputSeam::dispatch`] drains synchronously in the event pass instead of
-//! waiting for the next wake — this can fire at 30 Hz, so keep a hosting
-//! screen's `build` cheap.
-//!
-//! **Layout-blind, speaking cells**: [`ContentTapSink`]/[`WheelSink`] report cell
-//! coordinates, never a pane or an RPC — mapping onto a pane is the screen's job.
+//! The live terminal grid: a VT emulator fed off a `TerminalFeed`, its pump, and the input and
+//! selection seams. Repaints coalesce app-side at [`REPAINT_HZ`] because the mobile frame gate
+//! paces only animation frames; an echo drains synchronously, so keep a host's `build` cheap.
 
 pub mod batch;
 pub mod chip;
@@ -58,88 +38,49 @@ pub use pinch::{PinchIntent, PinchIntentTracker, PinchSink};
 pub use style::{TerminalPalette, terminal_palette};
 pub use widget::{TerminalGridView, TerminalGridWidget, terminal_grid};
 
-/// The app-side repaint coalescing cap, in Hz — **the single knob**.
 pub const REPAINT_HZ: f64 = 30.0;
 
-/// [`REPAINT_HZ`] as a period — derived, so that really is the only knob.
 pub const REPAINT_INTERVAL: Duration = Duration::from_nanos((1_000_000_000.0 / REPAINT_HZ) as u64);
 
-/// Scrollback lines the emulator retains (matches the Flutter client this
-/// replaces). No scrollback view exists yet; captured from the start so
-/// scrolling back later has something to show.
 pub const DEFAULT_SCROLLBACK: usize = 4000;
 
-/// The caret's shape — a **widget input**, not a preferences read; the screen
-/// that owns both maps `settings::CursorStyle` onto this (variants/default
-/// match 1:1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorStyle {
-    /// Filled cell (`ESC[2 q`) — default.
+    /// `ESC[2 q`.
     #[default]
     Block,
-    /// Bar along the cell's bottom (`ESC[4 q`).
+    /// `ESC[4 q`.
     Underline,
-    /// Vertical bar at the cell's left edge (`ESC[6 q`).
+    /// `ESC[6 q`.
     Bar,
 }
 
-/// The emulator, shared between the pump and the grid widget — `Rc<RefCell<_>>`,
-/// not a signal, per the [module docs](self).
 pub type SharedEmulator = Rc<RefCell<TerminalEmulator>>;
 
-/// The feed, shared between the pump and whatever sends input to it.
 pub type SharedFeed = Rc<RefCell<dyn TerminalFeed>>;
 
-/// The keystroke source, shared between the grid widget and the key bar (which
-/// arms the same latch) — see [`InputSeam`]. `Rc<RefCell<_>>` because it mutates
-/// during the *event* pass, where a signal per keystroke would wake a rebuild.
 pub type SharedKeystrokeSource = Rc<RefCell<KeystrokeSource>>;
 
-/// What the grid widget and the key bar share to be one keystroke source: the
-/// [`KeystrokeSource`] (and its modifier latch), the feed bytes leave through,
-/// and one signal a state change bumps.
-///
-/// The signal lives here, not in [`input`] (deliberately framework-free),
-/// because a latch change must wake the key bar's pips; [`dispatch`](Self::dispatch)
-/// sends bytes and mirrors the source's revision into it, once per event.
-///
-/// Read-only and scrub live here too, as session-level properties: a read-only
-/// session is inert to every widget, and buffered keystrokes drop the moment
-/// input stops.
+/// Shared by the grid widget and the key bar, so both drive one keystroke source and latch.
 #[derive(Clone)]
 pub struct InputSeam {
-    /// The shared source — the diff engine and the latch.
     pub source: SharedKeystrokeSource,
-    /// Where emitted bytes go.
     pub feed: SharedFeed,
-    /// Mirrors the source's revision — bumped once per [`dispatch`](Self::dispatch).
     pub revision: RwSignal<u64>,
-    /// Whether this session refuses input entirely (see the type docs). `Cell`
-    /// behind `Rc`: written from `build`, read from the event/paint passes.
+    /// Written from `build`, read from the event and paint passes.
     read_only: Rc<Cell<bool>>,
-    /// How many times a widget has claimed the focus path. The grid compares
-    /// this across its own blur edge to tell a **hand-off** (a key cap took the
-    /// surface) from a real blur. Monotonic; the value itself means nothing.
+    /// Compared across the grid's blur edge: unchanged means a real blur, not a key-cap hand-off.
     focus_claim: Rc<Cell<u64>>,
-    /// The session's pump — the emulator an echo lands in, and the generation
-    /// signal it publishes to — wired once by [`wire_pump`](Self::wire_pump).
-    /// `None` until then.
     pump: Option<PumpHandle>,
 }
 
-/// The session's pump, as [`InputSeam::dispatch`] needs it to drain an echo.
 #[derive(Clone)]
 struct PumpHandle {
-    /// The emulator the echoed bytes land in.
     emulator: SharedEmulator,
-    /// The generation signal, shared with [`run_feed`]'s loop. [`pump_wake`]
-    /// derives "next" from the signal itself, so both writers agree.
     generation: RwSignal<u64>,
 }
 
 impl InputSeam {
-    /// A seam over `feed`, fresh source, revision at zero. Not wired to a pump
-    /// yet — see [`wire_pump`](Self::wire_pump).
     pub fn new(feed: SharedFeed) -> Self {
         Self {
             source: Rc::new(RefCell::new(KeystrokeSource::new())),
@@ -151,11 +92,6 @@ impl InputSeam {
         }
     }
 
-    /// Wire this seam to the session's pump: the emulator an echo lands in, and
-    /// the generation signal it publishes to. Once wired,
-    /// [`dispatch`](Self::dispatch) drains synchronously after sending rather
-    /// than waiting for [`run_feed`]'s next wake. Called exactly once, from
-    /// `LiveSession::enter`.
     pub fn wire_pump(&mut self, emulator: SharedEmulator, generation: RwSignal<u64>) {
         self.pump = Some(PumpHandle {
             emulator,
@@ -163,16 +99,7 @@ impl InputSeam {
         });
     }
 
-    /// Send `emission`'s bytes and wake anything reading [`revision`](Self::revision).
-    ///
-    /// **The one place bytes leave the app** — bar taps and soft-keyboard chars
-    /// both route through here with the latch already applied, which is why the
-    /// read-only gate is final here.
-    ///
-    /// Once [`wire_pump`](Self::wire_pump) has run, sending non-empty bytes also
-    /// drains the feed synchronously (no `RefCell` borrow held across the call).
-    /// `pump_wake` derives "next" from `generation` itself, so this drain and
-    /// [`run_feed`]'s scheduled wake always agree on order.
+    /// The one place bytes leave the app, so the read-only gate is final here.
     pub fn dispatch(&self, emission: &Emission) {
         if !emission.bytes.is_empty() && !self.read_only() {
             self.feed.borrow_mut().send_input(&emission.bytes);
@@ -186,47 +113,33 @@ impl InputSeam {
         }
     }
 
-    /// Whether this session refuses input — see the type docs.
     pub fn read_only(&self) -> bool {
         self.read_only.get()
     }
 
-    /// Publish the session's read-only posture (the grid's
-    /// [`read_only`](TerminalGridView::read_only) input, threaded from its
-    /// `build`/`rebuild` so every emitter agrees). Turning it **on** scrubs —
-    /// stopped input has no reason to keep the last thing typed. Idempotent.
+    /// Turning read-only on scrubs the buffered keystrokes.
     pub fn set_read_only(&self, read_only: bool) {
         if self.read_only.replace(read_only) != read_only && read_only {
             self.scrub();
         }
     }
 
-    /// Drop every keystroke the source holds — see [`KeystrokeSource::scrub`].
-    ///
-    /// Deliberately does not mirror into [`revision`](Self::revision): this is
-    /// called from paint (the grid's blur edge), and a signal write from paint
-    /// would schedule a rebuild a paint pass must never trigger.
+    /// Never mirrors into `revision`: it runs from paint, where a signal write would schedule a
+    /// rebuild.
     pub fn scrub(&self) {
         self.source.borrow_mut().scrub();
     }
 
-    /// Claim the focus path, returning the new claim — called by every widget
-    /// that requests focus on the session's behalf. See [`focus_claim`](Self::focus_claim).
     pub fn claim_focus(&self) -> u64 {
         let claim = self.focus_claim.get().wrapping_add(1);
         self.focus_claim.set(claim);
         claim
     }
 
-    /// The current focus claim — recorded on focus gain, re-read on loss. An
-    /// unchanged claim across that edge means that really was a blur.
     pub fn focus_claim(&self) -> u64 {
         self.focus_claim.get()
     }
 
-    /// Fold a key-bar press into the source and send whatever it derived, or
-    /// `None` when read-only. [`absorb`](Self::absorb)'s bar counterpart — the
-    /// gate lives in the seam, not the cap.
     pub fn press_bar_key(&self, key: BarKey) -> Option<Emission> {
         if self.read_only() {
             return None;
@@ -236,26 +149,16 @@ impl InputSeam {
         Some(emission)
     }
 
-    /// The armed modifiers — what the key bar draws its pips from.
     pub fn latch(&self) -> ModifierLatch {
         self.source.borrow().latch()
     }
 
-    /// The editing state to publish to the platform right now.
     pub fn published(&self) -> EditingState {
         self.source.borrow().published()
     }
 
-    /// **The** IME surface a terminal input widget publishes: the source's
-    /// reconciled editing state, an optional caret rect (placement hint), and
-    /// [`ImeContentType::Terminal`] — turns off autocorrect/smart quotes/autocap
-    /// so a typed `"` arrives as `0x22`. Spelled once here, not per widget: two
-    /// spellings disagreeing on content type is a silent corrupt-shell-command
-    /// bug. `active` is always `true` — only a focused/claiming widget publishes
-    /// this, and a blur drops the surface. `suppress_soft_keyboard` mirrors
-    /// [`read_only`](Self::read_only): needed for Copy/selection, never the
-    /// keyboard — agreeing with, not fighting, `TerminalGridWidget`'s own
-    /// read-only suppression.
+    /// `ImeContentType::Terminal` disables autocorrect and smart quotes so a typed `"` arrives as
+    /// `0x22`; spelled once here so no two widgets disagree.
     pub fn ime_state(&self, caret: Option<Rect>) -> ImeState {
         ImeState {
             active: true,
@@ -266,17 +169,8 @@ impl InputSeam {
         }
     }
 
-    /// Fold one **focus-routed** event into the source and send whatever it
-    /// derived, or `None` when `event` is not one.
-    ///
-    /// Any widget requesting focus (the grid's `Down`, a key cap's `Down`) may
-    /// call this — frust blurs on a `Down` claiming no focus, dropping the whole
-    /// published surface, so whichever widget holds the focus path drives the
-    /// same [`KeystrokeSource`] and publishes the same
-    /// [`ime_state`](Self::ime_state). A read-only session absorbs nothing —
-    /// including `EditCommand::Paste`, folded in here since paste IS input
-    /// bytes (`Copy`/`Cut`/`SelectAll` are reads the grid answers itself; see
-    /// `edit_command`).
+    /// Any focus-requesting widget may call this, since frust blurs on a `Down` that claims no
+    /// focus. Paste is input; `Copy`/`Cut`/`SelectAll` are reads the grid answers itself.
     pub fn absorb(&self, event: &InputEvent) -> Option<Emission> {
         if self.read_only() {
             return None;
@@ -285,9 +179,6 @@ impl InputSeam {
             let mut source = self.source.borrow_mut();
             match event {
                 InputEvent::Key(key) => source.on_key(&key.key, key.modifiers),
-                // `ApplyEditingState` is the mobile (state-sync) path;
-                // `Compose`/`Commit` are the desktop (winit) shapes;
-                // `Enabled`/`Disabled` bracket a composition.
                 InputEvent::Ime(ImeEvent::ApplyEditingState(state)) => source.on_snapshot(state),
                 InputEvent::Ime(ImeEvent::Commit(text)) => source.on_commit(text),
                 InputEvent::Ime(ImeEvent::Compose { text, .. }) => source.on_compose(text),
@@ -302,66 +193,35 @@ impl InputSeam {
     }
 }
 
-/// The live selection gesture, shared between the grid widget (measures/paints/
-/// tracks the finger), the gesture detector's `on_long_press` (starts it), and
-/// the Copy chip (ends it) — see [`SelectionSeam`].
 pub type SharedSelection = Rc<RefCell<SelectionState>>;
 
-/// Everything one selection gesture is: last-measured cell box, finger position,
-/// anchor cell, and what's selected. Private, with accessors on [`SelectionSeam`]
-/// so all three reader widgets go through the same clamping/resolution rules.
 #[derive(Default)]
 pub struct SelectionState {
-    /// The cell box the grid last laid out at — the px→cell mapping.
     metrics: Option<CellGeometry>,
-    /// The finger, in the grid's own local logical px.
+    /// Grid-local logical px.
     pointer: Point,
-    /// Whether a finger is currently down (see [`SelectionSeam::begin`]).
     pressed: bool,
-    /// The cell the long-press anchored on. Fixed for the whole drag.
     anchor: Option<GridPoint>,
-    /// Whether a selection drag is live — what makes the loupe visible.
     dragging: bool,
-    /// The selected cells, if any.
     range: Option<GridRange>,
-    /// Where the drag released, i.e. where the Copy chip is anchored. `Some`
-    /// **is** "the chip is up".
+    /// `Some` is "the chip is up".
     chip: Option<Point>,
-    /// Selection-click haptics fired — a test/diagnostic counter.
     haptics: u32,
-    /// Last content generation observed (see
-    /// [`SelectionSeam::observe_generation`]); `None` until the grid's first
-    /// build.
     last_generation: Option<u64>,
 }
 
-/// What the grid widget, the long-press callback, and the Copy chip share to be
-/// one selection: the [`SelectionState`] and the emulator whose screen resolves
-/// words/copy text.
-///
-/// `Rc<RefCell<_>>`, not a signal, for the same reason [`InputSeam`]'s source is:
-/// a drag re-resolves both endpoints on every `Move`, and a signal write per move
-/// would rebuild the whole app 60+ times a second over pixels alone. The grid
-/// asks for a plain `request_redraw`; the chip (a sibling) sees the new state on
-/// the same paint pass with no rebuild.
-///
-/// [`begin`](Self::begin) fires the selection-click haptic — the one non-state
-/// side effect here, kept at this choke point so [`selection`] stays pure.
+/// `Rc<RefCell<_>>`, not a signal: a drag re-resolves on every `Move`, and the chip sees the
+/// new state on the same paint pass with no rebuild.
 #[derive(Clone)]
 pub struct SelectionSeam {
-    /// The shared gesture state.
     state: SharedSelection,
-    /// The screen words resolve against and copy text comes from.
     emulator: SharedEmulator,
-    /// The pinch reducer, kept here because `build` re-runs mid-gesture and a tracker made
-    /// there would forget its cumulative scale.
+    /// Kept here because `build` re-runs mid-gesture and a fresh tracker would lose its scale.
     pinch: Rc<RefCell<PinchIntentTracker>>,
-    /// Whether a recognised pinch is in flight: [`begin`](Self::begin) is inert meanwhile.
     pinching: Rc<Cell<bool>>,
 }
 
 impl SelectionSeam {
-    /// A seam over `emulator`, with nothing selected.
     pub fn new(emulator: SharedEmulator) -> Self {
         Self {
             state: Rc::new(RefCell::new(SelectionState::default())),
@@ -371,14 +231,8 @@ impl SelectionSeam {
         }
     }
 
-    /// Publish the cell box the grid laid out at (the px→cell mapping). Called
-    /// from `layout`.
-    ///
-    /// Clamps a held selection onto the new grid **here**, the instant a shrink
-    /// is observed — otherwise a stale off-screen `range` hits a u16 underflow in
-    /// `vt100`'s `contents_between` on shrink-then-Copy, or paints stale via
-    /// [`selection::segments`]. [`GridRange::clamp_to`] no-ops when nothing
-    /// shrank.
+    /// Clamps a held selection the instant a shrink is observed; a stale range would underflow
+    /// `contents_between` on Copy.
     pub fn set_metrics(&self, metrics: CellGeometry) {
         let mut state = self.state.borrow_mut();
         state.metrics = Some(metrics);
@@ -387,8 +241,6 @@ impl SelectionSeam {
         }
     }
 
-    /// The cell under `at` (grid-local logical px), clamped to the grid; `None` before the
-    /// first layout publishes the cell box. The one focal-to-cell path.
     pub fn cell_at(&self, at: Point) -> Option<GridPoint> {
         self.state
             .borrow()
@@ -396,21 +248,14 @@ impl SelectionSeam {
             .map(|metrics| selection::cell_at(at, metrics))
     }
 
-    /// Record the finger at `at` (grid-local logical px), and whether it is down.
     pub fn track(&self, at: Point, pressed: bool) {
         let mut state = self.state.borrow_mut();
         state.pointer = at;
         state.pressed = pressed;
     }
 
-    /// **The long-press consumer.** Anchors on the cell under the finger and
-    /// selects the word there.
-    ///
-    /// The haptic fires **before** the word resolves, even over a separator with
-    /// nothing to select — it acknowledges the gesture, not the result; its
-    /// `Result` is ignored (desktop reports `NotAvailable` by design). A fire
-    /// with **no finger down** (fire-on-release) resolves and goes straight to
-    /// released/chip state rather than leaving an unclosed drag.
+    /// The haptic fires before the word resolves, even over a separator. A fire with no finger
+    /// down goes straight to the released, chip-up state.
     pub fn begin(&self) {
         if self.pinching.get() {
             return;
@@ -433,8 +278,6 @@ impl SelectionSeam {
         }
     }
 
-    /// A pinch was recognised: long-press selection is inert until [`pinch_ended`](Self::pinch_ended),
-    /// and a selection drag this gesture already began is dropped.
     pub(crate) fn pinch_began(&self) {
         self.pinching.set(true);
         if self.state.borrow().dragging {
@@ -442,17 +285,12 @@ impl SelectionSeam {
         }
     }
 
-    /// The pinch guard resets only on the grid's fresh first-finger `Down`: it stays set
-    /// until then, a cancelled or ended pinch alike, because the first finger's gesture
-    /// returns to the grid late and a held finger would otherwise long-press.
+    /// Called only on the grid's fresh first-finger `Down`: a cancelled pinch delivers no `End`,
+    /// and the first finger's gesture returns to the grid late.
     pub(crate) fn pinch_ended(&self) {
         self.pinching.set(false);
     }
 
-    /// Re-resolve for the live finger: the word at the fixed anchor merged with
-    /// the word under the finger, in reading order. Recomputes both ends every
-    /// time ([`selection::resolve`]) — reversing direction mid-drag needs no
-    /// special case.
     pub fn extend(&self) {
         let mut state = self.state.borrow_mut();
         let (Some(metrics), Some(anchor)) = (state.metrics, state.anchor) else {
@@ -462,28 +300,22 @@ impl SelectionSeam {
         state.range = selection::resolve(self.emulator.borrow().screen(), anchor, extent);
     }
 
-    /// End the drag: the loupe goes away and, if anything is selected, the Copy
-    /// chip appears where the finger lifted.
     pub fn finish(&self) {
         let mut state = self.state.borrow_mut();
         state.dragging = false;
         state.chip = state.range.map(|_| state.pointer);
     }
 
-    /// Drop the drag **flag** only — the `Cancel` arm's whole vocabulary. The
-    /// selection itself survives a stolen gesture; the next tap clears it.
+    /// The selection survives a stolen gesture; the next tap clears it.
     pub fn cancel_drag(&self) {
         self.state.borrow_mut().dragging = false;
     }
 
-    /// Whether anything is selected or the chip is up — i.e. whether the next tap
-    /// is a **clearing** tap.
     pub fn is_active(&self) -> bool {
         let state = self.state.borrow();
         state.range.is_some() || state.chip.is_some()
     }
 
-    /// Drop the selection, the chip and the anchor.
     pub fn clear(&self) {
         let mut state = self.state.borrow_mut();
         state.anchor = None;
@@ -492,9 +324,7 @@ impl SelectionSeam {
         state.chip = None;
     }
 
-    /// Clear an existing selection, reporting whether there was one — **the
-    /// clearing tap**. One call so the grid can check *before* claiming focus:
-    /// dismissing a selection must not raise the keyboard.
+    /// One call so the grid checks before claiming focus: dismissing must not raise the keyboard.
     pub fn clear_if_active(&self) -> bool {
         let active = self.is_active();
         if active {
@@ -503,13 +333,7 @@ impl SelectionSeam {
         active
     }
 
-    /// Record that the grid observed content generation `generation`, clearing a
-    /// held selection if it moved since the last observation ([`selection`]'s
-    /// module docs explain why new output clears).
-    ///
-    /// No-op unless generation changed AND something is held — a same-generation
-    /// rebuild is not new output. Called from `build` (seeding) and every
-    /// `rebuild`.
+    /// A same-generation rebuild is not new output and clears nothing.
     pub fn observe_generation(&self, generation: u64) {
         let should_clear = {
             let mut state = self.state.borrow_mut();
@@ -522,27 +346,22 @@ impl SelectionSeam {
         }
     }
 
-    /// The selected cells, if any.
     pub fn range(&self) -> Option<GridRange> {
         self.state.borrow().range
     }
 
-    /// Whether a selection drag is live — what makes the loupe visible.
     pub fn dragging(&self) -> bool {
         self.state.borrow().dragging
     }
 
-    /// The finger, in the grid's own local logical px — the loupe's focal point.
     pub fn pointer(&self) -> Point {
         self.state.borrow().pointer
     }
 
-    /// Where the drag released, when the Copy chip is up.
     pub fn chip_anchor(&self) -> Option<Point> {
         self.state.borrow().chip
     }
 
-    /// The selected text, as the clipboard should receive it; empty when nothing is.
     pub fn text(&self) -> String {
         let Some(range) = self.range() else {
             return String::new();
@@ -550,64 +369,24 @@ impl SelectionSeam {
         selection::selected_text(self.emulator.borrow().screen(), range)
     }
 
-    /// Selection-click haptics fired so far — a test/diagnostic accessor.
     pub fn haptic_count(&self) -> u32 {
         self.state.borrow().haptics
     }
 
-    /// The cell box the grid last laid out at — a test/diagnostic accessor (and the
-    /// only way anything outside the grid can turn a cell into a pixel).
     pub fn metrics(&self) -> Option<CellGeometry> {
         self.state.borrow().metrics
     }
 }
 
-/// Where a **content tap** is reported: the zero-based `(col, row)` cell the
-/// finger lifted on, clamped to the grid. The `bool` answered is **whether this
-/// tap should raise the keyboard**.
-///
-/// `Rc<dyn Fn>`, like [`CopySink`]: installed from `build`, called from the
-/// *event* pass. Optional — with none wired, a tap claims focus and raises the
-/// keyboard.
-///
-/// The answer must be **synchronous**: the grid publishes its IME surface
-/// inside the same event pass (`EventCtx` is the only route to
-/// `publish_ime_state`), so a round-trip verdict can't be honoured. `false`
-/// leaves the keyboard as-is — the grid never dismisses one itself.
+/// Zero-based `(col, row)`; answers synchronously whether to raise the keyboard, since the IME
+/// surface publishes in the same event pass. `false` leaves the keyboard as-is.
 pub type ContentTapSink = Rc<dyn Fn(u32, u32) -> bool>;
 
-/// Where a **wheel step** is reported: direction (`up`) and the zero-based
-/// `(col, row)` cell it applies at. One call per step, never a batch or a pixel
-/// amount — the grid does px→line accumulation so touch drag and desktop wheel
-/// both arrive in the vocabulary `muxrd`'s scroll RPC speaks.
+/// `(up, col, row)`, one call per line step: the vocabulary `muxrd`'s scroll RPC speaks.
 pub type WheelSink = Rc<dyn Fn(bool, u32, u32)>;
 
-/// The whole interactive terminal: the grid, its long-press gesture, and the Copy
-/// chip over it.
-///
-/// ```text
-/// [pinch_detector]            ← OUTSIDE the stack, only with a PinchSink
-///  └─ Stack
-///      ├─ GestureDetector(on_long_press = seam.begin)   ← bottom
-///      │    └─ TerminalGridView (selection wired)
-///      └─ CopyChipView                                  ← top, full-bleed
-/// ```
-///
-/// 1. **The chip sits above the gesture detector** so a press on the pill never
-///    reaches the grid — tapping `Copy` cannot clear the selection it's copying.
-/// 2. **Only `on_long_press` is wired**; the grid runs its own tap/drag-scroll/
-///    long-press discrimination ([`widget`]'s touch state machine) off raw
-///    phases, since a tap must check a clearing selection and focus claim the
-///    detector knows nothing about. Both use [`TOUCH_SLOP`](frust::input::TOUCH_SLOP).
-/// 3. **The surface takes the whole offered box** (the chip overlay is
-///    full-bleed); the grid takes only its whole-cell box inside it — the
-///    sub-cell remainder is the tight-parent case [`TerminalGridWidget`] documents.
-/// 4. **Pinch** ([`terminal_surface_with_pinch`]): the first contact reaches the
-///    grid unchanged; a recognised pinch's Begin steals the grid's gesture with a
-///    synthesized `Cancel`, deferred to the first finger's next event. The Cancel arm
-///    drops only the drag/loupe; the seam's pinch guard is what prevents and clears a
-///    long-press selection during a pinch (the held finger still fires the timer). A
-///    cancelled pinch delivers no `End`, so the guard resets on the next first-finger `Down`.
+/// The Copy chip stacks above the gesture detector so a press on it never reaches the grid;
+/// only `on_long_press` is wired, as the grid discriminates taps and drag-scroll itself.
 pub fn terminal_surface<State: 'static>(
     seam: SelectionSeam,
     grid: TerminalGridView,
@@ -622,9 +401,7 @@ pub fn terminal_surface<State: 'static>(
         .child(chip)
 }
 
-/// [`terminal_surface`], optionally wrapped in a pinch detector reporting one
-/// [`PinchIntent`] per gesture (and its focal, grid-local) to `pinch`. `None`
-/// returns the bare stack, so mounts that never pinch pay nothing.
+/// A recognised pinch's `Begin` steals the grid's gesture with a synthesized `Cancel`.
 pub fn terminal_surface_with_pinch<State: 'static>(
     seam: SelectionSeam,
     grid: TerminalGridView,
@@ -650,22 +427,16 @@ pub fn terminal_surface_with_pinch<State: 'static>(
     )
 }
 
-/// A VT emulator sized to the grid on screen: a thin wrapper over `vt100::Parser`
-/// and the *only* place naming that crate's `(rows, cols)` argument order —
-/// everything above speaks `(cols, rows)`.
+/// The only place naming `vt100`'s `(rows, cols)` order; everything above speaks `(cols, rows)`.
 pub struct TerminalEmulator {
     parser: vt100::Parser,
-    /// A resize the layout pass derived, not yet told to the session. Drained
-    /// by whoever owns the feed, which turns it into `SIGWINCH`.
+    /// Drained by whoever owns the feed, which turns it into `SIGWINCH`.
     pending_resize: Option<(u16, u16)>,
-    /// Diagnostics: bytes and writes actually parsed.
     fed_bytes: usize,
     fed_writes: usize,
 }
 
 impl TerminalEmulator {
-    /// An emulator holding a blank `cols` x `rows` screen with `scrollback`
-    /// lines of history.
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         Self {
             parser: vt100::Parser::new(rows.max(1), cols.max(1), scrollback),
@@ -675,34 +446,26 @@ impl TerminalEmulator {
         }
     }
 
-    /// An emulator at the classic VT default grid (80x24) with
-    /// [`DEFAULT_SCROLLBACK`] — what it holds until the first `layout`.
     pub fn with_defaults() -> Self {
         Self::new(FALLBACK_COLS, FALLBACK_ROWS, DEFAULT_SCROLLBACK)
     }
 
-    /// The current visible screen.
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }
 
-    /// Parse `bytes`.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         self.fed_bytes += bytes.len();
         self.fed_writes += 1;
     }
 
-    /// The grid the emulator currently holds, as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
         let (rows, cols) = self.parser.screen().size();
         (cols, rows)
     }
 
-    /// Resize to `cols` x `rows`, reporting whether anything changed. `false`
-    /// (the common per-layout case at a stable size) does nothing, which matters
-    /// since this runs inside `layout`. A real change also records a
-    /// [`pending_resize`](Self::take_pending_resize).
+    /// Runs inside `layout`: an unchanged size does nothing.
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
         let (cols, rows) = (cols.max(1), rows.max(1));
         if self.size() == (cols, rows) {
@@ -713,32 +476,21 @@ impl TerminalEmulator {
         true
     }
 
-    /// Take the resize the session has not been told about yet, if any.
     pub fn take_pending_resize(&mut self) -> Option<(u16, u16)> {
         self.pending_resize.take()
     }
 
-    /// Bytes parsed so far — a diagnostic/test accessor.
     pub fn fed_bytes(&self) -> usize {
         self.fed_bytes
     }
 
-    /// Writes parsed so far — a diagnostic/test accessor.
     pub fn fed_writes(&self) -> usize {
         self.fed_writes
     }
 }
 
-/// One wake of the feed pump: drain everything due into the emulator and, if
-/// anything arrived, publish **exactly one** new generation. Returns whether it
-/// moved. Split out of [`run_feed`] so the one-write-per-wake rule is testable
-/// without a timer.
-///
-/// Shared by two callers — [`run_feed`]'s scheduled loop and
-/// [`InputSeam::dispatch`]'s echo drain — both writing the same `generation`
-/// signal. This function, not either caller, owns "next" (derives
-/// `generation.get_untracked() + 1` here), so neither can republish a duplicate
-/// or a stale value regardless of call order.
+/// Owns "next" (one generation per wake that drained anything), so `run_feed` and
+/// [`InputSeam::dispatch`] writing the same signal never publish a duplicate.
 pub fn pump_wake(
     feed: &RefCell<dyn TerminalFeed>,
     emulator: &RefCell<TerminalEmulator>,
@@ -756,10 +508,7 @@ pub fn pump_wake(
     true
 }
 
-/// The UI-thread feed loop: wake every [`REPAINT_INTERVAL`], drain, publish one
-/// generation, repeat until the feed closes or `cancelled` flips. Every `await`
-/// releases its borrows first — a `RefCell` borrow held across a suspension
-/// would panic the moment the grid laid out.
+/// No `RefCell` borrow is held across an `await`.
 pub async fn run_feed(
     feed: SharedFeed,
     emulator: SharedEmulator,
@@ -769,19 +518,7 @@ pub async fn run_feed(
     run_feed_watched(feed, emulator, generation, cancelled, || {}).await;
 }
 
-/// [`run_feed`] with an `on_tick` observer called once per wake, on the UI
-/// thread, after the drain.
-///
-/// The seam for surfacing what the feed knows beyond bytes (connection status,
-/// minted connection id) — deliberately not on the [`TerminalFeed`] port, since a
-/// feed writes no signal and a rendered status must be *polled* from the side
-/// that can write one. Costs nothing extra: this loop is already awake, on the
-/// right thread, at repaint rate.
-///
-/// `on_tick` runs with **no borrow held** on the feed or emulator, so an
-/// observer may borrow them itself — including replacing the feed (a re-attach).
-/// It also runs on the wake that ends the loop, after the open/closed decision,
-/// so a finished feed publishes its final status.
+/// `on_tick` runs once per wake with no borrow held (it may replace the feed), final wake included.
 pub async fn run_feed_watched(
     feed: SharedFeed,
     emulator: SharedEmulator,
@@ -801,8 +538,7 @@ pub async fn run_feed_watched(
         if !open {
             return;
         }
-        // Sleep to the next absolute grid point rather than "now + interval",
-        // so a slow frame cannot drift the schedule.
+        // An absolute schedule, so a slow frame cannot drift it.
         tick += 1;
         let deadline = REPAINT_INTERVAL * tick;
         if let Some(nap) = deadline.checked_sub(start.elapsed()) {
@@ -811,18 +547,11 @@ pub async fn run_feed_watched(
     }
 }
 
-/// Start [`run_feed`] under the current reactive owner, cancelling it on
-/// teardown via `on_cleanup` (never `Drop`). The flag is checked *before* the
-/// drain, so a component torn down between wakes never writes its signal again.
-/// `Arc<AtomicBool>` because `on_cleanup` needs `Send + Sync`.
+/// Cancelled on teardown via `on_cleanup`, never `Drop`; the flag is checked before the drain.
 pub fn spawn_feed_pump(feed: SharedFeed, emulator: SharedEmulator, generation: RwSignal<u64>) {
     spawn_feed_pump_watched(feed, emulator, generation, || {});
 }
 
-/// [`spawn_feed_pump`] over [`run_feed_watched`] — same ownership/cancellation
-/// contract, plus the per-wake observer. `on_tick` need not be `Send`: the loop
-/// rides the UI thread's queue, letting an observer hold the `Rc`-backed feed
-/// handle it polls.
 pub fn spawn_feed_pump_watched(
     feed: SharedFeed,
     emulator: SharedEmulator,
@@ -845,9 +574,6 @@ mod tests {
 
     use super::*;
 
-    /// A queue-driven [`TerminalFeed`] fake: [`push`](Self::push) queues chunks
-    /// due on the next [`pump_wake`]; `send_input` echoes synchronously —
-    /// `DemoFeed`'s PTY contract minus the fixture-replay machinery.
     #[derive(Default)]
     struct QueueFeed {
         due: VecDeque<Vec<u8>>,
@@ -858,7 +584,6 @@ mod tests {
             Self::default()
         }
 
-        /// Queue `bytes` as one more write, due on the next drain.
         fn push(&mut self, bytes: &[u8]) {
             self.due.push_back(bytes.to_vec());
         }
@@ -883,7 +608,6 @@ mod tests {
 
     #[test]
     fn the_repaint_interval_matches_the_documented_cap() {
-        // The one knob: REPAINT_HZ. Guard the derived period against drift.
         let expected = Duration::from_secs_f64(1.0 / REPAINT_HZ);
         assert!(
             REPAINT_INTERVAL.abs_diff(expected) < Duration::from_micros(1),
@@ -936,10 +660,6 @@ mod tests {
         assert_eq!(emulator.size(), (1, 1), "never a zero-cell screen");
     }
 
-    // Pins that `run_feed`'s scheduled loop and `InputSeam::dispatch`'s echo
-    // drain, both calling `pump_wake` against the same signal, cannot disagree
-    // about "next".
-
     #[test]
     fn a_dispatch_between_two_wakes_keeps_one_monotonic_generation() {
         let feed: Rc<RefCell<QueueFeed>> = Rc::new(RefCell::new(QueueFeed::new()));
@@ -949,13 +669,11 @@ mod tests {
         let mut input = InputSeam::new(feed_dyn.clone());
         input.wire_pump(Rc::clone(&emulator), generation);
 
-        // Wake 1 — a `run_feed`-style wake with real replay content due.
         feed.borrow_mut().push(b"first chunk");
         assert!(pump_wake(&feed_dyn, &emulator, generation));
         let first = generation.get_untracked();
         assert_eq!(first, 1);
 
-        // A keystroke lands mid-replay: the seam's own synchronous echo drain.
         input.dispatch(&Emission {
             bytes: b"q".to_vec(),
             ..Default::default()
@@ -966,8 +684,6 @@ mod tests {
             "the keystroke's own echo must move the counter: {first} -> {second}"
         );
 
-        // Wake 2 — the next scheduled wake, more content due. A caller deriving
-        // "next" from its own stale local would publish a duplicate here.
         feed.borrow_mut().push(b"second chunk");
         assert!(pump_wake(&feed_dyn, &emulator, generation));
         let third = generation.get_untracked();
@@ -1002,25 +718,20 @@ mod tests {
             rows: 4,
         };
         selection.set_metrics(metrics);
-        // Seed the seam's last-seen generation as the grid's first build does.
         selection.observe_generation(generation.get_untracked());
 
-        // Select the word "hello" at (row 0, col 0), re-armed after each clear.
         let arm = |selection: &SelectionSeam| {
             selection.track(Point::new(4.0, 8.0), true);
             selection.begin();
             assert!(selection.range().is_some(), "sanity: the word armed");
         };
 
-        // Wake 1: new content before anything is selected — a no-op on the
-        // selection, but it moves the generation the next observation compares to.
         feed.borrow_mut().push(b"more output");
         assert!(pump_wake(&feed_dyn, &emulator, generation));
         selection.observe_generation(generation.get_untracked());
 
         arm(&selection);
 
-        // A keystroke lands: the echo drain is the SECOND writer to this signal.
         input.dispatch(&Emission {
             bytes: b"x".to_vec(),
             ..Default::default()
@@ -1033,8 +744,6 @@ mod tests {
 
         arm(&selection);
 
-        // Wake 2. A repeated generation value would leave `observe_generation`'s
-        // `!=` check seeing no change, and the re-armed selection standing.
         feed.borrow_mut().push(b"even more output");
         assert!(pump_wake(&feed_dyn, &emulator, generation));
         selection.observe_generation(generation.get_untracked());
@@ -1047,10 +756,7 @@ mod tests {
     }
 
     thread_local! {
-        /// Selection feedback this thread's sink saw. `perform_haptic` runs the
-        /// sink synchronously on the caller's thread and every test has its
-        /// own thread, so parallel tests that reach `SelectionSeam::begin`
-        /// while the sink is installed cannot disturb this count.
+        /// Per-thread: `perform_haptic` runs the sink synchronously on the caller's thread.
         static THREAD_SELECTIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
 
@@ -1060,7 +766,6 @@ mod tests {
         }
     }
 
-    /// Clears the process-wide sink on drop, so a panic cannot leave it installed.
     struct SinkGuard;
 
     impl Drop for SinkGuard {
@@ -1069,12 +774,7 @@ mod tests {
         }
     }
 
-    /// One gesture start delivers exactly one `Selection` to the framework
-    /// sink. The sink is process state and no other test installs or clears
-    /// it, but other tests' `begin()` calls may run while it is installed;
-    /// the thread-local count ignores them. Should a concurrent writer ever
-    /// replace the sink between install and `begin`, the attempt sees 0 and is
-    /// retried; it can never see more than 1.
+    /// Other tests' `begin()` may run meanwhile; a replaced sink reads 0 and the loop retries.
     #[test]
     fn a_selection_begin_fires_exactly_one_framework_haptic() {
         let _guard = SinkGuard;

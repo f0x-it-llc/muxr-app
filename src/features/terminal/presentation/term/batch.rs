@@ -1,47 +1,18 @@
-//! Same-style run batching: one emulator screen in, a reusable list of
-//! [`GridRun`]s out.
-//!
-//! **Batching is the whole performance story.** Each `GlyphRun` the scene layer
-//! emits becomes exactly one vello `draw_glyphs` call. [`batch_screen`]
-//! coalesces consecutive cells sharing a whole [`CellStyle`] into **one**
-//! shaped run and **one** background rectangle — never a draw per cell —
-//! costing a 54x60 grid ~130 shapes a frame rather than ~3200.
-//!
-//! Four things the naive loop gets wrong:
-//!
-//! 1. **A never-written cell has no contents.** `vt100` returns an empty
-//!    string for a cell nothing printed to; pushing that would shift every
-//!    glyph after it one column left, so a space is substituted.
-//! 2. **A wide character owns two columns.** Its continuation cell contributes
-//!    no glyph of its own, so it is skipped and the run's cell span advances
-//!    by 2.
-//! 3. **Trailing blanks over the default background paint nothing.** Trimmed,
-//!    and a run left empty by that is discarded — most of a terminal screen
-//!    most of the time. A run with a **non-default** background always
-//!    commits: its rect paints where its text does not.
-//! 4. **Interior blanks are not a run boundary** — splitting on them would
-//!    turn every word of every line into its own draw call.
-//!
-//! **Allocation reuse**: [`RunBatch`] retains its `GridRun` slots (and their
-//! `String`s) across generations — `runs[..len]` are live, `runs[len..]` are
-//! retained empties the next batch re-fills. At 30 repaints a second,
-//! re-allocating a few hundred `String`s per generation is the difference
-//! between a terminal and a garbage collector, so a test pins it.
+//! Coalesces one emulator screen into same-style [`GridRun`]s: each run is one `draw_glyphs`
+//! call, and [`RunBatch`] keeps its run slots (and their `String`s) across generations.
+//! Trailing blanks over the default background paint nothing; interior blanks never split a run.
 
 use frust::authoring::text::TextLayout;
 
 use super::style::CellStyle;
 
-/// One batched run: consecutive same-style cells on one row, shaped once.
 pub struct GridRun {
     row: u16,
     col: u16,
-    /// Columns covered — the background rect's width in cells (a wide cell
-    /// counts 2).
+    /// Columns covered, in cells (a wide cell counts 2).
     cells: u16,
     style: CellStyle,
     text: String,
-    /// Filled by the shaping pass in the widget's `layout`.
     layout: Option<TextLayout>,
 }
 
@@ -57,44 +28,35 @@ impl GridRun {
         }
     }
 
-    /// The run's row.
     pub fn row(&self) -> u16 {
         self.row
     }
 
-    /// The run's starting column.
     pub fn col(&self) -> u16 {
         self.col
     }
 
-    /// Columns the run covers.
     pub fn cells(&self) -> u16 {
         self.cells
     }
 
-    /// The run's style.
     pub fn style(&self) -> CellStyle {
         self.style
     }
 
-    /// The run's text.
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    /// The shaped layout, once the widget's `layout` pass has filled it in.
     pub fn layout(&self) -> Option<&TextLayout> {
         self.layout.as_ref()
     }
 
-    /// Attach a shaped layout (the shaping pass's only mutation).
     pub fn set_layout(&mut self, layout: TextLayout) {
         self.layout = Some(layout);
     }
 }
 
-/// A reusable batch of [`GridRun`]s — see the [module docs](self)' allocation
-/// note.
 #[derive(Default)]
 pub struct RunBatch {
     runs: Vec<GridRun>,
@@ -102,33 +64,26 @@ pub struct RunBatch {
 }
 
 impl RunBatch {
-    /// The live runs.
     pub fn active(&self) -> &[GridRun] {
         &self.runs[..self.len]
     }
 
-    /// The live runs, mutably — the shaping pass fills each run's layout.
     pub fn active_mut(&mut self) -> &mut [GridRun] {
         &mut self.runs[..self.len]
     }
 
-    /// How many runs the current batch holds.
     pub fn count(&self) -> usize {
         self.len
     }
 
-    /// Retained slots, live or not — the allocation-reuse assertion's window
-    /// into this structure.
     pub fn capacity(&self) -> usize {
         self.runs.len()
     }
 
-    /// Drop every live run (keeping its allocation) and start a fresh batch.
     fn begin(&mut self) {
         self.len = 0;
     }
 
-    /// Start a run at `(row, col)` in the slot after the committed ones.
     fn open(&mut self, row: u16, col: u16, style: CellStyle) {
         if self.runs.len() == self.len {
             self.runs.push(GridRun::blank());
@@ -142,16 +97,12 @@ impl RunBatch {
         slot.layout = None;
     }
 
-    /// Append one cell's glyph(s) to the open run, advancing its span by
-    /// `span` (2 for a wide character — see the [module docs](self)).
     fn push_cell(&mut self, glyph: &str, span: u16) {
         let slot = &mut self.runs[self.len];
         slot.text.push_str(glyph);
         slot.cells += span;
     }
 
-    /// Commit the open run, or discard it if nothing would paint (see the
-    /// [module docs](self)' point 3).
     fn commit(&mut self, default_bg: bool) {
         let slot = &mut self.runs[self.len];
         if slot.cells == 0 {
@@ -159,9 +110,7 @@ impl RunBatch {
         }
         if default_bg {
             let trimmed = slot.text.trim_end_matches(' ').len();
-            // Each trimmed char is an ASCII space (one byte, one column), so
-            // the span shrinks with the text and a decoration spanning the
-            // run (an SGR underline) can't trail off across blanks.
+            // One column per trimmed space, so an SGR underline does not trail across blanks.
             let dropped = slot.text.len() - trimmed;
             slot.text.truncate(trimmed);
             slot.cells = slot.cells.saturating_sub(dropped as u16);
@@ -173,11 +122,8 @@ impl RunBatch {
     }
 }
 
-/// Batch one emulator screen into same-style runs (see the [module docs](self)).
-/// Walks the screen's **own** size, not a caller-supplied grid, so the batch can
-/// never disagree with what the emulator holds. `is_default_bg` (the palette's
-/// question, threaded in as a closure so this module stays colour-free) decides
-/// which runs are blank-elidable.
+/// Walks the screen's own size so the batch cannot disagree with the emulator;
+/// `is_default_bg` decides which runs are blank-elidable.
 pub fn batch_screen(
     screen: &vt100::Screen,
     out: &mut RunBatch,
@@ -195,8 +141,7 @@ pub fn batch_screen(
             let style = cell.map(CellStyle::from_cell).unwrap_or_default();
             let glyph = match cell {
                 Some(c) if c.has_contents() => c.contents(),
-                // A never-written cell: a space, or every glyph after it shifts
-                // a column left.
+                // A never-written cell is empty; a space keeps later glyphs in their columns.
                 _ => " ",
             };
             let span = if cell.is_some_and(vt100::Cell::is_wide) {
@@ -227,7 +172,6 @@ mod tests {
     const COLS: u16 = 80;
     const ROWS: u16 = 24;
 
-    /// A parser fed `bytes`, batched into runs against the app palette.
     fn batch_of(bytes: &[u8]) -> RunBatch {
         let mut parser = vt100::Parser::new(ROWS, COLS, 0);
         parser.process(bytes);
@@ -250,7 +194,6 @@ mod tests {
 
     #[test]
     fn same_style_cells_coalesce_and_a_style_change_splits() {
-        // Two SGR colours, three cells each: two runs, not six.
         let batch = batch_of(b"\x1b[31mAAA\x1b[32mBBB");
         let runs = batch.active();
         assert_eq!(runs.len(), 2, "one run per style, not one per cell");
@@ -290,9 +233,7 @@ mod tests {
 
     #[test]
     fn a_never_written_cell_substitutes_a_space_so_columns_do_not_shift() {
-        // Print at column 0, then jump to column 10 in the same style: the eight
-        // untouched cells between must contribute eight spaces, or `b` paints at
-        // column 2.
+        // Column 10 in the same style: the untouched cells between must become spaces.
         let batch = batch_of(b"a\x1b[1;11Hb");
         let runs = batch.active();
         assert_eq!(runs.len(), 1, "one style spans the gap");
@@ -303,8 +244,6 @@ mod tests {
 
     #[test]
     fn a_non_default_background_run_survives_even_when_blank() {
-        // A coloured background paints even with no glyphs, so a blank run over
-        // one must not be discarded.
         let batch = batch_of(b"\x1b[41m   \x1b[0m");
         let runs = batch.active();
         assert_eq!(runs.len(), 1);
@@ -318,8 +257,6 @@ mod tests {
 
     #[test]
     fn a_wide_cell_spans_two_columns_and_its_continuation_contributes_nothing() {
-        // A CJK ideograph is two columns wide; the run must carry one glyph and
-        // a span of 2, and the ASCII after it must land on column 2.
         let batch = batch_of("\u{4f60}a".as_bytes());
         let runs = batch.active();
         assert_eq!(runs.len(), 1);
@@ -354,12 +291,10 @@ mod tests {
         parser.process(b"\x1b[31mAAA\x1b[32mBBB");
         run(&parser, &mut batch);
         assert_eq!(batch.count(), 2);
-        // The slot vec also holds the uncommitted scratch slot each row's blank
-        // tail opened and discarded, so capacity >= committed count.
+        // Capacity also counts the scratch slot a row's blank tail opened and discarded.
         let capacity = batch.capacity();
         assert!(capacity >= batch.count());
 
-        // A screen that batches to fewer runs must keep every slot for reuse.
         parser.process(b"\x1b[H\x1b[0maaaaaa");
         run(&parser, &mut batch);
         assert_eq!(batch.count(), 1);
