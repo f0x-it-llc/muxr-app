@@ -1,23 +1,6 @@
-//! [`ConnectionController`] — muxr's one app-scoped connection handle — and
-//! the [`ConnectionBackend`] seam it drives.
-//!
-//! ## Token Hygiene
-//!
-//! The bearer token crossing this module lives only as long as it has a job:
-//! [`ConnectTarget::token`] rides `Zeroizing`-wrapped from Connect's form to
-//! [`open_session`], which drops (and so scrubs) the app's own copy the instant
-//! the `Login` request is built — leaving one **un-zeroized residual**: that
-//! request's `auth_token` is a plain prost `String`, not `Zeroizing`, so its
-//! plaintext copy survives unscrubbed in the message until the call it rides on
-//! is dropped. The session token `Login` mints is installed onto the client via
-//! [`crate::net::client::MuxrClient::set_session_token`] and the wire
-//! response's own copy is `zeroize`d immediately after. From there it lives
-//! behind [`crate::net::auth::SessionToken`]'s `ArcSwapOption<Zeroizing<_>>`,
-//! scrubbed on every `set`/`clear` and read fresh per call, never cached
-//! longer. [`NetConnectionBackend::disconnect`] clears the session token
-//! before dropping its client handle — since every [`MuxrClient`] clone
-//! shares one token store, that clear closes the authenticated surface for
-//! every clone at once, not just the one being torn down.
+//! [`ConnectionController`], the app's one connection handle, and its [`ConnectionBackend`] seam.
+//! The login token rides `Zeroizing` until the `Login` request is built; that request's prost
+//! `String` copy is the one unscrubbed residual. Disconnect clears the shared session token first.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -37,12 +20,10 @@ use crate::failure::AppFailure;
 use crate::net::proto::{Backend, Empty, LoginRequest, VersionInfo};
 use crate::net::{MuxrClient, TrustConfig, error};
 
-/// Capability flag: server supports mouse frames in `AttachTerminal`. Unknown
-/// flags carry through unchanged, as the wire requires.
+/// Server supports mouse frames in `AttachTerminal`; unknown flags carry through unchanged.
 pub const CAP_MOUSE_INPUT: &str = "mouse-input";
 
-/// Capability flag: `WatchAgents` delivers live agent changes. Absent, a client polls
-/// `ListAgents` instead.
+/// `WatchAgents` delivers live agent changes; absent, a client polls `ListAgents`.
 pub const CAP_AGENTS_STREAM: &str = "agents-stream";
 
 const UNKNOWN_VERSION: &str = "unknown";
@@ -65,13 +46,11 @@ pub struct ServerInfo {
 }
 
 impl ServerInfo {
-    /// Whether the server advertised `capability` (e.g. [`CAP_MOUSE_INPUT`]).
     pub fn supports(&self, capability: &str) -> bool {
         self.capabilities.contains(capability)
     }
 }
 
-/// A multiplexer a `muxrd` server can front.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ServerBackend {
     Zellij,
@@ -118,24 +97,18 @@ impl TrustMode {
     }
 }
 
-/// A connect request's target, credential and options.
 #[derive(Clone, PartialEq)]
 pub struct ConnectTarget {
     pub host: String,
     pub port: u16,
     pub trust_mode: TrustMode,
     pub label: String,
-    /// Whether a successful connect is *eligible* to offer saving this
-    /// target's credential.
+    /// Eligibility only: a successful connect may offer saving this target's credential.
     pub offer_credential: bool,
-    /// The login token this connect authenticates with — the one secret that
-    /// crosses the wire, [`Zeroizing`]-wrapped so dropping this target scrubs
-    /// it rather than leaving plaintext in a freed allocation.
+    /// The one secret that crosses the wire; dropping the target scrubs it.
     pub token: Zeroizing<String>,
     pub remember: bool,
-    /// The pinned certificate's SHA-256 as 64 lowercase hex characters —
-    /// [`TrustMode::Pinned`]'s input, and required by it: a pinned target
-    /// without one never dials.
+    /// 64 lowercase hex characters; a [`TrustMode::Pinned`] target without one never dials.
     pub fingerprint: Option<String>,
 }
 impl fmt::Debug for ConnectTarget {
@@ -153,11 +126,8 @@ impl fmt::Debug for ConnectTarget {
     }
 }
 
-/// What a completed connect produces: the connected server's facts, or why the
-/// connection did not open.
 pub type ConnectOutcome = Result<ServerInfo, AppFailure>;
 
-/// The work a [`ConnectRun::Pending`] still has to do.
 pub type ConnectFuture = Pin<Box<dyn Future<Output = ConnectOutcome> + Send>>;
 
 pub enum ConnectRun {
@@ -165,70 +135,45 @@ pub enum ConnectRun {
     Pending(ConnectFuture),
 }
 
-/// The work behind [`ConnectionController`]: opening a connection, tearing one
-/// down, and holding the live client in between.
 pub trait ConnectionBackend: Send + Sync + 'static {
-    /// Start a dial. One superseded by a later `begin_connect` or
-    /// `disconnect` before it lands must drop what it opened rather than
-    /// install it — the controller discards such a stale outcome unseen.
+    /// A dial superseded before it lands must drop what it opened rather than install it.
     fn begin_connect(&self, target: ConnectTarget) -> ConnectRun;
 
-    /// Tear the live connection down. Idempotent: a backend with nothing open
-    /// does nothing.
+    /// Idempotent.
     fn disconnect(&self);
 
-    /// The live `muxrd` client, for the repositories built over the same
-    /// connection. `None` when this backend has no wire behind it (the mock)
-    /// or nothing is open.
+    /// `None` under the mock or while nothing is open.
     fn client(&self) -> Option<MuxrClient> {
         None
     }
 
-    /// Rebuild the live client's channel (single-flight, see
-    /// [`MuxrClient::reconnect`]). Nothing open — or no wire behind the
-    /// backend — is nothing to rebuild, and succeeds.
+    /// Single-flight; with nothing open it succeeds without dialing.
     fn reconnect(&self) -> ReconnectFuture {
         Box::pin(async { Ok(()) })
     }
 }
 
-/// The work behind [`ConnectionController::reconnect`].
 pub type ReconnectFuture = Pin<Box<dyn Future<Output = Result<(), AppFailure>> + Send>>;
 
-/// The work behind an accepted credential offer — installed by the `connect`
-/// feature, called by [`ConnectionController::accept_credential_offer`].
 pub trait CredentialSaver: Send + Sync {
-    /// Save a credential for the connected server at `endpoint` (`host:port`),
-    /// which the offer showed the user as `label`, and run `on_done` once that
-    /// save has settled — **however** it settled.
+    /// `endpoint` is `host:port`; `on_done` runs once the save settles, however it settled.
     fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>);
 }
 
-/// What a live session's expiry is handed to before the controller logs out —
-/// installed by the feature that can log back in, called by
-/// [`ConnectionController::on_session_expired_for`].
 pub trait SessionRenewer: Send + Sync {
-    /// Renew the expired session at `endpoint` (`host:port`). `true` means the
-    /// renewer took it over and now owns every outcome the user sees — the
-    /// controller neither disconnects nor reports the expiry, and ignores further
-    /// expiries until the next dial settles or the connection is torn down, so a
-    /// renewal must end in one of those. `false` means it cannot (nothing saved
-    /// for `endpoint`), and the controller logs out as it would without one.
+    /// `true` hands the renewer every user-visible outcome; further expiries are ignored until the
+    /// next dial settles or a teardown. `false` (nothing saved for `endpoint`) logs out as usual.
     fn renew(&self, endpoint: &str) -> bool;
 }
 
-/// Whether a dial's failure is reported on [`ConnectionController::core`]'s
-/// sink or only handed to the caller's `on_done`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Report {
     Emit,
     Quiet,
 }
 
-/// What [`ConnectionController::lock_and_disconnect`] locks — the `connect`
-/// feature's keyring, named here by contract rather than by type.
+/// The `connect` feature's keyring, named by contract rather than type.
 pub trait KeyringLock {
-    /// Zeroize every held token and mark the keyring locked.
     fn lock_keyring(&self);
 }
 
@@ -236,9 +181,7 @@ const MOCK_LATENCY_MS: u32 = 36;
 const MOCK_SERVER_VERSION: &str = "zellij 0.44.3";
 const MOCK_ZELLIJ_VERSION: &str = "0.44.3";
 
-/// The in-memory backend: derives a [`ServerInfo`] from the target and answers
-/// on the spot. Never touches a socket, and fails only when a test scripted it
-/// to ([`fail_next_mock_dials_for_tests`]).
+/// Never touches a socket; fails only when scripted by [`fail_next_mock_dials_for_tests`].
 pub struct MockConnectionBackend;
 
 impl ConnectionBackend for MockConnectionBackend {
@@ -262,9 +205,6 @@ impl ConnectionBackend for MockConnectionBackend {
     fn disconnect(&self) {}
 }
 
-/// The mock backend's dial, reporting one real client as live from a settled
-/// successful dial until the next teardown — see
-/// [`ConnectionController::with_live_client_for_tests`].
 #[cfg(test)]
 struct LiveClientBackend {
     client: MuxrClient,
@@ -292,7 +232,6 @@ impl ConnectionBackend for LiveClientBackend {
     }
 }
 
-/// The facts the mock backend reports for a successful dial of `target`.
 fn mock_server_info(target: &ConnectTarget) -> ServerInfo {
     ServerInfo {
         endpoint: endpoint_of(target),
@@ -310,15 +249,11 @@ fn mock_server_info(target: &ConnectTarget) -> ServerInfo {
     }
 }
 
-/// The `muxrd` backend: a real dial + `Login` + `GetVersion` over
-/// [`crate::net`], holding the connected [`MuxrClient`] until a teardown drops
-/// it.
 pub struct NetConnectionBackend {
     live: Arc<Mutex<LiveSlot>>,
 }
 
-/// The one live client, and the ticket of the newest dial or teardown: a dial
-/// installs its client only while its own ticket is still the newest.
+/// A dial installs its client only while its own ticket is still the newest.
 #[derive(Default)]
 struct LiveSlot {
     client: Option<MuxrClient>,
@@ -374,9 +309,7 @@ impl ConnectionBackend for NetConnectionBackend {
         let Some(client) = taken else {
             return;
         };
-        // Scrub the credential before letting go: dropping this handle closes
-        // the transport only if it was the last clone, while clearing the token
-        // closes the authenticated surface for every clone there is.
+        // Clearing the shared token closes the authenticated surface for every clone, not just this one.
         client.clear_session_token();
         drop(client);
     }
@@ -393,7 +326,6 @@ impl ConnectionBackend for NetConnectionBackend {
     }
 }
 
-/// The TLS posture `target` dials under.
 fn trust_config_for(target: &ConnectTarget) -> Result<TrustConfig, AppFailure> {
     match target.trust_mode {
         TrustMode::System => Ok(TrustConfig::SystemCa),
@@ -408,9 +340,7 @@ fn trust_config_for(target: &ConnectTarget) -> Result<TrustConfig, AppFailure> {
     }
 }
 
-/// The whole wire flow, in order: dial, log in, install the session token, time
-/// a `GetVersion`, keep the client (unless `ticket` was superseded meanwhile),
-/// and hand back what the screens render.
+/// Keeps the client only while `ticket` is still the newest.
 async fn open_session(
     live: Arc<Mutex<LiveSlot>>,
     ticket: u64,
@@ -423,8 +353,7 @@ async fn open_session(
         auth_token: target.token.as_str().to_owned(),
         remember_me: target.remember,
     };
-    // The token's job ends with the request that carries it: drop this
-    // app's own copy now rather than at the end of the flow.
+    // Drop the app's own token copy as soon as the request carries it.
     drop(std::mem::take(&mut target.token));
 
     let mut login = client
@@ -456,7 +385,6 @@ async fn open_session(
     Ok(info)
 }
 
-/// The handshake, as the screens read it.
 fn server_info(
     target: &ConnectTarget,
     version: &VersionInfo,
@@ -491,8 +419,7 @@ fn server_info(
     }
 }
 
-/// The strip's `"zellij 0.44.3"` half: the first detected backend, or the
-/// wire's back-compat zellij field when a server reported no backends at all.
+/// The first detected backend, or the wire's back-compat zellij field when none is reported.
 fn multiplexer_version(version: &VersionInfo, backends: &[BackendVersion]) -> String {
     if let Some(primary) = backends.first() {
         return format!("{} {}", primary.backend.label(), primary.version);
@@ -512,46 +439,26 @@ fn endpoint_of(target: &ConnectTarget) -> String {
     format!("{}:{}", target.host, target.port)
 }
 
-// ---------------------------------------------------------------------------
-// The controller
-// ---------------------------------------------------------------------------
-
 pub struct ConnectionController {
     core: ControllerCore<AppFailure>,
     backend: Arc<dyn ConnectionBackend>,
-    /// Bumped by every connect and every teardown — a coordinator whose
-    /// captured value no longer matches drops its result instead of
-    /// publishing it.
+    /// Bumped by every connect and teardown; a coordinator whose captured value differs drops its result.
     generation: AtomicU64,
 
     pub connected: RwSignal<bool>,
-    /// Whether a connect is in flight — the Connect screen's busy state, and
-    /// the single-flight guard: a second connect while this is set is ignored.
+    /// A second connect while this is set is ignored.
     pub connecting: RwSignal<bool>,
     pub server_info: RwSignal<Option<ServerInfo>>,
     pub is_read_only: RwSignal<bool>,
-    /// Bumped by every published connect and every teardown, so a screen
-    /// holding per-server state resets it when this moves.
+    /// Bumped by every published connect and teardown; per-server screen state resets on it.
     pub connection_epoch: RwSignal<u64>,
-    /// Whether a [`ping`](Self::ping) is in flight — its single-flight claim.
-    /// A tick arriving mid-round-trip is dropped, not queued: a queued
-    /// reading would already be stale, and queuing would grow one RPC per
-    /// tick against a slow server.
+    /// A tick mid-round-trip is dropped, not queued: a queued reading would already be stale.
     pinging: AtomicBool,
-    /// The server label whose credential the just-settled connect should
-    /// offer to save, or `None` when there's nothing to offer. Written by
-    /// [`Self::settle`] before its `on_done`, so the Connect flow can read
-    /// it back and hold its own redirect on the answer.
+    /// Written by [`Self::settle`] before its `on_done`, so Connect can hold its redirect on it.
     pub credential_offer: RwSignal<Option<String>>,
-    /// What an accepted offer actually saves through, or `None` while nothing
-    /// has installed one — see [`CredentialSaver`].
     credential_saver: Mutex<Option<Arc<dyn CredentialSaver>>>,
-    /// What a live session's expiry is offered to first, or `None` while
-    /// nothing has installed one — see [`SessionRenewer`].
     session_renewer: Mutex<Option<Arc<dyn SessionRenewer>>>,
-    /// Set while an installed renewer owns an expiry, so a burst of calls
-    /// failing at once asks it once. Cleared by the next settled dial and by
-    /// every teardown.
+    /// A burst of failing calls asks the renewer once; cleared by the next settled dial and teardown.
     renewing: AtomicBool,
 }
 
@@ -574,25 +481,17 @@ impl ConnectionController {
         }
     }
 
-    /// A fresh, **unpublished** mock-backed controller — `#[cfg(test)]`-only,
-    /// so [`provide_connection_controller`] stays the single production
-    /// construction site. `crate::routes`' guard test needs one it can hold
-    /// without any reactive owner or context in play.
+    /// `#[cfg(test)]`-only, so [`provide_connection_controller`] stays the one production constructor.
     #[cfg(test)]
     pub(crate) fn detached() -> Self {
         Self::new(Arc::new(MockConnectionBackend))
     }
 
-    /// A fresh, unpublished controller over a test's own backend — the seam
-    /// for observing what a screen asks of the connection.
     #[cfg(test)]
     pub(crate) fn with_backend(backend: Arc<dyn ConnectionBackend>) -> Self {
         Self::new(backend)
     }
 
-    /// A fresh, unpublished controller already connected (through the mock's
-    /// facts) to `client`'s target, reporting `client` as its live client — the
-    /// seam for a repository test of the session-expiry fence.
     #[cfg(test)]
     pub(crate) fn with_live_client_for_tests(client: MuxrClient) -> Arc<Self> {
         let target = ConnectTarget {
@@ -613,53 +512,33 @@ impl ConnectionController {
         controller
     }
 
-    /// This controller's [`ControllerCore`] — the failure sink `MuxrApp::init`
-    /// bridges to the app's toasts. A named accessor rather than the [`AsRef`]
-    /// impl below because `Arc<ConnectionController>` has its own inherent
-    /// `as_ref`, which would make the bare call ambiguous at every site.
+    /// Named rather than the [`AsRef`] impl: `Arc<ConnectionController>` has its own `as_ref`.
     pub fn core(&self) -> &ControllerCore<AppFailure> {
         &self.core
     }
 
-    /// The live `muxrd` client, or `None` while disconnected (always `None`
-    /// under the mock backend).
     pub fn client(&self) -> Option<MuxrClient> {
         self.backend.client()
     }
 
-    /// Whether the connected server advertised `capability` — `false` while disconnected. An
-    /// untracked read, for a caller deciding once rather than a build.
+    /// An untracked read, for a caller deciding once rather than a build.
     pub fn supports(&self, capability: &str) -> bool {
         self.server_info
             .try_with_untracked(|info| info.as_ref().is_some_and(|info| info.supports(capability)))
             .unwrap_or(false)
     }
 
-    /// Rebuild the shared client's channel now — the shared client's
-    /// single-flight [`MuxrClient::reconnect`], so a concurrent caller (the
-    /// terminal feed) collapses into the same dial. A no-op `Ok` while nothing
-    /// is connected. For a screen that must not trust a half-open channel
-    /// after a network change before it sends its next RPC.
+    /// Single-flight, so a concurrent caller collapses into the same dial; `Ok` while disconnected.
     pub async fn reconnect(&self) -> Result<(), AppFailure> {
         self.backend.reconnect().await
     }
 
-    /// Connect to `target`, ignoring the outcome — the fire-and-forget form for
-    /// callers with nothing to do afterwards. See [`Self::connect_with`].
     pub fn connect(self: &Arc<Self>, target: ConnectTarget) {
         self.connect_with(target, |_| {});
     }
 
-    /// Connect to `target` and run `on_done` on the UI thread once the attempt
-    /// settles — with the mock backend, before this call even returns.
-    ///
-    /// Ignored while another connect is in flight, and — logged — while
-    /// already connected: one app, one connection. Moving to another server
-    /// goes through [`Self::switch_to`], which tears the live one down first.
-    ///
-    /// `on_done` is for what only the caller can do (navigate, scrub its
-    /// form) — not the failure path, which is emitted on [`Self::core`]'s
-    /// sink for the app's toast bridge.
+    /// `on_done` runs on the UI thread (before return under the mock) and is not the failure path:
+    /// failures go to [`Self::core`]'s sink. Ignored while connecting, and logged while connected.
     pub fn connect_with(
         self: &Arc<Self>,
         target: ConnectTarget,
@@ -676,10 +555,7 @@ impl ConnectionController {
         self.dial(generation, target, Report::Emit, on_done);
     }
 
-    /// Move to `target`: tear the live connection down first, then dial under
-    /// one fresh generation, so a dial still in flight can never publish over
-    /// the new one. Ignored (logged) while a connect is in flight. `on_done`
-    /// as for [`Self::connect_with`].
+    /// Tears down first, then dials under a fresh generation so an in-flight dial cannot publish over it.
     pub fn switch_to(
         self: &Arc<Self>,
         target: ConnectTarget,
@@ -688,9 +564,7 @@ impl ConnectionController {
         self.switch(target, Report::Emit, on_done);
     }
 
-    /// [`Self::switch_to`], but a failure is only handed to `on_done`, never
-    /// emitted on [`Self::core`]'s sink — for a caller that reports the dial
-    /// itself, such as a banner-owned background dial or a session renewal.
+    /// A failure goes only to `on_done`, for a caller that reports the dial itself.
     pub fn switch_to_quiet(
         self: &Arc<Self>,
         target: ConnectTarget,
@@ -716,11 +590,8 @@ impl ConnectionController {
         self.dial(generation, target, report, on_done);
     }
 
-    /// The dial generation: bumped by every accepted connect or switch and by
-    /// every teardown. A caller whose dial's `on_done` never arrived compares
-    /// it against the value it read right after starting the dial to learn the
-    /// dial was superseded (a superseded dial's `on_done` is dropped, see
-    /// `settle`). Read-only.
+    /// Compared against the value read after starting a dial to learn it was superseded, since a
+    /// superseded dial's `on_done` is dropped.
     pub fn dial_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
@@ -731,7 +602,6 @@ impl ConnectionController {
             .wrapping_add(1)
     }
 
-    /// Start a dial under `generation` and settle it on the UI thread.
     fn dial(
         self: &Arc<Self>,
         generation: u64,
@@ -739,16 +609,14 @@ impl ConnectionController {
         report: Report,
         on_done: impl FnOnce(Result<(), AppFailure>) + 'static,
     ) {
-        // The caller's half of the credential-offer decision, taken before the
-        // target moves into the backend.
+        // Taken before the target moves into the backend.
         let offer = target.offer_credential.then(|| target.label.clone());
         self.connecting.set(true);
 
         match self.backend.begin_connect(target) {
             ConnectRun::Ready(outcome) => self.settle(generation, outcome, offer, report, on_done),
             ConnectRun::Pending(work) => {
-                // The dial runs on the background runtime; the UI-thread
-                // coordinator below is the only thing that writes a signal.
+                // Only the UI-thread coordinator below writes a signal.
                 let (tx, rx) = oneshot::channel();
                 spawn(async move {
                     let _ = tx.send(work.await);
@@ -764,7 +632,7 @@ impl ConnectionController {
         }
     }
 
-    /// Publish a settled connect. Runs on the UI thread, always.
+    /// Runs on the UI thread, always.
     fn settle(
         &self,
         generation: u64,
@@ -774,10 +642,8 @@ impl ConnectionController {
         on_done: impl FnOnce(Result<(), AppFailure>),
     ) {
         if self.generation.load(Ordering::SeqCst) != generation {
-            // A teardown or a newer dial landed while this one was in flight,
-            // so its outcome belongs to nobody. The backend already declined
-            // to install what it opened (see `begin_connect`); a teardown here
-            // would close the newer connection instead.
+            // Superseded: the backend already declined to install it, and a teardown here would close the
+            // newer connection.
             return;
         }
         self.connecting.set(false);
@@ -790,7 +656,6 @@ impl ConnectionController {
                 self.server_info.set(Some(info));
                 self.connected.set(true);
                 self.bump_epoch();
-                // A read-only credential is never offered for saving
                 if let Some(label) = offer
                     && !read_only
                 {
@@ -807,19 +672,8 @@ impl ConnectionController {
         }
     }
 
-    /// Re-time the connection: one unauthenticated `GetVersion` round trip,
-    /// replacing [`ServerInfo::latency_ms`]. The Sessions strip's heartbeat is
-    /// the one caller.
-    ///
-    /// Single-flight via [`pinging`](Self::pinging), released through an RAII
-    /// guard so no early return wedges the heartbeat shut.
-    ///
-    /// `None` means nothing was measured, and is deliberately silent: the
-    /// session list's own 3s poll is what surfaces a failing connection, so a
-    /// heartbeat toasting its own failure would double up on it.
-    ///
-    /// Unauthenticated, like the connect-time `GetVersion`: no credential is
-    /// read, installed or scrubbed here.
+    /// Single-flight, released by an RAII guard so no early return wedges the heartbeat. `None` is
+    /// silent: the session list's own poll surfaces a failing connection.
     pub async fn ping(&self) -> Option<u32> {
         if self.pinging.swap(true, Ordering::SeqCst) {
             return None;
@@ -837,16 +691,14 @@ impl ConnectionController {
         client.unauth().get_version(Empty {}).await.ok()?;
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
 
-        // The rest of the handshake's facts are the connect's; only the
-        // measurement is this call's to replace.
+        // Only the measurement is this call's to replace.
         let info = self.server_info.get_untracked()?;
         self.server_info
             .set(Some(ServerInfo { latency_ms, ..info }));
         Some(latency_ms)
     }
 
-    /// Close the connection and clear every connection-scoped signal. Callers
-    /// navigate away themselves — this never touches the router.
+    /// Never touches the router; callers navigate away themselves.
     pub fn disconnect(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.backend.disconnect();
@@ -854,20 +706,17 @@ impl ConnectionController {
         self.clear_server_state();
     }
 
-    /// Lock `keyring` (zeroizing every token), then [`Self::disconnect`].
     pub fn lock_and_disconnect(&self, keyring: &dyn KeyringLock) {
         keyring.lock_keyring();
         self.disconnect();
     }
 
-    /// Let the backend's client go, then clear the server-scoped signals —
-    /// in that order, so no screen sees a live connection with a dead client.
+    /// The client goes first, so no screen sees a live connection with a dead client.
     fn tear_down(&self) {
         self.backend.disconnect();
         self.clear_server_state();
     }
 
-    /// Clear the server-scoped signals and move the epoch.
     fn clear_server_state(&self) {
         self.renewing.store(false, Ordering::SeqCst);
         self.server_info.set(None);
@@ -881,20 +730,9 @@ impl ConnectionController {
         self.connection_epoch.update(|epoch| *epoch += 1);
     }
 
-    /// The server rejected the credential `client` carried — every
-    /// [`AppFailure::Auth`] a repository raises funnels here, with the client
-    /// the failing call used.
-    ///
-    /// Fenced to the live connection: a `client` that is not the live one (a
-    /// call that outlived a switch or a renewal) is ignored, since the expiry
-    /// was its session's, not the current one's. A live expiry goes to the
-    /// installed [`SessionRenewer`] first; when it takes the renewal over,
-    /// nothing else happens here. Otherwise — declined, or none installed — the
-    /// connection is dropped and the expiry reported once.
-    ///
-    /// Idempotent: several in-flight calls failing at once is the normal shape
-    /// of an expiry, and they cost one renewal request or one teardown and one
-    /// toast, not one per call.
+    /// Fenced to the live connection: a stale `client`'s expiry is ignored. A live one goes to the
+    /// [`SessionRenewer`] first, else the connection drops and the expiry is reported once, however
+    /// many calls fail together.
     pub fn on_session_expired_for(&self, client: &MuxrClient) {
         if !self.connected.get_untracked()
             || !self.client().is_some_and(|live| live.is_same(client))
@@ -910,8 +748,8 @@ impl ConnectionController {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let endpoint = self.server_info.get_untracked().map(|info| info.endpoint);
-        // The flag is raised before the renewer runs: one that settles a dial
-        // synchronously clears it again, and that clear must win.
+        // Raised before the renewer runs: one that settles a dial synchronously clears it, and that
+        // clear must win.
         if let (Some(renewer), Some(endpoint)) = (renewer, endpoint)
             && renewer.renew(&endpoint)
         {
@@ -921,9 +759,7 @@ impl ConnectionController {
         self.expire();
     }
 
-    /// The unfenced legacy entry point, for a caller holding no client handle:
-    /// drops whatever connection is live and reports the expiry once, never
-    /// consulting a [`SessionRenewer`]. Prefer [`Self::on_session_expired_for`].
+    /// Unfenced and never consults a [`SessionRenewer`]; prefer [`Self::on_session_expired_for`].
     pub fn on_session_expired(&self) {
         if !self.connected.get_untracked() {
             return;
@@ -931,8 +767,6 @@ impl ConnectionController {
         self.expire();
     }
 
-    /// Log out of an expired session: disconnect, then one
-    /// [`AppFailure::Auth`] on [`Self::core`]'s sink.
     fn expire(&self) {
         self.disconnect();
         self.core
@@ -940,8 +774,6 @@ impl ConnectionController {
             .emit(&AppFailure::Auth(SESSION_EXPIRED.to_string()));
     }
 
-    /// Install what a live session's expiry is offered to, replacing any
-    /// previous one — see [`SessionRenewer`].
     pub fn set_session_renewer(&self, renewer: Arc<dyn SessionRenewer>) {
         *self
             .session_renewer
@@ -949,11 +781,6 @@ impl ConnectionController {
             .unwrap_or_else(PoisonError::into_inner) = Some(renewer);
     }
 
-    /// Install what an accepted offer saves through, replacing any previous
-    /// one — the `connect` feature's own [`CredentialSaver`].
-    ///
-    /// Called from the Connect screen's `Component::init`, where every
-    /// dependency the save needs is already resolved.
     pub fn set_credential_saver(&self, saver: Arc<dyn CredentialSaver>) {
         *self
             .credential_saver
@@ -961,26 +788,12 @@ impl ConnectionController {
             .unwrap_or_else(PoisonError::into_inner) = Some(saver);
     }
 
-    /// Accept the pending credential offer: clear it, and hand the save to the
-    /// installed [`CredentialSaver`] — the fire-and-forget form, for a caller
-    /// with nothing to resume. See [`Self::accept_credential_offer_with`].
     pub fn accept_credential_offer(&self) {
         self.accept_credential_offer_with(|| {});
     }
 
-    /// Accept the pending credential offer and run `on_done` once the save has
-    /// settled, whatever it settled as.
-    ///
-    /// The offer is cleared first and unconditionally, so a second press (or
-    /// a slow saver) cannot start the save twice. The save itself is also a
-    /// no-op on three more paths: no offer pending, no live connection to
-    /// name an endpoint, or a read-only session (mints no token to save) —
-    /// the same fact [`Self::settle`] refuses to raise the offer on.
-    ///
-    /// `on_done` runs on every one of those paths, including no
-    /// [`CredentialSaver`] installed at all: it is the Connect screen's held
-    /// navigation, so a save that could not run may never leave the user
-    /// parked on the form.
+    /// The offer is cleared first, so a second press cannot save twice. `on_done` runs on every
+    /// path, no saver included: it is Connect's held navigation and must never park the user.
     pub fn accept_credential_offer_with(&self, on_done: impl FnOnce() + 'static) {
         let offer = self.credential_offer.get_untracked();
         self.credential_offer.set(None);
@@ -1011,7 +824,6 @@ impl ConnectionController {
         }
     }
 
-    /// Dismiss the pending credential offer without saving it.
     pub fn dismiss_credential_offer(&self) {
         self.credential_offer.set(None);
     }
@@ -1023,59 +835,36 @@ impl AsRef<ControllerCore<AppFailure>> for ConnectionController {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Composition-root wiring
-// ---------------------------------------------------------------------------
-
-/// Set by [`use_mock_connection_for_tests`], read by [`platform_backend`]:
-/// `false` (the real `muxrd` client) for every app run, flipped to `true`
-/// once per test process before [`provide_connection_controller`] ever runs.
 static USE_MOCK_CONNECTION_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Opt the current process out of the real `muxrd` client for the rest of
-/// its life: every later [`provide_connection_controller`] builds a
-/// [`MockConnectionBackend`] instead. Idempotent. Must run before
-/// `MuxrApp::init` — `tests/support::setup` is the one call site outside
-/// this module.
+/// Must run before `MuxrApp::init`; idempotent.
 pub fn use_mock_connection_for_tests() {
     USE_MOCK_CONNECTION_FOR_TESTS.store(true, Ordering::Relaxed);
 }
 
-/// Dials the mock backend still has to refuse, set by
-/// [`fail_next_mock_dials_for_tests`].
 static MOCK_DIAL_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
-/// What a refused mock dial reports (the user sees the generic network text).
 const MOCK_DIAL_REFUSED: &str = "mock dial refused";
 
-/// Make the next `count` dials of [`MockConnectionBackend`] fail with an
-/// ordinary network failure, then succeed again. Process-wide, so a suite
-/// that uses it holds the serial guard; leftovers are the caller's to reset
-/// with `0`. Test-only behaviour: the real backend never reads it.
+/// Process-wide, so a suite using it holds the serial guard; reset leftovers with `0`.
 pub fn fail_next_mock_dials_for_tests(count: usize) {
     MOCK_DIAL_FAILURES.store(count, Ordering::SeqCst);
 }
 
-/// A mock dial held open by [`hold_next_mock_dials_for_tests`].
 pub struct HeldDial {
     release: oneshot::Sender<bool>,
 }
 
 impl HeldDial {
-    /// Let the held dial finish: `true` succeeds, `false` fails like a
-    /// refused dial. Dropping a `HeldDial` unreleased fails it.
+    /// Dropping a `HeldDial` unreleased fails it.
     pub fn release(self, succeed: bool) {
         let _ = self.release.send(succeed);
     }
 }
 
-/// Dials the mock backend still has to hold open, oldest first.
 static MOCK_DIAL_HOLDS: Mutex<Vec<oneshot::Receiver<bool>>> = Mutex::new(Vec::new());
 
-/// Make the next `count` dials of [`MockConnectionBackend`] (that are not
-/// scripted to fail) stay pending until the returned handle (one per dial, in
-/// dial order) is released. Process-wide like [`fail_next_mock_dials_for_tests`];
-/// calling with `0` drops any leftovers. Test-only behaviour.
+/// One handle per dial, in dial order; `0` drops any leftovers.
 pub fn hold_next_mock_dials_for_tests(count: usize) -> Vec<HeldDial> {
     let mut holds = MOCK_DIAL_HOLDS
         .lock()
@@ -1090,7 +879,6 @@ pub fn hold_next_mock_dials_for_tests(count: usize) -> Vec<HeldDial> {
         .collect()
 }
 
-/// Take the oldest hold, if any is left.
 fn take_mock_dial_hold() -> Option<oneshot::Receiver<bool>> {
     let mut holds = MOCK_DIAL_HOLDS
         .lock()
@@ -1098,7 +886,6 @@ fn take_mock_dial_hold() -> Option<oneshot::Receiver<bool>> {
     (!holds.is_empty()).then(|| holds.remove(0))
 }
 
-/// Consume one scripted mock failure, if any is left.
 fn take_mock_dial_failure() -> bool {
     MOCK_DIAL_FAILURES
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -1107,7 +894,6 @@ fn take_mock_dial_failure() -> bool {
         .is_ok()
 }
 
-/// The backend [`provide_connection_controller`] drives.
 fn platform_backend() -> Arc<dyn ConnectionBackend> {
     if USE_MOCK_CONNECTION_FOR_TESTS.load(Ordering::Relaxed) {
         return Arc::new(MockConnectionBackend);
@@ -1115,25 +901,15 @@ fn platform_backend() -> Arc<dyn ConnectionBackend> {
     Arc::new(NetConnectionBackend::new())
 }
 
-/// Construct the app's one [`ConnectionController`], publish it under the
-/// root owner, and hand it straight back. Called exactly once, from
-/// `MuxrApp::init`.
-///
-/// The return value is not a convenience: `crate::routes`' session guard is
-/// closed over this `Arc` at construction rather than reading it from
-/// context at navigation time, and the composition root is the one place
-/// that already holds it.
+/// Called exactly once, from `MuxrApp::init`; the route guard captures the returned `Arc`
+/// rather than reading context at navigation time.
 pub fn provide_connection_controller() -> Arc<ConnectionController> {
     let controller = Arc::new(ConnectionController::new(platform_backend()));
     provide_controller(Arc::clone(&controller));
     controller
 }
 
-/// Recover the app-scoped [`ConnectionController`]
-/// [`provide_connection_controller`] published — reachable from any screen,
-/// and from `crate::routes`'s session guard, which has no `&mut AppState` to
-/// reach one any other way. Panics if called before `MuxrApp::init`, which
-/// every call site in this app runs after.
+/// Panics if called before `MuxrApp::init`.
 pub fn expect_connection_controller() -> Arc<ConnectionController> {
     expect_controller::<Arc<ConnectionController>>()
 }
@@ -1160,14 +936,9 @@ mod tests {
         }
     }
 
-    /// A mock-backed controller, as every suite's `MuxrApp::init` builds one.
     fn controller() -> Arc<ConnectionController> {
         Arc::new(ConnectionController::new(Arc::new(MockConnectionBackend)))
     }
-
-    // -----------------------------------------------------------------------
-    // The mock backend's published facts
-    // -----------------------------------------------------------------------
 
     #[test]
     fn connect_fills_server_info_and_flips_connected() {
@@ -1224,10 +995,6 @@ mod tests {
         assert!(!controller.is_read_only.get_untracked());
     }
 
-    // -----------------------------------------------------------------------
-    // Credential-offer eligibility
-    // -----------------------------------------------------------------------
-
     #[test]
     fn connect_without_offer_credential_leaves_the_offer_none() {
         let controller = controller();
@@ -1277,17 +1044,11 @@ mod tests {
     }
 
     thread_local! {
-        /// The completion [`RecordingSaver`] was last handed, parked until the
-        /// test settles it. A `thread_local!` rather than a field because
-        /// [`CredentialSaver`] is `Send + Sync` and a boxed `FnOnce()` is
-        /// neither — which is honest here: this saver, like the real one, is
-        /// only ever called on the thread that accepted the offer.
+        /// A `thread_local!` because a boxed `FnOnce()` is not `Send + Sync`; savers run on the accepting thread.
         static PENDING_SAVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
     }
 
-    /// Run the completion the last `save_credential` parked, as a finished save
-    /// would.
     fn finish_pending_save() {
         let done = PENDING_SAVE.with_borrow_mut(Option::take);
         if let Some(done) = done {
@@ -1295,9 +1056,6 @@ mod tests {
         }
     }
 
-    /// A [`CredentialSaver`] that records what it was asked to save and parks
-    /// the completion, so a test can settle it on its own schedule — the
-    /// held-navigation handshake's stand-in for `connect`'s real saver.
     #[derive(Default)]
     struct RecordingSaver {
         saved: Mutex<Vec<(String, String)>>,
@@ -1313,7 +1071,6 @@ mod tests {
         }
     }
 
-    /// Flip a shared flag — the completion every test below hands in.
     fn flag() -> (Arc<AtomicBool>, impl FnOnce() + 'static) {
         let flag = Arc::new(AtomicBool::new(false));
         let write = Arc::clone(&flag);
@@ -1351,13 +1108,11 @@ mod tests {
 
     #[test]
     fn every_refused_accept_still_runs_its_completion() {
-        // Nothing pending: an accept with no offer up.
         let no_offer = controller();
         let (done, on_done) = flag();
         no_offer.accept_credential_offer_with(on_done);
         assert!(done.load(Ordering::SeqCst), "no offer");
 
-        // A read-only session, which cannot mint at all.
         let read_only = Arc::new(ConnectionController::new(Arc::new(CannedBackend {
             outcome: Mutex::new(Some(Ok(read_only_info()))),
         })));
@@ -1367,8 +1122,6 @@ mod tests {
         read_only.accept_credential_offer_with(on_done);
         assert!(done.load(Ordering::SeqCst), "read-only session");
 
-        // A connected session with no saver installed — every headless suite
-        // that never mounts Connect.
         let no_saver = controller();
         no_saver.connect(target(true));
         let (done, on_done) = flag();
@@ -1376,14 +1129,7 @@ mod tests {
         assert!(done.load(Ordering::SeqCst), "no saver installed");
     }
 
-    // -----------------------------------------------------------------------
-    // The heartbeat ping
-    // -----------------------------------------------------------------------
-
-    /// A ping with no wire behind it measures nothing, says so quietly, and —
-    /// the part that matters — hands its single-flight claim back, so the
-    /// Sessions strip's every-3s heartbeat is not wedged shut for the rest of
-    /// the mount by one no-op tick.
+    /// The single-flight claim must come back, or one no-op tick wedges the heartbeat.
     #[tokio::test]
     async fn a_ping_with_no_live_client_is_a_silent_no_op_that_releases_its_claim() {
         let controller = controller();
@@ -1412,9 +1158,6 @@ mod tests {
         );
     }
 
-    /// The real flow, against the in-process fixture: a live connection's ping
-    /// re-times `GetVersion` and republishes the handshake with the new
-    /// measurement and nothing else touched.
     #[tokio::test]
     async fn a_ping_over_a_live_connection_republishes_only_the_latency() {
         use crate::net::testing::{self, MuxrdFixture};
@@ -1431,11 +1174,8 @@ mod tests {
         connect.token = Zeroizing::new(testing::AUTH_TOKEN.to_string());
         connect.fingerprint = Some(fixture.fingerprint_hex().to_string());
 
-        // The dial itself is driven here rather than through `connect_with`:
-        // that path hands the work to `frust::spawn`, whose runtime no plain
-        // `#[tokio::test]` stands up (the net-backend tests above take the
-        // same route). The controller holds the same backend either way, so
-        // its `client()` — all a ping needs — is the production one.
+        // Driven directly: `connect_with` spawns on `frust::spawn`, whose runtime a plain
+        // `#[tokio::test]` lacks.
         let ConnectRun::Pending(work) = backend.begin_connect(connect) else {
             panic!("a real dial is never decided before it runs");
         };
@@ -1458,10 +1198,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Teardown
-    // -----------------------------------------------------------------------
-
     #[test]
     fn disconnect_clears_every_connection_scoped_signal() {
         let controller = controller();
@@ -1476,9 +1212,6 @@ mod tests {
         assert!(!controller.is_read_only.get_untracked());
     }
 
-    /// The teardown order, observed from inside the backend: the client is
-    /// let go while the app still reads as connected, so no screen can see a
-    /// live connection with a dead client behind it.
     #[test]
     fn the_backend_tears_down_before_the_signals_reset() {
         let backend = Arc::new(OrderedBackend::new());
@@ -1521,8 +1254,6 @@ mod tests {
         );
     }
 
-    /// Count every failure `controller` emits, for as long as the returned
-    /// subscription is held.
     fn emitted(
         controller: &ConnectionController,
     ) -> (Arc<AtomicUsize>, clean_signals::Subscription) {
@@ -1537,8 +1268,6 @@ mod tests {
         (raised, subscription)
     }
 
-    /// A [`SessionRenewer`] answering one scripted verdict and recording every
-    /// endpoint it was asked to renew.
     struct ScriptedRenewer {
         accept: bool,
         asked: Mutex<Vec<String>>,
@@ -1671,17 +1400,14 @@ mod tests {
         assert!(controller.connected.get_untracked());
     }
 
-    /// A controller whose one dial fails with a network failure.
     fn failing_dial() -> Arc<ConnectionController> {
         Arc::new(ConnectionController::new(Arc::new(CannedBackend {
             outcome: Mutex::new(Some(Err(AppFailure::Network("down".to_string())))),
         })))
     }
 
-    /// Where [`outcome_slot`]'s `on_done` records the outcome it was handed.
     type OutcomeSlot = Arc<Mutex<Option<Result<(), AppFailure>>>>;
 
-    /// An `on_done` recording the outcome it was handed.
     fn outcome_slot() -> (OutcomeSlot, impl FnOnce(Result<(), AppFailure>) + 'static) {
         let slot = Arc::new(Mutex::new(None));
         let write = Arc::clone(&slot);
@@ -1721,10 +1447,6 @@ mod tests {
         ));
         assert_eq!(raised.load(Ordering::SeqCst), 1);
     }
-
-    // -----------------------------------------------------------------------
-    // Switching servers, the epoch, and locking
-    // -----------------------------------------------------------------------
 
     fn target_at(host: &str) -> ConnectTarget {
         ConnectTarget {
@@ -1792,10 +1514,8 @@ mod tests {
     #[test]
     fn a_dial_started_before_switch_to_settles_after_it_and_is_dropped() {
         let (backend, controller) = recorded();
-        // A pending dial's prologue, as `dial` runs it for a real backend.
         let stale = controller.next_generation();
         controller.connecting.set(true);
-        // Backed out of (an app lock, say), then a switch to another server.
         controller.disconnect();
         controller.switch_to(target_at("b.example"), |_| {});
         let epoch = controller.connection_epoch.get_untracked();
@@ -1891,10 +1611,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Trust mapping
-    // -----------------------------------------------------------------------
-
     #[test]
     fn each_trust_mode_maps_onto_its_verifier() {
         let mut system = target(false);
@@ -1937,13 +1653,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // The real backend, against the in-process fixture
-    // -----------------------------------------------------------------------
-
-    /// The whole wire flow end to end: a pinned dial, a login, an installed
-    /// session token, a timed `GetVersion`, and a teardown that lets the client
-    /// go.
     #[tokio::test]
     async fn the_net_backend_logs_in_and_publishes_the_handshake() {
         use crate::net::testing::{self, MuxrdFixture};
@@ -1985,8 +1694,6 @@ mod tests {
         assert!(backend.client().is_none());
     }
 
-    /// A rejected credential is an auth failure, not a retryable network one —
-    /// the mapping `crate::net::error` owns, exercised through the flow.
     #[tokio::test]
     async fn a_rejected_auth_token_fails_the_connect_as_an_auth_failure() {
         use clean_signals::Failure;
@@ -2037,8 +1744,6 @@ mod tests {
         }
     }
 
-    /// A dial overtaken by a teardown or a newer dial keeps nothing: it can
-    /// neither resurrect a closed connection nor overwrite the newer client.
     #[tokio::test]
     async fn a_superseded_dial_never_installs_its_client() {
         use crate::net::testing::MuxrdFixture;
@@ -2064,11 +1769,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test doubles
-    // -----------------------------------------------------------------------
-
-    /// The mock's answers, plus an ordered log of every backend call.
     #[derive(Default)]
     struct RecordingBackend {
         events: Mutex<Vec<String>>,
@@ -2099,7 +1799,6 @@ mod tests {
         }
     }
 
-    /// A read-only server's facts, for the offer-eligibility test.
     fn read_only_info() -> ServerInfo {
         ServerInfo {
             endpoint: "mock.example:7777".to_string(),
@@ -2114,8 +1813,7 @@ mod tests {
         }
     }
 
-    /// A backend answering one canned outcome — for the facts the mock backend
-    /// deliberately never produces.
+    /// For the facts the mock backend never produces.
     struct CannedBackend {
         outcome: Mutex<Option<ConnectOutcome>>,
     }
@@ -2134,10 +1832,7 @@ mod tests {
         fn disconnect(&self) {}
     }
 
-    /// A mock backend that reads the controller's own `connected` signal back
-    /// as it is torn down — the only way to observe the teardown *order* from
-    /// outside the controller. `Weak` so the test double cannot keep the
-    /// controller that owns it alive.
+    /// `Weak`, so the double cannot keep the controller that owns it alive.
     struct OrderedBackend {
         controller: Mutex<Option<Weak<ConnectionController>>>,
         connected_at_teardown: Mutex<Option<bool>>,
@@ -2151,7 +1846,6 @@ mod tests {
             }
         }
 
-        /// Point the double at the controller it was handed to.
         fn watch(&self, controller: &Arc<ConnectionController>) {
             *self
                 .controller
@@ -2159,7 +1853,6 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner) = Some(Arc::downgrade(controller));
         }
 
-        /// What `connected` read while the teardown ran, or `None` if none has.
         fn connected_at_teardown(&self) -> Option<bool> {
             *self
                 .connected_at_teardown
