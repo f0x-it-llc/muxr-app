@@ -1,12 +1,3 @@
-//! [`CreateSession`] — creates a session by name and backend (the list's dashed
-//! "+ new session" row and the empty state's action, both through the
-//! name-input dialog).
-//!
-//! The name arrives already trimmed and non-blank (`ui::dialogs`'s
-//! `name_input_dialog` cannot submit anything else), so this use case adds no
-//! validation of its own; the repository still rejects a blank name, which is
-//! where that invariant is enforced once.
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;

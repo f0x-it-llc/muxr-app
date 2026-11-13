@@ -1,11 +1,3 @@
-//! `sessions`'s composition-root wiring seam (see
-//! `docs/FEATURES_ARCHITECTURE.md`'s DI pattern). [`provide`] constructs the
-//! one app-scoped [`SessionsRepository`] and publishes it via
-//! [`frust::provide_context`]. [`use_mock_sessions_for_tests`] must flip the
-//! mock switch before `provide` runs — no `cfg(test)` branch, since
-//! `tests/*.rs` links the normal build. `Arc<dyn SessionsRepository + Send +
-//! Sync>` satisfies `use_controller`'s `Send + Sync + 'static` bound.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,15 +9,11 @@ use crate::features::sessions::data::repositories::{
 };
 use crate::features::sessions::domain::repositories::SessionsRepository;
 
-/// Type alias so the provide/expect pair can never drift apart.
 pub type SharedSessionsRepository = Arc<dyn SessionsRepository + Send + Sync>;
 
-/// Real repository by default; flipped once per test process before
-/// [`provide`] runs.
 static USE_MOCK_SESSIONS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-/// Opts the process onto the mock for its remaining life. Idempotent; must
-/// run before `MuxrApp::init`.
+/// Must run before `provide`; there is no `cfg(test)` branch because `tests/*.rs` links the normal build.
 pub fn use_mock_sessions_for_tests() {
     USE_MOCK_SESSIONS_FOR_TESTS.store(true, Ordering::Relaxed);
 }
@@ -43,11 +31,7 @@ fn platform_sessions_repository() -> SharedSessionsRepository {
     Arc::new(GrpcSessionsRepository::new(expect_connection_controller()))
 }
 
-/// Resolves the repository [`provide`] published.
-///
-/// # Panics
-///
-/// Panics if called before `MuxrApp::init` has run.
+/// Panics before `provide` has run.
 pub fn expect_sessions_repository() -> SharedSessionsRepository {
     use_context::<SharedSessionsRepository>().expect(
         "expect_sessions_repository: features::sessions::di::provide() must run first \
@@ -55,11 +39,7 @@ pub fn expect_sessions_repository() -> SharedSessionsRepository {
     )
 }
 
-/// The concrete mock behind the repository, so a test can reach its churn seam.
-///
-/// # Panics
-///
-/// Panics unless [`provide`] ran on the mock ([`use_mock_sessions_for_tests`]).
+/// Panics unless `provide` ran on the mock.
 pub fn expect_mock_sessions_repository() -> Arc<MockSessionsRepository> {
     use_context::<Arc<MockSessionsRepository>>().expect(
         "expect_mock_sessions_repository: provide() must run on the mock \
