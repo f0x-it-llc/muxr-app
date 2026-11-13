@@ -280,11 +280,9 @@ fn orientation_ids() -> Vec<u32> {
 fn burst_glyphs(scene: &Recorder) -> usize {
     // `spec::BURST_CHARS` at `spec::BURST_FONT_SIZE` (`pub(crate)`), on the mono face `burst` uses.
     let theme = frust_glyph::baseline();
-    let style = TextStyle {
-        family: theme.type_scale.body_medium.family.clone(),
-        size: 13.0,
-        ..TextStyle::default()
-    };
+    let style = TextStyle::default()
+        .with_family(theme.type_scale.body_medium.family.clone())
+        .with_size(13.0);
     let alphabet: Vec<u32> = ["▣", "◧", "◎", "▤", "0", "1", "#"]
         .iter()
         .flat_map(|glyph| glyph_ids(glyph, &style))

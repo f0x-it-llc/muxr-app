@@ -187,10 +187,7 @@ fn app_wide_family() -> FontFamily {
 /// `style` with its family swapped to [`app_wide_family`]; every other field
 /// carried over unchanged.
 fn with_app_family(style: TextStyle) -> TextStyle {
-    TextStyle {
-        family: app_wide_family(),
-        ..style
-    }
+    style.with_family(app_wide_family())
 }
 
 /// Map every one of [`TypeScale`]'s 30 slots (15 M3 baseline roles + 15
