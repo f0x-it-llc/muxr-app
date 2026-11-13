@@ -1,19 +1,5 @@
-//! Whole-app coverage of the **server switcher**: the stage raised over the placed shell, driven
-//! by the pointer the way a thumb drives it, over the mocks and three saved servers.
-//!
-//! Only the real `MuxrApp` places the shell and the switcher host, so this suite mounts all of
-//! it. `tests/navigation_motion.rs` already proves the host's chrome (FAB, dots, bar chips, back,
-//! reduce-motion) and select through the controller seam; `tests/sessions.rs` the tablet card.
-//! This suite owns what those do not: a tap on a peer card's on-screen rect, the inert page, the
-//! locked-keyring prompt count, the failed-dial face and its retry, the paywall and the
-//! unverified-trust confirm gates, the cached face after a round trip, and the in-place renewal
-//! of an expired live session.
-//!
-//! **Peer cards have no accessibility nodes** (frust 0.6.5), so what a peer face shows is read
-//! off the controller's `faces`, and a peer is *tapped* at a rect computed from the strip
-//! geometry ([`support::strip_card_rect`]). The surface is a phone (400x800) so the shell paints
-//! the 0.62 card scale; the first peer then hangs off the right edge, and the tap lands on the
-//! part of it that is on screen.
+//! Whole-app coverage of the server switcher over the mocks and three saved servers, driven by pointer.
+//! Peer cards have no accessibility nodes: faces are read from the controller and taps land at computed rects.
 
 use std::any::Any;
 use std::rc::Rc;
@@ -58,17 +44,13 @@ use support::{
     node_values, on_screen_centre, pointer, serial, settle_sized, setup, strip_card_rect,
 };
 
-/// The phone surface every test lays out at.
 const WINDOW: Size = Size::new(400.0, 800.0);
-/// The shell's phone card scale, transcribed (`shell.rs`'s private constant).
 const CARD_SCALE: f64 = 0.62;
-/// The overlay host's depth with nothing open.
 const REST_DEPTH: usize = 1;
 /// One 60Hz frame of the parking loop, and its cap (ten seconds of frames).
 const FRAME_MS: f64 = 16.0;
 const PARK_FRAME_CAP: usize = 600;
 
-/// The connected server `A` (the live card) and the two peers.
 const A_HOST: &str = "mock.example";
 const A_ENDPOINT: &str = "mock.example:7777";
 const B_HOST: &str = "bravo.example";
@@ -78,7 +60,6 @@ const C_ENDPOINT: &str = "charlie.example:50051";
 const TOKEN: &str = "t0ken-s3cr3t";
 /// The retired unverified-trust confirm's title, kept to assert it never shows.
 const UNVERIFIED_TITLE: &str = "Connect without verification?";
-/// A session name the mock sessions repository always lists.
 const SESSION_NAME: &str = "dev";
 
 fn spend_cold_start() {
@@ -91,7 +72,6 @@ fn spend_cold_start() {
 
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
-/// The whole app on a phone surface.
 struct Harness {
     root: RenderRoot<AppState, AnyView<AppState>>,
     logic: Logic,
@@ -175,7 +155,6 @@ impl Harness {
         }
     }
 
-    /// A full tap at `point`, each half through the production loop.
     fn tap_parked(&mut self, point: Point) {
         self.dispatch(&pointer(PointerPhase::Down, point));
         self.dispatch(&pointer(PointerPhase::Up, point));
@@ -214,14 +193,11 @@ impl Harness {
         }
     }
 
-    /// Raise the stage the way the FAB does and run the loop to its parking point.
     fn open_stage(&mut self) {
         switcher().open();
         self.park();
     }
 
-    /// Tap strip card `card` (live page = 0, then the peers in `faces` order) while strip card
-    /// `centred` is in the middle, at the centre of its on-screen part.
     fn tap_card(&mut self, card: usize, centred: usize) {
         let rect = strip_card_rect(WINDOW, CARD_SCALE, card, centred);
         let point = on_screen_centre(rect, WINDOW)
@@ -251,7 +227,6 @@ fn epoch() -> u64 {
         .get_untracked()
 }
 
-/// A saved row at `host:port`, `age_h` hours since last used.
 fn row(
     host: &str,
     port: u16,
@@ -304,9 +279,6 @@ fn keyring_of(endpoints: &[&str]) -> Keyring {
     keyring
 }
 
-/// The three-server fixture: the app connected to A (mock), on `/sessions`, the saved list
-/// replaced by A (newest), B, C. `b_trust` is B's posture; every row claims a credential, whose
-/// token is in the vault, and in the unlocked keyring when `unlocked`. The stage is closed.
 fn three_servers(b_trust: TrustMode, unlocked: bool) -> Harness {
     fail_next_mock_dials_for_tests(0);
     let mut h = Harness::mount();
@@ -340,7 +312,6 @@ fn three_servers(b_trust: TrustMode, unlocked: bool) -> Harness {
     h
 }
 
-/// [`three_servers`] with Pro unlocked and the stage open.
 fn open_pro_stage(b_trust: TrustMode, unlocked: bool) -> Harness {
     let mut h = three_servers(b_trust, unlocked);
     set_entitlement(&mut h, Entitlement::Pro);
@@ -348,7 +319,6 @@ fn open_pro_stage(b_trust: TrustMode, unlocked: bool) -> Harness {
     h
 }
 
-/// Strip index of `endpoint`: its position among the faces (the live page sits at its own slot).
 fn strip_index(endpoint: &str) -> usize {
     switcher()
         .faces
@@ -358,7 +328,6 @@ fn strip_index(endpoint: &str) -> usize {
         .unwrap_or_else(|| panic!("{endpoint} has no card"))
 }
 
-/// Strip index of the live card.
 fn live_strip_index() -> usize {
     switcher()
         .faces
@@ -418,7 +387,6 @@ fn the_inner_page_is_inert_while_the_stage_is_open() {
     let _g = serial();
     let _ambient = setup();
     let mut h = three_servers(TrustMode::System, true);
-    // Where a session card sits in the full-size page, before the stage shrinks it.
     h.pump_until(|h| !node_centers_by_value(&h.root, SESSION_NAME).is_empty());
     h.park();
     let row_at = node_centers_by_value(&h.root, SESSION_NAME)
@@ -428,7 +396,6 @@ fn the_inner_page_is_inert_while_the_stage_is_open() {
     h.open_stage();
     let (before, depth, overlays) = (epoch(), h.depth(), h.overlay_depth());
 
-    // The same card, now inside the shrunken live card.
     let stage_centre = Point::new(WINDOW.width / 2.0, WINDOW.height / 2.0);
     let on_card = stage_centre + (row_at - stage_centre) * CARD_SCALE;
     h.tap_parked(on_card);
@@ -497,8 +464,6 @@ fn a_failed_dial_marks_the_face_keeps_the_stage_and_a_second_tap_retries() {
     assert!(switcher().busy.get_untracked().is_none());
     assert!(switcher().expanding.get_untracked().is_none());
 
-    // Retry: B is the centred card now (no face is live after the failure, so the strip is the
-    // empty live page and then every face), so the second tap lands on the middle of the stage.
     let b_now = strip_index(B_ENDPOINT) + 1;
     h.tap_card(b_now, b);
     settle_on(&mut h, B_ENDPOINT);
@@ -570,7 +535,6 @@ fn the_strip_keeps_its_order_after_a_switch_and_the_live_card_keeps_its_slot() {
     let before = order();
     assert_eq!(before, [A_ENDPOINT, B_ENDPOINT, C_ENDPOINT]);
 
-    // The right-hand peer (the card beside the live one).
     h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     settle_on(&mut h, B_ENDPOINT);
     h.open_stage();
@@ -585,7 +549,6 @@ fn the_strip_keeps_its_order_after_a_switch_and_the_live_card_keeps_its_slot() {
     );
 }
 
-/// Make the live server A a saved row with no stored credential.
 fn strip_a_of_its_credential() {
     expect_saved_servers()
         .save(row(A_HOST, 7777, 0, TrustMode::System, false))
@@ -686,7 +649,6 @@ fn a_visited_server_reads_cached_with_its_last_seen_sessions_after_switching_bac
     }
 }
 
-/// Visit B (its list loaded and filed), then come back to A, leaving the stage closed.
 fn visit_b_and_return_to_a(h: &mut Harness) {
     h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
     settle_on(h, B_ENDPOINT);
@@ -697,7 +659,6 @@ fn visit_b_and_return_to_a(h: &mut Harness) {
     settle_on(h, A_ENDPOINT);
 }
 
-/// Close the open stage and run to the parking point.
 fn close_stage(h: &mut Harness) {
     switcher().close_with(|_| {});
     h.park();
@@ -731,8 +692,6 @@ fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapsho
         other => panic!("B should read Cached with its page, got {other:?}"),
     }
 
-    // The same card without a page falls back to the dimmed glimpse list; the
-    // snapshot paints the whole screen (bar, strip, cards, create row) instead.
     close_stage(&mut h);
     let last_seen = use_last_seen().expect("the app provides the last-seen handle");
     last_seen.record_at(B_ENDPOINT, Vec::new(), 1);
@@ -744,7 +703,6 @@ fn a_cached_peer_card_renders_the_servers_last_sessions_page_through_the_snapsho
     );
 }
 
-/// Pin the stage clock, so the close tail is stepped rather than slept through.
 fn pin_stage_clock() -> Instant {
     let at = Instant::now();
     set_stage_clock_for_tests(Some(at));
@@ -768,7 +726,6 @@ fn the_stage_is_settled_only_once_closed_and_past_its_tail() {
     set_stage_clock_for_tests(None);
 }
 
-/// Tap a strip card and stop at the moment the select is in flight.
 fn tap_without_settling(h: &mut Harness, card: usize) {
     let rect = strip_card_rect(WINDOW, CARD_SCALE, card, live_strip_index());
     let point = on_screen_centre(rect, WINDOW).expect("card on screen");
@@ -815,7 +772,6 @@ fn the_repro_sequence_keeps_snapshot_peers_through_the_handshake_and_the_tail() 
     let t0 = pin_stage_clock();
     let mut h = open_pro_stage(TrustMode::System, true);
     visit_b_and_return_to_a(&mut h);
-    // A -> B -> A again with B cached: the switch back is the freezing one.
     h.open_stage();
     h.park();
     tap_without_settling(&mut h, strip_index(B_ENDPOINT));
@@ -874,7 +830,6 @@ fn closing_the_stage_keeps_building_the_peers_through_the_close_tail() {
         "the strip keeps its live slot"
     );
 
-    // Within the tail a rebuild still carries them; reopening is a normal open.
     set_stage_clock_for_tests(Some(t0 + PEER_TAIL / 2));
     let mid = snapshots_built_for_tests();
     switcher().refresh_faces();
@@ -888,7 +843,6 @@ fn closing_the_stage_keeps_building_the_peers_through_the_close_tail() {
     ));
     close_stage(&mut h);
 
-    // Past the tail the next rebuild drops them.
     set_stage_clock_for_tests(Some(t0 + PEER_TAIL * 3));
     let late = snapshots_built_for_tests();
     switcher().refresh_faces();
@@ -953,7 +907,6 @@ fn forgetting_a_row_drops_its_snapshot() {
     );
 }
 
-/// Tap B with its dial held open, and wait until the claim shows.
 fn tap_b_with_a_held_dial(h: &mut Harness) -> HeldDial {
     let held = hold_next_mock_dials_for_tests(1).remove(0);
     h.tap_card(strip_index(B_ENDPOINT), live_strip_index());
@@ -1031,7 +984,6 @@ fn closing_the_stage_after_a_failed_switch_lands_on_connect() {
     assert_eq!(h.depth(), 1, "landing on Connect, not a dead Sessions");
 }
 
-/// The stage bar's add chip label and the paywall sheet's two actions, transcribed.
 const ADD_CHIP: &str = "add server";
 const NOT_NOW: &str = "Not now";
 const RESTORE: &str = "Restore purchases";
@@ -1124,20 +1076,13 @@ fn a_settle_close_keeps_its_peer_tail_and_the_faces_name_the_new_live_server() {
         "settle refreshed the faces: B is live"
     );
     assert_ne!(face_kind(A_ENDPOINT), FaceKind::Live);
-    // The clock is still at the close instant: a settle-close keeps its tail,
-    // so the live card holds its strip slot while the neighbours ramp out.
     assert!(keep_peers(false), "a settle-close keeps the tail");
-    // So does a plain close of the next stage.
     h.open_stage();
     h.park();
     close_stage(&mut h);
     assert!(keep_peers(false), "a plain close keeps the tail");
     set_stage_clock_for_tests(None);
 }
-
-// ---------------------------------------------------------------------------
-// Background reconnect: a cached target goes live from its cache at once.
-// ---------------------------------------------------------------------------
 
 /// A session name only the cache knows, so the cached rows are told from the live ones.
 const CACHED_ONLY: &str = "cachedonly";
@@ -1154,7 +1099,6 @@ fn taint_cached_page(endpoint: &str) {
     last_seen.record_seen(endpoint, seen);
 }
 
-/// Visit B, taint its cache, return to A (stage closed): B is a cached target.
 fn cached_b() -> Harness {
     set_banner_timings_for_tests(60, 60);
     set_banner_connecting_delay_for_tests(60);
@@ -1309,19 +1253,15 @@ fn assert_page_shown(h: &Harness, rows: &[&str]) {
     );
 }
 
-/// The bar names `host` once its title transition has run.
 fn assert_title(h: &mut Harness, host: &str) {
     h.park();
     assert!(h.labels().iter().any(|v| v == host), "{:?}", h.labels());
 }
 
-/// The app bar's banner strip reads `text`.
 fn assert_banner_text(h: &Harness, text: &str) {
     assert!(h.labels().iter().any(|v| v == text), "{:?}", h.labels());
 }
 
-/// Open the stage and select `endpoint` through the controller (a card two slots
-/// from the centre is off screen), then wait for the connection to land there.
 fn switch_via_controller(h: &mut Harness, endpoint: &str) {
     h.open_stage();
     let gate = SwitchGate {
@@ -1332,7 +1272,6 @@ fn switch_via_controller(h: &mut Harness, endpoint: &str) {
     h.pump_until(|_| connected_endpoint().as_deref() == Some(endpoint) && !stage_is_open());
 }
 
-/// Open the stage and tap the cached B with its dial held open.
 fn tap_cached_b_held(h: &mut Harness) -> HeldDial {
     h.open_stage();
     let held = hold_next_mock_dials_for_tests(1).remove(0);
@@ -1439,8 +1378,6 @@ fn a_failed_background_dial_keeps_the_cached_page_and_marks_the_face_failed() {
     assert_banner_text(&h, "Couldn't reach bravo.example");
     assert!(matches!(face_kind(B_ENDPOINT), FaceKind::Failed { .. }));
 
-    // B stays pending and the banner stays past its own timeout; a select of
-    // the failed face cancels the pending reconnect and dials it itself.
     assert_eq!(switcher().pending_reconnect().as_deref(), Some(B_ENDPOINT));
     pump_for(&mut h, 200, || {
         assert!(matches!(banner(), Some(ReconnectBanner::Failed { .. })));
@@ -1475,7 +1412,6 @@ fn a_second_switch_during_a_background_dial_supersedes_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = cached_b();
-    // C visited too, so both targets are cached.
     switch_via_controller(&mut h, C_ENDPOINT);
     let last_seen = use_last_seen().expect("the app provides the last-seen handle");
     h.pump_until(|_| last_seen.snapshot().contains_key(C_ENDPOINT));
@@ -1494,7 +1430,6 @@ fn a_second_switch_during_a_background_dial_supersedes_it() {
     h.pump_until(|_| banner() == connecting_to(C_HOST));
     assert!(!stage_is_open());
 
-    // The superseded dial lands late: nothing follows it.
     first.release(true);
     for _ in 0..5 {
         h.frame();
@@ -1523,25 +1458,11 @@ fn a_commit_close_keeps_its_peer_tail() {
     assert!(keep_peers(false), "a commit-close keeps its tail of peers");
     held.release(true);
     h.pump_until(|_| connected_endpoint().as_deref() == Some(B_ENDPOINT));
-    // The clock is pinned at the close: the background dial landing inside the
-    // tail does not cut it short.
     assert!(keep_peers(false));
     set_stage_clock_for_tests(None);
     reset_reconnect_rig();
 }
 
-// ---------------------------------------------------------------------------
-// Renewing an expired live session in place
-// ---------------------------------------------------------------------------
-//
-// The mock backend reports no live client, so `ConnectionController::on_session_expired_for`
-// (whose live-client fence and burst flag `connection.rs`'s unit tests cover) never reaches the
-// renewer here. These tests drive the renewer `servers::di::provide_controller` installed on the
-// connection directly, the way that hook does, and fall back exactly as it does when declined.
-
-/// What the connection does with a live session's expiry once past its fence: offer it to the
-/// installed renewer, and log out (one Auth toast) when the renewer declines. Answers whether
-/// the renewer took it over.
 fn expire_live_session() -> bool {
     let endpoint = connected_endpoint().expect("a live session to expire");
     let renewed = renew(&endpoint);
@@ -1551,7 +1472,6 @@ fn expire_live_session() -> bool {
     renewed
 }
 
-/// Ask the installed renewer to renew `endpoint`.
 fn renew(endpoint: &str) -> bool {
     installed_session_renewer_for_tests()
         .expect("provide_controller installs the switcher's renewer")
@@ -1562,8 +1482,6 @@ fn dial_generation() -> u64 {
     expect_connection_controller().dial_generation()
 }
 
-/// [`three_servers`] with the Sessions page listed on A and filed in the last-seen map, the
-/// banner timings shortened and the toast queue empty.
 fn listed_on_a(unlocked: bool) -> Harness {
     set_banner_timings_for_tests(60, 600);
     set_banner_connecting_delay_for_tests(60);
@@ -1712,7 +1630,6 @@ fn a_failed_renewal_keeps_a_pending_reconnect_that_the_backoff_redials() {
         .and_then(|seen| seen.snapshot().remove(A_ENDPOINT)?.page)
         .expect("A's page was filed");
 
-    // The backoff redials A: `Connected` flashes over `Failed`, then clears; the page is live.
     h.pump_until(|_| connected_endpoint().as_deref() == Some(A_ENDPOINT));
     assert_eq!(dial_generation(), before + 2, "one retry dial");
     assert_eq!(banner(), Some(ReconnectBanner::Connected));
@@ -1722,7 +1639,6 @@ fn a_failed_renewal_keeps_a_pending_reconnect_that_the_backoff_redials() {
     });
     assert_eq!(switcher().pending_reconnect(), None);
     assert_eq!(face_kind(A_ENDPOINT), FaceKind::Live);
-    // The page went live again: it refreshed in place, filing a fresh list.
     let last_seen = use_last_seen().expect("the app provides the last-seen handle");
     h.pump_until(|_| {
         last_seen
@@ -1813,7 +1729,6 @@ fn a_retry_request_redials_the_pending_reconnect_at_once_one_dial_at_a_time() {
     let before = dial_generation();
     let held = hold_next_mock_dials_for_tests(1).remove(0);
 
-    // What the Sessions wake loop calls with nothing connected.
     assert!(switcher().retry_pending());
     assert!(!switcher().retry_pending(), "one dial in flight");
     assert_eq!(dial_generation(), before + 1);
@@ -1858,7 +1773,6 @@ fn a_keyring_locked_meanwhile_drops_the_pending_reconnect() {
     expect_keyring().lock();
     h.pump_until(|_| switcher().pending_reconnect().is_none());
     assert_eq!(dial_generation(), after, "no token, no dial");
-    // Back to the plain failure: the banner clears after its own timeout.
     h.pump_until(|_| banner().is_none());
     assert!(!expect_connection_controller().connected.get_untracked());
     reset_reconnect_rig();

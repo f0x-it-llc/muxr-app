@@ -1,20 +1,5 @@
-//! Headless behavior coverage for the `pro` slice (`src/features/pro/**`) — no
-//! GPU, no window, and no store account.
-//!
-//! Three bands. The **free-tier rule** is driven as the pure verdict it is
-//! (`domain::use_cases::check_server_limit`), with no controller and no mount.
-//! The **controller** band drives `ProController` over the scriptable mock,
-//! asserting both the signals it publishes and how many store calls it made —
-//! the single-flight guard is only observable in that second number. The
-//! **sheet** band mounts `show_upgrade_sheet` over a real navigator playing the
-//! root overlay host and drives it by tapping labelled buttons in the
-//! accessibility tree. Two tests mount the whole app, since the launch refresh
-//! is `MuxrApp::init`'s to fire, not the controller's.
-//!
-//! Every sheet action is asynchronous *and* staged: a tap spawns a store call,
-//! whose answer drives a staged close, whose follow-on only runs on the exit's
-//! completion frame. [`Sheet::flush`] is what carries all three — pump the
-//! UI-thread queue, settle the frames, then deliver the pop's result.
+//! Headless coverage of the `pro` slice: the free-tier rule, the controller over the mock, and the upgrade sheet.
+//! `Sheet::flush` carries each staged sheet action through its store call, close and completion frame.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -58,7 +43,6 @@ use support::{
 const A: &str = "a.example:50051";
 const B: &str = "b.example:50051";
 
-/// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
 fn row(endpoint: &str) -> SavedServer {
@@ -76,8 +60,6 @@ fn row(endpoint: &str) -> SavedServer {
     }
 }
 
-/// [`row`] carrying `label`, which is what the forget-and-connect action
-/// prints when exactly one row stands in the way.
 fn labelled_row(label: &str) -> SavedServer {
     SavedServer {
         label: label.to_string(),
@@ -85,7 +67,6 @@ fn labelled_row(label: &str) -> SavedServer {
     }
 }
 
-/// The endpoints a verdict asks to forget; empty for an allowed one.
 fn forgets(verdict: &ServerLimitVerdict) -> Vec<String> {
     match verdict {
         ServerLimitVerdict::Allowed => Vec::new(),
@@ -95,15 +76,12 @@ fn forgets(verdict: &ServerLimitVerdict) -> Vec<String> {
     }
 }
 
-/// A controller over a fresh mock, handed back beside it so a test can script
-/// the store and read its call counters.
 fn controller() -> (Arc<MockEntitlementRepository>, ProController) {
     let mock = Arc::new(MockEntitlementRepository::free());
     let repository = Arc::clone(&mock) as SharedEntitlementRepository;
     (mock, ProController::new(repository))
 }
 
-/// Every failure `controller` raises from here on, in order.
 fn failure_log(controller: &ProController) -> Arc<Mutex<Vec<AppFailure>>> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
@@ -128,10 +106,6 @@ fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         .expect("a current-thread runtime")
         .block_on(fut)
 }
-
-// ---------------------------------------------------------------------------
-// The free-tier server rule
-// ---------------------------------------------------------------------------
 
 #[test]
 fn pro_may_keep_every_server_it_has_saved() {
@@ -212,9 +186,6 @@ fn the_pro_tag_is_true_exactly_when_the_gate_blocks() {
     }
 }
 
-/// [`check_new_server_limit`]'s own three answers — asked with no target
-/// endpoint at all, unlike [`check_server_limit`], since the QR affordance
-/// that calls it has not scanned one yet.
 #[test]
 fn adding_an_unnamed_server_is_judged_by_whether_anything_is_saved_yet() {
     assert_eq!(
@@ -228,10 +199,6 @@ fn adding_an_unnamed_server_is_judged_by_whether_anything_is_saved_yet() {
     let verdict = check_new_server_limit(Entitlement::Free, &[row(A)]);
     assert_eq!(forgets(&verdict), vec![A.to_string()]);
 }
-
-// ---------------------------------------------------------------------------
-// The controller, over the scriptable store
-// ---------------------------------------------------------------------------
 
 #[test]
 fn refresh_publishes_what_the_store_answers_in_one_call() {
@@ -546,10 +513,6 @@ fn the_controllers_verdict_reads_its_own_live_entitlement() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The composition root
-// ---------------------------------------------------------------------------
-
 #[test]
 fn app_init_publishes_the_pro_seam_and_fires_one_launch_refresh() {
     let _g = serial();
@@ -578,26 +541,15 @@ fn app_init_publishes_the_pro_seam_and_fires_one_launch_refresh() {
     assert_eq!(controller.entitlement.get_untracked(), Entitlement::Free);
 }
 
-// ---------------------------------------------------------------------------
-// The upgrade sheet, over a real navigator
-// ---------------------------------------------------------------------------
-
-/// The seeded offer's Upgrade action, as the sheet labels it.
 const SEEDED_UPGRADE: &str = "Upgrade \u{b7} $4.99";
-/// …and the forget-and-connect action for a single row labelled `Home rig`.
 const FORGET_HOME_RIG: &str = "Forget Home rig and connect";
 
-/// A point in the top-left corner: scrim while the sheet is up, and where the
-/// harmless `Move` that flushes a pop's result lands (`tests/settings.rs`'s
-/// idiom).
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
 
 /// How many pump-and-settle rounds [`Sheet::flush`] runs — comfortably more
 /// than the spawn → store answer → staged close → completion-frame chain needs.
 const FLUSH_ROUNDS: usize = 4;
 
-/// The sheet mounted over a navigator playing the root overlay host, beside
-/// the store it reads and the two callback counters it fires.
 struct Sheet {
     nav: NavigatorController<AppState>,
     root: RenderRoot<AppState, AnyView<AppState>>,
@@ -653,8 +605,6 @@ impl Sheet {
         sheet
     }
 
-    /// Raise the paywall. A non-empty `to_forget` is what makes this the
-    /// Connect gate's shape rather than the Settings row's.
     fn open(&mut self, to_forget: Vec<SavedServer>) {
         let unlocked = Rc::clone(&self.unlocked);
         let forgotten = Rc::clone(&self.forgotten);
@@ -691,7 +641,6 @@ impl Sheet {
             .event(&mut self.state, &pointer(PointerPhase::Move, SCRIM_POINT));
     }
 
-    /// Tap the button labelled `label`, then flush what it started.
     fn tap_label(&mut self, label: &str) {
         let point = node_center_by_label(&self.root, label).unwrap_or_else(|| {
             panic!(
@@ -717,7 +666,6 @@ impl Sheet {
         self.labels().iter().any(|l| l.starts_with("Upgrade"))
     }
 
-    /// The overlay host's page depth: 1 is its own base page, 2 the sheet.
     fn depth(&self) -> usize {
         self.nav.depth()
     }
