@@ -1,45 +1,28 @@
-//! The pinch **intent reducer**: frust's `ScaleEvent` stream (a two-finger touch pinch) becomes at
-//! most one [`PinchIntent`] per gesture. A bracketed desktop Scale (trackpad pinch) drives the
-//! same reducer; a lone wheel notch (scale 1.105) does not reach a threshold (ctrl+wheel on
-//! Linux/Windows arrives as lone Updates of exp(0.1×lines)).
-//!
-//! Fingers spreading enter fullscreen, converging exit; swap [`ENTER_SCALE`] and [`EXIT_SCALE`]
-//! to invert.
-//!
-//! The reducer is pure: it multiplies the per-event `scale_delta`s into a cumulative scale and
-//! answers once when that crosses a threshold, so a slow drift and a quick flick behave the same
-//! and a wobbling gesture never fires twice. Mapping the intent onto a pane is the screen's job.
+//! Reduces frust's `ScaleEvent` stream to at most one [`PinchIntent`] per gesture: the
+//! `scale_delta`s multiply into a cumulative scale that answers once on crossing a threshold.
+//! A lone wheel notch (scale 1.105, ctrl+wheel arrives as exp(0.1×lines)) crosses none.
 
 use frust::ScalePhase;
 use frust::authoring::Point;
 use std::rc::Rc;
 
-/// Cumulative scale at or above which a gesture enters fullscreen (fingers spreading).
 pub const ENTER_SCALE: f64 = 1.25;
 
-/// Cumulative scale at or below which a gesture exits fullscreen (fingers converging).
 pub const EXIT_SCALE: f64 = 0.8;
 
-/// What a completed threshold crossing asks the screen to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinchIntent {
-    /// Fingers spread past [`ENTER_SCALE`].
     EnterFullscreen,
-    /// Fingers converged past [`EXIT_SCALE`].
     ExitFullscreen,
 }
 
-/// Where an intent is reported: the intent and the gesture's focal in grid-local logical px.
+/// The intent and the gesture's focal point in grid-local logical px.
 pub type PinchSink = Rc<dyn Fn(PinchIntent, Point)>;
 
-/// Folds one gesture's scale events into at most one [`PinchIntent`].
 #[derive(Debug)]
 pub struct PinchIntentTracker {
-    /// Product of every `scale_delta` since the gesture began.
     cumulative: f64,
-    /// Whether this gesture already answered.
     fired: bool,
-    /// Whether a `Begin` opened the current gesture (a lone `Update` has none).
     begun: bool,
 }
 
@@ -54,7 +37,6 @@ impl Default for PinchIntentTracker {
 }
 
 impl PinchIntentTracker {
-    /// A tracker between gestures.
     pub fn new() -> Self {
         Self::default()
     }
@@ -64,9 +46,7 @@ impl PinchIntentTracker {
         self.fired = false;
     }
 
-    /// Feed one event; `Some` exactly once per gesture, on the crossing `Update`.
-    ///
-    /// An `Update` with no `Begin` (a desktop wheel notch) is a one-event gesture of its own.
+    /// `Some` at most once per gesture; an `Update` with no `Begin` is a one-event gesture.
     pub fn feed(&mut self, phase: ScalePhase, scale_delta: f64) -> Option<PinchIntent> {
         match phase {
             ScalePhase::Begin => {
