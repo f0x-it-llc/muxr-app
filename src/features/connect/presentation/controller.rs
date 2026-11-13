@@ -26,50 +26,35 @@ use crate::ui::toasts::app_toasts;
 
 pub const SESSIONS_LOCATION: &str = "/sessions";
 
-/// What a settled connect's credential offer tells the screen's dialog.
 pub struct CredentialOffer {
     pub label: String,
     pub replacing: bool,
 }
 
-/// Callback [`ConnectController::connect`] invokes when a settled connect raises
-/// an offer instead of navigating; supplied by the screen, which holds the
-/// overlay host this controller does not.
 pub type OfferPrompt = Rc<dyn Fn(CredentialOffer)>;
 
-/// Which connect a blocked dial re-runs once the paywall's answer clears it.
-/// The entry point rather than the target: each one re-reads its own source
-/// (the form, the stashed pairing, the row that was tapped).
 #[derive(Clone)]
 pub enum ConnectRetry {
     Manual,
     Pairing,
     Saved(SavedServer),
-    /// The unlock dock, which re-reads the most recent credentialed row.
     Keyring,
 }
 
-/// The dock copy after re-enrollment made the vault unreadable and it was reset.
 pub const VAULT_RESET_MESSAGE: &str =
     "Biometrics changed — saved credentials were reset. Connect again with a token.";
-/// The dock copy after the user reset saved credentials from a failed unlock.
 pub const MANUAL_RESET_MESSAGE: &str = "Saved credentials were reset. Connect again with a token.";
-/// The copy when an unlock refused to run over the saved list
-/// ([`KeyringUnlockOutcome::ListUnavailable`]).
 pub const SAVED_LIST_UNAVAILABLE_MESSAGE: &str =
     "Saved servers aren't available right now. Connect with a token instead.";
 
-/// What the unlock dock shows, derived from the controller's signals.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DockState {
     Idle,
     Unlocking,
     Failed(DockFailure),
-    /// No biometric gate on this device: the rows keep their own tap-to-unlock.
     Unavailable,
 }
 
-/// A failed unlock's copy, and whether it offers the credential reset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DockFailure {
     pub message: String,
@@ -96,32 +81,21 @@ fn probe_biometrics() -> bool {
     )
 }
 
-/// What the free-tier server rule refused: the remembered rows standing in the
-/// way, and the connect to re-run once they no longer do.
 pub struct ServerLimitBlock {
     pub to_forget: Vec<SavedServer>,
     pub retry: ConnectRetry,
 }
 
-/// Callback a connect entry point invokes *instead of dialing* when the
-/// free-tier rule blocks it; supplied by the screen, which owns the paywall
-/// this controller cannot raise. Lent per call, exactly like [`OfferPrompt`].
 pub type GatePrompt = Rc<dyn Fn(ServerLimitBlock)>;
 
-/// Which Connect page a controller drives: the `/` home screen, or the
-/// add-server form pushed over a live shell (`/?mode=add`), which dials
-/// through [`ConnectionController::switch_to`] and lands by popping itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectMode {
     Home,
     Add,
 }
 
-/// Where a settled connect goes next: Home pushes Sessions; Add pops back to
-/// the shell it covers (whose Sessions screen restarts on the new epoch) —
-/// but only its own page, marked when the dial started, so a dial settling
-/// after the user already backed out never pops the shell — and latches the
-/// page shut against a second dial.
+/// Pops only the page marked when the dial started, so a dial settling after the user
+/// backed out never pops the shell; a landed Add page refuses a second dial.
 #[derive(Clone)]
 struct Landing {
     nav: Nav,
@@ -142,35 +116,23 @@ impl Landing {
     }
 }
 
-/// The trust posture a fresh form starts on — the safe one.
 const DEFAULT_TRUST_MODE: TrustMode = TrustMode::System;
 
-/// The port a bare host dials under [`TrustMode::System`]: a publicly trusted
-/// certificate implies a TLS-terminating edge in front of `muxrd`, which this
-/// app's own demo deployment fronts on the standard HTTPS port.
+/// A publicly trusted certificate implies a TLS-terminating edge on the HTTPS port.
 const PUBLIC_CA_DEFAULT_PORT: u16 = 443;
 
-/// The port a bare host dials under [`TrustMode::NoVerification`] or
-/// [`TrustMode::Pinned`]: `muxrd`'s own default bind port
-/// (`DEFAULT_BIND = "127.0.0.1:50051"` in `muxr-core/muxrd/src/config.rs`),
-/// dialed directly with no TLS-terminating edge in front of it.
+/// `muxrd`'s own default bind port, dialed with no TLS-terminating edge in front.
 const MUXRD_DEFAULT_PORT: u16 = 50051;
 
-/// Whether a fresh form offers to remember the server. `true`, matching the mock.
 const DEFAULT_REMEMBER: bool = true;
 
-/// What a host:port parse reject says under the SERVER URL field.
 pub const URL_ERROR_MESSAGE: &str = concat!(
     "Enter host:port, for example dev.home.local:50051. A bare host uses :443 ",
     "under Public domain (CA) and :50051 under Trust anyway.",
 );
 
-/// The prefix every token this device mints for itself carries, so a server's
-/// token list says which device asked for each one.
 const TOKEN_NAME_PREFIX: &str = "muxr-mobile";
 
-/// How much of a server's label rides in a minted token's name. Long enough to
-/// tell two rigs apart in the settings list, short enough to stay one line.
 const TOKEN_LABEL_MAX: usize = 24;
 
 pub struct ConnectController {
@@ -181,24 +143,14 @@ pub struct ConnectController {
     save_credential: SaveCredential,
     unlock_credential: UnlockCredential,
     connection: Arc<ConnectionController>,
-    /// The app-scoped entitlement view model every dial's free-tier verdict is
-    /// asked of. `Arc<ProController>`, so this controller stays `Send + Sync`.
     pro: Arc<ProController>,
-    /// The app-scoped unlocked keyring the dock publishes into.
     keyring: KeyringHandle,
-    /// The dock's one-prompt unlock, shared with Settings.
     keyring_unlock: KeyringUnlock,
     mode: ConnectMode,
-    /// Add mode: set once a settled connect lands — the page is leaving, so
-    /// every later dial is refused (see [`Self::busy_untracked`]).
+    /// Add mode: set once a connect lands; every later dial is refused.
     landed: Arc<AtomicBool>,
-    /// Add mode: the page mark the last dial started on, for an offer
-    /// answered after it settled.
     landing_mark: std::sync::Mutex<Option<PageMark>>,
-    /// Probed once per mount: enrollment can change while the app is away.
     biometrics_available: bool,
-    /// The connection epoch and keyring generation [`Self::saved`] was last
-    /// re-read against (see [`Self::refresh_saved_if_moved`]).
     seen_marks: Mutex<(u64, u64)>,
     saving_credential: AtomicBool,
     pub url: RwSignal<String>,
@@ -207,14 +159,10 @@ pub struct ConnectController {
     pub remember: RwSignal<bool>,
     pub saved: RwSignal<Vec<SavedServer>>,
     pub invalid: RwSignal<bool>,
-    /// The inline line under the URL field: set by a validation reject (which
-    /// raises no toast), cleared by a URL edit, an applied scanned payload and
-    /// the start of a dial.
     pub url_error: RwSignal<Option<String>>,
     pub pending_pairing: RwSignal<Option<PairingPayload>>,
     pub unlocking: RwSignal<bool>,
     pub resolving_offer: RwSignal<bool>,
-    /// The dock's last failed unlock, cleared by the next attempt.
     pub dock_failure: RwSignal<Option<DockFailure>>,
 }
 
@@ -267,7 +215,6 @@ impl ConnectController {
         controller
     }
 
-    /// This controller, driving the add-server page instead of `/`.
     pub fn in_add_mode(mut self) -> Self {
         self.mode = ConnectMode::Add;
         self
@@ -277,8 +224,6 @@ impl ConnectController {
         self.mode
     }
 
-    /// Where a dial starting now lands once it settles: in Add mode, marks
-    /// the page on top now and keeps that mark for the offer's answer.
     fn landing(&self, nav: &Nav) -> Landing {
         let mark = (self.mode == ConnectMode::Add).then(|| nav.mark_top());
         if mark.is_some() {
@@ -294,8 +239,6 @@ impl ConnectController {
         }
     }
 
-    /// [`Self::landing`] for an answer to the offer the last dial raised:
-    /// the dial's own mark, else (no dial recorded one) the page on top now.
     fn offer_landing(&self, nav: &Nav) -> Landing {
         let stored = self
             .landing_mark
@@ -311,8 +254,6 @@ impl ConnectController {
         }
     }
 
-    /// Dial `target` the way this page dials: `/` opens the first
-    /// connection, the add-server page moves the live one.
     fn dial(&self, target: ConnectTarget, on_done: impl FnOnce(Result<(), AppFailure>) + 'static) {
         match self.mode {
             ConnectMode::Home => self.connection.connect_with(target, on_done),
@@ -320,17 +261,13 @@ impl ConnectController {
         }
     }
 
-    /// The [`CredentialSaver`] `crate::connection` calls on an accepted offer,
-    /// held weakly since the connection handle outlives every screen; a
-    /// gone-away screen makes the accept a no-op.
+    /// Held weakly: the connection handle outlives every screen.
     pub fn credential_saver(self: &Arc<Self>) -> Arc<dyn CredentialSaver> {
         Arc::new(ControllerCredentialSaver {
             controller: Arc::downgrade(self),
         })
     }
 
-    /// Re-read the saved-server list into [`Self::saved`]. A repository failure
-    /// raises a toast and leaves the previous list in place.
     pub fn reload_saved(&self) {
         match self.repository.list() {
             Ok(servers) => self.saved.set(servers),
@@ -338,10 +275,8 @@ impl ConnectController {
         }
     }
 
-    /// Re-reads [`Self::saved`] once the connection epoch or the keyring
-    /// generation moved since the last look: `/` stays retained under the
-    /// shell while the add page and Settings edit the same list. Untracked
-    /// reads and a seen pair, so a build may call it every frame.
+    /// `/` stays retained under the shell while the add page and Settings edit the same
+    /// list. Untracked, so a build may call it every frame.
     fn refresh_saved_if_moved(&self) {
         let marks = (
             self.connection.connection_epoch.get_untracked(),
@@ -364,10 +299,8 @@ impl ConnectController {
         }
     }
 
-    /// Sets the URL field and clears stale validation. Also the manual-edit
-    /// seam: an address that no longer matches a live pairing's host/port drops
-    /// it (unparseable counts as mismatch) — why [`Self::apply_scanned_payload`]
-    /// writes [`Self::url`] directly instead.
+    /// An address that stops matching a live pairing's host/port drops it, which is why
+    /// [`Self::apply_scanned_payload`] writes [`Self::url`] directly.
     pub fn set_url(&self, url: String) {
         self.invalidate_pairing_unless_covering(&url);
         self.url.set(url);
@@ -376,27 +309,21 @@ impl ConnectController {
         }
     }
 
-    /// The one writer that rejects the URL: lights [`Self::invalid`] and sets
-    /// the inline line together, so the two signals never disagree.
     fn reject_url(&self, message: &str) {
         self.invalid.set(true);
         self.url_error.set(Some(message.to_owned()));
     }
 
-    /// The counterpart of [`Self::reject_url`]: clears both signals.
     fn clear_url_validation(&self) {
         self.invalid.set(false);
         self.url_error.set(None);
     }
 
-    /// The install's current entitlement, tracked — what the saved rows' pro
-    /// tags are computed from.
     pub fn entitlement(&self) -> Entitlement {
         self.pro.entitlement.get()
     }
 
-    /// Sets the token field. A hand-typed token drops a live pairing — the
-    /// pinned CTA sends the payload's token, so the two must never disagree.
+    /// A hand-typed token drops a live pairing: the pinned CTA sends the payload's token.
     pub fn set_token(&self, token: String) {
         self.token.set(Zeroizing::new(token));
         self.clear_pending_pairing();
@@ -406,14 +333,8 @@ impl ConnectController {
         self.token.set(Zeroizing::new(String::new()));
     }
 
-    /// Sets the trust mode. A manual choice that disagrees with a stashed
-    /// pairing's own posture ([`pairing_trust_mode`]) drops the pairing first
-    /// (`clear_pending_pairing`, which also resets the mode to the default)
-    /// and only then applies the chosen one — mirroring [`Self::set_token`]/
-    /// [`Self::set_url`]: without this, the selector's radio would move while
-    /// both CTAs kept dialing the pairing's own posture underneath it.
-    /// Re-selecting the pairing's own posture is not an override, so the
-    /// pairing survives it.
+    /// A choice that disagrees with a stashed pairing's posture drops the pairing first (which
+    /// resets the mode), then applies; re-selecting the pairing's own posture keeps it.
     pub fn select_trust_mode(&self, mode: TrustMode) {
         let overrides_pairing = self.pending_pairing.with(|pending| {
             pending
@@ -446,8 +367,6 @@ impl ConnectController {
         self.trust_mode.set(server.trust_mode);
     }
 
-    /// Reconnects through the row's stored credential if it has one, else
-    /// refills the form (no credential means no gate to raise).
     pub fn saved_row_tapped(self: &Arc<Self>, index: usize, nav: &Nav) {
         let Some(server) = self.saved_row(index) else {
             return;
@@ -459,22 +378,15 @@ impl ConnectController {
         }
     }
 
-    /// Whether a dial is in flight (the connection controller's own signal, not
-    /// a copy) — the single-flight guard both CTAs share.
     pub fn connecting(&self) -> RwSignal<bool> {
         self.connection.connecting
     }
 
-    /// Whether a dial, an unlock, or an unanswered offer is in flight — tracked,
-    /// for rendering busy state.
     pub fn busy(&self) -> bool {
         self.connection.connecting.get() || self.unlocking.get() || self.resolving_offer.get()
     }
 
-    /// [`Self::busy`] without subscribing, for press handlers with no owner to
-    /// subscribe — plus an add-server page that has already landed, whose
-    /// second dial (a double tap) would re-dial with a scrubbed form.
-    /// `pub(crate)` for the QR affordance's own use.
+    /// Untracked. Also refuses once an add page has landed: its form is already scrubbed.
     pub(crate) fn busy_untracked(&self) -> bool {
         self.landed.load(Ordering::SeqCst)
             || self.connection.connecting.get_untracked()
@@ -482,14 +394,7 @@ impl ConnectController {
             || self.resolving_offer.get_untracked()
     }
 
-    // -----------------------------------------------------------------------
-    // The free-tier server gate (`features::pro`'s rule, ahead of every dial)
-    // -----------------------------------------------------------------------
-
-    /// The free-tier verdict for `endpoint`, raised on `gate_prompt` when it
-    /// refuses. `true` means the caller must return without dialing: a blocked
-    /// connect saves, unlocks, writes and toasts nothing, since the only place
-    /// a new saved row is written is a successful login.
+    /// `true` means return without dialing: a blocked connect writes and toasts nothing.
     fn blocked(&self, endpoint: &str, retry: ConnectRetry, gate_prompt: &GatePrompt) -> bool {
         match self.pro.verdict_for(&self.saved.get_untracked(), endpoint) {
             ServerLimitVerdict::Allowed => false,
@@ -500,12 +405,8 @@ impl ConnectController {
         }
     }
 
-    /// [`Self::blocked`] for a tapped saved row, taken by the screen *ahead* of
-    /// [`Self::recover_and_connect`] rather than inside it: the row's own
-    /// no-verification confirmation sits between the two and dials through the
-    /// ungated method, so the verdict has to be taken before that dialog is
-    /// raised (`widgets::pro_gate` owns the ordering). A row with no stored
-    /// credential only refills the form, so there is nothing to judge.
+    /// Taken ahead of [`Self::recover_and_connect`]: the row's no-verification confirmation
+    /// sits between the two and dials ungated.
     pub fn saved_row_blocked(&self, server: &SavedServer, gate_prompt: &GatePrompt) -> bool {
         if !server.has_credential {
             return false;
@@ -517,8 +418,6 @@ impl ConnectController {
         )
     }
 
-    /// Where `endpoint` sits in [`Self::saved`] now. A retry holds the row it
-    /// was blocked on across a forget, which moves every later row's index.
     pub fn saved_row_index(&self, endpoint: &str) -> Option<usize> {
         self.saved
             .get_untracked()
@@ -526,13 +425,7 @@ impl ConnectController {
             .position(|server| server.endpoint() == endpoint)
     }
 
-    // -----------------------------------------------------------------------
-    // The pairing path (see the module docs)
-    // -----------------------------------------------------------------------
-
-    /// Prefills the form from a scanned payload and stashes it; never connects.
-    /// Writes [`Self::url`]/[`Self::token`] directly — their setters would clear
-    /// the payload being stashed.
+    /// Never connects. Writes the fields directly: their setters would clear the stashed payload.
     pub fn apply_scanned_payload(&self, payload: PairingPayload) {
         self.url.set(pairing_endpoint(&payload));
         self.token.set(payload.token.clone());
@@ -541,9 +434,7 @@ impl ConnectController {
         self.pending_pairing.set(Some(payload));
     }
 
-    /// Drops the stashed pairing and resets trust mode to the manual default — a
-    /// leftover [`TrustMode::Pinned`] would fail closed at dial time. No-op when
-    /// empty.
+    /// Resets trust to the default: a leftover [`TrustMode::Pinned`] fails closed at dial time.
     pub fn clear_pending_pairing(&self) {
         if self.pending_pairing.with(Option::is_none) {
             return;
@@ -552,7 +443,6 @@ impl ConnectController {
         self.trust_mode.set(DEFAULT_TRUST_MODE);
     }
 
-    /// Drop the stashed pairing unless `url` still names its host and port.
     fn invalidate_pairing_unless_covering(&self, url: &str) {
         let default_port = default_port_for(self.trust_mode.get_untracked());
         let covered = self.pending_pairing.with(|pending| match pending {
@@ -565,11 +455,6 @@ impl ConnectController {
         }
     }
 
-    /// The pinned CTA: connects with the stashed pairing's own credentials.
-    /// No-op with nothing stashed, or while [`Self::busy`]. On success, scrubs
-    /// the token and raises the paired credential's one save prompt (session
-    /// already live, so a denial changes nothing); on failure, leaves the form
-    /// untouched for a one-tap retry.
     pub fn connect_from_pairing(self: &Arc<Self>, nav: &Nav, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
@@ -583,17 +468,15 @@ impl ConnectController {
             ConnectRetry::Pairing,
             &gate_prompt,
         ) {
-            // The payload stays stashed, so the retry dials this same code.
             return;
         }
         self.clear_url_validation();
         let landing = self.landing(nav);
-        // Both `Copy`; the closure may outlive this borrow (see `Self::connect`).
         let token = self.token;
         let pending = self.pending_pairing;
         let upsert = self.login_upsert(&target);
         let controller = Arc::clone(self);
-        // Stored as scanned — never re-minted; the QR already is the credential.
+        // Stored as scanned, never re-minted: the QR already is the credential.
         let scanned = payload.token.clone();
         let label = target.label.clone();
         let endpoint = upsert.endpoint();
@@ -608,15 +491,9 @@ impl ConnectController {
         });
     }
 
-    /// The [`ConnectTarget`] this form describes, or why it doesn't; split out
-    /// so validation + mapping is unit-testable without a live navigator.
-    ///
-    /// `offer_credential` is set whenever remember is checked and this isn't a
-    /// pairing — including an already-saved endpoint, since that's exactly where
-    /// a revoked credential needs replacing. A hand-picked [`TrustMode::Pinned`]
-    /// carries no fingerprint and fails closed at dial time, except when a
-    /// matching stashed pairing supplies its own posture and fingerprint (never
-    /// offerable).
+    /// `offer_credential` is set whenever remember is checked outside a pairing, saved endpoints
+    /// included: that is where a revoked credential is replaced. A hand-picked `Pinned` carries
+    /// no fingerprint and fails closed unless a matching stashed pairing supplies one.
     pub fn validated_target(&self) -> Result<ConnectTarget, AppFailure> {
         let default_port = default_port_for(self.trust_mode.get_untracked());
         let endpoint = parse_endpoint(&self.url.get_untracked(), default_port)?;
@@ -640,7 +517,6 @@ impl ConnectController {
         let (trust_mode, fingerprint) =
             pairing.unwrap_or_else(|| (self.trust_mode.get_untracked(), None));
         Ok(ConnectTarget {
-            // A known endpoint keeps its stored label; a new one is labelled by its host.
             label: known.map_or_else(|| endpoint.host.clone(), |server| server.label.clone()),
             offer_credential: !paired && remember,
             host: endpoint.host,
@@ -652,8 +528,6 @@ impl ConnectController {
         })
     }
 
-    /// Whether a stored credential for `host:port` already exists — what makes an
-    /// offer a *replacement*.
     fn stores_credential_for(&self, host: &str, port: u16) -> bool {
         self.saved
             .get_untracked()
@@ -661,15 +535,7 @@ impl ConnectController {
             .any(|server| server.host == host && server.port == port && server.has_credential)
     }
 
-    /// Validates the form and, once the dial actually settles, pushes
-    /// [`SESSIONS_LOCATION`] through the app's guarded router.
-    ///
-    /// `nav`/`offer_prompt` are lent, not held: both wrap `Rc`, so are neither
-    /// `Send` nor `Sync`, while this controller must be both.
-    ///
-    /// A rejection sets [`Self::url_error`] and lights [`Self::invalid`], with
-    /// no toast; a refused dial toasts and leaves the form as typed, for a
-    /// one-tap retry. Neither navigates.
+    /// `nav`/`offer_prompt` are lent, not held: both wrap `Rc`, and this must be `Send + Sync`.
     pub fn connect(&self, nav: &Nav, offer_prompt: OfferPrompt, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
@@ -681,19 +547,13 @@ impl ConnectController {
                     ConnectRetry::Manual,
                     &gate_prompt,
                 ) {
-                    // Before `invalid` too: a blocked connect writes nothing at
-                    // all, and the form is left exactly as it was typed.
                     return;
                 }
                 self.clear_url_validation();
                 let landing = self.landing(nav);
-                // Token's job ends once the connection opens with it; captured by
-                // value (`RwSignal` is `Copy`) since the closure may outlive this borrow.
                 let token = self.token;
-                // The settled connect reads the offer back off the connection's own signal.
                 let offer = self.connection.credential_offer;
                 let resolving = self.resolving_offer;
-                // Whether this offer would be a *replacement* — read before the dial.
                 let replacing = self.stores_credential_for(&target.host, target.port);
                 let upsert = self.login_upsert(&target);
                 self.dial(target, move |outcome| {
@@ -712,12 +572,6 @@ impl ConnectController {
                 });
             }
             Err(failure) => {
-                // Intentional: every validation reject takes the inline line, not a
-                // toast (the plan's Phase 2 decision), superseding "Compact
-                // byte-for-byte" for this behaviour. `validated_target`'s only
-                // failure today is the URL parse, so the fixed message is honest.
-                // `parse_endpoint` only ever fails as `Network`; a second source
-                // (any other kind) must not silently reuse the fixed message.
                 debug_assert!(
                     matches!(failure, AppFailure::Network(_)),
                     "validated_target gained a failure source besides the URL parse"
@@ -729,15 +583,8 @@ impl ConnectController {
         }
     }
 
-    /// Runs the accepted offer's save, then lands ([`Landing`]) once it
-    /// settles (however it settled) — the prompt is answered on Connect, not
-    /// over Sessions.
-    ///
-    /// The add-server page saves through itself rather than the connection's
-    /// installed [`CredentialSaver`]: that saver is `/`'s, still retained
-    /// beneath the shell, and this short-lived page must not replace it. The
-    /// save is the same [`Self::begin_credential_save`] either way, with the
-    /// connection's own guards (no offer, no endpoint) mirrored here.
+    /// The add page saves through itself, not the connection's installed saver: that saver is
+    /// `/`'s, still retained beneath the shell.
     pub fn accept_offer_then_navigate(self: &Arc<Self>, nav: &Nav) {
         let landing = self.offer_landing(nav);
         let resolving = self.resolving_offer;
@@ -762,20 +609,12 @@ impl ConnectController {
         }
     }
 
-    /// Declined or dismissed (same outcome): drops the offer and lands, as
-    /// the connect would have done unprompted.
     pub fn decline_offer_then_navigate(&self, nav: &Nav) {
         self.connection.dismiss_credential_offer();
         self.resolving_offer.set(false);
         self.offer_landing(nav).land();
     }
 
-    // -----------------------------------------------------------------------
-    // Saved-server persistence (the module docs' flow 5)
-    // -----------------------------------------------------------------------
-
-    /// The metadata write a successful connect performs; built before `target`
-    /// moves into the connection controller, run from the completion.
     fn login_upsert(&self, target: &ConnectTarget) -> LoginUpsert {
         LoginUpsert::new(
             &self.repository,
@@ -786,8 +625,6 @@ impl ConnectController {
         )
     }
 
-    /// [`Self::reload_saved`] by another name, callable from the completion
-    /// closures that hold no `&self`.
     fn reload_into(repository: &SavedServers, saved: RwSignal<Vec<SavedServer>>) {
         match repository.list() {
             Ok(servers) => saved.set(servers),
@@ -795,9 +632,6 @@ impl ConnectController {
         }
     }
 
-    /// Rewrites the saved row for `endpoint` via `edit`, returning its previous
-    /// token name. No-op if no row exists (every credential flow runs after a
-    /// login that already wrote one).
     fn update_saved(&self, endpoint: &str, edit: impl FnOnce(&mut SavedServer)) -> Option<String> {
         let Ok(servers) = self.repository.list() else {
             return None;
@@ -815,14 +649,6 @@ impl ConnectController {
         previous
     }
 
-    // -----------------------------------------------------------------------
-    // Flow 1 — the manual save (the offer's accept)
-    // -----------------------------------------------------------------------
-
-    /// Mints a token, stores it behind the gate, and records it on the saved
-    /// row. Returns immediately; `on_done` fires once settled, on every path
-    /// out — including the two early refusals (read-only session, save already
-    /// running).
     pub fn begin_credential_save(
         self: &Arc<Self>,
         endpoint: String,
@@ -845,11 +671,8 @@ impl ConnectController {
         });
     }
 
-    /// [`Self::begin_credential_save`]'s body: mint, gate + store, record,
-    /// rotate. Ordering contract: a denied gate revokes the just-minted token
-    /// (else it sits unrevoked forever); the previous token is revoked only
-    /// after the new one persists, so a mid-flow failure leaves a working old
-    /// token, not none.
+    /// Ordering: a denied gate revokes the just-minted token; the previous token is revoked
+    /// only after the new one persists, so a mid-flow failure leaves the old one working.
     async fn save_session_credential(&self, endpoint: String, label: String) {
         let token_name = minted_token_name(&label);
         let minted = match self
@@ -862,7 +685,6 @@ impl ConnectController {
         {
             Ok(minted) => minted,
             Err(failure) => {
-                // Minting isn't run through `core`, so its failure is emitted here explicitly.
                 self.core.failures().emit(&failure);
                 return;
             }
@@ -890,14 +712,7 @@ impl ConnectController {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Flow 2 — the QR save
-    // -----------------------------------------------------------------------
-
-    /// Stores the scanned token for a just-paired server: one prompt, no mint,
-    /// silent regardless of the gate's answer (session already live). Only
-    /// flips the credential fields — the row itself was already written by the
-    /// login upsert.
+    /// One prompt, no mint, silent whatever the gate answers: the session is already live.
     fn save_paired_credential(
         self: &Arc<Self>,
         endpoint: String,
@@ -916,29 +731,16 @@ impl ConnectController {
             if status != CredentialStatus::Success {
                 return;
             }
-            // No token name: `muxrctl` minted it, this device never learns the name.
             controller.update_saved(&endpoint, |row| {
                 row.has_credential = true;
                 row.token_name = None;
             });
-            // A pairing target is never offerable; dismiss any pending offer regardless.
             controller.connection.dismiss_credential_offer();
         });
     }
 
-    // -----------------------------------------------------------------------
-    // Flow 3 — logging in with a saved credential
-    // -----------------------------------------------------------------------
-
-    /// Unlocks `server`'s stored credential and connects under its own posture
-    /// and pin, offering no save. Any other outcome reports its message and
-    /// prefills the form (a cancel is silent); an invalidated key also forgets
-    /// the credential. Ignored while busy.
-    ///
-    /// Callers own the no-verification confirmation — by the time this runs it
-    /// was either unnecessary or already given — and, for the same reason, the
-    /// free-tier verdict: `widgets::pro_gate` takes it through
-    /// [`Self::saved_row_blocked`] before the confirmation it sits ahead of.
+    /// Callers own the no-verification confirmation and, ahead of it, the free-tier verdict
+    /// ([`Self::saved_row_blocked`]). Ignored while busy.
     pub fn recover_and_connect(self: &Arc<Self>, server: SavedServer, nav: &Nav) {
         if self.busy_untracked() {
             return;
@@ -951,7 +753,6 @@ impl ConnectController {
         });
     }
 
-    /// [`Self::recover_and_connect`]'s body.
     async fn recover(self: &Arc<Self>, server: SavedServer, nav: Nav) {
         let endpoint = server.endpoint();
         let unlocked = self
@@ -973,7 +774,6 @@ impl ConnectController {
             Some(token) if status == CredentialStatus::Success => {
                 self.connect_recovered(&server, token, &nav);
             }
-            // A passed gate recovering nothing is always the not-found branch.
             _ => {
                 let status = if status == CredentialStatus::Success {
                     CredentialStatus::NotFound
@@ -991,7 +791,6 @@ impl ConnectController {
         }
     }
 
-    /// Connect with a token just recovered from `server`'s stored credential.
     fn connect_recovered(&self, server: &SavedServer, token: Zeroizing<String>, nav: &Nav) {
         let target = saved_target(server, token);
         let upsert = self.login_upsert(&target);
@@ -1004,22 +803,15 @@ impl ConnectController {
         });
     }
 
-    /// [`KeyringUnlock::forget_unreadable`], then the list re-read.
     async fn forget_unreadable(&self, endpoint: &str) {
         self.keyring_unlock.forget_unreadable(endpoint).await;
         self.reload_saved();
     }
 
-    // -----------------------------------------------------------------------
-    // The unlock dock — one prompt for the whole keyring, then the MRU row
-    // -----------------------------------------------------------------------
-
     pub fn biometrics_available(&self) -> bool {
         self.biometrics_available
     }
 
-    /// What the dock shows — tracked. Also the `/` build's per-frame look at
-    /// whether the list moved behind its back ([`Self::refresh_saved_if_moved`]).
     pub fn dock_state(&self) -> DockState {
         self.refresh_saved_if_moved();
         if !self.biometrics_available {
@@ -1033,12 +825,8 @@ impl ConnectController {
             .map_or(DockState::Idle, DockState::Failed)
     }
 
-    /// The dock's press, over the saved list read fresh now (never the
-    /// retained page's copy): the target is the most recent row claiming a
-    /// credential, none meaning nothing to do. Its free-tier verdict first
-    /// (a block raises `gate_prompt` and no biometric prompt), then one
-    /// `unlock_all` prompt, the keyring published, and that row dialed with
-    /// its token. Single-flight on [`Self::unlocking`].
+    /// Reads the saved list fresh, never the retained page's copy. The free-tier verdict comes
+    /// first, so a block raises no biometric prompt.
     pub fn unlock_keyring_and_connect(self: &Arc<Self>, nav: &Nav, gate_prompt: GatePrompt) {
         if self.busy_untracked() {
             return;
@@ -1064,12 +852,8 @@ impl ConnectController {
         });
     }
 
-    /// [`Self::unlock_keyring_and_connect`]'s body. A cancel is silent; a
-    /// vault re-enrollment can never be read again, so it is reset; `Failed`
-    /// offers that reset behind a confirm instead (it also covers a failed
-    /// authentication); every other refusal fails the dock and toasts. The
-    /// target dials only if, re-read after the unlock, it still claims a
-    /// credential the keyring holds.
+    /// A vault re-enrollment can never be read again, so it is reset; `Failed` offers that reset
+    /// behind a confirm. The target dials only if it still claims a held credential afterwards.
     async fn unlock_all_then_connect(self: &Arc<Self>, target: SavedServer, nav: Nav) {
         let unreadable = match self.keyring_unlock.unlock().await {
             KeyringUnlockOutcome::Unlocked { unreadable } => unreadable,
@@ -1120,7 +904,6 @@ impl ConnectController {
         self.connect_recovered(&target, token, &nav);
     }
 
-    /// Fails the dock with `status`'s message and toasts it, as every flow does.
     fn fail_dock(&self, status: CredentialStatus) {
         self.dock_failure
             .set(status.message().map(|message| DockFailure {
@@ -1130,8 +913,6 @@ impl ConnectController {
         self.report(status);
     }
 
-    /// The failed dock's confirmed reset: the vault goes, ungated, and every
-    /// saved row stops claiming a credential. Ignored while busy.
     pub fn reset_saved_credentials(self: &Arc<Self>) {
         if self.busy_untracked() {
             return;
@@ -1144,8 +925,6 @@ impl ConnectController {
         });
     }
 
-    /// Removes the vault (ungated), clears every row's credential fields — the
-    /// next unlock re-migrates any legacy leftovers — and locks the handle.
     async fn reset_credentials(&self, message: &str) {
         if let Err(failure) = self.credentials.reset_vault().await {
             app_toasts().raise(&failure);
@@ -1175,14 +954,6 @@ impl ConnectController {
         }));
     }
 
-    // -----------------------------------------------------------------------
-    // Flow 4 — forgetting a saved server (this device only)
-    // -----------------------------------------------------------------------
-
-    /// Drops everything this device holds for `server`: credential, then row.
-    /// Strictly local (no RPC) — the token keeps working until revoked
-    /// server-side, and removing the currently-connected row is harmless.
-    /// Returns immediately.
     pub fn forget_saved_server(self: &Arc<Self>, server: SavedServer) {
         let controller = Arc::clone(self);
         spawn_local(async move {
@@ -1190,13 +961,7 @@ impl ConnectController {
         });
     }
 
-    /// Forgets `rows` in turn, then runs `then` on the UI thread — the paywall's
-    /// forget-and-connect, whose retry must not start until the last row is
-    /// actually gone (the verdict it re-takes reads the same list). Each row
-    /// goes through [`Self::forget_saved`], so the semantics are
-    /// [`Self::forget_saved_server`]'s exactly, failures included: a row whose
-    /// secret refuses to delete toasts and keeps its row, and the retry still
-    /// runs — where the gate simply refuses again.
+    /// `then` runs only once the last row is gone: the retry's verdict reads the same list.
     pub fn forget_saved_servers_then(
         self: &Arc<Self>,
         rows: Vec<SavedServer>,
@@ -1211,11 +976,8 @@ impl ConnectController {
         });
     }
 
-    /// [`Self::forget_saved_server`]'s body. Ordering contract: secret first,
-    /// row second. Locked, the row goes only if the ungated legacy delete
-    /// succeeded — the row is the secret's own key, so removing it first could
-    /// strand the secret unreachable. Unlocked, the keyring evicts it
-    /// ([`Self::evict_forgotten`]) and the row goes whatever the vault said.
+    /// Ordering: secret first, row second. Locked, the row goes only if the legacy delete
+    /// succeeded: the row is the secret's own key.
     async fn forget_saved(&self, server: SavedServer) {
         let endpoint = server.endpoint();
         if self.keyring.is_unlocked() {
@@ -1226,7 +988,6 @@ impl ConnectController {
         }
         if let Err(failure) = self.repository.remove(&endpoint) {
             app_toasts().raise(&failure);
-            // The secret is gone regardless; the surviving row must stop claiming one.
             self.update_saved(&endpoint, |row| {
                 row.has_credential = false;
                 row.token_name = None;
@@ -1236,11 +997,8 @@ impl ConnectController {
         self.reload_saved();
     }
 
-    /// The unlocked forget: one gated vault rewrite without `endpoint` over a
-    /// snapshot, then the handle drops its token whatever the rewrite said —
-    /// a token left there would ride the next snapshot-based vault write back
-    /// in. A refused rewrite toasts and falls back to the ungated legacy
-    /// delete; the vault copy is pruned by the next unlock, the row being gone.
+    /// The handle drops the token whatever the rewrite said: a token left there would ride the
+    /// next snapshot-based vault write back in.
     async fn evict_forgotten(&self, endpoint: &str) {
         let mut snapshot = self.keyring.snapshot();
         let evicted = self
@@ -1256,19 +1014,9 @@ impl ConnectController {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Shared credential plumbing
-    // -----------------------------------------------------------------------
-
-    /// Gates and stores a secret. Unlocked, a snapshot of the keyring takes
-    /// the one gated vault write; on success the handle gains the token iff it
-    /// is still unlocked once the prompt settles. A lock during the prompt is
-    /// the one state the token must stay out of (the vault keeps it); any
-    /// other change meanwhile — another endpoint inserted or removed, a
-    /// re-unlock — still takes it, so the handle never lacks a token the vault
-    /// holds (the next snapshot-based vault write would erase it). Locked, the
-    /// read-modify-write save runs through `ControllerCore::run` (whose
-    /// impossible failure reads as `Failed`) and the handle is left alone.
+    /// Unlocked, the handle gains the token iff it is still unlocked once the prompt settles: a
+    /// lock during the prompt keeps it out, any other change still takes it, so the handle
+    /// never lacks a token the vault holds.
     async fn gate_store(
         &self,
         server_key: String,
@@ -1297,16 +1045,12 @@ impl ConnectController {
             .unwrap_or(CredentialStatus::Failed)
     }
 
-    /// Say what `status` means, if it means anything to say (a success and a cancel
-    /// do not — see [`CredentialStatus::message`]).
     fn report(&self, status: CredentialStatus) {
         if let Some(message) = status.message() {
             app_toasts().show(message);
         }
     }
 
-    /// Revokes a server-side token, best effort — every caller is past the
-    /// point of no return.
     async fn revoke_quietly(&self, name: String) {
         if let Err(failure) = self.tokens.revoke_token(name).await {
             log::warn!("credentials: revoking a replaced token failed: {failure:?}");
@@ -1314,32 +1058,18 @@ impl ConnectController {
     }
 }
 
-/// What a [`KeyringUnlock::unlock`] settled as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyringUnlockOutcome {
-    /// The keyring is published on the handle. `unreadable` names the rows
-    /// whose legacy credential could not be read and was dropped.
-    Unlocked { unreadable: Vec<String> },
-    /// Nothing was published. Never [`CredentialStatus::Success`].
+    Unlocked {
+        unreadable: Vec<String>,
+    },
     Refused(CredentialStatus),
-    /// Another unlock is already in flight app-wide: no prompt was raised.
-    /// Callers treat it silently.
     Busy,
-    /// A lock landed while the prompt was pending, so the unlocked keyring
-    /// was dropped unpublished. Callers treat it as a silent cancel: no dial,
-    /// no toast.
     Superseded,
-    /// The saved list could not be read, or is not the persisted one, so no
-    /// prompt was raised: a prune over it could drop every real entry.
-    /// Callers toast [`SAVED_LIST_UNAVAILABLE_MESSAGE`].
+    /// No prompt was raised: a prune over an unpersisted list could drop every real entry.
     ListUnavailable,
 }
 
-/// The page-agnostic keyring seam the Connect dock and Settings share: one
-/// `unlock_all` prompt over the saved list, its keyring published on the
-/// app-scoped [`KeyringHandle`], and a switch to a saved row with a token
-/// taken from that keyring. Owns no signals and raises no dialog, so any
-/// screen's controller can hold one and keep its own failure surface.
 pub struct KeyringUnlock {
     repository: SavedServers,
     credentials: Credentials,
@@ -1368,11 +1098,7 @@ impl KeyringUnlock {
         &self.keyring
     }
 
-    /// One gated read of the whole keyring over the saved list as it stands
-    /// now, never a page's copy: only rows claiming a credential are handed
-    /// to `unlock_all`, so their legacy entries migrate and every other vault
-    /// entry is pruned. On success, rows whose legacy entry was unreadable
-    /// lose their credential claim first, then the keyring is published.
+    /// Only rows claiming a credential reach `unlock_all`; every other vault entry is pruned.
     pub async fn unlock(&self) -> KeyringUnlockOutcome {
         let Some(_ticket) = self.keyring.begin_unlock() else {
             return KeyringUnlockOutcome::Busy;
@@ -1399,7 +1125,6 @@ impl KeyringUnlock {
             (status, _) => return KeyringUnlockOutcome::Refused(status),
         };
         if self.keyring.lock_epoch() != epoch {
-            // Lock & disconnect won: the keyring zeroizes on drop.
             return KeyringUnlockOutcome::Superseded;
         }
         for endpoint in &unreadable {
@@ -1412,8 +1137,6 @@ impl KeyringUnlock {
         KeyringUnlockOutcome::Unlocked { unreadable }
     }
 
-    /// The saved rows claiming a credential, most recent first, read fresh;
-    /// `None` when the list cannot be read or is not the persisted one.
     fn credentialed_rows(&self) -> Option<Vec<SavedServer>> {
         if !self.repository.is_persistent() {
             log::warn!("keyring: refusing to unlock over a saved list that is not persisted");
@@ -1428,9 +1151,6 @@ impl KeyringUnlock {
         }
     }
 
-    /// Drops a credential the device can no longer read (key invalidated by
-    /// re-enrollment) and clears its row's credential fields. Best-effort,
-    /// ungated — the user must be able to get rid of it either way.
     pub async fn forget_unreadable(&self, endpoint: &str) {
         if let Err(failure) = self.credentials.delete(endpoint.to_string()).await {
             log::warn!("credentials: dropping an invalidated entry failed: {failure:?}");
@@ -1448,9 +1168,6 @@ impl KeyringUnlock {
         }
     }
 
-    /// Move the live connection to `server` with `token` (one of the
-    /// keyring's), writing the row's login back once it opens — the switch
-    /// every saved-row entry point outside `/` takes.
     pub fn switch_to_saved(
         &self,
         server: &SavedServer,
@@ -1460,10 +1177,6 @@ impl KeyringUnlock {
         self.switch_saved(server, token, false, on_done);
     }
 
-    /// [`Self::switch_to_saved`] over [`ConnectionController::switch_to_quiet`]:
-    /// a failure is only handed to `on_done`, never toasted — for a caller that
-    /// reports the dial itself (the switcher's banner-owned background dials).
-    /// The login write-back on success is the same.
     pub fn switch_to_saved_quiet(
         &self,
         server: &SavedServer,
@@ -1502,8 +1215,6 @@ impl KeyringUnlock {
     }
 }
 
-/// The target a stored credential dials: the row's own posture and pin,
-/// never offerable (it is stored already), and remembered by definition.
 fn saved_target(server: &SavedServer, token: Zeroizing<String>) -> ConnectTarget {
     ConnectTarget {
         host: server.host.clone(),
@@ -1517,7 +1228,6 @@ fn saved_target(server: &SavedServer, token: Zeroizing<String>) -> ConnectTarget
     }
 }
 
-/// The [`CredentialSaver`] a [`ConnectController`] hands to `crate::connection`.
 struct ControllerCredentialSaver {
     controller: std::sync::Weak<ConnectController>,
 }
@@ -1526,28 +1236,21 @@ impl CredentialSaver for ControllerCredentialSaver {
     fn save_credential(&self, endpoint: String, label: String, on_done: Box<dyn FnOnce()>) {
         match self.controller.upgrade() {
             Some(controller) => controller.begin_credential_save(endpoint, label, on_done),
-            // A gone-away screen saves nothing, but `on_done` still runs — dropping
-            // it would strand the caller.
             None => on_done(),
         }
     }
 }
 
-/// The saved-server row a successful connect writes back — run from a completion
-/// closure that holds no `&self`, hence the cloned handles.
 struct LoginUpsert {
     repository: SavedServers,
     connection: Arc<ConnectionController>,
     keyring: KeyringHandle,
-    /// The list signal to re-read into, when the caller renders one.
     saved: Option<RwSignal<Vec<SavedServer>>>,
     host: String,
     port: u16,
     trust_mode: TrustMode,
     label: String,
     fingerprint: Option<String>,
-    /// The endpoint live when the switch began, captured before the dial tears
-    /// it down: switching away from it forgets a row holding no credential.
     previous: Option<String>,
 }
 
@@ -1578,11 +1281,8 @@ impl LoginUpsert {
         }
     }
 
-    /// Forgets the row of the server just switched away from when it holds no
-    /// credential: it can only reopen the add page, so it is not worth a
-    /// card. Every switch path builds a `LoginUpsert` before dialing and runs
-    /// it on success, so this is the one place the rule lives. A failed
-    /// switch never runs it, and neither does a plain disconnect.
+    /// A row holding no credential can only reopen the add page, so switching away from it
+    /// forgets it. Runs only after a successful switch.
     fn forget_previous_without_credential(&self) {
         let Some(previous) = self.previous.as_deref() else {
             return;
@@ -1601,16 +1301,12 @@ impl LoginUpsert {
         }
     }
 
-    /// The `host:port` this write is for.
     fn endpoint(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// Writes the row from a settled connect. Credential fields are carried
-    /// forward from any existing row — rebuilding them would wipe
-    /// `has_credential` on every login, including the recover path's own. A
-    /// row written with no credential claim takes any token the handle still
-    /// holds for it out, so no later vault write resurrects it.
+    /// Credential fields carry forward from any existing row. A row written with no credential
+    /// claim takes the handle's token out, so no later vault write resurrects it.
     fn run(&self) {
         let existing = self
             .repository
@@ -1648,13 +1344,10 @@ impl LoginUpsert {
     }
 }
 
-/// The `host:port` a target dials — the same key a saved row is written under
-/// ([`SavedServer::endpoint`]) and the free-tier rule is judged in.
 fn target_endpoint(target: &ConnectTarget) -> String {
     format!("{}:{}", target.host, target.port)
 }
 
-/// The keyring prompt's rationale: the one row by label, else the count.
 fn unlock_reason(saved: &[SavedServer]) -> String {
     match saved {
         [] => "Unlock saved servers".to_string(),
@@ -1663,8 +1356,6 @@ fn unlock_reason(saved: &[SavedServer]) -> String {
     }
 }
 
-/// `muxr-mobile-<label>-<base36 timestamp>` — the stamp keeps names unique
-/// since the daemon addresses tokens by name.
 fn minted_token_name(label: &str) -> String {
     format!(
         "{TOKEN_NAME_PREFIX}-{}-{}",
@@ -1673,8 +1364,6 @@ fn minted_token_name(label: &str) -> String {
     )
 }
 
-/// `label` as a token-name-safe fragment: lowercase, `[a-z0-9-]` only, no
-/// leading/trailing or repeated dashes, and capped at [`TOKEN_LABEL_MAX`].
 fn slug(label: &str) -> String {
     let mut out = String::new();
     for ch in label.chars() {
@@ -1689,14 +1378,11 @@ fn slug(label: &str) -> String {
     }
     let trimmed = out.trim_end_matches('-');
     if trimmed.is_empty() {
-        // Needs a fallback before the stamp, or the name reads as a stray double dash.
         return "device".to_string();
     }
     trimmed.to_string()
 }
 
-/// `value` in base 36 — the compact stamp a minted token's name ends with. A
-/// non-positive clock reads as `0`.
 fn base36(value: i64) -> String {
     const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     if value <= 0 {
@@ -1718,12 +1404,6 @@ impl AsRef<ControllerCore<AppFailure>> for ConnectController {
     }
 }
 
-/// The port a bare (no `:port`) host dials under `mode`: a publicly trusted
-/// certificate implies a TLS-terminating edge on the HTTPS port
-/// ([`PUBLIC_CA_DEFAULT_PORT`]); a self-verified or pinned connection dials
-/// `muxrd` directly on its own default ([`MUXRD_DEFAULT_PORT`]). A scanned
-/// pairing always prefills `host:port` explicitly, so this default never
-/// applies to it.
 fn default_port_for(mode: TrustMode) -> u16 {
     match mode {
         TrustMode::System => PUBLIC_CA_DEFAULT_PORT,
@@ -1731,13 +1411,7 @@ fn default_port_for(mode: TrustMode) -> u16 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pairing → form / target mapping
-// ---------------------------------------------------------------------------
-
-/// Endpoint text a scanned payload prefills: `host:port`, IPv6 bracketed.
-/// `parse_endpoint` is mock-grade and can't take that apart again — why
-/// [`pairing_covers`] strips brackets instead of round-tripping.
+/// `parse_endpoint` cannot split the bracketed form, so [`pairing_covers`] strips brackets.
 fn pairing_endpoint(payload: &PairingPayload) -> String {
     if payload.host.contains(':') {
         return format!("[{}]:{}", payload.host, payload.port);
@@ -1745,9 +1419,6 @@ fn pairing_endpoint(payload: &PairingPayload) -> String {
     format!("{}:{}", payload.host, payload.port)
 }
 
-/// The connect-form posture a pairing's trust hint maps onto — the one mapping
-/// between two deliberately separate types, with a pin's fingerprint threaded
-/// separately ([`pinned_fingerprint`]).
 fn pairing_trust_mode(trust: &PairingTrust) -> TrustMode {
     match trust {
         PairingTrust::Pin { .. } => TrustMode::Pinned,
@@ -1755,7 +1426,6 @@ fn pairing_trust_mode(trust: &PairingTrust) -> TrustMode {
     }
 }
 
-/// The pinned certificate's fingerprint, or `None` for a CA pairing.
 fn pinned_fingerprint(payload: &PairingPayload) -> Option<String> {
     match &payload.trust {
         PairingTrust::Pin { fp_hex } => Some(fp_hex.clone()),
@@ -1763,23 +1433,16 @@ fn pinned_fingerprint(payload: &PairingPayload) -> Option<String> {
     }
 }
 
-/// Whether `endpoint` still names the host/port `payload` was scanned for. Host
-/// comparison accepts the bracketed IPv6 form [`pairing_endpoint`] writes, since
-/// that's what sits in the field after a prefill.
 fn pairing_covers(payload: &PairingPayload, endpoint: &Endpoint) -> bool {
     endpoint.port == payload.port && unbracketed(&endpoint.host) == payload.host
 }
 
-/// `host` with one layer of IPv6 brackets removed, if it has them.
 fn unbracketed(host: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
         .unwrap_or(host)
 }
 
-/// The [`ConnectTarget`] a stashed pairing dials under: every field from the
-/// payload, endpoint as fallback label. Always `remember: true`,
-/// `offer_credential: false` (flow 2 owns that save).
 fn pairing_target(payload: &PairingPayload) -> ConnectTarget {
     let endpoint = pairing_endpoint(payload);
     ConnectTarget {
@@ -1812,7 +1475,6 @@ fn failure_kind(failure: &AppFailure) -> &'static str {
 mod tests {
     use super::*;
 
-    /// A `tm=pin` payload for `host:port`, with `fp` as its fingerprint.
     fn pinned(host: &str, port: u16, fp: &str) -> PairingPayload {
         PairingPayload {
             host: host.to_string(),
@@ -1843,8 +1505,6 @@ mod tests {
     #[test]
     fn a_pairing_covers_exactly_the_address_it_was_scanned_for() {
         let payload = pinned("192.168.1.100", 50051, "ab");
-        // Every prefill below always carries an explicit port, so the default
-        // passed here never applies — any [`TrustMode`] would do.
         let at = |raw: &str| {
             parse_endpoint(raw, default_port_for(TrustMode::System))
                 .is_ok_and(|endpoint| pairing_covers(&payload, &endpoint))
@@ -1857,7 +1517,6 @@ mod tests {
     #[test]
     fn a_bracketed_ipv6_prefill_still_covers_its_own_payload() {
         let payload = pinned("fd00::1", 50051, "ab");
-        // Explicit port again — the default passed here is never reached.
         let endpoint = parse_endpoint(
             &pairing_endpoint(&payload),
             default_port_for(TrustMode::System),

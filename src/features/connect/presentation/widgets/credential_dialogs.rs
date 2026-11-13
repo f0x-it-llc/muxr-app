@@ -1,22 +1,6 @@
-//! The screen's credential dialogs: the saved-row delete confirmation, the
-//! failed dock's reset confirmation, and the save-credential offer. Each is
-//! raised on the overlay host's navigator (never the route one), so it
-//! renders above every piece of app chrome.
-//!
-//! No confirm gate guards a saved no-verification row: choosing "Trust
-//! anyway" when the server was added is the consent, so a saved row dials
-//! straight through on every path.
-//!
-//! Removing a saved server: [`handle_saved_row_delete`] confirms, then drops
-//! this device's copy — strictly local, no call to the server.
-//!
-//! The save-credential offer: [`credential_offer_prompt`] is the
-//! `offer_prompt` lent to [`ConnectController::connect`], and
-//! [`offer_credential_save`] the dialog it raises over a still-held
-//! redirect, so the answer is what navigates. Composed from the glyph
-//! primitives directly rather than through [`confirm_dialog`]: that helper
-//! calls back only on confirm, and every way out of this one (decline,
-//! scrim, `Escape`, Android back) is an answer the held redirect awaits.
+//! Raised on the overlay host's navigator, never the route one, so each renders above all
+//! app chrome. No confirm guards a saved no-verification row: choosing "Trust anyway" when
+//! it was added is the consent.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -34,8 +18,7 @@ const OFFER_TITLE: &str = "Save this server?";
 fn offer_body(label: &str) -> String {
     format!("Keep {label}'s credential so the next connect is one tap.")
 }
-/// Title when a credential is already stored: accepting mints a fresh token,
-/// refreshing one whose server-side token was revoked.
+/// Accepting mints a fresh token, replacing one whose server-side token was revoked.
 const REPLACE_TITLE: &str = "Replace saved credential?";
 fn replace_body(label: &str) -> String {
     format!("Replace the saved credential for {label} with a fresh one for this device?")
@@ -44,7 +27,6 @@ const OFFER_ACCEPT_LABEL: &str = "Save";
 /// Also what every dismissal route resolves as.
 const OFFER_DECLINE_LABEL: &str = "Not now";
 const REMOVE_TITLE: &str = "Remove server?";
-/// States the scope honestly: this device only.
 fn remove_body(label: &str) -> String {
     format!(
         "{label} and its saved credential are removed from this device only. \
@@ -58,8 +40,7 @@ const RESET_BODY: &str = "Remove every saved credential on this device? Saved se
                           will paste or scan a token again.";
 const RESET_CONFIRM_LABEL: &str = "Reset";
 
-/// The failed dock's reset, behind its confirm — `Failed` also covers a
-/// failed authentication, so it never resets unasked.
+/// `Failed` also covers a failed authentication, so it never resets unasked.
 pub(crate) fn confirm_credential_reset(
     controller: &Arc<ConnectController>,
     overlays: &frust::NavigatorController<AppState>,
@@ -74,9 +55,7 @@ pub(crate) fn confirm_credential_reset(
     );
 }
 
-/// A saved row's delete affordance at `index` was pressed: confirm, then
-/// drop this device's copy. A row that has gone away between paint and
-/// press does nothing.
+/// A row gone between paint and press does nothing.
 pub(crate) fn handle_saved_row_delete(
     controller: &Arc<ConnectController>,
     overlays: &frust::NavigatorController<AppState>,
@@ -97,7 +76,6 @@ pub(crate) fn handle_saved_row_delete(
     );
 }
 
-/// Built per press, since nothing retains it past the connect it was made for.
 pub(crate) fn credential_offer_prompt(
     controller: &Arc<ConnectController>,
     overlays: &frust::NavigatorController<AppState>,
@@ -111,13 +89,9 @@ pub(crate) fn credential_offer_prompt(
     })
 }
 
-/// Asks whether to save the just-connected server's credential, and resolves
-/// the held redirect with the answer: accept navigates via
-/// [`ConnectController::accept_offer_then_navigate`], everything else
-/// (including a dialog popping empty) via
-/// [`ConnectController::decline_offer_then_navigate`] — treating an empty
-/// pop as anything but "not now" would park the user on a screen whose
-/// connection is already open.
+/// Built from glyph primitives, not `confirm_dialog`: every way out is an answer the held
+/// redirect awaits. Anything but accept, an empty pop included, declines; anything else
+/// would park the user on a screen whose connection is already open.
 fn offer_credential_save(
     controller: &Arc<ConnectController>,
     overlays: &frust::NavigatorController<AppState>,
@@ -156,9 +130,7 @@ fn offer_credential_save(
                     .small(),
                 )
         },
-        // Only the accept action pops `true`; decline and every dismissal
-        // route pop `false`/empty, the same answer. Both branches navigate —
-        // this is the one place the held redirect resolves from.
+        // Both branches navigate: this is the one place the held redirect resolves.
         move |_state: &mut AppState, result: PopResult| {
             if result.take::<bool>().unwrap_or(false) {
                 controller.accept_offer_then_navigate(&nav);
