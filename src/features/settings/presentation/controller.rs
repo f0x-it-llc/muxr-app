@@ -1,48 +1,6 @@
-//! [`SettingsController`] — the `/settings` screen's view model. A
-//! [`ControllerCore`] embedded by composition, the feature's six use cases
-//! over its two injected repositories, and the signals the screen renders.
-//! Hosted through `clean_signals_frust::use_controller`, created on route
-//! mount and disposed on unmount.
-//!
-//! The connection facts the first group prints live on
-//! [`crate::connection::ConnectionController`] instead, since more than one
-//! feature reads them. Both preference signals start seeded with
-//! [`Preferences::defaults`] rather than an `Option`, so the first frame
-//! paints the same rows the loaded frame does; [`loaded`](Self::loaded)
-//! still records whether the real read has landed.
-//!
-//! **Every mutation re-reads**: a create/revoke ends with a fresh
-//! [`refresh_tokens`](Self::refresh_tokens) rather than a local patch. A
-//! preference save is the exception — the repository *returns* the stored
-//! record, so the signal takes that value directly.
-//!
-//! **`saved`** is the `saved servers` group's rows, over `connect`'s own two
-//! stores, resolved through that feature's own `di::expect_*` (the same
-//! cross-feature widening the terminal screen makes). It lives here because
-//! deleting a credential is *also* a token revocation, which this feature
-//! owns. The token revoke that rides along is best-effort — its failure
-//! unshown — but the secret itself leaves through the keyring: with the
-//! keyring unlocked, one gated vault rewrite without it, then the handle
-//! drops it; locked, a forget takes the ungated legacy delete (the row goes
-//! too, so the next unlock prunes the vault's copy), while a credential
-//! delete keeps the row and so unlocks first rather than claim a vault copy
-//! it cannot reach. A refused rewrite leaves a credential delete's claim as
-//! it was, while a forget drops the handle's token regardless.
-//!
-//! **Switching servers**: [`switch_server`](SettingsController::switch_server)
-//! dials a saved row with its stored token through `connect`'s page-agnostic
-//! [`KeyringUnlock`] — from the unlocked keyring, else after its one
-//! `unlock_all` prompt — moving the live connection with `switch_to`, and
-//! only while the row, read fresh, still claims a credential.
-//!
-//! **The one-time secret**: [`pending_token_secret`](Self::pending_token_secret)
-//! is what the reveal sheet reads — a landed [`create_token`](Self::create_token)
-//! parks the daemon's one-time [`MintedToken`] there, and
-//! [`clear_pending_secret`](Self::clear_pending_secret) is the reveal's own
-//! "dismissed, gone forever" (the cleared `Option`'s dropped `Zeroizing`
-//! secret scrubs its buffer right there). No auto-clear on a scrim dismissal:
-//! the value sits until the next mint overwrites it or an explicit dismissal
-//! clears it.
+//! The `/settings` view model. A token mutation re-reads the list rather than patching it; a
+//! preference save publishes the record the repository returns. A minted secret stays on
+//! `pending_token_secret` until the next mint or an explicit dismissal clears it.
 
 use std::sync::Arc;
 
@@ -67,17 +25,12 @@ use crate::features::settings::domain::use_cases::{
 };
 use crate::ui::toasts::app_toasts;
 
-/// One row of the `saved servers` group, as the screen renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SavedServerRow {
-    /// A remembered server; `active` while it is the connected endpoint.
     Server { server: SavedServer, active: bool },
-    /// The trailing `+ add server` row.
     AddServer,
 }
 
-/// `saved`'s rows, the connected `active` endpoint marked, closed by the
-/// `+ add server` row.
 pub fn saved_server_rows(saved: &[SavedServer], active: Option<&str>) -> Vec<SavedServerRow> {
     saved
         .iter()
@@ -89,14 +42,12 @@ pub fn saved_server_rows(saved: &[SavedServer], active: Option<&str>) -> Vec<Sav
         .collect()
 }
 
-/// Toast `status`'s message, when it has one to say.
 fn report(status: CredentialStatus) {
     if let Some(message) = status.message() {
         app_toasts().show(message);
     }
 }
 
-/// The `/settings` screen's view model. See the [module docs](self).
 pub struct SettingsController {
     core: ControllerCore<AppFailure>,
     list_tokens: ListTokens,
@@ -105,40 +56,22 @@ pub struct SettingsController {
     load_preferences: LoadPreferences,
     update_appearance: UpdateAppearance,
     update_poll_prefs: UpdatePollPrefs,
-    /// The `connect` feature's saved-server list (see the [module docs](self)).
     saved_servers: SavedServers,
-    /// …and its credential store.
     credentials: Credentials,
-    /// `connect`'s keyring seam: the unlock, the handle and the switch.
     keyring_unlock: KeyringUnlock,
-    /// Whether a switch's keyring unlock is in flight — its single-flight
-    /// claim (the dial itself is guarded by the connection's own).
+    /// The single-flight claim of a switch's keyring unlock; the dial has the connection's own.
     pub switching: RwSignal<bool>,
-    /// The token set as last read from the repository — the `auth tokens`
-    /// group's rows.
     pub tokens: RwSignal<Vec<AuthToken>>,
-    /// The `terminal appearance` group's three values.
     pub appearance: RwSignal<AppearancePrefs>,
-    /// The `session poll` group's two values.
     pub poll: RwSignal<PollPrefs>,
-    /// Whether the first load has completed (see the [module docs](self)).
     pub loaded: RwSignal<bool>,
-    /// The most recently minted token's one-time secret — see the
-    /// [module docs](self)' "one-time secret" section.
     pub pending_token_secret: RwSignal<Option<MintedToken>>,
-    /// The saved servers this device remembers — the `saved servers` group's
-    /// rows, each with whether a credential is stored for it.
     pub saved: RwSignal<Vec<SavedServer>>,
-    /// Whether a restore started from the `muxr pro` restore row is in flight
-    /// (a purchase running elsewhere does not set it).
+    /// Set only by a restore started from the `muxr pro` row.
     pub restoring: RwSignal<bool>,
 }
 
 impl SettingsController {
-    /// A fresh controller over the four injected stores — built once by the
-    /// composition root (see [`crate::features::settings::di`] and, for the
-    /// two from `connect`, that feature's own `di`) — plus the app-scoped
-    /// keyring and connection a switch moves.
     pub fn new(
         tokens: Arc<dyn AuthTokensRepository + Send + Sync>,
         preferences: Arc<dyn PreferencesRepository + Send + Sync>,
@@ -176,18 +109,11 @@ impl SettingsController {
         }
     }
 
-    /// This controller's [`ControllerCore`] — the failure sink the screen
-    /// subscribes its toast bridge to (`use_failure_listener`). A named
-    /// accessor rather than the [`AsRef`] impl below because
-    /// `Arc<SettingsController>` has its own inherent `as_ref`, which would
-    /// make the bare call ambiguous at every site.
+    /// Named rather than [`AsRef`], which `Arc<Self>`'s inherent `as_ref` makes ambiguous.
     pub fn core(&self) -> &ControllerCore<AppFailure> {
         &self.core
     }
 
-    /// Load everything this screen renders from its own repositories: the
-    /// token list and both preference groups. The screen's `init` fires one of
-    /// these.
     pub async fn refresh(&self) {
         self.refresh_tokens().await;
         if let Ok(prefs) = self
@@ -202,26 +128,15 @@ impl SettingsController {
         self.loaded.set(true);
     }
 
-    /// Re-read the saved-server list — the same re-read-rather-than-patch
-    /// discipline the token list follows; every credential mutation below
-    /// ends with one. A failure leaves the previous list in place and raises
-    /// nothing: a screen that cannot list saved servers is still a screen
-    /// whose other four groups work.
+    /// A failure keeps the previous list and raises nothing.
     pub fn refresh_saved_servers(&self) {
         if let Ok(servers) = self.saved_servers.list() {
             self.saved.set(servers);
         }
     }
 
-    /// Delete the stored credential for `endpoint`, and the server-side token
-    /// behind it, keeping the saved server. A locked keyring is unlocked
-    /// first (one prompt; a refusal toasts and deletes nothing — see the
-    /// [module docs](self)). Order: evict the secret, then revoke the token
-    /// best-effort and clear the row's credential fields — both only once the
-    /// eviction landed, so a refused vault rewrite leaves the credential, its
-    /// token and the row's claim exactly as they were.
-    /// Answers whether the whole thing succeeded, which the screen's
-    /// confirmation toast keys off.
+    /// A locked keyring unlocks first, and a refusal deletes nothing. The token revoke and the
+    /// row clear run only once the eviction landed, so a refused vault rewrite changes nothing.
     pub async fn delete_credential(&self, endpoint: String) -> bool {
         let Some(mut server) = self.saved_row(&endpoint) else {
             return false;
@@ -257,14 +172,8 @@ impl SettingsController {
         true
     }
 
-    /// Remove the saved server at `endpoint` entirely — its stored credential
-    /// with it, since it's filed under this same endpoint key and would
-    /// otherwise be unreachable forever once the row stops being listed.
-    /// Never prompts to unlock: locked, the ungated legacy delete runs and
-    /// the vault's copy is pruned by the next unlock, the row being gone. A
-    /// failed eviction is emitted and the row still goes; unlocked, the
-    /// handle drops its token whatever the vault rewrite said, and a refused
-    /// rewrite falls back to the ungated legacy delete.
+    /// Never prompts: locked, the ungated legacy delete runs and the next unlock prunes the vault.
+    /// Unlocked, the handle drops its token regardless; a refused rewrite falls back to legacy.
     pub async fn forget_server(&self, endpoint: String) -> bool {
         let Some(server) = self.saved_row(&endpoint) else {
             return false;
@@ -299,14 +208,11 @@ impl SettingsController {
         removed.is_ok()
     }
 
-    /// The app-scoped keyring handle.
     fn keyring(&self) -> &KeyringHandle {
         self.keyring_unlock.keyring()
     }
 
-    /// The unlocked eviction: one gated vault rewrite without `endpoint`
-    /// (over a snapshot, never the handle's own lock), then the handle drops
-    /// it too — only once the rewrite landed.
+    /// Rewrites a snapshot, never under the handle's lock; the handle drops the entry after.
     async fn evict_unlocked(&self, endpoint: &str) -> Result<(), AppFailure> {
         let mut snapshot = self.keyring().snapshot();
         self.credentials
@@ -316,13 +222,8 @@ impl SettingsController {
         Ok(())
     }
 
-    /// Move the live connection to the saved server at `endpoint` with its
-    /// stored token, then run `on_switched`. Unlocked, the token comes
-    /// straight off the keyring; locked, one `unlock_all` prompt publishes
-    /// it first (a refusal toasts; a cancel is silent). The free-tier verdict is the caller's, ahead of this. Ignored
-    /// while a switch's unlock is already in flight. A row that no longer
-    /// claims a credential is never dialed with a keyring token: the list is
-    /// re-read so the next tap opens the add page instead.
+    /// The free-tier verdict is the caller's. A row whose fresh read claims no credential is never
+    /// dialed with a keyring token; the list is re-read instead.
     pub fn switch_server(self: &Arc<Self>, endpoint: String, on_switched: Box<dyn FnOnce()>) {
         if self.switching.get_untracked() {
             return;
@@ -355,14 +256,11 @@ impl SettingsController {
         });
     }
 
-    /// Whether the saved row at `endpoint`, read fresh, claims a credential.
     fn claims_credential(&self, endpoint: &str) -> bool {
         self.saved_row(endpoint)
             .is_some_and(|server| server.has_credential)
     }
 
-    /// [`Self::switch_server`]'s dial, the keyring already open: the row is
-    /// re-read, and dials only while it claims a credential the keyring holds.
     fn dial_saved(self: &Arc<Self>, endpoint: &str, on_switched: Box<dyn FnOnce()>) {
         let found = self
             .saved_row(endpoint)
@@ -390,7 +288,6 @@ impl SettingsController {
             });
     }
 
-    /// The saved row for `endpoint`, as last read from the store.
     fn saved_row(&self, endpoint: &str) -> Option<SavedServer> {
         self.saved_servers
             .list()
@@ -399,7 +296,6 @@ impl SettingsController {
             .find(|server| server.endpoint() == endpoint)
     }
 
-    /// Write `server` back with no credential on it, and re-read the list.
     fn clear_credential_fields(&self, mut server: SavedServer) {
         server.has_credential = false;
         server.token_name = None;
@@ -409,9 +305,7 @@ impl SettingsController {
         self.refresh_saved_servers();
     }
 
-    /// Revoke `name` without reporting a failure — the best-effort half of a
-    /// credential delete (see the [module docs](self)). A revoke needs a live,
-    /// read-write session; the delete it accompanies must not depend on one.
+    /// A revoke needs a live read-write session; the delete it accompanies must not depend on one.
     async fn revoke_quietly(&self, name: String) {
         let _ = self
             .core
@@ -427,7 +321,6 @@ impl SettingsController {
         self.refresh_tokens().await;
     }
 
-    /// Re-read the token list. Every token mutation ends with one of these.
     pub async fn refresh_tokens(&self) {
         if let Ok(tokens) = self
             .core
@@ -438,13 +331,6 @@ impl SettingsController {
         }
     }
 
-    /// Mint a token named `name` (already trimmed by the dialog) with the
-    /// requested `read_only` scope, then refresh. A landed mint parks the
-    /// daemon's one-time secret on [`Self::pending_token_secret`] (see the
-    /// [module docs](self)); a failed one leaves the list untouched and
-    /// surfaces through [`failures`](ControllerCore::failures). Answers
-    /// whether it landed, since a "Created …" toast beside a failure toast
-    /// for the same call would be a straight lie.
     pub async fn create_token(&self, name: String, read_only: bool) -> bool {
         let request = CreateTokenRequest { name, read_only };
         let Ok(minted) = self
@@ -459,14 +345,10 @@ impl SettingsController {
         true
     }
 
-    /// Dismiss the pending secret reveal — "gone forever" from here on. See
-    /// the [module docs](self)' "one-time secret" section.
     pub fn clear_pending_secret(&self) {
         self.pending_token_secret.set(None);
     }
 
-    /// Revoke the token called `name`, then refresh. Answers whether it
-    /// landed — see [`create_token`](Self::create_token).
     pub async fn revoke_token(&self, name: String) -> bool {
         let revoked = self
             .core
@@ -479,9 +361,6 @@ impl SettingsController {
         revoked
     }
 
-    /// Persist a new `terminal appearance` record and publish it. The
-    /// repository's own returned value is what lands in the signal, so the
-    /// screen shows what was stored rather than what was asked for.
     pub async fn set_appearance(&self, prefs: AppearancePrefs) {
         if let Ok(stored) = self
             .core
@@ -492,7 +371,6 @@ impl SettingsController {
         }
     }
 
-    /// Persist a new `session poll` record and publish it.
     pub async fn set_poll_prefs(&self, prefs: PollPrefs) {
         if let Ok(stored) = self
             .core
@@ -503,16 +381,11 @@ impl SettingsController {
         }
     }
 
-    /// The current appearance record, read **without** tracking — what a press
-    /// handler builds its "next" record from (a tracked read there would
-    /// subscribe whatever owner happens to be ambient, which on desktop is
-    /// none at all).
+    /// Untracked: a press handler's ambient owner is arbitrary, and none on desktop.
     pub fn appearance_untracked(&self) -> AppearancePrefs {
         self.appearance.get_untracked()
     }
 
-    /// The current poll record, read without tracking. See
-    /// [`appearance_untracked`](Self::appearance_untracked).
     pub fn poll_untracked(&self) -> PollPrefs {
         self.poll.get_untracked()
     }
@@ -537,21 +410,14 @@ mod tests {
     };
     use crate::features::settings::domain::entities::{CursorStyle, TokenScope};
 
-    /// How many tokens the mock repository seeds (the redesign's two rows).
     const SEEDED_COUNT: usize = 2;
 
-    /// The endpoint the credential cases operate on.
     const SAVED_ENDPOINT: &str = "rig.example:50051";
 
-    /// The test-wiring composition root: the four mocks behind their domain
-    /// traits. `#[cfg(test)]`-only wiring, so `di.rs` stays the only production
-    /// site where presentation meets `data` (huddle's convention).
     fn controller() -> SettingsController {
         controller_over(MockSavedServersRepository::with_servers(Vec::new()), None)
     }
 
-    /// A controller over an explicit saved-server store, and optionally a
-    /// credential service the caller keeps a handle on.
     fn controller_over(
         servers: MockSavedServersRepository,
         credentials: Option<Arc<MockCredentialService>>,
@@ -559,8 +425,6 @@ mod tests {
         controller_with_keyring(servers, credentials, KeyringHandle::new())
     }
 
-    /// [`controller_over`] sharing `keyring` (locked unless the caller
-    /// publishes into it).
     fn controller_with_keyring(
         servers: MockSavedServersRepository,
         credentials: Option<Arc<MockCredentialService>>,
@@ -576,7 +440,6 @@ mod tests {
         )
     }
 
-    /// A keyring unlocked over exactly `entries`.
     fn unlocked_keyring(entries: &[(&str, &str)]) -> KeyringHandle {
         let mut keyring = crate::features::connect::domain::keyring::Keyring::new();
         for (endpoint, token) in entries {
@@ -587,7 +450,6 @@ mod tests {
         handle
     }
 
-    /// A saved row for [`SAVED_ENDPOINT`], with or without a stored credential.
     fn saved_row(has_credential: bool) -> SavedServer {
         SavedServer {
             host: "rig.example".to_string(),
@@ -597,14 +459,12 @@ mod tests {
             last_used_ms: 1_700_000_000_000,
             read_only: false,
             has_credential,
-            // The seeded token store's second row — so a delete has something
-            // real to revoke.
+            // The seeded token store's second row, so a delete has something to revoke.
             token_name: has_credential.then(|| "token_2".to_string()),
             fingerprint: None,
         }
     }
 
-    /// Drive a controller call to completion on a current-thread runtime.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -682,7 +542,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        // The mock rejects a duplicate name — the one reachable failure here.
+        // The mock rejects a duplicate name.
         assert!(!block_on(c.create_token("token_2".to_string(), false)));
         assert_eq!(c.pending_token_secret.get_untracked(), None);
     }
@@ -710,7 +570,7 @@ mod tests {
         block_on(c.refresh());
         let before = c.tokens.get_untracked();
 
-        // No such token — the mock maps an unknown name to `Internal`.
+        // The mock maps an unknown name to `Internal`.
         let revoked = block_on(c.revoke_token("nope".to_string()));
 
         assert!(!revoked, "…and says so, rather than silently succeeding");
@@ -719,8 +579,6 @@ mod tests {
 
     #[test]
     fn a_mutation_reports_whether_it_landed() {
-        // What the screen's confirmation toasts key off: a "Created …" raised
-        // beside a failure toast for the same call would contradict it.
         let c = controller();
         block_on(c.refresh());
 
@@ -740,10 +598,6 @@ mod tests {
             "the list is back where it started"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // Saved servers and their credentials
-    // -----------------------------------------------------------------------
 
     #[test]
     fn refresh_loads_the_saved_servers_beside_everything_else() {
@@ -802,8 +656,7 @@ mod tests {
 
     #[test]
     fn a_refused_eviction_leaves_the_rows_credential_claim_as_it_was() {
-        // A row that stopped claiming a credential the store still holds
-        // would hide a secret the user can no longer reach to delete.
+        // A row that stops claiming a held credential would hide a secret the user cannot delete.
         let credentials = Arc::new(MockCredentialService::new());
         credentials.set_delete_failure(true);
         let c = controller_over(
@@ -998,9 +851,6 @@ mod tests {
 
     #[test]
     fn a_preference_survives_a_reload_rather_than_snapping_back() {
-        // The whole point of the round trip: the picker writes through the
-        // repository, so a later `refresh` reads the picked value back rather
-        // than the seed.
         let c = controller();
         block_on(c.refresh());
         block_on(c.set_poll_prefs(PollPrefs {
