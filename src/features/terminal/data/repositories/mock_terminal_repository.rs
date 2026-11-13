@@ -1,39 +1,6 @@
-//! [`MockTerminalRepository`] — the in-memory [`TerminalRepository`] every headless suite and
-//! the mock-era screen run on.
-//!
-//! Seeds exactly what `docs/terminal.html` v2 ships for its selected space (`forgekit`) — four
-//! tabs, each tab's title/name/path and its four `.term-line`s, transcribed rather than
-//! paraphrased — plus two more spaces so the sheet's space pill row has something to switch
-//! between: `zelli_mobile` (a second, smaller populated space) and `quill` (empty, proving a
-//! space with no tabs is a reachable answer, not a bug). Framework-free: a `Mutex`-guarded space
-//! list plus a `Mutex`-guarded **per-space** tab store (`HashMap<space id, tabs>`); the mutex
-//! (not a `RefCell`) is what makes it `Send + Sync`, which the controller needs to hold it
-//! behind an `Arc`.
-//!
-//! **What mutates**: space selection, and pane focus — [`TerminalRepository::focus_pane`] moves
-//! the `focused` flag within whichever space is currently selected, so a later `list_tabs` agrees
-//! with the move a client just made. Each space's own tab set, its panes' identities and its
-//! lines are fixed. [`TerminalRepository::list_tabs_in_space`] is the one read that never touches
-//! selection — it answers whatever space id it is asked for, selected or not.
-//!
-//! **Headless-test tab seam.** A tab world that never moves cannot exercise the screen's reason
-//! for re-reading one, so [`add_test_tab`]/[`clear_test_tabs`] append synthetic tabs to every
-//! later `list_tabs` answer for the *selected* space only (`list_tabs_in_space`'s per-key peek is
-//! untouched by it) — belongs to a serialized suite, since a suite reaches this store only as the
-//! `Arc<dyn TerminalRepository>` its `di` published, and is process-global.
-//!
-//! **Agents.** A store never seeded answers [`default_agents_for_preview`] (what the desktop
-//! preview shows, matching the sessions mock's herdr roll-up); the mock is session-agnostic, so a
-//! zellij session's terminal lists those agents too. `watch_agents` opens with a snapshot of
-//! that inventory and then delivers only what a test scripts through
-//! [`push_agent_event_for_tests`]; the open/stop counters let a suite pin the subscription's
-//! lifetime, [`end_agent_stream_for_tests`] ends it with a chosen [`WatchEnd`], and
-//! [`open_next_agent_watch_down_for_tests`] opens the next one not yet live.
-//!
-//! Failure mapping: an unknown tab key, space id or blank session id maps to
-//! [`AppFailure::Internal`] — a bug, since the screen only addresses what it just rendered.
-//! [`MOCK_LATENCY`] is a short sleep before every call, so the screen's async path is the one the
-//! real client will take.
+//! In-memory [`TerminalRepository`] for headless suites and the desktop preview. Only space
+//! selection and pane focus move; the `*_for_tests` seams are process-global, so only a
+//! serialized suite may use them.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -49,71 +16,48 @@ use crate::features::terminal::domain::repositories::{
     AgentSink, TerminalRepository, WatchEnd, WatchHandle,
 };
 
-/// Simulated round-trip latency on every call — see the [module docs](self).
 const MOCK_LATENCY: Duration = Duration::from_millis(20);
 
-/// The synthetic tabs [`add_test_tab`] appends to every later `list_tabs`
-/// answer — see the [module docs](self)' headless-test tab seam.
 static TEST_TABS: Mutex<Vec<TabEntry>> = Mutex::new(Vec::new());
 
-/// Append a tab keyed (and labelled) `key` to every later `list_tabs` answer, for a
-/// headless test that needs the tab world to move behind the screen's back — see
-/// the [module docs](self). Never called by production code.
 pub fn add_test_tab(key: &str) {
     let mut tabs = lock_test_tabs();
-    // Past the selected space's (`forgekit`'s) four seeded tabs, so an appended
-    // tab's index/id collides with nothing the seed already carries.
+    // Past the selected space's seeded tabs, so an appended index or id collides with nothing.
     let index = seed_tabs_forgekit().len() as u32 + tabs.len() as u32 + 1;
     tabs.push(test_tab(index, key));
 }
 
-/// The floating pane id [`seed_test_floating_overlay`] lays over the `devbox` tab.
 pub const TEST_FLOATING_PANE_ID: u32 = 99;
 
-/// `None` (the default) leaves the tab world alone; `Some(visible)` overlays one full-size
-/// floating pane on `devbox` with that layer visibility — see [`seed_test_floating_overlay`].
 static TEST_FLOATING_OVERLAY: Mutex<Option<bool>> = Mutex::new(None);
 
-/// Lay a full-grid floating pane ([`TEST_FLOATING_PANE_ID`]) over the `devbox` tab of every later
-/// `list_tabs` answer, its layer `visible` or hidden; `None` removes it. Process-global like
-/// [`TEST_TABS`]; cleared by [`clear_test_tabs`]. Never called by production code.
 pub fn seed_test_floating_overlay(visible: Option<bool>) {
     *TEST_FLOATING_OVERLAY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = visible;
 }
 
-/// Pane ids [`seed_test_union_fullscreen`] flags `is_fullscreen` while their tab is fullscreen.
 static TEST_UNION_FULLSCREEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
-/// Flag these panes `is_fullscreen` in every later `list_tabs` answer whose tab is fullscreen
-/// (`fullscreen_active`) — zellij's union shape, where every client-active pane carries the
-/// flag, not only the fullscreened one. Empty removes it; cleared by [`clear_test_tabs`].
-/// Never called by production code.
+/// zellij's union shape: every client-active pane carries the flag while the tab is fullscreen.
 pub fn seed_test_union_fullscreen(pane_ids: &[u32]) {
     *TEST_UNION_FULLSCREEN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = pane_ids.to_vec();
 }
 
-/// Drop every tab [`add_test_tab`] appended — a suite's own teardown, and its
-/// setup, since this store outlives any one mount of the screen.
 pub fn clear_test_tabs() {
     lock_test_tabs().clear();
     seed_test_floating_overlay(None);
     seed_test_union_fullscreen(&[]);
 }
 
-/// The appended-tab store, poisoned locks recovered like every other lock
-/// here.
 fn lock_test_tabs() -> std::sync::MutexGuard<'static, Vec<TabEntry>> {
     TEST_TABS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// One appended tab, shaped exactly like a seeded one (see [`seed_tabs_forgekit`]) so
-/// nothing downstream can tell the two apart.
 fn test_tab(index: u32, key: &str) -> TabEntry {
     TabEntry {
         index,
@@ -131,31 +75,23 @@ fn test_tab(index: u32, key: &str) -> TabEntry {
     }
 }
 
-/// The agents [`seed_agents`] publishes — process-global like [`TEST_TABS`]. `None` (never
-/// seeded) answers [`default_agents_for_preview`]; [`clear_test_agents`] stores an empty `Some`.
+/// `None` answers [`default_agents_for_preview`]; [`clear_test_agents`] stores an empty `Some`.
 static TEST_AGENTS: Mutex<Option<Vec<AgentEntry>>> = Mutex::new(None);
 
-/// Whether the next `list_agents` answers an error — see [`fail_next_list_agents_for_tests`].
 static FAIL_NEXT_LIST_AGENTS: AtomicBool = AtomicBool::new(false);
 
-/// Extra milliseconds the next `list_agents` sleeps — see [`delay_next_list_agents_for_tests`].
 static DELAY_NEXT_LIST_AGENTS_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Make the next `list_agents` answer an error. Test-only seam; never called by production code.
 pub fn fail_next_list_agents_for_tests() {
     FAIL_NEXT_LIST_AGENTS.store(true, Ordering::SeqCst);
 }
 
-/// Make the next `list_agents` land `by` later than usual, its answer snapshotted before the
-/// wait. Test-only seam; never called by production code.
+/// Its answer is snapshotted before the wait.
 pub fn delay_next_list_agents_for_tests(by: Duration) {
     let millis = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
     DELAY_NEXT_LIST_AGENTS_MS.store(millis, Ordering::SeqCst);
 }
 
-/// The four agents the desktop preview shows, [`PREVIEW_AGENT_MARKS`] given names, a pane
-/// each in the seeded tab world, and a line of context — the same inventory the sessions
-/// mock's herdr summary rolls up.
 pub fn default_agents_for_preview() -> Vec<AgentEntry> {
     let details = [
         (
@@ -217,14 +153,10 @@ pub fn default_agents_for_preview() -> Vec<AgentEntry> {
         .collect()
 }
 
-/// Replace the agent inventory every later `list_agents` answers, and mark the pane each one
-/// targets (matched by pane id and tab id) in every later tab/pane read. Never called by
-/// production code.
 pub fn seed_agents(agents: Vec<AgentEntry>) {
     *lock_test_agents() = Some(agents);
 }
 
-/// Drop every seeded agent — a suite's own teardown and setup.
 pub fn clear_test_agents() {
     *lock_test_agents() = Some(Vec::new());
 }
@@ -235,15 +167,12 @@ fn lock_test_agents() -> std::sync::MutexGuard<'static, Option<Vec<AgentEntry>>>
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The inventory `list_agents` and [`mark_agents`] both read: the seeded one, else the default.
 fn resolved_agents() -> Vec<AgentEntry> {
     lock_test_agents()
         .clone()
         .unwrap_or_else(default_agents_for_preview)
 }
 
-/// The one open agents subscription: its sink, its liveness and end, and the id its handle
-/// stops by.
 struct MockWatch {
     id: u64,
     sink: AgentSink,
@@ -251,20 +180,16 @@ struct MockWatch {
     ended: Arc<AtomicU8>,
 }
 
-/// Whether the next `watch_agents` opens not yet live and without its snapshot.
 static NEXT_WATCH_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// The newest `watch_agents` subscription — process-global like [`TEST_AGENTS`]; a newer
-/// one replaces it, dropping the older sink.
+/// A newer subscription replaces this one, dropping the older sink.
 static AGENT_WATCH: Mutex<Option<MockWatch>> = Mutex::new(None);
 
-/// Mints [`MockWatch::id`]s, so a stale handle's stop never clears a newer subscription.
+/// A stale handle's stop never clears a newer subscription.
 static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 
-/// How many subscriptions `watch_agents` has opened.
 static AGENT_WATCH_OPENS: AtomicUsize = AtomicUsize::new(0);
 
-/// How many [`WatchHandle`]s the mock has seen stopped.
 static AGENT_WATCH_STOPS: AtomicUsize = AtomicUsize::new(0);
 
 fn lock_agent_watch() -> std::sync::MutexGuard<'static, Option<MockWatch>> {
@@ -273,8 +198,7 @@ fn lock_agent_watch() -> std::sync::MutexGuard<'static, Option<MockWatch>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Deliver `event` on the open subscription, which counts as its stream being live again;
-/// `false` when none is open. Never called by production code.
+/// Delivering counts as the stream being live again; `false` when none is open.
 pub fn push_agent_event_for_tests(event: AgentEventEntry) -> bool {
     let watch = lock_agent_watch();
     let Some(watch) = watch.as_ref() else {
@@ -285,17 +209,12 @@ pub fn push_agent_event_for_tests(event: AgentEventEntry) -> bool {
     true
 }
 
-/// Mark the open subscription's stream lost, as a reconnect waiting out its backoff reports it.
-/// Never called by production code.
 pub fn drop_agent_stream_for_tests() {
     if let Some(watch) = lock_agent_watch().as_ref() {
         watch.live.store(false, Ordering::Release);
     }
 }
 
-/// End the open subscription for good with `end`, as a server's clean end, a refused credential
-/// or a spent reconnect schedule does: not live, and its sink dropped. Never called by
-/// production code.
 pub fn end_agent_stream_for_tests(end: WatchEnd) {
     if let Some(watch) = lock_agent_watch().take() {
         watch.live.store(false, Ordering::Release);
@@ -303,28 +222,22 @@ pub fn end_agent_stream_for_tests(end: WatchEnd) {
     }
 }
 
-/// Open the next subscription still connecting: not live, no snapshot yet. Never called by
-/// production code.
 pub fn open_next_agent_watch_down_for_tests() {
     NEXT_WATCH_DOWN.store(true, Ordering::SeqCst);
 }
 
-/// Whether a subscription is open (opened, and its handle not yet dropped).
 pub fn agent_watch_open_for_tests() -> bool {
     lock_agent_watch().is_some()
 }
 
-/// How many subscriptions `watch_agents` has opened, process-wide.
 pub fn agent_watch_opens_for_tests() -> usize {
     AGENT_WATCH_OPENS.load(Ordering::SeqCst)
 }
 
-/// How many subscription handles have been dropped, process-wide.
 pub fn agent_watch_stops_for_tests() -> usize {
     AGENT_WATCH_STOPS.load(Ordering::SeqCst)
 }
 
-/// Stamp `PaneEntry.agent` on each pane a seeded agent targets.
 fn mark_agents(mut tabs: Vec<TabEntry>) -> Vec<TabEntry> {
     let agents = resolved_agents();
     if agents.is_empty() {
@@ -345,22 +258,15 @@ fn mark_agents(mut tabs: Vec<TabEntry>) -> Vec<TabEntry> {
     tabs
 }
 
-/// The most verbs [`VERB_LOG`] keeps.
 const VERB_LOG_CAP: usize = 64;
 
-/// Every landed navigation verb (`switch_space:<id>`, `go_to_tab:<id>`,
-/// `focus_pane:<id>`), in call order — process-global like [`TEST_TABS`], so
-/// only a serialized suite reads it. Capped at [`VERB_LOG_CAP`]: the oldest verb
-/// drops first, so a long preview session cannot grow it.
+/// Capped at [`VERB_LOG_CAP`]; the oldest verb drops first.
 static VERB_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// The navigation verbs this store has answered `Ok` to since the last
-/// [`clear_verb_log_for_tests`]. Never read by production code.
 pub fn verb_log_for_tests() -> Vec<String> {
     lock_verb_log().clone()
 }
 
-/// Forget every recorded verb — a suite's own setup.
 pub fn clear_verb_log_for_tests() {
     lock_verb_log().clear();
 }
@@ -379,18 +285,12 @@ fn log_verb(verb: &str, target: impl std::fmt::Display) {
     log.push(format!("{verb}:{target}"));
 }
 
-/// An in-memory [`TerminalRepository`]. See the [module docs](self).
 pub struct MockTerminalRepository {
-    /// The space list — one of the two things this store lets move.
     spaces: Mutex<Vec<Space>>,
-    /// The tab world, keyed by [`Space::id`]: a fixed per-space set of tabs whose pane
-    /// **focus** moves within the currently *selected* space (see the [module docs](self)'
-    /// "What mutates").
     tabs_by_space: Mutex<HashMap<String, Vec<TabEntry>>>,
 }
 
 impl MockTerminalRepository {
-    /// A repository seeded with [`seed_spaces`]/[`seed_tabs_by_space`].
     pub fn seeded() -> Self {
         Self {
             spaces: Mutex::new(seed_spaces()),
@@ -398,23 +298,16 @@ impl MockTerminalRepository {
         }
     }
 
-    /// Select the space with id `id`, deselecting every other — the body
-    /// [`TerminalRepository::switch_space`] runs, exposed synchronously so a test
-    /// can move the selection without a runtime.
     pub fn select_space(&self, id: &str) {
         for space in self.lock().iter_mut() {
             space.selected = space.id == id;
         }
     }
 
-    /// The space list, cloned — a synchronous peek for tests, never part of
-    /// the trait contract production code speaks.
     pub fn spaces_snapshot(&self) -> Vec<Space> {
         self.lock().clone()
     }
 
-    /// The id of the currently selected space, or `None` if somehow nothing is (never
-    /// true of [`seeded`](Self::seeded) — exactly one space is always selected).
     fn selected_space_id(&self) -> Option<String> {
         self.lock()
             .iter()
@@ -422,9 +315,6 @@ impl MockTerminalRepository {
             .map(|space| space.id.clone())
     }
 
-    /// The *selected* space's seeded tabs plus whatever [`add_test_tab`] appended, cloned. An
-    /// id [`seed_tabs_by_space`] carries no entry for (unreachable through [`seeded`](Self::seeded),
-    /// defensive otherwise) answers empty rather than panicking.
     fn tabs_snapshot(&self) -> Vec<TabEntry> {
         let mut tabs = self
             .selected_space_id()
@@ -470,15 +360,13 @@ impl MockTerminalRepository {
         mark_agents(tabs)
     }
 
-    /// The store, with a poisoned lock recovered rather than propagated: a
-    /// panicking test must not cascade into every later call.
+    /// A poisoned lock is recovered, so a panicking test does not cascade into later calls.
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Space>> {
         self.spaces
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The per-space tab store, recovered the same way [`lock`](Self::lock) is.
     fn lock_tabs(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<TabEntry>>> {
         self.tabs_by_space
             .lock()
@@ -492,8 +380,6 @@ impl Default for MockTerminalRepository {
     }
 }
 
-/// The seeded space list — `docs/terminal.html`'s `spaces` pill row, in order,
-/// with `forgekit` selected (`.pill.sel`).
 fn seed_spaces() -> Vec<Space> {
     [
         ("quill", false),
@@ -509,14 +395,8 @@ fn seed_spaces() -> Vec<Space> {
     .collect()
 }
 
-/// `forgekit`'s seeded tab world — `docs/terminal.html`'s `TABS` map, in the order its
-/// `#sheetTabRow` pills draw, with `devbox` active (`.pill.sel`). Each tab also
-/// carries the **pane list** the sheet lists and commits against: the mock's own
-/// `.pane-item` plus one unfocused sibling, so the browse-then-commit flow has more
-/// than one row to move a focus between. Pane ids are `<tab index>0`/`<tab index>1`
-/// — this store fronts no backend, so an id only has to be stable and unique *within
-/// its own space* (see [`seed_tabs_by_space`] — `focus_pane` only ever searches the
-/// currently selected one, so nothing requires ids to be unique *across* spaces too).
+/// Pane ids are `<tab index>0`/`<tab index>1`, unique only within their space: `focus_pane`
+/// searches the selected space alone.
 fn seed_tabs_forgekit() -> Vec<TabEntry> {
     let tab = |index: u32, key: &str, label: &str, title: &str, name: &str, path: &str| TabEntry {
         index,
@@ -566,8 +446,6 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
             "/home/ed",
         ),
     ];
-    // One of each mark the docked rail draws: a ringing tab, an exited pane,
-    // and a floating one under the tab the rail rests on.
     tabs[2].has_bell = true;
     tabs[0].panes[1].exited = true;
     tabs[3].panes[1].floating = true;
@@ -575,9 +453,6 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
     tabs
 }
 
-/// `zelli_mobile`'s seeded tab world — a second, smaller populated space so
-/// [`TerminalRepository::list_tabs_in_space`](super::super::domain::repositories::TerminalRepository::list_tabs_in_space)
-/// has a non-selected space to answer distinctly from `forgekit`'s. Two tabs, `logs` active.
 fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
     let tab = |index: u32, key: &str, path: &str, active: bool| TabEntry {
         index,
@@ -599,9 +474,6 @@ fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
     ]
 }
 
-/// Every seeded space's tab world, keyed by [`Space::id`] — `forgekit` (multi-tab, the
-/// default selection), `zelli_mobile` (a second, smaller populated space), and `quill`
-/// (empty — a space with no tabs is a reachable answer, not a bug).
 fn seed_tabs_by_space() -> HashMap<String, Vec<TabEntry>> {
     HashMap::from([
         ("quill".to_string(), Vec::new()),
@@ -610,14 +482,7 @@ fn seed_tabs_by_space() -> HashMap<String, Vec<TabEntry>> {
     ])
 }
 
-/// One tab's two panes: the mock's own focused `.pane-item`, and an unfocused `zsh` beside it
-/// — see [`seed_tabs_forgekit`]/[`seed_tabs_zelli_mobile`].
-///
-/// Side by side, splitting a classic 80x24 grid down the middle, rather than sharing one
-/// full-grid rect: `presentation::pages`' content-tap hit test resolves a tapped cell against
-/// these rects, and identical ones would resolve every in-bounds tap to the same pane, leaving
-/// no cell to aim at the *other* one. Two disjoint halves make both panes tappable, which is
-/// what a tap's focus-or-keyboard verdict turns on.
+/// Disjoint halves of an 80x24 grid, so the content-tap hit test can resolve either pane.
 fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
     let pane = |id: u32, title: String, focused: bool, x: u32| PaneEntry {
         agent: None,
@@ -640,9 +505,6 @@ fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
     ]
 }
 
-/// One tab's lines — `TABS[key].lines`, transcribed span for span (`t:'p'` →
-/// [`TermLine::prompt`], `'out'` → output, `'cm'` → comment, and the trailing
-/// `cursor:true` prompt → [`TermLine::caret`]).
 fn seed_lines(key: &str) -> Option<Vec<TermLine>> {
     let lines = match key {
         "btop" => vec![
@@ -689,9 +551,7 @@ impl TerminalRepository for MockTerminalRepository {
 
     async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
-        // A read-only peek: answers whatever `space_id` names — selected or not — and
-        // never touches `Space.selected` or appends the headless-test seam's tabs (those
-        // ride only on the *selected* space's own `list_tabs` answer).
+        // Never touches selection or appends the test seam's tabs.
         if !self.lock().iter().any(|space| space.id == space_id) {
             return Err(AppFailure::Internal(format!(
                 "list_tabs_in_space: no space {space_id}"
@@ -756,9 +616,7 @@ impl TerminalRepository for MockTerminalRepository {
 
     async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
         clean_signals::time::sleep(MOCK_LATENCY).await;
-        // Nothing to tell: this store fronts no session, and the card's own switch
-        // is `tab_lines`. An id no seeded tab carries is still a bug worth
-        // surfacing — the sheet only addresses a tab it just drew.
+        // An unknown id is a bug: the sheet only addresses a tab it just drew.
         if !self.tabs_snapshot().iter().any(|tab| tab.tab_id == tab_id) {
             return Err(AppFailure::Internal(format!("go_to_tab: no tab {tab_id}")));
         }
@@ -773,8 +631,6 @@ impl TerminalRepository for MockTerminalRepository {
                 "detach_session called with a blank id".to_string(),
             ));
         }
-        // Nothing to drop: there is no real attachment until the `muxrd`
-        // client lands (see the module docs).
         Ok(())
     }
 
@@ -789,9 +645,7 @@ impl TerminalRepository for MockTerminalRepository {
             log_verb("focus_pane", pane_id);
             return Ok(());
         }
-        // A pane no seeded tab carries is a bug worth surfacing, since the
-        // sheet only ever commits a row it just drew. Scoped to the *selected*
-        // space, like every other write this store performs.
+        // Scoped to the selected space, like every write this store performs.
         let addressed = |pane: &PaneEntry| pane.id == pane_id && pane.is_plugin == is_plugin;
         let Some(space_id) = self.selected_space_id() else {
             return Err(AppFailure::Internal(format!(
@@ -809,8 +663,6 @@ impl TerminalRepository for MockTerminalRepository {
                 "focus_pane: no pane {pane_id}"
             )));
         };
-        // One focused pane per tab, and it is the one just addressed — so a client
-        // re-reading the layout is told what it just asked for.
         for pane in &mut tab.panes {
             let focused = addressed(pane);
             pane.focused = focused;
@@ -834,8 +686,7 @@ impl TerminalRepository for MockTerminalRepository {
             .iter_mut()
             .find(|tab| tab.panes.iter().any(addressed))
             .ok_or_else(unknown)?;
-        // Zellij fullscreen is per tab: the addressed pane flips, and entering fullscreen
-        // clears every sibling's flag.
+        // zellij fullscreen is per tab: entering it clears every sibling's flag.
         for pane in &mut tab.panes {
             pane.is_fullscreen = addressed(pane) && !pane.is_fullscreen;
         }
@@ -850,8 +701,6 @@ mod tests {
     use super::*;
     use crate::features::terminal::domain::entities::{AgentStatus, TermLineKind};
 
-    /// Drive one repository call to completion on a current-thread runtime —
-    /// a pure data-layer test, with no frust runtime in play.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -898,7 +747,6 @@ mod tests {
         assert!(block_on(repo.list_agents()).expect("ok").is_empty());
     }
 
-    /// The two watch tests share the process-global subscription slot.
     fn watch_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1010,7 +858,6 @@ mod tests {
             .collect();
         assert_eq!(active, ["devbox"]);
 
-        // The pane facts the card's status row and the sheet's pane item print.
         let devbox = tabs.last().expect("four tabs");
         assert_eq!(devbox.pane_title, "ed@devbox: ~");
         assert_eq!(devbox.pane_name, "ed@devbox");
@@ -1114,11 +961,9 @@ mod tests {
                 .map(|pane| pane.id)
                 .collect();
             assert_eq!(focused, [tab.index * 10], "{}", tab.key);
-            // The mock's own `.pane-item` is the focused one, verbatim.
             assert_eq!(tab.panes[0].title, tab.pane_name);
             assert_eq!(tab.panes[0].cwd, tab.pane_path);
         }
-        // …and no two panes share an id across the whole seed.
         let mut ids: Vec<u32> = tabs
             .iter()
             .flat_map(|t| t.panes.iter().map(|p| p.id))
@@ -1142,8 +987,7 @@ mod tests {
             }
         }
         assert!(block_on(repo.focus_pane(999, false)).is_err());
-        // The two id namespaces are separate — a plugin pane with a terminal
-        // pane's id is still not a pane this store carries.
+        // The id namespaces are separate: a plugin pane with a terminal pane's id is unknown.
         assert!(block_on(repo.focus_pane(10, true)).is_err());
     }
 
@@ -1198,7 +1042,7 @@ mod tests {
     #[test]
     fn a_pane_focus_moves_the_focused_flag_so_a_later_list_agrees_with_it() {
         let repo = MockTerminalRepository::seeded();
-        // The second pane of the first tab — the mock seeds the first focused.
+        // Pane 11 is the first tab's unfocused second pane.
         assert!(block_on(repo.focus_pane(11, false)).is_ok());
 
         let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
@@ -1245,9 +1089,8 @@ mod tests {
 
     #[test]
     fn an_appended_test_tab_is_shaped_exactly_like_a_seeded_one() {
-        // The seam's *effect* on `list_tabs` is exercised from
-        // `tests/terminal_live.rs`, whose suite is serialized — this binary runs its
-        // tests in parallel, and the appended-tab store is process-global.
+        // Tests here run in parallel against process-global state, so the seam's effect on
+        // `list_tabs` is covered by the serialized `tests/terminal_live.rs`.
         let appended = test_tab(5, "scratch");
         assert_eq!(appended.pill_label(), "5 scratch");
         assert_eq!(appended.tab_id, 5);
@@ -1270,8 +1113,6 @@ mod tests {
         assert!(block_on(repo.detach_session("s-1".to_string())).is_ok());
         assert!(block_on(repo.detach_session("  ".to_string())).is_err());
     }
-
-    // -- space-scoped tab listing ---------------------------------------------
 
     #[test]
     fn list_tabs_in_space_answers_a_non_selected_spaces_own_snapshot() {

@@ -1,7 +1,3 @@
-//! [`ListSpaceTabs`] — a read-only peek at another space's tabs, addressed by
-//! [`Space::id`](crate::features::terminal::domain::entities::Space), never moving this
-//! connection's (or the selected space's) focus.
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;
@@ -10,14 +6,7 @@ use crate::failure::AppFailure;
 use crate::features::terminal::domain::entities::TabEntry;
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
-/// Fronts [`TerminalRepository::list_tabs_in_space`] via the injected repository. `Params` is
-/// the space id to peek at; `Output` its tabs, in the repository's own display order.
-///
-/// Distinct from [`SwitchTab`](super::SwitchTab) on purpose: that reads the *active* tab's
-/// scrollback after a switch that already moved focus; this reads a tab list without moving
-/// anything — see the [module docs](self) and
-/// [`TerminalRepository::list_tabs_in_space`]'s own docs for the read-only-peek contract, and its
-/// degradation on a daemon that predates the wire field.
+/// Reads another space's tabs without moving this connection's focus.
 pub struct ListSpaceTabs {
     repo: Arc<dyn TerminalRepository + Send + Sync>,
 }
@@ -45,8 +34,6 @@ mod tests {
     use super::*;
     use crate::features::terminal::domain::entities::{PaneEntry, Space, TermLine};
 
-    /// A stub repository whose `list_tabs_in_space` answers a canned result per
-    /// space id — everything else panics, since no other method should be reached.
     struct StubRepository {
         answer: fn(&str) -> Result<Vec<TabEntry>, AppFailure>,
     }
@@ -83,8 +70,6 @@ mod tests {
         }
     }
 
-    /// Drive one call to completion on a current-thread runtime — no frust
-    /// runtime needed, mirroring every other use-case test in this feature.
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
