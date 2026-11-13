@@ -1,35 +1,19 @@
-//! A minimal JSON value, encoder and parser — the saved-server store's wire
-//! format, and nothing else.
-//!
-//! Hand-rolled: this app's manifest carries no JSON dependency and adding one
-//! to spell a ten-field record is not the trade
-//! (`docs/CODE_STANDARDS.md`'s hand-roll-JSON-at-the-FFI-seam rule).
-//!
-//! [`parse`] answers `None` for anything malformed; the store above treats
-//! that as an empty list rather than a failure — a corrupt payload must never
-//! take a boot down. Numbers are `f64`; the largest value this schema stores
-//! (an epoch millisecond stamp) is far inside the 2^53 range `f64` represents
-//! exactly, and [`Json::as_i64`] refuses a fractional part rather than rounding.
+//! Minimal JSON value, encoder and parser for the saved-server payload.
+//! [`parse`] answers `None` for malformed input; numbers are `f64`, and [`Json::as_i64`] refuses a fractional part.
 
 use std::fmt::Write as _;
 
-/// How deep a nested array/object may go before [`parse`] gives up — so a
-/// hostile payload cannot recurse the parser into a stack overflow.
+/// Nesting limit: a hostile payload cannot overflow the parser's stack.
 const MAX_DEPTH: usize = 32;
 
-/// One JSON value.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Json {
     Null,
     Bool(bool),
     Number(f64),
-    /// With every escape already resolved.
     String(String),
-    /// In source order.
     Array(Vec<Json>),
-    /// In source order. `Vec` rather than a map: insertion order makes an
-    /// encoded record diffable; a duplicate key resolves last-wins through
-    /// [`Json::get`] either way.
+    /// `Vec` keeps insertion order so an encoded record is diffable.
     Object(Vec<(String, Json)>),
 }
 
@@ -48,8 +32,7 @@ impl Json {
         }
     }
 
-    /// `None` if not a number, or if it carries a fractional part (which this
-    /// schema never writes, and which rounding would silently accept).
+    /// `None` if not a number or fractional.
     pub(super) fn as_i64(&self) -> Option<i64> {
         match self {
             Json::Number(value) if value.fract() == 0.0 && value.is_finite() => {
@@ -61,7 +44,6 @@ impl Json {
         }
     }
 
-    /// A duplicate key resolves last-wins, matching how mainstream parsers read one.
     pub(super) fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Object(fields) => fields
@@ -73,23 +55,19 @@ impl Json {
         }
     }
 
-    /// Compact (no whitespace) — the payload is machine state, not something
-    /// a human reads out of the store.
     pub(super) fn encode(&self) -> String {
         let mut out = String::new();
         self.write(&mut out);
         out
     }
 
-    /// [`Self::encode`]'s recursive half.
     fn write(&self, out: &mut String) {
         match self {
             Json::Null => out.push_str("null"),
             Json::Bool(true) => out.push_str("true"),
             Json::Bool(false) => out.push_str("false"),
             Json::Number(value) => {
-                // A non-finite float has no JSON spelling; writing `null` keeps
-                // the payload parseable if some later field ever produces one.
+                // A non-finite float has no JSON spelling.
                 if value.is_finite() {
                     let _ = write!(out, "{value}");
                 } else {
@@ -123,7 +101,6 @@ impl Json {
     }
 }
 
-/// `value` as a quoted, escaped JSON string.
 fn write_string(value: &str, out: &mut String) {
     out.push('"');
     for ch in value.chars() {
@@ -135,8 +112,6 @@ fn write_string(value: &str, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
-            // Every other C0 control needs the `\u` form; everything above it is
-            // legal verbatim, including non-ASCII.
             c if (c as u32) < 0x20 => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
@@ -146,7 +121,6 @@ fn write_string(value: &str, out: &mut String) {
     out.push('"');
 }
 
-/// Parse `raw` as one JSON value, or `None` if malformed (trailing content included).
 pub(super) fn parse(raw: &str) -> Option<Json> {
     let mut parser = Parser {
         input: raw.as_bytes(),
@@ -157,8 +131,7 @@ pub(super) fn parse(raw: &str) -> Option<Json> {
     parser.at.eq(&parser.input.len()).then_some(value)
 }
 
-/// Byte-indexed: every structural JSON character is ASCII; multi-byte text
-/// (inside a string) is copied out through `str::from_utf8`.
+/// Byte-indexed: structural characters are ASCII; string text is copied via `from_utf8`.
 struct Parser<'a> {
     input: &'a [u8],
     at: usize,
@@ -247,7 +220,6 @@ impl Parser<'_> {
         }
     }
 
-    /// A quoted string with its escapes resolved.
     fn string(&mut self) -> Option<String> {
         if !self.eat(b'"') {
             return None;
@@ -264,10 +236,8 @@ impl Parser<'_> {
                     self.at += 1;
                     self.escape(&mut out)?;
                 }
-                // A raw control character is illegal inside a JSON string.
                 0x00..=0x1f => return None,
                 _ => {
-                    // Copy the whole UTF-8 sequence at once via `from_utf8` on the remainder.
                     let rest = std::str::from_utf8(&self.input[self.at..]).ok()?;
                     let ch = rest.chars().next()?;
                     self.at += ch.len_utf8();
@@ -296,7 +266,6 @@ impl Parser<'_> {
         Some(())
     }
 
-    /// A `\uXXXX` escape, joining a surrogate pair when one follows.
     fn unicode_escape(&mut self, out: &mut String) -> Option<()> {
         let first = self.hex4()?;
         // A high surrogate only means something paired with the low one that follows.

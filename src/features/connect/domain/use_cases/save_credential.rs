@@ -7,8 +7,6 @@ use crate::features::connect::domain::entities::{CredentialStatus, StoreRequest}
 use crate::features::connect::domain::keyring::Keyring;
 use crate::features::connect::domain::repositories::CredentialService;
 
-/// Saves a credential: [`UseCase::execute`] is the locked save,
-/// [`Self::run_in_vault`] the unlocked one over the in-memory keyring.
 pub struct SaveCredential {
     service: Arc<dyn CredentialService + Send + Sync>,
 }
@@ -18,8 +16,7 @@ impl SaveCredential {
         Self { service }
     }
 
-    /// Writes `keyring` plus `request`'s token as the vault behind one gate;
-    /// `keyring` gains the token only when that write succeeded.
+    /// `keyring` gains the token only when the vault write succeeded.
     pub async fn run_in_vault(
         &self,
         request: StoreRequest,
