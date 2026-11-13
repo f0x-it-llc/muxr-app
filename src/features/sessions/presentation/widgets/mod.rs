@@ -1,22 +1,7 @@
-//! The `/sessions` screen's widget clusters, transcribed from
-//! `docs/redesign.html`'s **sessions** block and `docs/tablet.html`'s frame
-//! 02 — one submodule per visual cluster: [`server_strip`] (`.conn-row`),
-//! [`session_card`] (`.sess-card`), [`list`] (new-session button, empty and
-//! failed states, the Tablet list column beside the detail), [`detail`] (the
-//! Tablet detail pane), [`manage_sheet`] (long-press sheet rows),
-//! [`new_session_dialog`] (name + backend choice) and [`snapshot`] (the screen
-//! as an inert picture). Page-coupled by design
-//! (`APP_FEATURES_ARCHITECTURE.md`'s widgets/ paragraph): each reads the
-//! page's state type or calls its `pages::*` action shims directly.
+//! The `/sessions` screen's widget clusters, page-coupled by design: each reads the page's state
+//! type or calls its `pages::*` action shims.
 //!
-//! Amber is brand/CTA and the Tablet selection wash, never a health signal —
-//! liveness is always `success`; a running session must never read as
-//! "selected". Every element with a Glyph catalog counterpart uses it; the
-//! rest (card accent, pane pills, `.conn-row` rule, dashed outline) composes
-//! `frust::container`/`colored_box`/`divider` directly, each in the widget
-//! module that needs it — the feature-local `chrome` primitives that used to
-//! cover the gap are gone now that frust's own baseline carries them.
-//! `frust_glyph::baseline()` wins where it and the HTML disagree.
+//! Amber is brand/CTA and the Tablet selection wash, never a health signal: liveness is `success`.
 
 mod detail;
 mod list;
@@ -48,8 +33,6 @@ pub(in crate::features::sessions::presentation) use new_session_dialog::open_new
 pub(in crate::features::sessions::presentation) use server_strip::{DOT, server_strip};
 pub(in crate::features::sessions::presentation) use session_card::{CardMode, session_card};
 
-/// Where the list's load stands: in flight, failed before any list landed,
-/// or loaded (possibly empty).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::features::sessions::presentation) enum LoadPhase {
     Loading,
@@ -58,7 +41,6 @@ pub(in crate::features::sessions::presentation) enum LoadPhase {
 }
 
 impl LoadPhase {
-    /// The phase the controller's `loaded`/`first_load_settled` pair names.
     pub(in crate::features::sessions::presentation) fn of(loaded: bool, settled: bool) -> Self {
         match (loaded, settled) {
             (true, _) => LoadPhase::Loaded,
@@ -68,9 +50,7 @@ impl LoadPhase {
     }
 }
 
-/// Page tone behind `body`: `--bg-base`, not the shell's `--bg-surface`
-/// clear colour — without it, cards would show no visible edge against an
-/// unpainted background.
+/// Page tone behind `body`: `--bg-base`, so cards show an edge against the shell's surface clear colour.
 pub(in crate::features::sessions::presentation) fn page_tone<V: View<SessionsState>>(
     body: V,
     colors: &Palette,
@@ -86,7 +66,6 @@ pub(super) fn centered_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-/// `views` stacked and stretched, with a `gap`-tall space between neighbours.
 pub(super) fn gapped_column<V: View<SessionsState>>(
     views: Vec<V>,
     gap: f64,

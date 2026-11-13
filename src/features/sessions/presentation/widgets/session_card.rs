@@ -1,18 +1,5 @@
-//! `.sess-card` — one session card: the whole box is the control.
-//!
-//! **A tap attaches (on Tablet it selects instead); a long-press opens the
-//! management sheet** — the redesign draws no per-card buttons.
-//! [`GestureDetector`]'s long-press fires on the first pointer event after the
-//! 500ms threshold and never also fires the tap, which is what makes
-//! "long-press must not attach" a property of the framework rather than a
-//! guard written here.
-//!
-//! Running and idle differ in four places: the 2px `success` left accent
-//! (absent when idle, though its width is still reserved), the avatar's
-//! wash and ink, the status chip, and — idle only — a whole-card dim to
-//! [`IDLE_OPACITY`] plus no `.sess-panes` row at all. A bell mark follows the
-//! name and an accent `● this device` span closes the meta row on every
-//! class; a Tablet selection repaints the card in the amber selection wash.
+//! `.sess-card`: the whole box is the control. A tap attaches (on Tablet it selects); a long-press
+//! opens the management sheet and never also fires the tap.
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
@@ -37,69 +24,34 @@ use crate::ui::spacing;
 use super::super::pages::{self, SessionsState};
 use super::{active_theme, centered_row, h_gap};
 
-/// `.sess-avatar{width:26px;height:26px}` — a widget dimension, not a
-/// spacing gap, so it stays off the shared scale.
 const AVATAR_SIZE: f64 = 26.0;
-/// `.sess-card{padding:14px}`.
 const CARD_PAD: f64 = spacing::LG;
-/// `.sess-card{border-left:2px solid}` — the status accent's weight.
 const ACCENT_WIDTH: f64 = 2.0;
-/// `.sess-top{gap:10px}` — avatar to name.
 const ROW_GAP: f64 = spacing::MD;
-/// `.sess-badges{gap:6px}` / `.sess-panes{gap:6px}`.
 const PILL_GAP: f64 = spacing::XS;
-/// `.sess-meta{gap:12px}` — between the three meta spans.
 const META_GAP: f64 = spacing::BASE;
-/// `.sess-top{margin-bottom:10px}` / `.sess-meta{margin-bottom:10px}` — the
-/// card's inner vertical rhythm.
 const CARD_LINE_GAP: f64 = spacing::MD;
-/// `.pane-pill{padding:8px 10px}`.
 const PILL_PAD_X: f64 = spacing::MD;
 const PILL_PAD_Y: f64 = spacing::SM;
-/// `.sess-card.idle{opacity:0.55}` — the whole-card dim for a session that
-/// isn't running, and (see [`super::list`]) the same "disabled" dim the
-/// read-only create affordances reuse.
+/// The whole-card dim for a session that isn't running, reused for read-only create affordances.
 pub(super) const IDLE_OPACITY: f64 = 0.55;
-/// How many `.pane-pill` previews a card shows (the redesign draws two).
 const MAX_PREVIEW_PILLS: usize = 2;
-/// The bell mark after a ringing session's name.
 pub(super) const BELL_ICON: f64 = 14.0;
-/// How many distinct agent kinds the strip draws as tiles before a `+N` tile.
 const MAX_KIND_TILES: usize = 4;
-/// The status badge's text when an agent is blocked on the user.
 const NEEDS_YOU: &str = "needs you";
-/// The meta span a session attached from this device carries.
 const THIS_DEVICE: &str = "\u{25cf} this device";
 
-/// How a card is placed: Compact's list, or the Tablet list column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::features::sessions::presentation) enum CardMode {
-    /// A tap attaches.
     Compact,
-    /// A tap selects; `previews` is off on the collapsed band.
     Tablet { selected: bool, previews: bool },
 }
 
-/// `.sess-card`'s surface (`fill`/`border`/`radius`) plus, for a live
-/// session, the 2px `success` left status accent — an accent-filled
-/// `container` behind an `ACCENT_WIDTH`-inset surface `container`, since
-/// `frust::container` carries no left-accent knob by design (deferred: see
-/// `frust-widgets::container`'s module docs' "Sizing + a child" section, "app
-/// side layering over a plain `Container`"). The outer accent paints the
-/// *whole* card's rounded rect first; the inner surface, offset right by
-/// [`ACCENT_WIDTH`], paints on top of it — reproducing `border-left`'s
-/// curved ends without a per-edge radius.
+/// The surface plus, for a live session, the 2px `success` left accent: an accent-filled container
+/// behind an `ACCENT_WIDTH`-inset surface, since `Container` has no left-accent knob.
 ///
-/// The inset is unconditional (`Padding` always reserves [`ACCENT_WIDTH`]),
-/// independent of `accent` carrying a colour — `.sess-card{border-left:2px
-/// solid transparent}` — so an idle card's content still starts exactly
-/// where a running card's does and the list's left edge never jogs by 2px
-/// row to row.
-///
-/// `fill` must be opaque: the inner surface is all that hides the accent's
-/// solid colour, so a translucent wash here (the selected card once used
-/// `amber_faint`) lets the accent through and the whole card reads as a
-/// block of amber — hence the palette's opaque `amber_wash`.
+/// The inset is unconditional so an idle card's content starts where a running card's does.
+/// `fill` must be opaque: a translucent wash lets the accent through.
 fn accented_card<State: 'static>(
     body: impl View<State>,
     fill: Color,
@@ -127,7 +79,6 @@ fn accented_card<State: 'static>(
     outer
 }
 
-/// See the [module docs](self).
 pub(in crate::features::sessions::presentation) fn session_card(
     session: &Session,
     colors: &Palette,
@@ -147,8 +98,7 @@ pub(in crate::features::sessions::presentation) fn session_card(
                 .size(AVATAR_SIZE)
                 .background(avatar_bg)
                 .foreground(avatar_ink)
-                // `.sess-avatar` has no border of its own; `avatar` always
-                // strokes one, so it is stroked in nothing.
+                // `.sess-avatar` has no border; `avatar` always strokes one, so it is stroked in nothing.
                 .border_color(Color::TRANSPARENT),
         ),
         h_gap(ROW_GAP),
@@ -161,7 +111,6 @@ pub(in crate::features::sessions::presentation) fn session_card(
         top.push(h_gap(PILL_GAP));
         top.push(inflexible(bell_mark(colors)));
     }
-    // The agent roll-up shows only on a live card with at least one agent.
     let agents = session
         .agents
         .as_ref()
@@ -205,8 +154,6 @@ pub(in crate::features::sessions::presentation) fn session_card(
     if let Some(summary) = agents {
         lines.push(any(agent_strip(summary, colors)));
     }
-    // An idle card draws no pills at all, so liveness gates the row as well
-    // as the preview being non-empty.
     if live && previews && !session.layout.preview.is_empty() {
         lines.push(any(pane_pills(&session.layout.preview, colors)));
     }
@@ -248,21 +195,16 @@ pub(in crate::features::sessions::presentation) fn session_card(
     if live {
         Either::Left(pressable)
     } else {
-        // Frust has no *static* opacity wrapper; `AnimatedOpacity` settles at
-        // its initial target with no animate-in, so a pinned constant costs
-        // one layer push and no extra frames. A card that later stops
-        // running fades, which is the right behaviour anyway.
+        // No static opacity wrapper exists; `AnimatedOpacity` settles at its initial target with no animate-in.
         Either::Right(AnimatedOpacity(IDLE_OPACITY, pressable))
     }
 }
 
-/// The warning-toned bell a ringing session or tab carries.
 pub(super) fn bell_mark(colors: &Palette) -> impl View<SessionsState> {
     icon(NOTIFICATIONS).size(BELL_ICON).color(colors.warning)
 }
 
-/// The hue a status chip prints in — `success` for the live one, a neutral
-/// wash for everything else. Never amber: a chip is not a selection.
+/// Never amber: a chip is not a selection.
 pub(super) fn status_variant(status: SessionStatus) -> BadgeVariant {
     if status.is_live() {
         BadgeVariant::Success
@@ -271,8 +213,6 @@ pub(super) fn status_variant(status: SessionStatus) -> BadgeVariant {
     }
 }
 
-/// `.sess-panes` — up to [`MAX_PREVIEW_PILLS`] equal-width (`flex:1`) pane
-/// tiles.
 fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
     let theme = active_theme();
     let mut children = Vec::new();
@@ -291,9 +231,6 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
     centered_row(children).gap(PILL_GAP)
 }
 
-/// `.sess-agents` — kind tiles and the `N agents` count at the left, the
-/// per-status count pills at the right; announced as one
-/// [`summary_line`].
 fn agent_strip(summary: &AgentSummary, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let noun = if summary.total == 1 {
@@ -325,8 +262,6 @@ fn agent_strip(summary: &AgentSummary, colors: &Palette) -> impl View<SessionsSt
     }
 }
 
-/// Wraps `child` in a `Role::Group` semantics node carrying `label`; layout,
-/// paint and events pass straight through.
 struct Labeled<V> {
     child: V,
     label: String,
@@ -390,14 +325,10 @@ impl Widget for LabeledWidget {
     }
 }
 
-/// A flexible spacer that pushes what follows it to the trailing edge — Flex
-/// v1 has no `space-between`.
 fn spacer() -> FlexChild<SessionsState> {
     flexible(1, SizedBox::<SessionsState>(None, None))
 }
 
-/// `[a, b, c]` with a `gap`-tall spacer between consecutive items, as flex
-/// children.
 fn interleave(views: Vec<AnyView<SessionsState>>, gap: f64) -> Vec<FlexChild<SessionsState>> {
     let mut children = Vec::with_capacity(views.len() * 2);
     for (index, view) in views.into_iter().enumerate() {
@@ -415,8 +346,6 @@ mod tests {
 
     #[test]
     fn liveness_is_success_and_never_the_brand_hue() {
-        // The colour-role rule's own tripwire: a running chip is the
-        // success variant, an idle one is neutral, and neither is amber.
         assert_eq!(
             status_variant(SessionStatus::Running),
             BadgeVariant::Success
@@ -429,14 +358,12 @@ mod tests {
 
     #[test]
     fn the_idle_dim_matches_the_source() {
-        // `.sess-card.idle{opacity:0.55}` — a dim, not a disappearance.
         assert!((IDLE_OPACITY - 0.55).abs() < 1e-9, "{IDLE_OPACITY}");
     }
 
     #[test]
     fn the_cards_meta_row_gap_is_the_sources_and_not_the_chip_gap() {
-        // Two different 6/12px gaps live a few lines apart in the source; a
-        // swap is invisible in code review and obvious on screen.
+        // Two different 6/12px gaps live a few lines apart; a swap is invisible in review and obvious on screen.
         assert_eq!(META_GAP, 12.0);
         assert_eq!(PILL_GAP, 6.0);
     }
