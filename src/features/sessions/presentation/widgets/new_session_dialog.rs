@@ -1,12 +1,6 @@
-//! The "New session" dialog: a name field and, only when the server fronts
-//! more than one multiplexer, a `zellij | herdr` segmented choice
-//! (`docs/tablet.html` frame 02). With a single backend the dialog is the
-//! plain name prompt `ui::dialogs::name_input_dialog` draws.
-//!
-//! Composed over `glyph_dialog`/`show_glyph_dialog` directly because that
-//! prompt has no slot for a second control. Every dismissal route (Cancel,
-//! scrim, `Escape`, back) closes without calling back; Enter and Create both
-//! go through [`submit`], which refuses a blank name like the repository does.
+//! The "New session" dialog: a name field and, only when the server fronts more than one
+//! multiplexer, a `zellij | herdr` choice. Every dismissal closes without calling back; Enter and
+//! Create both go through [`submit`], which refuses a blank name.
 
 use frust::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, Get, GetUntracked, NavigatorController,
@@ -22,11 +16,8 @@ use crate::ui::spacing;
 const TITLE: &str = "New session";
 const CANCEL_LABEL: &str = "Cancel";
 const SUBMIT_LABEL: &str = "Create";
-/// Vertical gap between the name field and the backend choice.
 const FIELD_GAP: f64 = spacing::XL;
 
-/// The offered backends as the session domain names them, zellij first (the
-/// preferred default) and each listed once.
 pub(in crate::features::sessions::presentation) fn offered(
     available: &[ServerBackend],
 ) -> Vec<SessionBackend> {
@@ -45,8 +36,6 @@ pub(in crate::features::sessions::presentation) fn offered(
     out
 }
 
-/// Open the dialog over `overlays`. `on_submit` receives the trimmed,
-/// non-empty name and the chosen backend.
 pub(in crate::features::sessions::presentation) fn open_new_session_dialog(
     overlays: &NavigatorController<AppState>,
     available: &[ServerBackend],
@@ -124,14 +113,11 @@ pub(in crate::features::sessions::presentation) fn open_new_session_dialog(
     );
 }
 
-/// The backend the segmented choice currently names. The index is clamped, so
-/// a choice left over from a longer offer can never index past the end.
+/// The index is clamped, so a choice left over from a longer offer never indexes past the end.
 fn chosen(backends: &[SessionBackend], choice: RwSignal<usize>) -> SessionBackend {
     backends[choice.get_untracked().min(backends.len() - 1)]
 }
 
-/// Pop the dialog carrying the trimmed name and backend, or do nothing with a
-/// blank name — the one gate Enter and Create share.
 fn submit(nav: &NavigatorController<AppState>, typed: &str, backend: SessionBackend) {
     let name = typed.trim();
     if name.is_empty() {

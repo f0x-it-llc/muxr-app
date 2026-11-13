@@ -1,18 +1,6 @@
-//! The Sessions screen as a picture: [`sessions_snapshot`] re-renders a
-//! server's last [`PageSnapshot`] with the very widgets the live page is built
-//! from (the bar, the `.conn-row` strip, [`session_card`], the create row, the
-//! Tablet master-detail), wrapped in [`Inert`] so nothing in it reacts. The
-//! server switcher's peer cards use it, composed by the app-level shell, so a
-//! peer reads like the live card beside it — recents, without a screenshot API.
-//!
-//! Page-agnostic: it needs no `SessionsState` value, no controller, no poll and
-//! no loading rain. The widgets are typed over the page's state, but a view
-//! builds without a state value; only events need one, and [`Inert`] never
-//! forwards any, so a tap on the picture reaches the card, never a session.
-//!
-//! The picture assumes the loaded phase (a snapshot is only filed by a
-//! successful list), the heartbeat at rest on the handshake latency, and no
-//! selection on the Tablet class.
+//! The Sessions screen as a picture: [`sessions_snapshot`] re-renders a server's last
+//! [`PageSnapshot`] with the live page's widgets inside [`Inert`], which forwards no events. Needs
+//! no state value, controller, poll or rain; assumes the loaded phase and a heartbeat at rest.
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,29 +29,20 @@ use super::{
     page_tone, server_strip, session_card, tablet_list, tablet_list_pieces,
 };
 
-/// The bar title of a snapshot with no handshake facts.
 const FALLBACK_TITLE: &str = "muxrd";
-/// The bar's Settings affordance name (the live bar's).
 const SETTINGS_LABEL: &str = "Settings";
-/// The Compact list's padding and gap — the live page's.
 const LIST_PAD_X: f64 = spacing::XL;
 const LIST_PAD_Y: f64 = spacing::LG;
 const LIST_GAP: f64 = spacing::BASE;
-/// The live page's wide-window clamp.
 const CLAMP_WIDTH: f64 = 640.0;
 
-/// How many snapshots this process has built: the observable behind "a closed
-/// stage constructs no peer faces" (see `controllers::snapshots_built_for_tests`).
+/// Snapshots built in this process: what a suite reads to prove a closed stage builds none.
 static BUILT: AtomicUsize = AtomicUsize::new(0);
 
-/// The running count of [`sessions_snapshot`] calls.
 pub(crate) fn built() -> usize {
     BUILT.load(Ordering::Relaxed)
 }
 
-/// `page` as the inert Sessions screen under the shell's bar, laid out for
-/// `rule`'s window class. A view over any outer state: nothing in it touches
-/// the host's state.
 pub fn sessions_snapshot<S: 'static>(page: &PageSnapshot, rule: Responsive) -> impl View<S> {
     BUILT.fetch_add(1, Ordering::Relaxed);
     let theme = active_theme();
@@ -92,8 +71,6 @@ pub fn sessions_snapshot<S: 'static>(page: &PageSnapshot, rule: Responsive) -> i
     }
 }
 
-/// The page's body: the strip over the list (Compact), or the master-detail
-/// row with nothing selected (Tablet).
 fn body<'a>(
     page: &'a PageSnapshot,
     rule: Responsive,
@@ -153,8 +130,6 @@ fn body<'a>(
     Either::Right(page_tone(screen, colors))
 }
 
-/// The heartbeat as a settled strip draws it: no ring, no roll, the handshake
-/// latency.
 fn at_rest(info: Option<&ServerInfo>) -> HeartbeatVisual {
     HeartbeatVisual {
         ring: None,
@@ -163,9 +138,7 @@ fn at_rest(info: Option<&ServerInfo>) -> HeartbeatVisual {
     }
 }
 
-/// Lays out, paints and describes `child`, and answers no input: the picture
-/// of a screen that is not the live one. `state` ties the view to the host
-/// state it is mounted under; the child's own state type never meets a value.
+/// Lays out, paints and describes `child`, and answers no input; `state` ties the view to the host state.
 struct Inert<V, S> {
     child: V,
     state: PhantomData<fn(&mut S)>,
@@ -265,7 +238,6 @@ mod tests {
         )))
     }
 
-    /// The snapshot mounted under a host state of `()`, laid out at `size`.
     fn mounted(page: &PageSnapshot, rule: Responsive, size: Size) -> RenderRoot<(), AnyView<()>> {
         let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
         let mut logic = |_: &mut ()| AnyView::new(sessions_snapshot::<()>(page, rule));
@@ -324,7 +296,6 @@ mod tests {
             }
             redraw
         };
-        // Across the bar, the first card and the create row's bands.
         for y in (20..size.height as i32).step_by(40) {
             assert!(!tap(200.0, f64::from(y)), "a tap at y={y} reached a widget");
             assert!(!tap(370.0, f64::from(y)), "a tap at y={y} reached a widget");
