@@ -1,20 +1,6 @@
-//! Endpoint and [`Channel`] construction for a `(host, port, TrustConfig)`
-//! triple.
-//!
-//! Trust is installed via `Endpoint::tls_config_with_verifier` rather than a
-//! custom connector: one route covers all three hand-built `rustls`
-//! verifiers on the connector that already owns ALPN/handshake-timeout/
-//! keepalive below. A custom verifier replaces the default, so the
-//! `ClientTlsConfig` here carries nothing but the server name — mixing in a
-//! CA/trust-anchor/root method beside it is an error.
-//!
-//! Server names are set explicitly rather than left to the URI host: `muxrd`
-//! serves an IP-SAN self-signed cert, so rustls must match a
-//! `ServerName::IpAddress`. `domain_name` gets that for a bare address and is
-//! also the only way an IPv6 literal works (the URI authority needs
-//! brackets; `ServerName` refuses them).
-//!
-//! Keepalive below mirrors `muxrd`'s own settings — parity, not tuning.
+//! Endpoint and [`Channel`] construction. A custom verifier means the `ClientTlsConfig` carries
+//! only the server name, set explicitly: `muxrd`'s IP-SAN cert needs `ServerName::IpAddress`,
+//! and an IPv6 literal must drop the URI's brackets.
 
 use std::net::Ipv6Addr;
 use std::time::Duration;
@@ -25,18 +11,13 @@ use crate::failure::AppFailure;
 use crate::net::error;
 use crate::net::tls::TrustConfig;
 
-/// HTTP/2 keepalive ping interval — parity with `muxrd`'s server setting.
+/// Parity with `muxrd`'s server setting.
 pub const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
-/// How long a keepalive ping may go unanswered before the connection is
-/// considered dead — parity with `muxrd`'s server setting.
+/// Parity with `muxrd`'s server setting.
 pub const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Build the endpoint for a target, TLS and keepalive already configured.
-///
-/// Fallible before any socket is opened: an empty/unparseable host, a
-/// [`TrustConfig`] whose verifier cannot be built, or a URI tonic rejects all
-/// surface here rather than as a connect failure.
+/// Fails before any socket opens on an empty host or an unbuildable verifier.
 pub fn endpoint(host: &str, port: u16, trust: &TrustConfig) -> Result<Endpoint, AppFailure> {
     let name = server_name(host);
     if name.is_empty() {
@@ -62,7 +43,6 @@ pub fn endpoint(host: &str, port: u16, trust: &TrustConfig) -> Result<Endpoint, 
         .map_err(|err| error::from_transport(&format!("endpoint {name}:{port}"), &err))
 }
 
-/// Dial a target and return its connected channel.
 pub async fn connect(host: &str, port: u16, trust: &TrustConfig) -> Result<Channel, AppFailure> {
     endpoint(host, port, trust)?
         .connect()
@@ -70,8 +50,6 @@ pub async fn connect(host: &str, port: u16, trust: &TrustConfig) -> Result<Chann
         .map_err(|err| error::from_transport(&format!("connect {host}:{port}"), &err))
 }
 
-/// The URI authority for a target: an IPv6 literal is bracketed, everything else
-/// is passed through.
 fn authority(host: &str, port: u16) -> String {
     let name = server_name(host);
     if name.parse::<Ipv6Addr>().is_ok() {
@@ -81,8 +59,7 @@ fn authority(host: &str, port: u16) -> String {
     }
 }
 
-/// The bare name TLS verifies against — the host with any URI brackets removed,
-/// since `ServerName` parses `::1` but not `[::1]`.
+/// `ServerName` parses `::1` but not `[::1]`.
 fn server_name(host: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
@@ -95,9 +72,7 @@ mod tests {
 
     use super::*;
 
-    /// A bare IPv4 host keeps its shape, and the name TLS matches on parses as
-    /// an IP address rather than a DNS name — the form an IP-SAN certificate
-    /// needs.
+    /// An IP-SAN certificate needs an IP-address server name, not a DNS one.
     #[test]
     fn ipv4_authority_and_server_name() {
         assert_eq!(authority("127.0.0.1", 7777), "127.0.0.1:7777");
@@ -107,8 +82,6 @@ mod tests {
         ));
     }
 
-    /// An IPv6 literal is bracketed in the authority and unbracketed for TLS,
-    /// whichever way the caller spelled it.
     #[test]
     fn ipv6_authority_brackets_but_server_name_does_not() {
         assert_eq!(authority("::1", 7777), "[::1]:7777");
@@ -120,7 +93,6 @@ mod tests {
         ));
     }
 
-    /// A DNS host is untouched and still resolves to a DNS server name.
     #[test]
     fn dns_host_stays_a_dns_server_name() {
         assert_eq!(authority("muxr.example", 443), "muxr.example:443");
@@ -130,7 +102,6 @@ mod tests {
         ));
     }
 
-    /// Every trust mode builds an endpoint, and the URI it dials is `https`.
     #[test]
     fn endpoint_builds_for_every_trust_mode() {
         for trust in [
@@ -147,7 +118,6 @@ mod tests {
         }
     }
 
-    /// An empty host is rejected here, not as a connect timeout later.
     #[test]
     fn empty_host_is_rejected_before_dialing() {
         let failure = endpoint("", 7777, &TrustConfig::InsecureAcceptAny)

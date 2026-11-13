@@ -1,20 +1,6 @@
-//! An in-process `muxrd` stand-in: a real TLS gRPC server on a loopback port,
-//! serving the real generated stubs, so the client stack is exercised
-//! without the docker rig.
-//!
-//! `#[cfg(test)]`, not a feature flag: needs `rcgen` + tonic's
-//! `server`/`router`/`transport`, all `[dev-dependencies]`-only, so it's
-//! reachable from the crate's unit tests but not a `tests/*.rs` integration
-//! suite (linked against the dev-dependency-free library build).
-//!
-//! Auth mirrors `muxrd`, checked per method via [`require_bearer`] (a tonic
-//! interceptor can't see the URI to build an allowlist); unanswered RPCs
-//! return `UNIMPLEMENTED`, never a plausible canned value.
-//!
-//! `AttachTerminal` is scripted via [`TerminalScript`] (render frame, clean
-//! [`exit`](crate::net::control::CONTROL_EXIT), mid-flight drop, or a silent
-//! stall); `WatchAgents` via [`AgentScript`] (push an event, fail or end the stream, refuse
-//! the credential); the one-shot workspace-verb RPCs are just recorded via [`ActionLog`].
+//! An in-process `muxrd` stand-in: a real TLS gRPC server on a loopback port. `#[cfg(test)]`
+//! because its server deps are dev-only. Auth is checked per method via [`require_bearer`];
+//! unanswered RPCs return `UNIMPLEMENTED`, never a plausible canned value.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,8 +16,7 @@ use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 
-// Control-event kinds come from `control`, never re-spelled as literals —
-// see that module's docs on the drift two independent constants would hide.
+// Control kinds come from `control`, never re-spelled as literals.
 use crate::net::client::MuxrClient;
 use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::muxr_server::{Muxr, MuxrServer};
@@ -47,39 +32,28 @@ use crate::net::proto::{
 };
 use crate::net::tls::{TrustConfig, leaf_fingerprint_hex};
 
-/// The pairing token [`Muxr::login`] accepts.
 pub const AUTH_TOKEN: &str = "fixture-auth-token";
 
-/// The session token [`Muxr::login`] mints and every authenticated RPC demands.
 pub const SESSION_TOKEN: &str = "fixture-session-token";
 
-/// The canned session names [`Muxr::list_sessions`] returns.
 pub const SESSION_NAMES: [&str; 2] = ["alpha", "beta"];
 
-/// The version string [`Muxr::get_version`] reports.
 pub const SERVER_VERSION: &str = "0.0.0-fixture";
 
-/// Frames one scripted `AttachTerminal` stream buffers in each direction.
 const ATTACH_CAPACITY: usize = 64;
 
-/// How long [`wait_until`] gives a condition before failing — long enough
-/// not to flake on a loaded machine, short enough a stuck pump fails fast.
+/// Long enough not to flake on a loaded machine, short enough a stuck pump fails fast.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often [`wait_until`] re-checks — a poll, since the awaited condition
-/// can live on either side of the wire.
+/// A poll, since the awaited condition can live on either side of the wire.
 const WAIT_POLL: Duration = Duration::from_millis(1);
 
-/// The id [`Muxr::attach_terminal`] mints for the `nth` stream it serves
-/// (1-based, in attach order) and announces as its
-/// [`CONTROL_CONNECTION_ID`] event.
+/// 1-based, in attach order; announced as its [`CONTROL_CONNECTION_ID`] event.
 pub fn connection_id(nth: usize) -> String {
     format!("fixture-conn-{nth}")
 }
 
-/// Poll `probe` until it holds, failing the test after [`WAIT_TIMEOUT`] with
-/// `label` in the message — a fixed sleep would be either a flake or a slow
-/// suite, since the two stream sides share no clock to await on.
+/// A fixed sleep would flake or slow the suite: the two stream sides share no clock.
 pub async fn wait_until(label: &str, mut probe: impl FnMut() -> bool) {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     while !probe() {
@@ -91,8 +65,7 @@ pub async fn wait_until(label: &str, mut probe: impl FnMut() -> bool) {
     }
 }
 
-/// A running fixture server plus the certificate material a client needs to
-/// pin it. Dropping the fixture stops the server.
+/// Dropping the fixture stops the server.
 pub struct MuxrdFixture {
     addr: SocketAddr,
     cert_der: Vec<u8>,
@@ -105,9 +78,7 @@ pub struct MuxrdFixture {
 }
 
 impl MuxrdFixture {
-    /// Generate a self-signed certificate with an `127.0.0.1` IP SAN — the SAN
-    /// shape `muxrd` itself serves — bind an ephemeral loopback port and start
-    /// serving on the caller's runtime.
+    /// Self-signed with a `127.0.0.1` IP SAN, the shape `muxrd` serves.
     pub async fn start() -> Self {
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec!["127.0.0.1".to_string()])
@@ -146,8 +117,7 @@ impl MuxrdFixture {
                 agents: Arc::clone(&agents),
             }));
         let server = tokio::spawn(async move {
-            // The fixture is torn down by aborting this task, so a serve error
-            // at shutdown is expected and carries nothing a test can act on.
+            // Torn down by abort, so a serve error at shutdown is expected.
             let _ = router.serve_with_incoming(incoming).await;
         });
 
@@ -163,50 +133,39 @@ impl MuxrdFixture {
         }
     }
 
-    /// TCP connections the fixture has accepted. One per dial: a client's
-    /// channel rebuild shows up here as one more.
+    /// One per dial: a channel rebuild shows up as one more.
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
     }
 
-    /// The server side of this fixture's `AttachTerminal` streams: what the
-    /// client sent, and the levers a test pulls to answer it.
     pub fn terminal(&self) -> Arc<TerminalScript> {
         Arc::clone(&self.terminal)
     }
 
-    /// The server side of this fixture's one-shot action RPCs — see
-    /// [`ActionLog`].
     pub fn actions(&self) -> Arc<ActionLog> {
         Arc::clone(&self.actions)
     }
 
-    /// The server side of this fixture's `WatchAgents` streams — see [`AgentScript`].
     pub fn agents(&self) -> Arc<AgentScript> {
         Arc::clone(&self.agents)
     }
 
-    /// The loopback address the fixture is serving on.
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// The ephemeral port the fixture is serving on.
     pub fn port(&self) -> u16 {
         self.addr.port()
     }
 
-    /// The DER bytes of the certificate the fixture presents.
     pub fn cert_der(&self) -> &[u8] {
         &self.cert_der
     }
 
-    /// SHA-256 over [`Self::cert_der`], lowercase hex — the pin a client needs.
     pub fn fingerprint_hex(&self) -> &str {
         &self.fingerprint_hex
     }
 
-    /// A client connected to this fixture under its own pin.
     pub async fn connect_pinned(&self) -> MuxrClient {
         let trust = TrustConfig::pinned_from_hex(&self.fingerprint_hex)
             .expect("the fixture prints a well-formed pin");
@@ -222,8 +181,7 @@ impl Drop for MuxrdFixture {
     }
 }
 
-/// `muxrd`'s bearer contract: `authorization: Bearer <session_token>`, rejected
-/// as `UNAUTHENTICATED` whenever it is absent, malformed or unknown.
+/// `muxrd`'s bearer contract: an absent, malformed or unknown credential is `UNAUTHENTICATED`.
 fn require_bearer<T>(request: &Request<T>) -> Result<(), Status> {
     let raw = request
         .metadata()
@@ -242,15 +200,11 @@ fn require_bearer<T>(request: &Request<T>) -> Result<(), Status> {
     }
 }
 
-/// The status every RPC outside the fixture's answered subset returns.
 fn unsupported(rpc: &str) -> Status {
     Status::unimplemented(format!("{rpc} is outside the fixture's answered subset"))
 }
 
-/// The `ActionAck` every recording RPC below answers with — record then
-/// succeed. A test scripting a refusal drives
-/// [`crate::net::error::ack_result`] against a hand-built `ActionAck`
-/// directly instead.
+/// Record then succeed; refusals are tested against a hand-built `ActionAck`.
 fn ack_ok() -> ActionAck {
     ActionAck {
         ok: true,
@@ -259,10 +213,7 @@ fn ack_ok() -> ActionAck {
     }
 }
 
-/// A typed record of every one-shot workspace-verb RPC seen
-/// (`CreateSpace`/`RenameSpace`/`NewTab`/…/`ScrollPane`) — unlike
-/// [`TerminalScript`] there's nothing to drive, each RPC just answers once.
-/// Shared with a test through [`MuxrdFixture::actions`].
+/// Unlike [`TerminalScript`] there is nothing to drive: each RPC just answers once.
 #[derive(Default)]
 pub struct ActionLog {
     state: Mutex<ActionState>,
@@ -279,63 +230,50 @@ struct ActionState {
     focus_pane: Vec<PaneTarget>,
     scroll_pane: Vec<ScrollReq>,
     toggle_pane_fullscreen: Vec<ToggleFullscreenReq>,
-    /// When set, `TogglePaneFullscreen` answers a refused ack carrying this text.
     toggle_pane_fullscreen_refusal: Option<String>,
 }
 
 impl ActionLog {
-    /// Poisoning is recovered from rather than propagated — the same recovery
-    /// every other fixture lock in this module takes.
     fn state(&self) -> MutexGuard<'_, ActionState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Every `CreateSpace` request seen, oldest first.
     pub fn create_space_calls(&self) -> Vec<CreateSpaceReq> {
         self.state().create_space.clone()
     }
 
-    /// Every `RenameSpace` request seen, oldest first.
     pub fn rename_space_calls(&self) -> Vec<RenameSpaceReq> {
         self.state().rename_space.clone()
     }
 
-    /// Every `NewTab` request seen, oldest first.
     pub fn new_tab_calls(&self) -> Vec<NewTabReq> {
         self.state().new_tab.clone()
     }
 
-    /// Every `RenameTab` request seen, oldest first.
     pub fn rename_tab_calls(&self) -> Vec<RenameTabReq> {
         self.state().rename_tab.clone()
     }
 
-    /// Every `NewPane` request seen, oldest first.
     pub fn new_pane_calls(&self) -> Vec<NewPaneReq> {
         self.state().new_pane.clone()
     }
 
-    /// Every `RenamePane` request seen, oldest first.
     pub fn rename_pane_calls(&self) -> Vec<RenamePaneReq> {
         self.state().rename_pane.clone()
     }
 
-    /// Every `FocusPane` request seen, oldest first.
     pub fn focus_pane_calls(&self) -> Vec<PaneTarget> {
         self.state().focus_pane.clone()
     }
 
-    /// Every `ScrollPane` request seen, oldest first.
     pub fn scroll_pane_calls(&self) -> Vec<ScrollReq> {
         self.state().scroll_pane.clone()
     }
 
-    /// Every `TogglePaneFullscreen` request seen, oldest first.
     pub fn toggle_pane_fullscreen_calls(&self) -> Vec<ToggleFullscreenReq> {
         self.state().toggle_pane_fullscreen.clone()
     }
 
-    /// Make every later `TogglePaneFullscreen` answer `ok: false` with `error`.
     pub fn refuse_toggle_pane_fullscreen(&self, error: &str) {
         self.state().toggle_pane_fullscreen_refusal = Some(error.to_string());
     }
@@ -379,30 +317,21 @@ impl ActionLog {
     }
 }
 
-/// One observed `attach` handshake — the mandatory first frame of every
-/// `AttachTerminal` stream, including every reconnect.
+/// The mandatory first frame of every `AttachTerminal` stream, reconnects included.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachObservation {
-    /// The session name the client asked for.
     pub session: String,
-    /// The grid it attached at, column-major (the wire message is
-    /// `rows`-first; the app counts `cols` x `rows`).
+    /// Column-major; the wire message is `rows`-first.
     pub cols: u16,
     pub rows: u16,
-    /// The resume hints the frame carried, **verbatim** — proto3 defaults
-    /// (`""`/`0`) are what "no hint" looks like on the wire, so a test asserting
-    /// a hint-less attach asserts exactly these.
+    /// Verbatim: proto3 defaults (`""`/`0`) are what "no hint" looks like on the wire.
     pub resume_space_id: String,
     pub resume_tab_id: u64,
     pub resume_pane_id: u32,
-    /// The client view the attach names, verbatim.
     pub client_instance_id: String,
 }
 
-/// One observed `mouse` frame on an `AttachTerminal` stream.
-///
-/// Wire types (`MouseKind`), never a feature's own — see [`net`](self)'s
-/// module docs on why nothing under `src/net` names a feature.
+/// Wire types only; nothing under `src/net` names a feature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MouseObservation {
     pub kind: MouseKind,
@@ -410,8 +339,7 @@ pub struct MouseObservation {
     pub row: u32,
 }
 
-/// The drive half of the fixture's `WatchAgents` support: every call is counted, and the
-/// newest open stream is the one a lever reaches.
+/// Every call is counted; the newest open stream is the one a lever reaches.
 #[derive(Default)]
 pub struct AgentScript {
     state: Mutex<AgentState>,
@@ -419,13 +347,10 @@ pub struct AgentScript {
 
 #[derive(Default)]
 struct AgentState {
-    /// `WatchAgents` calls that opened a stream.
     opened: usize,
-    /// `WatchAgents` calls turned away as `UNAUTHENTICATED`.
     refused: usize,
-    /// Whether a new call is turned away as `UNAUTHENTICATED`.
     unauthenticated: bool,
-    /// The newest stream's sender; dropping it ends that stream cleanly.
+    /// Dropping it ends that stream cleanly.
     stream: Option<mpsc::Sender<Result<AgentEvent, Status>>>,
 }
 
@@ -434,41 +359,35 @@ impl AgentScript {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// How many `WatchAgents` calls opened a stream.
     pub fn opened(&self) -> usize {
         self.state().opened
     }
 
-    /// How many `WatchAgents` calls were refused as `UNAUTHENTICATED`.
     pub fn refused(&self) -> usize {
         self.state().refused
     }
 
-    /// Refuse every new `WatchAgents` call as `UNAUTHENTICATED` (a revoked token).
     pub fn refuse_unauthenticated(&self, refuse: bool) {
         self.state().unauthenticated = refuse;
     }
 
-    /// Send `event` on the newest stream. Dropped when none is open.
+    /// Dropped when no stream is open.
     pub fn push(&self, event: AgentEvent) {
         if let Some(stream) = self.state().stream.as_ref() {
             let _ = stream.try_send(Ok(event));
         }
     }
 
-    /// End the newest stream with `UNAVAILABLE`, a transport-shaped failure.
     pub fn fail(&self) {
         if let Some(stream) = self.state().stream.take() {
             let _ = stream.try_send(Err(Status::unavailable("the agents stream dropped")));
         }
     }
 
-    /// End the newest stream cleanly, as a server with nothing more to say does.
     pub fn end(&self) {
         self.state().stream = None;
     }
 
-    /// Whether the newest stream's client side has gone away.
     pub fn client_gone(&self) -> bool {
         self.state()
             .stream
@@ -476,8 +395,7 @@ impl AgentScript {
             .is_none_or(mpsc::Sender::is_closed)
     }
 
-    /// Count the call and answer whether it is refused; an accepted one becomes the newest
-    /// stream, its predecessor ending cleanly.
+    /// An accepted call becomes the newest stream; its predecessor ends cleanly.
     fn open(&self, stream: mpsc::Sender<Result<AgentEvent, Status>>) -> Result<(), Status> {
         let mut state = self.state();
         if state.unauthenticated {
@@ -490,25 +408,15 @@ impl AgentScript {
     }
 }
 
-/// What a test tells the currently-attached stream to do.
 enum ServerCommand {
-    /// Send these bytes as a `render` frame.
     Render(Vec<u8>),
-    /// Send a [`CONTROL_EXIT`] control event and end cleanly.
     Exit,
-    /// End the stream where it stands, saying nothing.
     Kill,
-    /// Go silent with the stream and its connection left open: no frame, no
-    /// end, no read — a half-open connection, short of the keepalive.
+    /// A half-open connection: no frame, no end, no read, short of the keepalive.
     Stall,
 }
 
-/// The record-and-drive half of the fixture's `AttachTerminal` support (see
-/// the [module docs](self)).
-///
-/// Shared with the test through [`MuxrdFixture::terminal`]; every accessor
-/// hands back a snapshot rather than a borrow, so a test never holds the
-/// fixture's lock across an `await`.
+/// Accessors hand back snapshots, so a test never holds the fixture's lock across an `await`.
 #[derive(Default)]
 pub struct TerminalScript {
     state: Mutex<ScriptState>,
@@ -521,92 +429,69 @@ struct ScriptState {
     resizes: Vec<(u16, u16)>,
     mice: Vec<MouseObservation>,
     stalls: usize,
-    /// Whether `AttachTerminal` answers `UNAVAILABLE` instead of opening a stream.
     refusing: bool,
-    /// Attaches refused while refusal was set.
     refused: usize,
-    /// The current stream's command channel, replaced on every attach. `None`
-    /// before the first one.
     commands: Option<mpsc::Sender<ServerCommand>>,
 }
 
 impl TerminalScript {
-    /// Poisoning is recovered from rather than propagated: a panic in one test
-    /// assertion must not turn every later one into a lock error that hides it.
+    /// Poisoning is recovered from, so one failed assertion is not hidden behind lock errors.
     fn state(&self) -> MutexGuard<'_, ScriptState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Every `attach` handshake seen so far, oldest first.
     pub fn attaches(&self) -> Vec<AttachObservation> {
         self.state().attaches.clone()
     }
 
-    /// How many streams have handshaked. The reconnect tests' clock.
     pub fn attach_count(&self) -> usize {
         self.state().attaches.len()
     }
 
-    /// Every `input` frame's bytes, in arrival order.
     pub fn inputs(&self) -> Vec<Vec<u8>> {
         self.state().inputs.clone()
     }
 
-    /// Every `resize` frame's `(cols, rows)` — column-major, matching the app
-    /// (the wire message is `rows`-first).
+    /// Column-major, matching the app; the wire message is `rows`-first.
     pub fn resizes(&self) -> Vec<(u16, u16)> {
         self.state().resizes.clone()
     }
 
-    /// Every `mouse` frame, in arrival order.
     pub fn mice(&self) -> Vec<MouseObservation> {
         self.state().mice.clone()
     }
 
-    /// How many streams have gone silent on [`stall`](Self::stall).
     pub fn stalls(&self) -> usize {
         self.state().stalls
     }
 
-    /// Make every new `AttachTerminal` answer `UNAVAILABLE` (a non-auth failure, so the client
-    /// takes its backoff path) until switched off again. Streams already open are untouched.
+    /// A non-auth failure, so the client takes its backoff path; open streams are untouched.
     pub fn refuse_attaches(&self, refuse: bool) {
         self.state().refusing = refuse;
     }
 
-    /// How many attaches [`refuse_attaches`](Self::refuse_attaches) turned away.
     pub fn refused(&self) -> usize {
         self.state().refused
     }
 
-    /// Send `bytes` to the client as a `render` frame.
     pub fn push_render(&self, bytes: Vec<u8>) {
         self.command(ServerCommand::Render(bytes));
     }
 
-    /// Close the current stream the clean way: a [`CONTROL_EXIT`] event, then
-    /// the end of the stream.
     pub fn send_exit(&self) {
         self.command(ServerCommand::Exit);
     }
 
-    /// Drop the current stream mid-flight, saying nothing — the client sees
-    /// its `AttachTerminal` end and takes its backoff path.
     pub fn kill(&self) {
         self.command(ServerCommand::Kill);
     }
 
-    /// Stall the current stream: it stays open on a live connection and the
-    /// server stops sending and reading, so the client sees nothing at all
-    /// until a keepalive would notice. [`stalls`](Self::stalls) counts it.
+    /// The stream stays open on a live connection while the server stops sending and reading.
     pub fn stall(&self) {
         self.command(ServerCommand::Stall);
     }
 
-    /// Record a handshake and take over the command channel, returning this
-    /// stream's 1-based index. One locked step, so an
-    /// [`attach_count`](Self::attach_count) a test just observed always names
-    /// the stream a following [`kill`](Self::kill) reaches.
+    /// One locked step, so an observed `attach_count` always names the stream a later `kill` reaches.
     fn arm(&self, attach: AttachObservation, commands: mpsc::Sender<ServerCommand>) -> usize {
         let mut state = self.state();
         state.attaches.push(attach);
@@ -614,16 +499,13 @@ impl TerminalScript {
         state.attaches.len()
     }
 
-    /// Queue a command for the current stream. A command with no stream (or
-    /// one whose task has already returned) is dropped: a test that means to
-    /// drive a stream waits for its attach first.
+    /// Dropped when no stream is live; a test waits for its attach first.
     fn command(&self, command: ServerCommand) {
         if let Some(commands) = self.state().commands.as_ref() {
             let _ = commands.try_send(command);
         }
     }
 
-    /// Count and report whether this attach is to be turned away.
     fn refuse(&self) -> bool {
         let mut state = self.state();
         if state.refusing {
@@ -644,9 +526,7 @@ impl TerminalScript {
         self.state().resizes.push((cols, rows));
     }
 
-    /// Record one `mouse` frame; an unrecognised `kind` falls back to
-    /// [`MouseKind::WheelUp`] (variant `0`), the same never-fail rule every
-    /// wire `i32`-to-enum read in this app's `data` layer takes.
+    /// An unrecognised `kind` falls back to [`MouseKind::WheelUp`], the app's never-fail enum read.
     fn record_mouse(&self, mouse: MouseInput) {
         self.state().mice.push(MouseObservation {
             kind: MouseKind::try_from(mouse.kind).unwrap_or(MouseKind::WheelUp),
@@ -656,14 +536,12 @@ impl TerminalScript {
     }
 }
 
-/// Build a `render` frame.
 fn render_frame(bytes: Vec<u8>) -> ServerFrame {
     ServerFrame {
         kind: Some(server_frame::Kind::Render(bytes)),
     }
 }
 
-/// Build a `control` frame.
 fn control_frame(kind: &str, payload: String) -> ServerFrame {
     ServerFrame {
         kind: Some(server_frame::Kind::Control(ControlEvent {
@@ -673,18 +551,12 @@ fn control_frame(kind: &str, payload: String) -> ServerFrame {
     }
 }
 
-/// A `u32` cell count off the wire, clamped into the `u16` the app counts
-/// cells in. A grid wider than 65535 columns is not a case worth modelling.
+/// A grid wider than 65535 columns is not worth modelling.
 fn cells(value: u32) -> u16 {
     u16::try_from(value).unwrap_or(u16::MAX)
 }
 
-/// One attached stream, for its whole life: announce the connection id, then
-/// serve whatever the test scripts and whatever the client sends, until either
-/// side is done.
-///
-/// Sole owner of the response channel's sender, which is what makes "drop the
-/// stream" expressible at all — returning from here ends the client's stream.
+/// Sole owner of the response sender: returning from here ends the client's stream.
 async fn serve_attach(
     index: usize,
     mut inbound: tonic::Streaming<ClientFrame>,
@@ -711,8 +583,7 @@ async fn serve_attach(
                         .await;
                     return;
                 }
-                // Both stream halves stay held, untouched, until a kill or a
-                // newer stream ends this one.
+                // Both halves stay held, untouched, until a kill or a newer stream ends this one.
                 Some(ServerCommand::Stall) => {
                     script.record_stall();
                     while let Some(command) = commands.recv().await {
@@ -722,8 +593,7 @@ async fn serve_attach(
                     }
                     return;
                 }
-                // A dropped command channel means a newer stream took over;
-                // this one is as dead as a killed one.
+                // A newer stream took over; this one is as dead as a killed one.
                 Some(ServerCommand::Kill) | None => return,
             },
             frame = inbound.message() => match frame {
@@ -740,17 +610,14 @@ async fn serve_attach(
                 Ok(Some(ClientFrame { kind: Some(client_frame::Kind::Mouse(mouse)) })) => {
                     script.record_mouse(mouse);
                 }
-                // A second attach frame, or an empty oneof: nothing this
-                // fixture models, and never a reason to fail.
+                // Nothing this fixture models, and never a reason to fail.
                 Ok(Some(_)) => {}
-                // The client hung up, or the transport did.
                 Ok(None) | Err(_) => return,
             },
         }
     }
 }
 
-/// The fixture's `muxr.v1.Muxr` implementation.
 struct FixtureService {
     terminal: Arc<TerminalScript>,
     actions: Arc<ActionLog>,
@@ -779,13 +646,9 @@ impl Muxr for FixtureService {
         }))
     }
 
-    /// The scripted stream [`serve_attach`] writes into — concrete rather than
-    /// boxed, since one channel is the whole response side.
     type AttachTerminalStream = ReceiverStream<Result<ServerFrame, Status>>;
 
-    /// The one streaming RPC. Refuses anything but an `attach` first frame —
-    /// `muxrd`'s own contract, and the fixture must not let a client that
-    /// forgot it pass.
+    /// Refuses anything but an `attach` first frame, as `muxrd` does.
     async fn attach_terminal(
         &self,
         request: Request<tonic::Streaming<ClientFrame>>,
@@ -846,9 +709,7 @@ impl Muxr for FixtureService {
         }))
     }
 
-    /// The agent inventory is outside the fixture's answered subset: no test
-    /// here seeds agents, and a real `muxrd` without the `agents` capability
-    /// answers the same way.
+    /// Unanswered: a real `muxrd` without the `agents` capability answers the same way.
     async fn list_agents(
         &self,
         _request: Request<SessionRef>,
@@ -856,8 +717,7 @@ impl Muxr for FixtureService {
         Err(unsupported("ListAgents"))
     }
 
-    /// Answered by [`AgentScript`]: nothing is sent until a test pushes it, so a test scripts
-    /// even the opening snapshot.
+    /// Nothing is sent until a test pushes it, the opening snapshot included.
     type WatchAgentsStream = ReceiverStream<Result<AgentEvent, Status>>;
 
     async fn watch_agents(
@@ -1080,8 +940,6 @@ impl Muxr for FixtureService {
 mod tests {
     use super::*;
 
-    /// The fixture's own credential check: the exact header shape passes, and
-    /// each way of getting it wrong is `UNAUTHENTICATED`.
     #[test]
     fn require_bearer_accepts_only_the_minted_token() {
         let bearer = |value: &str| {
@@ -1117,8 +975,6 @@ mod tests {
         );
     }
 
-    /// The fixture's certificate is pinnable: its printed fingerprint parses
-    /// back into a pin, which is what every pinned test depends on.
     #[tokio::test]
     async fn fixture_publishes_a_pinnable_fingerprint() {
         let fixture = MuxrdFixture::start().await;
@@ -1133,8 +989,6 @@ mod tests {
         assert_ne!(fixture.port(), 0);
     }
 
-    /// A one-shot workspace-verb RPC requires the same bearer credential as
-    /// every other authenticated RPC, records its request, and acks.
     #[tokio::test]
     async fn a_workspace_verb_rpc_requires_auth_records_and_acks() {
         let fixture = MuxrdFixture::start().await;
@@ -1165,9 +1019,6 @@ mod tests {
         assert_eq!(fixture.actions().create_space_calls(), vec![request]);
     }
 
-    /// The remaining seven workspace-verb RPCs each record their exact request
-    /// and ack — one call per RPC, the same "record then succeed" contract
-    /// [`ActionLog`] documents.
     #[tokio::test]
     async fn every_remaining_workspace_verb_rpc_records_and_acks() {
         let fixture = MuxrdFixture::start().await;
@@ -1287,8 +1138,6 @@ mod tests {
         assert_eq!(actions.scroll_pane_calls(), vec![scroll]);
     }
 
-    /// A `mouse` frame on an `AttachTerminal` stream is recorded verbatim,
-    /// alongside `input`/`resize` on the same stream.
     #[tokio::test]
     async fn attach_terminal_records_mouse_frames() {
         let fixture = MuxrdFixture::start().await;
@@ -1314,8 +1163,7 @@ mod tests {
             .await
             .expect("the fixture accepts the attach")
             .into_inner();
-        // Drain the connection-id announcement so the stream is fully live
-        // before sending a mouse frame.
+        // Drain the connection-id announcement so the stream is live first.
         stream.message().await.expect("a control frame arrives");
 
         outbound
