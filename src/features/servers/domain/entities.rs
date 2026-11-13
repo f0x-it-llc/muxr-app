@@ -1,10 +1,5 @@
-//! The switcher's plain-data model: one [`ServerFace`] per remembered server,
-//! and the pure [`faces_for`] that orders and classifies them.
-//!
-//! Deviation: reads `connect`'s own [`SavedServer`] and [`TrustMode`] rather
-//! than minting a second saved-server type (the `pro` domain does the same),
-//! and carries `sessions`' own domain [`Session`] in a [`PageSnapshot`] rather
-//! than mirroring it: the cache holds the list exactly as the page rendered it.
+//! The switcher's plain-data model: one [`ServerFace`] per remembered server, ordered and classified by the pure [`faces_for`].
+//! Reuses `connect`'s [`SavedServer`] and [`TrustMode`] and `sessions`' [`Session`] rather than mirroring them.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,72 +8,51 @@ use crate::connection::{ServerInfo, TrustMode};
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::sessions::domain::entities::Session;
 
-/// One session as a non-live face remembers it. Strings only, so the
-/// `sessions` slice can fill it without sharing a type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionGlimpse {
     pub name: String,
-    /// The backend's short label (`zellij`, `herdr`).
     pub backend: String,
     pub running: bool,
-    /// The dim second line (`2h · 3 tabs · 5 panes`).
     pub meta_line: String,
 }
 
-/// The Sessions page as a server last showed it: the list items exactly as
-/// the page renders them (agents summary included) and the header facts the
-/// page prints. Plain data, never a secret (`ServerInfo` carries the
-/// endpoint, versions and posture, no token).
+/// Plain data, never a secret: `ServerInfo` carries no token.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageSnapshot {
     pub sessions: Vec<Session>,
-    /// The handshake facts the strip and the bar title read; `None` when the
-    /// connection named none.
     pub info: Option<ServerInfo>,
     pub read_only: bool,
 }
 
-/// Everything remembered about one server's last listing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SeenServer {
-    /// The glimpse list: the fallback face for an entry with no `page`.
     pub glimpses: Vec<SessionGlimpse>,
-    /// The epoch-ms stamp the listing was seen at.
     pub seen_at_ms: i64,
-    /// The full page state the snapshot card re-renders; shared, so a strip
-    /// refresh copies a pointer, not the list.
+    /// Shared, so a strip refresh copies a pointer, not the list.
     pub page: Option<Arc<PageSnapshot>>,
 }
 
 /// What each server last showed this process, by endpoint. Never persisted.
 pub type LastSeen = BTreeMap<String, SeenServer>;
 
-/// What a card shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FaceKind {
-    /// The connected server; the switcher scales the real page instead of
-    /// drawing a face.
+    /// The connected server; the switcher scales the real page instead of drawing a face.
     Live,
-    /// Not connected, but listed earlier in this process.
     Cached {
         sessions: Vec<SessionGlimpse>,
         last_seen_ms: i64,
-        /// The full page state, when the listing filed one: the shell renders
-        /// it as the card; without it the glimpse list is the face.
         page: Option<Arc<PageSnapshot>>,
     },
-    /// Never connected in this process, and nothing to unlock.
     Never,
-    /// A stored credential the keyring has not opened yet.
     Locked,
-    /// The last switch to it failed.
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
-/// One card of the strip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerFace {
-    /// `host:port`, the row's identity.
     pub endpoint: String,
     pub label: String,
     pub trust_mode: TrustMode,
@@ -86,12 +60,7 @@ pub struct ServerFace {
     pub kind: FaceKind,
 }
 
-/// The strip, in `order` (endpoints, left to right): a saved row `order` does
-/// not name goes after the named ones, in the saved list's own order. Nothing
-/// reorders on use: the `active` row keeps its slot. A non-active row is
-/// `Failed` when `failures` names it, else `Locked` when it claims a
-/// credential and the keyring is shut, else `Cached` when `cache` holds it,
-/// else `Never`.
+/// A saved row `order` does not name goes after the named ones; nothing reorders on use. Non-active rows are `Failed`, else `Locked`, else `Cached`, else `Never`.
 pub fn faces_for(
     saved: &[SavedServer],
     order: &[String],

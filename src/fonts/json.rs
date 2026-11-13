@@ -1,49 +1,22 @@
-//! A minimal, read-only JSON value and parser — the font manifest's wire
-//! format, and nothing else.
-//!
-//! **Why hand-rolled (again).** The app already hand-rolls JSON once, for the
-//! saved-server store (`features::connect::data::repositories::json`); that
-//! copy is `pub(super)` inside a *feature's* `data` layer, and an app-level
-//! module reaching into it would be the layering violation
-//! `docs/ARCHITECTURE.md` forbids — so this is a second, narrower copy rather
-//! than a shared import. It is **parse-only**: nothing here re-encodes a
-//! manifest (the cached copy is the fetched bytes, verbatim), so it has no
-//! encoder half. Promoting one shared `crate::json` beside `failure.rs` is the
-//! obvious follow-up once a third consumer appears.
-//!
-//! **Contract.** [`parse`] answers `None` for anything that is not
-//! well-formed JSON — the catalog above treats that as "no catalog", never a
-//! panic. Numbers are `f64`: the largest value this schema carries is a font
-//! file's byte count (~3e6), far inside `f64`'s exact range.
+//! A minimal, parse-only JSON value and parser for the font manifest.
+//! Hand-rolled because the connect feature's copy is private to its data layer; numbers are `f64`.
+//! [`parse`] answers `None` for anything that is not well-formed JSON.
 
-/// How deep a nested array/object may go before [`parse`] gives up. The
-/// manifest is three levels (an object holding an array of objects holding an
-/// array of objects); the limit exists so a hostile or hand-edited payload
-/// cannot recurse this parser into a stack overflow.
+/// Nesting limit so a hostile payload cannot overflow the stack (the manifest is three levels deep).
 const MAX_DEPTH: usize = 32;
 
-/// One JSON value.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Json {
-    /// `null`.
     Null,
-    /// `true`/`false`.
     Bool(bool),
-    /// Any JSON number (see the [module docs](self)' note on `f64`).
     Number(f64),
-    /// A string, with every escape already resolved.
     String(String),
-    /// An array, in source order.
     Array(Vec<Json>),
-    /// An object, in source order. A `Vec` rather than a map: the manifest has
-    /// a handful of known keys per level, and a duplicate key (legal JSON)
-    /// resolves first-wins through [`Json::get`] rather than needing a map's
-    /// own policy.
+    /// In source order; a duplicate key resolves first-wins through [`Json::get`].
     Object(Vec<(String, Json)>),
 }
 
 impl Json {
-    /// This value as a string, or `None` if it is not one.
     pub(super) fn as_str(&self) -> Option<&str> {
         match self {
             Json::String(value) => Some(value),
@@ -51,7 +24,6 @@ impl Json {
         }
     }
 
-    /// This value as a bool, or `None` if it is not one.
     pub(super) fn as_bool(&self) -> Option<bool> {
         match self {
             Json::Bool(value) => Some(*value),
@@ -59,9 +31,7 @@ impl Json {
         }
     }
 
-    /// This value as a non-negative whole number, or `None` if it is not a
-    /// number, is negative, or carries a fractional part (which this schema
-    /// never writes, and which rounding would silently accept).
+    /// Rejects negative and fractional numbers rather than rounding them.
     pub(super) fn as_u64(&self) -> Option<u64> {
         match self {
             Json::Number(value) if value.fract() == 0.0 && value.is_finite() && *value >= 0.0 => {
@@ -71,7 +41,6 @@ impl Json {
         }
     }
 
-    /// This value's elements, or `None` if it is not an array.
     pub(super) fn as_array(&self) -> Option<&[Json]> {
         match self {
             Json::Array(items) => Some(items),
@@ -79,8 +48,6 @@ impl Json {
         }
     }
 
-    /// The value stored under `key`, or `None` for a non-object (or an object
-    /// without it). First match wins on a duplicate key.
     pub(super) fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Object(fields) => fields
@@ -92,8 +59,6 @@ impl Json {
     }
 }
 
-/// Parse `input` as one JSON document, or `None` if it is malformed (or
-/// carries trailing content past the top-level value).
 pub(super) fn parse(input: &str) -> Option<Json> {
     let bytes = input.as_bytes();
     let mut cursor = Cursor { bytes, at: 0 };
@@ -107,19 +72,16 @@ pub(super) fn parse(input: &str) -> Option<Json> {
     }
 }
 
-/// A byte cursor over the document being parsed.
 struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl Cursor<'_> {
-    /// The byte at the cursor, without consuming it.
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.at).copied()
     }
 
-    /// Consume `byte` if it is next; report whether it was.
     fn eat(&mut self, byte: u8) -> bool {
         if self.peek() == Some(byte) {
             self.at += 1;
@@ -129,14 +91,12 @@ impl Cursor<'_> {
         }
     }
 
-    /// Skip JSON's four whitespace bytes.
     fn skip_whitespace(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.at += 1;
         }
     }
 
-    /// One value at `depth`, or `None` for malformed input.
     fn value(&mut self, depth: usize) -> Option<Json> {
         if depth > MAX_DEPTH {
             return None;
@@ -152,7 +112,6 @@ impl Cursor<'_> {
         }
     }
 
-    /// Consume `word` exactly, or report `false` (leaving the cursor put).
     fn literal(&mut self, word: &[u8]) -> bool {
         if self.bytes[self.at..].starts_with(word) {
             self.at += word.len();
@@ -162,7 +121,6 @@ impl Cursor<'_> {
         }
     }
 
-    /// `{ "key": value, .. }`.
     fn object(&mut self, depth: usize) -> Option<Json> {
         self.at += 1; // '{'
         let mut fields = Vec::new();
@@ -188,7 +146,6 @@ impl Cursor<'_> {
         }
     }
 
-    /// `[ value, .. ]`.
     fn array(&mut self, depth: usize) -> Option<Json> {
         self.at += 1; // '['
         let mut items = Vec::new();
@@ -207,7 +164,6 @@ impl Cursor<'_> {
         }
     }
 
-    /// A `"…"` string with every escape resolved (including surrogate pairs).
     fn string(&mut self) -> Option<String> {
         if !self.eat(b'"') {
             return None;
@@ -234,12 +190,8 @@ impl Cursor<'_> {
                         _ => return None,
                     }
                 }
-                // A raw control byte is illegal in a JSON string.
                 0x00..=0x1f => return None,
                 _ => {
-                    // Any other byte is part of a UTF-8 sequence: copy the
-                    // whole sequence over verbatim (the input is already a
-                    // `&str`, so it is valid UTF-8 by construction).
                     let start = self.at - 1;
                     while self.peek().is_some_and(|next| (0x80..0xc0).contains(&next)) {
                         self.at += 1;
@@ -250,11 +202,8 @@ impl Cursor<'_> {
         }
     }
 
-    /// A `\uXXXX` escape's character, joining a surrogate pair when one
-    /// follows.
     fn unicode_escape(&mut self) -> Option<char> {
         let first = self.hex4()?;
-        // A high surrogate is only meaningful paired with its low half.
         if (0xd800..0xdc00).contains(&first) {
             if !self.eat(b'\\') || !self.eat(b'u') {
                 return None;
@@ -270,7 +219,6 @@ impl Cursor<'_> {
         char::from_u32(u32::from(first))
     }
 
-    /// Four hex digits, as a `u16`.
     fn hex4(&mut self) -> Option<u16> {
         let end = self.at.checked_add(4)?;
         let digits = self.bytes.get(self.at..end)?;
@@ -280,7 +228,6 @@ impl Cursor<'_> {
         Some(value)
     }
 
-    /// A JSON number, parsed by `f64`'s own parser over the span this scans.
     fn number(&mut self) -> Option<Json> {
         let start = self.at;
         if self.peek() == Some(b'-') {

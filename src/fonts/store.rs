@@ -1,31 +1,6 @@
-//! The on-disk font cache and the process-wide record of what is installed.
-//! Everything here is **blocking** — file reads, hashing, font parsing — and
-//! every caller reaches it through `frust::spawn_blocking`, never the UI thread.
-//!
-//! Layout: `<data dir>/fonts/<sanitized family>/` holds each cached file plus
-//! a `meta` sidecar (family / display name / manifest family / file hashes).
-//! Installed *is* the cache's contents: nothing about a downloaded font
-//! touches the preferences store, so clearing app storage clears the fonts
-//! too; the only preference that survives is the family name the terminal
-//! resolves (`super::resolve_terminal_family` degrades to the bundled stack).
-//!
-//! **Integrity: SHA-256, mandatory, before anything is written.**
-//! [`install_downloaded`] verifies every downloaded file — size cap, sfnt
-//! magic, then the manifest's SHA-256 — while the bytes are still in memory.
-//! The sfnt magic check is a cheap format probe only; it is **not** the
-//! integrity mechanism — the SHA-256 is what proves the bytes are what the
-//! manifest promised. A mismatch fails the install with nothing left on
-//! disk, as a generic [`AppFailure::Internal`] (no detail shown to the
-//! user). [`scan_cache_and_register`] re-verifies the same hashes at
-//! startup and deletes any family that no longer matches, dropped but never
-//! fatal.
-//!
-//! **The family name is fontique's, not the manifest's.** The string a
-//! `FontFamily` stack must carry is whatever fontique resolves the bytes
-//! into, not a manifest entry's claim. [`install_downloaded`] registers the
-//! entry's first file into a throwaway [`TextContext`] and reads the resolved
-//! name back — that name wins (a disagreement is logged), the price of never
-//! silently installing an unresolvable font.
+//! The on-disk font cache (`<data dir>/fonts/<sanitized family>/`: files plus a `meta` sidecar) and the installed record.
+//! Blocking; callers use `frust::spawn_blocking`. SHA-256 is mandatory and verified in memory before anything is written; the sfnt magic is only a format probe.
+//! The registered family is whatever fontique resolves the bytes into, not the manifest's claim.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -38,56 +13,34 @@ use crate::failure::AppFailure;
 use super::manifest::{FontEntry, FontFile};
 use super::source::MAX_FONT_BYTES;
 
-/// The cache directory's name under the app's data directory.
 const FONTS_DIR: &str = "fonts";
-/// The cached catalog's filename inside it.
 const MANIFEST_FILE: &str = "manifest.json";
-/// One family's sidecar filename.
 const META_FILE: &str = "meta";
 
-/// Valid `sfnt` magic prefixes — TrueType outlines, `OTTO` (CFF/OpenType), and
-/// legacy Apple `true`. A cheap format probe, run before the hash so obvious
-/// garbage (an HTML error page served with a 200) is refused early.
+/// Valid `sfnt` magic prefixes: TrueType, `OTTO` (CFF), legacy Apple `true`.
 const SFNT_MAGICS: [&[u8; 4]; 3] = [b"\x00\x01\x00\x00", b"OTTO", b"true"];
 
-/// One installed, downloaded family — the process-wide record
-/// [`super::installed_families`] folds in beside the bundled faces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InstalledFont {
-    /// The family fontique resolved — what a `FontFamily` stack names and what
-    /// the preference persists.
+    /// The family fontique resolved: what a stack names and the preference persists.
     family: String,
-    /// The catalog's label for it, for the picker and the settings row.
     display_name: String,
-    /// The family the *manifest* claimed, when it differed from
-    /// [`Self::family`] — the picker resolves a catalog row's true family
-    /// through this alias (see [`registered_family_for`]).
+    /// The manifest's claim, when it differed from [`Self::family`].
     manifest_family: String,
 }
 
-/// The process-wide record of every downloaded family registered this run.
 static INSTALLED: Mutex<Vec<InstalledFont>> = Mutex::new(Vec::new());
 
-/// The cache root override [`use_font_cache_dir_for_tests`] installs.
 static CACHE_DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// Point the font cache at `dir` (used verbatim — no `fonts/` suffix is
-/// appended) for the rest of this process's life. **Test-only**, the same
-/// process-static shape `features::settings::di`'s repository seams use: a
-/// `tests/*.rs` binary links the ordinary build of this crate, so a
-/// `#[cfg(test)]` helper would be unreachable there.
+/// Used verbatim (no `fonts/` suffix). Test-only: a `tests/*.rs` binary cannot reach a `#[cfg(test)]` helper.
 pub fn use_font_cache_dir_for_tests(dir: PathBuf) {
     *CACHE_DIR_OVERRIDE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(dir);
 }
 
-/// Forget every downloaded family this process has registered. **Test-only**
-/// (same contract as [`use_font_cache_dir_for_tests`]): the record is a
-/// process-wide static, so a suite that installs a font would otherwise leak
-/// it into every later test in the same binary. It cannot un-register the
-/// bytes themselves — that is the framework's process-wide registry, and
-/// nothing but a fresh process clears it.
+/// Test-only. Cannot un-register font bytes; only a fresh process clears the framework registry.
 pub fn reset_installed_fonts_for_tests() {
     INSTALLED
         .lock()
@@ -95,14 +48,11 @@ pub fn reset_installed_fonts_for_tests() {
         .clear();
 }
 
-/// The cache root: `<override>` when a test installed one, else the platform
-/// data directory joined with [`FONTS_DIR`].
+/// The cache root: the test override, else the platform data directory joined with [`FONTS_DIR`].
 ///
 /// # Errors
 ///
-/// [`AppFailure::Storage`] when no data directory resolves at all — a desktop
-/// environment with neither `HOME` nor `APPDATA`, or an Android process whose
-/// platform handles the shell installs are not up yet.
+/// [`AppFailure::Storage`] when no data directory resolves.
 fn cache_root() -> Result<PathBuf, AppFailure> {
     if let Some(dir) = CACHE_DIR_OVERRIDE
         .lock()
@@ -118,37 +68,20 @@ fn cache_root() -> Result<PathBuf, AppFailure> {
         })
 }
 
-/// The app-private directory the cache hangs off.
-///
-/// Off Android this is `frust-paths`' own resolution (`$XDG_DATA_HOME`/
-/// `$HOME/.local/share`, `%APPDATA%`), namespaced per binary by
-/// `frust_paths::app_stem` — same as `frust-shared-preferences`' file
-/// backend — so two Frust apps on one desktop never share a cache. On iOS
-/// that resolves inside the app's own sandbox container.
+/// Off Android this is `frust-paths`' resolution, namespaced per binary.
 #[cfg(not(target_os = "android"))]
 fn platform_data_dir() -> Option<PathBuf> {
     frust_paths::data_dir().map(|dir| dir.join(frust_paths::app_stem()))
 }
 
-/// Android's own app-private files directory (`Context.getFilesDir()`).
-///
-/// `frust-paths` cannot answer this: its Unix branch resolves
-/// `$XDG_DATA_HOME`/`$HOME`, and an Android app process has neither pointing
-/// anywhere writable — a download would EPERM otherwise. The `Context` comes
-/// from `frust_plugin::android::with_jni_env`, the same accessor
-/// `src/net/tls.rs` uses for the TLS verifier's own JNI init. No per-binary
-/// namespacing needed — the directory is already app-private.
-///
-/// Falls back to `frust-paths` if the handles aren't installed yet (a call
-/// racing the shell's `nativeInitPlatform`), so the ladder is never a hard
-/// failure where the fallback might still work.
+/// Android's app-private files directory; `frust-paths` cannot answer it (no writable `$HOME`).
+/// Falls back to `frust-paths` when the platform handles are not installed yet.
 #[cfg(target_os = "android")]
 fn platform_data_dir() -> Option<PathBuf> {
     android_files_dir()
         .or_else(|| frust_paths::data_dir().map(|dir| dir.join(frust_paths::app_stem())))
 }
 
-/// `context.getFilesDir().getAbsolutePath()`, or `None` if any step fails.
 #[cfg(target_os = "android")]
 fn android_files_dir() -> Option<PathBuf> {
     use jni::objects::JString;
@@ -183,11 +116,6 @@ fn android_files_dir() -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
-// ---------------------------------------------------------------------------
-// The installed record
-// ---------------------------------------------------------------------------
-
-/// Every downloaded family registered this process, in registration order.
 pub fn installed_downloads() -> Vec<String> {
     INSTALLED
         .lock()
@@ -197,7 +125,6 @@ pub fn installed_downloads() -> Vec<String> {
         .collect()
 }
 
-/// Whether `family` names a downloaded family this process has registered.
 pub fn is_downloaded(family: &str) -> bool {
     INSTALLED
         .lock()
@@ -206,10 +133,7 @@ pub fn is_downloaded(family: &str) -> bool {
         .any(|font| font.family == family)
 }
 
-/// The catalog label a downloaded `family` was installed under, if any — what
-/// the picker row and the settings row print instead of the raw family name
-/// (`BlexMono Nerd Font Mono` → `IBM Plex Mono Nerd Font Mono`). Survives a
-/// relaunch through the `meta` sidecar, so it needs no live catalog.
+/// Survives a relaunch through the `meta` sidecar, so it needs no live catalog.
 pub fn display_name_for(family: &str) -> Option<String> {
     INSTALLED
         .lock()
@@ -219,9 +143,7 @@ pub fn display_name_for(family: &str) -> Option<String> {
         .map(|font| font.display_name.clone())
 }
 
-/// The family a catalog entry claiming `manifest_family` actually registered
-/// as, when the two disagreed (see the [module docs](self)). `None` when this
-/// entry has never been installed here, or when the manifest was right.
+/// `None` when the entry was never installed here or the manifest was right.
 pub fn registered_family_for(manifest_family: &str) -> Option<String> {
     INSTALLED
         .lock()
@@ -231,7 +153,6 @@ pub fn registered_family_for(manifest_family: &str) -> Option<String> {
         .map(|font| font.family.clone())
 }
 
-/// Record `font` unless its family is already known.
 fn remember(font: InstalledFont) {
     let mut installed = INSTALLED
         .lock()
@@ -242,20 +163,12 @@ fn remember(font: InstalledFont) {
     installed.push(font);
 }
 
-// ---------------------------------------------------------------------------
-// The cached catalog
-// ---------------------------------------------------------------------------
-
-/// The last catalog document that parsed, if one was cached — what the picker
-/// renders when the network is gone.
 pub fn read_cached_manifest() -> Option<Vec<u8>> {
     let path = cache_root().ok()?.join(MANIFEST_FILE);
     std::fs::read(path).ok()
 }
 
-/// Cache `bytes` as the catalog's last known good copy. Best-effort: a failed
-/// write is logged and swallowed, since the catalog it came from is already in
-/// hand.
+/// Best-effort: a failed write is logged and swallowed.
 pub fn write_cached_manifest(bytes: &[u8]) {
     let Ok(root) = cache_root() else {
         return;
@@ -265,23 +178,14 @@ pub fn write_cached_manifest(bytes: &[u8]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Install
-// ---------------------------------------------------------------------------
-
-/// Verify, cache and register a downloaded entry; answer the family it
-/// registered as.
+/// Verify, cache and register a downloaded entry; answers the family it registered as.
 ///
-/// `files` pairs each of `entry`'s files with its downloaded bytes, in any
-/// order. Blocking — call it from `frust::spawn_blocking`.
+/// `files` pairs each of `entry`'s files with its bytes, in any order. Blocking.
 ///
 /// # Errors
 ///
-/// - [`AppFailure::Internal`] — a size/magic/SHA-256 check failed, or the
-///   bytes carry no font fontique can parse. **Nothing is written**: every
-///   check runs against the in-memory bytes first.
-/// - [`AppFailure::Storage`] — the cache directory could not be resolved or
-///   written. A partial write is removed before this returns.
+/// - [`AppFailure::Internal`]: a size/magic/SHA-256 check failed or no font parses. Nothing is written.
+/// - [`AppFailure::Storage`]: the cache directory could not be written; a partial write is removed.
 pub fn install_downloaded(
     entry: &FontEntry,
     files: Vec<(FontFile, Vec<u8>)>,
@@ -296,7 +200,6 @@ pub fn install_downloaded(
         verify(file, bytes)?;
     }
 
-    // The name probe, before anything touches the disk (see the module docs).
     let family = probe_family(&files[0].1).ok_or_else(|| {
         AppFailure::Internal(format!(
             "font install: {} carries no parseable font faces",
@@ -315,8 +218,7 @@ pub fn install_downloaded(
 
     let dir = cache_root()?.join(family_key(&family));
     if let Err(err) = write_family(&dir, entry, &family, &files) {
-        // Never leave a half-written family behind for the next startup scan
-        // to trip over.
+        // Never leave a half-written family for the next startup scan.
         let _ = std::fs::remove_dir_all(&dir);
         return Err(err);
     }
@@ -332,7 +234,6 @@ pub fn install_downloaded(
     Ok(family)
 }
 
-/// Write every file plus the `meta` sidecar into `dir`.
 fn write_family(
     dir: &Path,
     entry: &FontEntry,
@@ -348,8 +249,6 @@ fn write_family(
         .map_err(|err| AppFailure::Storage(format!("caching the {family} sidecar: {err}")))
 }
 
-/// Check one downloaded file against its manifest record: the size cap, the
-/// sfnt magic, then — the one that matters — its SHA-256.
 fn verify(file: &FontFile, bytes: &[u8]) -> Result<(), AppFailure> {
     if bytes.len() as u64 > MAX_FONT_BYTES {
         return Err(AppFailure::Internal(format!(
@@ -373,15 +272,12 @@ fn verify(file: &FontFile, bytes: &[u8]) -> Result<(), AppFailure> {
     Ok(())
 }
 
-/// Whether `bytes` open with a recognized `sfnt` magic prefix.
 fn has_sfnt_magic(bytes: &[u8]) -> bool {
     SFNT_MAGICS
         .iter()
         .any(|magic| bytes.starts_with(magic.as_slice()))
 }
 
-/// `bytes`' SHA-256, lowercase hex — the same digest spelling the manifest
-/// uses.
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
@@ -392,8 +288,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// The family name fontique resolves `bytes` into, or `None` if it parses no
-/// faces at all. See the [module docs](self)' name section for the cost.
 fn probe_family(bytes: &[u8]) -> Option<String> {
     let mut cx = TextContext::new();
     let registered = cx.register_fonts(bytes.to_vec()).ok()?;
@@ -403,7 +297,6 @@ fn probe_family(bytes: &[u8]) -> Option<String> {
         .find(|name| !name.is_empty())
 }
 
-/// A filesystem-safe directory name for `family`.
 fn family_key(family: &str) -> String {
     family
         .chars()
@@ -417,14 +310,7 @@ fn family_key(family: &str) -> String {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// The `meta` sidecar
-// ---------------------------------------------------------------------------
-
-/// One family's sidecar: the two names, the manifest's own claim, and one
-/// `<sha256> <filename>` line per cached file. Hand-written line format
-/// rather than JSON: this app writes no JSON anywhere (`super::json` is
-/// parse-only), and three keys plus a file list doesn't justify an encoder.
+/// Line format: the two names, the manifest's claim, then one `<sha256> <filename>` line per cached file.
 fn encode_meta(entry: &FontEntry, family: &str, files: &[(FontFile, Vec<u8>)]) -> String {
     let mut out = String::new();
     out.push_str(&format!("family={family}\n"));
@@ -436,16 +322,13 @@ fn encode_meta(entry: &FontEntry, family: &str, files: &[(FontFile, Vec<u8>)]) -
     out
 }
 
-/// A parsed sidecar.
 struct Meta {
     family: String,
     display_name: String,
     manifest_family: String,
-    /// `(sha256, filename)` per cached file.
     files: Vec<(String, String)>,
 }
 
-/// Parse a sidecar, or `None` if it is missing a name or a file list.
 fn parse_meta(text: &str) -> Option<Meta> {
     let mut family = String::new();
     let mut display_name = String::new();
@@ -484,24 +367,13 @@ fn parse_meta(text: &str) -> Option<Meta> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Startup scan
-// ---------------------------------------------------------------------------
-
-/// Re-register every valid cached family, dropping the ones that no longer
-/// verify; answer the families registered.
-///
-/// Blocking — `super::register_cached_fonts_at_startup` is the one caller, and
-/// it runs this on a background worker. Never fails: an unreadable cache root
-/// answers an empty list, and a family whose sidecar is gone, unparseable, or
-/// whose bytes no longer hash to what the sidecar recorded is **deleted** and
-/// skipped. A corrupt cache must never keep the app from starting.
+/// Re-registers every valid cached family and answers them. Never fails: an unreadable root answers an empty
+/// list, and a family with a missing, unparseable or non-matching sidecar is deleted and skipped.
 pub fn scan_cache_and_register() -> Vec<String> {
     let Ok(root) = cache_root() else {
         return Vec::new();
     };
     let Ok(entries) = std::fs::read_dir(&root) else {
-        // No cache yet is the ordinary cold-start case, not a failure.
         return Vec::new();
     };
 
@@ -538,15 +410,12 @@ pub fn scan_cache_and_register() -> Vec<String> {
     registered
 }
 
-/// One cached family's sidecar plus its verified file bytes, or `None` when
-/// anything about it fails to check out.
 fn load_cached_family(dir: &Path) -> Option<(Meta, Vec<Vec<u8>>)> {
     let text = std::fs::read_to_string(dir.join(META_FILE)).ok()?;
     let meta = parse_meta(&text)?;
     let mut payloads = Vec::with_capacity(meta.files.len());
     for (sha, name) in &meta.files {
-        // A sidecar naming a path rather than a filename would escape the
-        // cache directory; refuse it outright.
+        // A sidecar naming a path would escape the cache directory.
         if name.contains('/') || name.contains('\\') || name.is_empty() {
             return None;
         }
@@ -564,14 +433,10 @@ mod tests {
     use super::*;
     use std::sync::MutexGuard;
 
-    /// The bundled regular face — a real, parseable TTF for the tests that
-    /// need one. Its family (`JetBrains Mono`) is what the probe must report
-    /// no matter what a manifest entry claims.
+    /// A real TTF; its family (`JetBrains Mono`) is what the probe must report whatever a manifest claims.
     const REAL_FONT: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
 
-    /// Serializes every test here against the process-wide statics this module
-    /// owns (the installed record, the cache-dir override) — the same shape
-    /// `frust-shell-common`'s own registry tests use for their global slot.
+    /// Serializes tests against the process-wide statics (installed record, cache-dir override).
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn serial() -> MutexGuard<'static, ()> {
@@ -580,8 +445,6 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// A fresh, empty cache root under the OS temp directory, installed as the
-    /// process's cache for the rest of the test.
     fn temp_cache(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "muxr-fonts-{tag}-{}-{:?}",
@@ -598,7 +461,6 @@ mod tests {
         dir
     }
 
-    /// A one-file entry over `bytes`, claiming `family`.
     fn entry_for(family: &str, bytes: &[u8]) -> (FontEntry, Vec<(FontFile, Vec<u8>)>) {
         let file = FontFile {
             name: "Fixture-Regular.ttf".to_string(),
@@ -622,8 +484,7 @@ mod tests {
         let _guard = serial();
         let root = temp_cache("mismatch");
         let (entry, mut files) = entry_for("Fixture Mono", REAL_FONT);
-        // One flipped byte: still a font by magic, no longer the file the
-        // manifest vouched for.
+        // One flipped byte: a font by magic, but not the file the manifest vouched for.
         files[0].1[400] ^= 0xff;
 
         let failure = install_downloaded(&entry, files).expect_err("a mismatch must be refused");
@@ -644,8 +505,7 @@ mod tests {
     fn bytes_that_are_not_a_font_are_refused_before_any_hashing_matters() {
         let _guard = serial();
         let root = temp_cache("magic");
-        // An HTML error page served with a 200 — the shape the magic check
-        // exists for. Its hash is honest, so only the magic can catch it.
+        // An honest hash on an HTML page: only the magic check can catch it.
         let payload = b"<!DOCTYPE html><html>404</html>".to_vec();
         let (entry, mut files) = entry_for("Fixture Mono", REAL_FONT);
         files[0].0.sha256 = sha256_hex(&payload);
@@ -662,7 +522,6 @@ mod tests {
     fn a_verified_download_is_cached_registered_and_recorded_under_the_reported_family() {
         let _guard = serial();
         let root = temp_cache("install");
-        // The manifest lies about the family; the probe is what settles it.
         let (entry, files) = entry_for("Fixture Mono", REAL_FONT);
 
         let family = install_downloaded(&entry, files).expect("a verified install");
@@ -767,8 +626,7 @@ mod tests {
 
     #[test]
     fn a_sidecar_naming_a_path_rather_than_a_filename_is_refused() {
-        // Path traversal through the sidecar: `../../` would otherwise read
-        // (and then register) a file from outside the cache entirely.
+        // `../../` in a sidecar would read a file from outside the cache.
         let _guard = serial();
         let root = temp_cache("traversal");
         let dir = root.join("Escape_Mono");
@@ -798,7 +656,7 @@ mod tests {
 
     #[test]
     fn the_digest_is_the_manifests_own_spelling() {
-        // Lowercase hex, 64 chars — the empty string's SHA-256.
+        // The empty string's SHA-256.
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -830,7 +688,6 @@ mod tests {
     fn a_sidecar_missing_its_family_or_files_does_not_parse() {
         assert!(parse_meta("display=A\nfile=aa a.ttf\n").is_none());
         assert!(parse_meta("family=A\n").is_none());
-        // …and the two optional names default to the family itself.
         let meta = parse_meta("family=A\nfile=aa a.ttf\n").expect("the minimum");
         assert_eq!(meta.display_name, "A");
         assert_eq!(meta.manifest_family, "A");
