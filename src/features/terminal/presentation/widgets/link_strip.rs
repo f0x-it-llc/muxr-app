@@ -1,5 +1,4 @@
-//! The card's link strip — the one band between the status row and the body
-//! that says a live `muxrd` session is not currently healthy.
+//! The band between the status row and the body that says a live session is unhealthy.
 
 use frust::{View, button};
 
@@ -10,24 +9,14 @@ use super::super::chrome::status_strip;
 use super::super::pages::TerminalState;
 use super::card::CardInk;
 
-/// The link strip's three messages, and the two affordances beside them.
 const LINK_RECONNECTING: &str = "reconnecting\u{2026}";
 const LINK_DISCONNECTED: &str = "disconnected";
 const LINK_CLOSED: &str = "session ended";
 const LINK_RETRY: &str = "Retry";
 const LINK_LEAVE: &str = "Back to sessions";
 
-/// The card's link strip for `link`, or `None` when there is nothing to say.
-///
-/// `Idle`/`Connected` and no live session at all (`None`) are silent. The
-/// three shown states speak in severity order: reconnecting says only that
-/// (a button would invite interrupting it), disconnected offers the retry
-/// that re-arms it, and a server-ended session offers the way back to the
-/// list.
-///
-/// Every callback here takes `&mut TerminalState` — why the strip belongs to
-/// the card, not the sheet: `retry` needs the live session, which is screen
-/// state.
+/// Reconnecting offers no button, since one would invite interrupting it; disconnected offers the
+/// retry, and a server-ended session the way back to the list.
 pub(crate) fn link_strip(
     link: Option<LinkStatus>,
     colors: &Palette,
@@ -51,7 +40,6 @@ pub(crate) fn link_strip(
             })),
         ),
     };
-    // Resolved only once there is a strip to build — a silent `build` stays cheap.
     let style = inked(&active_theme().type_scale.label_medium, colors.fg_muted);
     Some(status_strip(message, style, ink.head, action))
 }

@@ -1,5 +1,4 @@
-//! `.term-statusrow` — the pane title plus the one expand button, the whole of
-//! the card's chrome band.
+//! `.term-statusrow`: the pane title and chrome-band buttons, plus the Tablet kebab's menu.
 
 use std::rc::Rc;
 
@@ -18,51 +17,33 @@ use super::super::chrome::{EXPAND_SIZE, expand_button};
 use super::card::CardInk;
 use super::util::{centered_row, h_gap, read_only_badge, sized};
 
-/// `.term-statusrow{padding:14px 14px 14px 18px}` with the **vertical** pair
-/// tightened to 6px — the mock's 14px made a 56px chrome band. Horizontal
-/// values are the mock's, untouched.
+/// `.term-statusrow{padding:14px 14px 14px 18px}` with the vertical pair tightened to 6px.
 const STATUS_PAD_TOP: f64 = 6.0;
 const STATUS_PAD_RIGHT: f64 = 14.0;
 const STATUS_PAD_LEFT: f64 = 18.0;
-/// The row's whole height, and so the expand button's press target: the
-/// 28px button (the row's shrink floor) plus [`STATUS_PAD_TOP`] above and
-/// below. The title's own line box never decides this number.
+/// The expand button's whole press target: the 28px button plus the padding above and below.
 const STATUS_ROW_H: f64 = EXPAND_SIZE + 2.0 * STATUS_PAD_TOP;
-/// `.term-pane-title{font-size:13.5px}` — a fixed-size logotype-ish run,
-/// overriding only the display role's size (the `crate::ui::topbar`
-/// brand-wordmark precedent).
+/// `.term-pane-title{font-size:13.5px}`, overriding only the display role's size.
 const TITLE_SIZE: f32 = 13.5;
-/// Its line box, tightened to match — the display role's 36px box would be
-/// taller than [`STATUS_ROW_H`] itself.
+/// The display role's 36px line box would be taller than [`STATUS_ROW_H`] itself.
 const TITLE_LINE_HEIGHT: f32 = 18.0;
 
-/// The expand button's accessible names — a *word* per state, never the
-/// `⛶`/`⤡` it draws (`crate::ui::topbar`'s `BACK_LABEL` rule).
+/// A word per state, never the `⛶`/`⤡` glyph it draws.
 const EXPAND_LABEL: &str = "Fullscreen";
 const COLLAPSE_LABEL: &str = "Exit fullscreen";
-/// The panes control's accessible name — what the tap opens, not its mark.
 const PANES_LABEL: &str = "Panes & tabs";
-/// The attention dot's diameter, drawn at the panes control's top-right.
 const ATTENTION_DOT: f64 = 8.0;
 
-/// What the Tablet's terminal menu asks for — [`terminal_menu_choice`] maps a
-/// picked entry index here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalMenuChoice {
-    /// The existing rename dialog (or its read-only toast).
     Rename,
-    /// The existing fullscreen toggle.
     Immersive,
-    /// The key-bar visibility signal.
     KeyBar,
-    /// The existing detach action.
     Detach,
 }
 
-/// The kebab's one table: each entry beside the choice it answers (`None` for
-/// the separator, which still occupies an index). Glyph's menu has no
-/// checked-item variant, so "Show key bar" carries a leading check icon
-/// **only while it is on** (the menu is rebuilt on every open).
+/// `None` marks the separator, which still occupies an index. Glyph's menu has no checked-item
+/// variant, so "Show key bar" carries a leading check only while it is on.
 fn terminal_menu_table(
     fullscreen: bool,
     key_bar_visible: bool,
@@ -94,7 +75,6 @@ fn terminal_menu_table(
     ]
 }
 
-/// The Tablet kebab's menu entries, straight from [`terminal_menu_table`].
 pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<MenuEntry> {
     terminal_menu_table(fullscreen, key_bar_visible)
         .into_iter()
@@ -102,32 +82,20 @@ pub(crate) fn terminal_menu(fullscreen: bool, key_bar_visible: bool) -> Vec<Menu
         .collect()
 }
 
-/// The [`TerminalMenuChoice`] behind entry `index` of [`terminal_menu`], read
-/// back through the same table (the separator answers `None`).
-///
-/// The throwaway table built on every decode is deliberate: it is the single source
-/// of truth for both the builder and this decoder, so the two can never disagree on
-/// a position. Its flags only change how an entry is drawn (an icon), never its
-/// position or choice, so any pair decodes alike — `false, false` stands for the
-/// open menu's own.
+/// Decodes through the builder's own table; its flags change only icons, so any pair decodes alike.
 pub(crate) fn terminal_menu_choice(index: usize) -> Option<TerminalMenuChoice> {
     terminal_menu_table(false, false)
         .get(index)
         .and_then(|(choice, _)| *choice)
 }
 
-/// The Compact-fullscreen panes control: the tap that opens the side sheet,
-/// and whether an agent needs attention. `attention` draws the round warning
-/// dot at the control's top-right; [`PanesControl::new`] leaves it off and
-/// [`PanesControl::with_attention`] sets it (the page wires it to "any agent
-/// blocked").
+/// `attention` draws the warning dot at the top-right; the page sets it while an agent is blocked.
 pub(crate) struct PanesControl<State> {
     on_tap: Rc<dyn Fn(&mut State)>,
     attention: bool,
 }
 
 impl<State> PanesControl<State> {
-    /// The control, with no attention dot.
     pub(crate) fn new(on_tap: impl Fn(&mut State) + 'static) -> Self {
         Self {
             on_tap: Rc::new(on_tap),
@@ -135,42 +103,23 @@ impl<State> PanesControl<State> {
         }
     }
 
-    /// The same control, with the attention dot on or off.
     pub(crate) fn with_attention(mut self, attention: bool) -> Self {
         self.attention = attention;
         self
     }
 }
 
-/// What [`status_row`] draws beyond its title, crumbs and palette. One struct
-/// so its parameter count stays under clippy's `too_many_arguments` threshold.
+/// One struct to stay under clippy's `too_many_arguments` threshold.
 pub(crate) struct StatusOptions<State> {
-    /// The card is fullscreen: the exit button is lit.
     pub(crate) fullscreen: bool,
-    /// A read-only credential: the cyan chip before the buttons.
     pub(crate) read_only: bool,
-    /// The panes control; `None` everywhere but Compact fullscreen.
+    /// `None` everywhere but Compact fullscreen.
     pub(crate) panes: Option<PanesControl<State>>,
 }
 
-/// `.term-statusrow` — the pane title (ellipsized, single line) and, at the
-/// trailing edge, the fullscreen affordance: no menu row, no gesture ("one
-/// button, always in the same place"). Compact fullscreen adds the panes
-/// control left of it (see [`panes_column`]).
-///
-/// The padding is applied to the **title**, not the whole row — that lets
-/// the button's column run the row's full [`STATUS_ROW_H`]: a 28px circle
-/// centred in a 40px column, the padding band above/below part of the same
-/// target (padding the row instead would leave a 28px target in a 40px row).
-///
-/// Two press paths, one callback, never both: the column is a [`Stack`]
-/// whose **top** child is the button and whose bottom is a
-/// [`GestureDetector`] over the full-height box. Hit-testing runs
-/// topmost-first and stops at the first handler, so a press on the circle
-/// is the button's and a press above/below it is the detector's.
-///
-/// `crumbs` (empty hides it) is Glyph's breadcrumb after the title, and
-/// `options.read_only` adds the cyan chip before the buttons.
+/// The padding sits on the title so the button column runs the full [`STATUS_ROW_H`] as one target.
+/// The column is a [`Stack`] with the button over a full-height [`GestureDetector`]: hit-testing is
+/// topmost-first and stops at the first handler, so each press fires the callback once.
 pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     title: &str,
     crumbs: &[String],
@@ -193,15 +142,13 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     } else {
         (icons::FULLSCREEN_EXPAND, EXPAND_LABEL)
     };
-    // `.expand-btn.on{...}` — the same trio the `:hover` state uses, which a
-    // touch screen has no notion of.
+    // `.expand-btn.on{...}`, the same trio as `:hover`, which a touch screen has no notion of.
     let (fill, tint, border) = if fullscreen {
         (colors.amber_faint, colors.amber, colors.amber_border)
     } else {
         (ink.expand_fill, colors.fg_muted, ink.card_border)
     };
 
-    // Shared so both halves of the press column can fire it (each just clones the handle).
     let on_toggle = Rc::new(on_toggle);
     let on_button = Rc::clone(&on_toggle);
     let button = SizedBox::<State>(Some(EXPAND_SIZE), Some(STATUS_ROW_H)).child(Align(
@@ -246,16 +193,13 @@ pub(crate) fn status_row<State: 'static, F: Fn(&mut State) + 'static>(
     }
     children.push(h_gap(spacing::SM));
     children.push(inflexible(stack().child(press_band).child(button)));
-    // Trailing padding as a spacer — the button column owns the vertical padding.
+    // The button column owns the vertical padding.
     children.push(h_gap(STATUS_PAD_RIGHT));
     container(centered_row(children)).fill(ink.head)
 }
 
-/// The panes control's column: the same 28px circle in the row's full height
-/// as the exit button, in the neutral tint (it toggles nothing, so it never
-/// takes the amber `.on` trio), with its own press band over the full height.
-/// The attention dot sits at the column's top-right and is stacked **under**
-/// the band, so it never takes a press.
+/// Neutral tint, since it toggles nothing. The attention dot is stacked under the press band so it
+/// never takes a press.
 fn panes_column<State: 'static>(
     panes: PanesControl<State>,
     colors: &Palette,
@@ -293,7 +237,6 @@ mod tests {
 
     #[test]
     fn the_expand_affordance_announces_a_word_and_not_a_mark() {
-        // The a11y half of the vector rule.
         for label in [EXPAND_LABEL, COLLAPSE_LABEL] {
             assert!(
                 label.chars().all(|c| c.is_ascii_alphabetic() || c == ' '),
@@ -342,7 +285,6 @@ mod tests {
 
     #[test]
     fn the_status_row_is_as_short_as_its_button_allows() {
-        // The *whole* height is the press target (`status_row`'s own doc).
         assert_eq!(STATUS_ROW_H, 40.0);
         assert!(
             f64::from(TITLE_LINE_HEIGHT) + 2.0 * STATUS_PAD_TOP < STATUS_ROW_H,
@@ -352,7 +294,6 @@ mod tests {
 
     #[test]
     fn the_panes_control_names_what_it_opens() {
-        // A name, not a mark: the one non-letter it needs is the `&`.
         assert_eq!(PANES_LABEL, "Panes & tabs");
         assert!(
             PANES_LABEL
@@ -369,7 +310,6 @@ mod tests {
         assert!(control.with_attention(true).attention);
     }
 
-    /// The round warning dots one status row paints, as `(width, radius)`.
     fn attention_dots(attention: bool) -> Vec<(f64, f64)> {
         use frust::authoring::{Color, Point, Size};
         use frust_core::{FrameTime, PaintScene, RenderRoot};

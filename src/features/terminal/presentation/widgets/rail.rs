@@ -1,14 +1,6 @@
-//! The Tablet's docked rail (`docs/tablet.html` frame 03): the "panes & tabs"
-//! tree docked beside the card instead of raised in a sheet, and its 56px mini
-//! rail for the collapsed band and immersive mode.
-//!
-//! **Composition only.** The tree arrives already built
-//! ([`super::side_sheet_tree::tree_body`] in its docked mode) and every press
-//! leaves through a caller-supplied callback, so this module owns layout and
-//! tone, never the controller.
-//!
-//! Known gap, as on Connect's in-flow QR button: `frust::button` takes a text
-//! label only, so the footer's `detach` carries no leading logout mark.
+//! The Tablet's docked rail and its 56px mini rail, transcribed from the `tablet.html` mock.
+//! Composition only: the tree arrives built and every press leaves through a callback.
+//! `frust::button` takes a text label only, so the footer's `detach` carries no leading mark.
 
 use std::rc::Rc;
 
@@ -78,20 +70,15 @@ const TIP_READ_ONLY: &str = "read-only: browse and switch only";
 const DETACH_LABEL: &str = "detach";
 const EXIT_IMMERSIVE: &str = "Exit immersive";
 
-/// What the rail's header prints.
 pub(crate) struct RailHead<'a> {
     pub name: &'a str,
-    /// `"3 spaces · 8 panes"` — see [`rail_summary`].
     pub summary: String,
     pub link: Option<LinkStatus>,
     pub read_only: bool,
-    /// An agent is waiting on the user: `needs you` stands where `running` would.
     pub needs_you: bool,
 }
 
-/// The header's small line: `N spaces · M panes` on herdr, `N tabs · M panes`
-/// on zellij, counting the panes of the tabs this client has read, then
-/// `· K agents` when the session runs any.
+/// `N spaces · M panes` on herdr, `N tabs · M panes` on zellij, over the tabs this client read.
 pub(crate) fn rail_summary(spaces: Option<usize>, tabs: &[TabEntry], agents: usize) -> String {
     let panes: usize = tabs.iter().map(|tab| tab.panes.len()).sum();
     let (count, unit) = match spaces {
@@ -110,9 +97,7 @@ fn plural(count: usize, unit: &str) -> String {
     format!("{count} {unit}{suffix}")
 }
 
-/// The status chip: the attached stream's link, or `running` for a session
-/// with no stream to report (the mock transcript) — `needs you` instead of
-/// `running` while an agent waits on the user. A link problem still wins.
+/// `running` with no stream to report, `needs you` while an agent waits; a link problem still wins.
 fn status_chip(link: Option<LinkStatus>, needs_you: bool) -> (&'static str, BadgeVariant) {
     match link {
         None | Some(LinkStatus::Connected) if needs_you => ("needs you", BadgeVariant::Warning),
@@ -123,9 +108,7 @@ fn status_chip(link: Option<LinkStatus>, needs_you: bool) -> (&'static str, Badg
     }
 }
 
-/// The full rail: header, the scrolling `tree` (over the scrolling `agents`
-/// half when there is one — [`tree_split`]), and the footer's tip and one
-/// `detach` button. `top` clears a status-bar inset the app bar no longer does.
+/// `top` clears the status-bar inset, which the app bar does not.
 pub(crate) fn docked_rail<
     State: 'static,
     Tree: View<State>,
@@ -187,8 +170,6 @@ pub(crate) fn docked_rail<
     panel(RAIL_WIDTH, body, &colors)
 }
 
-/// What the mini rail draws: every space, the selected space's tabs, and the
-/// active tab's panes.
 pub(crate) struct MiniData<'a> {
     pub spaces: &'a [Space],
     pub tabs: &'a [TabEntry],
@@ -197,14 +178,10 @@ pub(crate) struct MiniData<'a> {
     pub top: f64,
 }
 
-/// A mini-rail space press: its id.
 pub(crate) type PressSpace<State> = Rc<dyn Fn(&mut State, &str)>;
-/// A mini-rail tab press.
 pub(crate) type PressTab<State> = Rc<dyn Fn(&mut State, &TabEntry)>;
-/// A mini-rail pane press: its tab's key, and the pane.
 pub(crate) type PressPane<State> = Rc<dyn Fn(&mut State, &str, &PaneEntry)>;
 
-/// Every mini-rail press.
 pub(crate) struct MiniActions<State: 'static> {
     pub on_space: PressSpace<State>,
     pub on_tab: PressTab<State>,
@@ -212,9 +189,6 @@ pub(crate) struct MiniActions<State: 'static> {
     pub on_exit_immersive: Rc<dyn Fn(&mut State)>,
 }
 
-/// The 56px mini rail: 44px targets, each with its name as a tooltip, in
-/// separated runs of spaces, tabs (index badges) and panes, then — immersive
-/// only — the way back out.
 pub(crate) fn mini_rail<State: 'static>(
     data: &MiniData<'_>,
     actions: &MiniActions<State>,
@@ -308,7 +282,6 @@ pub(crate) fn mini_rail<State: 'static>(
     )
 }
 
-/// The rail's column at `width` on the surface tone, with its hairline right edge.
 fn panel<State: 'static, Body: View<State>>(
     width: f64,
     body: Body,
@@ -321,7 +294,6 @@ fn panel<State: 'static, Body: View<State>>(
         .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// A hairline rule: `width`×`height`, the unset one stretched by its parent.
 fn rule<State: 'static>(
     width: Option<f64>,
     height: Option<f64>,
@@ -330,20 +302,16 @@ fn rule<State: 'static>(
     container(SizedBox::<State>(width, height)).fill(colors.outline)
 }
 
-/// `child` (a tap target) published to accessibility as a button named `label`
-/// — a bare [`GestureDetector`] draws and taps but is invisible to a screen
-/// reader, and the badge inside carries only the tab's index.
+/// A bare [`GestureDetector`] is invisible to a screen reader; the inner badge shows only an index.
 pub(crate) fn labelled_button<V>(label: String, child: V) -> LabelledButtonView<V> {
     LabelledButtonView { label, child }
 }
 
-/// The declarative half of [`labelled_button`].
 pub(crate) struct LabelledButtonView<V> {
     label: String,
     child: V,
 }
 
-/// The retained half of a [`labelled_button`].
 pub(crate) struct LabelledButtonWidget {
     label: String,
     child: ChildPod,
