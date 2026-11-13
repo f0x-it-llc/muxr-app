@@ -30,9 +30,9 @@ use std::time::Duration;
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
     Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4,
-    FlexChild, FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox,
-    Stack, View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area,
-    scroll_view, spawn_local, use_context,
+    FlexView, Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, Stack,
+    View, WindowMetrics, any, component, flexible, inflexible, on_cleanup, safe_area, scroll_view,
+    spawn_local, use_context,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::sync::{Notify, broadcast};
@@ -945,7 +945,9 @@ fn list_view(
 fn padded_list(pieces: Vec<AnyView<SessionsState>>) -> impl View<SessionsState> {
     Padding(
         EdgeInsets::symmetric(LIST_PAD_X, LIST_PAD_Y),
-        FlexView::new(Axis::Vertical, gapped(pieces)).cross_axis(CrossAxisAlignment::Stretch),
+        FlexView::new(Axis::Vertical, pieces.into_iter().map(inflexible).collect())
+            .gap(LIST_GAP)
+            .cross_axis(CrossAxisAlignment::Stretch),
     )
 }
 
@@ -962,18 +964,6 @@ fn list_band(content: impl View<SessionsState>, is_wide: bool) -> impl View<Sess
     } else {
         Either::Right(band)
     }
-}
-
-/// The list's children with a [`LIST_GAP`] spacer between consecutive ones.
-fn gapped(views: Vec<AnyView<SessionsState>>) -> Vec<FlexChild<SessionsState>> {
-    let mut children = Vec::with_capacity(views.len() * 2);
-    for (index, view) in views.into_iter().enumerate() {
-        if index > 0 {
-            children.push(inflexible(SizedBox::<SessionsState>(None, Some(LIST_GAP))));
-        }
-        children.push(inflexible(view));
-    }
-    children
 }
 
 impl Actions {
