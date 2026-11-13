@@ -5152,10 +5152,8 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
     // device defect. The workaround is kept until it is re-measured on the
     // device that showed the defect. If this fails again, parley's fallback has
     // regressed and the workaround is load-bearing once more.
-    let broken = TextStyle {
-        family: FontFamily::Named(vec!["No Such Family 1234".to_string()]),
-        ..field_style()
-    };
+    let broken =
+        field_style().with_family(FontFamily::Named(vec!["No Such Family 1234".to_string()]));
     let em = f64::from(broken.size);
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &broken, |c| c.is_ascii_digit());
     assert_eq!(
@@ -5172,13 +5170,10 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
     );
 
     // …and the fix is one appended, resolvable generic, nothing more.
-    let rescued = TextStyle {
-        family: FontFamily::NamedWithGeneric(vec![
-            FamilyName::Named("No Such Family 1234".to_string()),
-            FamilyName::Generic(GenericSlot::SansSerif),
-        ]),
-        ..field_style()
-    };
+    let rescued = field_style().with_family(FontFamily::NamedWithGeneric(vec![
+        FamilyName::Named("No Such Family 1234".to_string()),
+        FamilyName::Generic(GenericSlot::SansSerif),
+    ]));
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &rescued, |c| c.is_ascii_digit());
     assert_eq!(
         digits.len(),

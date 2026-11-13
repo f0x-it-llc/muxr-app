@@ -74,10 +74,7 @@ pub(in crate::features::terminal::presentation) fn line_styles(
     comment.style = FontStyle::Italic;
     LineStyles {
         prompt: base.clone(),
-        output: TextStyle {
-            color: ink.out,
-            ..base
-        },
+        output: base.with_color(ink.out),
         comment,
     }
 }
